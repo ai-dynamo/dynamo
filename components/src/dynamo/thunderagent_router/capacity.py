@@ -16,16 +16,17 @@ from typing import Optional
 
 from dynamo.common.native_offloading import get_native_offloading_capacity_tokens
 from dynamo.llm import FpmEventSubscriber
-from dynamo.runtime import Endpoint
+from dynamo.runtime import Client, Endpoint
 
 logger = logging.getLogger(__name__)
 
 
 class WorkerCapacityProvider:
-    """Maps ``worker_id -> program-retention tokens`` from each worker's MDC."""
+    """Tracks live workers and their MDC program-retention capacity."""
 
-    def __init__(self, endpoint: Endpoint) -> None:
+    def __init__(self, endpoint: Endpoint, client: Client) -> None:
         self._endpoint = endpoint
+        self._client = client
         self._subscriber: Optional[FpmEventSubscriber] = None
         # Cache parsed cards keyed on the raw JSON string so a subsequent
         # snapshot() call avoids re-parsing on the request hot path.
@@ -66,6 +67,14 @@ class WorkerCapacityProvider:
             if retention_tokens is not None:
                 out[worker_id] = retention_tokens
         return out
+
+    def live_worker_ids(self) -> set[int]:
+        """Return workers currently registered for the generate endpoint."""
+        try:
+            return set(self._client.instance_ids())
+        except Exception as exc:
+            logger.debug("WorkerCapacityProvider liveness snapshot error: %s", exc)
+            return set()
 
     def _parse_pool_tokens(self, card_json: str) -> Optional[int]:
         if card_json in self._parsed:

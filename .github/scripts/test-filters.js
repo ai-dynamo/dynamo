@@ -89,6 +89,21 @@ const testCases = [
     desc: 'trtllm script triggers only trtllm'
   },
   {
+    file: 'recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml',
+    expect: { core: false, examples: true },
+    desc: 'recipe matrix dotfile triggers recipe check without core'
+  },
+  {
+    file: 'scripts/kustomize-matrix.py',
+    expect: { core: false, examples: true },
+    desc: 'recipe generator triggers recipe check without core'
+  },
+  {
+    file: 'tests/test_kustomize_matrix.py',
+    expect: { core: false, examples: true },
+    desc: 'recipe generator test triggers recipe check without core'
+  },
+  {
     file: 'components/src/dynamo/vllm/worker.py',
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'

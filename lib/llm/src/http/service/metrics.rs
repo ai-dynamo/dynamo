@@ -418,6 +418,7 @@ pub struct Metrics {
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
+    model_migration_duration_seconds: HistogramVec,
     model_migration_max_seq_len_exceeded_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
     model_rejection_total: IntCounterVec,
@@ -972,6 +973,22 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_migration_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_DURATION_SECONDS),
+                "Time from detecting a migratable failure until recovery, terminal failure, or cancellation",
+            )
+            .buckets(vec![
+                0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 40.0, 60.0,
+            ]),
+            &[
+                "model",
+                frontend_service::MIGRATION_TYPE_LABEL,
+                frontend_service::MIGRATION_OUTCOME_LABEL,
+            ],
+        )
+        .unwrap();
+
         let model_migration_max_seq_len_exceeded_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL),
@@ -1026,6 +1043,7 @@ impl Metrics {
             model_kv_cache_block_size,
             model_migration_limit,
             model_migration_total,
+            model_migration_duration_seconds,
             model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
             model_rejection_total,
@@ -1186,6 +1204,7 @@ impl Metrics {
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
+        registry.register(Box::new(self.model_migration_duration_seconds.clone()))?;
         registry.register(Box::new(
             self.model_migration_max_seq_len_exceeded_total.clone(),
         ))?;
@@ -1272,6 +1291,31 @@ impl Metrics {
         self.model_migration_total
             .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
             .get()
+    }
+
+    /// Observe the elapsed time for a completed migration event.
+    pub fn observe_migration_duration(
+        &self,
+        model: &str,
+        migration_type: &str,
+        outcome: &str,
+        duration: Duration,
+    ) {
+        self.model_migration_duration_seconds
+            .with_label_values(&[model, migration_type, outcome])
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Get the number of observed migration durations for the given dimensions.
+    pub fn get_migration_duration_sample_count(
+        &self,
+        model: &str,
+        migration_type: &str,
+        outcome: &str,
+    ) -> u64 {
+        self.model_migration_duration_seconds
+            .with_label_values(&[model, migration_type, outcome])
+            .get_sample_count()
     }
 
     /// Increment the counter for migrations disabled by max_seq_len being exceeded
@@ -2403,6 +2447,73 @@ mod tests {
         }
     }
 
+    /// A chunk whose delta renders as nothing is still an accounting event: the
+    /// engine generated those tokens. The chat SSE loop drops such chunks before
+    /// forwarding them (multi-byte token assembly, and the Nemotron
+    /// force_nonempty_content deferral, both produce them), so it observes their
+    /// metrics explicitly before discarding. This pins the helper it calls: an
+    /// empty delta carrying `llm_metrics` must still count.
+    #[test]
+    fn test_empty_delta_with_metrics_is_still_counted() {
+        use crate::protocols::common::metrics::LLMMetricAnnotation;
+        use dynamo_protocols::types::{
+            ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
+        };
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let model = "test-model";
+        let mut collector = metrics.clone().create_response_collector(model);
+        let mut guard = None;
+
+        #[allow(deprecated)]
+        let choice = ChatChoiceStream {
+            index: 0,
+            delta: ChatCompletionStreamResponseDelta {
+                role: None,
+                content: None,
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        };
+        let data = NvCreateChatCompletionStreamResponse {
+            inner: CreateChatCompletionStreamResponse {
+                id: "test".to_string(),
+                choices: vec![choice],
+                created: 0,
+                model: model.to_string(),
+                system_fingerprint: None,
+                object: "chat.completion.chunk".to_string(),
+                usage: None,
+                service_tier: None,
+            },
+            nvext: None,
+            llm_metrics: Some(LLMMetricAnnotation {
+                input_tokens: 10,
+                output_tokens: 4,
+                chunk_tokens: 4,
+                ..Default::default()
+            }),
+        };
+        let annotated = crate::types::Annotated::from_data(data);
+
+        process_chat_response_and_observe_metrics(&annotated, &mut collector, &mut guard);
+
+        assert_eq!(
+            metrics
+                .output_tokens_counter
+                .with_label_values(&[model])
+                .get(),
+            4,
+            "tokens on a non-renderable chunk must still be counted"
+        );
+    }
+
     #[test]
     fn test_output_tokens_counter_increments() {
         let metrics = Arc::new(Metrics::new());
@@ -3070,6 +3181,41 @@ mod tests {
             "internal metrics leaked to client SSE: {wire}"
         );
 
+        // A choice-less Dynamo metadata frame is client-visible.
+        let metadata: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
+                "model": "test-model", "choices": [],
+                "nvext": {"engine_data": {"prompt_token_ids": [1, 2]}}
+            }))
+            .unwrap();
+        let metadata = Annotated {
+            id: None,
+            data: Some(metadata),
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let mut http_queue_guard = None;
+        let event = process_chat_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(metadata),
+            &mut collector,
+            &mut http_queue_guard,
+            ReasoningField::default(),
+        )
+        .expect("conversion ok")
+        .expect("nvext chunk should yield a client event");
+        let sse = Sse::new(futures::stream::once(async move {
+            Ok::<_, std::convert::Infallible>(event)
+        }));
+        let body = sse.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let wire = String::from_utf8_lossy(&bytes);
+        assert!(
+            wire.contains("engine_data") && wire.contains("prompt_token_ids"),
+            "nvext metadata did not reach client SSE: {wire}"
+        );
+
         // (2) Payload-only usage chunk (event = payload_usage, carries usage data).
         let usage: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
             serde_json::from_value(serde_json::json!({
@@ -3087,10 +3233,11 @@ mod tests {
         };
 
         let mut http_queue_guard = None;
-        let result = process_response_using_event_converter_and_observe_metrics(
+        let result = process_chat_response_using_event_converter_and_observe_metrics(
             EventConverter::from(payload_usage),
             &mut collector,
             &mut http_queue_guard,
+            ReasoningField::default(),
         )
         .expect("conversion ok");
         assert!(

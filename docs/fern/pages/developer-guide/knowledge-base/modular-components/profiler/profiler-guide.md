@@ -209,7 +209,7 @@ the operator defaults it to
 
 ```yaml
 spec:
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 > [!NOTE]
@@ -241,7 +241,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"  # dynamo-frontend for Dynamo < 1.1.0
 ```
 
 **Step 2: Apply the DGDR**
@@ -427,7 +427,7 @@ metadata:
 spec:
   model: "Qwen/Qwen3-0.6B"
   backend: vllm
-  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"  # dynamo-frontend for Dynamo < 1.1.0
+  image: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"  # dynamo-frontend for Dynamo < 1.1.0
 
   searchStrategy: rapid  # or thorough
   autoApply: true
@@ -491,7 +491,9 @@ Pass arguments to the SLA planner via the features section:
 ```yaml
 features:
   planner:
-    min_endpoint: 2                            # Minimum endpoints to maintain
+    # Minimum for agg, both roles in disagg, or the active single role when
+    # its role-specific field is unset
+    min_endpoint: 2
     load_adjustment_interval_seconds: 5        # Load-scaling interval (seconds)
     throughput_adjustment_interval_seconds: 60 # Throughput-scaling interval (seconds)
     load_predictor: arima                      # Load prediction method
@@ -663,6 +665,28 @@ spec:
                 claimName: dynamo-pvc
 ```
 
+The profiling job also runs an `output-copier` sidecar that relays profiler status and
+writes results to the output ConfigMap. By default it uses `bitnami/kubectl:latest`.
+In air-gapped or private-registry clusters, override the sidecar image via
+`overrides.profilingJob`:
+
+```yaml
+overrides:
+  profilingJob:
+    template:
+      spec:
+        containers:
+        - name: output-copier
+          image: internal-registry/kubectl:1.29
+```
+
+The replacement image must include `kubectl` and a shell at `/bin/sh` that supports
+`set -o pipefail` (for example bash; a dash-only `/bin/sh` is not sufficient), plus the
+utilities used by the sidecar script: `grep`, `awk`, `tr`, `sed`, `date`, `cat`, and
+`sleep`. For `output-copier`, only `image` and `resources` are merged; other fields
+(`env`, `envFrom`, `volumeMounts`, `securityContext`, `command`/`args`) are ignored so
+controller-owned mounts such as `profiling-output` at `/data` stay intact.
+
 **ConfigMaps:**
 - `dgdr-output-<name>`: Generated DGD configuration
 - `planner-profile-data-XXXX`: Profiling data for Planner and mocker consumers (JSON), with a generated suffix. Only created for thorough sweeping when profile data is needed.
@@ -761,4 +785,4 @@ Ensure image pull secrets are configured in your namespace for the container reg
 - [Profiler README](overview.md) — Quick overview and feature matrix
 - [Profiler Examples](profiler-examples.md) — Complete DGDR YAML examples
 - [Planner Guide](../planner/planner-guide.md) — PlannerConfig reference and scaling modes
-- [DGDR API Reference](../../../../reference/kubernetes-api/additional-resources/api-reference-k8s.md) — Full DGDR specification
+- [DGDR API Reference](../../../../reference/kubernetes-api/full-api-reference.mdx) — Full DGDR specification

@@ -37,7 +37,7 @@ func Setup(mgr ctrl.Manager) error {
 	)
 	mgr.GetWebhookServer().Register(
 		groveValidatingPath,
-		admission.WithCustomValidator(mgr.GetScheme(), &grovev1alpha1.PodCliqueSet{}, h).WithRecoverPanic(true),
+		admission.WithValidator(mgr.GetScheme(), h).WithRecoverPanic(true),
 	)
 	return nil
 }
@@ -46,15 +46,15 @@ func (*handler) Default(context.Context, runtime.Object) error {
 	return nil
 }
 
-func (*handler) ValidateCreate(context.Context, runtime.Object) (admission.Warnings, error) {
+func (*handler) ValidateCreate(context.Context, *grovev1alpha1.PodCliqueSet) (admission.Warnings, error) {
 	return nil, nil
 }
 
-func (*handler) ValidateUpdate(context.Context, runtime.Object, runtime.Object) (admission.Warnings, error) {
+func (*handler) ValidateUpdate(context.Context, *grovev1alpha1.PodCliqueSet, *grovev1alpha1.PodCliqueSet) (admission.Warnings, error) {
 	return nil, nil
 }
 
-func (*handler) ValidateDelete(context.Context, runtime.Object) (admission.Warnings, error) {
+func (*handler) ValidateDelete(context.Context, *grovev1alpha1.PodCliqueSet) (admission.Warnings, error) {
 	return nil, nil
 }
 

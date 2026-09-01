@@ -11454,21 +11454,25 @@ spec:
                     main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
                     semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
                     not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
-                    It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+                    It does not change the image. Setting or changing an override that resolves to version 1.5.0 or
+                    later may trigger a rollout. Keep it consistent with the image's runtime version.
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                   type: string
                 scalingAdapter:
                   description: |-
                     ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
-                    When enabled, replicas are managed via DGDSA and external autoscalers can scale
-                    the service using the Scale subresource. When disabled, replicas can be modified directly.
+                    When enabled, replicas are managed by the DGDSA and external autoscalers scale the service
+                    via the Scale subresource; when disabled, replicas are set directly. Opt in with
+                    `scalingAdapter: {enabled: true}` -- a bare `scalingAdapter: {}` is disabled because
+                    `enabled` defaults to false.
                   properties:
                     enabled:
                       default: false
                       description: |-
-                        Enabled indicates whether the ScalingAdapter should be enabled for this service.
-                        When true, a DGDSA is created and owns the replicas field.
-                        When false (default), no DGDSA is created and replicas can be modified directly in the DGD.
+                        Enabled turns the ScalingAdapter on for this service. When true, a DGDSA is created and
+                        owns the replicas field. When false (the default), no DGDSA is created and replicas are
+                        set directly on the DGD -- so a bare `scalingAdapter: {}` is disabled; set
+                        `enabled: true` to opt in.
                       type: boolean
                   type: object
                 serviceName:
@@ -11542,6 +11546,8 @@ spec:
                   rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
+                - message: componentType is immutable after it is set
+                  rule: '!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)'
             status:
               description: Status reflects the current observed state of the component deployment.
               properties:
@@ -11649,6 +11655,26 @@ spec:
                       items:
                         type: string
                       type: array
+                    gpusPerEngine:
+                      description: |-
+                        GPUsPerEngine is the number of GPUs assigned to one inference engine in a
+                        service replica, across all of its nodes. Independent auxiliary GPU
+                        allocations are excluded. A present zero means the engine itself has no
+                        GPUs; consult GPUsPerReplica for auxiliary allocations.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    gpusPerReplica:
+                      description: |-
+                        GPUsPerReplica is the unique GPU allocation added when this service scales
+                        by one replica, across all nodes, application and initialization phases,
+                        and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod
+                        scheduling footprint; shared DRA claims are counted once. A present zero
+                        records a successful non-GPU resolution; omission means no current shape
+                        is available.
+                      format: int64
+                      minimum: 0
+                      type: integer
                     readyReplicas:
                       description: |-
                         ReadyReplicas is the number of ready replicas.
@@ -20436,17 +20462,16 @@ spec:
                     main image. DGD admission requires it when spec.podTemplate.spec.containers[name=main].image has
                     no parseable semantic-version tag; controller-generated DCDs may omit it. Set it also when the
                     parsed tag is not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for
-                    example "1.4.0". It does not change the image or rendered Pod, and changing only this field does
-                    not trigger a rollout.
+                    example "1.4.0". It does not change the image. Setting or changing an override that resolves to
+                    version 1.5.0 or later may trigger a rollout. Keep it consistent with the image's runtime version.
                   pattern: ^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$
                   type: string
                 scalingAdapter:
                   description: |-
-                    scalingAdapter opts this component into using the
-                    DynamoGraphDeploymentScalingAdapter. When set (even as an empty object,
-                    `scalingAdapter: {}`), a DGDSA is created and owns the `replicas` field
-                    so that external autoscalers (HPA/KEDA/Planner) can drive scaling via
-                    the Scale subresource. Omit the field to opt out.
+                    scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.
+                    Setting it (even as an empty object, `scalingAdapter: {}`) creates a DGDSA that owns the
+                    `replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the
+                    Scale subresource; omit the field to opt out.
                   type: object
                 sharedMemorySize:
                   anyOf:
@@ -20499,6 +20524,8 @@ spec:
                   rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                 - message: minAvailable is immutable after creation
                   rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
+                - message: type is immutable after it is set
+                  rule: '!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)'
             status:
               description: status reflects the current observed state of the component deployment.
               properties:
@@ -20531,6 +20558,26 @@ spec:
                       items:
                         type: string
                       type: array
+                    gpusPerEngine:
+                      description: |-
+                        gpusPerEngine is the number of GPUs assigned to one inference engine in a
+                        component replica, across all of its nodes. Independent auxiliary GPU
+                        allocations are excluded. A present zero means the engine itself has no
+                        GPUs; consult gpusPerReplica for auxiliary allocations.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    gpusPerReplica:
+                      description: |-
+                        gpusPerReplica is the unique GPU allocation added when this component
+                        scales by one replica, across all nodes, application and initialization
+                        phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective
+                        Pod scheduling footprint; shared DRA claims are counted once. A present
+                        zero records a successful non-GPU resolution; omission means no current
+                        shape is available.
+                      format: int64
+                      minimum: 0
+                      type: integer
                     readyReplicas:
                       description: |-
                         readyReplicas is the number of ready replicas. Populated for
@@ -20547,9 +20594,9 @@ spec:
                     runtimeNamespace:
                       description: |-
                         runtimeNamespace is the effective Dynamo runtime namespace for this
-                        component. Worker components may include a generation suffix; non-workers and
-                        Grove-backed workers use the base namespace. During rolling updates, worker
-                        status keeps the old active revision namespace until cutover completes.
+                        component. Worker components may include a generation suffix; non-workers
+                        use the base namespace. During rolling updates, worker status keeps the old
+                        active revision namespace until cutover completes.
                       type: string
                     scheduledReplicas:
                       description: |-

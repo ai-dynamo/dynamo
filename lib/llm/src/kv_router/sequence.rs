@@ -10,11 +10,11 @@
 mod direct_zmq;
 
 pub use dynamo_kv_router::multi_worker_sequence::{
-    ActiveSequencesMultiWorker, SequenceError, SequencePublishQueueError, SequencePublisher,
-    SequenceRequest, SequenceSubscriber,
+    ActiveSequencesMultiWorker, SchedulerLoadSnapshot, SequenceError, SequencePublishQueueError,
+    SequencePublisher, SequenceRequest, SequenceSubscriber,
 };
 use dynamo_kv_router::protocols::{
-    ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
+    ActiveSequenceEvent, ActiveSequenceEventBatch, MAX_REPLICA_BATCH_DURATION,
     MAX_REPLICA_BATCH_EVENTS, WorkerWithDpRank,
 };
 pub use dynamo_kv_router::sequence::{ActiveSequences, RequestId};
@@ -34,7 +34,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::metrics::{RouterWorkerStatusMetrics, WORKER_LOAD_METRICS};
-use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, KV_METRICS_SUBJECT};
+use crate::kv_router::{ACTIVE_SEQUENCES_SUBJECT, SchedulerLoadSender};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 #[cfg(test)]
 use dynamo_kv_router::protocols::PrefillLoadHint;
@@ -60,13 +60,15 @@ fn active_sequence_event_wire_format(
     }
 }
 
-struct ActiveSequenceEventSender {
+/// Cloneable handle for bounded active-sequence event publication.
+#[derive(Clone)]
+pub struct ActiveSequenceEventPublisher {
     event_tx: mpsc::Sender<ActiveSequenceEvent>,
     cancellation_token: CancellationToken,
 }
 
-impl ActiveSequenceEventSender {
-    fn channel(
+impl ActiveSequenceEventPublisher {
+    pub(crate) fn channel(
         capacity: usize,
         cancellation_token: CancellationToken,
     ) -> (Self, mpsc::Receiver<ActiveSequenceEvent>) {
@@ -96,6 +98,56 @@ impl ActiveSequenceEventSender {
             }
         }
     }
+
+    pub async fn for_endpoint(endpoint: &Endpoint, capacity: usize) -> Result<Self> {
+        anyhow::ensure!(
+            capacity > 0,
+            "active-sequence queue capacity must be positive"
+        );
+        let cancellation_token = CancellationToken::new();
+        let transport_kind = endpoint.drt().default_event_transport_kind();
+        let event_publisher = EventPublisher::for_endpoint_with_transport(
+            endpoint,
+            ACTIVE_SEQUENCES_SUBJECT,
+            transport_kind,
+        )
+        .await?;
+        let (event_sender, event_rx) = Self::channel(capacity, cancellation_token.clone());
+        match active_sequence_event_wire_format(transport_kind) {
+            ActiveSequenceEventWireFormat::Singleton => {
+                tokio::spawn(run_replica_singleton_publisher(
+                    event_publisher,
+                    event_rx,
+                    cancellation_token,
+                ));
+            }
+            ActiveSequenceEventWireFormat::Batch => {
+                tokio::spawn(run_replica_batch_publisher(
+                    event_publisher,
+                    event_rx,
+                    cancellation_token,
+                ));
+            }
+        }
+        Ok(event_sender)
+    }
+
+    /// Emit a worker-origin completion mark. `router_id` carries the worker's source DRT identity.
+    pub fn mark_prefill_completed(
+        &self,
+        request_id: String,
+        worker_id: u64,
+        dp_rank: u32,
+    ) -> anyhow::Result<()> {
+        let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+        self.enqueue(ActiveSequenceEvent {
+            request_id,
+            worker,
+            data: dynamo_kv_router::protocols::ActiveSequenceEventData::MarkPrefillCompleted,
+            router_id: worker.worker_id,
+            lora_name: None,
+        })
+    }
 }
 
 fn active_sequence_event_channel(
@@ -103,16 +155,17 @@ fn active_sequence_event_channel(
     capacity: usize,
     cancellation_token: &CancellationToken,
 ) -> Option<(
-    ActiveSequenceEventSender,
+    ActiveSequenceEventPublisher,
     mpsc::Receiver<ActiveSequenceEvent>,
 )> {
-    enabled.then(|| ActiveSequenceEventSender::channel(capacity, cancellation_token.child_token()))
+    enabled
+        .then(|| ActiveSequenceEventPublisher::channel(capacity, cancellation_token.child_token()))
 }
 
 /// Concrete [`SequencePublisher`] backed by the runtime event plane and Prometheus gauges.
 pub struct RuntimeSequencePublisher {
-    event_sender: Option<ActiveSequenceEventSender>,
-    metrics_publisher: Arc<EventPublisher>,
+    event_sender: Option<ActiveSequenceEventPublisher>,
+    scheduler_load: SchedulerLoadSender,
     worker_status_metrics: Arc<RouterWorkerStatusMetrics>,
 }
 
@@ -124,32 +177,12 @@ impl SequencePublisher for RuntimeSequencePublisher {
         event_sender.enqueue(event)
     }
 
-    fn publish_load(&self, load: ActiveLoad) {
-        let publisher = self.metrics_publisher.clone();
-        tokio::spawn(async move {
-            if let Err(e) = publisher.publish(&load).await {
-                tracing::trace!(
-                    "Failed to publish ActiveLoad to NATS for worker (id={}, dp_rank={}): {e:?}",
-                    load.worker_id,
-                    load.dp_rank
-                );
-            }
-        });
+    fn publish_scheduler_load(&self, snapshot: SchedulerLoadSnapshot) {
+        self.scheduler_load.publish(snapshot);
     }
 
-    fn publish_load_batch(&self, loads: Vec<ActiveLoad>) {
-        let publisher = self.metrics_publisher.clone();
-        tokio::spawn(async move {
-            for load in loads {
-                if let Err(e) = publisher.publish(&load).await {
-                    tracing::trace!(
-                        "Failed to publish ActiveLoad to NATS for worker (id={}, dp_rank={}): {e:?}",
-                        load.worker_id,
-                        load.dp_rank
-                    );
-                }
-            }
-        });
+    fn publish_scheduler_load_batch(&self, snapshots: Vec<SchedulerLoadSnapshot>) {
+        self.scheduler_load.publish_batch(snapshots);
     }
 
     fn observe_load(
@@ -388,9 +421,10 @@ pub async fn create_multi_worker_sequences(
     workers_with_configs: HashMap<u64, ModelRuntimeConfig>,
     replica_sync: bool,
     router_id: u64,
-    worker_type: &'static str,
+    scheduler_load: SchedulerLoadSender,
     cancellation_token: CancellationToken,
 ) -> Result<Arc<ActiveSequencesMulti>> {
+    let worker_type = scheduler_load.metric_label();
     let transport_kind = endpoint.drt().default_event_transport_kind();
     let event_sender = if let Some((event_sender, event_rx)) = active_sequence_event_channel(
         replica_sync,
@@ -424,13 +458,11 @@ pub async fn create_multi_worker_sequences(
     } else {
         None
     };
-    let metrics_publisher =
-        Arc::new(EventPublisher::for_endpoint(&endpoint, KV_METRICS_SUBJECT).await?);
     let worker_status_metrics = RouterWorkerStatusMetrics::from_component(endpoint.component());
 
     let publisher = RuntimeSequencePublisher {
         event_sender,
-        metrics_publisher,
+        scheduler_load,
         worker_status_metrics,
     };
 
@@ -455,20 +487,32 @@ pub async fn create_multi_worker_sequences(
 
     let arc = Arc::new(multi_worker);
 
-    if replica_sync {
-        let direct_config = direct_zmq::DirectZmqSequenceConfig::from_env();
-        if direct_config.should_use_direct(transport_kind) {
-            let _direct_zmq_task = direct_zmq::start(
-                endpoint,
-                arc.clone(),
-                direct_config.rcvhwm,
-                cancellation_token.child_token(),
-            )
-            .await?;
-        } else {
-            let subscriber = RuntimeSequenceSubscriber::for_endpoint(&endpoint).await?;
-            arc.start_replica_sync(subscriber, cancellation_token.child_token());
+    // Worker-origin completion marks are consumed even when router-to-router replica sync is
+    // disabled. The tracker filters all other remote lifecycle events in that mode.
+    let direct_config = direct_zmq::DirectZmqSequenceConfig::from_env();
+    let ingress_result = if direct_config.should_use_direct(transport_kind) {
+        direct_zmq::start(
+            endpoint,
+            arc.clone(),
+            direct_config.rcvhwm,
+            cancellation_token.child_token(),
+        )
+        .await
+        .map(|_task| ())
+    } else {
+        match RuntimeSequenceSubscriber::for_endpoint(&endpoint).await {
+            Ok(subscriber) => {
+                arc.start_replica_sync(subscriber, cancellation_token.child_token());
+                Ok(())
+            }
+            Err(error) => Err(error),
         }
+    };
+    if let Err(error) = ingress_result {
+        tracing::warn!(
+            %error,
+            "active-sequence event ingress unavailable; continuing with response-side cleanup"
+        );
     }
 
     arc.start_periodic_force_expiry_across_all_workers(cancellation_token.child_token());
@@ -482,6 +526,14 @@ mod tests {
     use dynamo_kv_router::protocols::ActiveSequenceEventData;
     use dynamo_runtime::{DistributedRuntime, Runtime, distributed::DistributedConfig};
     use tokio::time::Instant;
+
+    fn scheduler_load_sender() -> SchedulerLoadSender {
+        super::super::routing_load::scheduler_load_channel(
+            super::super::RouterLoadSource::Decode,
+            CancellationToken::new(),
+        )
+        .0
+    }
 
     fn tracking_hint(tokens: usize) -> Option<PrefillLoadHint> {
         Some(PrefillLoadHint {
@@ -564,7 +616,7 @@ mod tests {
     #[test]
     fn active_sequence_publish_sender_preserves_lifecycle_order() {
         let (sender, mut event_rx) =
-            ActiveSequenceEventSender::channel(3, CancellationToken::new());
+            ActiveSequenceEventPublisher::channel(3, CancellationToken::new());
         sender.enqueue(add_event("ordered")).unwrap();
         sender.enqueue(mark_event("ordered")).unwrap();
         sender.enqueue(free_event("ordered")).unwrap();
@@ -586,7 +638,7 @@ mod tests {
     #[test]
     fn active_sequence_publish_sender_drops_newest_when_full() {
         let (sender, mut event_rx) =
-            ActiveSequenceEventSender::channel(1, CancellationToken::new());
+            ActiveSequenceEventPublisher::channel(1, CancellationToken::new());
         sender.enqueue(add_event("accepted")).unwrap();
 
         let error = sender
@@ -608,7 +660,8 @@ mod tests {
     #[test]
     fn active_sequence_publish_sender_classifies_closed_queue_by_cancellation() {
         let cancellation_token = CancellationToken::new();
-        let (sender, event_rx) = ActiveSequenceEventSender::channel(1, cancellation_token.clone());
+        let (sender, event_rx) =
+            ActiveSequenceEventPublisher::channel(1, cancellation_token.clone());
         drop(event_rx);
 
         let unexpected = sender.enqueue(free_event("unexpected")).unwrap_err();
@@ -799,7 +852,7 @@ mod tests {
             workers.clone(),
             true,
             1,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             cancel.child_token(),
         )
         .await?;
@@ -809,7 +862,7 @@ mod tests {
             workers.clone(),
             true,
             3,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             cancel.child_token(),
         )
         .await?;
@@ -819,7 +872,7 @@ mod tests {
             workers,
             true,
             2,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             cancel.child_token(),
         )
         .await?;
@@ -871,6 +924,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_completion_ingress_runs_without_router_replica_sync() -> Result<()> {
+        let runtime = Runtime::from_current()?;
+        let distributed =
+            DistributedRuntime::new(runtime, DistributedConfig::process_local()).await?;
+        let endpoint = distributed
+            .namespace(format!(
+                "worker-completion-ingress-{}",
+                uuid::Uuid::new_v4()
+            ))?
+            .component("workers")?
+            .endpoint("generate");
+        let worker_id = 42;
+        let worker = WorkerWithDpRank::new(worker_id, 0);
+        let cancel = CancellationToken::new();
+        let sequences = create_multi_worker_sequences(
+            endpoint.clone(),
+            4,
+            HashMap::from([(worker_id, ModelRuntimeConfig::new())]),
+            false,
+            99,
+            scheduler_load_sender(),
+            cancel.child_token(),
+        )
+        .await?;
+        let request_id = "worker-origin-mark".to_string();
+        sequences.add_request(
+            SequenceRequest {
+                request_id: request_id.clone(),
+                token_sequence: Some(vec![1, 2, 3]),
+                track_prefill_tokens: true,
+                expected_output_tokens: None,
+                prefill_load_hint: tracking_hint(12),
+                worker,
+                lora_name: None,
+            },
+            Instant::now(),
+        )?;
+
+        let publisher = ActiveSequenceEventPublisher::for_endpoint(&endpoint, 16).await?;
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+            loop {
+                publisher.mark_prefill_completed(request_id.clone(), worker_id, 0)?;
+                if sequences.active_tokens(Instant::now())[&worker] == 0 {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+
+        drop(publisher);
+        cancel.cancel();
+        Ok(())
+    }
+
+    #[tokio::test]
     #[ignore]
     async fn test_multi_worker_cross_instance_sync() -> Result<()> {
         dynamo_runtime::logging::init();
@@ -898,7 +1008,7 @@ mod tests {
             workers_with_configs.clone(),
             true,
             1,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             CancellationToken::new(),
         )
         .await?;
@@ -908,7 +1018,7 @@ mod tests {
             workers_with_configs,
             true,
             2,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             CancellationToken::new(),
         )
         .await?;
@@ -1054,7 +1164,7 @@ mod tests {
             workers_with_configs.clone(),
             true,
             1,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             CancellationToken::new(),
         )
         .await?;
@@ -1064,7 +1174,7 @@ mod tests {
             workers_with_configs,
             true,
             2,
-            crate::discovery::WORKER_TYPE_DECODE,
+            scheduler_load_sender(),
             CancellationToken::new(),
         )
         .await?;

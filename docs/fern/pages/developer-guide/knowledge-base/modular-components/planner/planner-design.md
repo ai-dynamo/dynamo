@@ -27,7 +27,7 @@ used by external gRPC plugins.
    worker observations and applies the load-based +/-1 scaling algorithm.
 4. **RECONCILE / CONSTRAIN**: The generic pipeline merges proposals from
    builtin and external plugins. After CONSTRAIN, the engine adapter applies
-   the local planner's final `min_endpoint` and GPU-budget invariants before
+   the local planner's final effective component minimums and GPU-budget invariants before
    returning any scaling effect.
 5. **EXECUTE**: The adapter returns `PlannerEffects.scale_to`; `NativePlannerBase`
    applies those targets through the configured connector.
@@ -85,7 +85,7 @@ gRPC plugin contract.
   engine RPS, decision reasons, lower bounds, and execution/audit metadata used
   by metrics and HTML reports.
 - **Worker capabilities and budget inputs**: component GPU counts and runtime
-  capabilities used to clamp final targets to `min_endpoint` and GPU budgets.
+  capabilities used to clamp final targets to the effective component minimums and GPU budgets.
 
 Predictor history is intentionally not stored in `PlannerScalingState`.
 `builtin_load_predict` owns the request-count, ISL, and OSL predictor state and

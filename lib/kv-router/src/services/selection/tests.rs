@@ -5,7 +5,6 @@ use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
-use std::cell::Cell;
 use std::io::Write;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::Arc;
@@ -27,8 +26,8 @@ use crate::scheduling::WorkerSelectionPolicyError;
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::overlap::build_overlap_scores_response;
 use crate::scheduling::selector::{
-    WorkerCandidate, WorkerInputView, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy,
+    WorkerCandidate, WorkerFilter, WorkerInputView, WorkerPicker, WorkerScorer,
+    WorkerSelectionContext, WorkerSelectionPolicy,
 };
 use crate::{TrackingHashContext, TrackingHashScope};
 use tempfile::NamedTempFile;
@@ -44,20 +43,6 @@ fn test_config() -> crate::config::KvRouterConfig {
 fn app() -> Router {
     let service = Arc::new(SelectionService::new_local_for_test(test_config(), 1));
     create_router(Arc::new(AppState { service }))
-}
-
-struct HighestWorkerScorer {
-    calls: Cell<usize>,
-}
-impl WorkerScorer for HighestWorkerScorer {
-    fn score(
-        &mut self,
-        _context: &WorkerSelectionContext<'_>,
-        candidate: &WorkerCandidate,
-    ) -> Result<f64, WorkerSelectionPolicyError> {
-        self.calls.set(self.calls.get() + 1);
-        Ok(-2.0 * candidate.worker().worker_id as f64)
-    }
 }
 
 struct WorkerIdScorer;
@@ -111,6 +96,30 @@ impl WorkerPicker for InvalidRowPicker {
         input: WorkerInputView<'_>,
     ) -> Result<usize, WorkerSelectionPolicyError> {
         Ok(input.candidates().len())
+    }
+}
+
+struct RejectAllFilter;
+
+impl WorkerFilter for RejectAllFilter {
+    fn keep(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        _candidate: &WorkerCandidate,
+    ) -> Result<bool, WorkerSelectionPolicyError> {
+        Ok(false)
+    }
+}
+
+struct RejectWorker(WorkerId);
+
+impl WorkerFilter for RejectWorker {
+    fn keep(
+        &mut self,
+        _context: &WorkerSelectionContext<'_>,
+        candidate: &WorkerCandidate,
+    ) -> Result<bool, WorkerSelectionPolicyError> {
+        Ok(candidate.worker().worker_id != self.0)
     }
 }
 
@@ -229,20 +238,41 @@ impl FactoryRendezvous {
     }
 }
 
-async fn native_policy_app<F>(factory: F) -> Router
+async fn native_policy_app<F>(worker_type: crate::WorkerType, factory: F) -> Router
 where
     F: for<'a> Fn(
             &crate::config::KvRouterConfig,
-            &'static str,
+            crate::WorkerType,
             RoutingPartitionRef<'a>,
         ) -> WorkerSelectionPolicy
         + Send
         + Sync
         + 'static,
 {
-    let service = SelectionServiceBuilder::new(test_config())
+    let mut policy_file = NamedTempFile::new().expect("create worker-selection policy config");
+    write!(
+        policy_file,
+        "\nworker_selection:\n  {}: test\n  instances:\n    - name: test\n      type: test\n",
+        worker_type.as_str(),
+    )
+    .expect("write worker-selection policy config");
+    let config = crate::config::KvRouterConfig {
+        router_policy_config: Some(policy_file.path().display().to_string()),
+        ..test_config()
+    };
+    let factory: crate::WorkerSelectionPolicyFactory = Arc::new(factory);
+    let mut registry = WorkerSelectionPolicyRegistry::default();
+    registry
+        .register(
+            "test",
+            Arc::new(move |_| -> Result<_, WorkerSelectionPolicyProviderError> {
+                Ok(Arc::clone(&factory))
+            }),
+        )
+        .expect("register test worker-selection policy");
+
+    let service = SelectionServiceBuilder::new(config, worker_type, registry)
         .indexer_threads(1)
-        .worker_selection_policy_factory(factory)
         .build()
         .await
         .expect("build selection service");
@@ -272,45 +302,40 @@ async fn active_requests(app: Router, worker_id: WorkerId) -> u64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn worker_selection_policy_factory_is_per_partition_composes_and_books() {
+async fn custom_worker_selection_policy_is_per_partition_composes_filter_scorer_picker_and_books() {
     let factory_calls = Arc::new(AtomicUsize::new(0));
     let factory_partitions = Arc::new(Mutex::new(Vec::new()));
+    let factory_worker_types = Arc::new(Mutex::new(Vec::new()));
     let factory_rendezvous = Arc::new(FactoryRendezvous::default());
     let calls = Arc::clone(&factory_calls);
     let partitions = Arc::clone(&factory_partitions);
+    let worker_types = Arc::clone(&factory_worker_types);
     let rendezvous = Arc::clone(&factory_rendezvous);
-    let service = SelectionServiceBuilder::new(test_config())
-        .indexer_threads(1)
-        .worker_selection_policy_factory(move |config, worker_type, partition| {
+    let app = native_policy_app(
+        crate::WorkerType::Prefill,
+        move |config, worker_type, partition| {
             calls.fetch_add(1, Ordering::Relaxed);
             partitions.lock().unwrap().push(partition.into_owned());
+            worker_types.lock().unwrap().push(worker_type);
             rendezvous.wait_for_peer();
-            WorkerSelectionPolicy::new(
+            WorkerSelectionPolicy::new_with_filters(
                 config.clone(),
-                worker_type,
-                vec![
-                    Box::new(WorkerIdScorer),
-                    Box::new(HighestWorkerScorer {
-                        calls: Cell::new(0),
-                    }),
-                ],
+                worker_type.as_str(),
+                vec![Box::new(RejectWorker(1))],
+                vec![Box::new(WorkerIdScorer)],
                 Box::new(LowestCostPicker),
             )
-        })
-        .build()
-        .await
-        .expect("build selection service");
-    let app = create_router(Arc::new(AppState {
-        service: Arc::new(service),
-    }));
+        },
+    )
+    .await;
 
     let model_registration = tokio::spawn(register_worker_id(app.clone(), 1, None));
     let other_app = app.clone();
     let other_registration = tokio::spawn(async move {
         let body = serde_json::json!({
-            "worker_id": 3,
+            "worker_id": 4,
             "model_name": "other-model",
-            "endpoint": "http://worker-3:8000",
+            "endpoint": "http://worker-4:8000",
             "block_size": 4
         });
         post(other_app, "/workers", &body.to_string()).await
@@ -325,6 +350,10 @@ async fn worker_selection_policy_factory_is_per_partition_composes_and_books() {
     );
     assert_eq!(
         register_worker_id(app.clone(), 2, None).await.status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        register_worker_id(app.clone(), 3, None).await.status(),
         StatusCode::CREATED
     );
     assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
@@ -352,18 +381,25 @@ async fn worker_selection_policy_factory_is_per_partition_composes_and_books() {
     assert_eq!(active_requests(app.clone(), 2).await, 1);
 
     assert_eq!(factory_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        *factory_worker_types.lock().unwrap(),
+        vec![crate::WorkerType::Prefill; 2]
+    );
 }
 
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking() {
-    let app = native_policy_app(|config, worker_type, _partition| {
-        WorkerSelectionPolicy::new(
-            config.clone(),
-            worker_type,
-            vec![Box::new(NonFiniteScorer)],
-            Box::new(LowestCostPicker),
-        )
-    })
+    let app = native_policy_app(
+        crate::WorkerType::Aggregated,
+        |config, worker_type, _partition| {
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                worker_type.as_str(),
+                vec![Box::new(NonFiniteScorer)],
+                Box::new(LowestCostPicker),
+            )
+        },
+    )
     .await;
     assert_eq!(
         register_worker_id(app.clone(), 1, None).await.status(),
@@ -388,14 +424,17 @@ async fn native_worker_selection_policy_rejects_non_finite_costs_before_booking(
 
 #[tokio::test]
 async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
-    let app = native_policy_app(|config, worker_type, _partition| {
-        WorkerSelectionPolicy::new(
-            config.clone(),
-            worker_type,
-            Vec::new(),
-            Box::new(InvalidRowPicker),
-        )
-    })
+    let app = native_policy_app(
+        crate::WorkerType::Aggregated,
+        |config, worker_type, _partition| {
+            WorkerSelectionPolicy::new(
+                config.clone(),
+                worker_type.as_str(),
+                Vec::new(),
+                Box::new(InvalidRowPicker),
+            )
+        },
+    )
     .await;
     assert_eq!(
         register_worker_id(app.clone(), 1, None).await.status(),
@@ -415,6 +454,36 @@ async fn native_worker_selection_policy_rejects_invalid_rows_before_booking() {
             .unwrap()
             .contains("candidate row")
     );
+    assert_eq!(active_requests(app, 1).await, 0);
+}
+
+#[tokio::test]
+async fn worker_selection_filter_returns_unavailable_without_booking() {
+    let app = native_policy_app(
+        crate::WorkerType::Aggregated,
+        |config, worker_type, _partition| {
+            WorkerSelectionPolicy::new_with_filters(
+                config.clone(),
+                worker_type.as_str(),
+                vec![Box::new(RejectAllFilter)],
+                Vec::new(),
+                Box::new(LowestCostPicker),
+            )
+        },
+    )
+    .await;
+    assert_eq!(
+        register_worker_id(app.clone(), 1, None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let rejected = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"filtered"}"#,
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(active_requests(app, 1).await, 0);
 }
 
@@ -1732,14 +1801,27 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         kv_router_config: test_config(),
         selection_cache: SelectionCacheConfig::default(),
     };
-    let service_a = Arc::new(config_a.service_builder().build().await.unwrap());
-    let service_b = Arc::new(
-        SelectionServiceBuilder::new(test_config())
-            .indexer_threads(1)
-            .replica_sync(port_b, Vec::new())
+    let service_a = Arc::new(
+        config_a
+            .service_builder(
+                crate::WorkerType::Aggregated,
+                WorkerSelectionPolicyRegistry::default(),
+            )
             .build()
             .await
             .unwrap(),
+    );
+    let service_b = Arc::new(
+        SelectionServiceBuilder::new(
+            test_config(),
+            crate::WorkerType::Aggregated,
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .indexer_threads(1)
+        .replica_sync(port_b, Vec::new())
+        .build()
+        .await
+        .unwrap(),
     );
     service_b
         .register_replica_peer(format!("tcp://127.0.0.1:{port_a}"))

@@ -17,12 +17,13 @@ use crate::CancellationToken;
 use crate::discovery::{
     Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
     DiscoveryQuery, DiscoverySpec, DiscoveryStream, MAX_JSON_SAFE_PUBLISHER_ID, MetadataSnapshot,
-    diff_discovery_instances, endpoint_instances,
+    ModelCardInstanceId, reconcile_discovery_snapshot,
 };
 use anyhow::Result;
 use async_trait::async_trait;
 use kube::{Api, Client as KubeClient, api::DeleteParams};
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -35,6 +36,35 @@ fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn update_model_taints_and_persist<F, Fut>(
+    metadata: &Arc<RwLock<DiscoveryMetadata>>,
+    id: ModelCardInstanceId,
+    taints: HashSet<String>,
+    persist: F,
+) -> Result<bool>
+where
+    F: FnOnce(DiscoveryMetadata) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<DiscoveryMetadata>> + Send + 'static,
+{
+    let metadata = Arc::clone(metadata);
+    // Once started, persistence and the matching local commit must outlive request cancellation.
+    // Dropping the JoinHandle detaches this task instead of cancelling the remote-commit/local-
+    // state critical section.
+    tokio::spawn(async move {
+        let mut metadata = metadata.write().await;
+        let mut candidate = metadata.clone();
+        let changed = candidate.update_model_taints(&id, taints)?;
+
+        // Persist even a local no-op. This repairs an authoritative CR that may differ after an
+        // earlier commit/ack ambiguity instead of trusting potentially stale local metadata.
+        let persisted = persist(candidate).await?;
+        *metadata = persisted;
+        Ok(changed)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("model taint persistence task failed: {error}"))?
 }
 
 /// Kubernetes-based discovery client
@@ -150,7 +180,7 @@ impl Discovery for KubeDiscoveryClient {
         // Clone state for rollback in case CR persistence fails
         let original_state = metadata.clone();
 
-        match &instance {
+        let registered_instance = match &instance {
             DiscoveryInstance::Endpoint(inst) => {
                 tracing::info!(
                     "Registering endpoint: namespace={}, component={}, endpoint={}, instance_id={:x}",
@@ -160,6 +190,7 @@ impl Discovery for KubeDiscoveryClient {
                     instance_id
                 );
                 metadata.register_endpoint(instance.clone())?;
+                instance.clone()
             }
             DiscoveryInstance::Model {
                 namespace,
@@ -174,7 +205,7 @@ impl Discovery for KubeDiscoveryClient {
                     endpoint,
                     instance_id
                 );
-                metadata.register_model_card(instance.clone())?;
+                metadata.register_model_card(instance.clone())?
             }
             DiscoveryInstance::EventChannel { scope, topic, .. } => {
                 tracing::info!(
@@ -184,6 +215,7 @@ impl Discovery for KubeDiscoveryClient {
                     instance_id
                 );
                 metadata.register_event_channel(instance.clone())?;
+                instance.clone()
             }
             DiscoveryInstance::EventSource { scope, topic, .. } => {
                 tracing::info!(
@@ -193,8 +225,9 @@ impl Discovery for KubeDiscoveryClient {
                     instance_id
                 );
                 metadata.register_event_source(instance.clone())?;
+                instance.clone()
             }
-        }
+        };
 
         // Build and apply the CR with the updated metadata
         // This persists the metadata to Kubernetes for other pods to discover
@@ -218,7 +251,36 @@ impl Discovery for KubeDiscoveryClient {
 
         tracing::debug!("Persisted metadata to DynamoWorkerMetadata CR");
 
-        Ok(instance)
+        Ok(registered_instance)
+    }
+
+    async fn update_model_taints_internal(
+        &self,
+        id: ModelCardInstanceId,
+        taints: HashSet<String>,
+    ) -> Result<()> {
+        let kube_client = self.kube_client.clone();
+        let pod_namespace = self.pod_info.pod_namespace.clone();
+        let cr_name = self.pod_info.target.cr_name();
+        let pod_name = self.pod_info.pod_name.clone();
+        let pod_uid = self.pod_info.pod_uid.clone();
+        let changed = update_model_taints_and_persist(
+            &self.metadata,
+            id,
+            taints,
+            move |candidate| async move {
+                let cr = build_cr(&cr_name, &pod_name, &pod_uid, &candidate)?;
+                apply_cr(&kube_client, &pod_namespace, &cr).await?;
+                Ok(candidate)
+            },
+        )
+        .await?;
+        if !changed {
+            return Ok(());
+        }
+
+        tracing::debug!("Persisted model taint update to DynamoWorkerMetadata CR");
+        Ok(())
     }
 
     async fn unregister(&self, instance: DiscoveryInstance) -> Result<()> {
@@ -388,13 +450,13 @@ impl Discovery for KubeDiscoveryClient {
                 }
             }
 
-            let mut known_endpoints = endpoint_instances(&initial);
-            let mut known_ids: HashSet<DiscoveryInstanceId> = initial.into_keys().collect();
+            // Track complete values so same-ID model taint updates are observable.
+            let mut known = initial;
 
             loop {
                 tracing::trace!(
                     stream_id = %stream_id,
-                    known_count = known_ids.len(),
+                    known_count = known.len(),
                     "Watch loop waiting for changes"
                 );
 
@@ -431,15 +493,14 @@ impl Discovery for KubeDiscoveryClient {
                             stream_id = %stream_id,
                             seq = snapshot.sequence,
                             current_count = current.len(),
-                            known_count = known_ids.len(),
+                            known_count = known.len(),
                             "Watch received snapshot update"
                         );
 
-                        let (upserted, removed) =
-                            diff_discovery_instances(&known_ids, &known_endpoints, &current);
+                        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
 
                         // Log diff results (even if empty, for debugging)
-                        if upserted.is_empty() && removed.is_empty() {
+                        if events.is_empty() {
                             tracing::debug!(
                                 stream_id = %stream_id,
                                 seq = snapshot.sequence,
@@ -449,45 +510,39 @@ impl Discovery for KubeDiscoveryClient {
                             tracing::debug!(
                                 stream_id = %stream_id,
                                 seq = snapshot.sequence,
-                                upserted = upserted.len(),
-                                removed = removed.len(),
-                                total = current.len(),
+                                emitted_events = events.len(),
+                                total = reconciled.len(),
                                 "Watch detected changes"
                             );
                         }
 
-                        // Endpoint values are mutable, so emit Added for new instances and
-                        // same-ID endpoint updates. Other instance types remain ID-only.
-                        for instance in upserted {
+                        for event in events {
+                            let (event_kind, instance_id) = match &event {
+                                DiscoveryEvent::Added(instance) => ("added", instance.id()),
+                                DiscoveryEvent::ModelTaintsUpdated(update) => (
+                                    "model_taints_updated",
+                                    DiscoveryInstanceId::Model(update.id.clone()),
+                                ),
+                                DiscoveryEvent::Removed(id) => ("removed", id.clone()),
+                            };
                             tracing::info!(
                                 stream_id = %stream_id,
-                                instance_id = format!("{:x}", instance.instance_id()),
-                                "Emitting Added event"
+                                event_kind,
+                                ?instance_id,
+                                "Emitting discovery event"
                             );
-                            if event_tx.send(Ok(DiscoveryEvent::Added(instance))).is_err() {
-                                tracing::debug!(
-                                    stream_id = %stream_id,
-                                    "Watch receiver dropped"
-                                );
-                                return;
-                            }
-                        }
-
-                        // Emit Removed events
-                        for id in removed {
-                            tracing::info!(
+                            tracing::debug!(
                                 stream_id = %stream_id,
-                                id = ?id,
-                                "Emitting Removed event"
+                                ?event,
+                                "Discovery event detail"
                             );
-                            if event_tx.send(Ok(DiscoveryEvent::Removed(id))).is_err() {
+                            if event_tx.send(Ok(event)).is_err() {
                                 tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
                                 return;
                             }
                         }
 
-                        known_endpoints = endpoint_instances(&current);
-                        known_ids = current.into_keys().collect();
+                        known = reconciled;
                     }
                     Err(_) => {
                         tracing::info!(
@@ -510,7 +565,7 @@ impl Discovery for KubeDiscoveryClient {
 mod tests {
     use super::*;
     use crate::component::TransportType;
-    use crate::discovery::{EventScope, EventTransport};
+    use crate::discovery::{EventScope, EventTransport, ModelTaintsUpdate};
 
     fn endpoint_instance(instance_id: u64, transport: &str) -> DiscoveryInstance {
         DiscoveryInstance::Endpoint(crate::component::Instance {
@@ -522,6 +577,19 @@ mod tests {
             device_type: None,
             request_plane_codec: None,
         })
+    }
+
+    fn model_with_taint(taint: &str) -> DiscoveryInstance {
+        DiscoveryInstance::Model {
+            namespace: "ns".to_string(),
+            component: "worker".to_string(),
+            endpoint: "generate".to_string(),
+            instance_id: 7,
+            card_json: serde_json::json!({
+                "runtime_config": {"taints": [taint]}
+            }),
+            model_suffix: None,
+        }
     }
 
     #[test]
@@ -537,13 +605,11 @@ mod tests {
         let updated = endpoint_instance(1, "127.0.0.1:9000");
         let known = HashMap::from([(original.id(), original)]);
         let current = HashMap::from([(updated.id(), updated.clone())]);
-        let known_ids = known.keys().cloned().collect();
-        let known_endpoints = endpoint_instances(&known);
 
-        let (upserted, removed) = diff_discovery_instances(&known_ids, &known_endpoints, &current);
+        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
 
-        assert_eq!(upserted, vec![updated]);
-        assert!(removed.is_empty());
+        assert_eq!(events, vec![DiscoveryEvent::Added(updated.clone())]);
+        assert_eq!(reconciled.get(&updated.id()), Some(&updated));
     }
 
     #[test]
@@ -558,29 +624,158 @@ mod tests {
         };
         let original = event_channel("tcp://127.0.0.1:8000");
         let updated = event_channel("tcp://127.0.0.1:9000");
-        let known = HashMap::from([(original.id(), original)]);
+        let known = HashMap::from([(original.id(), original.clone())]);
         let current = HashMap::from([(updated.id(), updated)]);
-        let known_ids = known.keys().cloned().collect();
-        let known_endpoints = endpoint_instances(&known);
 
-        let (upserted, removed) = diff_discovery_instances(&known_ids, &known_endpoints, &current);
+        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
 
-        assert!(upserted.is_empty());
-        assert!(removed.is_empty());
+        assert!(events.is_empty());
+        assert_eq!(reconciled.get(&original.id()), Some(&original));
     }
 
     #[test]
     fn snapshot_diff_emits_added_and_removed_instances() {
         let removed_instance = endpoint_instance(1, "127.0.0.1:8000");
         let added_instance = endpoint_instance(2, "127.0.0.1:9000");
-        let known = HashMap::from([(removed_instance.id(), removed_instance.clone())]);
-        let current = HashMap::from([(added_instance.id(), added_instance.clone())]);
-        let known_ids = known.keys().cloned().collect();
-        let known_endpoints = endpoint_instances(&known);
+        let removed_id = removed_instance.id();
+        let added_id = added_instance.id();
+        let known = HashMap::from([(removed_id.clone(), removed_instance)]);
+        let current = HashMap::from([(added_id.clone(), added_instance.clone())]);
 
-        let (upserted, removed) = diff_discovery_instances(&known_ids, &known_endpoints, &current);
+        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
 
-        assert_eq!(upserted, vec![added_instance]);
-        assert_eq!(removed, vec![removed_instance.id()]);
+        assert_eq!(events.len(), 2);
+        assert!(events.contains(&DiscoveryEvent::Removed(removed_id.clone())));
+        assert!(events.contains(&DiscoveryEvent::Added(added_instance.clone())));
+        assert!(!reconciled.contains_key(&removed_id));
+        assert_eq!(reconciled.get(&added_id), Some(&added_instance));
+    }
+    #[test]
+    fn changed_model_taints_emit_scoped_event() {
+        let old = model_with_taint("old");
+        let updated = model_with_taint("updated");
+        let known = HashMap::from([(old.id(), old)]);
+        let current = HashMap::from([(updated.id(), updated.clone())]);
+
+        let (events, reconciled) = reconcile_discovery_snapshot(&known, current);
+
+        let DiscoveryInstanceId::Model(id) = updated.id() else {
+            unreachable!()
+        };
+        assert_eq!(
+            events,
+            vec![DiscoveryEvent::ModelTaintsUpdated(ModelTaintsUpdate {
+                id,
+                taints: vec!["updated".to_string()],
+            })]
+        );
+        assert_eq!(reconciled.get(&updated.id()), Some(&updated));
+    }
+
+    #[tokio::test]
+    async fn model_taint_persistence_completes_after_caller_cancellation() {
+        let model = model_with_taint("old");
+        let DiscoveryInstanceId::Model(id) = model.id() else {
+            unreachable!()
+        };
+        let mut initial = DiscoveryMetadata::new();
+        initial.register_model_card(model).unwrap();
+        let metadata = Arc::new(RwLock::new(initial));
+        let task_metadata = metadata.clone();
+        let remote = Arc::new(RwLock::new(DiscoveryMetadata::new()));
+        let task_remote = remote.clone();
+        let (remote_committed_tx, remote_committed_rx) = tokio::sync::oneshot::channel();
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+
+        let task = tokio::spawn(async move {
+            update_model_taints_and_persist(
+                &task_metadata,
+                id,
+                HashSet::from(["new".to_string()]),
+                move |candidate| async move {
+                    *task_remote.write().await = candidate.clone();
+                    remote_committed_tx.send(()).unwrap();
+                    ack_rx.await.unwrap();
+                    Ok(candidate)
+                },
+            )
+            .await
+        });
+
+        remote_committed_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        ack_tx.send(()).unwrap();
+
+        let stored = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let stored = metadata.read().await.get_all_model_cards().pop().unwrap();
+                let DiscoveryInstance::Model { card_json, .. } = &stored else {
+                    unreachable!()
+                };
+                if card_json["runtime_config"]["taints"] == serde_json::json!(["new"]) {
+                    break stored;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached persistence did not commit local metadata");
+        let DiscoveryInstance::Model { card_json, .. } = stored else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["new"])
+        );
+        let remote = remote.read().await.get_all_model_cards().pop().unwrap();
+        let DiscoveryInstance::Model { card_json, .. } = remote else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["new"])
+        );
+    }
+
+    #[tokio::test]
+    async fn local_noop_reapplies_authoritative_model_taints() {
+        let local_model = model_with_taint("old");
+        let DiscoveryInstanceId::Model(id) = local_model.id() else {
+            unreachable!()
+        };
+        let mut initial = DiscoveryMetadata::new();
+        initial.register_model_card(local_model).unwrap();
+        let metadata = Arc::new(RwLock::new(initial));
+        let persisted = Arc::new(RwLock::new(None));
+        let task_persisted = persisted.clone();
+
+        let changed = update_model_taints_and_persist(
+            &metadata,
+            id,
+            HashSet::from(["old".to_string()]),
+            move |candidate| async move {
+                *task_persisted.write().await = Some(candidate.clone());
+                Ok(candidate)
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(!changed);
+        let reapplied = persisted
+            .read()
+            .await
+            .clone()
+            .expect("no-op was not persisted");
+        let DiscoveryInstance::Model { card_json, .. } =
+            reapplied.get_all_model_cards().pop().unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            card_json["runtime_config"]["taints"],
+            serde_json::json!(["old"])
+        );
     }
 }

@@ -51,11 +51,25 @@ def test_get_local_dp_rank_range_respects_multinode_dp_attention():
 
 
 def test_set_forward_pass_metrics_worker_id_uses_endpoint_identity():
-    server_args = SimpleNamespace(enable_forward_pass_metrics=True)
+    class ReadOnlyServerArgs:
+        def __init__(self):
+            object.__setattr__(self, "enable_forward_pass_metrics", True)
+            object.__setattr__(self, "override_source", None)
+
+        def __setattr__(self, name, value):
+            raise AttributeError("server args are read-only")
+
+        def override(self, source, **fields):
+            object.__setattr__(self, "override_source", source)
+            for name, value in fields.items():
+                object.__setattr__(self, name, value)
+
+    server_args = ReadOnlyServerArgs()
     endpoint = SimpleNamespace(connection_id=lambda: "endpoint-9")
 
     set_forward_pass_metrics_worker_id(server_args, endpoint)
 
+    assert server_args.override_source == "dynamo.forward_pass_metrics"
     assert server_args.forward_pass_metrics_worker_id == "endpoint-9"
     assert server_args.forward_pass_metrics_ipc_name.startswith("ipc://")
 
@@ -452,6 +466,7 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     server_args = SimpleNamespace(
         kv_events_config='{"endpoint": "tcp://*:5557"}',
         page_size=16,
+        dcp_size=2,
         dp_size=8,
         enable_dp_attention=True,
         nnodes=2,
@@ -478,6 +493,7 @@ def test_init_kv_event_publish_uses_worker_id_override(monkeypatch):
     assert len(publishers) == 4
     assert [call["dp_rank"] for call in calls] == [4, 5, 6, 7]
     assert {call["worker_id"] for call in calls} == {1234}
+    assert {call["kv_block_size"] for call in calls} == {32}
 
 
 def test_init_kv_event_publish_uses_effective_kv_event_setting():

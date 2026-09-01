@@ -13,6 +13,12 @@ subtitle: Backend-neutral simulation and configuration-search tools
 AI Simulate is a standalone Python distribution. It provides inference-engine forward-pass
 simulation, deployment simulation, and search without depending on `ai-dynamo`.
 
+For an engine-only single replay run, use `python -m aisimulate.replay`. For a replay with Dynamo
+Router, Planner, or online adapters, use `python -m dynamo.replay`. Both commands share their base
+replay configuration; Dynamo extends it with adapter options. The selected runtime validates each
+`--*-engine-args` JSON payload, so runtime-specific fields can differ. For configuration search, call
+`Sweeper(runner_factory=...).run(config)`.
+
 ## Sweeper
 
 [Sweeper](sweeper-experimental/overview.md) searches backend deployment settings against an injected replay runner.
@@ -24,19 +30,20 @@ Optional adapters extend the search without adding a Dynamo dependency to AI Sim
 adapter imports its Dynamo implementation and adds a versioned runtime hook to the replay
 specification.
 
-KVBM search settings are deprecated and have no adapter migration. Native G2 replaces that path.
+KVBM search settings are deprecated and are not supported by the AI Simulate engine and replay
+path. They have no adapter migration.
 
 ## Install
 
-The `dynamo-planner` image builds and installs AI Simulate and Dynamo from the same source revision.
-The AI Simulate wheel remains inside the image and is not published as a standalone release
-artifact.
+The `dynamo-planner` image installs the published `aisimulate==0.1.0.dev1` wheel from its local
+wheelhouse. Dynamo builds `aisimulate-core==0.1.0-dev.1` from crates.io instead of vendoring the
+AI Simulate source tree.
 
-For source development, install AI Simulate, Dynamo, and the Planner dependencies from the
-repository root:
+For Dynamo source development, install the published AI Simulate wheel, Dynamo, and the Planner
+dependencies from the Dynamo repository root:
 
 ```bash
-uv pip install -e ./aisimulate
+uv pip install "aisimulate==0.1.0.dev1"
 uv pip install --no-deps -e .
 uv pip install -r container/deps/requirements.planner.txt
 ```

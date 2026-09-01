@@ -7,6 +7,7 @@ from typing import Awaitable, Callable
 
 import sglang as sgl
 
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.runtime import DistributedRuntime
@@ -71,6 +72,7 @@ async def init_embedding(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
     ).to_dict()
 
+    register_model_taint_route(runtime, generate_endpoint)
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(

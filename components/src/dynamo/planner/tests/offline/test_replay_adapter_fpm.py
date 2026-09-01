@@ -1,11 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Optional-dependency preflight must run before replay CLI imports.
+# ruff: noqa: E402
 
 """Regression tests for planner replay FPM handling."""
 
 from __future__ import annotations
 
 import pytest
+
+pytest.importorskip(
+    "aisimulate.replay",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
 
 from dynamo.mocker import MockEngineArgs
 from dynamo.planner.config.planner_config import PlannerConfig
@@ -225,6 +232,15 @@ def test_planner_metadata_identifies_custom_plugins_without_secrets():
     serialized = str(identities)
     assert "secret" not in serialized
     assert "grpc://planner-plugin:9000" not in serialized
+
+    changed_port_config = config.model_copy(
+        update={"control_api_port": config.control_api_port + 1}
+    )
+    adapter._config = changed_port_config
+    assert (
+        adapter._planner_metadata()["planner_config_digest"]
+        == metadata["planner_config_digest"]
+    )
 
     changed_config = config.model_copy(deep=True)
     changed_config.plugin_registration.in_process_plugins[0].kwargs["window"] = 8

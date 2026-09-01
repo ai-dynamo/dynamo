@@ -15,6 +15,7 @@
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
+#   examples -> recipe-check (Kustomize recipe generation and unit tests)
 #   sidecar  -> classification only; source and proto files also match rust
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
@@ -52,13 +53,33 @@ docs:
   - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
+  # Codex role configs for the optimization skill pack; agent guidance, no CI surface.
+  - '.codex/**'
   # Canonical agent skills live in .agents/skills; root skills/ is a symlink there.
   - 'skills/**'
   # Sidecar documentation is not part of the Fern docs site.
   - '!lib/sidecar/**'
 
+api_docs:
+  - '.github/filters.yaml'
+  - '.github/workflows/fern-docs.yml'
+  - '.github/workflows/pre-merge.yml'
+  - 'pyproject.toml'
+  - 'docs/fern/scripts/**'
+  - 'docs/fern/components/**'
+  - 'docs/fern/pages/reference/api/**'
+  - 'docs/fern/index.yml'
+  - 'docs/fern/docs.yml'
+  - 'docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx'
+  - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
+  - 'deploy/operator/docs/footer.md'
+  - 'lib/bindings/python/src/**'
+  - 'components/src/dynamo/**'
+  - '**/Cargo.toml'
+
 examples:
   - 'recipes/**'
+  - 'recipes/**/.kustomize-matrix.yaml'
   - 'examples/**'
   - '.devcontainer/**'
   - 'deploy/discovery/**'
@@ -66,8 +87,16 @@ examples:
   - 'dev/observability/**'
   - 'deploy/observability/**'
   - 'deploy/pre-deployment/**'
+  - 'scripts/generate_kustomize_openapi.py'
+  - 'scripts/kustomize-matrix.py'
+  - 'tests/test_generate_kustomize_openapi.py'
+  - 'tests/test_kustomize_matrix.py'
+  - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployment.yaml'
+  - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
 
 ignore:
+  # CI filter documentation does not affect any CI job.
+  - '.github/FILTERS.md'
   - '.lycheeignore'
   - '.pre-commit-config.yaml'
   - '.coderabbit.yaml'
@@ -89,6 +118,7 @@ ignore:
   - '.github/dco.yml'
   - '.github/secret_scanning.yml'
   - '.github/allurerc.mjs'
+  - '.github/actionlint.yaml'
   - 'container/Dockerfile.docs'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
@@ -98,7 +128,9 @@ ignore:
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
   - 'scripts/dco_check.py'
+  - 'scripts/validate_agent_instructions.py'
   - 'scripts/validate_skills.py'
+  - 'scripts/check_action_pins.py'
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
@@ -127,6 +159,7 @@ core:
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/kv_dc_relay/**'
+  - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
@@ -149,6 +182,8 @@ core:
   # Rust sidecars have their own classification and do not use the framework
   # container or E2E pipelines triggered by `core`.
   - '!lib/sidecar/**'
+  - '!tests/test_generate_kustomize_openapi.py'
+  - '!tests/test_kustomize_matrix.py'
   - '!**/*.md'
   - '!**/*.rst'
   - '!**/*.txt'
@@ -169,8 +204,6 @@ operator:
   - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
-  # Operator imports the local snapshot module.
-  - 'deploy/snapshot/**'
   - 'docs/fern/pages/reference/kubernetes-api/additional-resources/api-reference-k8s.md'
   - 'deploy/helm/charts/platform/**'
   # The operator check owns the real Go/Python DGD override contract test.
@@ -179,11 +212,18 @@ operator:
   - 'components/src/dynamo/profiler/utils/dgdr_*'
 
 snapshot:
-  - 'deploy/snapshot/**'
-  - 'deploy/snapshot/.*'
+  - 'deploy/checkpoint-placeholder/**'
   - 'components/src/dynamo/common/snapshot/**'
   - 'deploy/operator/internal/checkpoint/**'
+  - 'deploy/operator/internal/checkpointjob/**'
   - 'tests/deploy/test_dynamocheckpoint.py'
+  # Where the pinned github.com/ai-dynamo/snapshot chart version/values live --
+  # a version bump or install-config change must trigger the deploy-snapshot-
+  # agent-checkpoint-*/deploy-test-checkpoint-* jobs, not just 'operator'.
+  # Chart.lock is gitignored (never appears in a PR diff) and so is
+  # intentionally not listed here.
+  - 'deploy/helm/charts/platform/Chart.yaml'
+  - 'deploy/helm/charts/platform/values.yaml'
 
 # Framework-local snapshot lifecycle files, plus TRT-LLM's unit test. These gate
 # that framework's DynamoCheckpoint deploy jobs (and shared snapshot-agent/operator
@@ -209,7 +249,7 @@ deploy:
   - *ci
   - 'deploy/helm/**'
   - 'deploy/utils/**'
-  - 'deploy/snapshot/**'
+  - 'deploy/checkpoint-placeholder/**'
   - 'tests/deploy/**'
   # Standalone CRD apiVersion converter: not used by the deploy-test harness and
   # has no CI test wiring, so it should not trigger the operator deploy pipeline.
@@ -234,6 +274,8 @@ planner:
   - 'components/src/dynamo/global_planner/**'
   - 'components/src/dynamo/profiler/**'
   - 'components/src/dynamo/global_router/**'
+  # Keep this tombstone until the vendored-tree deletion has merged so the
+  # deleted paths in that PR remain covered by the Planner CI filter.
   - 'aisimulate/**'
   # Power-aware planner (PR #9369): per-node power agent component
   - 'deploy/power-agent/**'
@@ -289,6 +331,7 @@ frontend:
   - 'container/deps/*'
   - 'container/compliance/**'
   - 'components/src/dynamo/kv_dc_relay/**'
+  - 'components/src/dynamo/kv_state_agent/**'
   - 'components/src/dynamo/router/**'
   - 'components/src/dynamo/thunderagent_router/**'
   - 'components/src/dynamo/mocker/**'
@@ -313,6 +356,11 @@ rust:
   # Sidecar protobuf contracts are compiled by crate build scripts and need the
   # same workspace checks as sidecar Rust sources.
   - 'lib/sidecar/**/*.proto'
+  # The prometheus_names.py sync check runs as part of cargo test in the
+  # rust-tests job; trigger it when the generator template or committed output
+  # changes.
+  - 'lib/bindings/python/codegen/templates/prometheus_names.py.template'
+  - 'lib/bindings/python/src/dynamo/prometheus_names.py'
 
 benchmarks:
   - 'benchmarks/**'

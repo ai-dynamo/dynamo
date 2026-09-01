@@ -25,6 +25,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
@@ -154,13 +155,53 @@ func invalidVLLMDistributedExecutorBackendAnnotation(annotations map[string]stri
 // inferencePoolAvailabilityError checks the InferencePool API.
 // ctx and mgr must not be nil.
 func inferencePoolAvailabilityError(ctx context.Context, mgr ctrl.Manager) error {
-	if features.DetectInferencePoolAvailability(ctx, mgr) {
+	available, err := features.DetectInferencePoolAvailability(ctx, mgr)
+	if err != nil {
+		return fmt.Errorf("detect InferencePool API availability: %w", err)
+	}
+	if available {
 		return nil
 	}
 	return fmt.Errorf(
 		"InferencePool API group (%s) is not available in the cluster; install the Gateway API Inference Extension before deploying EPP components",
 		epp.InferencePoolGroup,
 	)
+}
+
+// validateElasticEPRequiresCommand rejects a vLLM component that requests the
+// elastic-EP Ray topology (--enable-elastic-ep with --data-parallel-backend ray,
+// including the -dpb alias and flag=value spellings) but omits the main
+// container command. The operator starts the single-pod Ray head by rewriting
+// the container to run "ray start ... && <command>", which needs an explicit
+// executable; with only the image ENTRYPOINT (empty command) it cannot build
+// that command, so elastic EP would silently never start. Fail closed here with
+// an actionable error rather than admit a request the operator cannot fulfill.
+func validateElasticEPRequiresCommand(
+	backendFramework string,
+	spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) field.ErrorList {
+	var allErrs field.ErrorList
+	if backendFramework != string(dynamo.BackendFrameworkVLLM) || spec.PodTemplate == nil {
+		return allErrs
+	}
+	containers := spec.PodTemplate.Spec.Containers
+	index := containerIndexByName(containers, consts.MainContainerName)
+	if index < 0 {
+		return allErrs
+	}
+	mainContainer := &containers[index]
+	if len(mainContainer.Command) > 0 || !dynamo.IsElasticEPRayLaunch(mainContainer) {
+		return allErrs
+	}
+	commandPath := fldPath.Child("podTemplate", "spec", "containers").Index(index).Child("command")
+	allErrs = append(allErrs, field.Required(
+		commandPath,
+		"elastic expert parallelism (--enable-elastic-ep with --data-parallel-backend ray) requires an explicit "+
+			"container command; the operator starts the single-pod Ray head by wrapping that command and cannot "+
+			"start it from the image ENTRYPOINT",
+	))
+	return allErrs
 }
 
 func gpuMemoryServiceFor(

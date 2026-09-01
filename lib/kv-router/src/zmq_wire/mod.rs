@@ -25,12 +25,16 @@ mod types;
 
 pub use convert::{
     StoredBlockOptions, convert_event, create_stored_block_from_parts, create_stored_blocks,
+    normalize_mm_token_runs,
 };
 pub use extra_keys::{
-    extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, parse_mm_hash_from_extra_key,
+    extra_keys_to_block_mm_infos, extra_keys_to_cache_namespace, mark_mm_hash_for_extra_key,
+    parse_mm_hash_from_extra_key,
 };
 pub use filter::KvCacheSpecKind;
-pub use types::{BlockHashValue, ExtraKeyItem, KvEventBatch, KvTokenIds, Locality, RawKvEvent};
+pub use types::{
+    BlockHashValue, ExtraKeyItem, KvEventBatch, KvEventOwnership, KvTokenIds, Locality, RawKvEvent,
+};
 
 use filter::KvCacheEventMetadata;
 
@@ -45,6 +49,9 @@ pub struct ZmqEventNormalizer {
     /// Lets `convert_event` normalize vLLM BlockStored events to the canonical
     /// pad_value scheme. `None` for text-only models / non-MM deployments.
     image_token_id: Option<u32>,
+    /// Model's video placeholder token id. When an event contains this token,
+    /// image and video objects are normalized with modality-aware mapping.
+    video_token_id: Option<u32>,
     warning_count: Arc<AtomicU32>,
     group_metadata: FxHashMap<(DpRank, u32), KvCacheGroupMetadata>,
     cache_namespaces: FxHashMap<(WorkerWithDpRank, u64), CacheNamespaceState>,
@@ -66,6 +73,9 @@ struct KvCacheGroupMetadata {
 pub enum ZmqEventFilterReason {
     IgnoredEvent,
     NonLocalLocality,
+    UnknownMedium,
+    UnsupportedOwnership,
+    UnknownOwnership,
     AmbiguousCacheNamespace,
     NonMainAttentionKind,
     UnknownKind,
@@ -78,6 +88,9 @@ impl ZmqEventFilterReason {
         match self {
             Self::IgnoredEvent => "ignored_event",
             Self::NonLocalLocality => "non_local_locality",
+            Self::UnknownMedium => "unknown_medium",
+            Self::UnsupportedOwnership => "unsupported_ownership",
+            Self::UnknownOwnership => "unknown_ownership",
             Self::AmbiguousCacheNamespace => "ambiguous_cache_namespace",
             Self::NonMainAttentionKind => "non_main_attention_kind",
             Self::UnknownKind => "unknown_kind",
@@ -92,6 +105,7 @@ impl ZmqEventNormalizer {
         Self {
             kv_block_size,
             image_token_id: None,
+            video_token_id: None,
             warning_count: Arc::new(AtomicU32::new(0)),
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
@@ -102,6 +116,7 @@ impl ZmqEventNormalizer {
         Self {
             kv_block_size,
             image_token_id: None,
+            video_token_id: None,
             warning_count,
             group_metadata: FxHashMap::default(),
             cache_namespaces: FxHashMap::default(),
@@ -116,15 +131,40 @@ impl ZmqEventNormalizer {
         self
     }
 
+    pub fn with_video_token_id(mut self, video_token_id: Option<u32>) -> Self {
+        self.video_token_id = video_token_id;
+        self
+    }
+
     pub fn preprocess(&mut self, raw: RawKvEvent, worker: WorkerWithDpRank) -> Option<RawKvEvent> {
         self.preprocess_with_reason(raw, worker).ok()
     }
 
     pub fn preprocess_with_reason(
         &mut self,
+        raw: RawKvEvent,
+        worker: WorkerWithDpRank,
+    ) -> Result<RawKvEvent, ZmqEventFilterReason> {
+        match raw.ownership() {
+            Ok(KvEventOwnership::Framework) => {}
+            Ok(KvEventOwnership::Kvcr) => {
+                return Err(ZmqEventFilterReason::UnsupportedOwnership);
+            }
+            Err(_) => return Err(ZmqEventFilterReason::UnknownOwnership),
+        }
+        self.preprocess_residency_with_reason(raw, worker)
+    }
+
+    /// Normalize a version-gated state-agent stream which may contain both
+    /// framework and vLLM-enriched KVCR transitions.
+    pub fn preprocess_residency_with_reason(
+        &mut self,
         mut raw: RawKvEvent,
         worker: WorkerWithDpRank,
     ) -> Result<RawKvEvent, ZmqEventFilterReason> {
+        if raw.ownership().is_err() {
+            return Err(ZmqEventFilterReason::UnknownOwnership);
+        }
         if raw.is_ignored() {
             return Err(ZmqEventFilterReason::IgnoredEvent);
         }
@@ -139,18 +179,25 @@ impl ZmqEventNormalizer {
             return Err(ZmqEventFilterReason::NonLocalLocality);
         }
 
-        // Hash-only lower-tier events (STORAGE -> Disk, and External) carry no
-        // extra_keys/cache_namespace and must not mutate per-group metadata or
-        // the salted-namespace propagation chain; they are also outside the
-        // SW/SSM group filter's semantics, so route them straight to conversion.
-        // Device and host-pinned events (CPU offload, #10368) stay on the
-        // normalizer path so their salted namespaces still propagate.
-        if raw
-            .medium()
-            .and_then(StorageTier::from_kv_medium)
-            .is_some_and(|tier| matches!(tier, StorageTier::Disk | StorageTier::External))
-        {
-            return Ok(raw);
+        // Classify by medium before touching normalizer state:
+        //  - Device / HostPinned (GPU, CPU offload #10368) stay on the normalizer
+        //    path so their salted namespaces still propagate.
+        //  - Disk / External (STORAGE) are hash-only lower-tier events with no
+        //    extra_keys/cache_namespace, so they must not mutate per-group
+        //    metadata or the salted-namespace chain and are outside the SW/SSM
+        //    group filter's semantics; bypass straight to conversion, which keeps
+        //    them (no event id is wasted).
+        //  - Unrecognized media (e.g. vLLM 0.26.0 FS/OBJ) fail closed here so the
+        //    listener records an intentional filter. Bypassing to conversion,
+        //    which drops them, would instead accept the event, burn a
+        //    next_event_id, and leave an id gap the event processor mistakes for
+        //    an engine drop -- the same trap the locality gate above avoids.
+        if let Some(m) = raw.medium() {
+            match StorageTier::from_kv_medium(m) {
+                Some(StorageTier::Device | StorageTier::HostPinned) => {}
+                Some(_) => return Ok(raw),
+                None => return Err(ZmqEventFilterReason::UnknownMedium),
+            }
         }
 
         let metadata = raw.metadata();
@@ -177,6 +224,7 @@ impl ZmqEventNormalizer {
             worker,
             &self.warning_count,
             self.image_token_id,
+            self.video_token_id,
         )
     }
 
@@ -296,7 +344,7 @@ impl ZmqEventNormalizer {
                     }
                 }
             }
-            RawKvEvent::AllBlocksCleared => {
+            RawKvEvent::AllBlocksCleared { .. } => {
                 self.cache_namespaces
                     .retain(|(known_worker, _), _| *known_worker != worker);
             }

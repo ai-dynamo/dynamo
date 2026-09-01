@@ -121,17 +121,15 @@ vllm-rs serve "$MODEL" \
     $GPU_MEM_ARGS \
     "${EXTRA_ARGS[@]}" &
 
-OTEL_SERVICE_NAME=dynamo-worker-decode \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}" \
     dynamo-vllm-sidecar \
-    --vllm-endpoint "127.0.0.1:${VLLM_DECODE_GRPC_PORT}" \
+    --grpc-endpoint "127.0.0.1:${VLLM_DECODE_GRPC_PORT}" \
     --disaggregation-mode decode &
 
 # Register prefill separately so the frontend routes each disaggregated stage.
-OTEL_SERVICE_NAME=dynamo-worker-prefill \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT2:-8082}" \
     dynamo-vllm-sidecar \
-    --vllm-endpoint "127.0.0.1:${VLLM_PREFILL_GRPC_PORT}" \
+    --grpc-endpoint "127.0.0.1:${VLLM_PREFILL_GRPC_PORT}" \
     --component prefill \
     --disaggregation-mode prefill &
 

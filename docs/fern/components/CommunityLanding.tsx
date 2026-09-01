@@ -3,15 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-"use client";
-
-import { useEffect, useState } from "react";
+// Server component: the calendar's "today" now comes from the generated
+// GENERATED_ON rather than a post-hydration `new Date()`, and nothing else in
+// this file uses hooks, state, or browser APIs.
 
 import {
   UPCOMING_EVENTS,
   PAST_EVENTS,
   type DynamoEvent,
 } from "./events.generated";
+import {
+  MONTH_INDEX,
+  resolveCalendarMonth,
+  resolveToday,
+} from "./calendar-today";
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
@@ -35,10 +40,6 @@ const MONTHS = [
   "November",
   "December",
 ] as const;
-
-const MONTH_INDEX = Object.fromEntries(
-  MONTHS.map((month, index) => [month.slice(0, 3), index]),
-);
 
 const CHANNELS = [
   {
@@ -132,36 +133,21 @@ function buildMonthCells(year: number, month: number) {
   return cells;
 }
 
-interface CalendarDate {
-  year: number;
-  month: number;
-  day: number;
-}
-
-function getPacificDate(date: Date): CalendarDate {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Los_Angeles",
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-  }).formatToParts(date);
-  const value = (type: "year" | "month" | "day") =>
-    Number(parts.find((part) => part.type === type)?.value);
-
-  return { year: value("year"), month: value("month") - 1, day: value("day") };
-}
-
 function FullCalendar() {
-  const [today, setToday] = useState<CalendarDate | null>(null);
-  const focusEvent = UPCOMING_EVENTS[0] ?? PAST_EVENTS[0];
-  const year = Number(focusEvent?.year ?? new Date().getUTCFullYear());
-  const month = MONTH_INDEX[focusEvent?.month ?? "Jan"] ?? 0;
+  // Today's month when it has events, else the nearest event's month. Keying
+  // it off UPCOMING_EVENTS[0] meant an empty calendar fell back to
+  // PAST_EVENTS[0] and sat on a month that had already gone by -- and because
+  // the today marker was resolved independently, it then matched no cell in the
+  // month on show, so the grid lost its highlight entirely. Resolving both from
+  // one helper keeps them in agreement; falling back to the nearest event keeps
+  // this grid, which renders full event slots, from shipping empty whenever the
+  // next event is in another month.
+  const { year, month } = resolveCalendarMonth();
+  const today = resolveToday();
   const events = [...UPCOMING_EVENTS, ...PAST_EVENTS].filter(
     (event) => Number(event.year) === year && MONTH_INDEX[event.month] === month,
   );
   const eventsByDay = new Map<number, DynamoEvent[]>();
-
-  useEffect(() => setToday(getPacificDate(new Date())), []);
 
   events.forEach((event) => {
     const day = Number(event.day);
@@ -193,10 +179,16 @@ function FullCalendar() {
         <div className="dynamo-community-calendar__grid">
           {buildMonthCells(year, month).map((day, index) => {
             const dayEvents = day === null ? [] : eventsByDay.get(day) ?? [];
-            const isToday = day !== null
-              && today?.year === year
-              && today.month === month
-              && today.day === day;
+            // The grid does not always render today's own month, so the month
+            // has to match too -- otherwise the highlight lands on the
+            // same-numbered day of whichever month is on show. A null `today`
+            // (stale or malformed GENERATED_ON) marks nothing at all.
+            const isToday =
+              day !== null &&
+              today !== null &&
+              today.year === year &&
+              today.month === month &&
+              day === today.day;
             return (
               <div
                 className={`dynamo-community-calendar__day${day === null ? ' is-empty' : ''}${dayEvents.length ? ' has-event' : ''}${isToday ? ' is-today' : ''}`}

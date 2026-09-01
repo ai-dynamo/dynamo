@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+"""Compatibility entry points spanning shared offline and Dynamo online replay."""
+
 import json
 import os
 from typing import Any, Literal, TypedDict, overload
@@ -230,10 +232,7 @@ def run_trace_replay(
     )
     if replay_mode == "online":
         return result
-    return _materialize_offline_report(
-        result,
-        planner=None,
-    )
+    return _materialize_offline_report(result, planner=None)
 
 
 @overload
@@ -371,7 +370,4 @@ def run_synthetic_trace_replay(
     )
     if replay_mode == "online":
         return result
-    return _materialize_offline_report(
-        result,
-        planner=None,
-    )
+    return _materialize_offline_report(result, planner=None)
