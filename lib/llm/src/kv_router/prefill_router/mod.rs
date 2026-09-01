@@ -159,6 +159,34 @@ fn strip_terminal_disaggregated_params(
 /// a DECODE-mode worker to run prefill+decode locally.
 pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefill";
 
+/// Annotation marker set when the router asks a PREFILL-mode worker to keep
+/// generating instead of handing the request to a decode worker. The worker will
+/// read it to keep the request's own token budget and skip the decode handoff.
+pub(crate) const PREFILL_CONTINUE_ANNOTATION: &str = "x-prefill-continue";
+
+/// Drop any client-supplied copy of the router-owned routing markers.
+///
+/// Both markers select a routing path, so honoring a client copy would let a
+/// caller pick its own. The router stamps them itself after its policies run.
+///
+/// Matches the bare marker and its `marker:value` form, because
+/// `PreprocessedRequest::get_annotation_value` reads values off a `marker:`
+/// prefix. Stripping only the bare form would leave `x-prefill-continue:1`
+/// intact for any future valued read.
+fn strip_router_owned_annotations(annotations: &mut Vec<String>) {
+    fn is_router_owned(annotation: &str, marker: &str) -> bool {
+        annotation == marker
+            || (annotation.len() > marker.len()
+                && annotation.starts_with(marker)
+                && annotation.as_bytes()[marker.len()] == b':')
+    }
+
+    annotations.retain(|annotation| {
+        !is_router_owned(annotation, BYPASS_REMOTE_PREFILL_ANNOTATION)
+            && !is_router_owned(annotation, PREFILL_CONTINUE_ANNOTATION)
+    });
+}
+
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
 /// from the prefill response and injecting them into the decode request.
@@ -289,11 +317,7 @@ where
         let metadata = context.metadata().clone();
         let engine_ctx = context.context();
 
-        // Conditional-disagg bypass is a router-owned decision. Drop any
-        // client-supplied marker before the policy runs so normal disagg
-        // requests cannot accidentally or maliciously skip remote prefill.
-        req.annotations
-            .retain(|annotation| annotation != BYPASS_REMOTE_PREFILL_ANNOTATION);
+        strip_router_owned_annotations(&mut req.annotations);
 
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
@@ -734,6 +758,15 @@ mod tests {
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
             assert!(request.get_annotation_value("query_instance_id").is_some());
+            // The router owns both routing markers. Assert here, at the earliest
+            // return in generate(), that a client copy never reaches a worker.
+            assert!(!request.has_annotation(BYPASS_REMOTE_PREFILL_ANNOTATION));
+            assert!(!request.has_annotation(PREFILL_CONTINUE_ANNOTATION));
+            assert!(
+                request
+                    .get_annotation_value(PREFILL_CONTINUE_ANNOTATION)
+                    .is_none()
+            );
             self.requests.fetch_add(1, Ordering::Relaxed);
             let output = Annotated::from_data(LLMEngineOutput {
                 routing_data: Some(RoutingData {
@@ -1034,5 +1067,70 @@ mod tests {
             "bootstrap_room": 1,
         });
         assert!(extract_bootstrap_info(&params).is_none());
+    }
+
+    #[tokio::test]
+    async fn client_supplied_routing_markers_never_reach_a_worker() {
+        // The helper being correct is the easy half. This guards the half that
+        // matters: that generate() strips BEFORE its earliest return, so the
+        // ordering cannot silently regress under refactor.
+        let router = active_conditional_router();
+        let decode_host = Arc::new(QueryOnlyDecodeHost::default());
+        let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            decode_host.clone();
+
+        let mut request = query_only_request();
+        request.annotations.extend([
+            BYPASS_REMOTE_PREFILL_ANNOTATION.to_string(),
+            PREFILL_CONTINUE_ANNOTATION.to_string(),
+            // the valued form a prefix-blind strip would miss
+            format!("{PREFILL_CONTINUE_ANNOTATION}:1"),
+        ]);
+
+        let mut response = router
+            .generate(SingleIn::new(request), next)
+            .await
+            .expect("query-only request should bypass conditional planning");
+        while response.next().await.is_some() {}
+
+        // The mock asserts the markers are gone; reaching it at all proves the
+        // strip ran before generate()'s earliest return.
+        assert_eq!(decode_host.requests.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn strip_router_owned_annotations_drops_the_valued_form() {
+        // `get_annotation_value` reads values off a `marker:` prefix, so the
+        // valued form is a live bypass if the strip only matches the bare marker.
+        let mut annotations = vec![
+            format!("{PREFILL_CONTINUE_ANNOTATION}:1"),
+            format!("{BYPASS_REMOTE_PREFILL_ANNOTATION}:true"),
+            // a different marker that merely shares a prefix must survive
+            format!("{PREFILL_CONTINUE_ANNOTATION}-other"),
+        ];
+
+        strip_router_owned_annotations(&mut annotations);
+
+        assert_eq!(
+            annotations,
+            vec![format!("{PREFILL_CONTINUE_ANNOTATION}-other")]
+        );
+    }
+
+    #[test]
+    fn strip_router_owned_annotations_drops_every_copy_of_both_markers() {
+        // A client can send a marker more than once; every copy must go, and
+        // everything else must survive in order.
+        let mut annotations = vec![
+            "keep-me".to_string(),
+            BYPASS_REMOTE_PREFILL_ANNOTATION.to_string(),
+            "also-keep".to_string(),
+            PREFILL_CONTINUE_ANNOTATION.to_string(),
+            PREFILL_CONTINUE_ANNOTATION.to_string(),
+        ];
+
+        strip_router_owned_annotations(&mut annotations);
+
+        assert_eq!(annotations, vec!["keep-me", "also-keep"]);
     }
 }
