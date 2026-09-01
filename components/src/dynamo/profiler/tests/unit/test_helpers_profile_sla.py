@@ -8,6 +8,7 @@ profiling pipeline.  External I/O (DGD generation, deployment) is mocked
 where needed.
 """
 
+import copy
 import logging
 import os
 from pathlib import Path
@@ -49,6 +50,7 @@ try:
         KVRouterSpec,
         MockerSpec,
         ModelCacheSpec,
+        OverridesSpec,
         SLASpec,
         WorkloadSpec,
     )
@@ -532,6 +534,92 @@ class TestAssembleFinalConfig:
 
         assert result == dgd_config
         assert result is not dgd_config
+
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_execution_options_are_applied_in_order(self, tmp_path, monkeypatch):
+        events: list[str] = []
+        dgd_override = {"metadata": {"annotations": {"user": "override"}}}
+        tolerations = [{"key": "nvidia.com/gpu", "operator": "Exists"}]
+        dgdr = _make_dgdr(
+            backend="vllm",
+            runtimeVersionOverride="1.5.0",
+            overrides=OverridesSpec(dgd=dgd_override),
+        )
+        dgd_config = {
+            "apiVersion": "nvidia.com/v1beta1",
+            "kind": "DynamoGraphDeployment",
+            "metadata": {"name": "generated"},
+            "spec": {
+                "components": [
+                    {
+                        "name": "VllmDecodeWorker",
+                        "type": "worker",
+                        "podTemplate": {
+                            "spec": {"containers": [{"name": "main", "args": []}]}
+                        },
+                    }
+                ]
+            },
+        }
+
+        def apply_runtime_version(_dgdr, config):
+            events.append("runtime-version")
+            config["spec"]["components"][0]["runtimeVersionOverride"] = "1.5.0"
+
+        def apply_override(config, override):
+            events.append("dgd-override")
+            assert override == dgd_override
+            assert config["spec"]["components"][0]["runtimeVersionOverride"] == "1.5.0"
+            result = copy.deepcopy(config)
+            result["metadata"]["annotations"] = override["metadata"]["annotations"]
+            return result
+
+        def apply_tolerations(config, requested_tolerations):
+            events.append("tolerations")
+            assert requested_tolerations == tolerations
+            assert config["metadata"]["annotations"] == {"user": "override"}
+            result = copy.deepcopy(config)
+            result["spec"]["components"][0]["podTemplate"]["spec"][
+                "tolerations"
+            ] = requested_tolerations
+            return result
+
+        def apply_remote_code(config, backend, model):
+            events.append("remote-code")
+            assert backend == "vllm"
+            assert model == dgdr.model
+            assert (
+                config["spec"]["components"][0]["podTemplate"]["spec"]["tolerations"]
+                == tolerations
+            )
+            return config
+
+        monkeypatch.setattr(
+            f"{_DGD_GEN}.apply_runtime_version_override", apply_runtime_version
+        )
+        monkeypatch.setattr(f"{_DGD_GEN}.apply_dgd_overrides", apply_override)
+        monkeypatch.setattr(
+            f"{_DGD_GEN}.inject_tolerations_into_dgd", apply_tolerations
+        )
+        monkeypatch.setattr(f"{_DGD_GEN}.apply_remote_code_policy", apply_remote_code)
+
+        result = assemble_final_config(
+            dgdr,
+            _make_ops(tmp_path),
+            dgd_config,
+            resolved_backend="vllm",
+            job_tolerations=tolerations,
+        )
+
+        assert events == [
+            "runtime-version",
+            "dgd-override",
+            "tolerations",
+            "remote-code",
+        ]
+        assert result is not dgd_config
+        assert "runtimeVersionOverride" not in dgd_config["spec"]["components"][0]
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
