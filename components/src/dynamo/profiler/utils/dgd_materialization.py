@@ -168,7 +168,7 @@ def _all_workers_already_have_trust_flag(config: dict) -> bool:
 
         # Skip mocker workers — they never carry the flag.
         all_tokens = " ".join(str(t) for t in (list(cmd) + list(args)))
-        if "dynamo.mocker" in all_tokens:
+        if "dynamo.mocker._worker" in all_tokens:
             continue
 
         is_shell_c = (
@@ -199,7 +199,7 @@ def _inject_trust_remote_code_flag(config: dict) -> None:
     rather than as a second list element (which would become ``$0`` and break
     the worker).
 
-    Mocker workers (``python3 -m dynamo.mocker``) are skipped because their
+    Internal Mocker workers are skipped because their
     argparse does not accept ``--trust-remote-code``.
     """
     components = config.get("spec", {}).get("components", [])
@@ -218,7 +218,7 @@ def _inject_trust_remote_code_flag(config: dict) -> None:
 
         # Skip mocker workers — their argparse does not accept the flag.
         all_tokens = " ".join(str(t) for t in (list(cmd) + list(args)))
-        if "dynamo.mocker" in all_tokens:
+        if "dynamo.mocker._worker" in all_tokens:
             continue
 
         # Detect shell form: command=["sh","-c"] with a single-string args.

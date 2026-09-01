@@ -24,16 +24,14 @@ use dynamo_runtime::{
 use super::{PrefillBinding, PrefillBuildContext, PrefillLifecycleState, PrefillRouter};
 use crate::{
     discovery::{LoadThresholdHandle, ModelManager},
-    kv_router::{
-        KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext, WorkerSelectorFactory,
-    },
+    kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext, WorkerSelectorFactory},
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
     protocols::common::{
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         timing::WORKER_TYPE_PREFILL,
     },
-    session_affinity::create_affinity_coordinator,
+    session_affinity::{SessionAffinityMode, create_affinity_coordinator},
 };
 
 /// How the prefill worker set wants to be routed to, resolved from its cards.
@@ -111,7 +109,12 @@ impl PrefillRouter<DefaultWorkerSelector> {
         decode_router_mode: RouterMode,
         session_affinity_ttl_secs: Option<u64>,
     ) -> Arc<Self> {
-        Self::disabled_with_selector(model_manager, decode_router_mode, session_affinity_ttl_secs)
+        Self::disabled_with_selector(
+            model_manager,
+            decode_router_mode,
+            session_affinity_ttl_secs,
+            SessionAffinityMode::Hard,
+        )
     }
 
     /// `decode_router_mode` is the owning decode worker set's mode. It governs
@@ -124,9 +127,9 @@ impl PrefillRouter<DefaultWorkerSelector> {
         decode_router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        decode_router: Option<Arc<KvRouter>>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
+        session_affinity_mode: SessionAffinityMode,
         model_name: String,
         namespace: String,
         load_thresholds: LoadThresholdHandle,
@@ -138,7 +141,6 @@ impl PrefillRouter<DefaultWorkerSelector> {
             decode_router_mode,
             kv_cache_block_size,
             kv_router_config,
-            decode_router,
             Arc::new(|config, worker_type, _partition| {
                 DefaultWorkerSelector::new(
                     Some(config.clone()),
@@ -147,6 +149,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
             }),
             prefill_load_estimator,
             session_affinity_ttl_secs,
+            session_affinity_mode,
             model_name,
             namespace,
             load_thresholds,
@@ -164,18 +167,19 @@ where
         model_manager: Arc<ModelManager>,
         decode_router_mode: RouterMode,
         session_affinity_ttl_secs: Option<u64>,
+        session_affinity_mode: SessionAffinityMode,
     ) -> Arc<Self> {
         Arc::new(Self {
             binding: arc_swap::ArcSwapOption::empty(),
             target: parking_lot::Mutex::new(None),
             target_tx: None,
-            decode_router: None,
+            decode_routing_host: std::sync::OnceLock::new(),
             worker_selector_factory: None,
-            decode_session_affinity: std::sync::OnceLock::new(),
             model_manager,
             cancel_token: tokio_util::sync::CancellationToken::new(),
             decode_router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            session_affinity_mode,
             conditional_disagg_policy: make_conditional_disagg_policy(None),
             conditional_disagg_prefill_busy_threshold: None,
             conditional_disagg_decode_busy_threshold: None,
@@ -196,10 +200,10 @@ where
         decode_router_mode: RouterMode,
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
-        decode_router: Option<Arc<KvRouter<Sel>>>,
         worker_selector_factory: WorkerSelectorFactory<Sel>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
+        session_affinity_mode: SessionAffinityMode,
         model_name: String,
         namespace: String,
         load_thresholds: LoadThresholdHandle,
@@ -221,13 +225,13 @@ where
             binding: arc_swap::ArcSwapOption::empty(),
             target: parking_lot::Mutex::new(None),
             target_tx: Some(target_tx),
-            decode_router,
+            decode_routing_host: std::sync::OnceLock::new(),
             worker_selector_factory: Some(worker_selector_factory),
-            decode_session_affinity: std::sync::OnceLock::new(),
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
             decode_router_mode,
             session_affinity_ttl: session_affinity_ttl_secs.map(std::time::Duration::from_secs),
+            session_affinity_mode,
             conditional_disagg_policy,
             conditional_disagg_prefill_busy_threshold,
             conditional_disagg_decode_busy_threshold,
@@ -394,6 +398,7 @@ where
                 kv_chooser,
                 load_context.clone(),
                 affinity,
+                context.session_affinity_mode,
             ))
         } else {
             let affinity =
@@ -413,6 +418,7 @@ where
                 push_router,
                 load_context.clone(),
                 affinity,
+                context.session_affinity_mode,
             )?)
         };
 
@@ -519,6 +525,7 @@ where
                     .expect("enabled prefill router has a worker selector factory"),
                 prefill_load_estimator: router_ref.prefill_load_estimator.clone(),
                 session_affinity_ttl: router_ref.session_affinity_ttl,
+                session_affinity_mode: router_ref.session_affinity_mode,
                 model_name: router_ref.model_name.clone(),
                 load_thresholds: load_thresholds.clone(),
                 parent_token: cancel_token.child_token(),
