@@ -137,13 +137,13 @@ Every distinct config the Vizier sweep evaluated (2k subset, c=32), best mean-e2
 - The smart sweep cut mean e2e **−3.6%** and TPOT **−27%** over the default kv_router with no
   change to the deployment — purely router tuning.
 
-## Reproduce
+## Reproduction Status
 
-```bash
-python aisimulate/examples/sweeper/tools/run_sweep.py --config path/to/router-sweep.yaml
-```
+These results are historical and cannot be reproduced from the current public artifacts.
+The published `aisimulate==0.1.0.dev1` wheel does not include the example runner or the
+experiment configuration used for this sweep.
 
-Run the winning router configuration against the full trace with
-`dynamo.replay.run_trace_replay`. The AI Configurator performance model needs the
-`aic-forward-pass` binding. To suppress router logs, set `RUST_LOG=error`.
-The Router adapter validates the configured search choices before the study starts.
+The original validation ran the winning router configuration against the full trace with
+`dynamo.replay.run_trace_replay`. It required the AI Configurator performance model and the
+`aic-forward-pass` binding. The Router adapter validated the configured search choices before
+the study started.

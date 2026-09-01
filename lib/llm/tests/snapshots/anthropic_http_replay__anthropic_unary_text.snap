@@ -17,6 +17,7 @@ expression: canonicalize(body)
   "stop_sequence": null,
   "usage": {
     "input_tokens": 5,
-    "output_tokens": 2
+    "output_tokens": 2,
+    "cache_creation_input_tokens": 0
   }
 }

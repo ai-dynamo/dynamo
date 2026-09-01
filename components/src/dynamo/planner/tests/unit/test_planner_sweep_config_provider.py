@@ -17,9 +17,10 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-import dynamo.planner.simulation.provider as planner_provider_module
 from aisimulate.sweeper.provider import CandidateContext, SweepContext
 from aisimulate.sweeper.replay import BackendDeploymentSpec
+
+import dynamo.planner.simulation.provider as planner_provider_module
 from dynamo.planner.simulation import create_provider
 from dynamo.planner.simulation.load_predictor import LoadPredictorResult
 

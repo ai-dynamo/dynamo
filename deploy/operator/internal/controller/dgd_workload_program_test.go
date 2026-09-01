@@ -30,10 +30,10 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
@@ -357,23 +357,14 @@ func TestComponentProgram_ReconcileRejectsInvalidLegacyGMSClient(t *testing.T) {
 }
 
 func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
-	t.Log("Inject an unsupported-path metadata failure before shared reconciliation")
-	reconcileErr := errors.New("reconcile failed")
+	t.Log("Inject a shared-resource failure before the PodCliqueSet sync")
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: commonconsts.ComponentTypeWorker},
 	})
 	dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{ClusterTopologyName: "test-topology"}
-	pcs := &grovev1alpha1.PodCliqueSet{
-		ObjectMeta: metav1.ObjectMeta{Name: dgd.Name, Namespace: dgd.Namespace},
-	}
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
-		WithObjects(dgd, pcs).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
-				return reconcileErr
-			},
-		}).
+		WithObjects(dgd).
 		Build()
 	reconciler := &DynamoGraphDeploymentReconciler{
 		Client:        kubeClient,
@@ -382,35 +373,100 @@ func TestGroveProgram_ReconcilePreservesResultOnError(t *testing.T) {
 		RuntimeConfig: &commonController.RuntimeConfig{Gate: features.Gates{Grove: true}},
 	}
 	program := reconciler.newGroveProgram()
+	oldGPUsPerEngine := int64(4)
+	oldGPUsPerReplica := int64(5)
 	dgd.Status = nvidiacomv1beta1.DynamoGraphDeploymentStatus{
 		State: nvidiacomv1beta1.DGDStatePending,
 		Components: map[string]nvidiacomv1beta1.ComponentReplicaStatus{
-			"worker": {Replicas: 1},
+			"worker": {
+				Replicas:       1,
+				GPUsPerEngine:  &oldGPUsPerEngine,
+				GPUsPerReplica: &oldGPUsPerReplica,
+			},
 		},
 	}
 	previous := dgd.DeepCopy().Status
 
 	result, err := program.Reconcile(context.Background(), workloadProgramRequest{DGD: dgd})
 
-	t.Log("Verify failed primary mutation returns failure status without mutating request.DGD.Status")
-	require.ErrorIs(t, err, reconcileErr)
-	assert.Equal(t, previous.Components, result.Status.Components)
+	t.Log("Verify the failed shared reconciliation returns failure status without mutating request.DGD.Status")
+	require.ErrorContains(t, err, "RBAC manager not initialized")
+	workerStatus := result.Status.Components["worker"]
+	assert.Equal(t, int32(1), workerStatus.Replicas)
+	assert.Nil(t, workerStatus.GPUsPerEngine)
+	assert.Nil(t, workerStatus.GPUsPerReplica)
 	assert.Equal(t, nvidiacomv1beta1.DGDStateFailed, result.Status.State)
 	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
 	require.NotNil(t, ready)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
-	assert.Equal(t, string(reasonFailedToInitializeWorkerHash), ready.Reason)
-	topologyCondition := meta.FindStatusCondition(
-		result.Status.Conditions,
-		nvidiacomv1beta1.ConditionTypeTopologyLevelsAvailable,
-	)
-	require.NotNil(t, topologyCondition)
-	assert.Equal(t, metav1.ConditionUnknown, topologyCondition.Status)
-	assert.Equal(t, nvidiacomv1beta1.ConditionReasonTopologyConditionPending, topologyCondition.Reason)
+	assert.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
 	assert.Equal(t, previous, dgd.Status)
-	reason, ok := workloadProgramFailureReason(err)
-	require.True(t, ok)
-	assert.Equal(t, reasonFailedToInitializeWorkerHash, reason)
+}
+
+func TestGroveRendererFailsWhenResolvedDRADependencyDisappears(t *testing.T) {
+	t.Log("Build a two-node DRA worker and its initially resolvable claim template")
+	claimTemplate := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "gpu-template", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+				Name: "gpu",
+				Exactly: &resourcev1.ExactDeviceRequest{
+					DeviceClassName: "gpu.nvidia.com",
+					AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+					Count:           2,
+				},
+			}}},
+		}},
+	}
+	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", Namespace: "default"},
+		Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: "vllm",
+			Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "decode",
+				ComponentType: nvidiacomv1beta1.ComponentTypeDecode,
+				Replicas:      ptr.To(int32(1)),
+				Multinode:     &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+				PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					ResourceClaims: []corev1.PodResourceClaim{{
+						Name:                      "gpu",
+						ResourceClaimTemplateName: ptr.To("gpu-template"),
+					}},
+					Containers: []corev1.Container{{
+						Name:  commonconsts.MainContainerName,
+						Image: "runtime:latest",
+						Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{
+							Name: "gpu",
+						}}},
+					}},
+				}},
+			}},
+		},
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+		WithObjects(
+			claimTemplate,
+			&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"}},
+		).
+		Build()
+	renderer := newGroveWorkloadRenderer(
+		kubeClient,
+		&configv1alpha1.OperatorConfiguration{},
+		&commonController.RuntimeConfig{Gate: features.Gates{DRA: true, Grove: true}},
+		nil,
+	)
+
+	t.Log("Verify the renderer initially publishes the full multinode shape")
+	rendered, err := renderer.Render(t.Context(), dgd, nil, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), rendered.gpuShapes["decode"].GPUsPerEngine)
+	assert.Equal(t, int64(4), rendered.gpuShapes["decode"].GPUsPerReplica)
+
+	t.Log("Delete the dependency without changing DGD generation and render again")
+	require.NoError(t, kubeClient.Delete(t.Context(), claimTemplate))
+	_, err = renderer.Render(t.Context(), dgd, nil, nil, false)
+	require.ErrorContains(t, err, "ResourceClaimTemplate default/gpu-template")
 }
 
 func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *testing.T) {
@@ -422,7 +478,7 @@ func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *te
 		},
 	})
 	dgd.Annotations = map[string]string{
-		commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+		commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 	}
 	reconciler := createTestDGDReconcilerWithStatus(dgd)
 	program := reconciler.newComponentProgram()
@@ -466,7 +522,7 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 				},
 			})
 			dgd.Annotations = map[string]string{
-				commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+				commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 			}
 			kubeClient := fake.NewClientBuilder().
 				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
@@ -485,11 +541,12 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 			reconciler := newDGDWorkerRolloutReconciler(kubeClient, recorder)
 
 			t.Log("Advance the unsupported pathway hash")
-			require.NoError(t, reconciler.ReconcileUnsupported(
+			err := reconciler.ReconcileUnsupported(
 				context.Background(),
 				dgd,
 				true,
-			))
+			)
+			require.NoError(t, err)
 
 			t.Log("Verify the warning reflects a successfully persisted primary mutation")
 			if tt.wantEvent {
@@ -541,7 +598,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 			},
 		})
 		dgd.Annotations = map[string]string{
-			commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+			commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 		}
 		reconciler := createTestDGDReconcilerWithStatus(dgd)
 		program := reconciler.newComponentProgram()
@@ -552,7 +609,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		require.NotNil(t, status.RollingUpdate)
 		assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, status.RollingUpdate.Phase)
 		assert.Nil(t, dgd.Status.RollingUpdate)
-		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash])
+		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
 	})
 
 	t.Run("multinode component workload keeps unsupported-path hash behavior", func(t *testing.T) {

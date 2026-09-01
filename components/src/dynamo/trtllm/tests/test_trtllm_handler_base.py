@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 import re as re_mod
 from copy import deepcopy
 from dataclasses import dataclass
@@ -1544,3 +1545,90 @@ class TestConversationAffinity:
             ):
                 pass
         handler.engine.llm.generate_async.assert_not_called()
+
+
+class TestEngineIdMapLogging:
+    """The submit-time "Engine ID map" INFO line is the only artifact that pairs
+    the Dynamo request UUID with the TRT-LLM executor client ID (and, on the
+    disaggregated path, the cross-phase disagg_request_id). Offline joins between
+    Dynamo traces and engine-side per-request records key on its exact shape, so
+    the format is a contract: assert the rendered message, not just that a log
+    happened."""
+
+    def _make_handler(self) -> HandlerBase:
+        config = MagicMock()
+        config.shutdown_event = None
+        config.disaggregation_mode = DisaggregationMode.AGGREGATED
+        config.conversation_affinity = False
+        handler = _ConcreteHandler(config)
+        handler.publisher = None
+        handler.multimodal_processor = None
+        handler.additional_metrics = None
+        handler.max_seq_len = None
+        handler.default_sampling_params = MockSamplingParams()
+        handler._conversation_affinity = False
+        return handler
+
+    def _make_mock_generation_result(self):
+        output = MagicMock()
+        output.token_ids = [42]
+        output.finish_reason = "stop"
+        output.stop_reason = None
+        output.request_perf_metrics = None
+
+        res = MagicMock()
+        res.outputs = [output]
+        res.finished = True
+
+        generation_result = MagicMock()
+        generation_result.abort = MagicMock()
+        # The executor assigns the client ID inside submit(), so it is readable
+        # synchronously on the object generate_async returns.
+        generation_result.request_id = 51420
+
+        async def mock_aiter(self_mock):
+            yield res
+
+        generation_result.__aiter__ = mock_aiter
+        return generation_result
+
+    def _make_context(self):
+        context = MagicMock()
+        never_resolve = asyncio.get_event_loop().create_future()
+        context.async_killed_or_stopped.return_value = never_resolve
+        # The mapping line must use the Context UUID, not the request payload:
+        # real-run data showed payload ids are absent on some paths.
+        context.id.return_value = "11111111-2222-3333-4444-555555555555"
+        return context
+
+    @pytest.mark.asyncio
+    async def test_mapping_logged_once_at_submit(self, caplog):
+        handler = self._make_handler()
+        handler.engine.llm.generate_async = MagicMock(
+            return_value=self._make_mock_generation_result()
+        )
+        # Deliberately NO id field in the payload -- the line must still carry
+        # the Context UUID.
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {"temperature": 0.7},
+        }
+
+        with caplog.at_level(logging.INFO):
+            chunks = [
+                c async for c in handler.generate_locally(request, self._make_context())
+            ]
+
+        assert chunks, "the mocked engine result should still yield a chunk"
+        maps = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("Engine ID map:")
+        ]
+        assert len(maps) == 1, f"expected exactly one mapping line, got {maps}"
+        # The rendered message is the offline-join contract.
+        assert "request_id=11111111-2222-3333-4444-555555555555" in maps[0]
+        assert "trtllm_client_id=51420" in maps[0]
+        # Aggregated mode carries no cross-phase disagg id.
+        assert "disagg_request_id=None" in maps[0]

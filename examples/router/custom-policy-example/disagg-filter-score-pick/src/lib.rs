@@ -120,7 +120,8 @@ mod tests {
     use dynamo_kv_router::protocols::{RoutingConstraints, WorkerConfigLike};
     use dynamo_kv_router::scheduling::{OverlapSignals, ScheduleMode};
     use dynamo_kv_router::{
-        KvSchedulerError, SchedulingRequest, WorkerSelectionPolicyError, WorkerSelector,
+        KvSchedulerError, SchedulingRequest, WorkerSelectionInput, WorkerSelectionPolicyError,
+        WorkerSelector,
     };
 
     use super::*;
@@ -193,7 +194,12 @@ mod tests {
         for worker_type in [WorkerType::Aggregated, WorkerType::Encode] {
             let policy = create_policy(&KvRouterConfig::default(), worker_type, 0.0);
             let error = policy
-                .select_worker(&workers, &request, request.eligibility(), 16)
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    16,
+                ))
                 .unwrap_err();
             assert!(matches!(
                 error,
