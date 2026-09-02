@@ -114,8 +114,11 @@ enum BoundaryRequest {
         reply: oneshot::Sender<Result<EngineEffects<CommandEffects>>>,
     },
     Finish {
+        probe_started_at: std::time::Instant,
         enqueued_at: Instant,
         sender_thread_id: std::thread::ThreadId,
+        sender_thread_cpu_ns: Option<u64>,
+        sender_cpu_id: Option<u32>,
         reply: oneshot::Sender<BoundaryFinishAck>,
     },
 }
@@ -123,10 +126,15 @@ enum BoundaryRequest {
 #[derive(Debug, Clone, Copy)]
 struct BoundaryFinishAck {
     actor_wake: Duration,
+    actor_probe_wall: Duration,
     completion_boundary: Duration,
     acknowledged_at: Instant,
     sender_thread_id: std::thread::ThreadId,
     actor_thread_id: std::thread::ThreadId,
+    sender_thread_cpu_ns: Option<u64>,
+    actor_thread_cpu_ns: Option<u64>,
+    sender_cpu_id: Option<u32>,
+    actor_cpu_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,7 +144,11 @@ pub(crate) struct BoundaryFinishTiming {
     pub(crate) reserve_waited: bool,
     pub(crate) send_sync: Duration,
     pub(crate) actor_wake: Duration,
+    pub(crate) actor_probe_wall: Duration,
     pub(crate) actor_same_thread: bool,
+    pub(crate) actor_same_thread_cpu: Option<Duration>,
+    pub(crate) actor_sender_cpu_id: Option<u32>,
+    pub(crate) actor_receiver_cpu_id: Option<u32>,
     pub(crate) completion_boundary: Duration,
     pub(crate) return_wake: Duration,
     pub(crate) return_same_thread: bool,
@@ -182,11 +194,17 @@ impl GroupedPassBoundary {
             }
         };
         let (reply, acknowledged) = oneshot::channel();
+        let probe_started_at = std::time::Instant::now();
+        let sender_thread_cpu_ns = thread_cpu_time_ns();
         let sender_thread_id = std::thread::current().id();
+        let sender_cpu_id = current_cpu_id();
         let enqueued_at = Instant::now();
         permit.send(BoundaryRequest::Finish {
+            probe_started_at,
             enqueued_at,
             sender_thread_id,
+            sender_thread_cpu_ns,
+            sender_cpu_id,
             reply,
         });
         let send_sync = enqueued_at.elapsed();
@@ -196,13 +214,27 @@ impl GroupedPassBoundary {
             .context("grouped live engine stopped before acknowledging pass-boundary finish")?;
         let return_wake = acknowledged.acknowledged_at.elapsed();
         let return_thread_id = std::thread::current().id();
+        let actor_same_thread = acknowledged.actor_thread_id == acknowledged.sender_thread_id;
+        let actor_same_thread_cpu = actor_same_thread
+            .then(|| {
+                acknowledged
+                    .sender_thread_cpu_ns
+                    .zip(acknowledged.actor_thread_cpu_ns)
+                    .and_then(|(started, finished)| finished.checked_sub(started))
+                    .map(Duration::from_nanos)
+            })
+            .flatten();
         Ok(BoundaryFinishTiming {
             admission,
             reserve,
             reserve_waited,
             send_sync,
             actor_wake: acknowledged.actor_wake,
-            actor_same_thread: acknowledged.actor_thread_id == acknowledged.sender_thread_id,
+            actor_probe_wall: acknowledged.actor_probe_wall,
+            actor_same_thread,
+            actor_same_thread_cpu,
+            actor_sender_cpu_id: acknowledged.sender_cpu_id,
+            actor_receiver_cpu_id: acknowledged.actor_cpu_id,
             completion_boundary: acknowledged.completion_boundary,
             return_wake,
             return_same_thread: return_thread_id == acknowledged.actor_thread_id,
@@ -692,20 +724,31 @@ impl GroupedLiveActor {
                     let _ = reply.send(result);
                 }
                 BoundaryRequest::Finish {
+                    probe_started_at,
                     enqueued_at,
                     sender_thread_id,
+                    sender_thread_cpu_ns,
+                    sender_cpu_id,
                     reply,
                 } => {
                     let acknowledged_at = Instant::now();
                     let actor_thread_id = std::thread::current().id();
+                    let actor_cpu_id = current_cpu_id();
+                    let actor_thread_cpu_ns = thread_cpu_time_ns();
+                    let actor_probe_wall = probe_started_at.elapsed();
                     let completion_boundary =
                         acknowledged_at.saturating_duration_since(completion_started_at);
                     let _ = reply.send(BoundaryFinishAck {
                         actor_wake: acknowledged_at.saturating_duration_since(enqueued_at),
+                        actor_probe_wall,
                         completion_boundary,
                         acknowledged_at,
                         sender_thread_id,
                         actor_thread_id,
+                        sender_thread_cpu_ns,
+                        actor_thread_cpu_ns,
+                        sender_cpu_id,
+                        actor_cpu_id,
                     });
                     return Ok(Some(completion_boundary));
                 }
@@ -902,6 +945,36 @@ async fn sleep_until_ms(origin: Instant, deadline_ms: Option<f64>) {
     tokio::time::sleep_until(deadline).await;
     #[cfg(not(test))]
     sleep_until_precise(deadline.into_std()).await;
+}
+
+#[cfg(target_os = "linux")]
+fn thread_cpu_time_ns() -> Option<u64> {
+    let mut timestamp = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut timestamp) };
+    (rc == 0).then(|| {
+        (timestamp.tv_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(timestamp.tv_nsec as u64)
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn thread_cpu_time_ns() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn current_cpu_id() -> Option<u32> {
+    let cpu = unsafe { libc::sched_getcpu() };
+    u32::try_from(cpu).ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_cpu_id() -> Option<u32> {
+    None
 }
 
 #[cfg(test)]
@@ -1113,6 +1186,7 @@ mod tests {
         let finish = runtime.block_on(boundary.finish()).unwrap();
 
         assert!(!finish.actor_same_thread);
+        assert!(finish.actor_same_thread_cpu.is_none());
         assert!(!finish.return_same_thread);
         assert!(actor.join().unwrap().is_some());
     }
@@ -1163,6 +1237,12 @@ mod tests {
         assert!(finish.actor_same_thread);
         assert!(finish.return_same_thread);
         assert!(finish.send_sync <= finish.actor_wake);
+        #[cfg(target_os = "linux")]
+        {
+            assert!(finish.actor_same_thread_cpu.is_some());
+            assert!(finish.actor_sender_cpu_id.is_some());
+            assert!(finish.actor_receiver_cpu_id.is_some());
+        }
 
         handle.shutdown();
         actor.await.unwrap().unwrap();

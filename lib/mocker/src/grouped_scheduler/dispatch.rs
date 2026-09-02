@@ -91,6 +91,11 @@ struct CompletionPassTiming {
     finish_actor_wake: std::time::Duration,
     finish_actor_same_thread_wake: std::time::Duration,
     finish_actor_cross_thread_wake: std::time::Duration,
+    finish_actor_same_thread_cpu_valid_wake: std::time::Duration,
+    finish_actor_same_thread_cpu_valid_probe_wall: std::time::Duration,
+    finish_actor_same_thread_cpu_time: std::time::Duration,
+    finish_actor_same_thread_probe_wall_minus_cpu_ms: f64,
+    finish_actor_same_thread_probe_edge_ms: f64,
     finish_return_wake: std::time::Duration,
     finish_return_same_thread_wake: std::time::Duration,
     finish_return_cross_thread_wake: std::time::Duration,
@@ -117,6 +122,15 @@ struct CompletionPassTiming {
     finish_reserve_waited_passes: u64,
     finish_actor_same_thread_passes: u64,
     finish_actor_cross_thread_passes: u64,
+    finish_actor_same_thread_cpu_valid_passes: u64,
+    finish_actor_same_thread_cpu_invalid_passes: u64,
+    finish_actor_same_thread_endpoint_same_cpu_passes: u64,
+    finish_actor_same_thread_endpoint_changed_cpu_passes: u64,
+    finish_actor_same_thread_endpoint_cpu_invalid_passes: u64,
+    finish_actor_sender_cpu_mask: u64,
+    finish_actor_receiver_cpu_mask: u64,
+    finish_actor_sender_cpu_id_overflow_passes: u64,
+    finish_actor_receiver_cpu_id_overflow_passes: u64,
     finish_return_same_thread_passes: u64,
     finish_return_cross_thread_passes: u64,
 }
@@ -177,11 +191,44 @@ impl CompletionPassTiming {
             self.finish_actor_same_thread_passes = 1;
             self.finish_actor_same_thread_send_sync = timing.send_sync;
             self.finish_actor_same_thread_wake = timing.actor_wake;
+            if let Some(cpu_time) = timing.actor_same_thread_cpu {
+                self.finish_actor_same_thread_cpu_valid_passes = 1;
+                self.finish_actor_same_thread_cpu_valid_wake = timing.actor_wake;
+                self.finish_actor_same_thread_cpu_valid_probe_wall = timing.actor_probe_wall;
+                self.finish_actor_same_thread_cpu_time = cpu_time;
+                self.finish_actor_same_thread_probe_wall_minus_cpu_ms =
+                    duration_ms(timing.actor_probe_wall) - duration_ms(cpu_time);
+                self.finish_actor_same_thread_probe_edge_ms =
+                    duration_ms(timing.actor_probe_wall) - duration_ms(timing.actor_wake);
+            } else {
+                self.finish_actor_same_thread_cpu_invalid_passes = 1;
+            }
+            match (timing.actor_sender_cpu_id, timing.actor_receiver_cpu_id) {
+                (Some(sender), Some(receiver)) if sender == receiver => {
+                    self.finish_actor_same_thread_endpoint_same_cpu_passes = 1;
+                }
+                (Some(_), Some(_)) => {
+                    self.finish_actor_same_thread_endpoint_changed_cpu_passes = 1;
+                }
+                _ => {
+                    self.finish_actor_same_thread_endpoint_cpu_invalid_passes = 1;
+                }
+            }
         } else {
             self.finish_actor_cross_thread_passes = 1;
             self.finish_actor_cross_thread_send_sync = timing.send_sync;
             self.finish_actor_cross_thread_wake = timing.actor_wake;
         }
+        record_cpu_id(
+            timing.actor_sender_cpu_id,
+            &mut self.finish_actor_sender_cpu_mask,
+            &mut self.finish_actor_sender_cpu_id_overflow_passes,
+        );
+        record_cpu_id(
+            timing.actor_receiver_cpu_id,
+            &mut self.finish_actor_receiver_cpu_mask,
+            &mut self.finish_actor_receiver_cpu_id_overflow_passes,
+        );
         self.finish_return_wake = timing.return_wake;
         if timing.return_same_thread {
             self.finish_return_same_thread_passes = 1;
@@ -265,6 +312,19 @@ impl CompletionTimingDiagnostics {
             finish_actor_cross_thread_wake_total_ms = duration_ms(
                 timing.finish_actor_cross_thread_wake
             ),
+            finish_actor_same_thread_cpu_valid_wake_total_ms = duration_ms(
+                timing.finish_actor_same_thread_cpu_valid_wake
+            ),
+            finish_actor_same_thread_cpu_valid_probe_wall_total_ms = duration_ms(
+                timing.finish_actor_same_thread_cpu_valid_probe_wall
+            ),
+            finish_actor_same_thread_cpu_time_total_ms = duration_ms(
+                timing.finish_actor_same_thread_cpu_time
+            ),
+            finish_actor_same_thread_probe_wall_minus_cpu_total_ms = timing
+                .finish_actor_same_thread_probe_wall_minus_cpu_ms,
+            finish_actor_same_thread_probe_edge_total_ms = timing
+                .finish_actor_same_thread_probe_edge_ms,
             finish_return_wake_total_ms = duration_ms(timing.finish_return_wake),
             finish_return_same_thread_wake_total_ms = duration_ms(
                 timing.finish_return_same_thread_wake
@@ -302,6 +362,39 @@ impl CompletionTimingDiagnostics {
                 timing.finish_actor_wake
             ) - duration_ms(timing.finish_actor_same_thread_wake)
                 - duration_ms(timing.finish_actor_cross_thread_wake),
+            finish_actor_same_thread_cpu_valid_passes = timing
+                .finish_actor_same_thread_cpu_valid_passes,
+            finish_actor_same_thread_cpu_invalid_passes = timing
+                .finish_actor_same_thread_cpu_invalid_passes,
+            finish_actor_same_thread_cpu_count_identity_residual = timing
+                .finish_actor_same_thread_passes as i64
+                - timing.finish_actor_same_thread_cpu_valid_passes as i64
+                - timing.finish_actor_same_thread_cpu_invalid_passes as i64,
+            finish_actor_same_thread_probe_cpu_identity_residual_total_ms = duration_ms(
+                timing.finish_actor_same_thread_cpu_valid_probe_wall
+            ) - duration_ms(timing.finish_actor_same_thread_cpu_time)
+                - timing.finish_actor_same_thread_probe_wall_minus_cpu_ms,
+            finish_actor_same_thread_probe_wake_identity_residual_total_ms = duration_ms(
+                timing.finish_actor_same_thread_cpu_valid_probe_wall
+            ) - duration_ms(timing.finish_actor_same_thread_cpu_valid_wake)
+                - timing.finish_actor_same_thread_probe_edge_ms,
+            finish_actor_same_thread_endpoint_same_cpu_passes = timing
+                .finish_actor_same_thread_endpoint_same_cpu_passes,
+            finish_actor_same_thread_endpoint_changed_cpu_passes = timing
+                .finish_actor_same_thread_endpoint_changed_cpu_passes,
+            finish_actor_same_thread_endpoint_cpu_invalid_passes = timing
+                .finish_actor_same_thread_endpoint_cpu_invalid_passes,
+            finish_actor_same_thread_endpoint_cpu_count_identity_residual = timing
+                .finish_actor_same_thread_passes as i64
+                - timing.finish_actor_same_thread_endpoint_same_cpu_passes as i64
+                - timing.finish_actor_same_thread_endpoint_changed_cpu_passes as i64
+                - timing.finish_actor_same_thread_endpoint_cpu_invalid_passes as i64,
+            finish_actor_sender_cpu_mask = timing.finish_actor_sender_cpu_mask,
+            finish_actor_receiver_cpu_mask = timing.finish_actor_receiver_cpu_mask,
+            finish_actor_sender_cpu_id_overflow_passes = timing
+                .finish_actor_sender_cpu_id_overflow_passes,
+            finish_actor_receiver_cpu_id_overflow_passes = timing
+                .finish_actor_receiver_cpu_id_overflow_passes,
             finish_return_same_thread_passes = timing.finish_return_same_thread_passes,
             finish_return_cross_thread_passes = timing.finish_return_cross_thread_passes,
             finish_return_thread_count_identity_residual = self.interval_passes as i64
@@ -361,6 +454,14 @@ impl CompletionPassTiming {
         self.finish_actor_wake += other.finish_actor_wake;
         self.finish_actor_same_thread_wake += other.finish_actor_same_thread_wake;
         self.finish_actor_cross_thread_wake += other.finish_actor_cross_thread_wake;
+        self.finish_actor_same_thread_cpu_valid_wake +=
+            other.finish_actor_same_thread_cpu_valid_wake;
+        self.finish_actor_same_thread_cpu_valid_probe_wall +=
+            other.finish_actor_same_thread_cpu_valid_probe_wall;
+        self.finish_actor_same_thread_cpu_time += other.finish_actor_same_thread_cpu_time;
+        self.finish_actor_same_thread_probe_wall_minus_cpu_ms +=
+            other.finish_actor_same_thread_probe_wall_minus_cpu_ms;
+        self.finish_actor_same_thread_probe_edge_ms += other.finish_actor_same_thread_probe_edge_ms;
         self.finish_return_wake += other.finish_return_wake;
         self.finish_return_same_thread_wake += other.finish_return_same_thread_wake;
         self.finish_return_cross_thread_wake += other.finish_return_cross_thread_wake;
@@ -387,8 +488,35 @@ impl CompletionPassTiming {
         self.finish_reserve_waited_passes += other.finish_reserve_waited_passes;
         self.finish_actor_same_thread_passes += other.finish_actor_same_thread_passes;
         self.finish_actor_cross_thread_passes += other.finish_actor_cross_thread_passes;
+        self.finish_actor_same_thread_cpu_valid_passes +=
+            other.finish_actor_same_thread_cpu_valid_passes;
+        self.finish_actor_same_thread_cpu_invalid_passes +=
+            other.finish_actor_same_thread_cpu_invalid_passes;
+        self.finish_actor_same_thread_endpoint_same_cpu_passes +=
+            other.finish_actor_same_thread_endpoint_same_cpu_passes;
+        self.finish_actor_same_thread_endpoint_changed_cpu_passes +=
+            other.finish_actor_same_thread_endpoint_changed_cpu_passes;
+        self.finish_actor_same_thread_endpoint_cpu_invalid_passes +=
+            other.finish_actor_same_thread_endpoint_cpu_invalid_passes;
+        self.finish_actor_sender_cpu_mask |= other.finish_actor_sender_cpu_mask;
+        self.finish_actor_receiver_cpu_mask |= other.finish_actor_receiver_cpu_mask;
+        self.finish_actor_sender_cpu_id_overflow_passes +=
+            other.finish_actor_sender_cpu_id_overflow_passes;
+        self.finish_actor_receiver_cpu_id_overflow_passes +=
+            other.finish_actor_receiver_cpu_id_overflow_passes;
         self.finish_return_same_thread_passes += other.finish_return_same_thread_passes;
         self.finish_return_cross_thread_passes += other.finish_return_cross_thread_passes;
+    }
+}
+
+fn record_cpu_id(cpu_id: Option<u32>, mask: &mut u64, overflow_passes: &mut u64) {
+    let Some(cpu_id) = cpu_id else {
+        return;
+    };
+    if let Some(bit) = 1_u64.checked_shl(cpu_id) {
+        *mask |= bit;
+    } else {
+        *overflow_passes += 1;
     }
 }
 
@@ -1025,7 +1153,11 @@ mod tests {
             reserve_waited: false,
             send_sync: std::time::Duration::from_millis(1),
             actor_wake: std::time::Duration::from_millis(actor_wake_ms),
+            actor_probe_wall: std::time::Duration::from_millis(actor_wake_ms + 1),
             actor_same_thread,
+            actor_same_thread_cpu: actor_same_thread.then(|| std::time::Duration::from_millis(2)),
+            actor_sender_cpu_id: Some(3),
+            actor_receiver_cpu_id: Some(if actor_same_thread { 3 } else { 5 }),
             completion_boundary: std::time::Duration::from_millis(20),
             return_wake: std::time::Duration::from_millis(return_wake_ms),
             return_same_thread,
@@ -1055,6 +1187,38 @@ mod tests {
                 + aggregate.finish_actor_cross_thread_send_sync,
             aggregate.finish_send_sync
         );
+        assert_eq!(aggregate.finish_actor_same_thread_cpu_valid_passes, 1);
+        assert_eq!(aggregate.finish_actor_same_thread_cpu_invalid_passes, 0);
+        assert_eq!(
+            aggregate.finish_actor_same_thread_cpu_valid_wake,
+            std::time::Duration::from_millis(3)
+        );
+        assert_eq!(
+            aggregate.finish_actor_same_thread_cpu_valid_probe_wall,
+            std::time::Duration::from_millis(4)
+        );
+        assert_eq!(
+            aggregate.finish_actor_same_thread_cpu_time,
+            std::time::Duration::from_millis(2)
+        );
+        assert_eq!(
+            aggregate.finish_actor_same_thread_probe_wall_minus_cpu_ms,
+            2.0
+        );
+        assert_eq!(aggregate.finish_actor_same_thread_probe_edge_ms, 1.0);
+        assert_eq!(
+            aggregate.finish_actor_same_thread_endpoint_same_cpu_passes,
+            1
+        );
+        assert_eq!(
+            aggregate.finish_actor_same_thread_endpoint_changed_cpu_passes,
+            0
+        );
+        assert_eq!(aggregate.finish_actor_sender_cpu_mask, 1_u64 << 3);
+        assert_eq!(
+            aggregate.finish_actor_receiver_cpu_mask,
+            (1_u64 << 3) | (1_u64 << 5)
+        );
         assert_eq!(
             aggregate.finish_return_same_thread_passes
                 + aggregate.finish_return_cross_thread_passes,
@@ -1068,6 +1232,47 @@ mod tests {
             aggregate.finish_send_sync,
             std::time::Duration::from_millis(2)
         );
+    }
+
+    #[test]
+    fn finish_cpu_probe_classifies_changed_and_invalid_samples() {
+        let mut aggregate = CompletionPassTiming::default();
+
+        let mut changed = finish_timing(true, true, 5, 1);
+        changed.actor_same_thread_cpu = Some(std::time::Duration::from_millis(3));
+        changed.actor_sender_cpu_id = Some(7);
+        changed.actor_receiver_cpu_id = Some(9);
+        let mut changed_timing = CompletionPassTiming::default();
+        changed_timing.record_finish(changed);
+        aggregate.add_assign(changed_timing);
+
+        let mut invalid = finish_timing(true, true, 6, 1);
+        invalid.actor_same_thread_cpu = None;
+        invalid.actor_sender_cpu_id = None;
+        invalid.actor_receiver_cpu_id = Some(70);
+        let mut invalid_timing = CompletionPassTiming::default();
+        invalid_timing.record_finish(invalid);
+        aggregate.add_assign(invalid_timing);
+
+        assert_eq!(aggregate.finish_actor_same_thread_passes, 2);
+        assert_eq!(aggregate.finish_actor_same_thread_cpu_valid_passes, 1);
+        assert_eq!(aggregate.finish_actor_same_thread_cpu_invalid_passes, 1);
+        assert_eq!(
+            aggregate.finish_actor_same_thread_endpoint_same_cpu_passes,
+            0
+        );
+        assert_eq!(
+            aggregate.finish_actor_same_thread_endpoint_changed_cpu_passes,
+            1
+        );
+        assert_eq!(
+            aggregate.finish_actor_same_thread_endpoint_cpu_invalid_passes,
+            1
+        );
+        assert_eq!(aggregate.finish_actor_sender_cpu_mask, 1_u64 << 7);
+        assert_eq!(aggregate.finish_actor_receiver_cpu_mask, 1_u64 << 9);
+        assert_eq!(aggregate.finish_actor_sender_cpu_id_overflow_passes, 0);
+        assert_eq!(aggregate.finish_actor_receiver_cpu_id_overflow_passes, 1);
     }
 
     #[tokio::test]
