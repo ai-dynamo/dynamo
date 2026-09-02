@@ -596,9 +596,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
 {% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist && \
 {% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
     # Skip maturin's built-in repair: it would graft the in-tree libav* into the
-        # wheel, which the codec gate rejects. Repair with those sonames excluded so
-        # they stay external and resolve to the image's /usr/local/lib copies. This
-        # media-enabled wheel is intentionally image-only and non-self-contained.
+    # wheel, which the codec gate rejects. Repair with those sonames excluded so
+    # they stay external and resolve to the image's /usr/local/lib copies. This
+    # media-enabled wheel is intentionally image-only and non-self-contained.
 {% if device == "xpu" %}        ARCH_ALT=x86_64 && \
     MANYLINUX_POLICY=manylinux_2_39_x86_64 && \
 {% else %}
