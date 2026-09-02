@@ -109,7 +109,7 @@ fn stream_error(error: &(dyn std::error::Error + 'static)) -> (ErrorType, String
     let (error_type, message) = if super::metrics::request_deadline_exceeded(error) {
         (
             ErrorType::Cancelled,
-            "request deadline exceeded".to_string(),
+            super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
         )
     } else if super::metrics::request_was_rejected(error) {
         (ErrorType::Overload, SanitizedError::Overloaded.to_string())
@@ -181,12 +181,13 @@ fn internal_error_response() -> Response {
     )
 }
 
-/// Caller-supplied deadline elapsed before the engine produced a stream; the
-/// OpenAI surface maps this to HTTP 429 with a `Cancelled` metric label.
+/// Caller-supplied deadline elapsed before the engine produced a stream: HTTP
+/// 429 with a `Cancelled` metric label, the same contract as the OpenAI
+/// surface's `ErrorMessage::from_anyhow` deadline branch.
 fn deadline_exceeded_response() -> Response {
     error_response(
         StatusCode::TOO_MANY_REQUESTS,
-        "request deadline exceeded".to_string(),
+        super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
     )
 }
 
