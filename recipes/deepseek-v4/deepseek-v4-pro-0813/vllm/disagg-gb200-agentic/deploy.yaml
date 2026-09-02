@@ -53,7 +53,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.2
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.0
               imagePullPolicy: Always
               workingDir: /workspace
               env:
