@@ -29,11 +29,13 @@ published, but the router needs at least two candidates to exercise KV-aware
 placement. Expert parallelism is deliberately disabled because the selected
 four-GPU profile is TP4/DP1 without EP.
 
-The deployment uses the revision-pinned A.X-K2 development image built from
-Dynamo 1.4.1 and vLLM 0.26.0. The image contains the A.X-K2 model port, DSpark
-support, and the native FP8 DS-MLA scale-writer fix. This recipe keeps
-`--kv-cache-dtype auto`, so the native FP8 DS-MLA fix is available but is not
-active in this BF16-KV routing test.
+The deployment uses the immutable A.X-K2 development image built from Dynamo
+1.4.1 and the stock vLLM 0.26.0 base. The Dynamo runtime build overlays the
+A.X-K2 model port, DSpark anchor-layout fix, and sparse-MLA/SWA KV-allocation
+fix as source-only patches. It deliberately excludes the native FP8 DS-MLA
+scale-writer patch and does not rebuild vLLM. This recipe keeps
+`--kv-cache-dtype auto`, so the deployment remains on the validated BF16-KV
+path and does not require that native FP8 KV-cache change.
 
 ## Prerequisites
 
