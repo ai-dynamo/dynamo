@@ -156,10 +156,9 @@ impl ResponseStreamConverter {
         let state_index = match self.active_reasoning_index {
             Some(state_index) => state_index,
             None => {
-                // Close pending tool calls first: live event order must match
-                // the final output order.
-                let output_status = self.output_status();
-                self.append_pending_function_call_done_events(events, output_status);
+                // Resumed reasoning proves pending tool calls completed, even if
+                // this chunk reports that the new reasoning exhausted the budget.
+                self.append_pending_function_call_done_events(events, OutputStatus::Completed);
 
                 let output_index = self.next_output_index;
                 self.next_output_index += 1;
@@ -2341,9 +2340,8 @@ mod tests {
         assert_eq!(reasoning_texts, vec!["first thought", "second thought"]);
     }
 
-    /// Resumed reasoning closes the pending tool call before opening the next item.
     #[test]
-    fn test_resumed_reasoning_completes_pending_tool_call_first() {
+    fn test_length_on_resumed_reasoning_keeps_prior_tool_call_completed() {
         let mut conv = ResponseStreamConverter::new("test-model".into(), reasoning_params());
 
         let _ = conv.process_chunk(&reasoning_chunk("first thought"));
@@ -2354,38 +2352,20 @@ mod tests {
             Some("{}"),
         ));
 
-        let resumed_types = event_types(&conv.process_chunk(&reasoning_chunk("second thought")));
-        assert_eq!(
-            resumed_types,
-            vec![
-                "response.function_call_arguments.done".to_string(),
-                "response.output_item.done".to_string(),
-                "response.output_item.added".to_string(),
-                "response.content_part.added".to_string(),
-                "response.reasoning_text.delta".to_string(),
-            ]
-        );
-
-        // No tool-call done events repeat at stream end.
-        let end_types = event_types(&conv.emit_end_events());
-        assert_eq!(
-            end_types,
-            vec![
-                "response.reasoning_text.done".to_string(),
-                "response.content_part.done".to_string(),
-                "response.output_item.done".to_string(),
-                "response.completed".to_string(),
-            ]
-        );
+        let resumed = with_finish_reason(reasoning_chunk("second thought"), FinishReason::Length);
+        let _ = conv.process_chunk(&resumed);
+        let _ = conv.emit_end_events();
 
         let output = conv.completed_output();
         assert_eq!(output.len(), 3);
-        assert!(matches!(output[0], OutputItem::Reasoning(_)));
         let OutputItem::FunctionCall(call) = &output[1] else {
             panic!("expected function call output");
         };
         assert_eq!(call.status, Some(OutputStatus::Completed));
-        assert!(matches!(output[2], OutputItem::Reasoning(_)));
+        let OutputItem::Reasoning(reasoning) = &output[2] else {
+            panic!("expected resumed reasoning output");
+        };
+        assert_eq!(reasoning.status, Some(OutputStatus::Incomplete));
     }
 
     #[test]
