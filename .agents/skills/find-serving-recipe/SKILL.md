@@ -59,6 +59,17 @@ Two invocation contexts, with different outputs:
 5. **Stop at the first tier that yields a candidate meeting the confidence bar** for the
    invocation context (deployable for baseline selection; hypothesis-grade for candidate
    hunting). Later tiers may still be consulted for expected performance.
+6. **Freshness is part of the verdict.** Serving recipes rot: engines rename flags, change
+   defaults, and ship kernels that invalidate old tuning. For every candidate, record the
+   engine version it pins (image tag, `min_*_version`, or commit) and its verification or
+   publication date, then compare against the engine's CURRENT stable release (the registry's
+   tag list, the engine's release page, or the catalog's own latest entry). A recipe is STALE
+   when its pinned engine is more than one minor release behind current, its verification date
+   is older than roughly ninety days, or any of its flags no longer exists in the current CLI.
+   A stale recipe is `hypothesis` at best, never `deployable` as-is: port its flags to current
+   names, pin the current image, re-verify, and say in the dossier what was ported. A version
+   label alone is evidence of relabeling, not revalidation; only a recorded re-verification
+   resets the clock. When two candidates are otherwise comparable, prefer the fresher one.
 
 ## Tier 0: this repository
 
@@ -167,8 +178,9 @@ Write `recipe-dossier.md` into the engagement's inputs (baseline selection:
 - the model card's correctness settings (sampling, context, parsers) and minimum engine version;
 - every tier consulted, what was searched, and what it returned (including "no match");
 - for each candidate: source with path or URL and commit or date, image and its gate result
-  (resolvable, digest-pinned, mutable, missing), flags or manifest, measured performance with
-  its source, and a verdict: `deployable`, `hypothesis`, or `ceiling-only`;
+  (resolvable, digest-pinned, mutable, missing), pinned engine version versus current stable
+  and the verification date (the freshness check), flags or manifest, measured performance
+  with its source, and a verdict: `deployable`, `hypothesis`, or `ceiling-only`;
 - conflicts encountered and how precedence resolved them;
 - the selected candidate and why, or an explicit statement that nothing met the bar.
 
