@@ -64,7 +64,7 @@ impl HasTokenIds for LLMEngineOutput {
 }
 
 /// Check if an error chain indicates the request should be migrated.
-fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
+pub(crate) fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
     const MIGRATABLE: &[ErrorType] = &[
         ErrorType::CannotConnect,
         ErrorType::Disconnected,
@@ -80,7 +80,11 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
         // ResourceExhausted below and stays non-migratable.
         ErrorType::WorkerOverloaded,
     ];
-    const NON_MIGRATABLE: &[ErrorType] = &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
+    const NON_MIGRATABLE: &[ErrorType] = &[
+        ErrorType::Cancelled,
+        ErrorType::DeadlineExceeded,
+        ErrorType::ResourceExhausted,
+    ];
     error::match_error_chain(err, MIGRATABLE, NON_MIGRATABLE)
 }
 
@@ -424,7 +428,11 @@ where
                 migration_event.as_ref(),
                 frontend_service::migration_outcome::FAILURE,
             );
-            return Err(Error::msg("Migration limit exhausted"));
+            let error = Error::msg("Migration limit exhausted");
+            if let Some(state) = self.request.migration_state.as_ref() {
+                state.abort_request_lifecycle(Some(error.as_ref()));
+            }
+            return Err(error);
         }
         while self.retries_left > 0 {
             self.retries_left -= 1;
@@ -483,14 +491,17 @@ where
                     migration_event.as_ref(),
                     frontend_service::migration_outcome::CANCELLED,
                 );
-                return Err(DynamoError::builder()
+                let error = DynamoError::builder()
                     .error_type(ErrorType::Cancelled)
                     .message(format!(
                         "Context id {} is stopped or killed",
                         self.context.id()
                     ))
-                    .build()
-                    .into());
+                    .build();
+                if let Some(state) = self.request.migration_state.as_ref() {
+                    state.abort_request_lifecycle(Some(&error));
+                }
+                return Err(error.into());
             }
             let source_guards = self
                 .request
@@ -538,6 +549,9 @@ where
                             migration_event.as_ref(),
                             frontend_service::migration_outcome::FAILURE,
                         );
+                        if let Some(state) = self.request.migration_state.as_ref() {
+                            state.abort_request_lifecycle(Some(err.as_ref()));
+                        }
                         return Err(err);
                     }
                     self.queue_migration(reason, Some(route_trace));
@@ -551,6 +565,9 @@ where
                             frontend_service::migration_outcome::FAILURE
                         };
                     self.record_migration_outcome(migration_event.as_ref(), outcome);
+                    if let Some(state) = self.request.migration_state.as_ref() {
+                        state.abort_request_lifecycle(Some(err.as_ref()));
+                    }
                     return Err(err);
                 }
             }
@@ -559,7 +576,11 @@ where
             migration_event.as_ref(),
             frontend_service::migration_outcome::FAILURE,
         );
-        Err(Error::msg("Migration limit exhausted"))
+        let error = Error::msg("Migration limit exhausted");
+        if let Some(state) = self.request.migration_state.as_ref() {
+            state.abort_request_lifecycle(Some(error.as_ref()));
+        }
+        Err(error)
     }
 
     /// The attempt a failure belongs to. Prefers the attempt's own trace
