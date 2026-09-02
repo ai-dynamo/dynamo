@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
 
-from pytest_markers import ALLOWED_AREA_MARKERS
+from pytest_markers import ALLOWED_AREA_MARKERS, SELECTIVE_FEATURE_MARKERS
 
 # ----------------------------------------------------------------------
 # Typed shapes (S6)
@@ -99,6 +99,7 @@ class ResolvedArea:
     github_team: str
     path_globs: list[str]
     pytest_markers: list[str] = field(default_factory=list)
+    pytest_configured: bool = False
 
 
 @dataclass
@@ -144,6 +145,20 @@ class ResolvedModel:
             if match(anchor(shared["glob"]), path):
                 labels.update(shared["owners"])
         return [area for area in self.areas if area.label in labels]
+
+    def pytest_markers_for_path(self, path: str) -> set[str]:
+        """Return effective pytest markers for a path's ownership areas.
+
+        ``core`` is the residual feature. A more specific feature mapping
+        replaces a broad area's residual ``core`` mapping unless the path is
+        explicitly listed in the ``core-tests`` area as a mixed-feature test.
+        """
+        areas = self.matching_areas(path)
+        markers = {marker for area in areas for marker in area.pytest_markers}
+        non_core_features = (markers & SELECTIVE_FEATURE_MARKERS) - {"core"}
+        if non_core_features and not any(area.label == "core-tests" for area in areas):
+            markers.discard("core")
+        return markers
 
     def owned_patterns(self) -> list[str]:
         """Every glob that contributes to explicit (non-catch-all) ownership.
@@ -437,6 +452,7 @@ def compute_resolution(spec: dict, tree: Iterable[str] | None = None) -> Resolve
                 github_team=area["github_team"],
                 path_globs=sorted(set(area.get("path_globs", []) or [])),
                 pytest_markers=sorted(set(markers)),
+                pytest_configured="pytest" in area,
             )
         )
 

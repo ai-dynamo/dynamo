@@ -65,11 +65,26 @@ An area can associate its owned paths with pytest markers:
   - tests/router/
 ```
 
+An explicitly empty marker list classifies an area as smoke-only:
+
+```yaml
+- label: docs
+  github_team: '@ai-dynamo/dynamo-docs-codeowners'
+  pytest:
+    markers: []
+```
+
+Omitting `pytest` is different: it means the area has not been classified and
+forces a full-suite fallback. Backend-only marker lists select the full affected
+backend lane. The `core` marker is residual; a more specific feature mapping
+replaces a broad area's `core` mapping unless a mixed-feature test path is
+explicitly included in the `core-tests` area.
+
 The PR workflow evaluates every ownership area matching each changed path.
 Backend markers narrow a feature to that framework, while other markers select
 the affected feature tests. Different changed paths are unioned. An area with no
-`pytest` policy contributes no markers; selection falls back to the full suite
-only when none of the areas matching a changed path provides a marker mapping.
+`pytest` policy is unclassified and fails closed to the full suite unless
+another matching area provides an explicit marker or smoke-only classification.
 
 The marker report collects effective pytest markers, including module, class,
 function, and parameter inheritance. Unit tests are the always-on smoke slice.
@@ -82,11 +97,12 @@ non-unit test does not intersect its path's feature and framework markers. Tests
 that span features may carry more than one. In selective mode, triggered backend
 lanes run their `unit` tests in addition to the selected feature expression.
 
-The selector exports one feature expression per backend. Lifecycle, framework,
+The selector exports a mode and feature expression per backend. Lifecycle, framework,
 and GPU-count markers remain in `.github/workflows/pr.yaml`; the selector does
-not generate or replace them. An empty feature expression preserves that job's
-existing full-suite marker expression, so an unmapped or inapplicable selection
-fails safely by running the lane already triggered by changed-files detection.
+not generate or replace them. `full` preserves the existing full-suite marker
+expression, `markers` runs unit smoke tests plus the feature expression, and
+`none` runs only unit smoke tests. An unclassified path still fails safely to
+`full`.
 For example, `tests/router/**` is explicitly mapped to the `router` area and
 feature. Mixed-feature files such as `tests/serve/test_vllm.py` belong to each
 applicable feature area, so their mapping selects the union of their `core`,

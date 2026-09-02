@@ -62,6 +62,7 @@ class SelectionPlan:
     areas: tuple[str, ...]
     changed_test_files: tuple[str, ...]
     ignored_paths: tuple[str, ...]
+    smoke_only_paths: tuple[str, ...]
     fallback_reasons: tuple[str, ...]
 
 
@@ -170,6 +171,7 @@ def build_plan(model: ResolvedModel, paths: list[str]) -> SelectionPlan:
     clauses: set[MarkerClause] = set()
     matched_labels: set[str] = set()
     fallback_reasons: list[str] = []
+    smoke_only_paths: list[str] = []
     unique_paths = sorted(set(paths))
     ignored_paths = tuple(
         path for path in unique_paths if _is_non_test_documentation(path)
@@ -182,9 +184,12 @@ def build_plan(model: ResolvedModel, paths: list[str]) -> SelectionPlan:
             fallback_reasons.append(f"{path}: no explicit ownership area")
             continue
         matched_labels.update(area.label for area in areas)
-        markers = {marker for area in areas for marker in area.pytest_markers}
+        markers = model.pytest_markers_for_path(path)
         if markers:
             clauses.add(MarkerClause.from_markers(markers))
+            continue
+        if any(area.pytest_configured for area in areas):
+            smoke_only_paths.append(path)
             continue
         labels = ", ".join(area.label for area in areas)
         fallback_reasons.append(f"{path}: no marker mapping ({labels})")
@@ -199,6 +204,7 @@ def build_plan(model: ResolvedModel, paths: list[str]) -> SelectionPlan:
             areas=tuple(sorted(matched_labels)),
             changed_test_files=changed_tests,
             ignored_paths=ignored_paths,
+            smoke_only_paths=tuple(smoke_only_paths),
             fallback_reasons=tuple(reasons),
         )
 
@@ -210,6 +216,7 @@ def build_plan(model: ResolvedModel, paths: list[str]) -> SelectionPlan:
             areas=(),
             changed_test_files=(),
             ignored_paths=ignored_paths,
+            smoke_only_paths=tuple(smoke_only_paths),
             fallback_reasons=(),
         )
 
@@ -222,6 +229,7 @@ def build_plan(model: ResolvedModel, paths: list[str]) -> SelectionPlan:
         areas=tuple(sorted(matched_labels)),
         changed_test_files=changed_tests,
         ignored_paths=ignored_paths,
+        smoke_only_paths=tuple(smoke_only_paths),
         fallback_reasons=(),
     )
 
@@ -229,15 +237,13 @@ def build_plan(model: ResolvedModel, paths: list[str]) -> SelectionPlan:
 def _write_github_output(
     path: Path, plan: SelectionPlan, *, apply_selection: bool
 ) -> None:
-    """Export only backend feature expressions consumed by the PR workflow."""
+    """Export the effective backend selection consumed by the PR workflow."""
     with path.open("a", encoding="utf-8") as output:
         for lane in sorted(BACKEND_MARKERS):
             selection = plan.lanes[lane]
-            features = (
-                selection.expression
-                if apply_selection and selection.mode == "markers"
-                else ""
-            )
+            mode = selection.mode if apply_selection else "full"
+            features = selection.expression if mode == "markers" else ""
+            output.write(f"{lane}_mode={mode}\n")
             output.write(f"{lane}_features={features}\n")
 
 
@@ -264,6 +270,10 @@ def _write_summary(
         if plan.ignored_paths:
             summary.write(
                 f"- Ignored non-test documentation: {len(plan.ignored_paths)} path(s)\n"
+            )
+        if plan.smoke_only_paths:
+            summary.write(
+                f"- Explicit smoke-only paths: {len(plan.smoke_only_paths)} path(s)\n"
             )
         summary.write("\n### Backend feature markers\n\n")
         for lane in sorted(BACKEND_MARKERS):

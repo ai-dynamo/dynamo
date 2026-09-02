@@ -329,7 +329,19 @@ class TestComputeResolution:
         kvbm = next(area for area in model.areas if area.label == "kvbm")
 
         assert runtime.pytest_markers == []
+        assert runtime.pytest_configured is False
         assert kvbm.pytest_markers == ["kvbm"]
+        assert kvbm.pytest_configured is True
+
+    def test_explicit_empty_pytest_policy_is_preserved(self) -> None:
+        spec = self._spec()
+        spec["areas"][0]["pytest"] = {"markers": []}
+
+        model = compute_resolution(spec)
+        runtime = next(area for area in model.areas if area.label == "runtime")
+
+        assert runtime.pytest_markers == []
+        assert runtime.pytest_configured is True
 
     def test_matching_areas_returns_all_overlaps(self) -> None:
         spec = self._spec()

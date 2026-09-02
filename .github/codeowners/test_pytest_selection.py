@@ -81,6 +81,12 @@ def _model():
                     "github_team": "@agents",
                     "path_globs": [],
                 },
+                {
+                    "label": "tooling",
+                    "github_team": "@runtime",
+                    "path_globs": ["tools/"],
+                    "pytest": {"markers": []},
+                },
             ],
             "shared": [{"glob": "lib/router/agents/", "owners": ["router", "agents"]}],
         }
@@ -140,6 +146,23 @@ def test_area_without_pytest_markers_falls_back_to_full() -> None:
     assert all(selection.mode == "full" for selection in plan.lanes.values())
 
 
+def test_explicit_empty_marker_mapping_selects_smoke_only() -> None:
+    plan = build_plan(_model(), ["tools/generate.py"])
+
+    assert plan.mode == "none"
+    assert plan.smoke_only_paths == ("tools/generate.py",)
+    assert not plan.fallback_reasons
+    assert all(selection.mode == "none" for selection in plan.lanes.values())
+
+
+def test_smoke_only_path_does_not_discard_a_feature_mapping() -> None:
+    plan = build_plan(_model(), ["lib/router/scheduler.rs", "tools/generate.py"])
+
+    assert plan.mode == "markers"
+    assert plan.smoke_only_paths == ("tools/generate.py",)
+    assert all(selection.expression == "router" for selection in plan.lanes.values())
+
+
 def test_shared_ownership_contributes_marker_metadata() -> None:
     plan = build_plan(_model(), ["lib/router/agents/tool.py"])
 
@@ -154,17 +177,19 @@ def test_unknown_path_falls_back_to_full() -> None:
     assert plan.fallback_reasons == ("unknown/new.py: no explicit ownership area",)
 
 
-def test_repository_area_fallback_is_implicit_and_markers_are_registered() -> None:
+def test_repository_area_policies_are_explicit_and_markers_are_registered() -> None:
     spec = yaml.safe_load(
         (REPO_ROOT / ".github/codeowners/areas.yaml").read_text(encoding="utf-8")
     )
     omitted_labels = {area["label"] for area in spec["areas"] if "pytest" not in area}
-    assert omitted_labels
+    assert not omitted_labels
     assert all(set(area.get("pytest", {})) <= {"markers"} for area in spec["areas"])
 
     model = compute_resolution(spec)
-    resolved_by_label = {area.label: area for area in model.areas}
-    assert all(not resolved_by_label[label].pytest_markers for label in omitted_labels)
+    assert all(area.pytest_configured for area in model.areas)
+    assert any(
+        area.pytest_configured and not area.pytest_markers for area in model.areas
+    )
     configured = {marker for area in model.areas for marker in area.pytest_markers}
     pyproject = tomllib.loads(
         (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
@@ -259,7 +284,7 @@ def test_repository_test_related_paths_have_explicit_marker_mappings() -> None:
             lane: "multimodal" for lane in ("generic", "sglang", "trtllm", "vllm")
         },
         "tests/report_pytest_markers.py": {
-            lane: "core" for lane in ("generic", "sglang", "trtllm", "vllm")
+            lane: "core" for lane in ("sglang", "trtllm", "vllm")
         },
         "tests/runtime/test_sample_multimodal_smoke.py": {
             lane: "multimodal" for lane in ("generic", "sglang", "trtllm", "vllm")
@@ -312,8 +337,11 @@ def test_github_outputs_only_applied_backend_features(tmp_path: Path) -> None:
     _write_github_output(output, plan, apply_selection=True)
 
     assert output.read_text(encoding="utf-8").splitlines() == [
+        "sglang_mode=markers",
         "sglang_features=router",
+        "trtllm_mode=markers",
         "trtllm_features=router",
+        "vllm_mode=markers",
         "vllm_features=router",
     ]
 
@@ -334,9 +362,34 @@ def test_github_outputs_empty_features_for_shadow_and_full_fallback(
         apply_selection=True,
     )
 
-    expected = ["sglang_features=", "trtllm_features=", "vllm_features="]
-    assert shadow_output.read_text(encoding="utf-8").splitlines() == expected
-    assert fallback_output.read_text(encoding="utf-8").splitlines() == expected
+    expected_full = [
+        "sglang_mode=full",
+        "sglang_features=",
+        "trtllm_mode=full",
+        "trtllm_features=",
+        "vllm_mode=full",
+        "vllm_features=",
+    ]
+    assert shadow_output.read_text(encoding="utf-8").splitlines() == expected_full
+    assert fallback_output.read_text(encoding="utf-8").splitlines() == expected_full
+
+
+def test_github_outputs_none_for_lanes_without_selected_features(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "github-output"
+    plan = build_plan(_model(), ["components/vllm/worker.py"])
+
+    _write_github_output(output, plan, apply_selection=True)
+
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "sglang_mode=none",
+        "sglang_features=",
+        "trtllm_mode=none",
+        "trtllm_features=",
+        "vllm_mode=full",
+        "vllm_features=",
+    ]
 
 
 def test_repository_selective_backend_jobs_keep_default_marker_dimensions() -> None:
@@ -356,9 +409,12 @@ def test_repository_selective_backend_jobs_keep_default_marker_dimensions() -> N
     assert "pytest_selection_mode" not in workflow
     assert "pytest_selection_areas" not in workflow
     assert "pytest_generic_" not in workflow
-    assert "pytest_vllm_mode" not in workflow
-    assert "pytest_sglang_mode" not in workflow
-    assert "pytest_trtllm_mode" not in workflow
+    assert "pytest_vllm_mode" in workflow
+    assert "pytest_sglang_mode" in workflow
+    assert "pytest_trtllm_mode" in workflow
+    assert workflow.count("_mode == 'markers'") == 9
+    assert workflow.count("_mode == 'none'") == 9
+    assert workflow.count("and unit' ||") == 9
     assert (
         "continue-on-error: ${{ vars.PYTEST_SELECTION_MODE != 'selective' }}"
         in workflow
@@ -444,12 +500,12 @@ def test_marker_audit_rejects_configured_feature_without_tests() -> None:
 def test_path_audit_requires_a_mapped_feature_marker() -> None:
     aligned = MarkerTestRecord(
         "tests/router/test_aligned.py::test_router",
-        ["pre_merge", "e2e", "gpu_0", "router"],
+        ["pre_merge", "e2e", "gpu_0", "vllm", "router"],
         [],
     )
     mismatched = MarkerTestRecord(
         "tests/router/test_mismatched.py::test_router",
-        ["pre_merge", "e2e", "gpu_0", "core"],
+        ["pre_merge", "e2e", "gpu_0", "vllm", "core"],
         [],
     )
     report = Report(
@@ -488,6 +544,27 @@ def test_path_audit_requires_a_mapped_framework_marker() -> None:
     assert report.path_marker_mismatches is not None
     assert report.path_marker_mismatches[0].mapped_frameworks == ["vllm"]
     assert report.path_marker_mismatches[0].actual_frameworks == ["sglang"]
+
+
+def test_path_audit_rejects_a_non_unit_framework_test_without_mapping() -> None:
+    unmapped = MarkerTestRecord(
+        "tests/unmapped/test_new.py::test_backend",
+        ["pre_merge", "e2e", "gpu_0", "vllm", "core"],
+        [],
+    )
+    report = Report(
+        total_checked=1,
+        total_skipped_mypy=0,
+        total_missing=0,
+        tests=[unmapped],
+        collected_tests=[unmapped],
+    )
+
+    validate_path_feature_alignment(report, _model())
+
+    assert report.path_marker_mismatches is not None
+    assert report.path_marker_mismatches[0].mapped_features == []
+    assert report.path_marker_mismatches[0].mapped_frameworks == []
 
 
 def test_marker_audit_collects_tool_calling_tests_deterministically() -> None:

@@ -641,20 +641,20 @@ def validate_path_feature_alignment(report: Report, model: ResolvedModel) -> Non
             continue
 
         test_path = test.nodeid.split("::", 1)[0]
-        mapped_markers = {
-            marker
-            for area in model.matching_areas(test_path)
-            for marker in area.pytest_markers
-        }
+        mapped_markers = model.pytest_markers_for_path(test_path)
         mapped_features = {
             marker for marker in mapped_markers if marker in SELECTIVE_FEATURE_MARKERS
         }
         mapped_frameworks = mapped_markers & FRAMEWORK_MARKERS
         actual_features = markers & SELECTIVE_FEATURE_MARKERS
         actual_frameworks = markers & FRAMEWORK_MARKERS
-        feature_mismatch = mapped_features and not mapped_features & actual_features
+        feature_mismatch = bool(actual_frameworks) and (
+            not mapped_features or not mapped_features & actual_features
+        )
         framework_mismatch = (
-            mapped_frameworks and not mapped_frameworks & actual_frameworks
+            bool(mapped_frameworks)
+            and bool(actual_frameworks)
+            and not mapped_frameworks & actual_frameworks
         )
         if feature_mismatch or framework_mismatch:
             mismatches.append(
