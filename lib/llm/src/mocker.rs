@@ -1023,8 +1023,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .as_ref()
                 .map(|cfg| cfg.num_thinking_tokens(max_output_tokens))
                 .unwrap_or(0);
-            let context_stopped = async_context.stopped();
-            tokio::pin!(context_stopped);
+            let mut context_stopped = async_context.stopped();
             let stream_closed = stream_tx.closed();
             tokio::pin!(stream_closed);
 
@@ -1336,10 +1335,11 @@ mod tests {
 
         let (closed_tx, closed_rx) = mpsc::unbounded_channel();
         drop(closed_rx);
+        let active_context: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
         assert!(!send_response(
             &closed_tx,
             LLMEngineOutput::length(),
-            &context
+            &active_context
         ));
     }
 
