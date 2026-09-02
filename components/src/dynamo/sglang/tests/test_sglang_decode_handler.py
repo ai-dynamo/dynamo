@@ -808,6 +808,40 @@ def test_build_sampling_params_maps_non_json_guided_decoding(guided_decoding, ex
         assert sampling_params[key] == value
 
 
+@pytest.mark.parametrize(
+    "guided_decoding",
+    [
+        {"json": {"type": "object"}},
+        {"regex": "a+"},
+        {"choice": ["yes", "no"]},
+        {"grammar": 'root ::= "a"'},
+        # Modifiers ride along with a constraint on the wire. SGLang has no
+        # SamplingParams field for either, so they must not be forwarded.
+        {"json": {"type": "object"}, "whitespace_pattern": "[\n ]?"},
+        {"regex": "a+", "backend": "xgrammar"},
+    ],
+)
+def test_guided_decoding_params_are_accepted_by_sglang(guided_decoding):
+    """Every key we emit must exist on SGLang's SamplingParams.
+
+    SamplingParams raises TypeError on an unknown keyword rather than ignoring
+    it, and the dict built here is passed straight to engine.async_generate,
+    which splats it into that constructor. Asserting only on the dict we return
+    cannot catch a key SGLang does not accept, so construct it for real.
+    """
+    from sglang.srt.sampling.sampling_params import SamplingParams
+
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {"guided_decoding": guided_decoding},
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    SamplingParams(**sampling_params)
+
+
 def test_build_sampling_params_maps_min_tokens_for_token_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 

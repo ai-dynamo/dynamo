@@ -1182,13 +1182,11 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
                                     structural_tag
                                 )
 
-            for source_key, target_key in (
-                ("whitespace_pattern", "whitespace_pattern"),
-                ("backend", "guided_decoding_backend"),
-            ):
-                value = guided_decoding.get(source_key)
-                if value is not None:
-                    params[target_key] = value
+            # whitespace_pattern and backend are deliberately not forwarded.
+            # SGLang exposes both as server options
+            # (server_args.constrained_json_whitespace_pattern and the
+            # --grammar-backend flag); SamplingParams has no field for either, and
+            # it raises TypeError on an unknown key rather than ignoring it.
             return params
         return {}
 
