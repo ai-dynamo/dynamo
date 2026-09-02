@@ -399,9 +399,10 @@ mod tests {
         }
     }
 
-    /// Two calls for the same codec must return the same bytes. This is the
-    /// assertion that actually pins the memoization: a bug that re-encoded on
-    /// every call would still pass the decode test above.
+    /// Two calls for the same codec must return the same cached `Bytes`
+    /// storage, not just equal contents. `assert_eq!` alone would still pass
+    /// if a bug re-encoded a byte-identical buffer on every call; comparing
+    /// `as_ptr()` is what actually pins the memoization.
     #[test]
     fn terminal_frame_bytes_is_memoized_per_codec() {
         for codec in [
@@ -410,7 +411,14 @@ mod tests {
         ] {
             let first = terminal_frame_bytes(codec).unwrap();
             let second = terminal_frame_bytes(codec).unwrap();
+            assert!(!first.is_empty(), "codec={}", codec.name());
             assert_eq!(first, second, "codec={}", codec.name());
+            assert_eq!(
+                first.as_ptr(),
+                second.as_ptr(),
+                "codec={} must reuse the cached Bytes storage",
+                codec.name()
+            );
         }
     }
 
