@@ -133,7 +133,6 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
         }
     };
 
-    // `_created` samples were already split out into their own gauge families.
     let samples = family.samples;
     if samples.is_empty() {
         return None;
