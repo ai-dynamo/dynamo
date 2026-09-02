@@ -35,12 +35,17 @@ ISL, 400 median OSL, 90% KV cache hit):
 | **Framework**            | vLLM                            | vLLM                            |
 | **Precision**            | NVFP4 (ModelOpt), BF16 KV       | NVFP4 (ModelOpt), BF16 KV       |
 | **Parallelism**          | TP4                             | TP4 per worker                  |
-| **MoE runner backend**   | FLASHINFER_TRTLLM               | FLASHINFER_TRTLLM               |
+| **MoE runner backend**   | auto: FLASHINFER_TRTLLM (routed) + FlashInfer CUTLASS (shared) | auto: FLASHINFER_TRTLLM (routed) + FlashInfer CUTLASS (shared) |
 | **AllReduce backend**    | vLLM default                    | FlashInfer (MNNVL)              |
 | **Context length**       | 1,048,576                       | 1,048,576                       |
 | **Speculative decoding** | MTP, 8 draft tokens             | MTP, 8 draft tokens             |
 | **Routing**              | KV-aware                        | KV-aware                        |
 | **KV transfer**          | n/a                             | NIXL over MNNVL, or RDMA where available |
+
+Inkling excludes the shared experts from NVFP4 quantization, so the two expert
+groups resolve their backend on their own. `--moe-backend` is global. Pinning it
+would also override the choice for the shared experts, which no published number
+covers.
 
 ## Supported features
 
