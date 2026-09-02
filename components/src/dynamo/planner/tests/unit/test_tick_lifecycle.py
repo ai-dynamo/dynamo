@@ -61,6 +61,7 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
         require_decode=True,
     )
     next_tick = ScheduledTick(at_s=20.0)
+    runtime_patch_tasks = []
 
     class RecordingEngine:
         async def observe(self, scheduled_tick, now_s):
@@ -86,7 +87,13 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
     class RecordingAggPlanner(AggPlanner):
         async def _apply_effects(self, effects):
             events.append("apply effects")
-            assert not self._config_lock.locked()
+            assert self._config_lock.locked()
+            patch_task = asyncio.create_task(
+                self.patch_min_endpoints({"max_gpu_budget": 9})
+            )
+            runtime_patch_tasks.append(patch_task)
+            await asyncio.sleep(0)
+            assert not patch_task.done()
             await super()._apply_effects(effects)
 
     config = PlannerConfig(
@@ -126,6 +133,7 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
     else:
         assert applied_targets == []
     assert events == expected_events
+    assert (await runtime_patch_tasks[0])["max_gpu_budget"] == 9
 
 
 @pytest.mark.asyncio

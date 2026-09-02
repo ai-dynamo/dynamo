@@ -237,11 +237,25 @@ class NativePlannerBase:
     def _build_worker_capabilities(self) -> WorkerCapabilities:
         return build_worker_capabilities(self.environment.deployment_state())
 
-    def _minimum_endpoint_budget_errors(
-        self, prefill_min_endpoint: Optional[int], decode_min_endpoint: Optional[int]
+    def _runtime_configuration_errors(
+        self,
+        prefill_min_endpoint: Optional[int],
+        decode_min_endpoint: Optional[int],
+        min_gpu_budget: int,
+        max_gpu_budget: int,
     ) -> list[str]:
         capabilities = self._build_worker_capabilities()
         errors: list[str] = []
+
+        if (
+            min_gpu_budget >= 0
+            and max_gpu_budget >= 0
+            and min_gpu_budget > max_gpu_budget
+        ):
+            errors.append(
+                f"min_gpu_budget={min_gpu_budget} exceeds "
+                f"max_gpu_budget={max_gpu_budget}"
+            )
 
         required_gpus = 0
         if prefill_min_endpoint is not None and capabilities.prefill is not None:
@@ -252,14 +266,11 @@ class NativePlannerBase:
             d_gpu = capabilities.decode.resolved_gpu_cost_per_replica
             if d_gpu is not None:
                 required_gpus += decode_min_endpoint * d_gpu
-        if (
-            self.config.max_gpu_budget >= 0
-            and required_gpus > self.config.max_gpu_budget
-        ):
+        if max_gpu_budget >= 0 and required_gpus > max_gpu_budget:
             errors.append(
                 "minimum endpoint footprint requires "
                 f"{required_gpus} GPUs, exceeding max_gpu_budget="
-                f"{self.config.max_gpu_budget}"
+                f"{max_gpu_budget}"
             )
 
         power_budget = self.config.total_gpu_power_limit
@@ -297,8 +308,12 @@ class NativePlannerBase:
         return errors
 
     def _validate_min_endpoint_budgets_at_startup(self) -> None:
-        errors = self._minimum_endpoint_budget_errors(
-            *self.config.active_min_endpoints()
+        prefill_min_endpoint, decode_min_endpoint = self.config.active_min_endpoints()
+        errors = self._runtime_configuration_errors(
+            prefill_min_endpoint,
+            decode_min_endpoint,
+            self.config.min_gpu_budget,
+            self.config.max_gpu_budget,
         )
         if errors:
             raise DeploymentValidationError(errors)
@@ -306,25 +321,34 @@ class NativePlannerBase:
     def _min_endpoint_response(self) -> dict[str, object]:
         mode = self.config.mode
         if mode == "agg":
-            return {"mode": mode, "min_endpoint": self.config.min_endpoint}
-        if mode == "prefill":
-            return {
+            response: dict[str, object] = {
+                "mode": mode,
+                "min_endpoint": self.config.min_endpoint,
+            }
+        elif mode == "prefill":
+            response = {
                 "mode": mode,
                 "prefill_min_endpoint": self.config.effective_prefill_min_endpoint,
             }
-        if mode == "decode":
-            return {
+        elif mode == "decode":
+            response = {
                 "mode": mode,
                 "decode_min_endpoint": self.config.effective_decode_min_endpoint,
             }
-        return {
-            "mode": mode,
-            "prefill_min_endpoint": self.config.effective_prefill_min_endpoint,
-            "decode_min_endpoint": self.config.effective_decode_min_endpoint,
-        }
+        else:
+            response = {
+                "mode": mode,
+                "prefill_min_endpoint": self.config.effective_prefill_min_endpoint,
+                "decode_min_endpoint": self.config.effective_decode_min_endpoint,
+            }
+        response.update(
+            min_gpu_budget=self.config.min_gpu_budget,
+            max_gpu_budget=self.config.max_gpu_budget,
+        )
+        return response
 
     async def get_min_endpoints(self) -> dict[str, object]:
-        """Return the active mode's effective minimum endpoint configuration."""
+        """Return the active endpoint floors and GPU budgets."""
 
         async with self._bounded_config_lock():
             return self._min_endpoint_response()
@@ -349,12 +373,13 @@ class NativePlannerBase:
     async def patch_min_endpoints(self, updates: dict[str, int]) -> dict[str, object]:
         """Atomically validate and apply a mode-shaped runtime update."""
 
-        allowed_fields = {
+        endpoint_fields = {
             "disagg": {"prefill_min_endpoint", "decode_min_endpoint"},
             "prefill": {"prefill_min_endpoint"},
             "decode": {"decode_min_endpoint"},
             "agg": {"min_endpoint"},
         }[self.config.mode]
+        allowed_fields = endpoint_fields | {"min_gpu_budget", "max_gpu_budget"}
         inactive_fields = sorted(set(updates) - allowed_fields)
         if inactive_fields:
             raise _MinimumEndpointValidationError(
@@ -367,15 +392,24 @@ class NativePlannerBase:
                 prefill_min_endpoint,
                 decode_min_endpoint,
             ) = self.config.active_min_endpoints()
+            min_gpu_budget = self.config.min_gpu_budget
+            max_gpu_budget = self.config.max_gpu_budget
             if "prefill_min_endpoint" in updates:
                 prefill_min_endpoint = updates["prefill_min_endpoint"]
             if "decode_min_endpoint" in updates:
                 decode_min_endpoint = updates["decode_min_endpoint"]
             if "min_endpoint" in updates:
                 decode_min_endpoint = updates["min_endpoint"]
+            if "min_gpu_budget" in updates:
+                min_gpu_budget = updates["min_gpu_budget"]
+            if "max_gpu_budget" in updates:
+                max_gpu_budget = updates["max_gpu_budget"]
 
-            errors = self._minimum_endpoint_budget_errors(
-                prefill_min_endpoint, decode_min_endpoint
+            errors = self._runtime_configuration_errors(
+                prefill_min_endpoint,
+                decode_min_endpoint,
+                min_gpu_budget,
+                max_gpu_budget,
             )
             if errors:
                 raise _MinimumEndpointValidationError("; ".join(errors))
@@ -384,7 +418,9 @@ class NativePlannerBase:
             for field, value in updates.items():
                 setattr(self.config, field, value)
             after = self._min_endpoint_response()
-            logger.info("Updated planner minimum endpoints: %s -> %s", before, after)
+            logger.info(
+                "Updated planner runtime configuration: %s -> %s", before, after
+            )
             return after
 
     def _runtime_namespace(self) -> str:
@@ -829,11 +865,11 @@ class NativePlannerBase:
         if tick_input.worker_counts is not None:
             self._last_worker_counts = tick_input.worker_counts
 
-        # Runtime floor updates are atomic with decision computation, but the
-        # lock is released before connector rollouts that may take minutes.
+        # Keep runtime configuration stable through decision submission. Scaling
+        # calls are non-blocking, so the lock is released before the rollout.
         async with self._config_lock:
             effects = await engine.tick(tick, tick_input)
-        await self._apply_effects(effects)
+            await self._apply_effects(effects)
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         if emit_diagnostics:
             self._report_diagnostics(tick, effects.diagnostics)
