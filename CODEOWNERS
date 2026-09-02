@@ -8,6 +8,7 @@
 # Area index (base owner per subsystem; the catch-all owns everything else):
 #   agents           @ai-dynamo/dynamo-agents-codeowners
 #   backend-sglang   @ai-dynamo/dynamo-backend-sglang-codeowners
+#   backend-triton   @ai-dynamo/dynamo-backend-triton-codeowners
 #   backend-trtllm   @ai-dynamo/dynamo-backend-trtllm-codeowners
 #   backend-vllm     @ai-dynamo/dynamo-backend-vllm-codeowners
 #   diffusion        @ai-dynamo/dynamo-diffusion-codeowners
@@ -34,6 +35,7 @@
 # Teams referenced (each must exist in the org before this file validates):
 #   @ai-dynamo/dynamo-agents-codeowners
 #   @ai-dynamo/dynamo-backend-sglang-codeowners
+#   @ai-dynamo/dynamo-backend-triton-codeowners
 #   @ai-dynamo/dynamo-backend-trtllm-codeowners
 #   @ai-dynamo/dynamo-backend-vllm-codeowners
 #   @ai-dynamo/dynamo-diffusion-codeowners
@@ -99,6 +101,11 @@
 /components/src/dynamo/trtllm/workers/                                       @ai-dynamo/dynamo-backend-trtllm-codeowners
 /components/src/dynamo/trtllm/request_handlers/                              @ai-dynamo/dynamo-backend-trtllm-codeowners
 /components/src/dynamo/trtllm/logits_processing/                             @ai-dynamo/dynamo-backend-trtllm-codeowners
+
+# === backend-triton  (@ai-dynamo/dynamo-backend-triton-codeowners) ===
+/components/src/dynamo/triton/**                                             @ai-dynamo/dynamo-backend-triton-codeowners
+/container/launch_message/triton.txt                                         @ai-dynamo/dynamo-backend-triton-codeowners
+/docs/backends/triton                                                        @ai-dynamo/dynamo-backend-triton-codeowners
 
 # === backend-sglang  (@ai-dynamo/dynamo-backend-sglang-codeowners) ===
 /lib/sidecar/sglang/                                                         @ai-dynamo/dynamo-backend-sglang-codeowners

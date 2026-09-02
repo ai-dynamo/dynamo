@@ -48,6 +48,7 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.pre_merge,
     pytest.mark.post_merge,
+    pytest.mark.timeout(180 * 60),
 ]
 
 _DEFAULT_SERVER_BRANCH = "main"

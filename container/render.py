@@ -100,8 +100,8 @@ def parse_args():
         "--cuda-version",
         type=str,
         default="13.0",
-        choices=["13.0", "13.1"],
-        help="CUDA version to use. [13.0 for vllm and sglang, 13.1 for trtllm].  Not required for Triton or non-cuda devices.",
+        choices=["13.0", "13.1", "13.2"],
+        help="CUDA version to use. [13.0 for vllm and sglang, 13.1 for trtllm, 13.2 for triton].  Not required for Triton or non-cuda devices.",
     )
     parser.add_argument("--make-efa", action="store_true", help="Enable AWS EFA")
     parser.add_argument(

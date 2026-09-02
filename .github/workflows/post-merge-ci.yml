@@ -622,30 +622,33 @@ jobs:
       target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
       cuda_version: '["13.2"]'
       platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
-      run_sanity_check: false # skip for absence of torch
+      run_sanity_check: false # requires torch which is not present.
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and triton and gpu_0'
       run_gpu_tests: false
     secrets: inherit
 
-  triton-qa-test:
-    name: triton-runtime
-    needs: [config, triton-build]
-    if: github.event_name != 'workflow_dispatch' || needs.config.outputs.run_triton == 'true'
-    uses: $/.github/workflows/shared-test.yml
-    with:
-      test_suite_name: triton
-      test_type: QA Test
-      amd_runner: prod-tester-amd-gpu-v2
-      target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
-      cuda_version: '["13.2"]'
-      platform: '["amd64"]'
-      run_sanity_check: false # skip for absence of torch
-      run_gpu_tests: true
-      gpu_test_markers: '(pre_merge or post_merge) and triton_qa'
-      gpu_test_timeout_minutes: 180
-      verify_gpu: false # skip for absence of torch
-    secrets: inherit
+  # TODO: Enable once test time has been reduced.
+  #       Current implementation takes up to 2 hours to complete.
+  # triton-qa-test:
+  #   name: triton-runtime
+  #   needs: [config, triton-build]
+  #   if: needs.config.outputs.run_triton == 'true'
+  #   uses: $/.github/workflows/shared-test.yml
+  #   with:
+  #     test_suite_name: triton
+  #     test_type: QA Test
+  #     amd_runner: prod-tester-amd-gpu-v2
+  #     target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
+  #     cuda_version: '["13.2"]'
+  #     platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
+  #     enable_coverage: true
+  #     run_sanity_check: false # requires torch which is not present.
+  #     run_gpu_tests: true
+  #     gpu_test_markers: '(pre_merge or post_merge) and triton_qa' and gpu_1
+  #     gpu_test_timeout_minutes: 180
+  #     verify_gpu: false # requires torch which is not present.
+  #   secrets: inherit
 
   planner-test:
     name: planner # This name overlaps with other planner jobs to group them in the UI

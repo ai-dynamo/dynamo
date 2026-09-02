@@ -134,9 +134,9 @@ on:
       DD_API_KEY:
         required: true
       TRITON_ARTIFACTORY_USER:
-        required: false
+        required: false # TODO: Make this required once credentials are available to CI.
       TRITON_ARTIFACTORY_TOKEN:
-        required: false
+        required: false # TODO: Make this required once credentials are available to CI.
 
 jobs:
   test:
