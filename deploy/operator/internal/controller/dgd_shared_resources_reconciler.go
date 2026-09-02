@@ -71,6 +71,7 @@ func newDGDSharedResourcesReconciler(
 func (r *dgdSharedResourcesReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	workerHashByComponents ...map[string]string,
 ) (dgdCheckpointsResult, error) {
 	logger := log.FromContext(ctx)
 	if err := r.rbac.Reconcile(ctx, dgd); err != nil {
@@ -88,7 +89,7 @@ func (r *dgdSharedResourcesReconciler) Reconcile(
 		return dgdCheckpointsResult{}, err
 	}
 
-	checkpoints, err := r.checkpoints.Reconcile(ctx, dgd)
+	checkpoints, err := r.checkpoints.Reconcile(ctx, dgd, workerHashByComponents...)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile checkpoints")
 		return dgdCheckpointsResult{}, fmt.Errorf("failed to reconcile checkpoints: %w", err)

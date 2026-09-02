@@ -604,7 +604,8 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		program := reconciler.newComponentProgram()
 		status := dgd.DeepCopy().Status
 
-		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
+		_, err := program.reconcileWorkerRollout(context.Background(), dgd, &status)
+		require.NoError(t, err)
 
 		require.NotNil(t, status.RollingUpdate)
 		assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, status.RollingUpdate.Phase)
@@ -627,7 +628,8 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		program := reconciler.newComponentProgram()
 		status := dgd.DeepCopy().Status
 
-		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
+		_, err := program.reconcileWorkerRollout(context.Background(), dgd, &status)
+		require.NoError(t, err)
 
 		assert.Nil(t, status.RollingUpdate)
 		assert.Nil(t, dgd.Status.RollingUpdate)

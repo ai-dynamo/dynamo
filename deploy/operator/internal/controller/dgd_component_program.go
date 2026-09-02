@@ -19,9 +19,11 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -86,11 +88,12 @@ func (p *componentProgram) Reconcile(
 	)
 
 	previousRolloutPhase := rollingUpdatePhase(programResult.Status.RollingUpdate)
-	if err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status); err != nil {
+	rollingUpdateCtx, err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status)
+	if err != nil {
 		return programResult, err
 	}
-	p.recordRollingUpdateTransition(req.DGD, previousRolloutPhase, &programResult)
-	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD)
+	p.recordRollingUpdateTransition(previousRolloutPhase, rollingUpdateCtx, &programResult)
+	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD, rollingUpdateCtx.WorkerHashByComponent)
 	if checkpoints.Statuses != nil {
 		programResult.Status.Checkpoints = checkpoints.Statuses
 	}
@@ -113,7 +116,9 @@ func (p *componentProgram) Reconcile(
 		ctx,
 		req.DGD,
 		&programResult.Status,
-		p.restartProgress.Resolve,
+		func(restartCtx context.Context, restartDGD *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
+			return p.restartProgress.ResolveWithRollingUpdateContext(restartCtx, restartDGD, inProgress, rollingUpdateCtx)
+		},
 	)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status
@@ -123,6 +128,7 @@ func (p *componentProgram) Reconcile(
 		req.DGD,
 		restart.State,
 		checkpoints.Infos,
+		rollingUpdateCtx,
 	)
 	if err != nil {
 		// Preserve newly observed component status while leaving the generation unobserved.
@@ -147,16 +153,17 @@ func (p *componentProgram) reconcileWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-) error {
-	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
-		return failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
-	}
-
+) (dynamo.RollingUpdateContext, error) {
 	if supportsManagedRollingUpdate(dgd) {
 		return p.reconcileManagedWorkerRollout(ctx, dgd, status)
 	}
-	return p.rollout.ReconcileUnsupported(ctx, dgd, false)
+	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd); err != nil {
+		return dynamo.RollingUpdateContext{}, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
+	}
+	if err := p.rollout.ReconcileUnsupported(ctx, dgd, false); err != nil {
+		return dynamo.RollingUpdateContext{}, err
+	}
+	return dynamo.RollingUpdateContext{}, nil
 }
 
 // supportsManagedRollingUpdate checks whether the component pathway can use
@@ -172,62 +179,41 @@ func (p *componentProgram) reconcileManagedWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-) error {
-	logger := log.FromContext(ctx)
-
-	if err := p.rollout.initializeWorkerHashIfNeeded(ctx, dgd); err != nil {
-		logger.Error(err, "Failed to initialize worker hash")
-		return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
-	}
-
-	rollingUpdateInProgress := isRollingUpdateInProgress(status)
-	triggerRollingUpdate := false
-	if !rollingUpdateInProgress {
-		var err error
-		triggerRollingUpdate, err = p.rollout.shouldTriggerRollingUpdate(dgd)
-		if err != nil {
-			logger.Error(err, "Failed to check rolling update trigger")
-			return failWorkloadProgram(reasonRollingUpdateFailed, err)
+) (dynamo.RollingUpdateContext, error) {
+	plan, err := p.rollout.buildManagedWorkerRolloutPlan(ctx, dgd)
+	if err != nil {
+		var collision *workerDCDIdentityCollisionError
+		if errors.As(err, &collision) {
+			return dynamo.RollingUpdateContext{}, failWorkloadProgram(reasonDCDIdentityCollision, err)
 		}
+		return dynamo.RollingUpdateContext{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
-	if rollingUpdateInProgress || triggerRollingUpdate {
-		if err := p.rollout.reconcileRollingUpdate(ctx, dgd, status); err != nil {
-			logger.Error(err, "Failed to reconcile rolling update")
-			return failWorkloadProgram(reasonRollingUpdateFailed, err)
-		}
+	if err := p.rollout.reconcileManagedWorkerInventory(ctx, dgd, status, plan); err != nil {
+		return plan.context, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
-	return nil
+	return plan.context, nil
 }
 
 func (p *componentProgram) recordRollingUpdateTransition(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	previous nvidiacomv1beta1.RollingUpdatePhase,
+	rollingUpdateCtx dynamo.RollingUpdateContext,
 	result *workloadProgramResult,
 ) {
 	current := rollingUpdatePhase(result.Status.RollingUpdate)
 	switch {
 	case current == nvidiacomv1beta1.RollingUpdatePhasePending && previous != current:
-		desired, err := desiredWorkerHashes(dgd)
-		if err != nil {
-			return
-		}
 		result.Eventf(
 			corev1.EventTypeNormal,
 			"RollingUpdateStarted",
 			"Starting rolling update to worker hash %s",
-			activeWorkerHashForDCDGeneration(dgd, desired),
+			rollingUpdateCtx.NewWorkerHash,
 		)
 	case current == nvidiacomv1beta1.RollingUpdatePhaseCompleted && previous != current:
-		currentHashes := currentWorkerHashes(dgd)
-		workerHash := currentHashes.v2
-		if workerHash == "" {
-			workerHash = currentHashes.v1
-		}
 		result.Eventf(
 			corev1.EventTypeNormal,
 			"RollingUpdateCompleted",
 			"Rolling update completed, worker hash %s",
-			workerHash,
+			rollingUpdateCtx.NewWorkerHash,
 		)
 	}
 }

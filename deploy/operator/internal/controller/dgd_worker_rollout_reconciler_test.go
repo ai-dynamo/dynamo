@@ -4902,3 +4902,242 @@ func TestBuildRollingUpdateContext_GetNewDCDError(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to get new worker DCD",
 		"error must originate from the new-DCD Get path, not some other call")
 }
+
+func TestManagedWorkerInventory_SemanticComparatorNormalizesGenerationIdentity(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "stable"}},
+		},
+	})
+	expected := renderManagedInventoryWorkerDCD(t, dgd)
+	observed := managedInventoryWorkerDCD(t, dgd, "opaque-h1")
+
+	require.True(t, workerDCDSemanticallyEqual(expected, observed))
+	observed.Spec.PodTemplate.Spec.Containers[0].Env = append(
+		observed.Spec.PodTemplate.Spec.Containers[0].Env,
+		corev1.EnvVar{Name: "WORKER_VERSION_OVERRIDE", Value: "changed"},
+	)
+	assert.False(t, workerDCDSemanticallyEqual(expected, observed))
+}
+
+func TestManagedWorkerInventory_ReconstructsStrippedAnnotationBridgeGeneration(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Replicas:      ptr.To(int32(1)),
+		},
+	})
+	dgd.UID = types.UID("dgd-uid")
+	observed := managedInventoryWorkerDCD(t, dgd, "opaque-h1")
+	setInventoryWorkerDCDReady(observed)
+	reconciler := createTestReconcilerWithStatus(dgd, withObjects(observed))
+
+	plan, err := reconciler.buildManagedWorkerRolloutPlan(context.Background(), dgd)
+	require.NoError(t, err)
+	assert.True(t, plan.context.TargetComplete)
+	assert.False(t, plan.context.InProgress())
+	assert.Equal(t, "opaque-h1", plan.context.WorkerHashByComponent["worker"])
+	assert.Empty(t, plan.inventory.old)
+
+	require.NoError(t, reconciler.reconcileManagedWorkerInventory(context.Background(), dgd, &dgd.Status, plan))
+	assert.Equal(t, betaDGDWorkersSpecHash(t, dgd), dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+	assert.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHash)
+}
+
+func TestManagedWorkerInventory_V1BlindChangeDoesNotMutateOldDCD(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Replicas:      ptr.To(int32(1)),
+		},
+	})
+	dgd.UID = types.UID("dgd-uid")
+	dgd.Spec.BackendFramework = "vllm"
+	old := managedInventoryWorkerDCD(t, dgd, "stable-v1")
+	dgd.Spec.BackendFramework = "sglang" // unchanged v1 hash, different effective DCD spec
+	reconciler := createTestReconcilerWithStatus(dgd, withObjects(old))
+
+	plan, err := reconciler.buildManagedWorkerRolloutPlan(context.Background(), dgd)
+	require.NoError(t, err)
+	assert.False(t, plan.context.TargetComplete)
+	assert.False(t, plan.context.MayMutateOld)
+	assert.Len(t, plan.inventory.old, 1)
+	require.NoError(t, reconciler.scaleOldWorkerDCDs(context.Background(), dgd, plan.context))
+
+	persisted := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(old), persisted))
+	require.NotNil(t, persisted.Spec.Replicas)
+	assert.Equal(t, int32(1), *persisted.Spec.Replicas)
+}
+
+func TestManagedWorkerInventory_ScalesObservedOldDCDDespiteDesiredHashLabel(t *testing.T) {
+	ctx := context.Background()
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker, Replicas: ptr.To(int32(1))},
+	})
+	dgd.UID = types.UID("dgd-uid")
+	old := managedInventoryWorkerDCD(t, dgd, "desired-hash")
+	old.Labels[consts.KubeLabelDynamoWorkerHash] = "desired-hash"
+	reconciler := createTestReconcilerWithStatus(dgd, withObjects(old))
+
+	rolling := dynamo.RollingUpdateContext{
+		NewWorkerHash:                      "desired-hash",
+		MayMutateOld:                       true,
+		OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 0},
+		OldWorkerReplicaTargetsByDCD:       map[string]int32{old.Name: 0},
+		ObservedOldWorkerDCDs: map[string]*nvidiacomv1beta1.DynamoComponentDeployment{
+			old.Name: old.DeepCopy(),
+		},
+	}
+	require.NoError(t, reconciler.scaleOldWorkerDCDs(ctx, dgd, rolling))
+	assertWorkerDCDReplicas(t, reconciler, old, 0)
+}
+
+func TestManagedWorkerInventory_RejectsNonmatchingDesiredNameCollision(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+	dgd.UID = types.UID("dgd-uid")
+	collision := managedInventoryWorkerDCD(t, dgd, betaDGDWorkersSpecHash(t, dgd))
+	collision.Spec.BackendFramework = "different"
+	reconciler := createTestReconcilerWithStatus(dgd, withObjects(collision))
+
+	_, err := reconciler.buildManagedWorkerRolloutPlan(context.Background(), dgd)
+	var identityCollision *workerDCDIdentityCollisionError
+	require.ErrorAs(t, err, &identityCollision)
+	assert.Equal(t, "worker", identityCollision.component)
+}
+
+func renderManagedInventoryWorkerDCD(
+	t *testing.T,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) *nvidiacomv1beta1.DynamoComponentDeployment {
+	t.Helper()
+	hash := betaDGDWorkersSpecHash(t, dgd)
+	dcds, err := dynamo.GenerateDynamoComponentsDeployments(
+		dgd, nil, nil, dynamo.RollingUpdateContext{NewWorkerHash: hash},
+	)
+	require.NoError(t, err)
+	return dcds["worker"]
+}
+
+func managedInventoryWorkerDCD(
+	t *testing.T,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	suffix string,
+) *nvidiacomv1beta1.DynamoComponentDeployment {
+	t.Helper()
+	dcd := renderManagedInventoryWorkerDCD(t, dgd).DeepCopy()
+	dcd.Name = dynamo.GetDCDResourceName(dgd, "worker", suffix)
+	dcd.Labels[consts.KubeLabelDynamoWorkerHash] = suffix
+	dcd.Spec.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash] = suffix
+	for i := range dcd.Spec.PodTemplate.Spec.Containers {
+		for j := range dcd.Spec.PodTemplate.Spec.Containers[i].Env {
+			if dcd.Spec.PodTemplate.Spec.Containers[i].Env[j].Name == "DYN_NAMESPACE_WORKER_SUFFIX" {
+				dcd.Spec.PodTemplate.Spec.Containers[i].Env[j].Value = suffix
+			}
+		}
+	}
+	dcd.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
+	}
+	return dcd
+}
+
+func setInventoryWorkerDCDReady(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+	dcd.Generation = 1
+	dcd.Status.ObservedGeneration = 1
+	dcd.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{
+		Replicas:          1,
+		ReadyReplicas:     ptr.To(int32(1)),
+		AvailableReplicas: ptr.To(int32(1)),
+	}
+}
+
+func TestManagedWorkerInventory_AnnotationlessAtoBRollsOutSafely(t *testing.T) {
+	ctx := context.Background()
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Replicas:      ptr.To(int32(1)),
+			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "a"}},
+		},
+	})
+	dgd.UID = types.UID("dgd-uid")
+	old := managedInventoryWorkerDCD(t, dgd, "opaque-a")
+	setInventoryWorkerDCDReady(old)
+	reconciler := createTestReconcilerWithStatus(dgd, withObjects(old))
+
+	dgd.GetComponentByName("worker").PodTemplate.Spec.Containers[0].Env[0].Value = "b"
+	first, err := reconciler.buildManagedWorkerRolloutPlan(ctx, dgd)
+	require.NoError(t, err)
+	assert.False(t, first.context.TargetComplete)
+	assert.False(t, first.context.MayMutateOld)
+	require.NoError(t, reconciler.scaleOldWorkerDCDs(ctx, dgd, first.context))
+	assertWorkerDCDReplicas(t, reconciler, old, 1)
+
+	target := managedInventoryWorkerDCD(t, dgd, betaDGDWorkersSpecHash(t, dgd))
+	setInventoryWorkerDCDReady(target)
+	require.NoError(t, reconciler.Create(ctx, target))
+	second, err := reconciler.buildManagedWorkerRolloutPlan(ctx, dgd)
+	require.NoError(t, err)
+	require.True(t, second.context.TargetComplete)
+	require.True(t, second.context.MayMutateOld)
+	require.NoError(t, reconciler.scaleOldWorkerDCDs(ctx, dgd, second.context))
+	assertWorkerDCDReplicas(t, reconciler, old, 0)
+
+	drainedOld := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(old), drainedOld))
+	drainedOld.Status.ObservedGeneration = drainedOld.Generation
+	drainedOld.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{
+		Replicas:          0,
+		ReadyReplicas:     ptr.To(int32(0)),
+		AvailableReplicas: ptr.To(int32(0)),
+	}
+	require.NoError(t, reconciler.Update(ctx, drainedOld))
+	third, err := reconciler.buildManagedWorkerRolloutPlan(ctx, dgd)
+	require.NoError(t, err)
+	require.NoError(t, reconciler.reconcileManagedWorkerInventory(ctx, dgd, &dgd.Status, third))
+	assert.True(t, apierrors.IsNotFound(reconciler.Get(ctx, client.ObjectKeyFromObject(old), &nvidiacomv1beta1.DynamoComponentDeployment{})))
+
+	final, err := reconciler.buildManagedWorkerRolloutPlan(ctx, dgd)
+	require.NoError(t, err)
+	require.NoError(t, reconciler.reconcileManagedWorkerInventory(ctx, dgd, &dgd.Status, final))
+	assert.Equal(t, betaDGDWorkersSpecHash(t, dgd), dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
+}
+
+func TestWorkerDCDSemanticComparatorIgnoresOnlyControllerGenerationMetadata(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+	dgd.UID = types.UID("dgd-uid")
+	expected := renderManagedInventoryWorkerDCD(t, dgd)
+	observed := managedInventoryWorkerDCD(t, dgd, "opaque-h1")
+	observed.UID = types.UID("observed-uid")
+	observed.ResourceVersion = "42"
+	observed.Generation = 9
+	observed.CreationTimestamp = metav1.Now()
+	observed.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "controller"}}
+	observed.Spec.PodTemplate.Annotations[consts.RestartAnnotation] = "2026-09-02T00:00:00Z"
+	observed.Spec.PodTemplate.Annotations[consts.CheckpointRestoreCandidateAnnotation] = "true"
+	observed.Spec.PodTemplate.Annotations[consts.CheckpointNameAnnotation] = "checkpoint"
+	observed.Spec.PodTemplate.Annotations[consts.CheckpointStartupPolicyAnnotation] = "waitForCheckpoint"
+
+	assert.True(t, workerDCDSemanticallyEqual(expected, observed))
+	observed.Spec.BackendFramework = "user-visible-change"
+	assert.False(t, workerDCDSemanticallyEqual(expected, observed))
+}
+
+func assertWorkerDCDReplicas(
+	t *testing.T,
+	reconciler *dgdWorkerRolloutReconciler,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	want int32,
+) {
+	t.Helper()
+	persisted := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(dcd), persisted))
+	require.NotNil(t, persisted.Spec.Replicas)
+	assert.Equal(t, want, *persisted.Spec.Replicas)
+}

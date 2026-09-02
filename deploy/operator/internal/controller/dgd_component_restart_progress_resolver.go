@@ -47,10 +47,28 @@ func (r *componentRestartProgressResolver) Resolve(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	inProgress []string,
 ) []string {
+	return r.resolve(ctx, dgd, inProgress)
+}
+
+func (r *componentRestartProgressResolver) ResolveWithRollingUpdateContext(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	inProgress []string,
+	rollingUpdateCtx dynamo.RollingUpdateContext,
+) []string {
+	return r.resolve(ctx, dgd, inProgress, rollingUpdateCtx)
+}
+
+func (r *componentRestartProgressResolver) resolve(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	inProgress []string,
+	rollingUpdateContexts ...dynamo.RollingUpdateContext,
+) []string {
 	logger := log.FromContext(ctx)
 	updatedInProgress := make([]string, 0, len(inProgress))
 	for _, componentName := range inProgress {
-		isFullyUpdated, reason := r.checkComponentFullyUpdated(ctx, dgd, componentName)
+		isFullyUpdated, reason := r.checkComponentFullyUpdated(ctx, dgd, componentName, rollingUpdateContexts...)
 		if !isFullyUpdated {
 			logger.V(1).Info("component not fully updated", "componentName", componentName, "reason", reason)
 			updatedInProgress = append(updatedInProgress, componentName)
@@ -63,7 +81,15 @@ func (r *componentRestartProgressResolver) checkComponentFullyUpdated(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	componentName string,
+	rollingUpdateContexts ...dynamo.RollingUpdateContext,
 ) (bool, string) {
+	if len(rollingUpdateContexts) > 0 && rollingUpdateContexts[0].TargetDCDNames != nil {
+		resourceName := rollingUpdateContexts[0].TargetDCDNames[componentName]
+		if resourceName == "" {
+			resourceName = dynamo.GetDCDResourceName(dgd, componentName, "")
+		}
+		return checkDCDReady(ctx, r.reader, resourceName, dgd.Namespace)
+	}
 	if currentWorkerHashes(dgd).empty() {
 		resourceName := dynamo.GetDCDResourceName(dgd, componentName, "")
 		return checkDCDReady(ctx, r.reader, resourceName, dgd.Namespace)

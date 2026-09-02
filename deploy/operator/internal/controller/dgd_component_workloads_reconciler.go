@@ -59,16 +59,23 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
+	rollingUpdateContexts ...dynamo.RollingUpdateContext,
 ) (ReconcileResult, error) {
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
-	rollingUpdateCtx, err := r.rollout.buildRollingUpdateContext(ctx, dgd)
-	if err != nil {
-		return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
+	var rollingUpdateCtx dynamo.RollingUpdateContext
+	if len(rollingUpdateContexts) > 0 {
+		rollingUpdateCtx = rollingUpdateContexts[0]
+	} else {
+		var err error
+		rollingUpdateCtx, err = r.rollout.buildRollingUpdateContext(ctx, dgd)
+		if err != nil {
+			return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
+		}
 	}
 
-	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd)
+	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd, rollingUpdateCtx)
 	if err != nil {
 		logger.Error(err, "failed to get existing restart annotations")
 		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
@@ -137,7 +144,11 @@ func (r *componentWorkloadsReconciler) Reconcile(
 func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsDCD(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	rollingUpdateContexts ...dynamo.RollingUpdateContext,
 ) (map[string]string, error) {
+	if len(rollingUpdateContexts) > 0 && rollingUpdateContexts[0].TargetDCDNames != nil {
+		return r.getExistingRestartAnnotationsFromInventory(ctx, dgd, rollingUpdateContexts[0])
+	}
 	logger := log.FromContext(ctx)
 	hashes, err := desiredWorkerHashes(dgd)
 	if err != nil {
@@ -172,6 +183,36 @@ func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsDCD(
 		)[consts.RestartAnnotation]
 		if restartAt != "" {
 			restartAnnotations[componentName] = restartAt
+		}
+	}
+	return restartAnnotations, nil
+}
+
+func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsFromInventory(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	rollingUpdateCtx dynamo.RollingUpdateContext,
+) (map[string]string, error) {
+	restartAnnotations := make(map[string]string)
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		name := dynamo.GetDCDResourceName(dgd, component.ComponentName, "")
+		if dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			name = rollingUpdateCtx.TargetDCDNames[component.ComponentName]
+		}
+		if name == "" {
+			continue
+		}
+		existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
+		err := r.syncer.Get(ctx, types.NamespacedName{Name: name, Namespace: dgd.Namespace}, existing)
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("get DynamoComponentDeployment %s: %w", name, err)
+		}
+		if restartAt := dynamo.GetPodTemplateAnnotations(&existing.Spec.DynamoComponentDeploymentSharedSpec)[consts.RestartAnnotation]; restartAt != "" {
+			restartAnnotations[component.ComponentName] = restartAt
 		}
 	}
 	return restartAnnotations, nil

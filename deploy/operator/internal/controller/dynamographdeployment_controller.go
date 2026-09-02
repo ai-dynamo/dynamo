@@ -56,6 +56,7 @@ const (
 	reasonNoMultinodeOrchestrator             Reason = "no_multinode_orchestrator_available"
 	reasonFailedToReconcileResources          Reason = "failed_to_reconcile_the_resources"
 	reasonRollingUpdateFailed                 Reason = "rolling_update_failed"
+	reasonDCDIdentityCollision                Reason = "dcd_identity_collision"
 	reasonWaitingForCheckpoint                Reason = "waiting_for_checkpoint"
 	reasonSelectedWorkloadProviderUnavailable Reason = "selected_workload_provider_unavailable"
 	reasonUnsupportedWorkloadProvider         Reason = "unsupported_workload_provider"
@@ -260,8 +261,9 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			builder.WithPredicates(dgdWorkerPodEventPredicate()),
 		).
 		Owns(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
-			// ignore creation cause we don't want to be called again after we create the deployment
-			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			// The cache observation that follows create is the write barrier for managed
+			// worker rollout. Re-enqueue on add instead of polling it.
+			CreateFunc:  func(ce event.CreateEvent) bool { return true },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },

@@ -267,13 +267,53 @@ func ParseDynDeploymentConfig(jsonContent []byte) (DynDeploymentConfig, error) {
 }
 
 func (r RollingUpdateContext) InProgress() bool {
-	return len(r.OldWorkerReplicaTargetsByComponent) > 0
+	return r.WorkerInventoryInProgress || len(r.OldWorkerReplicaTargetsByComponent) > 0
+}
+
+// WorkerHashForComponent returns the suffix used to render one worker DCD.
+// Existing generations can use a legacy suffix while a newly-created target
+// always uses NewWorkerHash. Non-worker callers may safely use the same value;
+// GetDCDResourceName ignores suffixes for non-worker components.
+func (r RollingUpdateContext) WorkerHashForComponent(componentName string) string {
+	if hash, ok := r.WorkerHashByComponent[componentName]; ok {
+		return hash
+	}
+	return r.NewWorkerHash
 }
 
 // RollingUpdateContext provides information about an in-progress rolling update.
 type RollingUpdateContext struct {
 	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
 	NewWorkerHash string
+
+	// WorkerHashByComponent contains the observed suffix for a semantically
+	// matching target DCD. A component absent from this map is rendered with
+	// NewWorkerHash. This keeps an h1 bridge generation stable while allowing
+	// new generations to use the canonical v2 suffix.
+	WorkerHashByComponent map[string]string
+
+	// TargetDCDNames is the per-component DCD name selected by the managed
+	// worker inventory. It is an observation, not a parent-annotation-derived
+	// guess, and is used by restart and checkpoint consumers.
+	TargetDCDNames map[string]string
+
+	// OldWorkerDCDNames contains only DCDs observed as old in the inventory
+	// pass that built this context. Mutating old DCDs outside this set is unsafe
+	// when the controller cache is stale.
+	OldWorkerDCDNames map[string]struct{}
+
+	// ObservedOldWorkerDCDs are the immutable inventory snapshot used for old
+	// DCD scaling and status aggregation. They prevent a hash-label query from
+	// reclassifying a DCD during a stale-cache reconcile.
+	ObservedOldWorkerDCDs map[string]*v1beta1.DynamoComponentDeployment
+
+	// TargetComplete requires exactly one semantically matching owned DCD for
+	// every desired worker component. MayMutateOld is false until that target is
+	// observed, preventing stale cached absence from scaling or deleting a
+	// serving generation.
+	TargetComplete            bool
+	MayMutateOld              bool
+	WorkerInventoryInProgress bool
 
 	// Aggregate desired replica targets for old worker generations, keyed by logical component name.
 	// Example: worker -> 3 means all old DCDs for component "worker" should sum to 3 replicas.
@@ -427,7 +467,8 @@ func generateSingleDCD(
 ) (*v1beta1.DynamoComponentDeployment, error) {
 	deployment := &v1beta1.DynamoComponentDeployment{}
 	deployment.Spec.DynamoComponentDeploymentSharedSpec = *component.DeepCopy()
-	deployment.Name = GetDCDResourceName(parentDGD, componentName, rollingUpdateCtx.NewWorkerHash)
+	workerHash := rollingUpdateCtx.WorkerHashForComponent(componentName)
+	deployment.Name = GetDCDResourceName(parentDGD, componentName, workerHash)
 	deployment.Spec.BackendFramework = backendFramework
 	deployment.Namespace = parentDGD.Namespace
 	component = &deployment.Spec.DynamoComponentDeploymentSharedSpec
@@ -448,9 +489,9 @@ func generateSingleDCD(
 
 	// only label worker DCDs with their hash for cleanup during rolling updates
 	if IsWorkerComponent(string(component.ComponentType)) {
-		labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
+		labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 		podTemplate := ensurePodTemplate(&deployment.Spec.DynamoComponentDeploymentSharedSpec)
-		podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = rollingUpdateCtx.NewWorkerHash
+		podTemplate.Labels[commonconsts.KubeLabelDynamoWorkerHash] = workerHash
 		if parentDGD.HasEPPComponent() {
 			labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
 			podTemplate.Labels[commonconsts.KubeLabelDynamoComponentClass] = commonconsts.ComponentClassWorker
