@@ -139,6 +139,14 @@ def _generate_dgd_from_pick(
 # Fallback backend when AIC simulation is unavailable and no concrete backend is specified.
 _DEFAULT_NAIVE_BACKEND = "vllm"
 
+# The sequence lengths build_naive_generator_params seeds its own SlaConfig with.
+# The backend rule plugins derive max_seq_len from that SlaConfig, so a declared
+# workload that never reaches the generator is silently replaced by these values
+# and the generated worker is sized for them instead. Kept here only to detect
+# and report that substitution; the declared values are always forwarded.
+_NAIVE_GENERATOR_DEFAULT_ISL = 4000
+_NAIVE_GENERATOR_DEFAULT_OSL = 1000
+
 
 def _run_naive_fallback(
     dgdr: DynamoGraphDeploymentRequestSpec,
@@ -146,8 +154,15 @@ def _run_naive_fallback(
     total_gpus: int,
     system: str,
     backend: str,
+    isl: int,
+    osl: int,
 ) -> dict:
-    """Handle the AIC-unsupported path via naive config generation."""
+    """Handle the AIC-unsupported path via naive config generation.
+
+    ``isl``/``osl`` are the declared workload sequence lengths resolved by the
+    caller. They are forwarded to the generator so the emitted worker is sized
+    for the requested sequence rather than for the generator's own defaults.
+    """
     if backend == "auto":
         backend = _DEFAULT_NAIVE_BACKEND
         logger.info("Auto backend resolved to '%s' for naive fallback.", backend)
@@ -172,11 +187,26 @@ def _run_naive_fallback(
         backend,
     )
 
+    if isl != _NAIVE_GENERATOR_DEFAULT_ISL or osl != _NAIVE_GENERATOR_DEFAULT_OSL:
+        logger.warning(
+            "Declared workload (isl=%d, osl=%d) differs from the naive generator "
+            "defaults (isl=%d, osl=%d); forwarding the declared values so the "
+            "generated worker is sized for the requested sequence length.",
+            isl,
+            osl,
+            _NAIVE_GENERATOR_DEFAULT_ISL,
+            _NAIVE_GENERATOR_DEFAULT_OSL,
+        )
+
+    # The generator derives max_seq_len (and hence the worker's max-model-len)
+    # from SlaConfig during generation, so the declared workload has to be an
+    # input here — patching generator_params afterwards would be too late.
     generator_params = build_naive_generator_params(
         model_name=model,
         total_gpus=total_gpus,
         system_name=system,
         backend_name=backend,
+        generator_overrides={"SlaConfig": {"isl": isl, "osl": osl}},
     )
 
     k8s_overrides = _build_k8s_overrides(dgdr, backend)
@@ -377,7 +407,7 @@ def run_rapid(
     ``best_config_df``, ``best_latencies``, and ``dgd_config``.
     """
     if not aic_supported:
-        return _run_naive_fallback(dgdr, model, total_gpus, system, backend)
+        return _run_naive_fallback(dgdr, model, total_gpus, system, backend, isl, osl)
     if picking_mode == "autoscale":
         return _run_autoscale_sim(
             dgdr,
