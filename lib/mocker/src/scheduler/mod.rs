@@ -12,6 +12,7 @@ mod protocol;
 
 use crate::common::protocols::{DirectRequest, OutputSignal};
 use tokio::sync::{mpsc, oneshot};
+#[cfg(test)]
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -33,6 +34,8 @@ pub struct SchedulerCommandEnvelope {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) enum LiveEngineEvent {
     Admissions(Vec<AdmissionEvent>),
     Outputs {
@@ -56,6 +59,7 @@ pub(crate) enum RouterEventVisibility {
 #[derive(Clone)]
 pub(crate) enum SchedulerEventSender {
     Outputs(mpsc::UnboundedSender<Vec<OutputSignal>>),
+    #[cfg(test)]
     Ordered {
         tx: mpsc::Sender<LiveEngineEvent>,
         forward_admissions: bool,
@@ -66,7 +70,9 @@ pub(crate) enum SchedulerEventSender {
 #[derive(Debug)]
 pub(crate) enum SchedulerEventSendError {
     OutputClosed(Vec<OutputSignal>),
+    #[cfg(test)]
     OrderedLaneClosed,
+    #[cfg(test)]
     Cancelled,
 }
 
@@ -80,10 +86,12 @@ impl SchedulerEventSender {
         }
         match self {
             Self::Outputs(_) => Ok(()),
+            #[cfg(test)]
             Self::Ordered {
                 forward_admissions: false,
                 ..
             } => Ok(()),
+            #[cfg(test)]
             Self::Ordered { tx, cancel, .. } => {
                 tokio::select! {
                     biased;
@@ -110,6 +118,7 @@ impl SchedulerEventSender {
             Self::Outputs(tx) => tx
                 .send(signals)
                 .map_err(|error| SchedulerEventSendError::OutputClosed(error.0)),
+            #[cfg(test)]
             Self::Ordered { tx, cancel, .. } => {
                 let (delivered, acknowledged) = oneshot::channel();
                 tokio::select! {

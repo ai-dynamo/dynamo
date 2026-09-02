@@ -59,6 +59,25 @@ pub(crate) fn create_engine_with_event_sender(
     cancellation_token: Option<CancellationToken>,
     fpm_publisher: FpmPublisher,
 ) -> anyhow::Result<LiveEngineScheduler> {
+    create_engine_with_rank_sink(
+        args,
+        dp_rank,
+        GroupedSchedulerRankEventSinks {
+            event_tx,
+            route_delivery: None,
+            kv_event_publishers,
+            fpm_publisher,
+        },
+        cancellation_token,
+    )
+}
+
+pub(crate) fn create_engine_with_rank_sink(
+    args: MockEngineArgs,
+    dp_rank: u32,
+    rank_sink: GroupedSchedulerRankEventSinks,
+    cancellation_token: Option<CancellationToken>,
+) -> anyhow::Result<LiveEngineScheduler> {
     // This compatibility API cannot safely construct attention-DP ranks one at
     // a time: each call would own a different generalized engine and bypass the
     // group barrier. Production Live Mocker constructs the complete group once
@@ -78,11 +97,7 @@ pub(crate) fn create_engine_with_event_sender(
     } = create_single_rank_scheduler_with_event_sender(
         args,
         dp_rank,
-        GroupedSchedulerRankEventSinks {
-            event_tx,
-            kv_event_publishers,
-            fpm_publisher,
-        },
+        rank_sink,
         cancellation_token,
     )?;
     let handle = schedulers

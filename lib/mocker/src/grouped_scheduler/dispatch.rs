@@ -9,6 +9,7 @@ use super::*;
 pub(super) struct RankDispatch {
     pub(super) external_dp_rank: u32,
     pub(super) event_tx: Option<SchedulerEventSender>,
+    pub(super) route_delivery: Option<LiveRouteDelivery>,
     pub(super) kv_event_publishers: KvEventPublishers,
     pub(super) fpm_publisher: FpmPublisher,
     pub(super) lifecycle_tx: mpsc::Sender<SchedulerLifecycleEvent>,
@@ -390,9 +391,6 @@ fn rank_dispatch(ranks: &[RankDispatch], dp_rank: u32) -> Result<&RankDispatch> 
 
 impl RankDispatch {
     async fn publish_admissions(&self, admissions: Vec<Admission>) -> Result<()> {
-        let Some(sender) = self.event_tx.as_ref() else {
-            return Ok(());
-        };
         let admissions = admissions
             .into_iter()
             .map(|admission| AdmissionEvent {
@@ -400,8 +398,18 @@ impl RankDispatch {
                 reused_input_tokens: admission.reused_input_tokens,
             })
             .collect::<Vec<_>>();
+        if let Some(delivery) = self.route_delivery.as_ref() {
+            return delivery.publish_admissions(admissions);
+        }
+        let Some(sender) = self.event_tx.as_ref() else {
+            return Ok(());
+        };
         match sender.send_admissions(&admissions).await {
+            #[cfg(test)]
             Ok(()) | Err(SchedulerEventSendError::Cancelled) => Ok(()),
+            #[cfg(not(test))]
+            Ok(()) => Ok(()),
+            #[cfg(test)]
             Err(SchedulerEventSendError::OrderedLaneClosed) => {
                 bail!("grouped live ordered admission lane is closed")
             }
@@ -413,12 +421,25 @@ impl RankDispatch {
 
     /// Publish output and return requests whose output-only consumer closed.
     async fn publish_outputs(&self, outputs: Vec<OutputSignal>) -> Result<OutputPublication> {
-        let Some(sender) = self.event_tx.as_ref() else {
-            return Ok(OutputPublication::Delivered(Vec::new()));
-        };
         if outputs.is_empty() {
             return Ok(OutputPublication::Delivered(Vec::new()));
         }
+        if let Some(delivery) = self.route_delivery.as_ref() {
+            return match delivery.publish_outputs(outputs).await? {
+                Some(failed) => Ok(OutputPublication::Delivered(
+                    failed
+                        .into_iter()
+                        .map(|signal| signal.uuid)
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                )),
+                None => Ok(OutputPublication::Cancelled),
+            };
+        }
+        let Some(sender) = self.event_tx.as_ref() else {
+            return Ok(OutputPublication::Delivered(Vec::new()));
+        };
         match sender.send_outputs(outputs).await {
             Ok(()) => Ok(OutputPublication::Delivered(Vec::new())),
             Err(SchedulerEventSendError::OutputClosed(signals)) => {
@@ -431,9 +452,11 @@ impl RankDispatch {
                         .collect(),
                 ))
             }
+            #[cfg(test)]
             Err(SchedulerEventSendError::OrderedLaneClosed) => {
                 bail!("grouped live ordered output lane is closed")
             }
+            #[cfg(test)]
             Err(SchedulerEventSendError::Cancelled) => Ok(OutputPublication::Cancelled),
         }
     }

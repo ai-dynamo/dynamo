@@ -125,6 +125,7 @@ async fn noop_cancellation_only_cleans_metadata_when_output_is_discarded() {
         let dispatch = RankDispatch {
             external_dp_rank: 0,
             event_tx: None,
+            route_delivery: None,
             kv_event_publishers: KvEventPublishers::default(),
             fpm_publisher: FpmPublisher::default(),
             lifecycle_tx,
@@ -338,6 +339,7 @@ async fn cancellation_lane_bypasses_an_ordinary_command_deferred_mid_pass() {
                 forward_admissions: true,
                 cancel: cancel.clone(),
             }),
+            route_delivery: None,
             kv_event_publishers: KvEventPublishers::default(),
             fpm_publisher: FpmPublisher::default(),
         }],
@@ -414,6 +416,7 @@ async fn cancellation_while_waiting_for_ordered_output_ack_is_orderly() {
                 forward_admissions: true,
                 cancel: cancel.clone(),
             }),
+            route_delivery: None,
             kv_event_publishers: KvEventPublishers::default(),
             fpm_publisher: FpmPublisher::default(),
         }],
@@ -577,6 +580,7 @@ async fn applied_midpass_cancellation_publishes_empty_occupancy_immediately() {
     let dispatch = RankDispatch {
         external_dp_rank: 0,
         event_tx: None,
+        route_delivery: None,
         kv_event_publishers: KvEventPublishers::default(),
         fpm_publisher: FpmPublisher::default(),
         lifecycle_tx,
@@ -650,6 +654,7 @@ async fn synthetic_midpass_kv_is_deferred_until_completion_before_fpm() {
     let dispatch = RankDispatch {
         external_dp_rank: 0,
         event_tx: None,
+        route_delivery: None,
         kv_event_publishers: KvEventPublishers::new(
             Some(Arc::clone(&effects) as Arc<dyn KvCacheEventSink>),
             None,

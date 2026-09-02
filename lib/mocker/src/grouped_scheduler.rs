@@ -42,6 +42,7 @@ use crate::generalized_live::{
     GroupedLiveDriverConfig, GroupedLiveEngineHandle, GroupedLiveEvent, GroupedLiveRuntime,
     GroupedPassBoundary, spawn_grouped_live_engine,
 };
+use crate::live::LiveRouteDelivery;
 use crate::scheduler::{
     AdmissionEvent, MockerMetrics, SchedulerCancellationEnvelope, SchedulerCommand,
     SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerCommandResult,
@@ -183,6 +184,7 @@ pub fn create_grouped_scheduler(
         .into_iter()
         .map(|sinks| GroupedSchedulerRankEventSinks {
             event_tx: sinks.output_tx.map(SchedulerEventSender::from),
+            route_delivery: None,
             kv_event_publishers: sinks.kv_event_publishers,
             fpm_publisher: sinks.fpm_publisher,
         })
@@ -192,6 +194,7 @@ pub fn create_grouped_scheduler(
 
 pub(crate) struct GroupedSchedulerRankEventSinks {
     pub(crate) event_tx: Option<SchedulerEventSender>,
+    pub(crate) route_delivery: Option<LiveRouteDelivery>,
     pub(crate) kv_event_publishers: KvEventPublishers,
     pub(crate) fpm_publisher: FpmPublisher,
 }
@@ -333,6 +336,7 @@ fn create_grouped_scheduler_from_components(
         dispatch_ranks.push(RankDispatch {
             external_dp_rank,
             event_tx: sinks.event_tx,
+            route_delivery: sinks.route_delivery,
             kv_event_publishers: sinks.kv_event_publishers,
             fpm_publisher: sinks.fpm_publisher,
             lifecycle_tx,

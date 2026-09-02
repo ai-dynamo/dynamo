@@ -103,8 +103,8 @@ async fn submit_and_finish(engine: &LiveEngine, tokens: Vec<u32>, uuid: Uuid) {
     })
     .await
     .expect("request should complete");
-    // The ordered output lane acknowledges terminal delivery before the
-    // grouped pass dispatcher publishes its completion metrics. Wait for the
+    // Direct route delivery completes before the grouped pass dispatcher
+    // publishes its completion metrics. Wait for the
     // whole boundary so the assertion below observes the same semantic point
     // as the historical single-rank live boundary.
     engine.drain_completion_boundary().await.unwrap();
@@ -915,7 +915,7 @@ async fn aborting_a_deferred_submit_cleans_up_after_admission() {
 }
 
 #[tokio::test]
-async fn dispatcher_exit_shuts_down_the_engine_and_closes_streams() {
+async fn direct_delivery_failure_shuts_down_the_engine_and_closes_streams() {
     let (gate_tx, gate_rx) = watch::channel(false);
     let engine = LiveEngine::start_with_output_gate(
         args(EngineType::Vllm),
@@ -939,7 +939,7 @@ async fn dispatcher_exit_shuts_down_the_engine_and_closes_streams() {
     assert!(
         tokio::time::timeout(std::time::Duration::from_secs(1), request.recv())
             .await
-            .expect("dispatcher failure should close request streams")
+            .expect("delivery failure should close request streams")
             .is_none()
     );
     let error = engine
@@ -952,13 +952,13 @@ async fn dispatcher_exit_shuts_down_the_engine_and_closes_streams() {
         })
         .await
         .err()
-        .expect("dispatcher failure should stop new submissions");
+        .expect("delivery failure should stop new submissions");
     assert!(error.to_string().contains("not running"));
     assert_eq!(engine.active_request_count(), 0);
 }
 
 #[tokio::test]
-async fn ordered_lane_forwards_admission_before_releasing_output() {
+async fn direct_delivery_forwards_admission_before_releasing_output() {
     let (gate_tx, gate_rx) = watch::channel(false);
     let (admission_tx, mut admission_rx) = mpsc::unbounded_channel();
     let engine = LiveEngine::start_internal(

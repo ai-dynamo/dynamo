@@ -51,6 +51,8 @@ pub(super) struct RequestRoute {
     pub(super) scheduler_id: Uuid,
     output_tx: Mutex<Option<mpsc::Sender<ObservedOutput>>>,
     lifecycle_tx: watch::Sender<RequestLifecycle>,
+    #[cfg(test)]
+    output_gate_bypass_tx: watch::Sender<bool>,
     pub(super) cancel_lock: tokio::sync::Mutex<()>,
 }
 
@@ -66,11 +68,15 @@ impl RequestRoute {
             stream_abandoned: false,
             terminal_seen: false,
         });
+        #[cfg(test)]
+        let (output_gate_bypass_tx, _) = watch::channel(false);
         Self {
             client_id,
             scheduler_id,
             output_tx: Mutex::new(Some(output_tx)),
             lifecycle_tx,
+            #[cfg(test)]
+            output_gate_bypass_tx,
             cancel_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -161,6 +167,25 @@ impl RequestRoute {
             Err(mpsc::error::TrySendError::Full(output)) => OutputDelivery::Full(output.event),
             Err(mpsc::error::TrySendError::Closed(output)) => OutputDelivery::Closed(output.event),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn request_output_gate_bypass(&self) {
+        self.output_gate_bypass_tx.send_replace(true);
+    }
+
+    #[cfg(test)]
+    pub(super) fn output_gate_bypass_requested(&self) -> bool {
+        *self.output_gate_bypass_tx.borrow()
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_output_gate_bypass(&self) {
+        let mut bypass = self.output_gate_bypass_tx.subscribe();
+        if *bypass.borrow_and_update() {
+            return;
+        }
+        let _ = bypass.wait_for(|requested| *requested).await;
     }
 
     /// Record a terminal signal and return whether the route can be removed.
