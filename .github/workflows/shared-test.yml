@@ -216,6 +216,38 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "Datadog lane tag: ${lane}"
 
+      # Datadog's installer shells out to `pip` to install ddtrace, and gives
+      # up with "Error: pip is not installed." if it is not on PATH. Images
+      # that run pytest from a virtualenv hit exactly that: the dynamo image
+      # runs /opt/dynamo/venv/bin/python, whose bin dir is not on PATH when
+      # this step executes, while the vllm/sglang/trtllm images run
+      # /usr/local/bin/python and install fine.
+      #
+      # That is the whole of the coverage gap: on main over 14 days the job
+      # index held 259 test-producing Nightly jobs and Datadog had sessions
+      # for 197 — the ~62 missing were the `dynamo-runtime / test / *` lanes,
+      # failing here and silenced by continue-on-error.
+      #
+      # Putting the venv's bin dir on PATH also makes ddtrace install INTO the
+      # venv that runs pytest, which is what instrumentation requires.
+      - name: Ensure pip is on PATH for Datadog instrumentation
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -uo pipefail
+          if command -v pip >/dev/null 2>&1; then
+            echo "pip already on PATH: $(command -v pip)"
+            exit 0
+          fi
+          for venv in "${VIRTUAL_ENV:-}" /opt/dynamo/venv; do
+            if [ -n "${venv}" ] && [ -x "${venv}/bin/pip" ]; then
+              echo "${venv}/bin" >> "$GITHUB_PATH"
+              echo "added ${venv}/bin to PATH for pip"
+              exit 0
+            fi
+          done
+          echo "::warning title=Datadog::pip not found and no virtualenv located; ddtrace will not install."
+
       # Experimental: trialing Datadog Test Visibility. Remove if not kept.
       - name: Configure Datadog Test Visibility
         id: dd_setup
