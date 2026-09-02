@@ -1404,3 +1404,52 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 		}
 	}
 }
+
+// TestVLLMBackend_ElasticEPRayPoCGateOffLeavesContainerUntouched covers the half of the
+// upgrade-safety property that generation-level tests cannot reach.
+//
+// TestElasticEPRayPoCGateIsUpgradeSafe proves the gate derives no follower and leaves the
+// leader's DCD spec alone, but the Ray-head wrapper is applied later, when a DCD is
+// rendered into a pod. That rewrite replaces Command with /bin/sh -c and rebuilds Args,
+// which changes the pod template and therefore rolls a serving deployment -- the exact
+// thing an operator upgrade must not do on its own.
+func TestVLLMBackend_ElasticEPRayPoCGateOffLeavesContainerUntouched(t *testing.T) {
+	newContainer := func() *corev1.Container {
+		return &corev1.Container{
+			Name:    "main",
+			Command: []string{"python3", "-m", "dynamo.vllm"},
+			Args:    []string{"--model", "test", "--enable-elastic-ep", "--data-parallel-backend", "ray"},
+		}
+	}
+
+	for _, role := range []Role{RoleMain, RoleFollower} {
+		t.Run(string(role), func(t *testing.T) {
+			t.Log("Render an elastic-EP container with the gate off")
+			container := newContainer()
+			backend := &VLLMBackend{ElasticEPRayPoCEnabled: false}
+			component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{})
+			require.NoError(t, backend.UpdateContainer(
+				container, 1, role, component, "test-service",
+				&GroveMultinodeDeployer{}, staticContainerGPUCount(1),
+			))
+
+			t.Log("Command, Args and Env are exactly as the user wrote them")
+			want := newContainer()
+			require.Equal(t, want.Command, container.Command,
+				"gate off rewrote the command; that changes the pod template and rolls the deployment")
+			require.Equal(t, want.Args, container.Args, "gate off rewrote the args")
+			require.Empty(t, container.Env, "gate off injected environment the user did not ask for")
+		})
+	}
+
+	t.Log("Gate on: the leader is wrapped, so the test fails if the switch is stuck off")
+	container := newContainer()
+	backend := &VLLMBackend{ElasticEPRayPoCEnabled: true}
+	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{})
+	require.NoError(t, backend.UpdateContainer(
+		container, 1, RoleMain, component, "test-service",
+		&GroveMultinodeDeployer{}, staticContainerGPUCount(1),
+	))
+	require.Equal(t, []string{"/bin/sh", "-c"}, container.Command,
+		"gate on should wrap the command in a Ray head")
+}
