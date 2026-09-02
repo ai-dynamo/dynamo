@@ -93,7 +93,8 @@ def auto_worker_count(
 def _cgroup_cpu_budget() -> int | None:
     """Return the cgroup CPU quota, or ``None`` when no quota is detectable."""
     try:
-        quota_s, period_s = open("/sys/fs/cgroup/cpu.max").read().split()[:2]
+        with open("/sys/fs/cgroup/cpu.max") as cpu_max:
+            quota_s, period_s = cpu_max.read().split()[:2]
         if quota_s != "max":
             # Floor at 1: fractional --cpus (e.g. 0.5 -> int 0) must not fall
             # through to the host os.cpu_count() and defeat the cap. Matches the
@@ -102,8 +103,10 @@ def _cgroup_cpu_budget() -> int | None:
     except (OSError, ValueError, ZeroDivisionError):
         pass
     try:
-        quota = int(open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read())
-        period = int(open("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read())
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as quota_file:
+            quota = int(quota_file.read())
+        with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as period_file:
+            period = int(period_file.read())
         if quota > 0 and period > 0:
             return max(1, quota // period)
     except (OSError, ValueError):
@@ -131,7 +134,7 @@ def effective_cpu_budget() -> int:
             requested_budget = int(float(env))
             if requested_budget > 0:
                 return min(requested_budget, detected_budget)
-        except ValueError:
+        except (OverflowError, ValueError):
             pass
     return detected_budget
 

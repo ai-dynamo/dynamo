@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.utils import vram_utils
 from tests.utils.pytest_parallel_gpu import (
     _GpuState,
     _priority_key,
@@ -383,8 +384,6 @@ def test_full_change_beats_status_quo():
 # effective_cpu_budget: don't let -n auto (host os.cpu_count) oversubscribe CPU
 # --------------------------------------------------------------------------- #
 def test_effective_cpu_budget_caps_num_cpus_at_detected_quota(monkeypatch):
-    from tests.utils import vram_utils
-
     monkeypatch.setattr(vram_utils, "_cgroup_cpu_budget", lambda: 1)
     monkeypatch.setenv("NUM_CPUS", "2")
     assert vram_utils.effective_cpu_budget() == 1
@@ -393,8 +392,9 @@ def test_effective_cpu_budget_caps_num_cpus_at_detected_quota(monkeypatch):
     monkeypatch.setattr(vram_utils.os, "cpu_count", lambda: 96)
     assert vram_utils.effective_cpu_budget() == 2
 
-    monkeypatch.setenv("NUM_CPUS", "bogus")
-    assert vram_utils.effective_cpu_budget() == 96
+    for invalid_budget in ("bogus", "inf", "1e309"):
+        monkeypatch.setenv("NUM_CPUS", invalid_budget)
+        assert vram_utils.effective_cpu_budget() == 96
 
 
 def test_simulation_conserves_work_and_respects_budget():
