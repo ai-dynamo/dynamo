@@ -405,6 +405,19 @@ class TestRunNaiveFallbackWorkloadForwarding:
         }
         assert "Declared workload" not in caplog.text
 
+    @pytest.mark.pre_merge
+    @pytest.mark.gpu_0
+    def test_absent_workload_lengths_fall_back_to_generator_defaults(self, caplog):
+        """An explicit null sequence length must not override the defaults."""
+        dgdr = _make_dgdr(workload=WorkloadSpec(isl=None, osl=None))
+        with caplog.at_level(logging.WARNING):
+            _, captured_kwargs, _ = self._run(dgdr, None, None)
+
+        assert captured_kwargs.get("generator_overrides") == {
+            "SlaConfig": {"isl": 4000, "osl": 1000}
+        }
+        assert "Declared workload" not in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # _run_default_sim

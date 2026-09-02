@@ -151,15 +151,10 @@ def _run_naive_fallback(
     total_gpus: int,
     system: str,
     backend: str,
-    isl: int,
-    osl: int,
+    isl: int | None,
+    osl: int | None,
 ) -> dict:
-    """Handle the AIC-unsupported path via naive config generation.
-
-    ``isl``/``osl`` are the declared workload sequence lengths resolved by the
-    caller. They are forwarded to the generator so the emitted worker is sized
-    for the requested sequence rather than for the generator's own defaults.
-    """
+    """Handle the AIC-unsupported path via naive config generation."""
     if backend == "auto":
         backend = _DEFAULT_NAIVE_BACKEND
         logger.info("Auto backend resolved to '%s' for naive fallback.", backend)
@@ -183,6 +178,13 @@ def _run_naive_fallback(
         system,
         backend,
     )
+
+    # WorkloadSpec.isl/osl are Optional and an explicit null reaches here intact,
+    # so substitute the generator's own defaults rather than overriding with None.
+    if isl is None:
+        isl = _NAIVE_GENERATOR_DEFAULT_ISL
+    if osl is None:
+        osl = _NAIVE_GENERATOR_DEFAULT_OSL
 
     if isl != _NAIVE_GENERATOR_DEFAULT_ISL or osl != _NAIVE_GENERATOR_DEFAULT_OSL:
         logger.warning(
