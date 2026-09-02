@@ -122,7 +122,13 @@ def main() -> int:
     author = os.environ.get("PR_AUTHOR", "")
     repo = os.environ.get("REPO", "")
     head_repo = os.environ.get("PR_HEAD_REPO", repo)
-    is_fork = head_repo.lower() != repo.lower()
+    association = os.environ.get("PR_AUTHOR_ASSOCIATION", "").upper()
+    # Fork-native development is the accepted governance model, so org
+    # members and collaborators routinely open PRs from forks; their Linear
+    # references are verified like same-repo PRs. The fork gating below
+    # applies only to authors outside the org.
+    trusted_author = association in {"OWNER", "MEMBER", "COLLABORATOR"}
+    is_untrusted_fork = head_repo.lower() != repo.lower() and not trusted_author
     gh_token = os.environ.get("GITHUB_TOKEN", "")
     linear_key = os.environ.get("LINEAR_API_KEY", "")
     blocking_date = os.environ.get("BLOCKING_DATE", "2026-10-15")
@@ -169,10 +175,11 @@ def main() -> int:
     for identifier in sorted(linear_ids)[:MAX_CANDIDATES]:
         if verified:
             break
-        if is_fork:
+        if is_untrusted_fork:
             # Do not turn the CI into an existence oracle for Linear IDs
-            # guessed from fork PRs, and do not let an unverifiable ID pass
-            # the check; fork contributors reference GitHub issues.
+            # guessed from outside-org fork PRs, and do not let an
+            # unverifiable ID pass the check; community contributors
+            # reference GitHub issues.
             fork_linear_ids.append(identifier)
             continue
         exists, api_ok = verify_linear_issue(identifier, linear_key)
@@ -223,7 +230,8 @@ def main() -> int:
             [
                 "",
                 f"Linear references found ({', '.join(fork_linear_ids)}) cannot be",
-                "verified for fork PRs; reference a GitHub issue instead.",
+                "verified for fork PRs from outside the org; reference a GitHub",
+                "issue instead.",
             ]
             if fork_linear_ids
             else []
