@@ -1805,7 +1805,7 @@ async fn component_honors_config_for_aggregated_but_fixes_disagg_roles() {
             true,
         ),
         (vec!["--disaggregation-mode", "decode"], "backend", false),
-        (vec!["--disaggregation-mode", "encode"], "backend", false),
+        (vec!["--disaggregation-mode", "encode"], "encode", false),
     ] {
         let mut argv = vec![
             "dynamo-vllm-sidecar".to_string(),
