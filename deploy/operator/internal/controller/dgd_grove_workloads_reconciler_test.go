@@ -304,13 +304,14 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
 	)
 
-	t.Log("Persist the PCS suffix, then fail the DGD hash commit")
+	t.Log("Persist the PCS suffix without projecting the DGD hash from the write receipt")
 	observedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), observedDGD))
-	_, err = workloads.Reconcile(context.Background(), observedDGD, nil, nil)
-	require.Error(t, err)
+	result, err := workloads.Reconcile(context.Background(), observedDGD, nil, nil)
+	require.NoError(t, err)
+	assert.Equal(t, groveWorkerHashObservationRequeueAfter, result.RequeueAfter)
 
-	t.Log("Verify the durable state is a suffixed PCS with the previous DGD hash")
+	t.Log("Verify the write receipt leaves the parent hash unchanged")
 	storedPCS := &grovev1alpha1.PodCliqueSet{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(legacyPCS), storedPCS))
 	clique := podCliqueSetCliqueForComponent(storedPCS, "prefill")
@@ -320,20 +321,20 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), storedDGD))
 	assert.Equal(t, currentHash, storedDGD.Annotations[consts.AnnotationCurrentWorkerHashV2])
 	assert.Equal(t, 1, pcsUpdateCalls)
-	assert.Equal(t, 1, dgdUpdateCalls)
+	assert.Zero(t, dgdUpdateCalls)
 
-	t.Log("Reconcile from freshly read objects after the simulated controller restart")
-	failDGDUpdate = false
+	t.Log("Observe the suffix on a later reconcile, then reject the parent projection")
 	freshDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), freshDGD))
-	workloads = newGroveWorkloadsReconciler(
-		kubeClient,
-		events.NewFakeRecorder(10),
-		newDGDWorkerRolloutReconciler(kubeClient, nil),
-		&configv1alpha1.OperatorConfiguration{},
-		&commoncontroller.RuntimeConfig{},
-		&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
-	)
+	_, err = workloads.Reconcile(context.Background(), freshDGD, nil, nil)
+	require.Error(t, err)
+	assert.Equal(t, 1, pcsUpdateCalls)
+	assert.Equal(t, 1, dgdUpdateCalls)
+
+	t.Log("Retry projection from a fresh observation after the simulated controller restart")
+	failDGDUpdate = false
+	freshDGD = &nvidiacomv1beta1.DynamoGraphDeployment{}
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), freshDGD))
 	_, err = workloads.Reconcile(context.Background(), freshDGD, nil, nil)
 	require.NoError(t, err)
 

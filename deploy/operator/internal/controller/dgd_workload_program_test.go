@@ -305,11 +305,11 @@ func TestComponentProgram_ReconcilePreservesResultOnError(t *testing.T) {
 	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
 	require.NotNil(t, ready)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
-	assert.Equal(t, string(reasonFailedToInitializeWorkerHash), ready.Reason)
+	assert.Equal(t, string(reasonRollingUpdateFailed), ready.Reason)
 	assert.Equal(t, previous, dgd.Status)
 	reason, ok := workloadProgramFailureReason(err)
 	require.True(t, ok)
-	assert.Equal(t, reasonFailedToInitializeWorkerHash, reason)
+	assert.Equal(t, reasonRollingUpdateFailed, reason)
 }
 
 func TestComponentProgram_ReconcileRejectsInvalidLegacyGMSClient(t *testing.T) {
@@ -348,7 +348,7 @@ func TestComponentProgram_ReconcileRejectsInvalidLegacyGMSClient(t *testing.T) {
 	ready := meta.FindStatusCondition(result.Status.Conditions, "Ready")
 	require.NotNil(t, ready)
 	assert.Equal(t, metav1.ConditionFalse, ready.Status)
-	assert.Equal(t, string(reasonFailedToInitializeWorkerHash), ready.Reason)
+	assert.Equal(t, string(reasonRollingUpdateFailed), ready.Reason)
 	assert.Contains(t, ready.Message, "gpuMemoryService.extraClientContainers")
 	assert.Contains(t, ready.Message, "missing-client")
 	dcds := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
@@ -495,69 +495,6 @@ func TestComponentProgram_ReconcileReturnsPartialRolloutStatusOnLaterError(t *te
 	assert.Nil(t, dgd.Status.RollingUpdate)
 }
 
-func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
-	updateErr := errors.New("update failed")
-	tests := []struct {
-		name      string
-		updateErr error
-		wantEvent bool
-	}{
-		{
-			name:      "successful hash update emits warning",
-			wantEvent: true,
-		},
-		{
-			name:      "failed hash update does not emit warning",
-			updateErr: updateErr,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build an unsupported pathway with a changed worker specification")
-			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"worker": {
-					ComponentType: commonconsts.ComponentTypeWorker,
-					Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "new"}},
-				},
-			})
-			dgd.Annotations = map[string]string{
-				commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
-			}
-			kubeClient := fake.NewClientBuilder().
-				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
-				WithInterceptorFuncs(interceptor.Funcs{
-					Update: func(
-						context.Context,
-						client.WithWatch,
-						client.Object,
-						...client.UpdateOption,
-					) error {
-						return tt.updateErr
-					},
-				}).
-				Build()
-			recorder := events.NewFakeRecorder(1)
-			reconciler := newDGDWorkerRolloutReconciler(kubeClient, recorder)
-
-			t.Log("Advance the unsupported pathway hash")
-			err := reconciler.ReconcileUnsupported(
-				context.Background(),
-				dgd,
-				true,
-			)
-			require.NoError(t, err)
-
-			t.Log("Verify the warning reflects a successfully persisted primary mutation")
-			if tt.wantEvent {
-				assert.Len(t, recorder.Events, 1)
-				return
-			}
-			assert.Empty(t, recorder.Events)
-		})
-	}
-}
-
 func TestRecordRestartTransitionQueuesSupersededTransition(t *testing.T) {
 	t.Log("Build an active rolling update that supersedes a new restart request")
 	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
@@ -613,7 +550,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
 	})
 
-	t.Run("multinode component workload keeps unsupported-path hash behavior", func(t *testing.T) {
+	t.Run("multinode component workload leaves DGD generation state unprojected", func(t *testing.T) {
 		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {
 				ComponentType: commonconsts.ComponentTypeWorker,
@@ -633,9 +570,8 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 
 		assert.Nil(t, status.RollingUpdate)
 		assert.Nil(t, dgd.Status.RollingUpdate)
-		desired, err := desiredWorkerHashes(dgd)
-		require.NoError(t, err)
-		assert.True(t, currentWorkerHashesMatchDesired(currentWorkerHashes(dgd), desired))
+		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash])
+		assert.NotContains(t, dgd.Annotations, commonconsts.AnnotationCurrentWorkerHashV2)
 	})
 }
 

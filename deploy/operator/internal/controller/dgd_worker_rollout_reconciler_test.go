@@ -435,60 +435,6 @@ func TestShouldTriggerRollingUpdate_UsesResolvedRuntimeVersion(t *testing.T) {
 	}
 }
 
-func TestCanonicalWorkerHashLifecycle_FirstDeploySpecChangeAndCompletion(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {
-			ComponentType: consts.ComponentTypeWorker,
-			Envs: []corev1.EnvVar{
-				{Name: "FOO", Value: "bar"},
-			},
-			Resources: &nvidiacomv1alpha1.Resources{
-				Requests: &nvidiacomv1alpha1.ResourceItem{CPU: "1"},
-			},
-		},
-	})
-
-	// Create reconciler with DGD already in the fake client (simulates existing resource)
-	r := createTestReconcilerWithStatus(dgd)
-	ctx := context.Background()
-
-	// Initialize the hash
-	err := r.initializeWorkerHashIfNeeded(ctx, dgd)
-	require.NoError(t, err)
-
-	// Verify only the v2 hash was set.
-	hash := r.getCurrentWorkerHashV2(dgd)
-	assert.NotEmpty(t, hash, "Hash should be set after initialization")
-	assert.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHash)
-
-	// Fresh deployments store one canonical v2 hash.
-	expectedV2Hash := betaDGDWorkersSpecHash(t, dgd)
-	assert.Equal(t, expectedV2Hash, hash)
-
-	// A later worker change rolls directly from one canonical v2 generation to the next.
-	dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Env = append(
-		dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Env,
-		corev1.EnvVar{Name: "NEW_WORKER_SETTING", Value: "true"},
-	)
-	newV2Hash := betaDGDWorkersSpecHash(t, dgd)
-	newLegacyHash := legacyDGDWorkersSpecHash(t, dgd)
-	require.NotEqual(t, expectedV2Hash, newV2Hash)
-	require.NotEqual(t, newLegacyHash, newV2Hash)
-
-	trigger, err := r.shouldTriggerRollingUpdate(dgd)
-	require.NoError(t, err)
-	require.True(t, trigger)
-
-	rollingCtx, err := r.buildRollingUpdateContext(ctx, dgd)
-	require.NoError(t, err)
-	require.Equal(t, newV2Hash, rollingCtx.NewWorkerHash)
-	require.NotEqual(t, newLegacyHash, rollingCtx.NewWorkerHash)
-
-	require.NoError(t, r.completeRollingUpdate(ctx, dgd, &dgd.Status, newV2Hash))
-	require.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHash)
-	require.Equal(t, newV2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-}
-
 func TestInitializeWorkerHashIfNeeded_MigratesOpaqueV1WithoutRollout(t *testing.T) {
 	t.Log("Build a v1-only DGD with an opaque stored worker suffix")
 	const existingHash = "existing-hash"
@@ -516,79 +462,6 @@ func TestInitializeWorkerHashIfNeeded_MigratesOpaqueV1WithoutRollout(t *testing.
 	trigger, err := r.shouldTriggerRollingUpdate(dgd)
 	require.NoError(t, err)
 	assert.False(t, trigger)
-}
-
-func TestActiveV1OnlyRolloutRerollsUnderV2(t *testing.T) {
-	tests := []struct {
-		name  string
-		phase nvidiacomv1beta1.RollingUpdatePhase
-	}{
-		{
-			name:  "pending",
-			phase: nvidiacomv1beta1.RollingUpdatePhasePending,
-		},
-		{
-			name:  "in progress",
-			phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Log("Build a v1-only DGD with an active rollout and a partially created target generation")
-			const activeV1 = "active-v1"
-			const targetV1 = "target-v1"
-			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"worker": {
-					ComponentType: consts.ComponentTypeWorker,
-					Replicas:      ptr.To(int32(1)),
-				},
-			})
-			dgd.Annotations = map[string]string{
-				consts.AnnotationCurrentWorkerHash: activeV1,
-			}
-			dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{Phase: tt.phase}
-			desiredV2 := betaDGDWorkersSpecHash(t, dgd)
-
-			targetDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-dgd-worker-target-v1",
-					Namespace: dgd.Namespace,
-					Labels: map[string]string{
-						consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-						consts.KubeLabelDynamoWorkerHash:          targetV1,
-					},
-				},
-				Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-					DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-						ComponentType: consts.ComponentTypeWorker,
-						ServiceName:   "worker",
-						Replicas:      ptr.To(int32(1)),
-					},
-				},
-			})
-			r := createTestReconcilerWithStatus(dgd, withObjects(targetDCD))
-
-			t.Log("Run two migration and rollout passes so Pending also reaches the former stuck-rollout path")
-			for range 2 {
-				require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))
-				require.NoError(t, r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status))
-			}
-
-			t.Log("Verify the rollout remains active under v2 without committing or deleting the partial v1 target")
-			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
-			assert.Equal(t, activeV1, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
-			assert.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHashV2)
-			desired, err := desiredWorkerHashes(dgd)
-			require.NoError(t, err)
-			assert.Equal(t, desiredV2, activeWorkerHashForDCDGeneration(dgd, desired))
-			require.NoError(t, r.Get(
-				context.Background(),
-				client.ObjectKeyFromObject(targetDCD),
-				&nvidiacomv1beta1.DynamoComponentDeployment{},
-			))
-		})
-	}
 }
 
 func TestActiveWorkerHashCandidatesV2Only(t *testing.T) {
@@ -781,58 +654,6 @@ func TestLegacyAlphaHashCompatibility_V2OnlyChangeUsesNewV2Generation(t *testing
 	require.Equal(t, newV2Hash, rollingCtx.NewWorkerHash)
 	require.NotEqual(t, newLegacyHash, rollingCtx.NewWorkerHash)
 
-	require.NoError(t, r.completeRollingUpdate(context.Background(), dgd, &dgd.Status, newV2Hash))
-	require.Empty(t, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
-	require.Equal(t, newV2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-}
-
-func TestUnsupportedPathwayMigratesV1OnlyAndKeepsV2OnlyGeneration(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {
-			ComponentType: consts.ComponentTypeWorker,
-			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
-			Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
-		},
-	})
-	dgd.Spec.BackendFramework = "vllm"
-	legacyHash := legacyDGDWorkersSpecHash(t, dgd)
-	v2Hash := betaDGDWorkersSpecHash(t, dgd)
-	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash: legacyHash,
-	}
-
-	r := createTestReconcilerWithStatus(dgd)
-	require.False(t, supportsManagedRollingUpdate(dgd))
-
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
-	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
-	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-
-	trigger, err := r.shouldTriggerRollingUpdate(dgd)
-	require.NoError(t, err)
-	require.False(t, trigger)
-
-	dgd.Spec.BackendFramework = "sglang"
-
-	newLegacyHash := legacyDGDWorkersSpecHash(t, dgd)
-	newV2Hash := betaDGDWorkersSpecHash(t, dgd)
-	require.Equal(t, legacyHash, newLegacyHash)
-	require.NotEqual(t, v2Hash, newV2Hash)
-
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
-	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
-	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-
-	desired, err := desiredWorkerHashes(dgd)
-	require.NoError(t, err)
-	completed := r.workerHashesForUnsupportedPathway(dgd, desired)
-	require.Empty(t, completed.v1)
-	require.Equal(t, newV2Hash, completed.v2)
-
-	r.setCurrentWorkerHashes(dgd, completed)
-	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
-	require.NoError(t, err)
-	require.Equal(t, newV2Hash, rollingCtx.NewWorkerHash)
 }
 
 func TestComponentProgram_SupportsManagedRollingUpdate(t *testing.T) {
@@ -1084,605 +905,6 @@ func TestGetDesiredWorkerReplicas(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
-}
-
-func TestDeleteOldWorkerDCDs(t *testing.T) {
-	newWorkerHash := testNewWorkerHash
-
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-
-	// Create DCD with old worker hash
-	oldDCD1 := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-oldhash1",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-			},
-		},
-	})
-
-	// Create DCD with new worker hash (should not be deleted)
-	newDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-newhash2",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          newWorkerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-			},
-		},
-	})
-
-	r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD1, newDCD))
-	ctx := context.Background()
-
-	// Delete old worker DCDs
-	err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash)
-	require.NoError(t, err)
-
-	// Verify old DCD is deleted
-	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
-	err = r.List(ctx, dcdList)
-	require.NoError(t, err)
-
-	// Should only have the new DCD remaining
-	assert.Len(t, dcdList.Items, 1)
-	assert.Equal(t, "test-dgd-worker-newhash2", dcdList.Items[0].Name)
-}
-
-func TestDeleteOldWorkerDCDs_NoDCDsToDelete(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-
-	r := createTestReconcilerWithStatus(dgd)
-	ctx := context.Background()
-
-	// Delete old worker DCDs when there are none - should not error
-	err := r.deleteOldWorkerDCDs(ctx, dgd, "somehash")
-	require.NoError(t, err)
-}
-
-func TestContinueRollingUpdate_UpdatedComponentsPartialCompletion(t *testing.T) {
-	oldWorkerHash := testOldWorkerHash
-	newWorkerHash := testNewWorkerHash
-
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"prefill": {
-			ComponentType: consts.ComponentTypePrefill,
-			Replicas:      ptr.To(int32(2)),
-		},
-		"decode": {
-			ComponentType: consts.ComponentTypeDecode,
-			Replicas:      ptr.To(int32(3)),
-		},
-	})
-	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash: oldWorkerHash,
-	}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
-	}
-
-	// New DCDs: prefill fully ready, decode not ready yet
-	newPrefillDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-prefill-" + newWorkerHash[:8],
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          newWorkerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypePrefill,
-				ServiceName:   "prefill",
-				Replicas:      ptr.To(int32(2)),
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(2)),
-			},
-		},
-	})
-
-	newDecodeDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-decode-" + newWorkerHash[:8],
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          newWorkerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeDecode,
-				ServiceName:   "decode",
-				Replicas:      ptr.To(int32(3)),
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(1)), // Not yet fully ready
-			},
-		},
-	})
-
-	// Old DCDs: prefill gone, decode still has replicas
-	oldDecodeDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-decode-" + oldWorkerHash[:8],
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          oldWorkerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeDecode,
-				ServiceName:   "decode",
-				Replicas:      ptr.To(int32(3)),
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(2)), // Still has old replicas
-			},
-		},
-	})
-
-	r := createTestReconcilerWithStatus(dgd, withObjects(newPrefillDCD, newDecodeDCD, oldDecodeDCD))
-	ctx := context.Background()
-
-	rollingUpdateStatus := dgd.Status.RollingUpdate
-	err := r.continueRollingUpdate(ctx, dgd, &dgd.Status, newWorkerHash)
-	require.NoError(t, err)
-
-	// Prefill is updated (new ready >= desired, old gone), decode is not
-	assert.Equal(t, []string{"prefill"}, rollingUpdateStatus.UpdatedComponents)
-	// Rolling update should remain in progress since not all services are updated
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, rollingUpdateStatus.Phase)
-}
-
-func TestContinueRollingUpdate_AggregateReadyButPerServiceNot(t *testing.T) {
-	oldWorkerHash := testOldWorkerHash
-	newWorkerHash := testNewWorkerHash
-
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"prefill": {
-			ComponentType: consts.ComponentTypePrefill,
-			Replicas:      ptr.To(int32(2)),
-		},
-		"decode": {
-			ComponentType: consts.ComponentTypeDecode,
-			Replicas:      ptr.To(int32(3)),
-		},
-	})
-	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash: oldWorkerHash,
-	}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
-	}
-
-	// New DCDs: prefill has excess ready replicas (5), decode has 0
-	// Aggregate: 5 total new ready >= 5 desired, 0 old ready == 0
-	// Per-service: prefill ready (5 >= 2), decode NOT ready (0 < 3)
-	newPrefillDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-prefill-" + newWorkerHash[:8],
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          newWorkerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypePrefill,
-				ServiceName:   "prefill",
-				Replicas:      ptr.To(int32(2)),
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(5)), // Excess ready replicas
-			},
-		},
-	})
-
-	newDecodeDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-decode-" + newWorkerHash[:8],
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          newWorkerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeDecode,
-				ServiceName:   "decode",
-				Replicas:      ptr.To(int32(3)),
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(0)), // No ready replicas
-			},
-		},
-	})
-
-	// No old DCDs — old workers are fully scaled down
-	r := createTestReconcilerWithStatus(dgd, withObjects(newPrefillDCD, newDecodeDCD))
-	ctx := context.Background()
-
-	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(&dgd.Status)
-	err := r.continueRollingUpdate(ctx, dgd, &dgd.Status, newWorkerHash)
-	require.NoError(t, err)
-
-	// Only prefill is updated; decode has 0 ready replicas
-	assert.Equal(t, []string{"prefill"}, rollingUpdateStatus.UpdatedComponents)
-	// Rolling update must NOT complete — decode is not ready
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, rollingUpdateStatus.Phase)
-}
-
-func TestStartRollingUpdate_UpdatedComponentsInitializedToNil(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {
-			ComponentType: consts.ComponentTypeWorker,
-			Replicas:      ptr.To(int32(2)),
-		},
-	})
-	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash: testOldWorkerHash,
-	}
-	// Simulate a previous rolling update that had UpdatedComponents populated
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase:             nvidiacomv1beta1.RollingUpdatePhaseNone,
-		UpdatedComponents: []string{"worker"},
-	}
-
-	r := createTestReconcilerWithStatus(dgd)
-	ctx := context.Background()
-
-	err := r.startRollingUpdate(ctx, dgd, &dgd.Status, testNewWorkerHash)
-	require.NoError(t, err)
-
-	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(&dgd.Status)
-	assert.Nil(t, rollingUpdateStatus.UpdatedComponents)
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, rollingUpdateStatus.Phase)
-}
-
-func TestCompleteRollingUpdate_UpdatedComponentsContainsAllWorkers(t *testing.T) {
-	oldWorkerHash := testOldWorkerHash
-	newWorkerHash := testNewWorkerHash
-
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"frontend": {
-			ComponentType: consts.ComponentTypeFrontend,
-			Replicas:      ptr.To(int32(1)),
-		},
-		"prefill": {
-			ComponentType: consts.ComponentTypePrefill,
-			Replicas:      ptr.To(int32(2)),
-		},
-		"decode": {
-			ComponentType: consts.ComponentTypeDecode,
-			Replicas:      ptr.To(int32(3)),
-		},
-	})
-	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash: oldWorkerHash,
-	}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
-	}
-
-	r := createTestReconcilerWithStatus(dgd)
-	ctx := context.Background()
-
-	err := r.completeRollingUpdate(ctx, dgd, &dgd.Status, newWorkerHash)
-	require.NoError(t, err)
-
-	// Check dgd.Status.RollingUpdate directly because r.Update() inside completeRollingUpdate
-	// decodes the API server response back into dgd, and status is re-set after the update.
-	assert.Equal(t, []string{"decode", "prefill"}, dgd.Status.RollingUpdate.UpdatedComponents)
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-	assert.NotNil(t, dgd.Status.RollingUpdate.EndTime)
-}
-
-func TestContinueRollingUpdate_AllServicesUpdated(t *testing.T) {
-	oldWorkerHash := testOldWorkerHash
-	newWorkerHash := testNewWorkerHash
-
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"prefill": {
-			ComponentType: consts.ComponentTypePrefill,
-			Replicas:      ptr.To(int32(2)),
-		},
-		"decode": {
-			ComponentType: consts.ComponentTypeDecode,
-			Replicas:      ptr.To(int32(3)),
-		},
-	})
-	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash: oldWorkerHash,
-	}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
-	}
-
-	// All new DCDs fully ready
-	newPrefillDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-prefill-" + newWorkerHash[:8],
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          newWorkerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypePrefill,
-				ServiceName:   "prefill",
-				Replicas:      ptr.To(int32(2)),
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(2)),
-			},
-		},
-	})
-
-	newDecodeDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-decode-" + newWorkerHash[:8],
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          newWorkerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeDecode,
-				ServiceName:   "decode",
-				Replicas:      ptr.To(int32(3)),
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(3)),
-			},
-		},
-	})
-
-	// No old DCDs (all scaled down and removed)
-
-	r := createTestReconcilerWithStatus(dgd, withObjects(newPrefillDCD, newDecodeDCD))
-	ctx := context.Background()
-
-	err := r.continueRollingUpdate(ctx, dgd, &dgd.Status, newWorkerHash)
-	require.NoError(t, err)
-
-	// Rolling update should complete, and all services should be listed.
-	// Check dgd.Status.RollingUpdate directly because r.Update() inside completeRollingUpdate
-	// decodes the API server response back into dgd, and status is re-set after the update.
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-	assert.Equal(t, []string{"decode", "prefill"}, dgd.Status.RollingUpdate.UpdatedComponents)
-}
-
-func TestReconcileRollingUpdate_RecreateAtZeroWaitsForOldPodTermination(t *testing.T) {
-	const oldWorkerHash = "oldhash0"
-
-	tests := []struct {
-		name         string
-		initialPhase nvidiacomv1beta1.RollingUpdatePhase
-	}{
-		{
-			name:         "in-progress rollout",
-			initialPhase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
-		},
-		{
-			name:         "stale-annotation recovery",
-			initialPhase: nvidiacomv1beta1.RollingUpdatePhaseCompleted,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"worker": {
-					ComponentType: consts.ComponentTypeWorker,
-					Replicas:      ptr.To(int32(0)),
-					Envs:          []corev1.EnvVar{{Name: "REVISION", Value: "v2"}},
-					Annotations: map[string]string{
-						KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
-					},
-				},
-			})
-			dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: oldWorkerHash}
-			dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-				Phase: tt.initialPhase,
-			}
-			newWorkerHash := betaDGDWorkersSpecHash(t, dgd)
-			require.NotEqual(t, oldWorkerHash, newWorkerHash)
-
-			makeZeroReplicaDCD := func(name, workerHash string) *nvidiacomv1beta1.DynamoComponentDeployment {
-				return &nvidiacomv1beta1.DynamoComponentDeployment{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       name,
-						Namespace:  dgd.Namespace,
-						Generation: 1,
-						Labels: map[string]string{
-							consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-							consts.KubeLabelDynamoWorkerHash:          workerHash,
-						},
-					},
-					Spec: nvidiacomv1beta1.DynamoComponentDeploymentSpec{
-						DynamoComponentDeploymentSharedSpec: nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
-							ComponentName: "worker",
-							ComponentType: consts.ComponentTypeWorker,
-							Replicas:      ptr.To(int32(0)),
-						},
-					},
-					Status: nvidiacomv1beta1.DynamoComponentDeploymentStatus{
-						ObservedGeneration: 1,
-						Component: &nvidiacomv1beta1.ComponentReplicaStatus{
-							Replicas:      0,
-							ReadyReplicas: ptr.To(int32(0)),
-						},
-					},
-				}
-			}
-			oldDCD := makeZeroReplicaDCD(
-				dynamo.GetDCDResourceName(dgd, "worker", oldWorkerHash),
-				oldWorkerHash,
-			)
-			newDCD := makeZeroReplicaDCD(
-				dynamo.GetDCDResourceName(dgd, "worker", newWorkerHash),
-				newWorkerHash,
-			)
-			oldPod := &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:              "terminating-old-worker",
-					Namespace:         dgd.Namespace,
-					DeletionTimestamp: ptr.To(metav1.Now()),
-					Finalizers:        []string{"test.example/finalizer"},
-					Labels: map[string]string{
-						consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-						consts.KubeLabelDynamoComponent:           "worker",
-						consts.KubeLabelDynamoComponentType:       consts.ComponentTypeWorker,
-						consts.KubeLabelDynamoWorkerHash:          oldWorkerHash,
-						consts.KubeLabelDynamoSelector:            oldDCD.Name,
-					},
-				},
-				Status: corev1.PodStatus{Phase: corev1.PodRunning},
-			}
-
-			r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD, newDCD, oldPod))
-			ctx := context.Background()
-
-			// Zero ready replicas satisfy the status-only completion check, but the
-			// running old Pod must keep both the rollout and its hash in place.
-			require.NoError(t, r.reconcileRollingUpdate(ctx, dgd, &dgd.Status))
-			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
-			assert.Equal(t, oldWorkerHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(oldDCD), &nvidiacomv1beta1.DynamoComponentDeployment{}))
-
-			// Once the old Pod reaches a terminal phase, the state machine may
-			// complete the rollout and retire the old generation.
-			cachedPod := &corev1.Pod{}
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(oldPod), cachedPod))
-			cachedPod.Status.Phase = corev1.PodSucceeded
-			require.NoError(t, r.Status().Update(ctx, cachedPod))
-
-			require.NoError(t, r.reconcileRollingUpdate(ctx, dgd, &dgd.Status))
-			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-			assert.True(t, r.currentWorkerHashes(dgd).contains(newWorkerHash))
-			err := r.Get(ctx, client.ObjectKeyFromObject(oldDCD), &nvidiacomv1beta1.DynamoComponentDeployment{})
-			assert.True(t, apierrors.IsNotFound(err))
-
-			// Replicas are excluded from the worker hash. A later scale-up
-			// therefore stays on the completed generation.
-			dgd.Spec.Components[0].Replicas = ptr.To(int32(1))
-			trigger, err := r.shouldTriggerRollingUpdate(dgd)
-			require.NoError(t, err)
-			assert.False(t, trigger)
-			require.NoError(t, r.reconcileRollingUpdate(ctx, dgd, &dgd.Status))
-			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-			assert.True(t, r.currentWorkerHashes(dgd).contains(newWorkerHash))
-		})
-	}
-}
-
-func TestGetWorkerInfoForWorkerHash(t *testing.T) {
-	workerHash := "hash1234"
-
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"prefill": {ComponentType: consts.ComponentTypePrefill},
-		"decode":  {ComponentType: consts.ComponentTypeDecode},
-	})
-
-	// Create DCDs for prefill and decode with different ready counts
-	prefillDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-prefill-hash1234",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          workerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypePrefill,
-				ServiceName:   "prefill",
-				Replicas:      ptr.To(int32(2)),
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(2)),
-			},
-		},
-	})
-
-	decodeDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-decode-hash1234",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          workerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeDecode,
-				ServiceName:   "decode",
-				Replicas:      ptr.To(int32(3)),
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(1)),
-			},
-		},
-	})
-
-	r := createTestReconcilerWithStatus(dgd, withObjects(prefillDCD, decodeDCD))
-	ctx := context.Background()
-
-	status, err := r.getWorkerInfoForWorkerHash(ctx, dgd, workerHash)
-	require.NoError(t, err)
-
-	assert.Len(t, status.components, 2)
-	assert.Equal(t, int32(2), status.components[consts.ComponentTypePrefill].readyReplicas)
-	assert.Equal(t, int32(1), status.components[consts.ComponentTypeDecode].readyReplicas)
-	assert.Equal(t, int32(3), status.totalReadyWorkers) // 2 + 1
 }
 
 func TestMergeWorkerComponentStatuses(t *testing.T) {
@@ -2331,59 +1553,6 @@ func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.
 	})
 }
 
-func TestInitializeWorkerHashIfNeeded_LegacyDCDsMigration(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {
-			ComponentType: consts.ComponentTypeWorker,
-			Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
-		},
-	})
-
-	// Create a legacy worker DCD: has DGD name label but NO worker hash label.
-	// This simulates a DCD created by a pre-rolling-update operator version.
-	legacyWorkerDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				// Note: No KubeLabelDynamoWorkerHash label
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				ServiceName:   "worker",
-			},
-		},
-	})
-
-	r := createTestReconcilerWithStatus(dgd, withObjects(legacyWorkerDCD))
-	ctx := context.Background()
-
-	err := r.initializeWorkerHashIfNeeded(ctx, dgd)
-	require.NoError(t, err)
-
-	// DGD annotation should be set to the legacy sentinel, NOT the computed hash
-	hash := r.getCurrentWorkerHash(dgd)
-	assert.Equal(t, consts.LegacyWorkerHash, hash, "Hash should be legacy sentinel after migration")
-
-	// Legacy DCD should now have the worker hash label backfilled
-	updatedDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{})
-	err = r.Get(ctx, types.NamespacedName{Name: "test-dgd-worker", Namespace: "default"}, updatedDCD)
-	require.NoError(t, err)
-	assert.Equal(t, consts.LegacyWorkerHash, updatedDCD.Labels[consts.KubeLabelDynamoWorkerHash],
-		"Legacy DCD should have worker hash label backfilled")
-
-	desired, err := desiredWorkerHashes(dgd)
-	require.NoError(t, err)
-	require.NoError(t, r.completeRollingUpdate(ctx, dgd, &dgd.Status, desired.v1))
-
-	trigger, err := r.shouldTriggerRollingUpdate(dgd)
-	require.NoError(t, err)
-	require.False(t, trigger)
-}
-
 func TestInitializeWorkerHashIfNeeded_LegacyMultipleWorkers(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {
@@ -2749,6 +1918,7 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
 			NewWorkerHash:                      "newhash1",
+			MayMutateOld:                       true,
 			OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 1},
 			OldWorkerReplicaTargetsByDCD:       map[string]int32{"test-dgd-worker": 1},
 			NewWorkerReplicaTargetsByComponent: map[string]int32{"worker": 3},
@@ -2815,6 +1985,7 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
 			NewWorkerHash:                      "newhash1",
+			MayMutateOld:                       true,
 			OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 1},
 			OldWorkerReplicaTargetsByDCD:       map[string]int32{"test-dgd-worker": 1},
 			NewWorkerReplicaTargetsByComponent: map[string]int32{"worker": 3},
@@ -2897,6 +2068,7 @@ func TestAggregateOldWorkerServiceStatuses_LegacyDCDs(t *testing.T) {
 
 		rollingUpdateCtx := dynamo.RollingUpdateContext{
 			NewWorkerHash:                      "newhash1",
+			MayMutateOld:                       true,
 			OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 1},
 			NewWorkerReplicaTargetsByComponent: map[string]int32{"worker": 1},
 		}
@@ -2905,131 +2077,6 @@ func TestAggregateOldWorkerServiceStatuses_LegacyDCDs(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, statuses)
 	})
-}
-
-func TestDeleteOldWorkerDCDs_LegacyDCDs(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-
-	// Legacy DCD with backfilled hash label
-	legacyDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          consts.LegacyWorkerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-			},
-		},
-	})
-
-	// New DCD with real hash (should NOT be deleted)
-	newDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-abc12345",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          "abc12345",
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-			},
-		},
-	})
-
-	r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD, newDCD))
-	ctx := context.Background()
-
-	err := r.deleteOldWorkerDCDs(ctx, dgd, "abc12345")
-	require.NoError(t, err)
-
-	// Verify legacy DCD is deleted and new DCD remains
-	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
-	err = r.List(ctx, dcdList)
-	require.NoError(t, err)
-
-	assert.Len(t, dcdList.Items, 1)
-	assert.Equal(t, "test-dgd-worker-abc12345", dcdList.Items[0].Name)
-}
-
-func TestDeleteOldWorkerDCDs_MultipleGenerations(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-
-	// Generation A (legacy)
-	legacyDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          consts.LegacyWorkerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-			},
-		},
-	})
-
-	// Generation B (intermediate)
-	genBDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-hashbbbb",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          "hashbbbb",
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-			},
-		},
-	})
-
-	// Generation C (current)
-	currentDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-hashcccc",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          "hashcccc",
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-			},
-		},
-	})
-
-	r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD, genBDCD, currentDCD))
-	ctx := context.Background()
-
-	err := r.deleteOldWorkerDCDs(ctx, dgd, "hashcccc")
-	require.NoError(t, err)
-
-	// Verify both old generations are deleted, only current remains
-	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
-	err = r.List(ctx, dcdList)
-	require.NoError(t, err)
-
-	assert.Len(t, dcdList.Items, 1)
-	assert.Equal(t, "test-dgd-worker-hashcccc", dcdList.Items[0].Name)
 }
 
 func TestListOldWorkerDCDs_ExcludesCurrentHash(t *testing.T) {
@@ -3160,6 +2207,7 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerations(t *testing.T) {
 	// oldNeeded = 2: newest old (B) should get 2, oldest (A) should get 0
 	rollingUpdateCtx := dynamo.RollingUpdateContext{
 		NewWorkerHash:                      "hashcccc",
+		MayMutateOld:                       true,
 		OldWorkerReplicaTargetsByComponent: map[string]int32{"worker": 2},
 		OldWorkerReplicaTargetsByDCD: map[string]int32{
 			"test-dgd-worker-hashaaaa": 0,
@@ -3337,6 +2385,8 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerationsPreservesAvailableReplicas(t *
 	assert.Equal(t, int32(0), rollingUpdateCtx.OldWorkerReplicaTargetsByDCD["test-dgd-worker-hashbbbb"])
 	assert.Equal(t, int32(0), rollingUpdateCtx.NewWorkerReplicaTargetsByComponent["worker"])
 
+	rollingUpdateCtx.MayMutateOld = true
+
 	err = r.scaleOldWorkerDCDs(ctx, dgd, rollingUpdateCtx)
 	require.NoError(t, err)
 
@@ -3431,108 +2481,6 @@ func TestAggregateOldWorkerServiceStatuses_MultipleOldGenerations(t *testing.T) 
 	assert.Equal(t, ptr.To(int32(3)), statuses["worker"].ReadyReplicas)
 	// ComponentNames should include both old DCDs
 	assert.Len(t, statuses["worker"].ComponentNames, 2)
-}
-
-func TestContinueRollingUpdate_CascadingSpecChange(t *testing.T) {
-	// Scenario: A→B rolling update in progress, spec changes to C.
-	// B DCDs should be treated as old alongside A DCDs.
-	newWorkerHash := "hashcccc"
-
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {
-			ComponentType: consts.ComponentTypeWorker,
-			Replicas:      ptr.To(int32(2)),
-		},
-	})
-	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash: "hashaaaa",
-	}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
-	}
-
-	// Generation A (old)
-	genADCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-hashaaaa",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          "hashaaaa",
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				ServiceName:   "worker",
-				Replicas:      ptr.To(int32(1)),
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(1)),
-			},
-		},
-	})
-
-	// Generation B (intermediate, now also old)
-	genBDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-hashbbbb",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          "hashbbbb",
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				ServiceName:   "worker",
-				Replicas:      ptr.To(int32(1)),
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(1)),
-			},
-		},
-	})
-
-	// Generation C (new, not yet ready)
-	genCDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-" + newWorkerHash[:8],
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          newWorkerHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				ServiceName:   "worker",
-				Replicas:      ptr.To(int32(2)),
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(0)),
-			},
-		},
-	})
-
-	r := createTestReconcilerWithStatus(dgd, withObjects(genADCD, genBDCD, genCDCD))
-	ctx := context.Background()
-
-	err := r.continueRollingUpdate(ctx, dgd, &dgd.Status, newWorkerHash)
-	require.NoError(t, err)
-
-	// Both A and B have ready replicas, C has 0 — rolling update not complete
-	rollingUpdateStatus := r.getOrCreateRollingUpdateStatus(&dgd.Status)
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, rollingUpdateStatus.Phase)
-	assert.Empty(t, rollingUpdateStatus.UpdatedComponents, "No services should be fully updated yet")
 }
 
 func TestResolveRollingUpdateParams(t *testing.T) {
@@ -3965,268 +2913,6 @@ func TestMapDGDWorkerPodToRequests(t *testing.T) {
 
 	delete(pod.Labels, consts.KubeLabelDynamoGraphDeploymentName)
 	assert.Empty(t, mapDGDWorkerPodToRequests(context.Background(), pod))
-}
-
-// --- reconcileRollingUpdate state machine tests ---
-
-func TestReconcileRollingUpdate_NoChange(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	hash := legacyDGDWorkersSpecHash(t, dgd)
-	v2Hash := betaDGDWorkersSpecHash(t, dgd)
-	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash:   hash,
-		consts.AnnotationCurrentWorkerHashV2: v2Hash,
-	}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseCompleted,
-	}
-
-	r := createTestReconcilerWithStatus(dgd)
-	err := r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status)
-	require.NoError(t, err)
-	// Phase should stay Completed — no spec change
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-}
-
-func TestReconcileRollingUpdate_SpecChangeStartsRollout(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: "stale000"}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseCompleted,
-	}
-
-	r := createTestReconcilerWithStatus(dgd)
-	err := r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status)
-	require.NoError(t, err)
-	// Should transition to Pending (new rollout started)
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, dgd.Status.RollingUpdate.Phase)
-	assert.NotNil(t, dgd.Status.RollingUpdate.StartTime)
-}
-
-func TestReconcileRollingUpdate_PendingToInProgress(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: "oldhash0"}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhasePending,
-	}
-
-	r := createTestReconcilerWithStatus(dgd)
-	err := r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status)
-	require.NoError(t, err)
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
-}
-
-func TestReconcileRollingUpdate_StuckDetection(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	hash := legacyDGDWorkersSpecHash(t, dgd)
-	// Hash matches current but phase is InProgress — stuck
-	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash:   hash,
-		consts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
-	}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
-	}
-
-	r := createTestReconcilerWithStatus(dgd)
-	err := r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status)
-	require.NoError(t, err)
-	// Should auto-complete
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-}
-
-func TestReconcileRollingUpdate_NewRollingUpdate(t *testing.T) {
-	newHash := "newhash1"
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: "oldhash0"}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseCompleted,
-	}
-
-	// Create a DCD with the new hash that has ready replicas — stale annotation scenario
-	newDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-worker-" + newHash,
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          newHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				ServiceName:   "worker",
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(1)),
-			},
-		},
-	})
-
-	r := createTestReconcilerWithStatus(dgd, withObjects(newDCD))
-
-	// When computed hash != current hash and no DCDs exist with computed hash, start rollout.
-	err := r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status)
-	require.NoError(t, err)
-	// Should start a new rolling update (Pending) since computed hash DCDs don't exist
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, dgd.Status.RollingUpdate.Phase)
-}
-
-func TestReconcileRollingUpdate_StaleAnnotationRequiresAllNewWorkersReady(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"prefill": {ComponentType: consts.ComponentTypePrefill},
-		"decode":  {ComponentType: consts.ComponentTypeDecode},
-	})
-	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: testOldWorkerHash}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseCompleted,
-	}
-	newHash := betaDGDWorkersSpecHash(t, dgd)
-	require.NotEqual(t, testOldWorkerHash, newHash)
-
-	newPrefillDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      dynamo.GetDCDResourceName(dgd, "prefill", newHash),
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				consts.KubeLabelDynamoWorkerHash:          newHash,
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypePrefill,
-				ServiceName:   "prefill",
-			},
-		},
-		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-				ReadyReplicas: ptr.To(int32(1)),
-			},
-		},
-	})
-	r := createTestReconcilerWithStatus(dgd, withObjects(newPrefillDCD))
-
-	err := r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status)
-	require.NoError(t, err)
-
-	assert.Equal(t, testOldWorkerHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, dgd.Status.RollingUpdate.Phase)
-}
-
-func TestReconcileRollingUpdate_StaleAnnotationUpdatesAfterAllNewWorkersReady(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"prefill": {ComponentType: consts.ComponentTypePrefill},
-		"decode":  {ComponentType: consts.ComponentTypeDecode},
-	})
-	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: testOldWorkerHash}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseCompleted,
-	}
-	newHash := betaDGDWorkersSpecHash(t, dgd)
-	require.NotEqual(t, testOldWorkerHash, newHash)
-
-	makeReadyDCD := func(componentName, componentType string) *nvidiacomv1beta1.DynamoComponentDeployment {
-		return betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      dynamo.GetDCDResourceName(dgd, componentName, newHash),
-				Namespace: "default",
-				Labels: map[string]string{
-					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-					consts.KubeLabelDynamoWorkerHash:          newHash,
-				},
-			},
-			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: componentType,
-					ServiceName:   componentName,
-				},
-			},
-			Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
-				Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
-					ReadyReplicas: ptr.To(int32(1)),
-				},
-			},
-		})
-	}
-	r := createTestReconcilerWithStatus(
-		dgd,
-		withObjects(
-			makeReadyDCD("prefill", consts.ComponentTypePrefill),
-			makeReadyDCD("decode", consts.ComponentTypeDecode),
-		),
-	)
-
-	err := r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status)
-	require.NoError(t, err)
-
-	assert.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHash)
-	assert.Equal(t, newHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-}
-
-func TestReconcileRollingUpdate_NonePhaseStartsRollout(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: "oldhash0"}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseNone,
-	}
-
-	r := createTestReconcilerWithStatus(dgd)
-	err := r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status)
-	require.NoError(t, err)
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhasePending, dgd.Status.RollingUpdate.Phase)
-	assert.NotNil(t, dgd.Status.RollingUpdate.StartTime)
-	assert.Nil(t, dgd.Status.RollingUpdate.UpdatedComponents)
-}
-
-func TestReconcileRollingUpdate_StuckDetection_CompletesViaCompleteRollingUpdate(t *testing.T) {
-	// Stuck case: hashes match but phase is InProgress (e.g., operator restarted between
-	// annotation write and status persistence). Should call completeRollingUpdate which
-	// cleans up old DCDs, updates annotation, and sets Completed.
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"prefill": {ComponentType: consts.ComponentTypePrefill},
-		"decode":  {ComponentType: consts.ComponentTypeDecode},
-	})
-	legacyHash := legacyDGDWorkersSpecHash(t, dgd)
-	v2Hash := betaDGDWorkersSpecHash(t, dgd)
-	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash:   legacyHash,
-		consts.AnnotationCurrentWorkerHashV2: v2Hash,
-	}
-	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
-		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
-	}
-
-	r := createTestReconcilerWithStatus(dgd)
-	err := r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status)
-	require.NoError(t, err)
-
-	// Phase should be Completed
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-	// EndTime should be set
-	assert.NotNil(t, dgd.Status.RollingUpdate.EndTime)
-	// UpdatedComponents should contain all worker services
-	assert.Contains(t, dgd.Status.RollingUpdate.UpdatedComponents, "prefill")
-	assert.Contains(t, dgd.Status.RollingUpdate.UpdatedComponents, "decode")
-	// Completion records both active compatibility hashes.
-	assert.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
-	assert.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 }
 
 func TestBuildRollingUpdateContext(t *testing.T) {
@@ -5053,6 +3739,88 @@ func setInventoryWorkerDCDReady(dcd *nvidiacomv1beta1.DynamoComponentDeployment)
 		ReadyReplicas:     ptr.To(int32(1)),
 		AvailableReplicas: ptr.To(int32(1)),
 	}
+}
+
+func TestDeleteObservedOldWorkerDCDsUsesUIDPrecondition(t *testing.T) {
+	ctx := context.Background()
+	old := &nvidiacomv1beta1.DynamoComponentDeployment{ObjectMeta: metav1.ObjectMeta{
+		Name:      "old-worker",
+		Namespace: "default",
+		UID:       types.UID("observed-uid"),
+	}}
+	var deleteUID *types.UID
+	funcs := interceptor.Funcs{
+		Delete: func(ctx context.Context, writer client.WithWatch, object client.Object, options ...client.DeleteOption) error {
+			deleteUID = (&client.DeleteOptions{}).ApplyOptions(options).Preconditions.UID
+			return writer.Delete(ctx, object, options...)
+		},
+	}
+	reconciler := createTestReconcilerWithStatus(createTestDGD("test-dgd", nil), withObjects(old), withInterceptor(funcs))
+
+	t.Log("Delete the observed old DCD")
+	require.NoError(t, reconciler.deleteObservedOldWorkerDCDs(ctx, []nvidiacomv1beta1.DynamoComponentDeployment{*old}))
+
+	t.Log("Verify the delete is constrained to the observed object UID")
+	require.NotNil(t, deleteUID)
+	assert.Equal(t, old.UID, *deleteUID)
+}
+
+func TestManagedWorkerInventory_AtoBtoAWaitsForOldDrainAndCacheDeletion(t *testing.T) {
+	ctx := context.Background()
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Replicas:      ptr.To(int32(1)),
+			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "b"}},
+		},
+	})
+	dgd.UID = types.UID("dgd-uid")
+	old := managedInventoryWorkerDCD(t, dgd, "generation-b")
+	setInventoryWorkerDCDReady(old)
+
+	t.Log("Revert the DGD from B to A while its parent state already names A")
+	dgd.GetComponentByName("worker").PodTemplate.Spec.Containers[0].Env[0].Value = "a"
+	targetHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: targetHash}
+	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress}
+	reconciler := createTestReconcilerWithStatus(dgd, withObjects(old))
+
+	t.Log("Keep serving generation B unchanged until target A is observed")
+	first, err := reconciler.buildManagedWorkerRolloutPlan(ctx, dgd)
+	require.NoError(t, err)
+	assert.False(t, first.context.TargetComplete)
+	assert.False(t, first.context.MayMutateOld)
+	require.NoError(t, reconciler.scaleOldWorkerDCDs(ctx, dgd, first.context))
+	assertWorkerDCDReplicas(t, reconciler, old, 1)
+
+	t.Log("Observe ready target A and scale B down through the rollout planner")
+	target := managedInventoryWorkerDCD(t, dgd, targetHash)
+	setInventoryWorkerDCDReady(target)
+	require.NoError(t, reconciler.Create(ctx, target))
+	second, err := reconciler.buildManagedWorkerRolloutPlan(ctx, dgd)
+	require.NoError(t, err)
+	require.True(t, second.context.TargetComplete)
+	require.True(t, second.context.MayMutateOld)
+	require.NoError(t, reconciler.scaleOldWorkerDCDs(ctx, dgd, second.context))
+	assertWorkerDCDReplicas(t, reconciler, old, 0)
+
+	t.Log("Report B drained, then delete only from the observed inventory")
+	drainedOld := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(old), drainedOld))
+	drainedOld.Status.ObservedGeneration = drainedOld.Generation
+	drainedOld.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{Replicas: 0, ReadyReplicas: ptr.To(int32(0)), AvailableReplicas: ptr.To(int32(0))}
+	require.NoError(t, reconciler.Update(ctx, drainedOld))
+	third, err := reconciler.buildManagedWorkerRolloutPlan(ctx, dgd)
+	require.NoError(t, err)
+	require.NoError(t, reconciler.reconcileManagedWorkerInventory(ctx, dgd, &dgd.Status, third))
+	assert.True(t, apierrors.IsNotFound(reconciler.Get(ctx, client.ObjectKeyFromObject(old), &nvidiacomv1beta1.DynamoComponentDeployment{})))
+	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
+
+	t.Log("Project completion only after the deletion is observed on the next inventory read")
+	final, err := reconciler.buildManagedWorkerRolloutPlan(ctx, dgd)
+	require.NoError(t, err)
+	require.NoError(t, reconciler.reconcileManagedWorkerInventory(ctx, dgd, &dgd.Status, final))
+	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
 }
 
 func TestManagedWorkerInventory_AnnotationlessAtoBRollsOutSafely(t *testing.T) {

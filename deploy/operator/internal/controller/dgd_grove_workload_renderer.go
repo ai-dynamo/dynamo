@@ -227,6 +227,39 @@ func podCliqueSetUsesGroveWorkerHashSuffix(
 	return true
 }
 
+// podCliqueSetObservesGroveWorkerGeneration reports whether the informer snapshot
+// contains one coherent observed worker generation. A write receipt is not an
+// observation: callers must pass the PodCliqueSet read before any sync.
+func podCliqueSetObservesGroveWorkerGeneration(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	pcs *grovev1alpha1.PodCliqueSet,
+	allowLegacy bool,
+) (bool, error) {
+	if !dgdHasWorkerComponents(dgd) {
+		return true, nil
+	}
+	want, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	if err != nil {
+		return false, fmt.Errorf("compute desired Grove worker hash: %w", err)
+	}
+	canonical := true
+	legacy := allowLegacy
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			continue
+		}
+		clique := podCliqueSetCliqueForComponent(pcs, component.ComponentName)
+		if clique == nil {
+			return false, nil
+		}
+		hash := clique.Labels[commonconsts.KubeLabelDynamoWorkerHash]
+		canonical = canonical && hash == want
+		legacy = legacy && hash == ""
+	}
+	return canonical || legacy, nil
+}
+
 func podCliqueSetCliqueForComponent(
 	pcs *grovev1alpha1.PodCliqueSet,
 	componentName string,

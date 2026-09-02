@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -45,6 +46,7 @@ type ReconcileResult struct {
 	Reason          Reason
 	Message         Message
 	ComponentStatus map[string]nvidiacomv1beta1.ComponentReplicaStatus
+	RequeueAfter    time.Duration
 }
 
 // clearComponentGPUShapes removes previously projected GPU shapes before a

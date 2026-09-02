@@ -51,9 +51,9 @@ func newGroveWatchSetup(reader client.Reader) *groveWatchSetup {
 func (s *groveWatchSetup) addTo(ctrlBuilder *builder.Builder) *builder.Builder {
 	return ctrlBuilder.
 		Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
-			// Creation is caused by DGD reconciliation and does not need to
-			// enqueue the owner again.
-			CreateFunc:  func(event.CreateEvent) bool { return false },
+			// Creating a PodCliqueSet is only a write receipt. Enqueue the owner
+			// after the informer observes it so worker-hash projection can proceed.
+			CreateFunc:  func(event.CreateEvent) bool { return true },
 			DeleteFunc:  func(event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(event.UpdateEvent) bool { return true },
 			GenericFunc: func(event.GenericEvent) bool { return true },

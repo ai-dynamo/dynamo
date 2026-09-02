@@ -157,18 +157,14 @@ func (p *componentProgram) reconcileWorkerRollout(
 	if supportsManagedRollingUpdate(dgd) {
 		return p.reconcileManagedWorkerRollout(ctx, dgd, status)
 	}
-	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd); err != nil {
-		return dynamo.RollingUpdateContext{}, failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
-	}
-	if err := p.rollout.ReconcileUnsupported(ctx, dgd, false); err != nil {
-		return dynamo.RollingUpdateContext{}, err
-	}
+
+	// LWS has no controller-owned rollout contract. Its DCD and LWS writes are
+	// receipts only, so this program does not project them into DGD generation state.
 	return dynamo.RollingUpdateContext{}, nil
 }
 
-// supportsManagedRollingUpdate checks whether the component pathway can use
-// operator-managed rolling updates. Multinode component workloads rely on
-// external orchestration and retain the compatibility hash behavior instead.
+// supportsManagedRollingUpdate selects the component pathway with a controller-owned
+// rollout contract. Multinode component workloads remain provider-owned.
 func supportsManagedRollingUpdate(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) bool {
