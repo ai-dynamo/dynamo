@@ -217,12 +217,7 @@ pub(crate) fn write_annotated_response<T: Serialize, W: std::io::Write>(
     Ok(is_error)
 }
 
-/// The end-of-stream marker: no data, `complete_final: true`.
-///
-/// The wrapper is a constant, so its bytes are fixed for the process — encoded
-/// once per codec rather than once per request. Both ingress encoders emit the
-/// identical frame, so the shape is defined here and nowhere else, exactly as
-/// [`write_annotated_response`] owns the non-terminal shape.
+/// Memoized separately per codec, since encoding is codec-specific.
 fn terminal_frame_bytes(codec: RequestPlanePayloadCodec) -> Result<Bytes, PipelineError> {
     static JSON: OnceLock<Bytes> = OnceLock::new();
     static MSGPACK: OnceLock<Bytes> = OnceLock::new();
@@ -379,8 +374,6 @@ mod tests {
         Annotated, NetworkStreamWrapper, RequestPlanePayloadCodec, encode_annotated_response,
         terminal_frame_bytes,
     };
-
-    // ── terminal_frame_bytes memoization ─────────────────────────────────────
 
     /// Each codec's terminal frame must decode back to `data: None,
     /// complete_final: true` — the contract both egress paths rely on to
