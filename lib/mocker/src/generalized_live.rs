@@ -4,11 +4,14 @@
 //! Tokio/wall-clock driver for one logical generalized mock engine.
 //!
 //! The AISimulate engine remains runtime-neutral: it eagerly computes a pass
-//! and returns an absolute modeled completion time. This module owns the live
-//! concerns around that contract: bounded control lanes, wall-clock sleeps,
-//! mid-pass cancellation, attention-DP barrier release, and ordered effect
-//! delivery. Dynamo-specific transport and metric publication stay outside the
-//! driver and consume [`GroupedLiveEvent`] values.
+//! and returns an absolute modeled completion time. While work remains ready,
+//! this driver carries that modeled completion forward as the next pass start
+//! deadline. It uses wall time for sleeps and when work resumes after idle.
+//!
+//! This module also owns bounded control lanes, mid-pass cancellation,
+//! attention-DP barrier release, and ordered effect delivery. Dynamo-specific
+//! transport and metric publication stay outside the driver and consume
+//! [`GroupedLiveEvent`] values.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -37,9 +40,9 @@ use crate::common::utils::sleep_until_precise;
 /// Engine type driven by the native live runtime.
 pub type GroupedEngine = GeneralizedMockerEngine<SchedulerRank>;
 
-const DEFAULT_ABSOLUTE_PASS_MAX_CATCH_UP: Duration = Duration::from_millis(5);
+const ABSOLUTE_PASS_MAX_CATCH_UP: Duration = Duration::from_millis(5);
 
-/// Bounded-channel sizing for one grouped live engine.
+/// Bounded-channel configuration for one grouped live engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupedLiveDriverConfig {
     /// Capacity shared independently by the ordinary-command and cancellation
@@ -47,10 +50,6 @@ pub struct GroupedLiveDriverConfig {
     pub control_capacity: usize,
     /// Capacity of the ordered neutral-effect lane.
     pub event_capacity: usize,
-    /// Use each modeled pass end as the next pass start deadline, but do not
-    /// start more than this duration behind wall time. This defaults to 5 ms.
-    /// `None` explicitly selects the historical wall-clock-per-pass behavior.
-    pub absolute_pass_max_catch_up: Option<Duration>,
 }
 
 impl Default for GroupedLiveDriverConfig {
@@ -58,7 +57,6 @@ impl Default for GroupedLiveDriverConfig {
         Self {
             control_capacity: 64,
             event_capacity: 64,
-            absolute_pass_max_catch_up: Some(DEFAULT_ABSOLUTE_PASS_MAX_CATCH_UP),
         }
     }
 }
@@ -70,9 +68,6 @@ impl GroupedLiveDriverConfig {
         }
         if self.event_capacity == 0 {
             bail!("grouped live event capacity must be positive");
-        }
-        if self.absolute_pass_max_catch_up == Some(Duration::ZERO) {
-            bail!("grouped live absolute-pass catch-up must be positive");
         }
         Ok(self)
     }
@@ -303,7 +298,6 @@ pub fn spawn_grouped_live_engine(
             cancel_token: actor_cancel_token,
             clock_origin,
             deferred_commands: VecDeque::new(),
-            absolute_pass_max_catch_up: config.absolute_pass_max_catch_up,
             engine_time_ms: 0.0,
             next_pass_deadline_ms: None,
         }
@@ -332,26 +326,33 @@ struct GroupedLiveActor {
     cancel_token: CancellationToken,
     clock_origin: Instant,
     deferred_commands: VecDeque<ControlEnvelope>,
-    absolute_pass_max_catch_up: Option<Duration>,
     engine_time_ms: f64,
     next_pass_deadline_ms: Option<f64>,
 }
 
-fn select_pass_start(
-    wall_ms: f64,
-    engine_time_ms: f64,
-    next_deadline_ms: Option<f64>,
-    max_catch_up: Option<Duration>,
-) -> f64 {
-    let Some(max_catch_up) = max_catch_up else {
-        return wall_ms.max(engine_time_ms);
-    };
+fn select_pass_start(wall_ms: f64, engine_time_ms: f64, next_deadline_ms: Option<f64>) -> f64 {
     let Some(deadline_ms) = next_deadline_ms else {
         return wall_ms.max(engine_time_ms);
     };
 
-    let catch_up_floor_ms = (wall_ms - max_catch_up.as_secs_f64() * 1_000.0).max(0.0);
+    let catch_up_floor_ms = (wall_ms - ABSOLUTE_PASS_MAX_CATCH_UP.as_secs_f64() * 1_000.0).max(0.0);
     deadline_ms.max(catch_up_floor_ms).max(engine_time_ms)
+}
+
+fn select_internal_work_time(
+    wall_ms: f64,
+    engine_time_ms: f64,
+    deadline_ms: f64,
+    active_pass_sequence: bool,
+) -> Option<f64> {
+    if deadline_ms > wall_ms.max(engine_time_ms) {
+        return None;
+    }
+    if active_pass_sequence {
+        Some(engine_time_ms.max(deadline_ms))
+    } else {
+        Some(engine_time_ms.max(wall_ms))
+    }
 }
 
 #[derive(Debug)]
@@ -400,9 +401,8 @@ impl GroupedLiveActor {
                 self.elapsed_ms(),
                 self.engine_time_ms,
                 self.next_pass_deadline_ms,
-                self.absolute_pass_max_catch_up,
             );
-            self.engine_time_ms = started_at_ms;
+            self.advance_engine_time(started_at_ms);
             let Some(started) = self.engine.execute_pass(started_at_ms)? else {
                 self.next_pass_deadline_ms = None;
                 continue;
@@ -416,12 +416,7 @@ impl GroupedLiveActor {
             if !self.wait_for_pass_boundary(end_ms).await? {
                 return Ok(());
             }
-            let completion_candidate_ms = if self.absolute_pass_max_catch_up.is_some() {
-                end_ms
-            } else {
-                self.elapsed_ms().max(end_ms)
-            };
-            let completed_at_ms = self.advance_engine_time(completion_candidate_ms);
+            let completed_at_ms = self.advance_engine_time(end_ms);
             let completed = self.engine.complete_pass(pass_id, completed_at_ms)?;
             let (boundary_tx, boundary_rx) = mpsc::channel(1);
             self.publish(GroupedLiveEvent::PassCompleted {
@@ -452,6 +447,15 @@ impl GroupedLiveActor {
     fn advance_engine_time(&mut self, candidate_ms: f64) -> f64 {
         self.engine_time_ms = self.engine_time_ms.max(candidate_ms);
         self.engine_time_ms
+    }
+
+    fn command_time_ms(&mut self) -> f64 {
+        let candidate_ms = if self.next_pass_deadline_ms.is_some() {
+            self.engine_time_ms
+        } else {
+            self.elapsed_ms()
+        };
+        self.advance_engine_time(candidate_ms)
     }
 
     async fn publish(&self, event: GroupedLiveEvent) -> Result<()> {
@@ -485,8 +489,7 @@ impl GroupedLiveActor {
             };
             match request {
                 BoundaryRequest::Apply { command, reply } => {
-                    let wall_ms = self.elapsed_ms();
-                    let now_ms = self.advance_engine_time(wall_ms);
+                    let now_ms = self.command_time_ms();
                     let result = self.engine.apply_command_effects(command, now_ms);
                     let _ = reply.send(result);
                 }
@@ -502,8 +505,7 @@ impl GroupedLiveActor {
         let command_id = envelope.command_id;
         let is_request_cancellation =
             matches!(&envelope.command.command, Command::CancelRequest { .. });
-        let wall_ms = self.elapsed_ms();
-        let now_ms = self.advance_engine_time(wall_ms);
+        let now_ms = self.command_time_ms();
         let result = self.engine.apply_command_effects(envelope.command, now_ms);
         match result {
             Ok(effects) => {
@@ -613,8 +615,7 @@ impl GroupedLiveActor {
         let command_id = envelope.command_id;
         let is_request_cancellation =
             matches!(&envelope.command.command, Command::CancelRequest { .. });
-        let wall_ms = self.elapsed_ms();
-        let now_ms = self.advance_engine_time(wall_ms);
+        let now_ms = self.command_time_ms();
         let result = self.engine.apply_command_effects(envelope.command, now_ms);
         match result {
             Ok(effects) => {
@@ -659,15 +660,18 @@ impl GroupedLiveActor {
     }
 
     async fn process_due_internal_work(&mut self) -> Result<()> {
-        let now_ms = self.engine_time_ms.max(self.elapsed_ms());
-        if !self
-            .engine
-            .next_internal_deadline_ms()
-            .is_some_and(|deadline| deadline <= now_ms)
-        {
+        let Some(deadline_ms) = self.engine.next_internal_deadline_ms() else {
             return Ok(());
-        }
-        let now_ms = self.advance_engine_time(now_ms);
+        };
+        let Some(candidate_ms) = select_internal_work_time(
+            self.elapsed_ms(),
+            self.engine_time_ms,
+            deadline_ms,
+            self.next_pass_deadline_ms.is_some(),
+        ) else {
+            return Ok(());
+        };
+        let now_ms = self.advance_engine_time(candidate_ms);
         self.engine.process_internal_work(now_ms)?;
         Ok(())
     }
@@ -732,19 +736,11 @@ mod tests {
     }
 
     fn runtime_with_config(dp_size: u32, config: EngineConfig) -> GroupedLiveRuntime {
-        runtime_with_driver_config(dp_size, config, GroupedLiveDriverConfig::default())
-    }
-
-    fn runtime_with_driver_config(
-        dp_size: u32,
-        config: EngineConfig,
-        driver_config: GroupedLiveDriverConfig,
-    ) -> GroupedLiveRuntime {
         let engine = EngineFactory::new(config)
             .unwrap()
             .build(EngineIdentity::new(7), NonZeroU32::new(dp_size).unwrap())
             .unwrap();
-        spawn_grouped_live_engine(engine, driver_config, None).unwrap()
+        spawn_grouped_live_engine(engine, GroupedLiveDriverConfig::default(), None).unwrap()
     }
 
     struct PromptLengthTiming;
@@ -789,8 +785,8 @@ mod tests {
         events.recv().await.expect("live actor must remain active")
     }
 
-    fn ten_ms_runtime(max_catch_up: Option<Duration>) -> GroupedLiveRuntime {
-        runtime_with_driver_config(
+    fn ten_ms_runtime() -> GroupedLiveRuntime {
+        runtime_with_config(
             1,
             EngineConfig {
                 num_gpu_blocks: 128,
@@ -802,10 +798,6 @@ mod tests {
                     decode_ms: 10.0,
                 },
                 ..EngineConfig::default()
-            },
-            GroupedLiveDriverConfig {
-                absolute_pass_max_catch_up: max_catch_up,
-                ..GroupedLiveDriverConfig::default()
             },
         )
     }
@@ -841,24 +833,34 @@ mod tests {
 
     #[test]
     fn absolute_pass_start_is_bounded_and_monotonic() {
-        let cap = Some(Duration::from_millis(5));
+        assert_eq!(ABSOLUTE_PASS_MAX_CATCH_UP, Duration::from_millis(5));
+        assert_eq!(select_pass_start(12.0, 0.0, Some(10.0)), 10.0);
+        assert_eq!(select_pass_start(30.0, 0.0, Some(10.0)), 25.0);
+        assert_eq!(select_pass_start(30.0, 28.0, Some(10.0)), 28.0);
+        assert_eq!(select_pass_start(100.0, 28.0, None), 100.0);
+        assert_eq!(select_pass_start(9.0, 0.0, Some(10.0)), 10.0);
+    }
 
+    #[test]
+    fn internal_work_uses_the_active_modeled_timeline() {
         assert_eq!(
-            GroupedLiveDriverConfig::default().absolute_pass_max_catch_up,
-            cap
+            select_internal_work_time(30.0, 10.0, 12.0, true),
+            Some(12.0)
         );
-        assert_eq!(select_pass_start(12.0, 0.0, Some(10.0), cap), 10.0);
-        assert_eq!(select_pass_start(30.0, 0.0, Some(10.0), cap), 25.0);
-        assert_eq!(select_pass_start(30.0, 28.0, Some(10.0), cap), 28.0);
-        assert_eq!(select_pass_start(100.0, 28.0, None, cap), 100.0);
-        assert_eq!(select_pass_start(9.0, 0.0, Some(10.0), cap), 10.0);
-        assert_eq!(select_pass_start(30.0, 0.0, Some(10.0), None), 30.0);
+        assert_eq!(
+            select_internal_work_time(30.0, 15.0, 12.0, true),
+            Some(15.0)
+        );
+        assert_eq!(
+            select_internal_work_time(30.0, 10.0, 12.0, false),
+            Some(30.0)
+        );
+        assert_eq!(select_internal_work_time(11.0, 10.0, 12.0, true), None);
     }
 
     #[tokio::test(start_paused = true)]
     async fn default_deadline_removes_finish_delay_without_skipping_finish() {
-        let mut runtime =
-            ten_ms_runtime(GroupedLiveDriverConfig::default().absolute_pass_max_catch_up);
+        let mut runtime = ten_ms_runtime();
         let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 201, 3).await;
 
         tokio::time::advance(Duration::from_millis(2)).await;
@@ -879,9 +881,8 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn boundary_command_time_floors_a_carried_deadline() {
-        let mut runtime =
-            ten_ms_runtime(GroupedLiveDriverConfig::default().absolute_pass_max_catch_up);
+    async fn boundary_command_keeps_a_carried_deadline() {
+        let mut runtime = ten_ms_runtime();
         let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 202, 3).await;
 
         tokio::time::advance(Duration::from_millis(2)).await;
@@ -896,7 +897,36 @@ mod tests {
         let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
             panic!("expected second pass start");
         };
-        assert_eq!(second.started_at_ms, first_end_ms + 2.0);
+        assert_eq!(second.started_at_ms, first_end_ms);
+
+        runtime.handle.shutdown();
+        runtime.actor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_control_keeps_a_carried_deadline() {
+        let mut runtime = ten_ms_runtime();
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 204, 3).await;
+
+        tokio::time::advance(Duration::from_millis(2)).await;
+        let queued = runtime
+            .handle
+            .enqueue_command(SchedulerCommand::new(
+                0,
+                Command::Submit(request(205, 4, 1)),
+            ))
+            .await
+            .unwrap();
+        boundary.finish().await.unwrap();
+        assert!(matches!(
+            next_event(&mut runtime.events).await,
+            GroupedLiveEvent::CommandApplied { .. }
+        ));
+        queued.response.await.unwrap().unwrap();
+        let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
+            panic!("expected second pass start");
+        };
+        assert_eq!(second.started_at_ms, first_end_ms);
 
         runtime.handle.shutdown();
         runtime.actor.await.unwrap().unwrap();
@@ -904,9 +934,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn default_catch_up_is_bounded_after_a_long_finish_delay() {
-        let mut runtime =
-            ten_ms_runtime(GroupedLiveDriverConfig::default().absolute_pass_max_catch_up);
-        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 204, 3).await;
+        let mut runtime = ten_ms_runtime();
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 206, 3).await;
 
         tokio::time::advance(Duration::from_millis(20)).await;
         boundary.finish().await.unwrap();
@@ -921,26 +950,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn explicit_legacy_schedule_keeps_finish_delay_in_the_next_pass_start() {
-        let mut runtime = ten_ms_runtime(None);
-        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 205, 3).await;
-
-        tokio::time::advance(Duration::from_millis(2)).await;
-        boundary.finish().await.unwrap();
-        let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
-            panic!("expected second pass start");
-        };
-        assert_eq!(second.started_at_ms, first_end_ms + 2.0);
-
-        runtime.handle.shutdown();
-        runtime.actor.await.unwrap().unwrap();
-    }
-
-    #[tokio::test(start_paused = true)]
     async fn default_deadline_restarts_from_wall_time_after_idle() {
-        let mut runtime =
-            ten_ms_runtime(GroupedLiveDriverConfig::default().absolute_pass_max_catch_up);
-        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 206, 1).await;
+        let mut runtime = ten_ms_runtime();
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 207, 1).await;
         boundary.finish().await.unwrap();
         tokio::task::yield_now().await;
 
@@ -949,7 +961,7 @@ mod tests {
             .handle
             .apply_command(SchedulerCommand::new(
                 0,
-                Command::Submit(request(207, 4, 1)),
+                Command::Submit(request(208, 4, 1)),
             ))
             .await
             .unwrap();
@@ -1000,7 +1012,6 @@ mod tests {
             cancel_token,
             clock_origin: Instant::now(),
             deferred_commands: VecDeque::new(),
-            absolute_pass_max_catch_up: None,
             engine_time_ms: 0.0,
             next_pass_deadline_ms: None,
         }
@@ -1269,7 +1280,6 @@ mod tests {
             cancel_token: CancellationToken::new(),
             clock_origin: Instant::now() - Duration::from_millis(200),
             deferred_commands: VecDeque::new(),
-            absolute_pass_max_catch_up: None,
             engine_time_ms: 0.0,
             next_pass_deadline_ms: None,
         };
