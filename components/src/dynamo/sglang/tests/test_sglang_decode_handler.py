@@ -808,6 +808,26 @@ def test_build_sampling_params_maps_non_json_guided_decoding(guided_decoding, ex
         assert sampling_params[key] == value
 
 
+def test_build_sampling_params_degenerate_choice_does_not_hide_later_constraint():
+    """A choice list that filters to nothing must not consume the constraint slot.
+
+    The nested cascade this replaced entered the choice branch on a truthy list,
+    filtered it empty, and then skipped grammar and structural_tag entirely.
+    """
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {
+                "guided_decoding": {"choice": [None], "grammar": 'root ::= "a"'}
+            },
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["ebnf"] == 'root ::= "a"'
+
+
 @pytest.mark.parametrize(
     "guided_decoding",
     [

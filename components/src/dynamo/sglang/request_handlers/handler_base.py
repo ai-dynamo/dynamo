@@ -1150,44 +1150,48 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
     def _get_guided_decoding_params(
         guided_decoding: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Extract guided decoding params (e.g. json_schema) for SGLang sampling_params."""
-        if isinstance(guided_decoding, dict):
-            params: Dict[str, Any] = {}
-            json_schema = guided_decoding.get("json")
-            if json_schema is not None:
-                reject_nonprogressing_guided_json_ref_cycles(json_schema)
-                params["json_schema"] = json.dumps(json_schema)
-            else:
-                regex = guided_decoding.get("regex")
-                if regex is not None:
-                    params["regex"] = regex
-                else:
-                    choice = guided_decoding.get("choice")
-                    if choice:
-                        choices = [str(value) for value in choice if value is not None]
-                        if choices:
-                            params["regex"] = (
-                                "("
-                                + "|".join(re.escape(value) for value in choices)
-                                + ")"
-                            )
-                    else:
-                        grammar = guided_decoding.get("grammar")
-                        if grammar is not None:
-                            params["ebnf"] = grammar
-                        else:
-                            structural_tag = guided_decoding.get("structural_tag")
-                            if structural_tag is not None:
-                                params["structural_tag"] = serialize_structural_tag(
-                                    structural_tag
-                                )
+        """Map one guided-decoding constraint to SGLang sampling_params.
 
-            # whitespace_pattern and backend are deliberately not forwarded.
-            # SGLang exposes both as server options
-            # (server_args.constrained_json_whitespace_pattern and the
-            # --grammar-backend flag); SamplingParams has no field for either, and
-            # it raises TypeError on an unknown key rather than ignoring it.
-            return params
+        Upstream validation admits at most one constraint, so the order below is a
+        formality rather than a precedence policy.
+
+        whitespace_pattern and backend are deliberately absent. SGLang exposes both
+        as server options (server_args.constrained_json_whitespace_pattern and the
+        --grammar-backend flag); SamplingParams has no field for either and raises
+        TypeError on an unknown keyword rather than ignoring it.
+        """
+        if not isinstance(guided_decoding, dict):
+            return {}
+
+        json_schema = guided_decoding.get("json")
+        if json_schema is not None:
+            reject_nonprogressing_guided_json_ref_cycles(json_schema)
+            return {"json_schema": json.dumps(json_schema)}
+
+        regex = guided_decoding.get("regex")
+        if regex is not None:
+            return {"regex": regex}
+
+        # SGLang has no choice constraint, so an alternation stands in for one.
+        # Its regex is a full-match FSM, so no anchors are needed.
+        choices = [
+            str(value)
+            for value in guided_decoding.get("choice") or []
+            if value is not None
+        ]
+        if choices:
+            return {
+                "regex": "(" + "|".join(re.escape(value) for value in choices) + ")"
+            }
+
+        grammar = guided_decoding.get("grammar")
+        if grammar is not None:
+            return {"ebnf": grammar}
+
+        structural_tag = guided_decoding.get("structural_tag")
+        if structural_tag is not None:
+            return {"structural_tag": serialize_structural_tag(structural_tag)}
+
         return {}
 
     @staticmethod
