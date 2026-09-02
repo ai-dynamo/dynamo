@@ -298,6 +298,19 @@ impl KvRouterConfig {
             );
         }
 
+        // No `..Default::default()` here on purpose. While one was present, the
+        // seven prefill-continue fields landed in the Rust config and this file
+        // still compiled with them unexposed — nothing flagged it, and they sat
+        // that way until a person noticed. Without it, the next field added
+        // upstream stops this build until someone writes it in and decides
+        // whether Python gets it.
+        //
+        // Not every field becomes a parameter: `policy_model_name`,
+        // `policy_config_cache` and `skip_initial_worker_wait` are process-local
+        // and stay off the Python surface deliberately.
+        //
+        // The `.pyi` stub is the leg nothing guards — it must agree by name,
+        // order and default value, and no test checks it.
         let inner = RsKvRouterConfig {
             overlap_score_credit,
             overlap_score_credit_decay,
