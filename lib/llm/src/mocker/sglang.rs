@@ -18,16 +18,9 @@ const PAYLOAD_KEY: &str = "sglang_tito";
 #[derive(Deserialize)]
 struct NativeControls {
     rid: Option<String>,
-    #[serde(default)]
-    return_logprob: bool,
-    #[serde(default)]
-    top_logprobs_num: i64,
-    #[serde(default = "no_prompt_logprobs")]
-    logprob_start_len: i64,
-}
-
-fn no_prompt_logprobs() -> i64 {
-    -1
+    return_logprob: Option<bool>,
+    top_logprobs_num: Option<i64>,
+    logprob_start_len: Option<i64>,
 }
 
 /// Response metadata for a native SGLang request, or `None` for every other
@@ -47,9 +40,9 @@ pub(super) fn response_metadata(
     let controls = NativeControls::deserialize(payload)
         .map_err(|error| invalid_argument(format!("invalid extra_args.{PAYLOAD_KEY}: {error}")))?;
     let logprobs = LogprobOptions::new(
-        controls.return_logprob,
-        controls.top_logprobs_num,
-        controls.logprob_start_len,
+        controls.return_logprob.unwrap_or(false),
+        controls.top_logprobs_num.unwrap_or(0),
+        controls.logprob_start_len.unwrap_or(-1),
     )
     .map_err(invalid_argument)?;
     let request_id = controls
@@ -187,6 +180,28 @@ mod tests {
         let meta = &token.engine_data.as_ref().unwrap()["sglang_response"]["meta_info"];
         assert_eq!(meta["output_token_logprobs"][0][1], 107);
         assert_eq!(meta["output_top_logprobs"][0].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn null_logprob_controls_use_sglang_defaults() {
+        let metadata = native_metadata(json!({
+            "return_logprob": null,
+            "top_logprobs_num": null,
+            "logprob_start_len": null,
+        }));
+        let response = metadata.response(&[107], 1, Some(json!({"type": "length"})));
+        assert!(response["meta_info"].get("output_token_logprobs").is_none());
+
+        let metadata = native_metadata(json!({
+            "return_logprob": true,
+            "top_logprobs_num": null,
+            "logprob_start_len": null,
+        }));
+        let response = metadata.response(&[107], 1, Some(json!({"type": "length"})));
+        let meta = &response["meta_info"];
+        assert!(meta.get("output_token_logprobs").is_some());
+        assert!(meta.get("output_top_logprobs").is_none());
+        assert!(meta.get("input_token_logprobs").is_none());
     }
 
     #[test]

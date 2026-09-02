@@ -166,11 +166,7 @@ fn selected_logprob(token_id: u32) -> f64 {
 }
 
 fn logprob_entry(token_id: u32) -> Value {
-    json!([
-        selected_logprob(token_id),
-        token_id,
-        format!("<token:{token_id}>")
-    ])
+    json!([selected_logprob(token_id), token_id, null])
 }
 
 fn top_logprob_entries(token_id: u32, count: usize) -> Value {
@@ -181,7 +177,7 @@ fn top_logprob_entries(token_id: u32, count: usize) -> Value {
                 json!([
                     selected_logprob(candidate) - (offset as f64 * 0.01),
                     candidate,
-                    format!("<token:{candidate}>")
+                    null
                 ])
             })
             .collect(),
@@ -216,20 +212,26 @@ mod tests {
         let selected = &response["meta_info"]["output_token_logprobs"][0];
         assert!((selected[0].as_f64().unwrap() + 0.3).abs() < f64::EPSILON);
         assert_eq!(selected[1], 42);
-        assert_eq!(selected[2], "<token:42>");
-        assert_eq!(
-            response["meta_info"]["output_top_logprobs"][0]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
+        assert!(selected[2].is_null());
+        let output_top_logprobs = response["meta_info"]["output_top_logprobs"][0]
+            .as_array()
+            .unwrap();
+        assert_eq!(output_top_logprobs.len(), 2);
+        assert!(output_top_logprobs.iter().all(|entry| entry[2].is_null()));
         assert_eq!(
             response["meta_info"]["input_token_logprobs"][0],
             json!([null, 11, null])
         );
         assert_eq!(response["meta_info"]["input_token_logprobs"][1][1], 12);
+        assert!(response["meta_info"]["input_token_logprobs"][1][2].is_null());
         assert_eq!(response["meta_info"]["input_top_logprobs"][0], Value::Null);
+        assert!(
+            response["meta_info"]["input_top_logprobs"][1]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| entry[2].is_null())
+        );
 
         // Prompt logprobs belong to the terminal response only.
         let incremental = metadata.response(&[42], 1, None);
