@@ -51,6 +51,8 @@ Pick your GPU architecture; every command on this page updates to match.
 
 ## Prerequisites
 
+- An image-pull secret when required by the cluster. Replace `your-image-pull-secret` in the deployment manifest with the local secret name.
+
 <div data-sku="b200">
 
 - A Kubernetes cluster with the Dynamo platform installed and 8x B200 GPUs available. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
@@ -90,7 +92,7 @@ kubectl create secret generic hf-token-secret \
 Edit `recipes/gemma4-31b/model-cache/model-cache.yaml` and set `storageClassName` to a ReadWriteMany storage class available on the target cluster.
 </Warning>
 
-If the cluster already provides a shared ReadWriteMany model-cache persistent volume claim (PVC), skip creating `model-cache` and replace `claimName: model-cache` in the download, deploy, and performance manifests with the existing claim name.
+If the cluster already provides a shared ReadWriteMany model-cache persistent volume claim (PVC), skip creating `shared-model-cache` and replace `claimName: shared-model-cache` in the download, deploy, and performance manifests with the existing claim name.
 
 ```bash
 kubectl apply -f recipes/gemma4-31b/model-cache/model-cache.yaml -n ${NAMESPACE}
@@ -211,6 +213,8 @@ All targets use `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15p
 
 The Job passes the trace to AIPerf with `--custom-dataset-type mooncake_trace`. All targets use `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl`; its SHA-256 is `f20d3f2bc83dd1306cda659fbe34e7c4d85ca5497626c98bc0b1c4d2211379d0`.
 
+### Run the benchmark
+
 Then run the Job:
 
 ```bash
@@ -218,7 +222,7 @@ kubectl delete job gemma4-31b-bench -n ${NAMESPACE} --ignore-not-found
 kubectl create -f recipes/gemma4-31b/perf/perf.yaml -n ${NAMESPACE}
 kubectl logs -n ${NAMESPACE} -l job-name=gemma4-31b-bench -f
 kubectl wait --for=condition=Complete job/gemma4-31b-bench \
-  -n ${NAMESPACE} --timeout=7200s
+  -n ${NAMESPACE} --timeout=10800s
 ```
 
 For trace staging, concurrency sweeps, and fetching artifacts, see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/perf/README.md).
@@ -263,7 +267,7 @@ The B200 and GB200 targets serve the model on TensorRT-LLM with KV-aware routing
 
 - MTP support has not been verified on H200 and is not enabled in the H200 deployment.
 - Audio is not supported by the model.
-- For streaming responses with multimodal inputs, the HTTP status code can be misreported. Newer Dynamo versions fix this by setting `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`, for example to `500`; the source README notes that this fix was not included in Dynamo v1.4.0.
+- For streaming responses with multimodal inputs, the HTTP status code can be misreported. Newer Dynamo versions fix this by setting `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`, for example to `500`.
 - Some video codecs, including AV1, are not included in the runtime image. Extend the image when those codecs are required.
 - `media_io_kwargs` applies only when frontend decoding is enabled. When frontend decoding is disabled, the frameworks do not receive it correctly.
 - Multimodal items support public URLs only.
@@ -273,7 +277,7 @@ The B200 and GB200 targets serve the model on TensorRT-LLM with KV-aware routing
 
 ## Source
 
-- Source READMEs: [Gemma 4 31B recipe](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/) and [benchmark workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/perf/README.md)
+- Source READMEs: [Gemma 4 31B recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/gemma4-31b/) and [benchmark workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/perf/README.md)
 - Deploy manifests: [B200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/trtllm/agg-b200-agentic/deploy.yaml), [GB200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/trtllm/agg-gb200-agentic/deploy.yaml), and [H200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/trtllm/agg-h200-agentic/deploy.yaml)
 - Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/perf/perf.yaml)
 - Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/model-cache/model-download.yaml)

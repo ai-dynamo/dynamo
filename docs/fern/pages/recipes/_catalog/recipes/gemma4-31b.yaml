@@ -18,7 +18,7 @@ targets:
     count: 8
   runtime:
     framework: trtllm
-    image: nvcr.io/nvstaging/nim/dynamo-trtllm:1.4.1-gemma4-patched@sha256:570dc3dd2356ab57fc0c16612e75e5f03ae98d1ca67ac824d432e4198e078c27
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-gemma-4-31b-dev.1
   topology: aggregated
   techniques:
   - tp1
@@ -45,7 +45,7 @@ targets:
     count: 8
   runtime:
     framework: trtllm
-    image: nvcr.io/nvstaging/nim/dynamo-trtllm:1.4.1-gemma4-patched@sha256:570dc3dd2356ab57fc0c16612e75e5f03ae98d1ca67ac824d432e4198e078c27
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-gemma-4-31b-dev.1
   topology: aggregated
   techniques:
   - tp1
@@ -64,7 +64,7 @@ targets:
     asset: recipes/gemma4-31b/perf/perf.yaml
   expected_performance:
     available: true
-    summary: 1,085.038 output tok/s/GPU, 48.67 user output tok/s P50, TTFT P50 378.79 ms at concurrency 192 over 8 TP1 workers
+    summary: 1,037.40 output tok/s/GPU, 49.98 user output tok/s P50, TTFT P50 2,893.94 ms at concurrency 192 over 8 TP1 workers
 - id: agg-h200-agentic
   recommended: true
   hardware:
@@ -72,7 +72,7 @@ targets:
     count: 8
   runtime:
     framework: trtllm
-    image: nvcr.io/nvstaging/avisva/dynamo-trtllm@sha256:046d1e1687ab61eb4c91eaee1e6a23f26dc8dda034d2d5cabad490d21d71cfc4
+    image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-gemma-4-31b-dev.1
   topology: aggregated
   techniques:
   - tp4
@@ -93,6 +93,4 @@ targets:
 related_benchmarks: []
 maintainer: null
 gaps:
-- the B200 deploy manifest says it has not been validated on a cluster, while the source README reports B200 performance results
-- the deployment manifests use staging runtime images
 - maintainer unknown

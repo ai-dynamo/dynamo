@@ -61,7 +61,7 @@ export NAMESPACE=your-namespace
 
 ### 1. Deploy Gemma 4
 
-Follow the deployment instructions in the [Gemma 4 recipe README](../README.md)
+Follow the deployment instructions in the [Gemma 4 31B documentation](../../../docs/fern/pages/recipes/model-recipes/gemma4-31b.mdx)
 and wait for the selected DGD to become ready. Use the DGD affinity value from
 the target table when configuring `perf.yaml`.
 
@@ -148,7 +148,7 @@ errored, and unfinished requests before reporting aggregate throughput.
 | --- | --- | --- |
 | `ENDPOINT` | `gemma4-31b-agg-b200-agentic-frontend:8000` | Change per DGD variant |
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | 3,541-request agentic trace |
-| `CONCURRENCY` | `192` | B200 starting point; sweep and record a value for GB200 or H200 |
+| `CONCURRENCY` | `192` | Use `192` for B200 and GB200, and `32` for H200 to reproduce the published results; sweep only for cluster-specific tuning |
 | `TARGET_MODEL` | `nvidia/Gemma-4-31B-IT-NVFP4` | Change per DGD variant; must match `--served-model-name` |
 
 ## Artifacts

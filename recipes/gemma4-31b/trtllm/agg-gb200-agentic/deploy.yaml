@@ -49,7 +49,7 @@ spec:
       podTemplate:
         spec:
           imagePullSecrets:
-            - name: nvcr-docker-config
+            - name: your-image-pull-secret
           nodeSelector:
             kubernetes.io/arch: arm64
           tolerations:
@@ -59,7 +59,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/dynamo-trtllm:1.4.1-gemma4-patched@sha256:570dc3dd2356ab57fc0c16612e75e5f03ae98d1ca67ac824d432e4198e078c27
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-gemma-4-31b-dev.1
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/bash
@@ -103,7 +103,7 @@ spec:
       podTemplate:
         spec:
           imagePullSecrets:
-            - name: nvcr-docker-config
+            - name: your-image-pull-secret
           affinity:
             nodeAffinity:
               requiredDuringSchedulingIgnoredDuringExecution:
@@ -124,7 +124,7 @@ spec:
               effect: NoSchedule
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/dynamo-trtllm:1.4.1-gemma4-patched@sha256:570dc3dd2356ab57fc0c16612e75e5f03ae98d1ca67ac824d432e4198e078c27
+              image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:1.5.0-gemma-4-31b-dev.1
               imagePullPolicy: IfNotPresent
               workingDir: /workspace/
               command:
