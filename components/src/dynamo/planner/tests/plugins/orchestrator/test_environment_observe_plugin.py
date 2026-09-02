@@ -3,7 +3,12 @@
 
 import pytest
 
-from dynamo.planner.core.types import FpmObservations, ScheduledTick, TrafficObservation
+from dynamo.planner.core.types import (
+    BatchSchedulingObservation,
+    FpmObservations,
+    ScheduledTick,
+    TrafficObservation,
+)
 from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.plugins.builtins.observe import (
     EnvironmentObservePlugin,
@@ -24,6 +29,8 @@ class _FakeEnvironment:
         self.full_traffic_calls = 0
         self.kv_hit_calls: list[float] = []
         self.fpm_calls = 0
+        self.batch_calls = 0
+        self.batch_error: Exception | None = None
 
     def deployment_state(self) -> DeploymentState:
         return self.state
@@ -45,6 +52,12 @@ class _FakeEnvironment:
     def collect_fpm(self):
         self.fpm_calls += 1
         return FpmObservations(prefill={}, decode={})
+
+    async def collect_batch_scheduling(self):
+        self.batch_calls += 1
+        if self.batch_error is not None:
+            raise self.batch_error
+        return BatchSchedulingObservation()
 
 
 async def test_environment_observe_plugin_collects_requested_observations():
@@ -106,3 +119,54 @@ async def test_environment_observe_plugin_collects_load_only_traffic_window():
     assert env.full_traffic_calls == 0
     assert env.kv_hit_calls == [5]
     assert env.fpm_calls == 0
+
+
+async def test_environment_observe_plugin_collects_batch_and_anchors_after_io():
+    env = _FakeEnvironment()
+    plugin = EnvironmentObservePlugin(
+        env,
+        require_prefill=False,
+        require_decode=True,
+        clock=lambda: 500.0,
+    )
+
+    response = await plugin.Observe(
+        ObserveStageRequest(
+            scheduled_tick=ScheduledTick(
+                at_s=123,
+                need_batch_scheduling=True,
+            ),
+            now_s=456,
+        )
+    )
+
+    assert response.tick_input.now_s == 500.0
+    assert response.tick_input.batch == BatchSchedulingObservation()
+    assert env.batch_calls == 1
+
+
+async def test_environment_observe_plugin_batch_failure_is_fail_closed():
+    env = _FakeEnvironment()
+    env.batch_error = RuntimeError("telemetry unavailable")
+    plugin = EnvironmentObservePlugin(
+        env,
+        require_prefill=False,
+        require_decode=True,
+        clock=lambda: 500.0,
+    )
+
+    response = await plugin.Observe(
+        ObserveStageRequest(
+            scheduled_tick=ScheduledTick(
+                at_s=123,
+                need_worker_states=True,
+                need_batch_scheduling=True,
+            ),
+            now_s=456,
+        )
+    )
+
+    assert response.tick_input.now_s == 500.0
+    assert response.tick_input.batch is None
+    assert response.tick_input.worker_counts is not None
+    assert env.batch_calls == 1
