@@ -220,6 +220,17 @@ snapshot:
   - 'deploy/operator/internal/checkpoint/**'
   - 'deploy/operator/internal/controller/*checkpoint*'
   - 'deploy/operator/internal/controller/*snapshot*'
+  - 'deploy/operator/internal/controller/dgd_component_workloads_reconciler.go'
+  - 'deploy/operator/internal/controller/dynamographdeployment_*'
+  - 'deploy/operator/internal/controller/dynamocomponentdeployment_*'
+  - 'deploy/operator/internal/controller/gms_pod_replacement_controller*'
+  - 'deploy/operator/internal/webhook/mutation/pod_checkpoint_restore_handler*'
+  - 'deploy/operator/internal/podcache/**'
+  - 'deploy/operator/internal/gms/**'
+  - 'deploy/operator/internal/dynamo/graph.go'
+  - 'deploy/operator/internal/dynamo/hash.go'
+  - 'deploy/operator/internal/dynamo/component_worker.go'
+  - 'deploy/operator/internal/dynamo/failover.go'
   - 'deploy/operator/api/**'
   - 'deploy/operator/config/crd/**'
   - 'deploy/operator/config/rbac/**'
@@ -235,18 +246,22 @@ snapshot:
   - 'deploy/helm/charts/platform/Chart.yaml'
   - 'deploy/helm/charts/platform/values.yaml'
 
-# Framework-local snapshot lifecycle files, plus TRT-LLM's unit test. These gate
-# that framework's checkpoint deploy jobs (and shared Snapshot/operator
-# deps) without forcing the other backends' checkpoint suites.
+# Backend-specific snapshot runtime and Pod-rendering files. These gate that
+# backend's checkpoint deploy jobs (and shared Snapshot/operator dependencies)
+# without forcing the other backends' checkpoint suites.
 snapshot_vllm:
   - 'components/src/dynamo/vllm/snapshot.py'
+  - 'components/src/dynamo/vllm/handlers.py'
+  - 'deploy/operator/internal/dynamo/backend_vllm.go'
 
 snapshot_sglang:
   - 'components/src/dynamo/sglang/snapshot.py'
+  - 'deploy/operator/internal/dynamo/backend_sglang.go'
 
 snapshot_trtllm:
   - 'components/src/dynamo/trtllm/snapshot.py'
   - 'components/src/dynamo/trtllm/tests/test_trtllm_snapshot.py'
+  - 'deploy/operator/internal/dynamo/backend_trtllm.go'
 
 power_agent:
   - *ci

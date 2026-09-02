@@ -1786,6 +1786,13 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-worker",
 				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: v1beta1.GroupVersion.String(),
+					Kind:       v1beta1.DynamoGraphDeploymentGVK.Kind,
+					Name:       "test-dgd",
+					UID:        "test-dgd-uid",
+					Controller: ptr.To(true),
+				}},
 			},
 			Spec: v1alpha1.DynamoComponentDeploymentSpec{
 				BackendFramework: string(dynamo.BackendFrameworkVLLM),
@@ -1830,8 +1837,8 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		}
 	}
 
-	t.Run("direct checkpointRef resolves only a native PodSnapshot", func(t *testing.T) {
-		t.Log("Given a direct DCD reference and a Ready compatible PodSnapshot")
+	t.Run("DGD-managed checkpointRef resolves only a native PodSnapshot", func(t *testing.T) {
+		t.Log("Given a DGD-managed DCD reference and a Ready compatible PodSnapshot")
 		dcd := makeDCD("worker-snapshot")
 		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
 		r := makeReconciler(dcd, snapshot)

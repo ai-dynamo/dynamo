@@ -29,7 +29,14 @@ func TestResolvePodSnapshotForService(t *testing.T) {
 		config := nativeTestCheckpointConfig(snapshot.Name)
 
 		t.Log("When the explicit reference is resolved for the same worker generation")
-		info, err := ResolvePodSnapshotForService(context.Background(), reader, snapshot.Namespace, config, ptr.To("worker-v1"))
+		info, err := ResolvePodSnapshotForService(
+			context.Background(),
+			reader,
+			snapshot.Namespace,
+			config,
+			ptr.To("worker-v1"),
+			PodSnapshotUseExplicitReference,
+		)
 
 		t.Log("Then the resolver returns the bound native artifact identity and source container")
 		require.NoError(t, err)
@@ -59,6 +66,7 @@ func TestResolvePodSnapshotForService(t *testing.T) {
 			snapshot.Namespace,
 			nativeTestCheckpointConfig(snapshot.Name),
 			ptr.To("worker-v1"),
+			PodSnapshotUseExplicitReference,
 		)
 
 		t.Log("Then reconciliation can retain the UID while keeping the workload gated")
@@ -93,6 +101,7 @@ func TestResolvePodSnapshotForService(t *testing.T) {
 					snapshot.Namespace,
 					nativeTestCheckpointConfig(snapshot.Name),
 					ptr.To("worker-v1"),
+					PodSnapshotUseExplicitReference,
 				)
 
 				t.Log("Then Dynamo reconstructs only the compatibility topology for later client overlay")
@@ -117,6 +126,7 @@ func TestResolvePodSnapshotForService(t *testing.T) {
 			snapshot.Namespace,
 			nativeTestCheckpointConfig(snapshot.Name),
 			nil,
+			PodSnapshotUseExplicitReference,
 		)
 
 		t.Log("Then the remaining native compatibility contract is still enforced")
@@ -138,6 +148,7 @@ func TestResolvePodSnapshotForService(t *testing.T) {
 			snapshot.Namespace,
 			nativeTestCheckpointConfig(snapshot.Name),
 			ptr.To(""),
+			PodSnapshotUseExplicitReference,
 		)
 
 		t.Log("Then resolution fails closed until the worker generation is known")
@@ -219,12 +230,49 @@ func TestResolvePodSnapshotForServiceRejectsIncompatibleReferences(t *testing.T)
 				snapshot.Namespace,
 				nativeTestCheckpointConfig(snapshot.Name),
 				ptr.To("worker-v1"),
+				PodSnapshotUseExplicitReference,
 			)
 
 			t.Log("Then the resolver fails closed with the violated invariant")
 			require.ErrorContains(t, err, test.wantErr)
 		})
 	}
+}
+
+func TestResolvePodSnapshotForServiceRetainedAutomaticCheckpoint(t *testing.T) {
+	t.Log("Given a compatible automatic PodSnapshot configured for retention")
+	snapshot := nativeTestPodSnapshot()
+	snapshot.Annotations[consts.CheckpointAutoAnnotation] = consts.KubeLabelValueTrue
+	snapshot.Annotations[consts.CheckpointDeletionPolicyAnnotation] = string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain)
+	reader := fake.NewClientBuilder().WithScheme(nativeTestScheme(t)).WithObjects(snapshot).Build()
+	config := nativeTestCheckpointConfig(snapshot.Name)
+
+	t.Run("explicit checkpointRef is rejected", func(t *testing.T) {
+		_, err := ResolvePodSnapshotForService(
+			context.Background(),
+			reader,
+			snapshot.Namespace,
+			config,
+			ptr.To("worker-v1"),
+			PodSnapshotUseExplicitReference,
+		)
+
+		require.ErrorContains(t, err, "retained automatic checkpoint")
+	})
+
+	t.Run("owning DGD managed restore remains valid", func(t *testing.T) {
+		info, err := ResolvePodSnapshotForService(
+			context.Background(),
+			reader,
+			snapshot.Namespace,
+			config,
+			ptr.To("worker-v1"),
+			PodSnapshotUseManagedRestore,
+		)
+
+		require.NoError(t, err)
+		assert.True(t, info.Ready)
+	})
 }
 
 func nativeTestPodSnapshot() *snapshotv1alpha1.PodSnapshot {

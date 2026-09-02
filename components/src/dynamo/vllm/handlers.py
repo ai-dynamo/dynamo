@@ -412,14 +412,20 @@ class VllmEnginePauseController:
 
         if self._is_paused:
             if self._prepare_for_process_checkpoint:
+                logger.info("Starting vLLM communicator restore")
                 await self._engine_client.checkpoint_restore()
+                logger.info("Completed vLLM communicator restore")
+            logger.info("Starting vLLM engine wake-up")
             if tags is None:
                 await self._engine_client.wake_up()
             else:
                 await self._engine_client.wake_up(tags)
+            logger.info("Completed vLLM engine wake-up")
         if self._generation_paused:
+            logger.info("Starting vLLM generation resume")
             await self._engine_client.resume_generation()
             self._generation_paused = False
+            logger.info("Completed vLLM generation resume")
         return True
 
     def mark_resumed(self) -> None:

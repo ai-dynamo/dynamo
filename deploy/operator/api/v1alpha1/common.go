@@ -390,6 +390,9 @@ type ServiceCheckpointConfig struct {
 	// CheckpointRef references an existing PodSnapshot in the same namespace by
 	// metadata.name. If specified, this service's Identity is ignored and the
 	// referenced PodSnapshot is used directly.
+	// Standalone worker-class (worker, prefill, or decode)
+	// DynamoComponentDeployment resources cannot set this field; configure
+	// CheckpointRef on the owning DynamoGraphDeployment service.
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 

@@ -683,6 +683,9 @@ spec:
                         CheckpointRef references an existing PodSnapshot in the same namespace by
                         metadata.name. If specified, this service's Identity is ignored and the
                         referenced PodSnapshot is used directly.
+                        Standalone worker-class (worker, prefill, or decode)
+                        DynamoComponentDeployment resources cannot set this field; configure
+                        CheckpointRef on the owning DynamoGraphDeployment service.
                       type: string
                     deletionPolicy:
                       default: Delete
@@ -11993,6 +11996,9 @@ spec:
                             metadata.name.
                             When set, this component's `identity` is ignored and the referenced
                             PodSnapshot is used directly.
+                            Standalone worker-class (worker, prefill, or decode)
+                            DynamoComponentDeployment resources cannot set this field; configure
+                            checkpointRef on the owning DynamoGraphDeployment component.
                           type: string
                         deletionPolicy:
                           default: Delete

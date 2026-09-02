@@ -296,6 +296,7 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 			dcd.Namespace,
 			alphaCheckpointConfig,
 			expectedWorkerHash,
+			checkpoint.PodSnapshotUseExplicitReference,
 		)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")

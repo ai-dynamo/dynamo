@@ -106,7 +106,8 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		}
 
 		logger.Info("Reconciling checkpoint for component", "component", componentName)
-		hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
+		checkpointName := strings.TrimSpace(ptr.Deref(checkpointConfig.CheckpointRef, ""))
+		hasCheckpointRef := checkpointName != ""
 
 		alphaCheckpointConfig := dynamo.ToAlphaCheckpointConfig(checkpointConfig)
 		startupPolicy := alphaCheckpointConfig.StartupPolicy
@@ -133,7 +134,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			logger.Info("Waiting for active worker hash before checkpoint reconciliation", "component", componentName)
 			info = &checkpoint.CheckpointInfo{
 				Enabled:        true,
-				CheckpointName: strings.TrimSpace(ptr.Deref(checkpointConfig.CheckpointRef, "")),
+				CheckpointName: checkpointName,
 				StartupPolicy:  startupPolicy,
 			}
 			if hasCheckpointRef {
@@ -160,7 +161,19 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 				dgd.Namespace,
 				alphaCheckpointConfig,
 				expectedWorkerHash,
+				checkpoint.PodSnapshotUseExplicitReference,
 			)
+			if apierrors.IsNotFound(err) {
+				// A missing explicit reference is a resolvable wait state: keep
+				// the workload gated until the referenced PodSnapshot appears.
+				logger.Info("Waiting for referenced PodSnapshot", "component", componentName, "podSnapshot", checkpointName)
+				info = &checkpoint.CheckpointInfo{
+					Enabled:        true,
+					CheckpointName: checkpointName,
+					StartupPolicy:  nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				}
+				err = nil
+			}
 		}
 		if err != nil {
 			logger.Error(err, "Failed to resolve checkpoint for component", "component", componentName)
@@ -386,6 +399,7 @@ func buildAutomaticSnapshotJob(
 	}
 	snapshotAnnotations := map[string]string{
 		consts.CheckpointAutoAnnotation:               consts.KubeLabelValueTrue,
+		consts.CheckpointDeletionPolicyAnnotation:     string(deletionPolicy),
 		consts.CheckpointOwnerUIDAnnotation:           string(dgd.UID),
 		consts.SnapshotCompatibilityVersionAnnotation: consts.SnapshotCompatibilityVersion,
 		consts.SnapshotWorkerHashAnnotation:           workerHash,
@@ -580,6 +594,7 @@ func (r *dgdCheckpointsReconciler) resolveAutomaticSnapshotJob(
 		snapshotJob.Namespace,
 		refConfig,
 		expectedWorkerHash,
+		checkpoint.PodSnapshotUseManagedRestore,
 	)
 	if apierrors.IsNotFound(err) {
 		return info, nil

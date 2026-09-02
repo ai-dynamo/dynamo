@@ -18,8 +18,8 @@ SNAPSHOT_CONTROL_DIR = "/snapshot-control"
 SNAPSHOT_RESTORE_CONTEXT_FILE = "restore-context.json"
 SNAPSHOT_RESTORE_STANDBY_ENV = "SNAPSHOT_RESTORE_STANDBY"
 
-# Must match snapshotprotocol.{SnapshotCompleteFile,RestoreCompleteFile,
-# ReadyForSnapshotFile}.
+# Must match the public file-name constants in
+# github.com/ai-dynamo/snapshot/api/podcontract.
 SNAPSHOT_COMPLETE_FILE = "snapshot-complete"
 RESTORE_COMPLETE_FILE = "restore-complete"
 READY_FOR_SNAPSHOT_FILE = "ready-for-snapshot"

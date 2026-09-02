@@ -149,6 +149,7 @@ func (h *PodCheckpointRestoreMutator) buildNativeRestorePod(
 		podNamespace,
 		config,
 		expectedWorkerHash,
+		checkpoint.PodSnapshotUseManagedRestore,
 	)
 	if err != nil {
 		return nil, err

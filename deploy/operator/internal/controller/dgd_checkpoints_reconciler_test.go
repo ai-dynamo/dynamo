@@ -605,9 +605,20 @@ func TestDGDCheckpointsReconciler_ExplicitRestoreWaitsForActiveWorkerHash(t *tes
 	assert.False(t, info.Ready)
 	assert.Equal(t, v1alpha1.CheckpointStartupPolicyWaitForCheckpoint, info.StartupPolicy)
 
-	t.Log("Record the active hash and create its compatible referenced PodSnapshot")
+	t.Log("Record the active hash while the referenced PodSnapshot is still missing")
 	workerHash := betaDGDWorkersSpecHash(t, dgd)
 	dgd.Annotations = map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: workerHash}
+
+	result, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	require.NoError(t, err)
+	info = result.Infos["worker"]
+	require.NotNil(t, info)
+	assert.Equal(t, ref, info.CheckpointName)
+	assert.False(t, info.Exists)
+	assert.False(t, info.Ready)
+	assert.Equal(t, v1alpha1.CheckpointStartupPolicyWaitForCheckpoint, info.StartupPolicy)
+
+	t.Log("Create the compatible referenced PodSnapshot")
 	referenced := dgdTestPodSnapshot(ref, workerHash, true)
 	require.NoError(t, reconciler.Create(ctx, referenced))
 

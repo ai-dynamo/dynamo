@@ -306,6 +306,81 @@ const testCases = [
     desc: 'Operator RBAC changes trigger snapshot contract tests'
   },
   {
+    file: 'deploy/operator/internal/controller/dgd_component_workloads_reconciler.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'DGD workload reconciliation changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/controller/dynamographdeployment_controller.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'DGD controller changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/controller/dynamocomponentdeployment_renderer.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'DCD rendering changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/controller/gms_pod_replacement_controller.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'GMS replacement changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/webhook/mutation/pod_checkpoint_restore_handler.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Restore admission changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/podcache/transform.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Pod cache projection changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/gms/gms.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'GMS compatibility changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/hash.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Worker compatibility hash changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/graph.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Graph workload shaping changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/component_worker.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Worker Pod shaping changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/failover.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Failover Pod shaping changes trigger snapshot integration'
+  },
+  {
+    file: 'components/src/dynamo/vllm/handlers.py',
+    expect: { snapshot: false, snapshot_vllm: true, vllm: true },
+    desc: 'vLLM pause and resume changes trigger vLLM snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/backend_vllm.go',
+    expect: { snapshot: false, snapshot_vllm: true, operator: true },
+    desc: 'vLLM Pod rendering changes trigger vLLM snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/backend_sglang.go',
+    expect: { snapshot: false, snapshot_sglang: true, operator: true },
+    desc: 'SGLang Pod rendering changes trigger SGLang snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/dynamo/backend_trtllm.go',
+    expect: { snapshot: false, snapshot_trtllm: true, operator: true },
+    desc: 'TensorRT-LLM Pod rendering changes trigger TensorRT-LLM snapshot integration'
+  },
+  {
     file: 'deploy/helm/charts/platform/components/operator/templates/deployment.yaml',
     expect: { snapshot: true, deploy: true, operator: true },
     desc: 'Operator Helm changes trigger snapshot integration'

@@ -238,7 +238,7 @@ The upgrade does not delete the legacy `DynamoCheckpoint` CRD, instances, `PodSn
     <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>Delete</Badge> <Badge intent="note" minimal>Retain</Badge></span>
   </ParamField>
   <ParamField path="checkpointRef" type="string">
-    References an existing `PodSnapshot` in the same namespace by `metadata.name`. When set, this component's `identity` is ignored and the referenced PodSnapshot is used directly.
+    References an existing `PodSnapshot` in the same namespace by `metadata.name`. When set, this component's `identity` is ignored and the referenced PodSnapshot is used directly. Standalone worker-class (`worker`, `prefill`, or `decode`) `DynamoComponentDeployment` resources cannot set this field; configure `checkpointRef` on the component in the owning `DynamoGraphDeployment`.
   </ParamField>
   <ParamField path="targetContainerName" type="string" default="main">
     The workload container to snapshot and restore. Must match `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, 1–63 characters.

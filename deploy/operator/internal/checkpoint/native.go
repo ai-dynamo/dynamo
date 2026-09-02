@@ -27,8 +27,20 @@ type ResolvedPodSnapshot struct {
 	GMSMode              string
 }
 
-// ResolvePodSnapshotForService resolves an explicit checkpointRef as a native
-// PodSnapshot and validates the Dynamo compatibility contract. A compatible
+// PodSnapshotUse identifies whether a PodSnapshot is being resolved from a
+// user-facing checkpointRef or from a restore already managed by the operator.
+type PodSnapshotUse uint8
+
+const (
+	// PodSnapshotUseExplicitReference applies the public checkpointRef contract.
+	PodSnapshotUseExplicitReference PodSnapshotUse = iota
+	// PodSnapshotUseManagedRestore allows the owning DGD to continue using its
+	// automatic checkpoint, including one configured for retention on deletion.
+	PodSnapshotUseManagedRestore
+)
+
+// ResolvePodSnapshotForService resolves a native PodSnapshot and validates the
+// Dynamo compatibility contract for the requested use. A compatible
 // but not-yet-ready snapshot is returned with Ready=false so callers can gate
 // workloads while retaining an admission-time reference to the same object.
 // A nil config means checkpointing is disabled. Reader must be non-nil when
@@ -40,6 +52,7 @@ func ResolvePodSnapshotForService(
 	namespace string,
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
 	expectedWorkerHash *string,
+	use PodSnapshotUse,
 ) (*CheckpointInfo, error) {
 	if config == nil || !config.Enabled {
 		return &CheckpointInfo{Enabled: false}, nil
@@ -77,6 +90,20 @@ func ResolvePodSnapshotForService(
 	// Compatibility metadata belongs to Dynamo and is deliberately validated
 	// independently of Snapshot's generic capture and restore protocol.
 	annotations := snapshot.GetAnnotations()
+	switch use {
+	case PodSnapshotUseExplicitReference:
+		if annotations[consts.CheckpointAutoAnnotation] == consts.KubeLabelValueTrue &&
+			annotations[consts.CheckpointDeletionPolicyAnnotation] == string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain) {
+			return nil, fmt.Errorf(
+				"referenced PodSnapshot %s/%s is a retained automatic checkpoint and cannot be used as checkpointRef",
+				namespace,
+				snapshotName,
+			)
+		}
+	case PodSnapshotUseManagedRestore:
+	default:
+		return nil, fmt.Errorf("unsupported PodSnapshot use %d", use)
+	}
 	version := annotations[consts.SnapshotCompatibilityVersionAnnotation]
 	if version != consts.SnapshotCompatibilityVersion {
 		return nil, fmt.Errorf(

@@ -431,6 +431,9 @@ type ComponentCheckpointConfig struct {
 	// metadata.name.
 	// When set, this component's `identity` is ignored and the referenced
 	// PodSnapshot is used directly.
+	// Standalone worker-class (worker, prefill, or decode)
+	// DynamoComponentDeployment resources cannot set this field; configure
+	// checkpointRef on the owning DynamoGraphDeployment component.
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
