@@ -133,27 +133,6 @@ pub enum LifecycleStage {
 }
 
 impl LifecycleStage {
-    /// Stable OpenTelemetry span name for this stage.
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::RequestLifecycle => "request.lifecycle",
-            Self::RequestPreprocessing => "request.preprocessing",
-            Self::RouterQueue => "router.queue",
-            Self::RouterSelection => "router.selection",
-            Self::WorkerAdmission => "worker.admission",
-            Self::RequestDispatch => "request.dispatch",
-            Self::KvTransfer => "kv.transfer",
-            Self::EngineQueue => "engine.queue",
-            Self::WorkerOperation => "worker.operation",
-            Self::WorkerOperationPrefill => "worker.operation.prefill",
-            Self::WorkerOperationDecode => "worker.operation.decode",
-            Self::ResponseStreaming => "response.streaming",
-            Self::ResponseStreamingPrefill => "response.streaming.prefill",
-            Self::ResponseStreamingDecode => "response.streaming.decode",
-            Self::ResponseStreamingWorker => "response.streaming.worker",
-        }
-    }
-
     const fn component(self) -> &'static str {
         match self {
             Self::RequestLifecycle | Self::RequestPreprocessing | Self::ResponseStreaming => {
@@ -239,7 +218,7 @@ impl LifecycleStage {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LifecycleTrace {
     enabled: bool,
-    identity: LifecycleIdentity,
+    identity: Option<LifecycleIdentity>,
     session: Option<(String, &'static str)>,
 }
 
@@ -251,16 +230,29 @@ impl LifecycleTrace {
 
     /// Construct capture state explicitly, primarily for integrations and tests.
     pub fn new(enabled: bool) -> Self {
-        Self {
-            enabled,
-            identity: LifecycleIdentity::new(None, LifecycleOperationRole::Worker),
-            session: None,
+        if enabled {
+            Self::enabled(
+                LifecycleIdentity::new(None, LifecycleOperationRole::Worker),
+                None,
+            )
+        } else {
+            Self::disabled()
         }
     }
 
     /// Construct worker capture state using the request ID propagated at ingress.
     pub fn from_request_id(request_id: impl Into<String>) -> Self {
-        Self::with_role(request_id, worker_operation_role())
+        if !lifecycle_tracing_enabled() {
+            return Self::disabled();
+        }
+        let mode = worker_disaggregation_mode();
+        Self::enabled(
+            LifecycleIdentity::new(
+                Some(request_id.into()),
+                worker_operation_role(mode.as_deref()),
+            ),
+            None,
+        )
     }
 
     pub fn router_request(request_id: impl Into<String>) -> Self {
@@ -269,34 +261,45 @@ impl LifecycleTrace {
 
     /// Construct frontend capture state and root-only session identity.
     pub fn frontend_request(request_id: impl Into<String>, session_id: Option<String>) -> Self {
+        if !lifecycle_tracing_enabled() {
+            return Self::disabled();
+        }
         let request_id = request_id.into();
         let session = match session_id.filter(|id| !id.is_empty()) {
             Some(id) => (id, "agent_context"),
             None => (request_id.clone(), "request_id_fallback"),
         };
-        Self {
-            enabled: lifecycle_tracing_enabled(),
-            identity: LifecycleIdentity::new(Some(request_id), LifecycleOperationRole::Frontend),
-            session: Some(session),
-        }
+        Self::enabled(
+            LifecycleIdentity::new(Some(request_id), LifecycleOperationRole::Frontend),
+            Some(session),
+        )
     }
 
     /// Construct a frontend trace before request parsing has made a session ID available.
     pub fn frontend_request_without_session(request_id: impl Into<String>) -> Self {
-        Self {
-            enabled: lifecycle_tracing_enabled(),
-            identity: LifecycleIdentity::new(
-                Some(request_id.into()),
-                LifecycleOperationRole::Frontend,
-            ),
-            session: None,
-        }
+        Self::with_role(request_id, LifecycleOperationRole::Frontend)
     }
 
     fn with_role(request_id: impl Into<String>, role: LifecycleOperationRole) -> Self {
+        if lifecycle_tracing_enabled() {
+            Self::enabled(LifecycleIdentity::new(Some(request_id.into()), role), None)
+        } else {
+            Self::disabled()
+        }
+    }
+
+    fn enabled(identity: LifecycleIdentity, session: Option<(String, &'static str)>) -> Self {
         Self {
-            enabled: lifecycle_tracing_enabled(),
-            identity: LifecycleIdentity::new(Some(request_id.into()), role),
+            enabled: true,
+            identity: Some(identity),
+            session,
+        }
+    }
+
+    const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            identity: None,
             session: None,
         }
     }
@@ -327,8 +330,8 @@ impl LifecycleTrace {
     /// Start a duration-only lifecycle span.
     #[must_use]
     pub fn start(&self, stage: LifecycleStage) -> Span {
-        if self.enabled {
-            stage.span(&self.identity)
+        if let Some(identity) = self.identity.as_ref() {
+            stage.span(identity)
         } else {
             Span::none()
         }
@@ -338,7 +341,11 @@ impl LifecycleTrace {
     /// disaggregation role encoded in the timing span name.
     #[must_use]
     pub fn start_worker_response_streaming(&self) -> Span {
-        self.start(worker_response_streaming_stage())
+        if !self.enabled {
+            return Span::none();
+        }
+        let mode = worker_disaggregation_mode();
+        self.start(worker_response_streaming_stage(mode.as_deref()))
     }
 
     /// Start the worker operation boundary for a disaggregated role.
@@ -347,11 +354,11 @@ impl LifecycleTrace {
     /// includes any backend-internal queueing or decode-side KV wait.
     #[must_use]
     pub fn start_worker_operation(&self) -> Span {
-        match worker_disaggregation_mode().as_deref() {
-            Some("prefill") => self.start(LifecycleStage::WorkerOperationPrefill),
-            Some("decode") => self.start(LifecycleStage::WorkerOperationDecode),
-            _ => self.start(LifecycleStage::WorkerOperation),
+        if !self.enabled {
+            return Span::none();
         }
+        let mode = worker_disaggregation_mode();
+        self.start(worker_operation_stage(mode.as_deref()))
     }
 }
 
@@ -458,16 +465,24 @@ fn worker_disaggregation_mode() -> Option<String> {
         .map(|mode| mode.trim().to_ascii_lowercase())
 }
 
-fn worker_operation_role() -> LifecycleOperationRole {
-    match worker_disaggregation_mode().as_deref() {
+fn worker_operation_role(mode: Option<&str>) -> LifecycleOperationRole {
+    match mode {
         Some("prefill") => LifecycleOperationRole::Prefill,
         Some("decode") => LifecycleOperationRole::Decode,
         _ => LifecycleOperationRole::Worker,
     }
 }
 
-fn worker_response_streaming_stage() -> LifecycleStage {
-    match worker_disaggregation_mode().as_deref() {
+fn worker_operation_stage(mode: Option<&str>) -> LifecycleStage {
+    match mode {
+        Some("prefill") => LifecycleStage::WorkerOperationPrefill,
+        Some("decode") => LifecycleStage::WorkerOperationDecode,
+        _ => LifecycleStage::WorkerOperation,
+    }
+}
+
+fn worker_response_streaming_stage(mode: Option<&str>) -> LifecycleStage {
+    match mode {
         Some("prefill") => LifecycleStage::ResponseStreamingPrefill,
         Some("decode") => LifecycleStage::ResponseStreamingDecode,
         _ => LifecycleStage::ResponseStreamingWorker,
@@ -531,36 +546,37 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(captured.clone()));
         let _guard = tracing::subscriber::set_default(subscriber);
-        let _span = LifecycleTrace::new(false).start(LifecycleStage::RouterQueue);
+        let trace = LifecycleTrace::new(false);
+        assert!(trace.identity.is_none());
+        let _span = trace.start(LifecycleStage::RouterQueue);
 
         assert!(captured.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn response_streaming_stage_names_distinguish_owners() {
+    fn worker_stage_selection_emits_expected_spans() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(captured.clone()));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let trace = LifecycleTrace::new(true);
+
+        for mode in [None, Some("prefill"), Some("decode")] {
+            let _operation = trace.start(worker_operation_stage(mode));
+            let _streaming = trace.start(worker_response_streaming_stage(mode));
+        }
+
+        let captured = captured.lock().unwrap();
+        assert!(captured.iter().all(|span| span.target == LIFECYCLE_TARGET));
         assert_eq!(
-            LifecycleStage::WorkerOperationPrefill.name(),
-            "worker.operation.prefill"
-        );
-        assert_eq!(
-            LifecycleStage::WorkerOperationDecode.name(),
-            "worker.operation.decode"
-        );
-        assert_eq!(
-            LifecycleStage::ResponseStreaming.name(),
-            "response.streaming"
-        );
-        assert_eq!(
-            LifecycleStage::ResponseStreamingPrefill.name(),
-            "response.streaming.prefill"
-        );
-        assert_eq!(
-            LifecycleStage::ResponseStreamingDecode.name(),
-            "response.streaming.decode"
-        );
-        assert_eq!(
-            LifecycleStage::ResponseStreamingWorker.name(),
-            "response.streaming.worker"
+            captured.iter().map(|span| span.name).collect::<Vec<_>>(),
+            [
+                "worker.operation",
+                "response.streaming.worker",
+                "worker.operation.prefill",
+                "response.streaming.prefill",
+                "worker.operation.decode",
+                "response.streaming.decode",
+            ]
         );
     }
 }
