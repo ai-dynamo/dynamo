@@ -1260,13 +1260,9 @@ mod tests {
         controller.apply_build_result(result);
     }
 
-    /// Run the controller's build side to a standstill.
-    ///
-    /// Re-electing away from a building cohort cancels that build, so the group
-    /// can have a cancelled build and its replacement outstanding at the same
-    /// time and the caller cannot tell in advance how many joins one commit
-    /// takes. Joining every outstanding build and restarting queued ones after
-    /// each join leaves the same state whichever order the two complete in.
+    /// Run the controller's build side to a standstill. An election change can
+    /// leave a cancelled build and its replacement outstanding together, so
+    /// join every build and restart queued work after each join.
     async fn drain_builds(host: &FakeHost, controller: &mut ModelDiscoveryController<FakeHost>) {
         while !controller.builds.is_empty() {
             host.release.add_permits(1);
@@ -1420,8 +1416,6 @@ mod tests {
 
     #[tokio::test]
     async fn simultaneous_mixed_checksums_elect_one_cohort_and_register_the_model() {
-        // Both workers of one worker set register at once with different card
-        // checksums: the mocker's race for one system status server port.
         let self_hosted = instance(1, "self-hosted-spec");
         let fallback = instance(2, "fallback-spec");
         let (host, mut controller, _starts) =
