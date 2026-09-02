@@ -11,7 +11,7 @@ import tempfile
 import warnings
 from argparse import Namespace
 from pathlib import Path
-from typing import Any, Dict, Generator, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 import yaml
 from sglang.srt.server_args import ServerArgs
@@ -39,6 +39,7 @@ from dynamo.sglang._compat import (
     resolved_server_args,
 )
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
+from dynamo.sglang.diffusion_args import build_diffusion_parser, parse_diffusion_args
 
 configure_dynamo_logging()
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
@@ -84,27 +85,6 @@ class Config:
         """Switch post-runtime Dynamo code to SGLang's resolved configuration."""
         self.server_args = resolved_server_args(server_args)
         return self.server_args
-
-
-def _diffusion_generator_kwargs(server_args: Any) -> dict[str, Any]:
-    """Translate Dynamo's SGLang config into DiffGenerator arguments."""
-    tp_size = getattr(server_args, "tp_size", 1)
-    dp_size = getattr(server_args, "dp_size", 1)
-    kwargs = {
-        "model_path": server_args.model_path,
-        "num_gpus": tp_size * dp_size,
-        "tp_size": tp_size,
-        "dp_size": dp_size,
-        "dist_timeout": getattr(server_args, "dist_timeout", None),
-    }
-
-    # The text-engine CLI names this --nccl-port; DiffGenerator v0.5.15+
-    # names the same torch.distributed rendezvous setting ``master_port``.
-    # Omit it when unset so SGLang retains its own default/settling behavior.
-    if (master_port := getattr(server_args, "nccl_port", None)) is not None:
-        kwargs["master_port"] = master_port
-
-    return kwargs
 
 
 def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
@@ -355,6 +335,18 @@ async def parse_args(args: list[str]) -> Config:
     Raises:
         SystemExit: If arguments are invalid or incompatible.
     """
+    # Help must match the parser the worker will actually use. Diffusion
+    # workers parse engine args with sglang's diffusion ServerArgs, so route
+    # --help through that parser instead of letting the Dynamo/LLM parsers
+    # print LLM engine options that a diffusion worker would reject. Checked
+    # on the raw strings because argparse exits on -h in whichever parser
+    # sees it first.
+    if ("-h" in args or "--help" in args) and (
+        "--image-diffusion-worker" in args or "--video-generation-worker" in args
+    ):
+        _print_diffusion_worker_help()
+        sys.exit(0)
+
     runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_sglang_argspec = DynamoSGLangArgGroup()
 
@@ -397,6 +389,13 @@ async def parse_args(args: list[str]) -> Config:
     # Consume the router flags before the SGLang parser sees the remainder.
     dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
     dynamo_config.validate()
+
+    # Image/video diffusion workers configure DiffGenerator, whose options
+    # live in SGLang's *diffusion* ServerArgs — a different dataclass from the
+    # LLM ServerArgs everything below parses against. Branch off before any
+    # LLM-specific processing so diffusion engine args are parsed natively.
+    if dynamo_config.image_diffusion_worker or dynamo_config.video_generation_worker:
+        return await _resolve_diffusion_worker_config(unknown, dynamo_config)
 
     # Dealing with SGLang native configs
     temp_config_file = None
@@ -555,11 +554,6 @@ async def parse_args(args: list[str]) -> Config:
     # fetch_model (download the model) here, in `parse_args`. `parse_args` should not
     # contain code to download a model, it should only parse the args.
 
-    # For diffusion/video workers, create a minimal dummy ServerArgs since diffusion
-    # doesn't use transformer models or sglang Engine - it uses DiffGenerator directly
-    image_diffusion_worker = dynamo_config.image_diffusion_worker
-    video_generation_worker = dynamo_config.video_generation_worker
-
     # ServerArgs is read-only after resolution, so apply Dynamo defaults first.
     # DYN_GMS_USE_V1 is operator-injected (env-only, like DYN_SNAPSHOT_CONTROL_DIR).
     if os.environ.get("DYN_GMS_USE_V1") == "true":
@@ -581,51 +575,11 @@ async def parse_args(args: list[str]) -> Config:
         parsed_args.max_running_requests = 8
         logging.info("Defaulting max_running_requests to 8 for diffusion worker")
 
-    if image_diffusion_worker or video_generation_worker:
-        worker_type = (
-            "image diffusion" if image_diffusion_worker else "video generation"
-        )
-        logging.info(
-            f"{worker_type.title()} worker detected with model: {model_path}, creating minimal ServerArgs stub"
-        )
-        # Create a minimal ServerArgs-like object that bypasses model config loading
-        # Diffusion/video workers don't actually use ServerArgs - they use DiffGenerator
-        import types
-
-        server_args = types.SimpleNamespace()
-        # Copy over any attrs that might be needed, but avoid triggering __post_init__
-        server_args.model_path = model_path
-        server_args.served_model_name = parsed_args.served_model_name
-        server_args.enable_metrics = getattr(parsed_args, "enable_metrics", False)
-        server_args.log_level = getattr(parsed_args, "log_level", "info")
-        server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
-        server_args.tp_size = getattr(parsed_args, "tp_size", 1)
-        server_args.dp_size = getattr(parsed_args, "dp_size", 1)
-        # DiffGenerator calls this ``master_port``. Preserve SGLang's existing
-        # --nccl-port CLI value on the lightweight diffusion config so the init
-        # path can map a test-allocated port into torch.distributed.
-        server_args.nccl_port = getattr(parsed_args, "nccl_port", None)
-        # _diffusion_generator_kwargs forwards dist_timeout to DiffGenerator;
-        # without this copy the stub never carries it and --dist-timeout is
-        # silently dropped for diffusion workers.
-        server_args.dist_timeout = getattr(parsed_args, "dist_timeout", None)
-        server_args.speculative_algorithm = None
-        server_args.disaggregation_mode = None
-        server_args.dllm_algorithm = False
-        server_args.load_format = None
-        server_args.enable_trace = getattr(parsed_args, "enable_trace", False)
-        server_args.enable_forward_pass_metrics = getattr(
-            parsed_args, "enable_forward_pass_metrics", False
-        )
-        logging.info(
-            f"Created stub ServerArgs for {worker_type}: model_path={server_args.model_path}"
-        )
-    else:
-        # Dynamo expects disjoint output_ids; ServerArgs is read-only after resolution.
-        parsed_args.incremental_streaming_output = True
-        server_args = ServerArgs.from_cli_args(parsed_args)
-        if server_args.get_model_config().is_multimodal:
-            ensure_sglang_tensor_image_size()
+    # Dynamo expects disjoint output_ids; ServerArgs is read-only after resolution.
+    parsed_args.incremental_streaming_output = True
+    server_args = ServerArgs.from_cli_args(parsed_args)
+    if server_args.get_model_config().is_multimodal:
+        ensure_sglang_tensor_image_size()
 
     if getattr(server_args, "schedule_low_priority_values_first", False):
         raise ValueError(
@@ -671,6 +625,100 @@ async def parse_args(args: list[str]) -> Config:
     dynamo_config.custom_jinja_template = expanded_template_path
     dynamo_config.diffusion_worker = diffusion_worker
     dynamo_config.use_kv_events = use_kv_events
+
+    logging.debug(f"Dynamo configs: {dynamo_config}")
+
+    return Config(server_args, dynamo_config)
+
+
+def _print_diffusion_worker_help() -> None:
+    """Print combined Dynamo + native diffusion engine options."""
+    dynamo_parser = argparse.ArgumentParser(
+        prog="dynamo.sglang",
+        description="Dynamo SGLang diffusion worker configuration",
+        formatter_class=argparse.RawTextHelpFormatter,
+        add_help=False,
+    )
+    DynamoRuntimeArgGroup().add_arguments(dynamo_parser)
+    DynamoSGLangArgGroup().add_arguments(dynamo_parser)
+    print(dynamo_parser.format_help())
+    print(
+        "SGLang Diffusion Engine Options (native sglang diffusion ServerArgs;"
+        " every option below is forwarded to the engine):\n"
+    )
+    diffusion_parser, _ = build_diffusion_parser()
+    print(diffusion_parser.format_help())
+
+
+async def _resolve_diffusion_worker_config(
+    unknown: List[str], dynamo_config: "DynamoConfig"
+) -> Config:
+    """Resolve Config for image/video diffusion workers.
+
+    Engine arguments are parsed with SGLang's native diffusion ServerArgs CLI
+    (see diffusion_args.py), so every native diffusion engine argument is
+    reachable — no hand-copied stub. The returned server_args is a
+    DiffusionWorkerArgs adapter: engine fields resolve from the natively
+    parsed diffusion ServerArgs, Dynamo-side settings live on the adapter.
+    """
+    worker_type = (
+        "image diffusion"
+        if dynamo_config.image_diffusion_worker
+        else "video generation"
+    )
+    logging.info(
+        f"{worker_type.title()} worker detected: parsing engine args with "
+        "SGLang's native diffusion ServerArgs"
+    )
+
+    # Fetch the model before the full parse: sglang's diffusion ServerArgs
+    # resolves model info during argument resolution, so the weights must be
+    # available first (mirrors the LLM path, which fetches before
+    # ServerArgs.from_cli_args).
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--model-path", type=str, default=None)
+    pre_args, _ = pre_parser.parse_known_args(unknown)
+    if not pre_args.model_path:
+        raise ValueError("--model-path is required for diffusion workers")
+    if should_fetch_model(argparse.Namespace(), pre_args.model_path):
+        await fetch_model(pre_args.model_path)
+
+    _parsed_args, server_args = parse_diffusion_args(unknown)
+
+    # --served-model-name may pack several names; first is primary.
+    served_names = split_served_model_names(server_args.served_model_name)
+    if served_names:
+        server_args.served_model_name = served_names[0]
+        # If the engine args natively define served_model_name (newer sglang),
+        # keep them consistent with the adapter: the engine must not receive
+        # the unsplit multi-name string.
+        if hasattr(server_args.engine_args, "served_model_name"):
+            server_args.engine_args.served_model_name = served_names[0]
+        dynamo_config.served_model_aliases = served_names[1:]
+        if served_names[1:]:
+            logging.info(
+                "Multi-name registration: primary=%r, aliases=%s",
+                served_names[0],
+                served_names[1:],
+            )
+
+    if is_snapshot_enabled():
+        configure_snapshot_capture_env()
+
+    endpoint = (
+        dynamo_config.endpoint or f"dyn://{dynamo_config.namespace}.backend.generate"
+    )
+    parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+        endpoint
+    )
+    dynamo_config.namespace = parsed_namespace
+    dynamo_config.component = parsed_component_name
+    dynamo_config.endpoint = parsed_endpoint_name
+    # dllm (text diffusion LLM) does not apply to image/video workers. The
+    # old stub accidentally made this True (False is not None); it was never
+    # load-bearing because main.py dispatches image/video workers first.
+    dynamo_config.diffusion_worker = False
+    dynamo_config.use_kv_events = False
 
     logging.debug(f"Dynamo configs: {dynamo_config}")
 
