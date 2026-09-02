@@ -146,7 +146,6 @@ _WORKER_COMPONENT_TYPES = frozenset({"worker", "prefill", "decode"})
 def _invokes_mocker(
     command: list[str] | str | None, args: list[str] | str | None
 ) -> bool:
-    """Return whether a container command invokes the public Mocker module."""
     return "dynamo.mocker" in break_arguments(command) + break_arguments(args)
 
 
