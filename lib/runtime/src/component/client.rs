@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, LazyLock, Mutex as StdMutex},
@@ -11,6 +10,7 @@ use std::{
 use anyhow::Result;
 use arc_swap::ArcSwap;
 use futures::StreamExt;
+use tokio::time::Instant;
 
 use crate::component::{Endpoint, Instance};
 use crate::config::environment_names::runtime as env_runtime;
@@ -20,6 +20,10 @@ use crate::traits::DistributedRuntimeProvider;
 
 /// Default interval for periodic reconciliation of instance_avail with instance_source
 const DEFAULT_INHIBITED_DURATION_SECS: u64 = 5;
+
+/// Request-path overload is a short-lived routing hint. A worker is probed
+/// again after this cooldown if no authoritative load update arrives first.
+const REQUEST_PATH_OVERLOAD_COOLDOWN: Duration = Duration::from_secs(1);
 
 /// Process-wide inhibited duration, resolved from the environment on first client construction.
 static INHIBITED_DURATION: LazyLock<Duration> =
@@ -114,6 +118,9 @@ pub struct RoutingInstanceCounts {
 pub(crate) struct RoutingInstances {
     discovered_ids: Vec<u64>,
     routable_ids: Vec<u64>,
+    monitor_overloaded_ids: HashSet<u64>,
+    request_overload_deadlines: HashMap<u64, Instant>,
+    next_request_overload_expiry: Option<Instant>,
     overloaded_ids: HashSet<u64>,
     free_ids: Vec<u64>,
     routable_id_set: Arc<HashSet<u64>>,
@@ -130,6 +137,7 @@ impl RoutingInstances {
             discovered_ids.clone(),
             discovered_ids,
             HashSet::new(),
+            HashMap::new(),
             availability_initialized,
         )
     }
@@ -137,18 +145,25 @@ impl RoutingInstances {
     fn from_parts(
         mut discovered_ids: Vec<u64>,
         mut routable_ids: Vec<u64>,
-        overloaded_ids: HashSet<u64>,
+        monitor_overloaded_ids: HashSet<u64>,
+        request_overload_deadlines: HashMap<u64, Instant>,
         availability_initialized: bool,
     ) -> Self {
         discovered_ids.sort_unstable();
         discovered_ids.dedup();
         routable_ids.sort_unstable();
         routable_ids.dedup();
+        let mut overloaded_ids = monitor_overloaded_ids.clone();
+        let next_request_overload_expiry = request_overload_deadlines.values().min().copied();
+        overloaded_ids.extend(request_overload_deadlines.keys().copied());
         let free_ids = Self::derive_free_ids(&routable_ids, &overloaded_ids);
         let routable_id_set = Arc::new(routable_ids.iter().copied().collect());
         Self {
             discovered_ids,
             routable_ids,
+            monitor_overloaded_ids,
+            request_overload_deadlines,
+            next_request_overload_expiry,
             overloaded_ids,
             free_ids,
             routable_id_set,
@@ -197,15 +212,19 @@ impl RoutingInstances {
     fn reconcile_discovered(&self, discovered_ids: Vec<u64>) -> Self {
         let old_discovered_ids = self.discovered_ids.iter().copied().collect::<HashSet<_>>();
         let new_discovered_ids = discovered_ids.iter().copied().collect::<HashSet<_>>();
-        let mut overloaded_ids = self.overloaded_ids.clone();
-        overloaded_ids
+        let mut monitor_overloaded_ids = self.monitor_overloaded_ids.clone();
+        monitor_overloaded_ids
             .retain(|id| !old_discovered_ids.contains(id) || new_discovered_ids.contains(id));
+        let mut request_overload_deadlines = self.request_overload_deadlines.clone();
+        request_overload_deadlines
+            .retain(|id, _| !old_discovered_ids.contains(id) || new_discovered_ids.contains(id));
 
         let availability_initialized = self.availability_initialized || !discovered_ids.is_empty();
         Self::from_parts(
             discovered_ids.clone(),
             discovered_ids,
-            overloaded_ids,
+            monitor_overloaded_ids,
+            request_overload_deadlines,
             availability_initialized,
         )
     }
@@ -221,7 +240,8 @@ impl RoutingInstances {
         Self::from_parts(
             self.discovered_ids.clone(),
             routable_ids,
-            self.overloaded_ids.clone(),
+            self.monitor_overloaded_ids.clone(),
+            self.request_overload_deadlines.clone(),
             self.availability_initialized,
         )
     }
@@ -233,7 +253,8 @@ impl RoutingInstances {
         Self::from_parts(
             self.discovered_ids.clone(),
             routable_ids,
-            self.overloaded_ids.clone(),
+            self.monitor_overloaded_ids.clone(),
+            self.request_overload_deadlines.clone(),
             self.availability_initialized,
         )
     }
@@ -243,31 +264,53 @@ impl RoutingInstances {
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
             overloaded_ids,
+            HashMap::new(),
             self.availability_initialized,
         )
     }
 
     /// Add a single instance to the overloaded set (immediate
-    /// backpressure mark). Short-lived: the next metric-driven
-    /// `set_overloaded` recompute overwrites the whole set.
-    fn mark_overloaded(&self, instance_id: u64) -> Self {
-        let mut overloaded_ids = self.overloaded_ids.clone();
-        overloaded_ids.insert(instance_id);
+    /// backpressure mark). A monitor update clears all request-path
+    /// marks. Otherwise, each mark expires at its own deadline.
+    fn mark_overloaded_until(&self, instance_id: u64, deadline: Instant) -> Self {
+        let mut request_overload_deadlines = self.request_overload_deadlines.clone();
+        request_overload_deadlines.insert(instance_id, deadline);
         Self::from_parts(
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
-            overloaded_ids,
+            self.monitor_overloaded_ids.clone(),
+            request_overload_deadlines,
+            self.availability_initialized,
+        )
+    }
+
+    fn has_expired_request_overload(&self, now: Instant) -> bool {
+        self.next_request_overload_expiry
+            .is_some_and(|deadline| deadline <= now)
+    }
+
+    fn clear_expired_request_overloads(&self, now: Instant) -> Self {
+        let mut request_overload_deadlines = self.request_overload_deadlines.clone();
+        request_overload_deadlines.retain(|_, deadline| *deadline > now);
+        Self::from_parts(
+            self.discovered_ids.clone(),
+            self.routable_ids.clone(),
+            self.monitor_overloaded_ids.clone(),
+            request_overload_deadlines,
             self.availability_initialized,
         )
     }
 
     fn clear_overloaded_for_removed(&self, removed_ids: &HashSet<u64>) -> Self {
-        let mut overloaded_ids = self.overloaded_ids.clone();
-        overloaded_ids.retain(|id| !removed_ids.contains(id));
+        let mut monitor_overloaded_ids = self.monitor_overloaded_ids.clone();
+        monitor_overloaded_ids.retain(|id| !removed_ids.contains(id));
+        let mut request_overload_deadlines = self.request_overload_deadlines.clone();
+        request_overload_deadlines.retain(|id, _| !removed_ids.contains(id));
         Self::from_parts(
             self.discovered_ids.clone(),
             self.routable_ids.clone(),
-            overloaded_ids,
+            monitor_overloaded_ids,
+            request_overload_deadlines,
             self.availability_initialized,
         )
     }
@@ -289,7 +332,6 @@ impl RoutingInstances {
 struct RoutingInstancesState {
     snapshot: ArcSwap<RoutingInstances>,
     update_lock: StdMutex<()>,
-    overload_reconciliation_needed: AtomicBool,
     instance_avail_tx: tokio::sync::watch::Sender<Vec<u64>>,
 }
 
@@ -302,7 +344,6 @@ impl RoutingInstancesState {
             Self {
                 snapshot: ArcSwap::from_pointee(snapshot),
                 update_lock: StdMutex::new(()),
-                overload_reconciliation_needed: AtomicBool::new(false),
                 instance_avail_tx,
             },
             instance_avail_rx,
@@ -310,7 +351,26 @@ impl RoutingInstancesState {
     }
 
     fn snapshot(&self) -> arc_swap::Guard<Arc<RoutingInstances>> {
+        let now = Instant::now();
+        let current = self.snapshot.load();
+        if !current.has_expired_request_overload(now) {
+            return current;
+        }
+        drop(current);
+
+        self.reconcile_expired_request_overloads(now);
         self.snapshot.load()
+    }
+
+    fn reconcile_expired_request_overloads(&self, now: Instant) {
+        let _guard = self.update_lock.lock().unwrap();
+        let current = self.snapshot.load();
+        if !current.has_expired_request_overload(now) {
+            return;
+        }
+
+        let next = Arc::new(current.clear_expired_request_overloads(now));
+        self.snapshot.store(next);
     }
 
     fn update(
@@ -364,29 +424,32 @@ impl RoutingInstancesState {
             .copied()
             .collect::<HashSet<_>>();
         let _guard = self.update_lock.lock().unwrap();
-        self.overload_reconciliation_needed
-            .store(false, Ordering::Release);
         let current = self.snapshot.load();
-        if current.overloaded_ids == overloaded_ids {
+        let next = Arc::new(current.set_overloaded(overloaded_ids));
+        let effective_changed = current.overloaded_ids != next.overloaded_ids;
+        let source_changed = current.monitor_overloaded_ids != next.monitor_overloaded_ids
+            || !current.request_overload_deadlines.is_empty();
+        if !source_changed {
             return false;
         }
 
-        let next = Arc::new(current.set_overloaded(overloaded_ids));
         self.snapshot.store(next);
-        true
+        effective_changed
     }
 
     fn mark_overloaded_immediate(&self, instance_id: u64) {
+        self.mark_overloaded_until(instance_id, Instant::now() + REQUEST_PATH_OVERLOAD_COOLDOWN);
+    }
+
+    fn mark_overloaded_until(&self, instance_id: u64, deadline: Instant) {
         let _guard = self.update_lock.lock().unwrap();
         let current = self.snapshot.load();
-        let next = Arc::new(current.mark_overloaded(instance_id));
+        let next = Arc::new(current.mark_overloaded_until(instance_id, deadline));
         self.snapshot.store(next);
-        self.overload_reconciliation_needed
-            .store(true, Ordering::Release);
     }
 
     fn overload_reconciliation_needed(&self) -> bool {
-        self.overload_reconciliation_needed.load(Ordering::Acquire)
+        !self.snapshot().request_overload_deadlines.is_empty()
     }
 
     fn clear_overloaded_for_removed(&self, removed_instance_ids: &[u64]) {
@@ -689,28 +752,28 @@ impl Client {
     }
 
     /// Replace the set of overloaded instances reported by the worker monitor.
-    /// Returns true when this changes the routing snapshot.
+    /// Returns true when this changes the effective overloaded set.
     pub fn set_overloaded_instances(&self, overloaded_instance_ids: &[u64]) -> bool {
         self.routing_instances
             .set_overloaded_instances(overloaded_instance_ids)
     }
 
-    /// Whether request-path backpressure changed overload state after the monitor's
-    /// most recent metric publication.
+    /// Whether an unexpired request-path overload lease remains after the
+    /// monitor's most recent metric publication.
     pub fn overload_reconciliation_needed(&self) -> bool {
         self.routing_instances.overload_reconciliation_needed()
     }
 
     /// Mark an instance overloaded immediately after a worker-scoped
     /// `WorkerOverloaded` response. This is backpressure, not a fault, so it
-    /// does not call `report_instance_down`. The next worker-monitor
-    /// reconciliation replaces this short-lived global routing hint.
+    /// does not call `report_instance_down`. A fresh worker-monitor publication
+    /// clears this hint early. Its bounded lease otherwise permits a recovery probe.
     pub fn mark_overloaded_immediate(&self, instance_id: u64) {
         self.routing_instances
             .mark_overloaded_immediate(instance_id);
         tracing::debug!(
             instance_id,
-            "marking instance overloaded (backpressure); next metric event will re-evaluate"
+            "marking instance overloaded with a bounded backpressure lease"
         );
     }
 
@@ -1167,6 +1230,69 @@ mod tests {
         assert_eq!(client.overloaded_instance_ids(), None);
         assert!(!client.set_overloaded_instances(&[]));
 
+        rt.shutdown();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn request_path_overload_expires_without_monitor_update() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let client = drt
+            .namespace("test_request_overload_expiry".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string())
+            .client()
+            .await
+            .unwrap();
+
+        client.mark_overloaded_immediate(7);
+        assert_eq!(client.overloaded_instance_ids(), Some(HashSet::from([7])));
+
+        tokio::time::advance(REQUEST_PATH_OVERLOAD_COOLDOWN).await;
+
+        assert_eq!(client.overloaded_instance_ids(), None);
+        assert!(!client.overload_reconciliation_needed());
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn request_path_expiry_preserves_monitor_overload() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let client = drt
+            .namespace("test_request_expiry_preserves_monitor".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("decode".to_string())
+            .client()
+            .await
+            .unwrap();
+        let now = Instant::now();
+
+        assert!(client.set_overloaded_instances(&[11]));
+        client
+            .routing_instances
+            .mark_overloaded_until(7, now + Duration::from_secs(1));
+        client
+            .routing_instances
+            .mark_overloaded_until(8, now + Duration::from_secs(2));
+
+        client
+            .routing_instances
+            .reconcile_expired_request_overloads(now + Duration::from_millis(1500));
+
+        assert_eq!(
+            client.overloaded_instance_ids(),
+            Some(HashSet::from([8, 11]))
+        );
+        assert!(client.overload_reconciliation_needed());
         rt.shutdown();
     }
 

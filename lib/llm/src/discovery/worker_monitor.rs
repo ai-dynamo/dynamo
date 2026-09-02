@@ -78,9 +78,9 @@ fn publish_overloaded_instances_if_needed(
     overloaded_tracker: &OverloadedWorkerTracker,
     overloaded_changed: bool,
 ) -> bool {
-    // NOTE: Recovery still relies on load producers publishing after meaningful capacity or
-    // lifecycle changes. This only prevents the next observation from being suppressed when
-    // request-path backpressure changed Client state outside this monitor's cached set.
+    // A fresh load observation clears request-path overload leases early.
+    // This prevents the monitor's unchanged-set suppression from retaining
+    // a request-path mark until its bounded lease expires.
     if !overloaded_changed && !overload_reconciliation_needed(client) {
         return false;
     }
