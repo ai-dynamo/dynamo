@@ -1897,6 +1897,21 @@ mod tests {
     }
 
     #[test]
+    fn the_e2e_arms_configuration_is_accepted() {
+        // Mirrors tests/serve/test_vllm.py's prefill-continue arm. A GPU job is
+        // an expensive place to discover the config was invalid.
+        let config = KvRouterConfig {
+            prefill_continue_enabled: true,
+            prefill_continue_force: true,
+            prefill_continue_max_concurrent: Some(2),
+            prefill_continue_prefill_busy_threshold: Some(0.9),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok(), "{:?}", config.validate());
+    }
+
+    #[test]
     fn prefill_continue_requires_a_concurrency_cap() {
         // The cap is the only bound that can see a continuation after its first
         // token, so enabling the feature without one is refused rather than

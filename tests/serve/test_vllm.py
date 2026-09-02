@@ -442,6 +442,46 @@ vllm_configs = {
             completion_payload_default(),
         ],
     ),
+    # prefill-continues-decode: the prefill worker generates the whole response
+    # instead of handing off. Same single-GPU disagg shape as the config above,
+    # with the feature forced on.
+    #
+    # `force` is what makes this testable: a 0.6B model with two concurrent
+    # sequences never fills its decode pool, so the load trigger would refuse
+    # every request and the arm would silently be its own control. Force waives
+    # only the decode-load test — the capability gate, the prefill interlock and
+    # the concurrency cap all still apply, so the path under test is the real
+    # one. `max_concurrent` is mandatory whenever the feature is enabled.
+    "disaggregated_same_gpu_prefill_continue": VLLMConfig(
+        name="disaggregated_same_gpu_prefill_continue",
+        directory=vllm_dir,
+        script_name="disagg_same_gpu.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.profiled_vram_gib(7.3),
+            pytest.mark.requested_vllm_kv_cache_bytes(1_023_525_000),
+            pytest.mark.timeout(300),
+            pytest.mark.pre_merge,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=10,
+        health_check_workers=True,
+        env={
+            "DYN_CHAT_PROCESSOR": "vllm",
+            # Both load signals the feature reads come from a KV route preview,
+            # so it cannot fire on any other routing mode.
+            "DYN_ROUTER_MODE": "kv",
+            "PYTHONHASHSEED": "0",
+            "DYN_ROUTER_PREFILL_CONTINUE": "true",
+            "DYN_ROUTER_PREFILL_CONTINUE_CONFIG": (
+                '{"force": true, "max_concurrent": 2, "prefill_busy_threshold": 0.9}'
+            ),
+        },
+        request_payloads=[
+            chat_payload_default(),
+            completion_payload_default(),
+        ],
+    ),
     "deepep": VLLMConfig(
         name="deepep",
         directory=vllm_dir,

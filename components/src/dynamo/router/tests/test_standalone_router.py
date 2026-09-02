@@ -123,3 +123,45 @@ async def test_get_overlap_scores_forwards_cache_namespace() -> None:
         False,
         "tenant-a",
     )
+
+
+class TestStandaloneRouterRefusesDisaggFlags:
+    """Flags the standalone router cannot honour must fail, not be ignored.
+
+    `dynamo.router` builds only a `KvRouter`, never a `PrefillRouter`, so a
+    disaggregation flag it accepted would start a plain router that reads as
+    the treatment arm.
+
+    These drive `parse_args` rather than mutating a parsed config, so they
+    cover the wiring too: a flag that was never registered, or registered to
+    the wrong `dest`, would otherwise pass a validator-only test.
+    """
+
+    def _parse(self, *flags: str):
+        # Imported here, not at module scope: the stubbing above exists so this
+        # file collects without the compiled bindings, and a top-level import
+        # would make every test in it uncollectable.
+        from dynamo.router.args import parse_args
+
+        # --endpoint first: validate() checks it before it reaches either guard.
+        return parse_args(["--endpoint", "test-ns.test-comp.generate", *flags])
+
+    def test_prefill_continue_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="no prefill router"):
+            self._parse("--router-prefill-continue")
+
+    def test_prefill_continue_config_alone_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="no prefill router"):
+            self._parse("--router-prefill-continue-config", '{"max_concurrent": 2}')
+
+    def test_conditional_disagg_is_refused(self) -> None:
+        """The sibling guard this one mirrors."""
+        with pytest.raises(ValueError, match="does not run conditional disaggregation"):
+            self._parse("--router-conditional-disagg")
+
+    def test_no_disagg_flags_parse_cleanly(self) -> None:
+        """A config that asks for neither must not trip either guard."""
+        config = self._parse()
+
+        assert config.prefill_continue_enabled is False
+        assert config.conditional_disagg_enabled is False

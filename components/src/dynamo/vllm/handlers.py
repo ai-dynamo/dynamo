@@ -4014,9 +4014,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 token_ids = res.outputs[0].token_ids if res.outputs else []
                 for output in res.outputs or []:
                     index = getattr(output, "index", 0) or 0
-                    total_output_tokens_by_index[index] = total_output_tokens_by_index.get(
-                        index, 0
-                    ) + len(output.token_ids or [])
+                    total_output_tokens_by_index[
+                        index
+                    ] = total_output_tokens_by_index.get(index, 0) + len(
+                        output.token_ids or []
+                    )
 
                 # A handoff yields exactly one result, so its embedding params are
                 # built unconditionally. A continuation yields many and hands off
@@ -4049,9 +4051,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 # A continuation is the whole response, so report why it ended:
                 # the client needs it to know the stream is over. The one-token
-                # prefill still reports nothing, because there the router does
-                # read a finish reason as "already complete" — on a continuation
-                # it never inspects the stream at all.
+                # prefill reports nothing, because there a finish reason means
+                # "this request is already complete" to the router; on a
+                # continuation the router never inspects the stream at all.
                 finish_reason = res.outputs[0].finish_reason if res.outputs else None
                 if prefill_continues and finish_reason:
                     output["finish_reason"] = normalize_finish_reason(finish_reason)
