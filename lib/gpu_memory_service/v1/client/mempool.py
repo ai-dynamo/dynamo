@@ -72,6 +72,8 @@ class TorchMempoolMemoryClient:
     def __init__(self) -> None:
         self._state = "RUNNING"
         self._weights_state = "OPEN"
+        self._weights_mapped = True
+        self._kv_cache_mapped = True
         weights: GMSClientMemoryManager | None = None
         kv_cache: GMSClientMemoryManager | None = None
         _reserve_allocator(self)
@@ -207,6 +209,8 @@ class TorchMempoolMemoryClient:
             self._weights.disconnect()
             self._kv_cache.unmap_all_vas()
             self._kv_cache.disconnect()
+            self._weights_mapped = False
+            self._kv_cache_mapped = False
             self._state = "SUSPENDED"
         except Exception:  # noqa: BLE001
             common_utils.fail(
@@ -214,10 +218,15 @@ class TorchMempoolMemoryClient:
                 exc_info=True,
             )
 
-    def resume(self) -> None:
-        """Reconnect and remap all client-owned GPU memory."""
-        if self._state != "SUSPENDED":
+    def resume(self, tags: Iterable[str] | None = None) -> None:
+        """Reconnect and remap the requested client-owned GPU memory."""
+        if self._state not in {"SUSPENDED", "PARTIALLY_RESUMED"}:
             raise RuntimeError(f"cannot resume GMS V1 from {self._state}")
+
+        requested = {_KV_CACHE, _WEIGHTS} if tags is None else set(tags)
+        unknown = requested - {_KV_CACHE, _WEIGHTS}
+        if unknown:
+            raise ValueError(f"unsupported GMS V1 resume tags: {sorted(unknown)}")
 
         try:
             self._state = "RESUMING"
@@ -229,15 +238,26 @@ class TorchMempoolMemoryClient:
                 step()
                 phases.append((name, monotonic() - started_at))
 
-            phase("kv_connect", lambda: self._kv_cache.connect(RequestedLockType.RW))
-            phase("kv_reallocate", self._kv_cache.reallocate_all_handles)
-            phase("kv_remap", self._kv_cache.remap_all_vas)
-            phase(
-                "weights_connect",
-                lambda: self._weights.connect(RequestedLockType.RO),
+            if _KV_CACHE in requested and not self._kv_cache_mapped:
+                phase(
+                    "kv_connect",
+                    lambda: self._kv_cache.connect(RequestedLockType.RW),
+                )
+                phase("kv_reallocate", self._kv_cache.reallocate_all_handles)
+                phase("kv_remap", self._kv_cache.remap_all_vas)
+                self._kv_cache_mapped = True
+            if _WEIGHTS in requested and not self._weights_mapped:
+                phase(
+                    "weights_connect",
+                    lambda: self._weights.connect(RequestedLockType.RO),
+                )
+                phase("weights_remap", self._weights.remap_all_vas)
+                self._weights_mapped = True
+            self._state = (
+                "RUNNING"
+                if self._kv_cache_mapped and self._weights_mapped
+                else "PARTIALLY_RESUMED"
             )
-            phase("weights_remap", self._weights.remap_all_vas)
-            self._state = "RUNNING"
             logger.info(
                 "GMS V1 wake complete device=%d total_elapsed=%.3fs %s",
                 self._device,

@@ -15,12 +15,17 @@ from sglang.srt.managers.io_struct import (
 
 logger = logging.getLogger(__name__)
 
+_WEIGHTS_TAG = "weights"
+_ALL_MEMORY_TAGS = ["kv_cache", _WEIGHTS_TAG, "cuda_graph"]
+
 
 class SGLangEnginePauseController:
-    def __init__(self, engine: Any):
+    def __init__(self, engine: Any, *, premap_weights: bool = False):
         self._engine = engine
+        self._premap_weights = premap_weights
         self._is_paused = False
         self._generation_paused = False
+        self._weights_premapped = False
 
     @property
     def is_paused(self) -> bool:
@@ -34,6 +39,7 @@ class SGLangEnginePauseController:
         if self._is_paused or self._generation_paused:
             return False
 
+        self._weights_premapped = False
         await self._engine.tokenizer_manager.pause_generation(PauseGenerationReqInput())
         self._generation_paused = True
         try:
@@ -56,15 +62,33 @@ class SGLangEnginePauseController:
         self._is_paused = True
         return True
 
+    async def prepare_for_failover(self) -> bool:
+        """Map immutable GMS weights while generation remains paused."""
+        if not self._premap_weights or not self._is_paused or self._weights_premapped:
+            return False
+
+        logger.info("Pre-mapping GMS weights before waiting for the failover lock")
+        await self._engine.tokenizer_manager.resume_memory_occupation(
+            ResumeMemoryOccupationReqInput(tags=[_WEIGHTS_TAG]),
+            None,
+        )
+        self._weights_premapped = True
+        return True
+
     async def resume(self, tags: list[str] | None = None) -> bool:
         if not self._is_paused and not self._generation_paused:
             return False
 
         if self._is_paused:
-            await self._engine.tokenizer_manager.resume_memory_occupation(
-                ResumeMemoryOccupationReqInput(tags=tags),
-                None,
-            )
+            resume_tags = tags
+            if self._weights_premapped:
+                requested_tags = tags or _ALL_MEMORY_TAGS
+                resume_tags = [tag for tag in requested_tags if tag != _WEIGHTS_TAG]
+            if resume_tags:
+                await self._engine.tokenizer_manager.resume_memory_occupation(
+                    ResumeMemoryOccupationReqInput(tags=resume_tags),
+                    None,
+                )
         if self._generation_paused:
             await self._engine.tokenizer_manager.continue_generation(
                 ContinueGenerationReqInput()
@@ -75,3 +99,4 @@ class SGLangEnginePauseController:
     def mark_resumed(self) -> None:
         self._is_paused = False
         self._generation_paused = False
+        self._weights_premapped = False

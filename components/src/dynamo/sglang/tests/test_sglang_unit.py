@@ -41,7 +41,10 @@ from dynamo.sglang.health_check import (
 )
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
-from dynamo.sglang.snapshot import snapshot_server_arg_overrides
+from dynamo.sglang.snapshot import (
+    should_premap_gms_weights,
+    snapshot_server_arg_overrides,
+)
 from dynamo.sglang.tests.conftest import make_cli_args_fixture
 
 try:
@@ -152,6 +155,23 @@ def test_snapshot_overrides_always_disable_forward_pass_metrics(monkeypatch, gms
     assert overrides["enable_forward_pass_metrics"] is False
     # memory_saver is the V0-only weight-release path; V1 manages weights itself.
     assert ("enable_memory_saver" in overrides) is not gms_v1
+
+
+@pytest.mark.parametrize(
+    ("load_format", "gms_v1", "expected"),
+    [
+        ("gms", False, True),
+        ("auto", True, True),
+        ("auto", False, False),
+    ],
+)
+def test_should_premap_gms_weights(monkeypatch, load_format, gms_v1, expected):
+    if gms_v1:
+        monkeypatch.setenv("DYN_GMS_USE_V1", "true")
+    else:
+        monkeypatch.delenv("DYN_GMS_USE_V1", raising=False)
+
+    assert should_premap_gms_weights(load_format) is expected
 
 
 @pytest.fixture(autouse=True)
@@ -1496,12 +1516,12 @@ async def test_lora_registration_model_type_gate(
 
     assert results and results[-1]["status"] == "success", results
     assert captured, "register_llm was not invoked"
-    assert (
-        str(captured["model_type"]) == expected_model_type_str
-    ), f"model_type {captured['model_type']} != expected {expected_model_type_str}"
-    assert (
-        str(captured["worker_type"]) == expected_worker_type
-    ), f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
+    assert str(captured["model_type"]) == expected_model_type_str, (
+        f"model_type {captured['model_type']} != expected {expected_model_type_str}"
+    )
+    assert str(captured["worker_type"]) == expected_worker_type, (
+        f"worker_type {captured['worker_type']} != expected {expected_worker_type}"
+    )
     assert captured["lora_name"] == "test_lora"
     assert captured["kv_cache_block_size"] == 32
     assert captured["runtime_config"] is lora_runtime_config

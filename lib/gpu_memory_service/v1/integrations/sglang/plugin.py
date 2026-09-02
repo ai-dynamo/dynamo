@@ -79,8 +79,8 @@ class GMSV1MemorySaverAdapter(TorchMemorySaverAdapter):
             self.client.suspend()
 
     def resume(self, tag: str) -> None:
-        if tag == "weights":
-            self.client.resume()
+        if tag in {"weights", "kv_cache"}:
+            self.client.resume((tag,))
 
     @property
     def enabled(self) -> bool:

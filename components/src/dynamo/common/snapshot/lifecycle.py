@@ -196,9 +196,10 @@ async def wake_restored_engine(
             # monitor is built with the handler; an operator-side liveness
             # probe is the durable fix.
             runtime.set_health_status(True)
+        await pause_controller.prepare_for_failover()
         logger.info(
-            "[Shadow][snapshot] Engine restored paused, startup probe now passing, "
-            "waiting for failover lock"
+            "[Shadow][snapshot] Engine restored with standby memory prepared, "
+            "startup probe now passing, waiting for failover lock"
         )
         from gpu_memory_service.failover_lock.flock import FlockFailoverLock
 

@@ -104,6 +104,37 @@ async def test_release_and_resume_are_idempotent(handler):
 
 
 @pytest.mark.asyncio
+async def test_failover_preparation_maps_only_weights_without_resuming_generation(
+    handler,
+):
+    manager = handler.engine.tokenizer_manager
+    controller = SGLangEnginePauseController(
+        handler.engine,
+        premap_weights=True,
+    )
+
+    await controller.pause()
+    prepared = await controller.prepare_for_failover()
+    duplicate_prepare = await controller.prepare_for_failover()
+
+    assert prepared is True
+    assert duplicate_prepare is False
+    assert manager.resume_memory_occupation.await_count == 1
+    request = manager.resume_memory_occupation.await_args.args[0]
+    assert request.tags == ["weights"]
+    manager.continue_generation.assert_not_awaited()
+    assert controller.is_paused is True
+    assert controller.needs_resume_recovery is True
+
+    await controller.resume()
+
+    assert manager.resume_memory_occupation.await_count == 2
+    final_request = manager.resume_memory_occupation.await_args.args[0]
+    assert final_request.tags == ["kv_cache", "cuda_graph"]
+    manager.continue_generation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_memory_occupation_handlers_forward_tags_exactly(handler):
     await handler.release_memory_occupation({"tags": []})
     resume_result = await handler.resume_memory_occupation({"tags": []})

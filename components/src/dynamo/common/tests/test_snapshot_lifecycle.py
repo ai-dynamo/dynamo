@@ -20,10 +20,14 @@ pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 class _PauseController:
     def __init__(self) -> None:
         self.paused = False
+        self.prepared = False
         self.resumed = False
 
     async def pause(self) -> None:
         self.paused = True
+
+    async def prepare_for_failover(self) -> None:
+        self.prepared = True
 
     async def resume(self) -> None:
         self.resumed = True
@@ -100,6 +104,7 @@ async def test_wake_restored_engine_resumes_without_lock(monkeypatch):
     lock = await wake_restored_engine(controller)
 
     assert lock is None
+    assert controller.prepared is False
     assert controller.resumed is True
 
 
@@ -127,6 +132,7 @@ async def test_wake_restored_engine_elects_then_resumes(monkeypatch):
     fake_lock.acquire.assert_awaited_once_with(engine_id="engine-3")
     assert lock is fake_lock
     assert runtime.healthy is True
+    assert controller.prepared is True
     assert controller.resumed is True
 
 
