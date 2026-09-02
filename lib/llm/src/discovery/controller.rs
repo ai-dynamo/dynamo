@@ -1404,9 +1404,8 @@ mod tests {
     async fn conflict_during_build_commits_the_elected_cohort_alone() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
-        // The in-flight cohort wins this election on its own merits — the two
-        // cohorts are the same size and `first-spec` sorts first — so the build
-        // survives the conflicting arrival and commits its own cohort alone.
+        // The two cohorts are the same size and `first-spec` wins the
+        // tie-break, so the in-flight build survives the conflicting arrival.
         let elected = instance(1, "first-spec");
         let conflicting = instance(2, "second-spec");
         controller.apply_added(elected.clone());
@@ -1430,11 +1429,8 @@ mod tests {
 
     #[tokio::test]
     async fn simultaneous_mixed_checksums_elect_one_cohort_and_register_the_model() {
-        // Both workers of one worker set register at once, each with its own card
-        // checksum: the mocker's race for a single system status server port
-        // leaves one worker self-hosting its assets and the other falling back.
-        // They arrive one run-loop iteration apart, so the first cohort's build is
-        // already in flight when the second worker is applied.
+        // Both workers of one worker set register at once with different card
+        // checksums: the mocker's race for one system status server port.
         let self_hosted = instance(1, "self-hosted-spec");
         let fallback = instance(2, "fallback-spec");
         let (host, mut controller, _starts) =
@@ -1467,10 +1463,8 @@ mod tests {
 
     #[tokio::test]
     async fn cohort_election_does_not_depend_on_worker_arrival_order() {
-        // Two frontend replicas can observe two simultaneously registering workers
-        // in either order. Neither replica has committed anything, so both must
-        // elect the same cohort — otherwise one model's traffic is served from two
-        // materializations, split across replicas.
+        // Two frontend replicas can observe the same workers in either order.
+        // With no commit anywhere, both must elect the same cohort.
         let self_hosted = instance(1, "self-hosted-spec");
         let fallback = instance(2, "fallback-spec");
 
