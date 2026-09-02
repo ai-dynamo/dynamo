@@ -2758,6 +2758,7 @@ def _test_router_decisions(
             approximate routing with the configured retention policy (--no-kv-events mode).
         router_aic_config: Optional AIC router perf-model config for direct KvRouter tests.
         router_approximate_cache_policy: Retention policy for the local approximate indexer.
+        router_init_timeout: Maximum time for the router to discover its initial workers.
 
     Raises:
         AssertionError: If routing decisions don't match expected prefix logic

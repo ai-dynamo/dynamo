@@ -21,7 +21,7 @@ from tests.router.e2e_harness import (
 from tests.router.helper import generate_random_suffix
 from tests.utils.constants import DynamoPortRange
 from tests.utils.gpu_args import build_gpu_mem_args
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, check_health_ready
 from tests.utils.port_utils import (
     allocate_contiguous_ports,
     allocate_port,
@@ -67,6 +67,8 @@ class SGLangProcess(ManagedEngineProcessMixin):
     - KV cache event publishing (ZMQ → NATS bridge)
     - Integration with dynamo.frontend router
     """
+
+    serialize_startup_with_readiness = True
 
     def __init__(
         self,
@@ -251,10 +253,15 @@ class SGLangProcess(ManagedEngineProcessMixin):
             process = ManagedProcess(
                 command=command,
                 env=env,
-                timeout=120,  # Allow time for model loading
+                timeout=180,  # Bound serialized model loading and registration
                 display_output=True,
                 health_check_ports=[],
-                health_check_urls=[],
+                health_check_urls=[
+                    (
+                        f"http://localhost:{system_port}/health",
+                        check_health_ready,
+                    )
+                ],
                 log_dir=request.node.name,
                 terminate_all_matching_process_names=False,
             )
@@ -310,7 +317,7 @@ def test_sglang_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.profiled_vram_gib(12.0)
 @pytest.mark.requested_sglang_kv_tokens(2048)
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(600)  # Covers two bounded 180s startups plus router validation
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_sglang_multiple_workers(
     request,
