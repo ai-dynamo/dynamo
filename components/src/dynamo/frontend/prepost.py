@@ -325,10 +325,8 @@ def _build_assistant_guided_decoding(
     if legacy_guidance:
         # Legacy guided_* takes precedence over structured_outputs (prior
         # behavior), but as a single constraint.
+        # legacy_guided_decoding already carried whitespace_pattern across.
         guided_decoding = legacy_guidance
-        whitespace_pattern = request_extra.get("guided_whitespace_pattern")
-        if whitespace_pattern is not None:
-            guided_decoding["whitespace_pattern"] = whitespace_pattern
     return guided_decoding
 
 

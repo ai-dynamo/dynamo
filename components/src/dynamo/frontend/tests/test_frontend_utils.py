@@ -64,12 +64,16 @@ class TestValidateLegacyGuidedDecodingConstraints:
             }
         )
 
-    @pytest.mark.parametrize(
-        "payload",
-        [{"guided_choice": []}, {"guided_choice": "yes"}],
-    )
-    def test_non_list_or_empty_choice_is_not_an_active_constraint(self, payload):
-        validate_legacy_guided_decoding_constraints(payload)
+    def test_empty_choice_is_not_an_active_constraint(self):
+        # An empty list is a caller supplying no choices, which is no constraint.
+        validate_legacy_guided_decoding_constraints({"guided_choice": []})
+
+    @pytest.mark.parametrize("choice", ["yes", ("x", "y"), 5])
+    def test_non_list_choice_is_rejected(self, choice):
+        # Ignoring a malformed choice would generate unconstrained text for a
+        # caller who believes it constrained the output.
+        with pytest.raises(InvalidArgument, match="guided_choice must be a list"):
+            validate_legacy_guided_decoding_constraints({"guided_choice": choice})
 
     def test_empty_string_message_uses_fallback(self):
         resp = {"status": "error", "message": ""}

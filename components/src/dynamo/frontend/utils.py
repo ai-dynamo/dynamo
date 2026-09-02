@@ -18,13 +18,23 @@ ChatProcessorBackend = Literal["vllm", "sglang"]
 
 
 def validate_legacy_guided_decoding_constraints(request: dict[str, Any]) -> None:
-    """Reject multiple legacy guided-decoding constraints before preprocessing."""
+    """Reject malformed or multiple legacy guided-decoding constraints."""
     choice = request.get("guided_choice")
+    # An empty list is a caller saying "no choices", which is simply no
+    # constraint. Any other non-list is malformed: silently ignoring it would
+    # generate unconstrained text for a caller who believes it constrained the
+    # output. The Rust frontend types this field as Option<Vec<String>> and
+    # rejects a scalar, so rejecting here keeps the two paths in step.
+    if choice is not None and not isinstance(choice, list):
+        raise InvalidArgument(
+            "guided_choice must be a list of strings; received "
+            f"{type(choice).__name__}"
+        )
     constraints = (
         ("json", request.get("guided_json") is not None),
         ("regex", request.get("guided_regex") is not None),
         ("grammar", request.get("guided_grammar") is not None),
-        ("choice", isinstance(choice, list) and bool(choice)),
+        ("choice", bool(choice)),
     )
     active_constraints = [name for name, is_set in constraints if is_set]
     if len(active_constraints) > 1:
@@ -42,7 +52,7 @@ def legacy_guided_decoding(request: dict[str, Any]) -> dict[str, Any] | None:
         ("json", request.get("guided_json")),
         ("regex", request.get("guided_regex")),
         ("grammar", request.get("guided_grammar")),
-        ("choice", choice if isinstance(choice, list) and choice else None),
+        ("choice", choice or None),
     ):
         if value is not None:
             guidance = {key: value}
