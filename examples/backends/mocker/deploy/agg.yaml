@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Live Mocker deployment example for testing without GPUs.
-
 # NOTE: There is no dedicated `mocker-runtime` image. The published
 # `dynamo-planner` image includes the ai-dynamo wheel, ai-dynamo-runtime, and
 # Planner/profiler dependencies needed by the Mocker worker launcher.
