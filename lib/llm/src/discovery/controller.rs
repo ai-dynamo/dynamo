@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     panic::AssertUnwindSafe,
     sync::Arc,
     time::Duration,
@@ -121,7 +121,6 @@ enum GroupStatus {
         fingerprint: String,
         deadline: Instant,
     },
-    Conflict,
     Blocked {
         fingerprint: String,
         deadline: Instant,
@@ -139,6 +138,11 @@ struct DesiredGroup {
     cohorts: HashMap<String, BTreeSet<String>>,
     admission_tx: watch::Sender<Vec<u64>>,
     status: GroupStatus,
+    /// The elected winner and the refused cohorts of the last logged election.
+    /// A disagreement between workers persists until an operator drains them, so
+    /// the refusal is reported when the election changes rather than on every
+    /// reconciliation pass.
+    reported_election: Option<(String, BTreeMap<String, BTreeSet<String>>)>,
 }
 
 impl DesiredGroup {
@@ -150,6 +154,7 @@ impl DesiredGroup {
             cohorts: HashMap::new(),
             admission_tx,
             status: GroupStatus::Idle,
+            reported_election: None,
         }
     }
 
@@ -388,27 +393,13 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
             return;
         }
 
-        if group.cohorts.len() > 1 {
-            group.admission_tx.send_replace(Vec::new());
-            cancel_build(&old_status);
-            if status_has_commit(&old_status) {
-                self.host.remove_group(key);
-            }
-            if !matches!(old_status, GroupStatus::Conflict) {
-                group.generation = group.generation.wrapping_add(1);
-                group.retry_attempt = 0;
-            }
-            group.status = GroupStatus::Conflict;
-            self.groups.insert(key.clone(), group);
-            return;
-        }
-
-        let (fingerprint, member_keys) = group
+        let fingerprint = elect_cohort(&group.cohorts, committed_fingerprint(&old_status)).clone();
+        let member_keys = group
             .cohorts
-            .iter()
-            .next()
-            .map(|(fingerprint, members)| (fingerprint.clone(), members.clone()))
-            .expect("non-empty group has one cohort");
+            .get(&fingerprint)
+            .cloned()
+            .expect("the elected cohort is one of this group's cohorts");
+        report_refused_cohorts(key, &mut group, &fingerprint);
         let members = self.members(&member_keys);
         let admitted = admitted_ids(&members);
         if !matches!(
@@ -668,8 +659,7 @@ impl<H: ControllerHost> ModelDiscoveryController<H> {
                 generation,
                 ..
             } if fingerprint == &result.spec.fingerprint && *generation == result.spec.generation
-        ) && group.cohorts.len() == 1
-            && group.cohorts.contains_key(&result.spec.fingerprint);
+        ) && group.cohorts.contains_key(&result.spec.fingerprint);
         if !is_current {
             if let BuildOutcome::Prepared(prepared) = result.outcome {
                 self.host.discard_prepared(prepared);
@@ -882,6 +872,107 @@ fn admitted_ids(members: &[DesiredInstance]) -> Vec<u64> {
     ids
 }
 
+/// Pick the one cohort of a group whose workers are allowed to serve the model.
+///
+/// Workers that disagree about a model's deployment card land in different
+/// cohorts, and serving them together could route one model's traffic to a
+/// different materialization. A cohort the group has already committed keeps
+/// the model, so a worker that joins later with an incompatible card cannot
+/// displace workers that are already serving. Everything short of a commit is
+/// contestable: the largest cohort wins, ties broken by the lexicographically
+/// smallest fingerprint. That makes the winner a function of the cohort set
+/// alone, so frontend replicas that observe the same workers in different
+/// orders still admit the same cohort — up to the point where one of them
+/// commits, after which keeping healthy serving state takes priority over
+/// agreeing with a replica that has committed nothing.
+fn elect_cohort<'a>(
+    cohorts: &'a HashMap<String, BTreeSet<String>>,
+    committed: Option<&str>,
+) -> &'a String {
+    if let Some(committed) = committed
+        && let Some((fingerprint, _)) = cohorts.get_key_value(committed)
+    {
+        return fingerprint;
+    }
+    cohorts
+        .iter()
+        .max_by(|(left_fingerprint, left), (right_fingerprint, right)| {
+            left.len()
+                .cmp(&right.len())
+                .then_with(|| right_fingerprint.cmp(left_fingerprint))
+        })
+        .map(|(fingerprint, _)| fingerprint)
+        .expect("a non-empty group has at least one cohort")
+}
+
+fn report_refused_cohorts(key: &GroupKey, group: &mut DesiredGroup, elected: &str) {
+    if group.cohorts.len() < 2 {
+        group.reported_election = None;
+        return;
+    }
+    let refused = group
+        .cohorts
+        .iter()
+        .filter(|(fingerprint, _)| fingerprint.as_str() != elected)
+        .map(|(fingerprint, members)| (fingerprint.clone(), members.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let election = (elected.to_string(), refused);
+    if group.reported_election.as_ref() == Some(&election) {
+        return;
+    }
+    let (_, refused) = &election;
+    let refused_summary = refused
+        .iter()
+        .map(|(fingerprint, members)| {
+            format!(
+                "{fingerprint} ({})",
+                members
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    tracing::error!(
+        model_name = %key.model_name,
+        worker_set = %key.worker_set_key,
+        elected_checksum = %elected,
+        refused_checksums = %refused_summary,
+        "Workers in this worker set published model deployment cards with different checksums. \
+         Serving the elected cohort only; the refused workers receive no traffic. \
+         Drain all old workers in this namespace before deploying a new version."
+    );
+    group.reported_election = Some(election);
+}
+
+/// The fingerprint this group currently has a commit on, if any.
+///
+/// A commit is the only thing that wins an election outright, so this covers
+/// exactly the statuses `status_has_commit` reports. Every other status has
+/// published nothing, and protecting one would decide the election by the order
+/// this frontend happened to observe two simultaneously registering workers:
+/// `ModelDiscoveryController::run` starts queued builds at the top of every
+/// iteration and applies one discovery event per iteration, so the first
+/// observed cohort is always `Building` by the time the second is applied.
+/// `Retrying` and `Blocked` are excluded for a second reason — `release_due_retries`
+/// recycles them onto the same fingerprint and the next `start_queued_builds`
+/// promotes them straight back to `Building`, so a cohort that can never build
+/// would hold the model unregistered for as long as it keeps failing.
+fn committed_fingerprint(status: &GroupStatus) -> Option<&str> {
+    match status {
+        GroupStatus::Ready { fingerprint, .. } | GroupStatus::BlockedReady { fingerprint, .. } => {
+            Some(fingerprint)
+        }
+        GroupStatus::Idle
+        | GroupStatus::Queued { .. }
+        | GroupStatus::Building { .. }
+        | GroupStatus::Retrying { .. }
+        | GroupStatus::Blocked { .. } => None,
+    }
+}
+
 fn cancel_build(status: &GroupStatus) {
     if let GroupStatus::Building { cancellation, .. } = status {
         cancellation.cancel();
@@ -889,10 +980,7 @@ fn cancel_build(status: &GroupStatus) {
 }
 
 fn status_has_commit(status: &GroupStatus) -> bool {
-    matches!(
-        status,
-        GroupStatus::Ready { .. } | GroupStatus::BlockedReady { .. }
-    )
+    committed_fingerprint(status).is_some()
 }
 
 async fn wait_for_deadline(deadline: Option<Instant>) {
@@ -1181,6 +1269,45 @@ mod tests {
         controller.apply_build_result(result);
     }
 
+    /// Run the controller's build side to a standstill.
+    ///
+    /// Re-electing away from a building cohort cancels that build, so the group
+    /// can have a cancelled build and its replacement outstanding at the same
+    /// time and the caller cannot tell in advance how many joins one commit
+    /// takes. Joining every outstanding build and restarting queued ones after
+    /// each join leaves the same state whichever order the two complete in.
+    async fn drain_builds(host: &FakeHost, controller: &mut ModelDiscoveryController<FakeHost>) {
+        while !controller.builds.is_empty() {
+            host.release.add_permits(1);
+            finish_build(controller).await;
+            controller.start_queued_builds();
+        }
+    }
+
+    /// Register two workers of one worker set the way the run loop observes
+    /// them: `ModelDiscoveryController::run` starts queued builds at the top of
+    /// every iteration and applies one discovery event per iteration, so the
+    /// second worker is always seen after the first worker's build has started.
+    async fn register_in_arrival_order(
+        first: &DesiredInstance,
+        second: &DesiredInstance,
+    ) -> (
+        Arc<FakeHost>,
+        ModelDiscoveryController<FakeHost>,
+        mpsc::UnboundedReceiver<GroupSpec>,
+    ) {
+        let (host, starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+
+        controller.apply_added(first.clone());
+        controller.start_queued_builds();
+        controller.apply_added(second.clone());
+        controller.start_queued_builds();
+        drain_builds(&host, &mut controller).await;
+
+        (host, controller, starts)
+    }
+
     #[tokio::test]
     async fn membership_churn_keeps_one_build_and_commits_latest_members() {
         let (host, mut starts) = FakeHost::new();
@@ -1233,12 +1360,22 @@ mod tests {
         assert_eq!(host.starts.load(Ordering::SeqCst), 1);
     }
 
+    fn admitted(controller: &ModelDiscoveryController<FakeHost>) -> Vec<u64> {
+        controller
+            .groups
+            .get(&group_key())
+            .expect("the group is still tracked")
+            .admission_tx
+            .borrow()
+            .clone()
+    }
+
     #[tokio::test]
-    async fn conflict_fails_ready_group_closed_and_recovers_after_clear() {
+    async fn conflict_after_commit_keeps_the_incumbent_and_refuses_the_newcomer() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
-        let compatible = instance(1, "first-spec");
-        controller.apply_added(compatible.clone());
+        let incumbent = instance(1, "first-spec");
+        controller.apply_added(incumbent.clone());
         controller.start_queued_builds();
         starts.recv().await.unwrap();
         host.release.add_permits(1);
@@ -1247,37 +1384,147 @@ mod tests {
 
         let conflicting = instance(2, "second-spec");
         controller.apply_added(conflicting.clone());
-        assert!(host.members(&group_key()).is_empty());
-        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([incumbent.key.clone()])
+        );
+        assert_eq!(admitted(&controller), vec![incumbent.mcid.instance_id]);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
 
         controller.apply_removed(&conflicting.key);
-        controller.start_queued_builds();
-        starts.recv().await.unwrap();
-        host.release.add_permits(1);
-        finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([compatible.key]));
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([incumbent.key.clone()])
+        );
+        assert_eq!(admitted(&controller), vec![incumbent.mcid.instance_id]);
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn conflict_during_build_cancels_without_publishing_either_cohort() {
+    async fn conflict_during_build_commits_the_elected_cohort_alone() {
         let (host, mut starts) = FakeHost::new();
         let mut controller = ModelDiscoveryController::new(host.clone());
-        let first = instance(1, "first-spec");
+        // The in-flight cohort wins this election on its own merits — the two
+        // cohorts are the same size and `first-spec` sorts first — so the build
+        // survives the conflicting arrival and commits its own cohort alone.
+        let elected = instance(1, "first-spec");
         let conflicting = instance(2, "second-spec");
-        controller.apply_added(first.clone());
+        controller.apply_added(elected.clone());
         controller.start_queued_builds();
         starts.recv().await.unwrap();
 
         controller.apply_added(conflicting.clone());
+        host.release.add_permits(1);
         finish_build(&mut controller).await;
-        assert!(host.members(&group_key()).is_empty());
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([elected.key.clone()])
+        );
+        assert_eq!(admitted(&controller), vec![elected.mcid.instance_id]);
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
 
         controller.apply_removed(&conflicting.key);
+        assert_eq!(host.members(&group_key()), BTreeSet::from([elected.key]));
+        assert_eq!(host.starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn simultaneous_mixed_checksums_elect_one_cohort_and_register_the_model() {
+        // Both workers of one worker set register at once, each with its own card
+        // checksum: the mocker's race for a single system status server port
+        // leaves one worker self-hosting its assets and the other falling back.
+        // They arrive one run-loop iteration apart, so the first cohort's build is
+        // already in flight when the second worker is applied.
+        let self_hosted = instance(1, "self-hosted-spec");
+        let fallback = instance(2, "fallback-spec");
+        let (host, mut controller, _starts) =
+            register_in_arrival_order(&self_hosted, &fallback).await;
+
+        // Neither cohort has committed anything, so the election is decided by the
+        // cohort set alone: equal sizes, and `fallback-spec` sorts first.
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([fallback.key.clone()])
+        );
+        assert_eq!(host.removed_groups.load(Ordering::SeqCst), 0);
+        // Negative control: merging both cohorts would satisfy every assertion
+        // above while routing one model's traffic across two materializations.
+        assert!(!host.members(&group_key()).contains(&self_hosted.key));
+        assert_eq!(admitted(&controller), vec![fallback.mcid.instance_id]);
+
+        // The refused cohort is refused, not discarded: it is promoted and built
+        // once the elected cohort leaves.
+        let starts_before = host.starts.load(Ordering::SeqCst);
+        controller.apply_removed(&fallback.key);
+        controller.start_queued_builds();
+        drain_builds(&host, &mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([self_hosted.key])
+        );
+        assert_eq!(host.starts.load(Ordering::SeqCst), starts_before + 1);
+    }
+
+    #[tokio::test]
+    async fn cohort_election_does_not_depend_on_worker_arrival_order() {
+        // Two frontend replicas can observe two simultaneously registering workers
+        // in either order. Neither replica has committed anything, so both must
+        // elect the same cohort — otherwise one model's traffic is served from two
+        // materializations, split across replicas.
+        let self_hosted = instance(1, "self-hosted-spec");
+        let fallback = instance(2, "fallback-spec");
+
+        let (self_hosted_first, _, _self_hosted_starts) =
+            register_in_arrival_order(&self_hosted, &fallback).await;
+        let (fallback_first, _, _fallback_starts) =
+            register_in_arrival_order(&fallback, &self_hosted).await;
+
+        assert_eq!(
+            self_hosted_first.members(&group_key()),
+            fallback_first.members(&group_key())
+        );
+        assert_eq!(
+            self_hosted_first.members(&group_key()),
+            BTreeSet::from([fallback.key])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cohort_whose_build_keeps_failing_loses_the_election() {
+        let (host, mut starts) = FakeHost::new();
+        let mut controller = ModelDiscoveryController::new(host.clone());
+        // `failing` sorts first, so it wins every tie-break and can only lose the
+        // election by losing to a larger cohort. Its first two builds fail.
+        host.failures.store(2, Ordering::SeqCst);
+        let failing = instance(1, "a-failing-spec");
+        let healthy = instance(2, "b-healthy-spec");
+        let healthy_peer = instance(3, "b-healthy-spec");
+
+        controller.apply_added(failing.clone());
         controller.start_queued_builds();
         starts.recv().await.unwrap();
         host.release.add_permits(1);
         finish_build(&mut controller).await;
-        assert_eq!(host.members(&group_key()), BTreeSet::from([first.key]));
+
+        // A second cohort of one loses the tie-break, so the failing cohort is
+        // rebuilt — and fails again.
+        controller.apply_added(healthy.clone());
+        controller.start_queued_builds();
+        starts.recv().await.unwrap();
+        host.release.add_permits(1);
+        finish_build(&mut controller).await;
+        assert!(host.members(&group_key()).is_empty());
+
+        // The healthy cohort now outnumbers the failing one and takes the model.
+        controller.apply_added(healthy_peer.clone());
+        controller.start_queued_builds();
+        drain_builds(&host, &mut controller).await;
+        assert_eq!(
+            host.members(&group_key()),
+            BTreeSet::from([healthy.key, healthy_peer.key])
+        );
+        assert!(!host.members(&group_key()).contains(&failing.key));
+        assert_eq!(host.failures.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
