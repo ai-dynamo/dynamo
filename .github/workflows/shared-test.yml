@@ -151,6 +151,8 @@ jobs:
         # Datadog Test Optimization scoping (settings are per service+env).
         DD_SERVICE: ai-dynamo
         DD_ENV: ${{ inputs.dd_env }}
+        # Overwritten per-lane by the 'Tag Datadog test sessions with the
+        # CI lane' step below; this is the fallback if that step is skipped.
         DD_TAGS: 'team:dynamo'
         DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
         DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '2'
@@ -181,6 +183,39 @@ jobs:
           KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
         run: |
           echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
+      # Datadog derives ci.job.name from $GITHUB_JOB, which inside a reusable
+      # workflow is the inner job id — literally "test" for every caller. So
+      # every test session from this workflow lands under one job name and the
+      # test data cannot be attributed to a CI lane at all (measured: 105,505
+      # Nightly test events on main over 14 days, all under ci.job.name:test,
+      # while the pipeline-side job events carry 69 distinct lane names).
+      #
+      # Tagging the session restores that dimension. Composed here rather than
+      # inline in DD_TAGS because DD_TAGS is comma-separated and the lane name
+      # contains commas and spaces ("Test cuda13.0, amd64"), and GitHub
+      # expressions have no replace() to sanitise them.
+      - name: Tag Datadog test sessions with the CI lane
+        shell: bash
+        env:
+          LANE_SUITE: ${{ inputs.test_suite_name }}
+          LANE_TYPE: ${{ inputs.test_type }}
+          LANE_CUDA: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
+          LANE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          slug() {
+            printf '%s' "$1" \
+              | tr '[:upper:]' '[:lower:]' \
+              | tr -c 'a-z0-9._-' '-' \
+              | tr -s '-' \
+              | sed 's/^-//; s/-$//'
+          }
+          lane="$(slug "${LANE_SUITE}-${LANE_TYPE}-${LANE_CUDA}-${LANE_PLATFORM}")"
+          {
+            echo "DD_TAGS=team:dynamo,lane:${lane},test_suite:$(slug "${LANE_SUITE}")"
+          } >> "$GITHUB_ENV"
+          echo "Datadog lane tag: ${lane}"
+
       # Experimental: trialing Datadog Test Visibility. Remove if not kept.
       - name: Configure Datadog Test Visibility
         continue-on-error: true
