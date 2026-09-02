@@ -21,14 +21,286 @@ struct PendingRankPublication {
     metrics: Metrics,
 }
 
+// Keep the timing inline: boxing this diagnostic would add an allocation to
+// the completion path being measured.
+#[allow(clippy::large_enum_variant)]
 enum OutputPublication {
-    Delivered(Vec<Uuid>),
+    Delivered {
+        failed_requests: Vec<Uuid>,
+        timing: OutputPublishTiming,
+    },
     Cancelled,
 }
 
 enum CompletionDispatch {
     Completed,
     Cancelled,
+}
+
+const COMPLETION_TIMING_LOG_INTERVAL_PASSES: u64 = 512;
+
+#[derive(Debug, Default, Clone, Copy)]
+struct CompletionEventTiming {
+    admission: std::time::Duration,
+    reserve: std::time::Duration,
+    reserve_waited: bool,
+    predecessor_busy: std::time::Duration,
+    receiver_wake: std::time::Duration,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct RouterPublishTiming {
+    kv_publish: std::time::Duration,
+    fpm_publish: std::time::Duration,
+    completion_kv_events: u64,
+    deferred_kv_events: u64,
+}
+
+#[derive(Debug, Default)]
+struct CompletionPassTiming {
+    completion_boundary: std::time::Duration,
+    event: CompletionEventTiming,
+    body_wall: std::time::Duration,
+    kv_publish: std::time::Duration,
+    fpm_publish: std::time::Duration,
+    output_convert: std::time::Duration,
+    output_publish_wall: std::time::Duration,
+    output_admission: std::time::Duration,
+    output_reserve: std::time::Duration,
+    output_predecessor_busy: std::time::Duration,
+    output_receiver_wake: std::time::Duration,
+    output_gate_wait: std::time::Duration,
+    output_route_wall: std::time::Duration,
+    output_route_cpu_valid_wall: std::time::Duration,
+    output_route_thread_cpu: std::time::Duration,
+    output_route_wall_minus_thread_cpu_ms: f64,
+    output_dispatcher_residual: std::time::Duration,
+    output_ack_wake: std::time::Duration,
+    output_residual_ms: f64,
+    lifecycle_convert: std::time::Duration,
+    failure_cleanup: std::time::Duration,
+    lifecycle_publish: std::time::Duration,
+    metrics_publish: std::time::Duration,
+    before_finish: std::time::Duration,
+    body_residual_ms: f64,
+    finish_admission: std::time::Duration,
+    finish_reserve: std::time::Duration,
+    finish_actor_wake: std::time::Duration,
+    finish_return_wake: std::time::Duration,
+    boundary_identity_residual_ms: f64,
+    rank_batches: u64,
+    event_reserve_waited_passes: u64,
+    output_batches: u64,
+    output_reserve_waited_batches: u64,
+    output_signals: u64,
+    uninstrumented_output_signals: u64,
+    terminal_signals: u64,
+    route_found: u64,
+    route_missing: u64,
+    delivered: u64,
+    full: u64,
+    closed: u64,
+    terminal_removals: u64,
+    route_cpu_valid_batches: u64,
+    route_cpu_invalid_batches: u64,
+    cleanup_commands: u64,
+    completion_kv_events: u64,
+    deferred_kv_events: u64,
+    lifecycle_events: u64,
+    finish_reserve_waited_passes: u64,
+}
+
+#[derive(Debug, Default)]
+struct CompletionTimingDiagnostics {
+    total_passes: u64,
+    interval_passes: u64,
+    timing: CompletionPassTiming,
+}
+
+fn duration_ms(duration: std::time::Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+
+impl CompletionPassTiming {
+    fn add_output(&mut self, timing: OutputPublishTiming) {
+        self.output_batches += 1;
+        self.output_publish_wall += timing.wall;
+        self.output_admission += timing.admission;
+        self.output_reserve += timing.reserve;
+        self.output_reserve_waited_batches += u64::from(timing.reserve_waited);
+        self.output_predecessor_busy += timing.predecessor_busy;
+        self.output_receiver_wake += timing.receiver_wake;
+        self.output_gate_wait += timing.gate_wait;
+        self.output_route_wall += timing.route_wall;
+        self.output_dispatcher_residual += timing.dispatcher_residual;
+        self.output_ack_wake += timing.ack_wake;
+        self.output_residual_ms += timing.residual_ms;
+        self.output_signals += timing.signals;
+        self.uninstrumented_output_signals += timing.uninstrumented_signals;
+        self.terminal_signals += timing.terminals;
+        self.route_found += timing.route_found;
+        self.route_missing += timing.route_missing;
+        self.delivered += timing.delivered;
+        self.full += timing.full;
+        self.closed += timing.closed;
+        self.terminal_removals += timing.terminal_removals;
+        if let Some(cpu) = timing.route_thread_cpu {
+            self.route_cpu_valid_batches += 1;
+            self.output_route_cpu_valid_wall += timing.route_wall;
+            self.output_route_thread_cpu += cpu;
+            self.output_route_wall_minus_thread_cpu_ms +=
+                (timing.route_wall.as_secs_f64() - cpu.as_secs_f64()) * 1_000.0;
+        } else {
+            self.route_cpu_invalid_batches += 1;
+        }
+    }
+}
+
+impl CompletionTimingDiagnostics {
+    fn record(&mut self, timing: CompletionPassTiming) {
+        self.total_passes += 1;
+        self.interval_passes += 1;
+        self.timing.add_assign(timing);
+        if self.interval_passes < COMPLETION_TIMING_LOG_INTERVAL_PASSES {
+            return;
+        }
+
+        let timing = &self.timing;
+        tracing::info!(
+            target: "dynamo_mocker::completion_timing",
+            event = "mocker_completion_timing",
+            total_passes = self.total_passes,
+            interval_passes = self.interval_passes,
+            completion_boundary_total_ms = duration_ms(timing.completion_boundary),
+            event_admission_total_ms = duration_ms(timing.event.admission),
+            event_reserve_total_ms = duration_ms(timing.event.reserve),
+            event_admission_nonreserve_total_ms = duration_ms(
+                timing.event.admission.saturating_sub(timing.event.reserve)
+            ),
+            event_predecessor_busy_total_ms = duration_ms(timing.event.predecessor_busy),
+            event_receiver_wake_total_ms = duration_ms(timing.event.receiver_wake),
+            body_wall_total_ms = duration_ms(timing.body_wall),
+            kv_publish_total_ms = duration_ms(timing.kv_publish),
+            fpm_publish_total_ms = duration_ms(timing.fpm_publish),
+            output_convert_total_ms = duration_ms(timing.output_convert),
+            output_publish_wall_total_ms = duration_ms(timing.output_publish_wall),
+            output_admission_total_ms = duration_ms(timing.output_admission),
+            output_reserve_total_ms = duration_ms(timing.output_reserve),
+            output_admission_nonreserve_total_ms = duration_ms(
+                timing.output_admission.saturating_sub(timing.output_reserve)
+            ),
+            output_predecessor_busy_total_ms = duration_ms(timing.output_predecessor_busy),
+            output_receiver_wake_total_ms = duration_ms(timing.output_receiver_wake),
+            output_gate_wait_total_ms = duration_ms(timing.output_gate_wait),
+            output_route_wall_total_ms = duration_ms(timing.output_route_wall),
+            output_route_cpu_valid_wall_total_ms = duration_ms(timing.output_route_cpu_valid_wall),
+            output_route_thread_cpu_total_ms = duration_ms(timing.output_route_thread_cpu),
+            output_route_wall_minus_thread_cpu_total_ms = timing.output_route_wall_minus_thread_cpu_ms,
+            output_dispatcher_residual_total_ms = duration_ms(timing.output_dispatcher_residual),
+            output_ack_wake_total_ms = duration_ms(timing.output_ack_wake),
+            output_residual_total_ms = timing.output_residual_ms,
+            lifecycle_convert_total_ms = duration_ms(timing.lifecycle_convert),
+            failure_cleanup_total_ms = duration_ms(timing.failure_cleanup),
+            lifecycle_publish_total_ms = duration_ms(timing.lifecycle_publish),
+            metrics_publish_total_ms = duration_ms(timing.metrics_publish),
+            before_finish_total_ms = duration_ms(timing.before_finish),
+            body_residual_total_ms = timing.body_residual_ms,
+            finish_admission_total_ms = duration_ms(timing.finish_admission),
+            finish_reserve_total_ms = duration_ms(timing.finish_reserve),
+            finish_admission_nonreserve_total_ms = duration_ms(
+                timing.finish_admission.saturating_sub(timing.finish_reserve)
+            ),
+            finish_actor_wake_total_ms = duration_ms(timing.finish_actor_wake),
+            finish_return_wake_total_ms = duration_ms(timing.finish_return_wake),
+            boundary_identity_residual_total_ms = timing.boundary_identity_residual_ms,
+            rank_batches = timing.rank_batches,
+            event_reserve_waited_passes = timing.event_reserve_waited_passes,
+            output_batches = timing.output_batches,
+            output_reserve_waited_batches = timing.output_reserve_waited_batches,
+            output_signals = timing.output_signals,
+            uninstrumented_output_signals = timing.uninstrumented_output_signals,
+            terminal_signals = timing.terminal_signals,
+            route_found = timing.route_found,
+            route_missing = timing.route_missing,
+            delivered = timing.delivered,
+            full = timing.full,
+            closed = timing.closed,
+            terminal_removals = timing.terminal_removals,
+            route_cpu_valid_batches = timing.route_cpu_valid_batches,
+            route_cpu_invalid_batches = timing.route_cpu_invalid_batches,
+            cleanup_commands = timing.cleanup_commands,
+            completion_kv_events = timing.completion_kv_events,
+            deferred_kv_events = timing.deferred_kv_events,
+            lifecycle_events = timing.lifecycle_events,
+            finish_reserve_waited_passes = timing.finish_reserve_waited_passes,
+            "mocker completion timing interval"
+        );
+
+        let total_passes = self.total_passes;
+        *self = Self {
+            total_passes,
+            ..Self::default()
+        };
+    }
+}
+
+impl CompletionPassTiming {
+    fn add_assign(&mut self, other: Self) {
+        self.completion_boundary += other.completion_boundary;
+        self.event.admission += other.event.admission;
+        self.event.reserve += other.event.reserve;
+        self.event.reserve_waited |= other.event.reserve_waited;
+        self.event.predecessor_busy += other.event.predecessor_busy;
+        self.event.receiver_wake += other.event.receiver_wake;
+        self.body_wall += other.body_wall;
+        self.kv_publish += other.kv_publish;
+        self.fpm_publish += other.fpm_publish;
+        self.output_convert += other.output_convert;
+        self.output_publish_wall += other.output_publish_wall;
+        self.output_admission += other.output_admission;
+        self.output_reserve += other.output_reserve;
+        self.output_predecessor_busy += other.output_predecessor_busy;
+        self.output_receiver_wake += other.output_receiver_wake;
+        self.output_gate_wait += other.output_gate_wait;
+        self.output_route_wall += other.output_route_wall;
+        self.output_route_cpu_valid_wall += other.output_route_cpu_valid_wall;
+        self.output_route_thread_cpu += other.output_route_thread_cpu;
+        self.output_route_wall_minus_thread_cpu_ms += other.output_route_wall_minus_thread_cpu_ms;
+        self.output_dispatcher_residual += other.output_dispatcher_residual;
+        self.output_ack_wake += other.output_ack_wake;
+        self.output_residual_ms += other.output_residual_ms;
+        self.lifecycle_convert += other.lifecycle_convert;
+        self.failure_cleanup += other.failure_cleanup;
+        self.lifecycle_publish += other.lifecycle_publish;
+        self.metrics_publish += other.metrics_publish;
+        self.before_finish += other.before_finish;
+        self.body_residual_ms += other.body_residual_ms;
+        self.finish_admission += other.finish_admission;
+        self.finish_reserve += other.finish_reserve;
+        self.finish_actor_wake += other.finish_actor_wake;
+        self.finish_return_wake += other.finish_return_wake;
+        self.boundary_identity_residual_ms += other.boundary_identity_residual_ms;
+        self.rank_batches += other.rank_batches;
+        self.event_reserve_waited_passes += other.event_reserve_waited_passes;
+        self.output_batches += other.output_batches;
+        self.output_reserve_waited_batches += other.output_reserve_waited_batches;
+        self.output_signals += other.output_signals;
+        self.uninstrumented_output_signals += other.uninstrumented_output_signals;
+        self.terminal_signals += other.terminal_signals;
+        self.route_found += other.route_found;
+        self.route_missing += other.route_missing;
+        self.delivered += other.delivered;
+        self.full += other.full;
+        self.closed += other.closed;
+        self.terminal_removals += other.terminal_removals;
+        self.route_cpu_valid_batches += other.route_cpu_valid_batches;
+        self.route_cpu_invalid_batches += other.route_cpu_invalid_batches;
+        self.cleanup_commands += other.cleanup_commands;
+        self.completion_kv_events += other.completion_kv_events;
+        self.deferred_kv_events += other.deferred_kv_events;
+        self.lifecycle_events += other.lifecycle_events;
+        self.finish_reserve_waited_passes += other.finish_reserve_waited_passes;
+    }
 }
 
 #[derive(Default)]
@@ -48,6 +320,8 @@ pub(super) async fn run_effect_dispatcher(
     let mut deferred_commands = (0..ranks.len())
         .map(|_| DeferredCommandPublication::default())
         .collect::<Vec<_>>();
+    let mut timing_diagnostics = CompletionTimingDiagnostics::default();
+    let mut last_handler_finished_at = None;
     loop {
         let event = tokio::select! {
             biased;
@@ -57,6 +331,7 @@ pub(super) async fn run_effect_dispatcher(
         let Some(event) = event else {
             return Ok(());
         };
+        let dequeued_at = tokio::time::Instant::now();
         match event {
             GroupedLiveEvent::CommandApplied {
                 command_id,
@@ -87,9 +362,28 @@ pub(super) async fn run_effect_dispatcher(
             GroupedLiveEvent::PassCompleted {
                 completed,
                 boundary,
+                completion_started_at,
+                event_enqueued_at,
+                event_reserve,
+                event_reserve_waited,
             } => {
                 let _completion_guard = completion_tracker.enter();
-                dispatch_pass_completion(
+                let event_timing = CompletionEventTiming {
+                    admission: event_enqueued_at.saturating_duration_since(completion_started_at),
+                    reserve: event_reserve,
+                    reserve_waited: event_reserve_waited,
+                    predecessor_busy: last_handler_finished_at
+                        .map(|finished_at: tokio::time::Instant| {
+                            finished_at.saturating_duration_since(event_enqueued_at)
+                        })
+                        .unwrap_or_default(),
+                    receiver_wake: dequeued_at.saturating_duration_since(
+                        last_handler_finished_at
+                            .map(|finished_at| finished_at.max(event_enqueued_at))
+                            .unwrap_or(event_enqueued_at),
+                    ),
+                };
+                if let Some(timing) = dispatch_pass_completion(
                     completed,
                     boundary,
                     &ranks,
@@ -97,8 +391,12 @@ pub(super) async fn run_effect_dispatcher(
                     &mut deferred_commands,
                     &cancel,
                     &completion_tracker,
+                    event_timing,
                 )
-                .await?;
+                .await?
+                {
+                    timing_diagnostics.record(timing);
+                }
                 ensure!(
                     deferred_commands
                         .iter()
@@ -107,9 +405,13 @@ pub(super) async fn run_effect_dispatcher(
                 );
             }
         }
+        last_handler_finished_at = Some(tokio::time::Instant::now());
     }
 }
 
+// The diagnostic event timing is deliberately carried beside the existing
+// completion context so the production dispatch sequence stays unchanged.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_pass_completion(
     completed: EnginePassCompleted<PassCompletionEffects>,
     boundary: GroupedPassBoundary,
@@ -118,14 +420,22 @@ async fn dispatch_pass_completion(
     deferred_commands: &mut [DeferredCommandPublication],
     cancel: &CancellationToken,
     completion_tracker: &CompletionBoundaryTracker,
-) -> Result<()> {
+    event_timing: CompletionEventTiming,
+) -> Result<Option<CompletionPassTiming>> {
+    let body_started_at = tokio::time::Instant::now();
+    let mut timing = CompletionPassTiming {
+        event: event_timing,
+        event_reserve_waited_passes: u64::from(event_timing.reserve_waited),
+        ..CompletionPassTiming::default()
+    };
     let dispatch_result = async {
         let mut publications = Vec::with_capacity(completed.effects.by_rank.len());
         let mut delivery_failures = Vec::new();
         for rank in completed.effects.by_rank {
+            timing.rank_batches += 1;
             let dispatch = rank_dispatch(ranks, rank.dp_rank)?;
             let effects = rank.effects;
-            publish_pass_router_effects(
+            let router_timing = publish_pass_router_effects(
                 dispatch,
                 effects.kv_events,
                 &mut deferred_commands
@@ -134,13 +444,25 @@ async fn dispatch_pass_completion(
                     .kv,
                 effects.forward_pass_metrics,
             );
+            timing.kv_publish += router_timing.kv_publish;
+            timing.fpm_publish += router_timing.fpm_publish;
+            timing.completion_kv_events += router_timing.completion_kv_events;
+            timing.deferred_kv_events += router_timing.deferred_kv_events;
+            let output_convert_started_at = tokio::time::Instant::now();
             let outputs = effects
                 .outputs
                 .into_iter()
                 .map(|output| compatibility.output_signal(output))
-                .collect();
+                .collect::<Vec<_>>();
+            timing.output_convert += output_convert_started_at.elapsed();
             match dispatch.publish_outputs(outputs).await? {
-                OutputPublication::Delivered(failed_requests) => {
+                OutputPublication::Delivered {
+                    failed_requests,
+                    timing: output_timing,
+                } => {
+                    if output_timing.signals > 0 {
+                        timing.add_output(output_timing);
+                    }
                     delivery_failures.extend(
                         failed_requests
                             .into_iter()
@@ -149,11 +471,14 @@ async fn dispatch_pass_completion(
                 }
                 OutputPublication::Cancelled => return Ok(CompletionDispatch::Cancelled),
             }
+            let lifecycle_convert_started_at = tokio::time::Instant::now();
             let lifecycle = effects
                 .lifecycle_events
                 .into_iter()
                 .map(|event| compatibility.lifecycle_event(event))
                 .collect::<Result<Vec<_>>>()?;
+            timing.lifecycle_convert += lifecycle_convert_started_at.elapsed();
+            timing.lifecycle_events += lifecycle.len() as u64;
             publications.push(PendingRankPublication {
                 dp_rank: rank.dp_rank,
                 lifecycle,
@@ -168,7 +493,9 @@ async fn dispatch_pass_completion(
             });
         }
 
+        let failure_cleanup_started_at = tokio::time::Instant::now();
         for (dp_rank, request_id) in delivery_failures {
+            timing.cleanup_commands += 1;
             let command_result = boundary
                 .apply_command(EngineSchedulerCommand::new(
                     dp_rank,
@@ -184,11 +511,16 @@ async fn dispatch_pass_completion(
             let effects = command_result?;
             merge_boundary_command_effects(effects, ranks, compatibility, &mut publications)?;
         }
+        timing.failure_cleanup += failure_cleanup_started_at.elapsed();
 
         for publication in publications {
             let dispatch = rank_dispatch(ranks, publication.dp_rank)?;
+            let lifecycle_publish_started_at = tokio::time::Instant::now();
             dispatch.publish_lifecycle(publication.lifecycle).await;
+            timing.lifecycle_publish += lifecycle_publish_started_at.elapsed();
+            let metrics_publish_started_at = tokio::time::Instant::now();
             dispatch.publish_metrics(publication.metrics);
+            timing.metrics_publish += metrics_publish_started_at.elapsed();
         }
         Ok(CompletionDispatch::Completed)
     }
@@ -199,27 +531,67 @@ async fn dispatch_pass_completion(
     // A cancellation observed by the ordered output lane means the actor is
     // already shutting down, so there is no boundary left to release.
     let finish_result = if matches!(&dispatch_result, Ok(CompletionDispatch::Cancelled)) {
-        Ok(())
+        Ok(None)
     } else {
+        let before_finish_started_at = tokio::time::Instant::now();
         completion_tracker.before_finish().await;
+        timing.before_finish += before_finish_started_at.elapsed();
+        timing.body_wall = body_started_at.elapsed();
+        let body_accounted = timing
+            .kv_publish
+            .saturating_add(timing.fpm_publish)
+            .saturating_add(timing.output_convert)
+            .saturating_add(timing.output_publish_wall)
+            .saturating_add(timing.lifecycle_convert)
+            .saturating_add(timing.failure_cleanup)
+            .saturating_add(timing.lifecycle_publish)
+            .saturating_add(timing.metrics_publish)
+            .saturating_add(timing.before_finish);
+        timing.body_residual_ms =
+            (timing.body_wall.as_secs_f64() - body_accounted.as_secs_f64()) * 1_000.0;
         finish_boundary_or_cancel(boundary.finish(), cancel).await
     };
     match dispatch_result {
         Err(error) => Err(error),
-        Ok(CompletionDispatch::Cancelled) => Ok(()),
-        Ok(CompletionDispatch::Completed) => finish_result,
+        Ok(CompletionDispatch::Cancelled) => Ok(None),
+        Ok(CompletionDispatch::Completed) => {
+            let Some(finish) = finish_result? else {
+                return Ok(None);
+            };
+            timing.completion_boundary = finish.completion_boundary;
+            timing.finish_admission = finish.admission;
+            timing.finish_reserve = finish.reserve;
+            timing.finish_reserve_waited_passes = u64::from(finish.reserve_waited);
+            timing.finish_actor_wake = finish.actor_wake;
+            timing.finish_return_wake = finish.return_wake;
+            let boundary_accounted = timing
+                .event
+                .admission
+                .saturating_add(timing.event.predecessor_busy)
+                .saturating_add(timing.event.receiver_wake)
+                .saturating_add(timing.body_wall)
+                .saturating_add(timing.finish_admission)
+                .saturating_add(timing.finish_actor_wake);
+            timing.boundary_identity_residual_ms = (timing.completion_boundary.as_secs_f64()
+                - boundary_accounted.as_secs_f64())
+                * 1_000.0;
+            Ok(Some(timing))
+        }
     }
 }
 
-async fn finish_boundary_or_cancel<F>(finish: F, cancel: &CancellationToken) -> Result<()>
+async fn finish_boundary_or_cancel<F>(
+    finish: F,
+    cancel: &CancellationToken,
+) -> Result<Option<BoundaryFinishTiming>>
 where
-    F: std::future::Future<Output = Result<()>>,
+    F: std::future::Future<Output = Result<BoundaryFinishTiming>>,
 {
     tokio::pin!(finish);
     tokio::select! {
         biased;
-        result = &mut finish => result,
-        _ = cancel.cancelled() => Ok(()),
+        result = &mut finish => result.map(Some),
+        _ = cancel.cancelled() => Ok(None),
     }
 }
 
@@ -266,10 +638,21 @@ pub(super) fn publish_pass_router_effects(
     completion_kv: Vec<KvEvent>,
     deferred_command_kv: &mut Vec<KvEvent>,
     fpm: ForwardPassMetrics,
-) {
+) -> RouterPublishTiming {
+    let completion_kv_events = completion_kv.len() as u64;
+    let deferred_kv_events = deferred_command_kv.len() as u64;
+    let kv_publish_started_at = tokio::time::Instant::now();
     dispatch.publish_kv(completion_kv);
     dispatch.publish_kv(std::mem::take(deferred_command_kv));
+    let kv_publish = kv_publish_started_at.elapsed();
+    let fpm_publish_started_at = tokio::time::Instant::now();
     dispatch.publish_fpm(fpm);
+    RouterPublishTiming {
+        kv_publish,
+        fpm_publish: fpm_publish_started_at.elapsed(),
+        completion_kv_events,
+        deferred_kv_events,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -413,23 +796,49 @@ impl RankDispatch {
 
     /// Publish output and return requests whose output-only consumer closed.
     async fn publish_outputs(&self, outputs: Vec<OutputSignal>) -> Result<OutputPublication> {
+        let output_signals = outputs.len() as u64;
         let Some(sender) = self.event_tx.as_ref() else {
-            return Ok(OutputPublication::Delivered(Vec::new()));
+            return Ok(OutputPublication::Delivered {
+                failed_requests: Vec::new(),
+                timing: OutputPublishTiming {
+                    signals: output_signals,
+                    uninstrumented_signals: output_signals,
+                    ..OutputPublishTiming::default()
+                },
+            });
         };
         if outputs.is_empty() {
-            return Ok(OutputPublication::Delivered(Vec::new()));
+            return Ok(OutputPublication::Delivered {
+                failed_requests: Vec::new(),
+                timing: OutputPublishTiming::default(),
+            });
         }
-        match sender.send_outputs(outputs).await {
-            Ok(()) => Ok(OutputPublication::Delivered(Vec::new())),
+        match sender.send_outputs_timed(outputs).await {
+            Ok(result) => Ok(OutputPublication::Delivered {
+                failed_requests: result
+                    .failed
+                    .into_iter()
+                    .map(|signal| signal.uuid)
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                timing: result.timing,
+            }),
             Err(SchedulerEventSendError::OutputClosed(signals)) => {
-                Ok(OutputPublication::Delivered(
-                    signals
+                let output_signals = signals.len() as u64;
+                Ok(OutputPublication::Delivered {
+                    failed_requests: signals
                         .into_iter()
                         .map(|signal| signal.uuid)
                         .collect::<BTreeSet<_>>()
                         .into_iter()
                         .collect(),
-                ))
+                    timing: OutputPublishTiming {
+                        signals: output_signals,
+                        uninstrumented_signals: output_signals,
+                        ..OutputPublishTiming::default()
+                    },
+                })
             }
             Err(SchedulerEventSendError::OrderedLaneClosed) => {
                 bail!("grouped live ordered output lane is closed")
@@ -526,7 +935,7 @@ mod tests {
         cancel.cancel();
 
         let error = finish_boundary_or_cancel(
-            async { Err(anyhow!("unexpected boundary failure")) },
+            async { Err::<BoundaryFinishTiming, _>(anyhow!("unexpected boundary failure")) },
             &cancel,
         )
         .await
@@ -540,8 +949,11 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        finish_boundary_or_cancel(std::future::pending(), &cancel)
-            .await
-            .unwrap();
+        finish_boundary_or_cancel(
+            std::future::pending::<Result<BoundaryFinishTiming>>(),
+            &cancel,
+        )
+        .await
+        .unwrap();
     }
 }

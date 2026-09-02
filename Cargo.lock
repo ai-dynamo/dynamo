@@ -2787,6 +2787,7 @@ dependencies = [
  "dynamo-kv-router",
  "dynamo-tokens",
  "futures",
+ "libc",
  "ndarray 0.16.1",
  "ndarray-interp",
  "ndarray-npy",

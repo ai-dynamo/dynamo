@@ -95,6 +95,10 @@ pub enum GroupedLiveEvent {
     PassCompleted {
         completed: EnginePassCompleted<PassCompletionEffects>,
         boundary: GroupedPassBoundary,
+        completion_started_at: Instant,
+        event_enqueued_at: Instant,
+        event_reserve: Duration,
+        event_reserve_waited: bool,
     },
 }
 
@@ -110,8 +114,26 @@ enum BoundaryRequest {
         reply: oneshot::Sender<Result<EngineEffects<CommandEffects>>>,
     },
     Finish {
-        reply: oneshot::Sender<()>,
+        enqueued_at: Instant,
+        reply: oneshot::Sender<BoundaryFinishAck>,
     },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BoundaryFinishAck {
+    actor_wake: Duration,
+    completion_boundary: Duration,
+    acknowledged_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BoundaryFinishTiming {
+    pub(crate) admission: Duration,
+    pub(crate) reserve: Duration,
+    pub(crate) reserve_waited: bool,
+    pub(crate) actor_wake: Duration,
+    pub(crate) completion_boundary: Duration,
+    pub(crate) return_wake: Duration,
 }
 
 /// Adapter-owned handle that keeps a completed pass at its publication
@@ -136,15 +158,38 @@ impl GroupedPassBoundary {
             .context("grouped live engine stopped while applying a boundary command")?
     }
 
-    pub(crate) async fn finish(self) -> Result<()> {
+    pub(crate) async fn finish(self) -> Result<BoundaryFinishTiming> {
+        let admission_started_at = Instant::now();
+        let (permit, reserve, reserve_waited) = match self.request_tx.try_reserve() {
+            Ok(permit) => (permit, Duration::ZERO, false),
+            Err(mpsc::error::TrySendError::Full(())) => {
+                let reserve_started_at = Instant::now();
+                let permit = self
+                    .request_tx
+                    .reserve()
+                    .await
+                    .map_err(|_| anyhow!("grouped live pass boundary is closed"))?;
+                (permit, reserve_started_at.elapsed(), true)
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                return Err(anyhow!("grouped live pass boundary is closed"));
+            }
+        };
         let (reply, acknowledged) = oneshot::channel();
-        self.request_tx
-            .send(BoundaryRequest::Finish { reply })
+        let enqueued_at = Instant::now();
+        permit.send(BoundaryRequest::Finish { enqueued_at, reply });
+        let admission = enqueued_at.saturating_duration_since(admission_started_at);
+        let acknowledged = acknowledged
             .await
-            .map_err(|_| anyhow!("grouped live pass boundary is closed"))?;
-        acknowledged
-            .await
-            .context("grouped live engine stopped before acknowledging pass-boundary finish")
+            .context("grouped live engine stopped before acknowledging pass-boundary finish")?;
+        Ok(BoundaryFinishTiming {
+            admission,
+            reserve,
+            reserve_waited,
+            actor_wake: acknowledged.actor_wake,
+            completion_boundary: acknowledged.completion_boundary,
+            return_wake: acknowledged.acknowledged_at.elapsed(),
+        })
     }
 }
 
@@ -327,6 +372,10 @@ struct GroupedLiveActor {
 
 const LIVE_TIMING_LOG_INTERVAL_PASSES: u64 = 512;
 
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1_000.0
+}
+
 #[derive(Debug, Default)]
 struct LiveTimingDiagnostics {
     total_passes: u64,
@@ -338,6 +387,8 @@ struct LiveTimingDiagnostics {
     wake_overshoot_ms: f64,
     complete_pass_ms: f64,
     completion_boundary_ms: f64,
+    completion_boundary_ack_ms: f64,
+    completion_boundary_edge_ms: f64,
     post_pass_controls_ms: f64,
     cycle_overhead_ms: f64,
     non_modeled_overhead_ms: f64,
@@ -355,6 +406,8 @@ struct LivePassTiming {
     wake_overshoot_ms: f64,
     complete_pass_ms: f64,
     completion_boundary_ms: f64,
+    completion_boundary_ack_ms: f64,
+    completion_boundary_edge_ms: f64,
     post_pass_controls_ms: f64,
     cycle_overhead_ms: f64,
     non_modeled_overhead_ms: f64,
@@ -371,6 +424,8 @@ impl LiveTimingDiagnostics {
         self.wake_overshoot_ms += timing.wake_overshoot_ms;
         self.complete_pass_ms += timing.complete_pass_ms;
         self.completion_boundary_ms += timing.completion_boundary_ms;
+        self.completion_boundary_ack_ms += timing.completion_boundary_ack_ms;
+        self.completion_boundary_edge_ms += timing.completion_boundary_edge_ms;
         self.post_pass_controls_ms += timing.post_pass_controls_ms;
         self.cycle_overhead_ms += timing.cycle_overhead_ms;
         self.non_modeled_overhead_ms += timing.non_modeled_overhead_ms;
@@ -397,6 +452,8 @@ impl LiveTimingDiagnostics {
             wake_overshoot_mean_ms = self.wake_overshoot_ms / count,
             complete_pass_mean_ms = self.complete_pass_ms / count,
             completion_boundary_mean_ms = self.completion_boundary_ms / count,
+            completion_boundary_ack_mean_ms = self.completion_boundary_ack_ms / count,
+            completion_boundary_edge_mean_ms = self.completion_boundary_edge_ms / count,
             post_pass_controls_mean_ms = self.post_pass_controls_ms / count,
             cycle_overhead_mean_ms = self.cycle_overhead_ms / count,
             non_modeled_overhead_mean_ms = self.non_modeled_overhead_ms / count,
@@ -475,17 +532,22 @@ impl GroupedLiveActor {
             let completed_at_ms = woke_at_ms.max(end_ms);
             let completed = self.engine.complete_pass(pass_id, completed_at_ms)?;
             let complete_pass_finished_ms = self.elapsed_ms();
+            let completion_started_at = Instant::now();
             let (boundary_tx, boundary_rx) = mpsc::channel(1);
-            self.publish(GroupedLiveEvent::PassCompleted {
+            self.publish_pass_completed(
                 completed,
-                boundary: GroupedPassBoundary {
+                GroupedPassBoundary {
                     request_tx: boundary_tx,
                 },
-            })
+                completion_started_at,
+            )
             .await?;
-            if !self.serve_pass_boundary(boundary_rx).await? {
+            let Some(completion_boundary_ack) = self
+                .serve_pass_boundary(boundary_rx, completion_started_at)
+                .await?
+            else {
                 return Ok(());
-            }
+            };
             let completion_boundary_finished_ms = self.elapsed_ms();
             self.apply_post_pass_controls().await?;
             let post_pass_controls_finished_ms = self.elapsed_ms();
@@ -502,6 +564,10 @@ impl GroupedLiveActor {
                 completion_boundary_ms: (completion_boundary_finished_ms
                     - complete_pass_finished_ms)
                     .max(0.0),
+                completion_boundary_ack_ms: duration_ms(completion_boundary_ack),
+                completion_boundary_edge_ms: (completion_boundary_finished_ms
+                    - complete_pass_finished_ms)
+                    - duration_ms(completion_boundary_ack),
                 post_pass_controls_ms: (post_pass_controls_finished_ms
                     - completion_boundary_finished_ms)
                     .max(0.0),
@@ -539,14 +605,63 @@ impl GroupedLiveActor {
         }
     }
 
+    async fn publish_pass_completed(
+        &self,
+        completed: EnginePassCompleted<PassCompletionEffects>,
+        boundary: GroupedPassBoundary,
+        completion_started_at: Instant,
+    ) -> Result<()> {
+        let (permit, event_reserve, event_reserve_waited) = match self.event_tx.try_reserve() {
+            Ok(permit) => (permit, Duration::ZERO, false),
+            Err(mpsc::error::TrySendError::Full(())) => {
+                let reserve_started_at = Instant::now();
+                let permit = tokio::select! {
+                    biased;
+                    result = self.event_tx.reserve() => {
+                        match result {
+                            Ok(permit) => permit,
+                            Err(_) if self.cancel_token.is_cancelled() => {
+                                return Err(PublishCancelled.into());
+                            }
+                            Err(_) => {
+                                return Err(anyhow!("grouped live engine event lane is closed"));
+                            }
+                        }
+                    },
+                    _ = self.cancel_token.cancelled() => {
+                        return Err(PublishCancelled.into());
+                    },
+                };
+                (permit, reserve_started_at.elapsed(), true)
+            }
+            Err(mpsc::error::TrySendError::Closed(())) if self.cancel_token.is_cancelled() => {
+                return Err(PublishCancelled.into());
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                return Err(anyhow!("grouped live engine event lane is closed"));
+            }
+        };
+        let event_enqueued_at = Instant::now();
+        permit.send(GroupedLiveEvent::PassCompleted {
+            completed,
+            boundary,
+            completion_started_at,
+            event_enqueued_at,
+            event_reserve,
+            event_reserve_waited,
+        });
+        Ok(())
+    }
+
     async fn serve_pass_boundary(
         &mut self,
         mut requests: mpsc::Receiver<BoundaryRequest>,
-    ) -> Result<bool> {
+        completion_started_at: Instant,
+    ) -> Result<Option<Duration>> {
         loop {
             let request = tokio::select! {
                 biased;
-                _ = self.cancel_token.cancelled() => return Ok(false),
+                _ = self.cancel_token.cancelled() => return Ok(None),
                 request = requests.recv() => request,
             };
             let Some(request) = request else {
@@ -559,9 +674,16 @@ impl GroupedLiveActor {
                         .apply_command_effects(command, self.elapsed_ms());
                     let _ = reply.send(result);
                 }
-                BoundaryRequest::Finish { reply } => {
-                    let _ = reply.send(());
-                    return Ok(true);
+                BoundaryRequest::Finish { enqueued_at, reply } => {
+                    let acknowledged_at = Instant::now();
+                    let completion_boundary =
+                        acknowledged_at.saturating_duration_since(completion_started_at);
+                    let _ = reply.send(BoundaryFinishAck {
+                        actor_wake: acknowledged_at.saturating_duration_since(enqueued_at),
+                        completion_boundary,
+                        acknowledged_at,
+                    });
+                    return Ok(Some(completion_boundary));
                 }
             }
         }
@@ -972,6 +1094,7 @@ mod tests {
         let GroupedLiveEvent::PassCompleted {
             completed,
             boundary,
+            ..
         } = next_event(&mut events).await
         else {
             panic!("expected grouped pass completion");
@@ -1027,6 +1150,7 @@ mod tests {
         let GroupedLiveEvent::PassCompleted {
             completed,
             boundary,
+            ..
         } = next_event(&mut events).await
         else {
             panic!("expected grouped pass completion");
@@ -1083,6 +1207,7 @@ mod tests {
         let GroupedLiveEvent::PassCompleted {
             completed,
             boundary,
+            ..
         } = next_event(&mut events).await
         else {
             panic!("expected grouped pass completion");
@@ -1225,6 +1350,7 @@ mod tests {
         let GroupedLiveEvent::PassCompleted {
             completed,
             boundary,
+            ..
         } = next_event(&mut events).await
         else {
             panic!("expected grouped pass completion");
@@ -1294,6 +1420,7 @@ mod tests {
         let GroupedLiveEvent::PassCompleted {
             completed,
             boundary,
+            ..
         } = next_event(&mut events).await
         else {
             panic!("expected source-hold pass completion");
@@ -1451,6 +1578,7 @@ mod tests {
         let GroupedLiveEvent::PassCompleted {
             completed,
             boundary,
+            ..
         } = next_event(&mut events).await
         else {
             panic!("expected grouped pass completion");
@@ -1535,6 +1663,7 @@ mod tests {
         let GroupedLiveEvent::PassCompleted {
             completed,
             boundary,
+            ..
         } = next_event(&mut events).await
         else {
             panic!("expected grouped pass completion");

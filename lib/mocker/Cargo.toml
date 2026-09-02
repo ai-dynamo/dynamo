@@ -54,6 +54,7 @@ ndarray-interp = "0.5"
 rustc-hash = "2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
 tokio-timerfd = "0.2"
 
 [dev-dependencies]

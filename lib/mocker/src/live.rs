@@ -32,8 +32,9 @@ use crate::grouped_scheduler::{
     create_grouped_scheduler_with_event_senders,
 };
 use crate::scheduler::{
-    LiveEngineEvent, MockerMetrics, SchedulerCancellationEnvelope, SchedulerCommand,
-    SchedulerCommandEnvelope, SchedulerCommandResult, SchedulerEventSender, SchedulerHandle,
+    LiveEngineEvent, MockerMetrics, OutputDeliveryAck, OutputRouteTiming,
+    SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEnvelope,
+    SchedulerCommandResult, SchedulerEventSender, SchedulerHandle,
 };
 
 mod handoff;
@@ -841,13 +842,6 @@ impl LiveRequest {
         self.recv_observed().await.map(|output| output.event)
     }
 
-    /// Receive an output signal with the time it waited after route delivery.
-    pub async fn recv_with_observation_delay(&mut self) -> Option<(OutputSignal, Duration)> {
-        self.recv_observed()
-            .await
-            .map(|output| (output.event, output.observed_at.elapsed()))
-    }
-
     pub(crate) async fn recv_observed(&mut self) -> Option<ObservedOutput> {
         self.rx.recv().await
     }
@@ -895,6 +889,7 @@ async fn run_event_dispatcher(
     admission_tx: Option<mpsc::UnboundedSender<ObservedAdmission>>,
 ) -> anyhow::Result<()> {
     let mut pending_event = None;
+    let mut last_handler_finished_at = None;
     loop {
         if cancel.is_cancelled() {
             drop(pending_event.take());
@@ -902,10 +897,10 @@ async fn run_event_dispatcher(
             return Ok(());
         }
 
-        if matches!(
-            pending_event.as_ref(),
-            Some(LiveEngineEvent::Outputs { .. })
-        ) && output_gate.as_ref().is_some_and(|gate| !*gate.borrow())
+        if pending_event
+            .as_ref()
+            .is_some_and(|(event, _)| matches!(event, LiveEngineEvent::Outputs { .. }))
+            && output_gate.as_ref().is_some_and(|gate| !*gate.borrow())
         {
             let Some(gate) = output_gate.as_mut() else {
                 unreachable!("the output gate was checked above");
@@ -922,7 +917,7 @@ async fn run_event_dispatcher(
             continue;
         }
 
-        let event = if let Some(event) = pending_event.take() {
+        let (event, dequeued_at) = if let Some(event) = pending_event.take() {
             event
         } else {
             tokio::select! {
@@ -935,7 +930,7 @@ async fn run_event_dispatcher(
                         }
                         bail!("live Mocker ordered event lane closed unexpectedly");
                     };
-                    event
+                    (event, tokio::time::Instant::now())
                 }
             }
         };
@@ -944,22 +939,59 @@ async fn run_event_dispatcher(
             LiveEngineEvent::Admissions(batch) => {
                 dispatch_admission_batch(batch, &routes, admission_tx.as_ref())?;
             }
-            LiveEngineEvent::Outputs { signals, delivered }
-                if output_gate.as_ref().is_some_and(|gate| !*gate.borrow()) =>
-            {
-                pending_event = Some(LiveEngineEvent::Outputs { signals, delivered });
+            LiveEngineEvent::Outputs {
+                signals,
+                enqueued_at,
+                delivered,
+            } if output_gate.as_ref().is_some_and(|gate| !*gate.borrow()) => {
+                pending_event = Some((
+                    LiveEngineEvent::Outputs {
+                        signals,
+                        enqueued_at,
+                        delivered,
+                    },
+                    dequeued_at,
+                ));
+                continue;
             }
-            LiveEngineEvent::Outputs { signals, delivered } => {
-                let Some(failed) = dispatch_output_batch(signals, &routes, &cancel) else {
+            LiveEngineEvent::Outputs {
+                signals,
+                enqueued_at,
+                delivered,
+            } => {
+                let route_started_at = tokio::time::Instant::now();
+                let predecessor_busy = last_handler_finished_at
+                    .map(|finished_at: tokio::time::Instant| {
+                        finished_at.saturating_duration_since(enqueued_at)
+                    })
+                    .unwrap_or_default();
+                let wake_started_at = last_handler_finished_at
+                    .map(|finished_at| finished_at.max(enqueued_at))
+                    .unwrap_or(enqueued_at);
+                let receiver_wake = dequeued_at.saturating_duration_since(wake_started_at);
+                let gate_wait = route_started_at.saturating_duration_since(dequeued_at);
+                let Some(mut dispatch) = dispatch_output_batch(signals, &routes, &cancel) else {
                     return Ok(());
                 };
+                let acknowledged_at = tokio::time::Instant::now();
+                dispatch.timing.predecessor_busy = predecessor_busy;
+                dispatch.timing.receiver_wake = receiver_wake;
+                dispatch.timing.gate_wait = gate_wait;
+                dispatch.timing.dispatcher_residual = acknowledged_at
+                    .saturating_duration_since(route_started_at)
+                    .saturating_sub(dispatch.timing.route_wall);
                 // This is the route-delivery boundary, not merely the
                 // scheduler-to-dispatcher enqueue boundary. Failed routes are
                 // returned to the grouped dispatcher, which applies native
                 // cleanup synchronously through `GroupedPassBoundary`.
-                let _ = delivered.send(failed);
+                let _ = delivered.send(OutputDeliveryAck {
+                    failed: dispatch.failed,
+                    timing: dispatch.timing,
+                    acknowledged_at,
+                });
             }
         }
+        last_handler_finished_at = Some(tokio::time::Instant::now());
     }
 }
 
@@ -1014,13 +1046,24 @@ async fn supervise_event_dispatcher(
     result
 }
 
+struct OutputBatchDispatch {
+    failed: Vec<OutputSignal>,
+    timing: OutputRouteTiming,
+}
+
 fn dispatch_output_batch(
     batch: Vec<OutputSignal>,
     routes: &Routes,
     cancel: &CancellationToken,
-) -> Option<Vec<OutputSignal>> {
+) -> Option<OutputBatchDispatch> {
+    let route_started_at = tokio::time::Instant::now();
+    let cpu_started_ns = thread_cpu_time_ns();
     let observed_at = tokio::time::Instant::now();
     let mut failed = Vec::new();
+    let mut timing = OutputRouteTiming {
+        signals: batch.len() as u64,
+        ..OutputRouteTiming::default()
+    };
     for mut signal in batch {
         if cancel.is_cancelled() {
             return None;
@@ -1028,19 +1071,27 @@ fn dispatch_output_batch(
         let scheduler_signal = signal.clone();
         let scheduler_id = signal.uuid;
         let terminal = signal.completed;
+        timing.terminals += u64::from(terminal);
         let Some(route) = routes
             .by_scheduler
             .get(&scheduler_id)
             .map(|entry| Arc::clone(entry.value()))
         else {
+            timing.route_missing += 1;
             continue;
         };
+        timing.route_found += 1;
 
         signal.uuid = route.client_id;
         let delivery = route.send_output(ObservedOutput {
             event: signal,
             observed_at,
         });
+        match delivery {
+            OutputDelivery::Delivered => timing.delivered += 1,
+            OutputDelivery::Full => timing.full += 1,
+            OutputDelivery::Closed => timing.closed += 1,
+        }
         if delivery != OutputDelivery::Delivered {
             let newly_abandoned = route.abandon_stream();
             if newly_abandoned && delivery == OutputDelivery::Full {
@@ -1060,10 +1111,36 @@ fn dispatch_output_batch(
             continue;
         }
         if terminal && route.observe_terminal() {
+            timing.terminal_removals += 1;
             remove_route(routes, &route);
         }
     }
-    Some(failed)
+    let cpu_finished_ns = thread_cpu_time_ns();
+    timing.route_wall = route_started_at.elapsed();
+    timing.route_thread_cpu = cpu_started_ns
+        .zip(cpu_finished_ns)
+        .and_then(|(started, finished)| finished.checked_sub(started))
+        .map(Duration::from_nanos);
+    Some(OutputBatchDispatch { failed, timing })
+}
+
+#[cfg(target_os = "linux")]
+fn thread_cpu_time_ns() -> Option<u64> {
+    let mut timestamp = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut timestamp) };
+    (rc == 0).then(|| {
+        (timestamp.tv_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(timestamp.tv_nsec as u64)
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn thread_cpu_time_ns() -> Option<u64> {
+    None
 }
 
 fn spawn_cancellation(

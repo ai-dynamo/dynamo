@@ -11,7 +11,9 @@ mod metrics;
 mod protocol;
 
 use crate::common::protocols::{DirectRequest, OutputSignal};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -37,11 +39,68 @@ pub(crate) enum LiveEngineEvent {
     Admissions(Vec<AdmissionEvent>),
     Outputs {
         signals: Vec<OutputSignal>,
+        enqueued_at: Instant,
         /// Acknowledge only after the request-route dispatcher has attempted
         /// delivery. The grouped pass boundary waits on this signal, so the
         /// next pass cannot overtake route cleanup for the current one.
-        delivered: oneshot::Sender<Vec<OutputSignal>>,
+        delivered: oneshot::Sender<OutputDeliveryAck>,
     },
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct OutputRouteTiming {
+    pub(crate) predecessor_busy: Duration,
+    pub(crate) receiver_wake: Duration,
+    pub(crate) gate_wait: Duration,
+    pub(crate) route_wall: Duration,
+    pub(crate) route_thread_cpu: Option<Duration>,
+    pub(crate) dispatcher_residual: Duration,
+    pub(crate) signals: u64,
+    pub(crate) terminals: u64,
+    pub(crate) route_found: u64,
+    pub(crate) route_missing: u64,
+    pub(crate) delivered: u64,
+    pub(crate) full: u64,
+    pub(crate) closed: u64,
+    pub(crate) terminal_removals: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct OutputDeliveryAck {
+    pub(crate) failed: Vec<OutputSignal>,
+    pub(crate) timing: OutputRouteTiming,
+    pub(crate) acknowledged_at: Instant,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct OutputPublishTiming {
+    pub(crate) wall: Duration,
+    pub(crate) admission: Duration,
+    pub(crate) reserve: Duration,
+    pub(crate) reserve_waited: bool,
+    pub(crate) predecessor_busy: Duration,
+    pub(crate) receiver_wake: Duration,
+    pub(crate) gate_wait: Duration,
+    pub(crate) route_wall: Duration,
+    pub(crate) route_thread_cpu: Option<Duration>,
+    pub(crate) dispatcher_residual: Duration,
+    pub(crate) ack_wake: Duration,
+    pub(crate) residual_ms: f64,
+    pub(crate) signals: u64,
+    pub(crate) uninstrumented_signals: u64,
+    pub(crate) terminals: u64,
+    pub(crate) route_found: u64,
+    pub(crate) route_missing: u64,
+    pub(crate) delivered: u64,
+    pub(crate) full: u64,
+    pub(crate) closed: u64,
+    pub(crate) terminal_removals: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct OutputSendResult {
+    pub(crate) failed: Vec<OutputSignal>,
+    pub(crate) timing: OutputPublishTiming,
 }
 
 /// Visibility point retained by Dynamo's replay-artifact adapter. Native
@@ -102,30 +161,78 @@ impl SchedulerEventSender {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn send_outputs(
         &self,
         signals: Vec<OutputSignal>,
     ) -> Result<(), SchedulerEventSendError> {
+        let result = self.send_outputs_timed(signals).await?;
+        if result.failed.is_empty() {
+            Ok(())
+        } else {
+            Err(SchedulerEventSendError::OutputClosed(result.failed))
+        }
+    }
+
+    pub(crate) async fn send_outputs_timed(
+        &self,
+        signals: Vec<OutputSignal>,
+    ) -> Result<OutputSendResult, SchedulerEventSendError> {
+        let started_at = Instant::now();
         match self {
-            Self::Outputs(tx) => tx
-                .send(signals)
-                .map_err(|error| SchedulerEventSendError::OutputClosed(error.0)),
+            Self::Outputs(tx) => {
+                let signal_count = signals.len() as u64;
+                tx.send(signals)
+                    .map_err(|error| SchedulerEventSendError::OutputClosed(error.0))?;
+                Ok(OutputSendResult {
+                    failed: Vec::new(),
+                    timing: OutputPublishTiming {
+                        wall: started_at.elapsed(),
+                        signals: signal_count,
+                        uninstrumented_signals: signal_count,
+                        ..OutputPublishTiming::default()
+                    },
+                })
+            }
             Self::Ordered { tx, cancel, .. } => {
-                let (delivered, acknowledged) = oneshot::channel();
-                tokio::select! {
-                    biased;
-                    result = tx.send(LiveEngineEvent::Outputs { signals, delivered }) => {
-                        result.map_err(|_| {
-                            if cancel.is_cancelled() {
-                                SchedulerEventSendError::Cancelled
-                            } else {
-                                SchedulerEventSendError::OrderedLaneClosed
+                let (permit, reserve, reserve_waited) = match tx.try_reserve() {
+                    Ok(permit) => (permit, Duration::ZERO, false),
+                    Err(mpsc::error::TrySendError::Full(())) => {
+                        let reserve_started_at = Instant::now();
+                        let permit = tokio::select! {
+                            biased;
+                            result = tx.reserve() => {
+                                result.map_err(|_| {
+                                    if cancel.is_cancelled() {
+                                        SchedulerEventSendError::Cancelled
+                                    } else {
+                                        SchedulerEventSendError::OrderedLaneClosed
+                                    }
+                                })?
                             }
-                        })?;
+                            _ = cancel.cancelled() => {
+                                return Err(SchedulerEventSendError::Cancelled);
+                            }
+                        };
+                        (permit, reserve_started_at.elapsed(), true)
                     }
-                    _ = cancel.cancelled() => return Err(SchedulerEventSendError::Cancelled),
-                }
-                let failed = tokio::select! {
+                    Err(mpsc::error::TrySendError::Closed(())) => {
+                        return Err(if cancel.is_cancelled() {
+                            SchedulerEventSendError::Cancelled
+                        } else {
+                            SchedulerEventSendError::OrderedLaneClosed
+                        });
+                    }
+                };
+                let (delivered, acknowledged) = oneshot::channel();
+                let enqueued_at = Instant::now();
+                permit.send(LiveEngineEvent::Outputs {
+                    signals,
+                    enqueued_at,
+                    delivered,
+                });
+                let admission = enqueued_at.saturating_duration_since(started_at);
+                let acknowledged = tokio::select! {
                     biased;
                     result = acknowledged => {
                         result.map_err(|_| {
@@ -138,11 +245,42 @@ impl SchedulerEventSender {
                     }
                     _ = cancel.cancelled() => return Err(SchedulerEventSendError::Cancelled),
                 };
-                if failed.is_empty() {
-                    Ok(())
-                } else {
-                    Err(SchedulerEventSendError::OutputClosed(failed))
-                }
+                let ack_wake = acknowledged.acknowledged_at.elapsed();
+                let wall = started_at.elapsed();
+                let timing = acknowledged.timing;
+                let accounted = admission
+                    .saturating_add(timing.predecessor_busy)
+                    .saturating_add(timing.receiver_wake)
+                    .saturating_add(timing.gate_wait)
+                    .saturating_add(timing.route_wall)
+                    .saturating_add(timing.dispatcher_residual)
+                    .saturating_add(ack_wake);
+                Ok(OutputSendResult {
+                    failed: acknowledged.failed,
+                    timing: OutputPublishTiming {
+                        wall,
+                        admission,
+                        reserve,
+                        reserve_waited,
+                        predecessor_busy: timing.predecessor_busy,
+                        receiver_wake: timing.receiver_wake,
+                        gate_wait: timing.gate_wait,
+                        route_wall: timing.route_wall,
+                        route_thread_cpu: timing.route_thread_cpu,
+                        dispatcher_residual: timing.dispatcher_residual,
+                        ack_wake,
+                        residual_ms: (wall.as_secs_f64() - accounted.as_secs_f64()) * 1_000.0,
+                        signals: timing.signals,
+                        uninstrumented_signals: 0,
+                        terminals: timing.terminals,
+                        route_found: timing.route_found,
+                        route_missing: timing.route_missing,
+                        delivered: timing.delivered,
+                        full: timing.full,
+                        closed: timing.closed,
+                        terminal_removals: timing.terminal_removals,
+                    },
+                })
             }
         }
     }
@@ -208,7 +346,7 @@ mod tests {
         };
         let send = tokio::spawn(async move {
             sender
-                .send_outputs(vec![OutputSignal {
+                .send_outputs_timed(vec![OutputSignal {
                     uuid: Uuid::from_u128(1),
                     token_id: Some(2),
                     completed: true,
@@ -219,7 +357,10 @@ mod tests {
                 .await
         });
 
-        let Some(LiveEngineEvent::Outputs { signals, delivered }) = rx.recv().await else {
+        let Some(LiveEngineEvent::Outputs {
+            signals, delivered, ..
+        }) = rx.recv().await
+        else {
             panic!("expected an ordered output batch");
         };
         assert_eq!(signals.len(), 1);
@@ -229,8 +370,44 @@ mod tests {
             "enqueueing the output must not acknowledge route delivery"
         );
 
-        delivered.send(Vec::new()).unwrap();
-        send.await.unwrap().unwrap();
+        delivered
+            .send(OutputDeliveryAck {
+                failed: Vec::new(),
+                timing: OutputRouteTiming {
+                    predecessor_busy: Duration::from_millis(1),
+                    receiver_wake: Duration::from_millis(2),
+                    gate_wait: Duration::from_millis(3),
+                    route_wall: Duration::from_millis(4),
+                    route_thread_cpu: Some(Duration::from_millis(3)),
+                    dispatcher_residual: Duration::from_millis(5),
+                    signals: 1,
+                    terminals: 1,
+                    route_found: 1,
+                    delivered: 1,
+                    terminal_removals: 1,
+                    ..OutputRouteTiming::default()
+                },
+                acknowledged_at: Instant::now(),
+            })
+            .unwrap();
+        let result = send.await.unwrap().unwrap();
+        assert!(result.failed.is_empty());
+        assert_eq!(result.timing.predecessor_busy, Duration::from_millis(1));
+        assert_eq!(result.timing.receiver_wake, Duration::from_millis(2));
+        assert_eq!(result.timing.gate_wait, Duration::from_millis(3));
+        assert_eq!(result.timing.route_wall, Duration::from_millis(4));
+        assert_eq!(
+            result.timing.route_thread_cpu,
+            Some(Duration::from_millis(3))
+        );
+        assert_eq!(result.timing.dispatcher_residual, Duration::from_millis(5));
+        assert_eq!(result.timing.signals, 1);
+        assert_eq!(result.timing.terminals, 1);
+        assert_eq!(result.timing.route_found, 1);
+        assert_eq!(result.timing.delivered, 1);
+        assert_eq!(result.timing.terminal_removals, 1);
+        assert_eq!(result.timing.uninstrumented_signals, 0);
+        assert!(!result.timing.reserve_waited);
     }
 
     #[tokio::test]
