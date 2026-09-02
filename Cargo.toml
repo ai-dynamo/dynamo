@@ -70,6 +70,8 @@ dynamo-mocker = { path = "lib/mocker", version = "1.5.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.5.0" }
 dynamo-protocols = { version = "=5.4.0" }
 dynamo-parsers = { version = "8.1.0" }
+switchyard-protocol = { version = "=0.2.0" }
+switchyard-translation = { version = "=0.2.0" }
 
 # Published on crates.io. To see all available versions:
 #   web:          https://crates.io/crates/dynamo-parsers-v2/versions

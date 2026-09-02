@@ -87,6 +87,7 @@ arc-swap = "1.9.1"
 dynamo-protocols = { workspace = true }
 dynamo-parsers = { workspace = true }
 dynamo-parsers-v2 = { workspace = true }
+switchyard-protocol = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 async-nats = { workspace = true }
@@ -241,6 +242,7 @@ serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 tempfile = "3.17.1"
 tracing-subscriber = { workspace = true }
+switchyard-translation = { workspace = true }
 insta = { version = "1.41", features = [
   "glob",
   "json",

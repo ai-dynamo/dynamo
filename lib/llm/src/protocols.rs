@@ -16,6 +16,7 @@ pub mod codec;
 pub mod common;
 pub mod openai;
 pub mod sglang;
+pub mod switchyard;
 pub mod tensor;
 pub(crate) mod unified;
 

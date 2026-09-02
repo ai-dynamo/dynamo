@@ -97,8 +97,10 @@ use crate::protocols::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     },
+    switchyard::{DynamoExecutionOptions, LlmRequestView},
 };
 use crate::tokenizers::traits::Tokenizer;
+use switchyard_protocol::llm::LlmRequest;
 
 use crate::preprocessor::prompt::{
     MediaRequestExt, apply_continue_final_message, prompt_formatter_from_mdc,
@@ -1393,7 +1395,11 @@ impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> 
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let mut json = serde_json::to_value(self.inner.typed_messages().unwrap_or_default())
+        let mut json = self
+            .inner
+            .typed_messages()
+            .map(serde_json::to_value)
+            .unwrap_or_else(|| serde_json::to_value(self.inner.messages()))
             .unwrap_or_default();
         if self.normalize_tool_call_args
             && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
@@ -2616,6 +2622,19 @@ impl OpenAIPreprocessor {
             )
             .await?;
         Ok((request, annotations, prompt_injected_reasoning))
+    }
+
+    /// Lower Switchyard's provider-neutral request IR directly into Dynamo's
+    /// worker-facing request. The borrowed view projects the IR into the prompt
+    /// renderer without constructing an OpenAI Chat request.
+    pub async fn preprocess_llm_request(
+        &self,
+        request: &LlmRequest,
+        execution: &DynamoExecutionOptions,
+        tracker: Option<&RequestTracker>,
+    ) -> Result<(PreprocessedRequest, HashMap<String, String>, bool)> {
+        let request = LlmRequestView::try_new(request, execution)?;
+        self.preprocess_request(&request, tracker).await
     }
 
     async fn preprocess_request_with_options<
@@ -7363,6 +7382,50 @@ mod tests {
         ChatChoiceStream, ChatCompletionStreamResponseDelta, CreateChatCompletionStreamResponse,
         FinishReason, Role,
     };
+
+    struct UntypedTemplateRequest;
+
+    impl OAIChatLikeRequest for UntypedTemplateRequest {
+        fn model(&self) -> String {
+            "test-model".to_string()
+        }
+
+        fn messages(&self) -> minijinja::value::Value {
+            minijinja::value::Value::from_serialize(serde_json::json!([{
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": { "name": "lookup", "arguments": "{\"x\":1}" }
+                }]
+            }]))
+        }
+
+        fn should_add_generation_prompt(&self) -> bool {
+            true
+        }
+
+        fn extract_text(&self) -> Option<TextInput> {
+            Some(TextInput::Single(String::new()))
+        }
+    }
+
+    #[test]
+    fn normalized_args_uses_untyped_template_messages() {
+        let request = UntypedTemplateRequest;
+        let normalized = NormalizedArgsRequest {
+            inner: &request,
+            normalize_tool_call_args: true,
+            continue_final_message: false,
+        };
+
+        let messages = serde_json::to_value(normalized.messages()).unwrap();
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["arguments"],
+            serde_json::json!({ "x": 1 })
+        );
+    }
 
     #[test]
     fn guided_tool_streaming_release_only_when_guided_json_and_not_rolled_back() {
