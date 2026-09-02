@@ -13,12 +13,16 @@ status: experimental
 artifacts:
   recipe_specific_images:
   - nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
+  - nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-inkling-dev.1
   recipe_specific_image_periods:
   - image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
     source_revision: 73aa2073d12c8cbd5c955f618aed251be920b8cd
     source_kind: github-release
     release_tag: v1.4.0-inkling-dev.1
     release_state: prerelease
+  - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-inkling-dev.1
+    source_revision: 872b5171bdbb77805263cdcdecedabfe76c981c2
+    source_kind: deploy-asset
 targets:
 - id: agg-gb300-agentic
   recommended: true
@@ -102,6 +106,8 @@ gaps:
 - no related Feature Benchmark page exists for this model
 - SGLang runtime is a Day-0 dev image (sglang-runtime:1.4.0-inkling-dev.1, custom SGLang
   build) pending upstream merge; no expected-performance numbers published for it
+- the vLLM runtime is a dev image (vllm-runtime:1.5.0-inkling-dev.1). Its provenance is
+  recorded against the deploy asset, because no matching GitHub release is cut yet
 - AAC/.m4a audio decode absent from the SGLang runtime image (royalty-bearing codec
   removal); noted on page
 - provider logo sourced from thinkingmachines.ai site icon; formal brand-asset provenance
