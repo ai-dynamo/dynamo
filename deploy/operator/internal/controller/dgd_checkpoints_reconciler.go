@@ -161,7 +161,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 				dgd.Namespace,
 				alphaCheckpointConfig,
 				expectedWorkerHash,
-				checkpoint.PodSnapshotUseExplicitReference,
+				checkpoint.ExplicitPodSnapshotUse(),
 			)
 			if apierrors.IsNotFound(err) {
 				// A missing explicit reference is a resolvable wait state: keep
@@ -594,7 +594,7 @@ func (r *dgdCheckpointsReconciler) resolveAutomaticSnapshotJob(
 		snapshotJob.Namespace,
 		refConfig,
 		expectedWorkerHash,
-		checkpoint.PodSnapshotUseManagedRestore,
+		checkpoint.ManagedPodSnapshotUse(types.UID(snapshotJob.Annotations[consts.CheckpointOwnerUIDAnnotation])),
 	)
 	if apierrors.IsNotFound(err) {
 		return info, nil

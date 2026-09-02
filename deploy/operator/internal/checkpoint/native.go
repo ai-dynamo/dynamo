@@ -27,17 +27,42 @@ type ResolvedPodSnapshot struct {
 	GMSMode              string
 }
 
-// PodSnapshotUse identifies whether a PodSnapshot is being resolved from a
-// user-facing checkpointRef or from a restore already managed by the operator.
-type PodSnapshotUse uint8
+type podSnapshotUseKind uint8
 
 const (
-	// PodSnapshotUseExplicitReference applies the public checkpointRef contract.
-	PodSnapshotUseExplicitReference PodSnapshotUse = iota
-	// PodSnapshotUseManagedRestore allows the owning DGD to continue using its
-	// automatic checkpoint, including one configured for retention on deletion.
-	PodSnapshotUseManagedRestore
+	podSnapshotUseInvalid podSnapshotUseKind = iota
+	podSnapshotUseExplicitReference
+	podSnapshotUseManagedRestore
+	podSnapshotUsePinnedRestore
 )
+
+// PodSnapshotUse identifies the authority under which a PodSnapshot is being
+// resolved. Managed automatic restores carry the concrete owning DGD UID so a
+// retained artifact cannot be adopted by another graph incarnation.
+type PodSnapshotUse struct {
+	kind            podSnapshotUseKind
+	managedOwnerUID types.UID
+}
+
+// ExplicitPodSnapshotUse applies the public checkpointRef contract.
+func ExplicitPodSnapshotUse() PodSnapshotUse {
+	return PodSnapshotUse{kind: podSnapshotUseExplicitReference}
+}
+
+// ManagedPodSnapshotUse allows an owning DGD to restore its automatic
+// checkpoint, including one configured for retention on deletion.
+func ManagedPodSnapshotUse(ownerUID types.UID) PodSnapshotUse {
+	return PodSnapshotUse{
+		kind:            podSnapshotUseManagedRestore,
+		managedOwnerUID: ownerUID,
+	}
+}
+
+// PinnedPodSnapshotUse revalidates an admission candidate whose identity and
+// compatibility metadata were pinned by workload rendering.
+func PinnedPodSnapshotUse() PodSnapshotUse {
+	return PodSnapshotUse{kind: podSnapshotUsePinnedRestore}
+}
 
 // ResolvePodSnapshotForService resolves a native PodSnapshot and validates the
 // Dynamo compatibility contract for the requested use. A compatible
@@ -90,8 +115,8 @@ func ResolvePodSnapshotForService(
 	// Compatibility metadata belongs to Dynamo and is deliberately validated
 	// independently of Snapshot's generic capture and restore protocol.
 	annotations := snapshot.GetAnnotations()
-	switch use {
-	case PodSnapshotUseExplicitReference:
+	switch use.kind {
+	case podSnapshotUseExplicitReference:
 		if annotations[consts.CheckpointAutoAnnotation] == consts.KubeLabelValueTrue &&
 			annotations[consts.CheckpointDeletionPolicyAnnotation] == string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain) {
 			return nil, fmt.Errorf(
@@ -100,9 +125,26 @@ func ResolvePodSnapshotForService(
 				snapshotName,
 			)
 		}
-	case PodSnapshotUseManagedRestore:
+	case podSnapshotUseManagedRestore:
+		// Managed resolution must name the graph incarnation claiming the artifact.
+		if use.managedOwnerUID == "" {
+			return nil, fmt.Errorf("managed PodSnapshot restore requires an owning DGD UID")
+		}
+
+		// Automatic snapshots remain private to the DGD incarnation that created them.
+		if annotations[consts.CheckpointAutoAnnotation] == consts.KubeLabelValueTrue &&
+			annotations[consts.CheckpointOwnerUIDAnnotation] != string(use.managedOwnerUID) {
+			return nil, fmt.Errorf(
+				"automatic PodSnapshot %s/%s belongs to DGD uid %q, not %q",
+				namespace,
+				snapshotName,
+				annotations[consts.CheckpointOwnerUIDAnnotation],
+				use.managedOwnerUID,
+			)
+		}
+	case podSnapshotUsePinnedRestore:
 	default:
-		return nil, fmt.Errorf("unsupported PodSnapshot use %d", use)
+		return nil, fmt.Errorf("unsupported PodSnapshot use %d", use.kind)
 	}
 	version := annotations[consts.SnapshotCompatibilityVersionAnnotation]
 	if version != consts.SnapshotCompatibilityVersion {

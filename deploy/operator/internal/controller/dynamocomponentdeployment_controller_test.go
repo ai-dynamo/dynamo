@@ -1836,7 +1836,6 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 		}
 	}
-
 	t.Run("DGD-managed checkpointRef resolves only a native PodSnapshot", func(t *testing.T) {
 		t.Log("Given a DGD-managed DCD reference and a Ready compatible PodSnapshot")
 		dcd := makeDCD("worker-snapshot")
@@ -1880,6 +1879,70 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		assert.Equal(t, commonconsts.MainContainerName, podTemplateSpec.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
 	})
 
+	t.Run("owning DGD can render its retained automatic checkpoint", func(t *testing.T) {
+		t.Log("Given a generated DCD and its owning DGD's retained automatic PodSnapshot")
+		dcd := makeDCD("worker-snapshot")
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
+		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
+		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = "test-dgd-uid"
+		r := makeReconciler(dcd, snapshot)
+
+		t.Log("When the DCD workload template is rendered")
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
+			context.Background(),
+			dcd,
+			dynamo.RoleMain,
+			noContainerGPUs(),
+		)
+
+		t.Log("Then the owning DGD may continue using its managed snapshot")
+		require.NoError(t, err)
+		assert.Equal(t, string(snapshot.UID), podTemplateSpec.Annotations[commonconsts.SnapshotCandidateUIDAnnotation])
+	})
+
+	t.Run("different DGD cannot render a retained automatic checkpoint", func(t *testing.T) {
+		t.Log("Given a generated DCD referencing another DGD's retained automatic PodSnapshot")
+		dcd := makeDCD("worker-snapshot")
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
+		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
+		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = "different-dgd-uid"
+		r := makeReconciler(dcd, snapshot)
+
+		t.Log("When the DCD workload template is rendered")
+		_, err := r.workloadRenderer().generatePodTemplateSpec(
+			context.Background(),
+			dcd,
+			dynamo.RoleMain,
+			noContainerGPUs(),
+		)
+
+		t.Log("Then the DCD cannot adopt the other graph incarnation's snapshot")
+		require.ErrorContains(t, err, "belongs to DGD uid")
+	})
+
+	t.Run("standalone DCD cannot render a retained automatic checkpoint", func(t *testing.T) {
+		t.Log("Given a standalone DCD referencing a retained automatic PodSnapshot")
+		dcd := makeDCD("worker-snapshot")
+		dcd.OwnerReferences = nil
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
+		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
+		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = "test-dgd-uid"
+		r := makeReconciler(dcd, snapshot)
+
+		t.Log("When the DCD workload template is rendered")
+		_, err := r.workloadRenderer().generatePodTemplateSpec(
+			context.Background(),
+			dcd,
+			dynamo.RoleMain,
+			noContainerGPUs(),
+		)
+
+		t.Log("Then the public checkpointRef contract rejects the retained artifact")
+		require.ErrorContains(t, err, "retained automatic checkpoint")
+	})
 }
 
 func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {

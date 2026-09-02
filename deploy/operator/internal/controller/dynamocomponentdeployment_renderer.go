@@ -37,6 +37,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
@@ -296,7 +297,7 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 			dcd.Namespace,
 			alphaCheckpointConfig,
 			expectedWorkerHash,
-			checkpoint.PodSnapshotUseExplicitReference,
+			podSnapshotUseForDCD(dcd),
 		)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
@@ -317,6 +318,24 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 		return nil, errors.Wrap(err, "failed to apply checkpoint gpuMemoryService config")
 	}
 	return info, nil
+}
+
+func podSnapshotUseForDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) checkpoint.PodSnapshotUse {
+	// Only a concrete DGD controller reference can grant managed restore authority.
+	controller := metav1.GetControllerOf(dcd)
+	if controller == nil ||
+		controller.Kind != nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind ||
+		controller.UID == "" {
+		return checkpoint.ExplicitPodSnapshotUse()
+	}
+
+	// Accept any served DGD API version from Dynamo's API group.
+	groupVersion, err := schema.ParseGroupVersion(controller.APIVersion)
+	if err != nil || groupVersion.Group != nvidiacomv1beta1.GroupVersion.Group {
+		return checkpoint.ExplicitPodSnapshotUse()
+	}
+
+	return checkpoint.ManagedPodSnapshotUse(controller.UID)
 }
 
 func (r *dcdWorkloadRenderer) generateService(
