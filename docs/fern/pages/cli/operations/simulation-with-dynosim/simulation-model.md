@@ -41,87 +41,66 @@ events. The SGLang core uses its own token-pool and radix-cache implementation.
 ## Timing Sources
 
 Scheduler state determines the batch and cache-hit inputs to the timing source. Choose one timing
-source for prefill and decode work.
+source for each worker role with `engine.workers.<role>.timing.type`.
+
+The removed public Mocker CLI options for profile-derived interpolation and direct `--aic-*`
+configuration are not part of the unified CLI. Use only the timing types accepted by the
+AISimulate YAML schema.
+
+### AISimulate Performance Model
+
+`timing.type: default` uses the AISimulate performance model. AISimulate selects model data from
+`engine.model`, `engine.hardware`, `engine.backend`, the optional `engine.backend_version`, and the
+role's parallelism mapping. Unsupported combinations fail instead of silently using an
+uncalibrated timing model.
+
+KV-capacity selection is independent of the timing source. With `kv_cache.capacity.type: default`,
+AISimulate estimates capacity from the model, backend, hardware, parallelism, block size, and memory
+fraction. With `type: fixed`, set the concrete block count in `blocks`.
+
+### Fixed Timing
+
+Set `timing.type: fixed` and provide both `prefill_ms` and `decode_ms` to apply constant durations:
+
+```yaml
+timing: {type: fixed, prefill_ms: 2, decode_ms: 0.5}
+```
+
+Use fixed timing for functional tests or controlled comparisons. These values replace the
+AISimulate timing lookup but do not disable default KV-capacity estimation.
 
 ### Polynomial Baseline
 
-The default model is an uncalibrated synthetic baseline. Prefill latency follows a polynomial over
-the uncached tokens scheduled in the pass. Decode latency follows a polynomial over active KV-cache
-utilization. Use it for functional tests and relative experiments where hardware calibration is not
-required.
-
-### Profile-Derived Interpolation
-
-Set `--planner-profile-data` to either:
-
-- a profiler results directory, which Mocker converts to its interpolation input; or
-- a Mocker-format `.npz` file.
-
-The model linearly interpolates prefill latency over uncached batch tokens and bilinearly
-interpolates decode latency over the profiled decode dimensions. Values outside the measured grid
-are extrapolated, so inspect the profile coverage before relying on boundary results.
-
-### AIConfigurator
-
-Set `--aic-perf-model` to use
-[AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) for forward-pass latency prediction.
-Select the model, system, backend, parallelism, and quantization identity with the `--aic-*` knobs.
-`--aic-backend` can differ from `--engine-type` when an experiment intentionally decouples simulated
-scheduler behavior from the timing backend.
-
-When block capacity is not overridden, the AIC-backed configuration estimates KV capacity from the
-backend-specific GPU-memory fraction. `--aic-nextn`, `--aic-nextn-accept-rates`, and
-`--aic-mtp-seed` add deterministic speculative-token burst sampling to the scheduler simulation.
-
-AIC predicts forward-pass duration and capacity inputs. Mocker still owns request admission,
-batching, prefix hits, memory pressure, token emission, and handoff state.
+Set `timing.type: polynomial` to use the uncalibrated synthetic baseline. Prefill latency follows a
+polynomial over the uncached tokens scheduled in the pass. Decode latency follows a polynomial over
+active KV-cache utilization.
 
 ## Prefill/Decode Handoff
 
-The retained internal disaggregated worker runtime has two handoff paths. The prefill worker's
-bootstrap configuration, rather than its engine type alone, selects the path.
+For `engine.mode: disaggregated`, define `engine.workers.prefill` and
+`engine.workers.decode`. Configure the modeled transfer under `engine.kv_transfer`:
 
-### Direct Completion Path
+```yaml
+kv_transfer:
+  bytes_per_token: auto
+  bandwidth_gb_per_second: 400
+  timing_mode: destination_missing
+```
 
-This is the default when the prefill worker omits `--bootstrap-ports`. The prefill worker completes
-the request, and the router consumes that result before dispatching decode. There is no handoff ID,
-source/destination rendezvous, destination reservation, or coordinated activation and release.
-
-The direct path still applies the simple full-prompt line-rate delay as part of prefill completion
-when transfer bandwidth and KV bytes per token are available. It does not use destination cache
-state, so `--kv-transfer-timing-mode destination_missing` does not apply.
-
-### Coordinated Bootstrap Path
-
-Set `--bootstrap-ports` on prefill workers to advertise a handoff endpoint. The router can then
-dispatch decode with a handoff ID and endpoint while prefill remains active. The two workers
-coordinate this lifecycle:
-
-1. The source finishes prefill and holds the terminal prefill result.
-2. The destination accepts the request and reserves capacity.
-3. The handoff applies the configured transfer delay.
-4. The destination activates the request.
-5. The source releases its hold.
-
-Cancellation and failure paths release the corresponding reservation or hold. vLLM uses
-source-first coordination; SGLang uses destination-first coordination. TensorRT-LLM handoff is not
-supported.
-
-Both paths use a per-request line-rate model:
+The offline simulation uses a per-request line-rate model:
 
 ```text
 transfer time = transferred KV bytes / kv_transfer_bandwidth
 transferred KV bytes = charged tokens * kv_bytes_per_token
 ```
 
-The direct path always charges the full logical prompt. In the coordinated path,
-`--kv-transfer-timing-mode full_prompt` does the same, while `destination_missing` charges only the
-prompt footprint missing at the destination and can produce zero delay on a full destination hit.
-Neither handoff path makes concurrent requests contend for a shared link.
+`timing_mode: full_prompt` charges the full logical prompt. `destination_missing` charges only the
+prompt footprint absent from the destination and can produce zero delay on a full destination hit.
+Concurrent requests do not contend for a shared link.
 
-Mocker derives `kv_bytes_per_token` from model metadata and `--kv-cache-dtype` when possible. Set
-`--kv-bytes-per-token` when the model configuration is unavailable or when the experiment requires
-an explicit value. Set `--kv-transfer-bandwidth 0` to disable P/D transfer delay.
+Set `bytes_per_token: auto` to derive the value from model metadata and parallelism, or provide a
+positive integer. Set a positive `bandwidth_gb_per_second` to apply the transfer delay. TensorRT-LLM
+does not support disaggregated simulation.
 
 ## Distributed Signals
 

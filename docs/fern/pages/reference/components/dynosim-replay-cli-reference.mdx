@@ -37,8 +37,9 @@ aisimulate predict --stack dynamo --config prediction.yaml
 </ParamField>
 
 <ParamField path="--set" type="PATH=YAML_VALUE" default="null">
-  Override an existing configuration path after loading the YAML file. Repeat the option for
-  multiple overrides. Values are parsed as YAML, and later assignments win.
+  Override a schema-valid configuration path after loading the YAML file. Repeat the option for
+  multiple overrides. Values are parsed as YAML, and later assignments win. Sequence indexes are
+  not supported.
 </ParamField>
 
 <ParamField path="--output-dir" type="path" default="./aisimulate-output">
@@ -125,38 +126,62 @@ evaluation:
 
 `traffic` contains `source`, `load`, and `stop` mappings.
 
+- Omitting the entire section creates 100 independent synthetic requests at concurrency 10, with
+  1,024 input tokens and 128 output tokens per request.
 - `source.type: synthetic` creates independent requests with `input_tokens` and `output_tokens`.
 - `source.type: synthetic-session` creates ordered multi-turn sessions.
 - `source.type: trace` reads one or more paths. Supported formats include `mooncake`,
   `mooncake-delta`, `agentic_mooncake`, `applied_compute_agentic`, and `dynamo`.
 - `load.type: concurrency` keeps a fixed number of requests or sessions active.
-- `load.type: constant_rate` uses `requests_per_second` or `sessions_per_second`.
+- `load.type: constant_rate` schedules evenly spaced arrivals from `requests_per_second` or
+  `sessions_per_second`.
+- `load.type: poisson` uses the matching rate with exponential inter-arrival times and an optional
+  `seed`, which defaults to 42.
 - `load.type: trace_timestamps` preserves trace timing and accepts a positive `speedup`.
 - `stop.requests` applies to independent requests. `stop.sessions` applies to session sources.
+- `stop.requests_per_load_unit` and `stop.sessions_per_load_unit` derive the count from the concrete
+  concurrency or arrival rate.
 - `stop.max_virtual_time_seconds` is a soft virtual-time cutoff. Requests admitted before the
   cutoff may finish afterward.
 
 For a Dynamo request trace, omit `traffic.source.block_size`; AISimulate derives it from the trace
-records and rejects mixed block sizes. For Mooncake-family traces, set the block size used to encode
-`hash_ids`.
+records and rejects mixed block sizes. Dynamo format accepts multiple trace shards. Other formats
+accept exactly one path, and their block size defaults to 512 when omitted.
+
+`mooncake-delta` and `agentic_mooncake` require aggregated engine mode.
+`agentic_mooncake` also requires `trace_timestamps` and rejects the virtual-time cutoff.
+`applied_compute_agentic` requires concurrency load.
+With the Dynamo stack, omit `planner` or set `planner.policy: disabled` for `mooncake-delta`,
+`agentic_mooncake`, and Dynamo traces that carry `agent_context` records.
 
 ## Engine and Adapter Rules
 
 - `engine.mode: aggregated` requires `engine.workers.aggregated`.
 - `engine.mode: disaggregated` requires `engine.workers.prefill`,
   `engine.workers.decode`, and `engine.kv_transfer`.
+- `aisimulate predict` and `aisimulate recommend` currently support TensorRT-LLM only in
+  aggregated mode. This is an offline simulation limitation; Dynamo runtime deployments support
+  TensorRT-LLM disaggregated serving.
 - Each `parallelism` mapping is concrete and contains `replicas`, `tensor`, `pipeline`,
   `attention_data`, `moe_tensor`, and `moe_expert`.
+- `engine.context_length` defaults to `max`, which AISimulate resolves from the model's Hugging Face
+  configuration. Default KV block sizes are 64 for vLLM, 1 for SGLang, and 32 for TensorRT-LLM.
+- Scheduler defaults are 8,192 batched tokens for every role and 256 sequences for aggregated and
+  decode workers. Prefill workers default to one sequence.
+- `timing.type: default` uses the AIConfigurator forward-pass model shipped in the `aisimulate`
+  wheel. `fixed` requires both `prefill_ms` and `decode_ms`; `polynomial` selects the built-in
+  polynomial model.
 - `router.policy: kv_router` requires more than one routable worker. Set
   `router.prefill_load_model.type` to `none` or `aic`.
 - `planner.policy` is `disabled` or `enabled`. When enabled, `planner.max_num_gpus` limits the
   Planner runtime budget; it is distinct from recommendation candidate constraints.
-- `evaluation.sla` accepts either or both `ttft_ms` and `itl_ms`. An omitted threshold does not
-  constrain that metric.
+- `evaluation.sla` accepts either `e2e_ms` alone or `ttft_ms` and `itl_ms` together. The two forms
+  are mutually exclusive.
 
 ## Overrides
 
-`--set` accepts dot-separated paths that already exist in the input schema:
+`--set` accepts dot-separated, schema-valid paths. The field does not need to be present in the
+input YAML:
 
 ```bash
 aisimulate predict \
