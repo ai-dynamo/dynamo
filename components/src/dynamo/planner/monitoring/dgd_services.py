@@ -137,7 +137,10 @@ class Service(BaseModel):
         container = get_main_container(self.service)
         command = break_arguments(container.get("command"))
         args = break_arguments(container.get("args"))
-        return "dynamo.mocker" in command + args
+        return any(
+            module in {"dynamo.mocker", "dynamo.mocker._worker"}
+            for module in command + args
+        )
 
     def get_model_name(self) -> Optional[str]:
         args = get_main_container(self.service).get("args", [])
