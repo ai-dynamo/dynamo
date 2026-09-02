@@ -123,10 +123,8 @@ def main() -> int:
     repo = os.environ.get("REPO", "")
     head_repo = os.environ.get("PR_HEAD_REPO", repo)
     association = os.environ.get("PR_AUTHOR_ASSOCIATION", "").upper()
-    # Fork-native development is the accepted governance model, so org
-    # members and collaborators routinely open PRs from forks; their Linear
-    # references are verified like same-repo PRs. The fork gating below
-    # applies only to authors outside the org.
+    # Org authors keep Linear verification from forks; the fork gating
+    # below applies only to authors outside the org.
     trusted_author = association in {"OWNER", "MEMBER", "COLLABORATOR"}
     is_untrusted_fork = head_repo.lower() != repo.lower() and not trusted_author
     gh_token = os.environ.get("GITHUB_TOKEN", "")

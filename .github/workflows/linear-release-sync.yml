@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Syncs merged work into the release in Linear. On every push the action scans
-# the new commits for Linear issue identifiers and PR references and attaches
-# the referenced issues to the release, so the Release view stays a live
-# feature list without a manual step. Pushes to main sync into the release
-# currently in development on main; pushes to a release branch sync into that
-# release's own entry.
+# Merged commits sync their referenced issues to the corresponding Linear
+# release, keeping the Release view a live feature list without a manual step.
+#
+# Main only for the rollout: the action keeps per-pipeline scan state, so
+# release/* branches join once the dry run confirms how that state behaves
+# across concurrently active branches (they may need their own pipeline and
+# access key per stream).
 
 name: Linear Release Sync
 
@@ -26,7 +27,6 @@ on:
   push:
     branches:
       - main
-      - "release/*"
 
 env:
   # The release currently in development on main. Update at each cycle open,
@@ -48,21 +48,13 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
-      - name: Resolve release version
-        id: version
-        run: |
-          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
-            echo "version=${MAIN_RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF#refs/heads/release/}" >> "$GITHUB_OUTPUT"
-          fi
       - name: Sync release
         uses: linear/linear-release-action@53ad0f863963e7f8e270fba18426bbb55ef55384  # v0.17.2
         with:
           access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
           command: sync
-          version: ${{ steps.version.outputs.version }}
-          name: Dynamo v${{ steps.version.outputs.version }}
+          version: ${{ env.MAIN_RELEASE_VERSION }}
+          name: Dynamo v${{ env.MAIN_RELEASE_VERSION }}
           # Deliberate rollout gate: the workflow does not sync until this is
           # flipped. Dry run scans and logs what it would attach without
           # creating or modifying anything in Linear. Flip to false in a
