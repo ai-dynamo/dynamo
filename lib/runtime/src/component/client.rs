@@ -519,8 +519,7 @@ impl Client {
     }
 
     /// Whether the live discovery source (not the asynchronously reconciled
-    /// routing snapshot) currently contains this instance. Zero-allocation
-    /// equivalent of `instance_ids().contains(&instance_id)`.
+    /// routing snapshot) currently contains this instance.
     pub fn is_instance_live(&self, instance_id: u64) -> bool {
         self.instance_source
             .borrow()
