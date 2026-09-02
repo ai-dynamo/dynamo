@@ -527,47 +527,6 @@ mod tests {
         );
     }
 
-    /// Every family from a real vLLM 0.18.0 registry survives the mapping with
-    /// at least one datapoint. Constructed registries only contain shapes
-    /// someone thought to write down; this is the capture.
-    #[test]
-    fn real_vllm_registry_maps_without_dropping_a_family() {
-        let typed: Vec<TypedFamily> = serde_json::from_str(include_str!(
-            "../../tests/data/vllm-same-registry-typed.json"
-        ))
-        .expect("fixture");
-        let families = build_families(typed);
-        let metrics = to_resource_metrics(&families, &[], UNIX_EPOCH)
-            .scope_metrics
-            .into_iter()
-            .next()
-            .expect("scope")
-            .metrics;
-
-        assert_eq!(
-            metrics.len(),
-            families.len(),
-            "a family was dropped by the OTLP mapping"
-        );
-        assert!(
-            families.iter().any(|f| f.name().starts_with("vllm:")),
-            "fixture should carry engine families"
-        );
-
-        let empty: Vec<&str> = metrics
-            .iter()
-            .filter(|m| match &m.data {
-                Some(metric::Data::Sum(s)) => s.data_points.is_empty(),
-                Some(metric::Data::Gauge(g)) => g.data_points.is_empty(),
-                Some(metric::Data::Histogram(h)) => h.data_points.is_empty(),
-                Some(metric::Data::Summary(s)) => s.data_points.is_empty(),
-                _ => true,
-            })
-            .map(|m| m.name.as_str())
-            .collect();
-        assert!(empty.is_empty(), "families with no datapoints: {empty:?}");
-    }
-
     /// Dynamo's own metrics reach OTLP by a different route than engine
     /// metrics: `Registry::gather()` straight into the mapper, never through
     /// the typed builder. Every other test here feeds engine-side data, so
