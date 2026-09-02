@@ -5,8 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # Mocker engine
 
-The public `python -m dynamo.mocker` CLI is removed while online simulation is unavailable. The
-engine and private worker launcher remain for Dynamo internals, tests, and managed templates.
+Run the mocker worker with `python -m dynamo.mocker`. The internal
+`python -m dynamo.mocker._worker` entry point remains available for managed templates.
 
 The user-facing availability notice lives at
 [Simulate a Kubernetes Deployment with Mocker](../../../../docs/fern/pages/kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx).

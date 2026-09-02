@@ -13,6 +13,6 @@ pytestmark = [
 ]
 
 
-def test_public_mocker_module_cli_is_removed() -> None:
-    assert importlib.util.find_spec("dynamo.mocker.__main__") is None
+def test_mocker_module_entry_points_are_available() -> None:
+    assert importlib.util.find_spec("dynamo.mocker.__main__") is not None
     assert importlib.util.find_spec("dynamo.mocker._worker") is not None
