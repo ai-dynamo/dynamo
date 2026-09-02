@@ -56,7 +56,6 @@ func needsSubjectUpdate(existing *rbacv1.RoleBinding, serviceAccountName, target
 //
 // Parameters:
 //   - ctx: context
-//   - kubeClient: Kubernetes client used to read and write RBAC resources
 //   - targetNamespace: namespace to create RBAC resources in
 //   - serviceAccountName: name of the ServiceAccount to create
 //   - clusterRoleName: name of the ClusterRole to bind to (must exist)
