@@ -897,21 +897,13 @@ navigation:
             slug: kv-router-ab-testing
             hidden: true
 
-  # Agent Skills is its own tab: the skills are a tool surface for coding
-  # agents, not a Dynamo API or release fact, and the inventory grows per
-  # release. The tab slug keeps the published /dynamo/dev/agent-skills URL,
-  # so the category pages hang off it as /agent-skills/<category>.
+  # The tab slug preserves the published /dynamo/dev/agent-skills URL.
   - tab: agent-skills
     layout:
       - page: Overview
         icon: robot
-        path: pages/agent-skills/index.mdx
+        path: pages/agent-skills/overview.mdx
         slug: overview
-
-      - page: Development and Documentation
-        icon: code
-        path: pages/agent-skills/development.mdx
-        slug: development
 
       - page: Deployment and Operations
         icon: screwdriver-wrench
@@ -922,6 +914,11 @@ navigation:
         icon: gauge-high
         path: pages/agent-skills/optimization.mdx
         slug: optimization
+
+      - page: Development and Documentation
+        icon: code
+        path: pages/agent-skills/development.mdx
+        slug: development
 
   - tab: reference
     layout:

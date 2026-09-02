@@ -8,9 +8,16 @@ subtitle: Skills for standing up Dynamo deployments and diagnosing them when the
 These skills act on a running or intended cluster: deploying a recipe, starting a router,
 validating the interconnect fabric, and troubleshooting unhealthy workloads.
 
+Prompts that reach them: "Deploy the Qwen3 32B FP8 recipe on my cluster and smoke-test the
+endpoint," or "My prefill pods are restarting after a rolling update. Find out why."
+
+<SearchableTable placeholder="Search deployment skills...">
+
 | Skill | Use for |
 | --- | --- |
 | [`deploy-dynamo-recipe`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/deploy-dynamo-recipe) | Deploy an assigned DynamoGraphDeployment and verify it with an OpenAI-compatible smoke test. |
 | [`dynamo-interconnect-check`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-interconnect-check) | Validate NIXL, Unified Communication X (UCX), and NVIDIA Collective Communications Library (NCCL) readiness for disaggregated serving over remote direct memory access (RDMA) or NVLink. |
 | [`dynamo-router-starter`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-router-starter) | Start or patch round-robin, KV-aware, least-loaded, or device-aware routing and run endpoint checks. |
 | [`troubleshoot-dynamo`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/troubleshoot-dynamo) | Diagnose failed or unhealthy deployments, pods, model caches, workers, endpoints, or benchmark jobs. |
+
+</SearchableTable>

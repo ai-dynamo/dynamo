@@ -47,8 +47,6 @@ versions:
     path: ./index.yml
 
 redirects:
-  # Agent Skills is a standalone tab again, and its single Reference page is
-  # now an overview plus one page per skill category.
   - source: "/dynamo/dev/reference/agent-skills"
     destination: "/dynamo/dev/agent-skills/overview"
 

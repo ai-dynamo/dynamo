@@ -5,9 +5,15 @@ title: Performance Optimization Skills
 subtitle: The evidence-driven loop that benchmarks a confirmed baseline and challenges it with candidates.
 ---
 
-These skills form the optimization workflow. The loop also uses
-[`deploy-dynamo-recipe`](deployment.mdx) to deploy the confirmed baseline and each approved
-candidate.
+These skills form the optimization workflow: capture a workload contract, benchmark a confirmed
+baseline, then challenge it with one candidate at a time until the Service Level Objectives (SLOs)
+are met or the budget runs out. The loop also uses
+[`deploy-dynamo-recipe`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/deploy-dynamo-recipe),
+listed on the [Deployment and Operations](deployment.mdx) page, to deploy the confirmed baseline and
+each approved candidate.
+
+A prompt that reaches them: "Optimize this deployment for output tokens per second per user under a
+200 ms time-to-first-token SLO. Budget 8 GPU-hours and stop after three failed deployments."
 
 <SearchableTable placeholder="Search optimization skills...">
 
