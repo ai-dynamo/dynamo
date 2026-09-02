@@ -133,6 +133,13 @@ spec:
               echo "RDMA_HCA_SELECTED=${hca} UCX_TLS=${UCX_TLS:-default}"
             else
               echo "RDMA_HCA_SELECTED=none UCX_TLS=${UCX_TLS:-default}"
+              # A fabric variant whose UCX_TLS has no TCP fallback cannot
+              # carry NIXL without an HCA. Stop now. Otherwise the pod
+              # runs and the startupProbe fails 3h later.
+              if [ "${DYN_REQUIRE_RDMA_HCA:-0}" = "1" ]; then
+                echo "FATAL: no RDMA HCA, and UCX_TLS has no TCP fallback" >&2
+                exit 1
+              fi
             fi
             exec python3 -m dynamo.vllm \
               --model /model-cache/thinkingmachines/Inkling-NVFP4 \
@@ -276,6 +283,13 @@ spec:
               echo "RDMA_HCA_SELECTED=${hca} UCX_TLS=${UCX_TLS:-default}"
             else
               echo "RDMA_HCA_SELECTED=none UCX_TLS=${UCX_TLS:-default}"
+              # A fabric variant whose UCX_TLS has no TCP fallback cannot
+              # carry NIXL without an HCA. Stop now. Otherwise the pod
+              # runs and the startupProbe fails 3h later.
+              if [ "${DYN_REQUIRE_RDMA_HCA:-0}" = "1" ]; then
+                echo "FATAL: no RDMA HCA, and UCX_TLS has no TCP fallback" >&2
+                exit 1
+              fi
             fi
             exec python3 -m dynamo.vllm \
               --model /model-cache/thinkingmachines/Inkling-NVFP4 \
