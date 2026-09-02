@@ -8,5 +8,5 @@ pub(crate) use picker::RoutePicker;
 pub use types::RouteTarget;
 pub(crate) use types::{
     AdmissionKind, CandidateView, RouteCandidate, RouteContext, RouteDecision, RouteDevice,
-    RoutePolicy,
+    RouteLoad, RoutePolicy,
 };

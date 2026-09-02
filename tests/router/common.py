@@ -3939,3 +3939,144 @@ def _test_disagg_per_role_session_affinity(
             f"{set(prefill_ids)} (TTL advertised) while decode spread across "
             f"{set(decode_ids)} (no TTL)"
         )
+
+
+def _test_least_loaded_token_aware(
+    engine_workers,
+    request,
+    frontend_port: int,
+    *,
+    token_aware: bool,
+    store_backend: str = "file",
+    request_plane: str = "tcp",
+    block_size: int = 16,
+    long_prompt_words: int = 4000,
+    probe_count: int = 10,
+):
+    """Pin what `DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE` changes about least-loaded.
+
+    Holds one long-prompt and one short-prompt request open, one per worker, then
+    sends `probe_count` short probes one at a time. Both workers are tied at a
+    single in-flight request throughout, so:
+
+    * token-aware ordering must send every probe to the short-prompt worker, which
+      is the only one that is lighter by prompt tokens;
+    * request-count ordering sees a tie and breaks it randomly, so the long-prompt
+      worker must still receive probes.
+
+    Returns `(long_worker, short_worker, probes)` so callers can assert further.
+    """
+    url = f"http://localhost:{frontend_port}/v1/chat/completions"
+    model_name = engine_workers.model_name
+
+    def payload(word_count: int, max_tokens: int) -> dict[str, Any]:
+        # A fresh suffix per prompt keeps prefix caching from coupling the two
+        # workers; this scenario is about occupancy, not cache overlap.
+        content = " ".join([f"tok{uuid.uuid4().hex[:6]}"] * word_count)
+        return {
+            "model": model_name,
+            "messages": [{"role": "user", "content": content}],
+            "stream": True,
+            "max_tokens": max_tokens,
+            "nvext": {"extra_fields": ["worker_id"]},
+        }
+
+    def worker_of(chunks) -> Optional[int]:
+        worker = None
+        for chunk in chunks:
+            candidate = chunk.get("nvext", {}).get("worker_id")
+            if candidate:
+                worker = int(candidate["decode_worker_id"])
+        return worker
+
+    async def worker_of_open_stream(response: aiohttp.ClientResponse) -> int:
+        """Read only as far as the worker_id, leaving the request in flight."""
+        async for raw in response.content:
+            line = raw.decode("utf-8").strip()
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            worker = worker_of([json.loads(line[len("data: ") :])])
+            if worker is not None:
+                return worker
+        raise AssertionError("stream ended before reporting a worker_id")
+
+    async def run() -> tuple[int, int, list[int]]:
+        await wait_for_frontend_ready(
+            frontend_url=f"http://localhost:{frontend_port}",
+            expected_num_workers=engine_workers.num_workers,
+            timeout=120,
+            engine_workers=engine_workers,
+            store_backend=store_backend,
+            request_plane=request_plane,
+        )
+
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=300)
+        ) as session:
+            # A large max_tokens keeps these two requests in flight for the whole
+            # scenario, so their prompt weight stays charged to their workers.
+            long_ctx = session.post(url, json=payload(long_prompt_words, 4000))
+            long_response = await long_ctx.__aenter__()
+            try:
+                long_worker = await worker_of_open_stream(long_response)
+
+                short_ctx = session.post(url, json=payload(4, 4000))
+                short_response = await short_ctx.__aenter__()
+                try:
+                    short_worker = await worker_of_open_stream(short_response)
+                    assert short_worker != long_worker, (
+                        "the second request must land on the idle worker, but "
+                        f"both went to {long_worker}"
+                    )
+
+                    probes = []
+                    for _ in range(probe_count):
+                        async with session.post(
+                            url, json=payload(4, 1)
+                        ) as probe_response:
+                            body = await probe_response.text()
+                            assert probe_response.status == 200, body
+                        worker = worker_of(parse_sse_json_chunks(body))
+                        assert worker is not None, body
+                        probes.append(worker)
+
+                    logger.info(
+                        "token_aware=%s long_worker=%s short_worker=%s probes=%s",
+                        token_aware,
+                        long_worker,
+                        short_worker,
+                        probes,
+                    )
+                    return long_worker, short_worker, probes
+                finally:
+                    short_response.close()
+            finally:
+                long_response.close()
+
+    with FrontendRouterProcess(
+        request,
+        block_size=block_size,
+        frontend_port=frontend_port,
+        namespace=engine_workers.namespace,
+        store_backend=store_backend,
+        request_plane=request_plane,
+        router_mode="least-loaded",
+        min_initial_workers=engine_workers.num_workers,
+        extra_env={"DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE": "1" if token_aware else None},
+    ):
+        long_worker, short_worker, probes = asyncio.run(run())
+
+    assert probes, "no probes were sent"
+    if token_aware:
+        assert all(worker == short_worker for worker in probes), (
+            "token-aware ordering must send every probe to the worker holding "
+            f"fewer prompt tokens ({short_worker}); got {probes} with the long "
+            f"prompt on {long_worker}"
+        )
+    else:
+        assert long_worker in probes, (
+            "request-count ordering ties the workers at one request each, so the "
+            f"long-prompt worker {long_worker} must still receive probes; "
+            f"got {probes}"
+        )
+    return long_worker, short_worker, probes

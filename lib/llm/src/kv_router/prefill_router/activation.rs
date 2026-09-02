@@ -30,7 +30,7 @@ use crate::{
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
     protocols::common::{
-        llm_backend::{LLMEngineOutput, PreprocessedRequest},
+        llm_backend::{LLMEngineOutput, PreprocessedRequest, preprocessed_prompt_load_weight},
         timing::WORKER_TYPE_PREFILL,
     },
     session_affinity::create_affinity_coordinator,
@@ -402,7 +402,10 @@ where
                 prefill_router_mode,
                 None, // worker_monitor
             )
-            .await?;
+            .await?
+            // The prefill hop's cost is the prompt itself, so let least-loaded
+            // ordering weigh workers by the prompt tokens they already hold.
+            .with_load_weight(preprocessed_prompt_load_weight());
 
             (
                 InnerPrefillRouter::SimpleRouter(Arc::new(

@@ -20,6 +20,30 @@ impl RouteTarget {
     }
 }
 
+/// Per-worker load used to order routing candidates.
+///
+/// Field order is the comparison order: derived `Ord` compares `queued_tokens`
+/// first and uses `requests` only to break ties. When token-aware occupancy is
+/// disabled `queued_tokens` is always zero, so the ordering degenerates to the
+/// in-flight request count.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct RouteLoad {
+    /// Prompt tokens of the requests currently charged to this worker.
+    pub(crate) queued_tokens: u64,
+    /// In-flight requests currently charged to this worker.
+    pub(crate) requests: u64,
+}
+
+impl RouteLoad {
+    /// A load carrying only a request count, as used by the request-count-ordered policies.
+    pub(crate) const fn requests(requests: u64) -> Self {
+        Self {
+            queued_tokens: 0,
+            requests,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RoutePolicy {
     RoundRobin,

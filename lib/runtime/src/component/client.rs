@@ -14,29 +14,129 @@ use dashmap::DashMap;
 use futures::StreamExt;
 
 use crate::component::{Endpoint, Instance};
+use crate::config::environment_names::router as env_router;
 use crate::config::environment_names::runtime as env_runtime;
 use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
 use crate::routing_policy::{
-    AdmissionKind, CandidateView, RouteContext, RouteDecision, RoutePicker, RoutePolicy,
+    AdmissionKind, CandidateView, RouteContext, RouteDecision, RouteLoad, RoutePicker, RoutePolicy,
 };
 use crate::traits::DistributedRuntimeProvider;
 
+/// Whether least-loaded routing orders workers by queued prompt tokens.
+///
+/// Read once per process: the routing hot path must not touch the environment.
+static LEAST_LOADED_TOKEN_AWARE: LazyLock<bool> =
+    LazyLock::new(|| token_aware_least_loaded_from_env(|name| std::env::var(name).ok()));
+
+fn token_aware_least_loaded_from_env(mut lookup: impl FnMut(&str) -> Option<String>) -> bool {
+    let Some(raw) = lookup(env_router::DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE) else {
+        return false;
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => true,
+        "" | "0" | "false" | "off" | "no" => false,
+        other => {
+            tracing::warn!(
+                value = other,
+                env = env_router::DYN_ROUTER_LEAST_LOADED_TOKEN_AWARE,
+                "Unrecognized boolean, keeping request-count least-loaded ordering"
+            );
+            false
+        }
+    }
+}
+
+/// The per-worker counters one admitted request is charged against.
+///
+/// Held for the lifetime of the request and released exactly once, either
+/// explicitly via [`Self::release`] or when the owning permit drops.
+#[derive(Clone, Debug)]
+pub(crate) struct OccupancyLease {
+    requests: Arc<AtomicU64>,
+    /// `None` unless token-aware ordering is on and the request carries a weight.
+    queued_tokens: Option<Arc<AtomicU64>>,
+    weight: u64,
+}
+
+impl OccupancyLease {
+    /// The prompt-token weight this lease charges, so a retarget can re-charge the same amount.
+    pub(crate) fn weight(&self) -> u64 {
+        self.weight
+    }
+
+    pub(crate) fn release(&self) {
+        subtract(&self.requests, 1);
+        if let Some(queued_tokens) = self.queued_tokens.as_ref() {
+            subtract(queued_tokens, self.weight);
+        }
+    }
+}
+
+fn subtract(counter: &AtomicU64, amount: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(amount))
+    });
+}
+
 /// Shared occupancy state for routing modes that track per-worker in-flight requests.
-#[derive(Debug, Default)]
+///
+/// When `token_aware` is set, each admitted request also charges its prompt-token
+/// weight, and least-loaded selection orders by that total with the request count
+/// as the tie-break. Otherwise the token totals stay at zero and ordering is by
+/// request count alone.
+#[derive(Debug)]
 pub(crate) struct RoutingOccupancyState {
     counts: DashMap<u64, Arc<AtomicU64>>,
+    queued_tokens: DashMap<u64, Arc<AtomicU64>>,
+    token_aware: bool,
     exact_selection_lock: parking_lot::Mutex<()>,
 }
 
+impl Default for RoutingOccupancyState {
+    fn default() -> Self {
+        Self::new(*LEAST_LOADED_TOKEN_AWARE)
+    }
+}
+
 impl RoutingOccupancyState {
-    pub(crate) fn increment(&self, instance_id: u64) -> Arc<AtomicU64> {
-        let count = self
+    pub(crate) fn new(token_aware: bool) -> Self {
+        Self {
+            counts: DashMap::new(),
+            queued_tokens: DashMap::new(),
+            token_aware,
+            exact_selection_lock: parking_lot::Mutex::new(()),
+        }
+    }
+
+    /// Whether callers should compute a prompt-token weight for each request.
+    pub(crate) fn is_token_aware(&self) -> bool {
+        self.token_aware
+    }
+
+    /// Charge one request, plus `weight` prompt tokens when token-aware ordering is on.
+    pub(crate) fn increment(&self, instance_id: u64, weight: u64) -> OccupancyLease {
+        let requests = self
             .counts
             .entry(instance_id)
             .or_insert_with(|| Arc::new(AtomicU64::new(0)))
             .clone();
-        count.fetch_add(1, Ordering::Relaxed);
-        count
+        requests.fetch_add(1, Ordering::Relaxed);
+
+        let queued_tokens = (self.token_aware && weight > 0).then(|| {
+            let queued_tokens = self
+                .queued_tokens
+                .entry(instance_id)
+                .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+                .clone();
+            queued_tokens.fetch_add(weight, Ordering::Relaxed);
+            queued_tokens
+        });
+
+        OccupancyLease {
+            requests,
+            queued_tokens,
+            weight,
+        }
     }
 
     pub(crate) async fn select_exact_min(&self, instance_ids: &[u64]) -> Option<u64> {
@@ -55,6 +155,7 @@ impl RoutingOccupancyState {
             &picker,
             CandidateView::Workers(instance_ids),
             RouteContext::default(),
+            0,
         )
         .map(|(decision, _)| decision.target.worker_id)
     }
@@ -81,34 +182,49 @@ impl RoutingOccupancyState {
         picker.peek(candidates, context, |id| self.load(id))
     }
 
+    /// Select a worker and, when the policy admits against occupancy, charge it.
+    ///
+    /// `weight` is the request's prompt-token count; it is ignored unless
+    /// token-aware ordering is on.
     pub(crate) fn select_and_admit(
         &self,
         picker: &RoutePicker,
         candidates: CandidateView<'_>,
         context: RouteContext,
-    ) -> Option<(RouteDecision, Option<Arc<AtomicU64>>)> {
+        weight: u64,
+    ) -> Option<(RouteDecision, Option<OccupancyLease>)> {
         let _guard = self.exact_selection_lock.lock();
         let decision = picker.select(candidates, context, |id| self.load(id))?;
-        let counter = match decision.admission {
+        let lease = match decision.admission {
             AdmissionKind::None => None,
-            AdmissionKind::Occupancy => Some(self.increment(decision.target.worker_id)),
+            AdmissionKind::Occupancy => Some(self.increment(decision.target.worker_id, weight)),
         };
-        Some((decision, counter))
+        Some((decision, lease))
     }
 
-    pub(crate) fn decrement_counter(counter: &AtomicU64) {
-        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            Some(current.saturating_sub(1))
-        });
-    }
-
+    /// Drop one request-count charge without touching the token total.
+    ///
+    /// Requests release through their [`OccupancyLease`]; this exists for callers
+    /// holding only an instance id, and is therefore not weight-aware.
     pub(crate) fn decrement(&self, instance_id: u64) {
         if let Some(count) = self.counts.get(&instance_id) {
-            Self::decrement_counter(count.as_ref());
+            subtract(count.as_ref(), 1);
         }
     }
 
-    pub(crate) fn load(&self, instance_id: u64) -> u64 {
+    pub(crate) fn load(&self, instance_id: u64) -> RouteLoad {
+        RouteLoad {
+            queued_tokens: self
+                .queued_tokens
+                .get(&instance_id)
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(0),
+            requests: self.request_load(instance_id),
+        }
+    }
+
+    /// In-flight request count, for logging and tests that report a single number.
+    pub(crate) fn request_load(&self, instance_id: u64) -> u64 {
         self.counts
             .get(&instance_id)
             .map(|c| c.load(Ordering::Relaxed))
@@ -118,6 +234,7 @@ impl RoutingOccupancyState {
     pub(crate) fn retain(&self, instance_ids: &[u64]) {
         let live: HashSet<u64> = instance_ids.iter().copied().collect();
         self.counts.retain(|id, _| live.contains(id));
+        self.queued_tokens.retain(|id, _| live.contains(id));
     }
 }
 
@@ -1646,9 +1763,9 @@ mod tests {
             handle.await.unwrap();
         }
 
-        assert_eq!(state.load(100), 30);
-        assert_eq!(state.load(200), 30);
-        assert_eq!(state.load(300), 30);
+        assert_eq!(state.request_load(100), 30);
+        assert_eq!(state.request_load(200), 30);
+        assert_eq!(state.request_load(300), 30);
     }
 
     #[tokio::test]
@@ -1693,7 +1810,7 @@ mod tests {
             .select_exact_min_and_increment(&[10, 20, 30])
             .await
             .unwrap();
-        assert_eq!(state1.load(picked1), 1);
+        assert_eq!(state1.request_load(picked1), 1);
 
         let picked2 = state1
             .select_exact_min_and_increment(&[10, 20, 30])
@@ -1702,12 +1819,15 @@ mod tests {
         assert_ne!(picked1, picked2);
 
         // state2 should see the same counts (same underlying Arc)
-        assert_eq!(state2.load(10), state1.load(10));
-        assert_eq!(state2.load(20), state1.load(20));
-        assert_eq!(state2.load(30), state1.load(30));
+        assert_eq!(state2.request_load(10), state1.request_load(10));
+        assert_eq!(state2.request_load(20), state1.request_load(20));
+        assert_eq!(state2.request_load(30), state1.request_load(30));
 
         state2.decrement(picked1);
-        assert_eq!(state1.load(picked1), if picked1 == picked2 { 1 } else { 0 });
+        assert_eq!(
+            state1.request_load(picked1),
+            if picked1 == picked2 { 1 } else { 0 }
+        );
 
         rt.shutdown();
     }
@@ -1721,16 +1841,16 @@ mod tests {
         state.select_exact_min_and_increment(&[1, 2, 3]).await;
         state.select_exact_min_and_increment(&[1, 2, 3]).await;
         // Each instance should have 1 connection
-        assert_eq!(state.load(1), 1);
-        assert_eq!(state.load(2), 1);
-        assert_eq!(state.load(3), 1);
+        assert_eq!(state.request_load(1), 1);
+        assert_eq!(state.request_load(2), 1);
+        assert_eq!(state.request_load(3), 1);
 
         // Retain only instances 1 and 3 (instance 2 was removed)
         state.retain(&[1, 3]);
 
-        assert_eq!(state.load(1), 1);
-        assert_eq!(state.load(2), 0);
-        assert_eq!(state.load(3), 1);
+        assert_eq!(state.request_load(1), 1);
+        assert_eq!(state.request_load(2), 0);
+        assert_eq!(state.request_load(3), 1);
     }
 
     #[tokio::test]
@@ -1753,20 +1873,139 @@ mod tests {
 
         let worker_id = client.instance_ids_avail()[0];
         let state = get_or_create_routing_occupancy_state(&endpoint).await;
-        state.increment(worker_id);
-        assert_eq!(state.load(worker_id), 1);
+        state.increment(worker_id, 0);
+        assert_eq!(state.request_load(worker_id), 1);
 
         endpoint.unregister_endpoint_instance().await.unwrap();
 
         for _ in 0..10 {
-            if state.load(worker_id) == 0 {
+            if state.request_load(worker_id) == 0 {
                 break;
             }
             tokio::time::sleep(TEST_RECONCILE_INTERVAL).await;
         }
 
-        assert_eq!(state.load(worker_id), 0);
+        assert_eq!(state.request_load(worker_id), 0);
 
         rt.shutdown();
+    }
+
+    #[test]
+    fn token_aware_least_loaded_env_parses_booleans() {
+        for raw in ["1", "true", "TRUE", "on", " yes "] {
+            assert!(
+                token_aware_least_loaded_from_env(|_| Some(raw.to_string())),
+                "{raw} must enable token-aware ordering"
+            );
+        }
+        for raw in ["0", "false", "off", "no", "", "sometimes"] {
+            assert!(
+                !token_aware_least_loaded_from_env(|_| Some(raw.to_string())),
+                "{raw} must leave request-count ordering in place"
+            );
+        }
+        assert!(!token_aware_least_loaded_from_env(|_| None));
+    }
+
+    #[test]
+    fn token_aware_state_prefers_fewer_queued_prompt_tokens() {
+        let state = RoutingOccupancyState::new(true);
+        // Worker 1 holds one long prompt; worker 2 holds two short ones.
+        let long = state.increment(1, 4096);
+        state.increment(2, 16);
+        state.increment(2, 16);
+
+        assert_eq!(
+            state.load(1),
+            RouteLoad {
+                queued_tokens: 4096,
+                requests: 1
+            }
+        );
+        let picker = RoutePicker::new(RoutePolicy::LeastLoaded);
+        let (decision, lease) = state
+            .select_and_admit(
+                &picker,
+                CandidateView::Workers(&[1, 2]),
+                RouteContext::default(),
+                8,
+            )
+            .unwrap();
+        assert_eq!(
+            decision.target.worker_id, 2,
+            "the worker holding fewer prompt tokens wins despite more in-flight requests"
+        );
+        assert_eq!(state.load(2).queued_tokens, 40);
+
+        lease.unwrap().release();
+        assert_eq!(state.load(2).queued_tokens, 32);
+        long.release();
+        assert_eq!(
+            state.load(1),
+            RouteLoad::default(),
+            "releasing must return both counters to zero"
+        );
+    }
+
+    #[test]
+    fn token_aware_state_breaks_token_ties_on_request_count() {
+        let state = RoutingOccupancyState::new(true);
+        state.increment(1, 32);
+        state.increment(2, 16);
+        state.increment(2, 16);
+
+        let picker = RoutePicker::new(RoutePolicy::LeastLoaded);
+        let decision = state
+            .peek(
+                &picker,
+                CandidateView::Workers(&[1, 2]),
+                RouteContext::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            decision.target.worker_id, 1,
+            "equal prompt tokens must fall back to the in-flight request count"
+        );
+    }
+
+    #[test]
+    fn request_count_state_ignores_prompt_weight() {
+        let state = RoutingOccupancyState::new(false);
+        state.increment(1, 4096);
+        state.increment(2, 16);
+        state.increment(2, 16);
+
+        assert_eq!(state.load(1), RouteLoad::requests(1));
+        assert_eq!(state.load(2), RouteLoad::requests(2));
+
+        let picker = RoutePicker::new(RoutePolicy::LeastLoaded);
+        let decision = state
+            .peek(
+                &picker,
+                CandidateView::Workers(&[1, 2]),
+                RouteContext::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            decision.target.worker_id, 1,
+            "with weights off the long prompt must not count against worker 1"
+        );
+    }
+
+    #[test]
+    fn retain_drops_queued_tokens_for_departed_workers() {
+        let state = RoutingOccupancyState::new(true);
+        state.increment(1, 128);
+        state.increment(2, 128);
+
+        state.retain(&[2]);
+        assert_eq!(state.load(1), RouteLoad::default());
+        assert_eq!(
+            state.load(2),
+            RouteLoad {
+                queued_tokens: 128,
+                requests: 1
+            }
+        );
     }
 }
