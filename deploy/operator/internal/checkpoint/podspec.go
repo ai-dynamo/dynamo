@@ -20,14 +20,14 @@ import (
 const restoreStartupFailureThreshold = 1800 // 30 minutes at 1s cadence.
 
 // ApplyRestoreCandidateMetadata writes Dynamo's private admission handoff for
-// a resolved PodSnapshot. Pending automatic captures deliberately produce no
-// candidate metadata until their PodSnapshot is ready to resolve.
+// a resolved, Ready PodSnapshot. Pending snapshots deliberately produce no
+// candidate metadata so Immediate workloads continue with a cold start.
 func ApplyRestoreCandidateMetadata(annotations map[string]string, checkpointInfo *CheckpointInfo) error {
 	if annotations == nil {
 		return fmt.Errorf("checkpoint restore candidate annotations map is required")
 	}
 	removeRestoreCandidateMetadata(annotations)
-	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Exists || checkpointInfo.CheckpointName == "" {
+	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Exists || !checkpointInfo.Ready || checkpointInfo.CheckpointName == "" {
 		return nil
 	}
 	if checkpointInfo.NativeSnapshot == nil {

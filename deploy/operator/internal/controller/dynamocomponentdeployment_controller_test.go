@@ -1857,6 +1857,26 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		assert.Equal(t, commonconsts.MainContainerName, podTemplateSpec.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
 	})
 
+	t.Run("pending explicit snapshot keeps Immediate workload cold-start shaped", func(t *testing.T) {
+		t.Log("Given an Immediate DCD referencing a compatible PodSnapshot that is not Ready")
+		dcd := makeDCD("worker-snapshot")
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", false)
+		r := makeReconciler(dcd, snapshot)
+
+		t.Log("When the DCD workload template is rendered")
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
+			context.Background(),
+			dcd,
+			dynamo.RoleMain,
+			noContainerGPUs(),
+		)
+
+		t.Log("Then the workload can cold-start without restore-candidate metadata")
+		require.NoError(t, err)
+		assert.NotContains(t, podTemplateSpec.Annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
+		assert.NotContains(t, podTemplateSpec.Annotations, commonconsts.SnapshotCandidateUIDAnnotation)
+	})
+
 	t.Run("native wait policy remains an admission candidate", func(t *testing.T) {
 		t.Log("Given a WaitForCheckpoint DCD and a Ready compatible PodSnapshot with no legacy checkpoint")
 		dcd := makeDCD("worker-snapshot")
