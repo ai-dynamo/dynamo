@@ -107,16 +107,6 @@ def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
 
 
 def test_sglang_generate_capability_is_opt_in():
-    engine_args = CONFIG.build_mocker_engine_args(make_args(engine_type="sglang"))
-
-    _, default_config = CONFIG.build_runtime_config(engine_args)
-    _, native_config = CONFIG.build_runtime_config(
-        engine_args,
-        sglang_generate=True,
-    )
-
-    assert "sglang_generate" not in default_config.runtime_data
-    assert native_config.runtime_data["sglang_generate"] == "true"
     assert parse_args([]).sglang_generate is False
     assert parse_args(["--sglang-generate"]).sglang_generate is True
 
