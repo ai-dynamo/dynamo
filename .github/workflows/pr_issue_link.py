@@ -195,7 +195,6 @@ def main() -> int:
             elif not visible:
                 invisible_repo_refs.append(label)
         if verified:
-            # One verified issue satisfies the check; stop spending lookups.
             break
 
     if not verified and len(all_refs) > MAX_CANDIDATES:
