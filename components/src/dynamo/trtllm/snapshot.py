@@ -8,7 +8,6 @@ import logging
 import os
 from typing import Any
 
-from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 
 _EXTERNAL_MODEL_LOAD_FORMATS = {"gms"}
@@ -155,6 +154,8 @@ class _SnapshotRuntimeProxy:
             request_plane=config.request_plane,
             event_plane=config.event_plane,
         )
+        from dynamo.common.snapshot.lifecycle import elect_and_wake
+
         self._failover_lock = await elect_and_wake(pause_controller, self._runtime)
         logging.info("Dynamo runtime created after TRT-LLM snapshot restore")
 
