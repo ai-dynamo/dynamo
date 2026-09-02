@@ -31,8 +31,10 @@ from typing import Any
 
 try:
     from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
-except ImportError:
-    # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is 0.5.19+.
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang.srt.utils.server_args_config_parser":
+        raise
+    # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
     from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 try:
