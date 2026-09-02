@@ -369,6 +369,7 @@ where
             .observe(request.token_ids.len() as f64);
         drop(route_guard);
 
+        let budget = CleanupBudget::default();
         guard.start_dispatch(&phase_label);
         guard.record_prefill_start();
         let dispatch_result = if is_direct && !has_affinity_session {
@@ -376,6 +377,8 @@ where
             await_with_phase_policy(
                 request_context.as_ref(),
                 phase,
+                "builtin.dispatch_direct",
+                &budget,
                 self.inner.direct_within_prepared(
                     request,
                     target.worker_id,
@@ -406,6 +409,8 @@ where
             await_with_phase_policy(
                 request_context.as_ref(),
                 phase,
+                "builtin.dispatch_exact",
+                &budget,
                 self.inner.dispatch_exact(request, target.worker_id),
             )
             .await
@@ -415,6 +420,8 @@ where
             await_with_phase_policy(
                 request_context.as_ref(),
                 phase,
+                "builtin.dispatch_occupancy",
+                &budget,
                 self.inner.dispatch_preselected_prepared(
                     request,
                     initial_worker,
@@ -433,6 +440,8 @@ where
             await_with_phase_policy(
                 request_context.as_ref(),
                 phase,
+                "builtin.dispatch",
+                &budget,
                 self.inner.direct_within_prepared(
                     request,
                     initial_worker,

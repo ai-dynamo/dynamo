@@ -8,6 +8,7 @@ impl<Sel> RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     async fn select_request_outcome(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -16,6 +17,7 @@ where
         affinity_target: Option<AffinityTarget>,
         planned_worker: Option<WorkerWithDpRank>,
         admission: FindBestMatchAdmission,
+        budget: &CleanupBudget,
     ) -> Result<SelectionOutcome, Error> {
         let context_id = request.context().id().to_string();
         let policy_class = request.metadata().get("policy-class").cloned();
@@ -49,7 +51,14 @@ where
             )
             .instrument(tracing::info_span!("kv_router.select_worker"));
 
-        await_with_phase_policy(request_context.as_ref(), phase, selection_future).await?
+        await_with_phase_policy(
+            request_context.as_ref(),
+            phase,
+            "kv.select_worker",
+            budget,
+            selection_future,
+        )
+        .await?
     }
 
     async fn select_request(
@@ -58,6 +67,7 @@ where
         phase: RequestPhase,
         is_query_only: bool,
         affinity_target: Option<AffinityTarget>,
+        budget: &CleanupBudget,
     ) -> Result<WorkerSelection, Error> {
         self.select_request_outcome(
             request,
@@ -68,6 +78,7 @@ where
             FindBestMatchAdmission::WithAdmission {
                 track_lifecycle: true,
             },
+            budget,
         )
         .await?
         .into_result()
@@ -78,9 +89,10 @@ where
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         is_query_only: bool,
+        budget: &CleanupBudget,
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
         self.select_with_session_affinity(request, phase, is_query_only, |target| {
-            self.select_request(request, phase, is_query_only, target)
+            self.select_request(request, phase, is_query_only, target, budget)
         })
         .await
     }
@@ -111,6 +123,7 @@ where
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
     ) -> Result<RoutePreview, Error> {
+        let budget = CleanupBudget::default();
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("KV route previews require KV routing"));
         }
@@ -126,6 +139,7 @@ where
                     target,
                     None,
                     FindBestMatchAdmission::WithoutAdmission,
+                    &budget,
                 )
             })
             .await?;
@@ -144,6 +158,7 @@ where
         request: &SingleIn<PreprocessedRequest>,
         preview: RoutePreview,
     ) -> Result<RoutePlan<Sel>, Error> {
+        let budget = CleanupBudget::default();
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("KV route plans require KV routing"));
         }
@@ -160,19 +175,23 @@ where
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let planned_worker = preview.signals.worker;
         let (selection, affinity) = self
-            .select_with_session_affinity(request, phase, false, |target| async move {
-                self.select_request_outcome(
-                    request,
-                    phase,
-                    false,
-                    target,
-                    Some(planned_worker),
-                    FindBestMatchAdmission::WithAdmission {
-                        track_lifecycle: true,
-                    },
-                )
-                .await?
-                .into_result()
+            .select_with_session_affinity(request, phase, false, |target| {
+                let budget = &budget;
+                async move {
+                    self.select_request_outcome(
+                        request,
+                        phase,
+                        false,
+                        target,
+                        Some(planned_worker),
+                        FindBestMatchAdmission::WithAdmission {
+                            track_lifecycle: true,
+                        },
+                        budget,
+                    )
+                    .await?
+                    .into_result()
+                }
             })
             .await?;
         let signals = self.route_signals(&selection);
@@ -195,6 +214,7 @@ where
         request: SingleIn<PreprocessedRequest>,
         plan: RoutePlan<Sel>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let budget = CleanupBudget::default();
         let RoutePlan {
             mut selection,
             cleanup,
@@ -203,13 +223,16 @@ where
         } = plan;
         let selected_target = route_target(selection.worker);
         let guard = match self
-            .track_planned_selection(&request, &mut selection, cleanup)
+            .track_planned_selection(&request, &mut selection, cleanup, &budget)
             .await
         {
             Ok(guard) => guard,
             Err(error) => return Err(error),
         };
-        let stream = match self.dispatch_selection(request, selection, guard).await {
+        let stream = match self
+            .dispatch_selection(request, selection, guard, &budget)
+            .await
+        {
             Ok(stream) => stream,
             Err(error) => {
                 if self.session_affinity_mode == SessionAffinityMode::Hard
@@ -234,6 +257,7 @@ where
         request: &SingleIn<PreprocessedRequest>,
         threshold: f64,
     ) -> Result<bool, Error> {
+        let budget = CleanupBudget::default();
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("prefill load probe requires KV routing"));
         }
@@ -247,6 +271,7 @@ where
                     target,
                     None,
                     FindBestMatchAdmission::WithoutAdmission,
+                    &budget,
                 )
             })
             .await?;
@@ -265,8 +290,9 @@ where
         selection: &mut WorkerSelection,
         phase: RequestPhase,
         is_query_only: bool,
+        budget: &CleanupBudget,
     ) -> Result<RequestGuard<Sel>, Error> {
-        self.track_selection_with_cleanup(request, selection, phase, is_query_only, None)
+        self.track_selection_with_cleanup(request, selection, phase, is_query_only, None, budget)
             .await
     }
 
@@ -275,13 +301,14 @@ where
         request: &SingleIn<PreprocessedRequest>,
         selection: &mut WorkerSelection,
         cleanup: KvRequestCleanup<Sel>,
+        budget: &CleanupBudget,
     ) -> Result<RequestGuard<Sel>, Error> {
         let phase = request
             .tracker
             .as_ref()
             .map(|tracker| tracker.phase())
             .unwrap_or(RequestPhase::Aggregated);
-        self.track_selection_with_cleanup(request, selection, phase, false, Some(cleanup))
+        self.track_selection_with_cleanup(request, selection, phase, false, Some(cleanup), budget)
             .await
     }
 
@@ -292,6 +319,7 @@ where
         phase: RequestPhase,
         is_query_only: bool,
         cleanup: Option<KvRequestCleanup<Sel>>,
+        budget: &CleanupBudget,
     ) -> Result<RequestGuard<Sel>, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
@@ -346,6 +374,8 @@ where
                     await_with_phase_policy(
                         request_context.as_ref(),
                         phase,
+                        "kv.record_routing_decision",
+                        budget,
                         guard.acquire_approximate_lru(hashes),
                     )
                     .await?
@@ -353,6 +383,8 @@ where
                     await_with_phase_policy(
                         request_context.as_ref(),
                         phase,
+                        "kv.record_routing_decision",
+                        budget,
                         chooser.record_routing_decision_hashes(hashes, worker),
                     )
                     .await?
@@ -402,6 +434,7 @@ where
         request: SingleIn<PreprocessedRequest>,
         selection: WorkerSelection,
         mut guard: RequestGuard<Sel>,
+        budget: &CleanupBudget,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
@@ -468,6 +501,8 @@ where
         let dispatch_result = await_with_phase_policy(
             request_context.as_ref(),
             phase,
+            "kv.dispatch",
+            budget,
             dispatch.instrument(route_span.clone()),
         )
         .await
@@ -532,15 +567,16 @@ where
     where
         F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M, Error>,
     {
+        let budget = CleanupBudget::default();
         let phase = RequestPhase::Prefill;
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
         let (mut selection, mut operation) = self
-            .select_with_affinity(&request, phase, is_query_only)
+            .select_with_affinity(&request, phase, is_query_only, &budget)
             .await?;
         let mut guard = match self
-            .track_selection(&request, &mut selection, phase, is_query_only)
+            .track_selection(&request, &mut selection, phase, is_query_only, &budget)
             .await
         {
             Ok(guard) => guard,
@@ -555,7 +591,10 @@ where
             }
         };
         drop(route_guard);
-        let stream = match self.dispatch_selection(request, selection, guard).await {
+        let stream = match self
+            .dispatch_selection(request, selection, guard, &budget)
+            .await
+        {
             Ok(stream) => stream,
             Err(error) => {
                 if self.session_affinity_mode == SessionAffinityMode::Hard

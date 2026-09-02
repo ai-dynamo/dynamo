@@ -54,7 +54,7 @@ mod occupancy;
 mod request_guard;
 
 use builtin::BuiltinWorkerSelector;
-use cancellation::await_with_phase_policy;
+use cancellation::{CleanupBudget, await_with_phase_policy};
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
@@ -616,6 +616,8 @@ where
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        // One cleanup budget for this request's whole route through the host.
+        let budget = CleanupBudget::default();
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
             let phase = request
                 .tracker
@@ -637,7 +639,7 @@ where
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let (mut selection, mut operation) = self
-            .select_with_affinity(&request, phase, is_query_only)
+            .select_with_affinity(&request, phase, is_query_only, &budget)
             .await?;
         if is_query_only {
             let routing_parts = RoutingRequestParts::new(&request);
@@ -685,7 +687,7 @@ where
         }
 
         let guard = match self
-            .track_selection(&request, &mut selection, phase, false)
+            .track_selection(&request, &mut selection, phase, false, &budget)
             .await
         {
             Ok(guard) => guard,
@@ -693,7 +695,10 @@ where
         };
         drop(route_guard);
         let selected_target = route_target(selection.worker);
-        let stream = match self.dispatch_selection(request, selection, guard).await {
+        let stream = match self
+            .dispatch_selection(request, selection, guard, &budget)
+            .await
+        {
             Ok(stream) => stream,
             Err(error) => {
                 if self.session_affinity_mode == SessionAffinityMode::Hard

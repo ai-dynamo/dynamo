@@ -706,7 +706,12 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
     let failed_request =
         Context::with_id_and_metadata(request(), context_id.clone(), Default::default());
     let (mut failed_selection, _) = router
-        .select_with_affinity(&failed_request, RequestPhase::Aggregated, false)
+        .select_with_affinity(
+            &failed_request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
         .await
         .unwrap();
     let failed_worker = failed_selection.worker;
@@ -716,6 +721,7 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
             &mut failed_selection,
             RequestPhase::Aggregated,
             false,
+            &CleanupBudget::default(),
         )
         .await
         .unwrap();
@@ -747,7 +753,12 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
     let retry_request =
         Context::with_id_and_metadata(request(), context_id.clone(), Default::default());
     let (mut retry_selection, _) = router
-        .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
+        .select_with_affinity(
+            &retry_request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
         .await
         .unwrap();
     assert_eq!(retry_selection.worker, failed_worker);
@@ -757,6 +768,7 @@ async fn stream_failure_releases_booking_before_error_is_observable() {
             &mut retry_selection,
             RequestPhase::Aggregated,
             false,
+            &CleanupBudget::default(),
         )
         .await
         .expect("same-worker booking must be released before yielding the error");
@@ -947,11 +959,17 @@ async fn admitted_request_stopped_before_dispatch(
     let request = Context::with_id_and_metadata(input, context_id.to_string(), Default::default());
 
     let (mut selection, _) = router
-        .select_with_affinity(&request, phase, false)
+        .select_with_affinity(&request, phase, false, &CleanupBudget::default())
         .await
         .unwrap();
     let guard = router
-        .track_selection(&request, &mut selection, phase, false)
+        .track_selection(
+            &request,
+            &mut selection,
+            phase,
+            false,
+            &CleanupBudget::default(),
+        )
         .await
         .unwrap();
 
@@ -979,7 +997,7 @@ async fn kv_cancellation_after_admission_still_stops_the_aggregated_dispatch() {
     .await;
 
     let error = router
-        .dispatch_selection(request, selection, guard)
+        .dispatch_selection(request, selection, guard, &CleanupBudget::default())
         .await
         .expect_err("aggregated dispatch must still be cancelled before it is issued");
     assert!(match_error_chain(
@@ -1002,7 +1020,12 @@ async fn track_request(
 ) -> (SingleIn<PreprocessedRequest>, WorkerSelection, RequestGuard) {
     let request = Context::new(request());
     let (mut selection, _) = router
-        .select_with_affinity(&request, RequestPhase::Aggregated, is_query_only)
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            is_query_only,
+            &CleanupBudget::default(),
+        )
         .await
         .unwrap();
     let guard = router
@@ -1011,6 +1034,7 @@ async fn track_request(
             &mut selection,
             RequestPhase::Aggregated,
             is_query_only,
+            &CleanupBudget::default(),
         )
         .await
         .unwrap();
@@ -1277,7 +1301,12 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     let cancelled_request = Context::with_controller(request(), controller);
     assert!(
         router
-            .select_with_affinity(&cancelled_request, RequestPhase::Aggregated, false)
+            .select_with_affinity(
+                &cancelled_request,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default()
+            )
             .await
             .is_err()
     );
@@ -1304,7 +1333,12 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     let migration_state = failed_input.migration_state.clone().unwrap();
     let failed_request = Context::new(failed_input);
     let (mut failed_selection, _) = router
-        .select_with_affinity(&failed_request, RequestPhase::Aggregated, false)
+        .select_with_affinity(
+            &failed_request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
         .await
         .unwrap();
     let failed_worker = failed_selection.worker.worker_id;
@@ -1314,12 +1348,18 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
             &mut failed_selection,
             RequestPhase::Aggregated,
             false,
+            &CleanupBudget::default(),
         )
         .await
         .unwrap();
     assert!(
         router
-            .dispatch_selection(failed_request, failed_selection, failed_dispatch_guard,)
+            .dispatch_selection(
+                failed_request,
+                failed_selection,
+                failed_dispatch_guard,
+                &CleanupBudget::default()
+            )
             .await
             .is_err()
     );
@@ -1411,7 +1451,12 @@ async fn session_affinity_existing_selection_cancellation_preserves_binding_with
     request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
 
     let Err(error) = router
-        .select_with_affinity(&request, RequestPhase::Aggregated, false)
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
         .await
     else {
         panic!("stopped request must return cancellation");
@@ -1483,7 +1528,12 @@ async fn request_constraints_preserve_worker_only_affinity() {
     allowlist_request.insert(SESSION_AFFINITY_CONTEXT_KEY, allowlist_session.clone());
     assert!(
         router
-            .select_with_affinity(&allowlist_request, RequestPhase::Aggregated, false)
+            .select_with_affinity(
+                &allowlist_request,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default()
+            )
             .await
             .is_err()
     );
@@ -1508,7 +1558,12 @@ async fn request_constraints_preserve_worker_only_affinity() {
     taint_request.insert(SESSION_AFFINITY_CONTEXT_KEY, taint_session.clone());
     assert!(
         router
-            .select_with_affinity(&taint_request, RequestPhase::Aggregated, false)
+            .select_with_affinity(
+                &taint_request,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default()
+            )
             .await
             .is_err()
     );
@@ -1535,7 +1590,12 @@ async fn stale_affinity_rank_recovers_within_request() {
     request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id);
 
     let (selection, operation) = router
-        .select_with_affinity(&request, RequestPhase::Aggregated, false)
+        .select_with_affinity(
+            &request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
         .await
         .unwrap();
     assert_eq!(selection.worker, WorkerWithDpRank::new(7, 0));
@@ -1567,7 +1627,12 @@ async fn config_watch_gap_preserves_hard_affinity() {
     request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
     assert!(
         router
-            .select_with_affinity(&request, RequestPhase::Aggregated, false)
+            .select_with_affinity(
+                &request,
+                RequestPhase::Aggregated,
+                false,
+                &CleanupBudget::default()
+            )
             .await
             .is_err()
     );
@@ -1633,7 +1698,12 @@ async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escapin
     retry_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
 
     let Err(error) = router
-        .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
+        .select_with_affinity(
+            &retry_request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
         .await
     else {
         panic!("migration exclusions must not rebind hard affinity");
@@ -1667,7 +1737,12 @@ async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escapin
         );
     let exhausted_request = Context::new(exhausted_input);
     let Err(error) = router
-        .select_with_affinity(&exhausted_request, RequestPhase::Aggregated, false)
+        .select_with_affinity(
+            &exhausted_request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
         .await
     else {
         panic!("exhausting the constrained worker set must reject the retry");
@@ -1699,7 +1774,12 @@ async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escapin
         );
     let constrained_request = Context::new(constrained_input);
     let Err(error) = router
-        .select_with_affinity(&constrained_request, RequestPhase::Aggregated, false)
+        .select_with_affinity(
+            &constrained_request,
+            RequestPhase::Aggregated,
+            false,
+            &CleanupBudget::default(),
+        )
         .await
     else {
         panic!("routing constraints must not be widened during retry");
@@ -1722,7 +1802,12 @@ async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escapin
         .record_failure(7, None);
     let pinned_request = Context::new(pinned_input);
     let (selection, _) = router
-        .select_with_affinity(&pinned_request, RequestPhase::Aggregated, true)
+        .select_with_affinity(
+            &pinned_request,
+            RequestPhase::Aggregated,
+            true,
+            &CleanupBudget::default(),
+        )
         .await
         .unwrap();
     assert_eq!(selection.worker.worker_id, 7);
