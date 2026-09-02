@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant as StdInstant};
 
@@ -47,38 +47,6 @@ struct ClassQueueCounters {
     pending_count: AtomicUsize,
     pending_isl_tokens: AtomicUsize,
     pending_cached_tokens: AtomicUsize,
-}
-
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AdmissionCounterSnapshot {
-    pub(crate) received: u64,
-    pub(crate) due_time_passed: u64,
-}
-
-// TODO: wire into the router metrics exporter and re-expose through KvRouter.
-#[derive(Default)]
-struct AdmissionCounters {
-    received: AtomicU64,
-    due_time_passed: AtomicU64,
-}
-
-impl AdmissionCounters {
-    fn record_received(&self) {
-        self.received.fetch_add(1, AtomicOrdering::Relaxed);
-    }
-
-    fn record_due_time_passed(&self) {
-        self.due_time_passed.fetch_add(1, AtomicOrdering::Relaxed);
-    }
-
-    #[cfg(test)]
-    fn snapshot(&self) -> AdmissionCounterSnapshot {
-        AdmissionCounterSnapshot {
-            received: self.received.load(AtomicOrdering::Relaxed),
-            due_time_passed: self.due_time_passed.load(AtomicOrdering::Relaxed),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -450,7 +418,6 @@ struct SchedulerQueueActor<
     pending_count: Arc<AtomicUsize>,
     pending_isl_tokens: Arc<AtomicUsize>,
     class_counters: Arc<Vec<ClassQueueCounters>>,
-    admission_counters: Arc<AdmissionCounters>,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     block_size: u32,
@@ -482,7 +449,6 @@ pub struct SchedulerQueue<
     /// Incremented after push, decremented after pop. Lock-free reads via `Relaxed` load.
     pending_isl_tokens: Arc<AtomicUsize>,
     class_counters: Arc<Vec<ClassQueueCounters>>,
-    admission_counters: Arc<AdmissionCounters>,
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     profile: PolicyProfile,
@@ -610,7 +576,6 @@ impl<
                 })
                 .collect(),
         );
-        let admission_counters = Arc::new(AdmissionCounters::default());
         let (admission_tx, admission_rx) = mpsc::channel(admission_channel_capacity);
         let cleanup = Arc::new(AdmissionCleanup::default());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
@@ -622,7 +587,6 @@ impl<
             pending_count: Arc::clone(&pending_count),
             pending_isl_tokens: Arc::clone(&pending_isl_tokens),
             class_counters: Arc::clone(&class_counters),
-            admission_counters: Arc::clone(&admission_counters),
             slots: Arc::clone(&slots),
             workers_with_configs: workers_with_configs.clone(),
             block_size,
@@ -641,7 +605,6 @@ impl<
             pending_count,
             pending_isl_tokens,
             class_counters,
-            admission_counters,
             slots,
             workers_with_configs,
             profile,
@@ -784,7 +747,6 @@ impl<
         lease: Option<Box<RequestLifecycleLease>>,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
     ) -> Option<Box<RequestLifecycleLease>> {
-        self.record_received();
         if self.queueing_enabled && lease.is_none() && request.mode.lifecycle_request_id().is_some()
         {
             request.respond(Err(KvSchedulerError::BookingFailed(
@@ -861,15 +823,6 @@ impl<
                 request_id.to_string(),
             ))),
         }))
-    }
-
-    pub(crate) fn record_received(&self) {
-        self.admission_counters.record_received();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn admission_counters(&self) -> AdmissionCounterSnapshot {
-        self.admission_counters.snapshot()
     }
 
     pub fn booking_cleanup(&self) -> SchedulerBookingCleanup {
@@ -1161,7 +1114,6 @@ impl<
             .due_at
             .is_some_and(|due_at| due_at <= decay_now.into_std())
         {
-            self.admission_counters.record_due_time_passed();
             request.respond(Err(KvSchedulerError::DueTimeExpired));
             return false;
         }
@@ -1233,7 +1185,6 @@ impl<
 
     fn reject_expired(&mut self, now: StdInstant) {
         for entry in self.pending.take_expired(now) {
-            self.admission_counters.record_due_time_passed();
             let class_index = entry.class_index();
             self.subtract_pending_counters(class_index, entry.snapshot());
             let mut request = entry.into_payload().request;
@@ -1437,8 +1388,7 @@ impl<
                 .due_at
                 .is_some_and(|due_at| due_at <= Instant::now().into_std())
             {
-                self.admission_counters.record_due_time_passed();
-                let mut request = popped.into_payload().request;
+                    let mut request = popped.into_payload().request;
                 request.respond(Err(KvSchedulerError::DueTimeExpired));
                 continue;
             }
@@ -2414,25 +2364,6 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
-    }
-
-    #[tokio::test]
-    async fn admission_counters_record_every_received_request() {
-        let (queue, _slots) = make_queue(1, 16, 64, Some(0.0));
-        let (active, active_rx) = make_request("active", 64);
-        queue.enqueue(active).await;
-        active_rx.await.unwrap().unwrap();
-
-        let (queued, _queued_rx) = make_request("queued", 64);
-        queue.enqueue(queued).await;
-        assert_eq!(queue.pending_count(), 1);
-        assert_eq!(
-            queue.admission_counters(),
-            AdmissionCounterSnapshot {
-                received: 2,
-                due_time_passed: 0,
-            }
-        );
     }
 
     #[tokio::test]
