@@ -799,11 +799,24 @@ impl MmRoutingEntry {
 }
 
 #[cfg(feature = "mm-routing")]
+fn exact_mm_routing_layout_accepts_next_entry(
+    previous_entry_was_video: &mut bool,
+    current_entry_is_video: bool,
+) -> bool {
+    // Adjacent video placeholders cannot be mapped unambiguously to vLLM KV
+    // events. Keep this transition shared by the pre-decode and final checks.
+    let accepted = !(*previous_entry_was_video && current_entry_is_video);
+    *previous_entry_was_video = current_entry_is_video;
+    accepted
+}
+
+#[cfg(feature = "mm-routing")]
 fn exact_mm_routing_entries_are_unambiguous(entries: &[MmRoutingEntry]) -> bool {
-    !entries.windows(2).any(|pair| {
-        matches!(
-            pair,
-            [MmRoutingEntry::Video { .. }, MmRoutingEntry::Video { .. }]
+    let mut previous_entry_was_video = false;
+    entries.iter().all(|entry| {
+        exact_mm_routing_layout_accepts_next_entry(
+            &mut previous_entry_was_video,
+            matches!(entry, MmRoutingEntry::Video { .. }),
         )
     })
 }
@@ -3189,11 +3202,14 @@ impl OpenAIPreprocessor {
         // counter is unavailable or checked addition overflowed.
         #[cfg(feature = "mm-routing")]
         let mut image_tokens = self.image_token_counter.as_ref().map(|_| 0usize);
-        // A raw/passthrough video or unsupported decoded-video processor makes
-        // the model-visible token sequence unknowable. In that case the whole
-        // request falls back rather than publishing a partial routing view.
+        // A raw/passthrough video, unsupported decoded-video processor, or
+        // ambiguous consecutive-video layout makes exact routing unavailable.
+        // In that case the whole request falls back rather than publishing a
+        // partial routing view.
         #[cfg(feature = "mm-routing")]
         let mut exact_mm_routing_eligible = true;
+        #[cfg(feature = "mm-routing")]
+        let mut previous_routing_entry_was_video = false;
         // Total `image_url` content parts in the request. Bumped at every
         // image part regardless of which fetch path handles it. Used at
         // hash forwarding time: if fewer image entries were resolved, we omit
@@ -3238,7 +3254,12 @@ impl OpenAIPreprocessor {
                     total_image_count += 1;
                 }
                 #[cfg(feature = "mm-routing")]
-                if !exact_mm_routing_supports_modality(type_str, has_media_loader) {
+                if !exact_mm_routing_supports_modality(type_str, has_media_loader)
+                    || !exact_mm_routing_layout_accepts_next_entry(
+                        &mut previous_routing_entry_was_video,
+                        type_str == "video_url",
+                    )
+                {
                     exact_mm_routing_eligible = false;
                 }
 
@@ -8359,6 +8380,30 @@ mod tests {
         assert!(!should_hash_decoded_video(true, true, false, true));
         assert!(!should_hash_decoded_video(true, false, true, true));
         assert!(!should_hash_decoded_video(true, false, false, false));
+    }
+
+    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+    #[test]
+    fn consecutive_video_layout_skips_hashing_before_decode() {
+        let is_eligible = |modalities: &[&str]| {
+            let mut previous_entry_was_video = false;
+            modalities.iter().all(|modality| {
+                exact_mm_routing_layout_accepts_next_entry(
+                    &mut previous_entry_was_video,
+                    *modality == "video_url",
+                )
+            })
+        };
+
+        let adjacent_videos_are_eligible = is_eligible(&["video_url", "video_url"]);
+        assert!(!adjacent_videos_are_eligible);
+        assert!(!should_hash_decoded_video(
+            adjacent_videos_are_eligible,
+            false,
+            false,
+            true
+        ));
+        assert!(is_eligible(&["video_url", "image_url", "video_url"]));
     }
 
     #[test]
