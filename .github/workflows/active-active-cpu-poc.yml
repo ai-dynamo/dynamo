@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Active-active CPU POC
+
+on:
+  push:
+    branches:
+      - poc/active-active-cpu-smoke
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: active-active-cpu-poc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  west:
+    name: West staging runner
+    runs-on:
+      group: dynamo-ci-west-poc
+      labels: poc-active-active-cpu-v1
+    timeout-minutes: 15
+    container:
+      image: ubuntu:24.04
+      env:
+        HOME: /tmp
+        USER: runner
+    steps:
+      - name: Report west assignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'requested_group=%s\n' 'dynamo-ci-west-poc'
+          printf 'requested_label=%s\n' 'poc-active-active-cpu-v1'
+          printf 'runner_name=%s\n' "${RUNNER_NAME}"
+          printf 'runner_os=%s\n' "${RUNNER_OS}"
+          printf 'runner_arch=%s\n' "${RUNNER_ARCH}"
+          printf 'poc_aws_region=%s\n' "${POC_AWS_REGION:-missing}"
+          printf 'cpu_count=%s\n' "$(getconf _NPROCESSORS_ONLN)"
+          uname -a
+          sed -n '1,8p' /etc/os-release
+          sed -n '1,3p' /proc/meminfo
+          test "${POC_AWS_REGION:-missing}" = us-west-2
+          head -c 33554432 /dev/zero | sha256sum
+
+  east:
+    name: East POC runner
+    runs-on:
+      group: dynamo-ci-east-poc
+      labels: poc-active-active-cpu-v1
+    timeout-minutes: 15
+    container:
+      image: ubuntu:24.04
+      env:
+        HOME: /tmp
+        USER: runner
+    steps:
+      - name: Report east assignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'requested_group=%s\n' 'dynamo-ci-east-poc'
+          printf 'requested_label=%s\n' 'poc-active-active-cpu-v1'
+          printf 'runner_name=%s\n' "${RUNNER_NAME}"
+          printf 'runner_os=%s\n' "${RUNNER_OS}"
+          printf 'runner_arch=%s\n' "${RUNNER_ARCH}"
+          printf 'poc_aws_region=%s\n' "${POC_AWS_REGION:-missing}"
+          printf 'cpu_count=%s\n' "$(getconf _NPROCESSORS_ONLN)"
+          uname -a
+          sed -n '1,8p' /etc/os-release
+          sed -n '1,3p' /proc/meminfo
+          test "${POC_AWS_REGION:-missing}" = us-east-1
+          head -c 33554432 /dev/zero | sha256sum
