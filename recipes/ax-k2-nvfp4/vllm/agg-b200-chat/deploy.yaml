@@ -1,6 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: axk2-agg-b200-chat-specdec-config
+  labels:
+    app.kubernetes.io/name: axk2-agg-b200-chat
+    app.kubernetes.io/part-of: ax-k2-nvfp4
+data:
+  speculative-config: |-
+    {
+      "method": "eagle3",
+      "model": "skt/A.X-K2-EAGLE3",
+      "revision": "24958e91737d760908f73a8af4b6e06080fc5c1d",
+      "num_speculative_tokens": 3
+    }
+---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -115,6 +131,7 @@ spec:
                     --block-size 64 \
                     --enable-prefix-caching \
                     --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}' \
+                    --speculative-config="${SPECULATIVE_CONFIG}" \
                     --async-scheduling \
                     --dyn-tool-call-parser hermes \
                     --dyn-reasoning-parser deepseek_v3 \
@@ -146,6 +163,11 @@ spec:
                   value: /tmp/hf-modules
                 - name: PYTHONHASHSEED
                   value: "42"
+                - name: SPECULATIVE_CONFIG
+                  valueFrom:
+                    configMapKeyRef:
+                      name: axk2-agg-b200-chat-specdec-config
+                      key: speculative-config
               envFrom:
                 - secretRef:
                     name: hf-token-secret
