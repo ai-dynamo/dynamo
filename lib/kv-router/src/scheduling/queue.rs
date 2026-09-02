@@ -60,6 +60,7 @@ struct QueuedRequest {
     request: SchedulingRequest,
     attempt_tx: Option<oneshot::Sender<AttemptId>>,
     lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
+    allowed_workers: Option<HashSet<WorkerWithDpRank>>,
     enqueue_at: Instant,
     block_hashes: Option<Vec<LocalBlockHash>>,
 }
@@ -133,6 +134,7 @@ enum AdmissionCommand {
         request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
+        allowed_workers: Option<HashSet<WorkerWithDpRank>>,
         lease: Option<Box<RequestLifecycleLease>>,
         ack_tx: oneshot::Sender<Option<Box<RequestLifecycleLease>>>,
     },
@@ -518,7 +520,7 @@ impl<
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn new_with_policy_profile_and_capacity(
+    pub(crate) fn new_with_policy_profile_and_capacity(
         slots: Arc<ActiveSequencesMultiWorker<P>>,
         workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
         profile: PolicyProfile,
@@ -733,7 +735,7 @@ impl<
         block_hashes: Option<Vec<LocalBlockHash>>,
         lease: Option<Box<RequestLifecycleLease>>,
     ) -> Option<Box<RequestLifecycleLease>> {
-        self.enqueue_admitted_with_block_hashes_and_lease(request, block_hashes, lease, None)
+        self.enqueue_admitted_with_block_hashes_and_lease(request, block_hashes, None, lease, None)
             .await
     }
 
@@ -741,18 +743,20 @@ impl<
         &self,
         mut request: SchedulingRequest,
         block_hashes: Option<Vec<LocalBlockHash>>,
+        allowed_workers: Option<HashSet<WorkerWithDpRank>>,
         lease: Option<Box<RequestLifecycleLease>>,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
     ) -> Option<Box<RequestLifecycleLease>> {
-        if self.queueing_enabled && lease.is_none() && request.mode.lifecycle_request_id().is_some()
-        {
+        if lease.is_none() && request.mode.lifecycle_request_id().is_some() {
             request.respond(Err(KvSchedulerError::BookingFailed(
                 "admission-managed requests must be scheduled through LocalScheduler".to_string(),
             )));
             return None;
         }
 
-        let eligibility = request.eligibility();
+        let eligibility = request
+            .eligibility()
+            .with_allowed_workers(allowed_workers.as_ref());
 
         if let Err(error) = eligibility.validate_pinned_worker_allowed() {
             request.respond(Err(error));
@@ -764,6 +768,7 @@ impl<
             request,
             attempt_tx,
             block_hashes: self.prepare_block_hashes_for_refresh(block_hashes),
+            allowed_workers,
             lease,
             ack_tx,
         };
@@ -789,9 +794,6 @@ impl<
         &self,
         request_id: Option<&str>,
     ) -> Option<Box<RequestLifecycleLease>> {
-        if !self.queueing_enabled {
-            return None;
-        }
         let request_id = request_id?;
         Some(Box::new(RequestLifecycleLease {
             cleanup: Arc::clone(&self.cleanup),
@@ -935,6 +937,11 @@ impl<
         self.supports_overlap_refresh
     }
 
+    #[cfg(test)]
+    pub(crate) fn admission_capacity(&self) -> usize {
+        self.admission_tx.capacity()
+    }
+
     fn prepare_block_hashes_for_refresh(
         &self,
         block_hashes: Option<Vec<LocalBlockHash>>,
@@ -966,14 +973,20 @@ impl<
                     request,
                     attempt_tx,
                     block_hashes,
+                    allowed_workers,
                     lease,
                     ack_tx,
                 } => {
                     let lifecycle_transfer = lease
                         .as_ref()
                         .and_then(|lease| lease.transfer.as_ref().map(Arc::clone));
-                    let enqueue_ready =
-                        self.handle_enqueue(request, attempt_tx, lifecycle_transfer, block_hashes);
+                    let enqueue_ready = self.handle_enqueue(
+                        request,
+                        attempt_tx,
+                        lifecycle_transfer,
+                        block_hashes,
+                        allowed_workers,
+                    );
                     let cleanup_ready = drain_cleanup && self.drain_cleanup();
                     let made_ready = enqueue_ready || cleanup_ready;
                     if made_ready {
@@ -1063,6 +1076,7 @@ impl<
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
         block_hashes: Option<Vec<LocalBlockHash>>,
+        allowed_workers: Option<HashSet<WorkerWithDpRank>>,
     ) -> bool {
         let decay_now = Instant::now();
         // Synthetic and explicit selections avoid cache work. Family classification
@@ -1074,7 +1088,7 @@ impl<
             (class_index, None)
         } else {
             let workers = self.workers_with_configs.borrow();
-            let snapshot = Self::snapshot_for_with(&request, &workers);
+            let snapshot = Self::snapshot_for_with(&request, allowed_workers.as_ref(), &workers);
             let class_index = self
                 .profile
                 .resolve_class_index(request.policy_class.as_deref(), snapshot.uncached_tokens);
@@ -1082,13 +1096,26 @@ impl<
         };
         let class = self.profile.class(class_index);
         let should_queue = self.should_queue(class_index, class, || {
-            self.all_workers_prefill_busy(class, request.eligibility(), decay_now)
+            self.all_workers_prefill_busy(
+                class,
+                request
+                    .eligibility()
+                    .with_allowed_workers(allowed_workers.as_ref()),
+                decay_now,
+            )
         });
         if !should_queue {
-            return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
+            return self.admit_one(
+                request,
+                attempt_tx,
+                lifecycle_transfer,
+                allowed_workers.as_ref(),
+                decay_now,
+            );
         }
 
-        let snapshot = snapshot.unwrap_or_else(|| self.snapshot_for(&request));
+        let snapshot =
+            snapshot.unwrap_or_else(|| self.snapshot_for(&request, allowed_workers.as_ref()));
         tracing::debug!(policy_class = class.name, "queueing request");
         let arrival_offset = self.start_time.elapsed().as_secs_f64();
         let priority_jump = request.priority_jump;
@@ -1100,6 +1127,7 @@ impl<
             request,
             attempt_tx,
             lifecycle_transfer: lifecycle_transfer.clone(),
+            allowed_workers,
             enqueue_at: decay_now,
             block_hashes,
         };
@@ -1139,18 +1167,24 @@ impl<
         class.queueing_enabled() && (self.pending.has_backlog(class_index) || all_workers_busy())
     }
 
-    fn snapshot_for(&self, request: &SchedulingRequest) -> QueueSnapshot {
+    fn snapshot_for(
+        &self,
+        request: &SchedulingRequest,
+        allowed_workers: Option<&HashSet<WorkerWithDpRank>>,
+    ) -> QueueSnapshot {
         let workers = self.workers_with_configs.borrow();
-        Self::snapshot_for_with(request, &workers)
+        Self::snapshot_for_with(request, allowed_workers, &workers)
     }
 
     fn snapshot_for_with(
         request: &SchedulingRequest,
+        allowed_workers: Option<&HashSet<WorkerWithDpRank>>,
         workers: &HashMap<WorkerId, C>,
     ) -> QueueSnapshot {
         // Cache overlap is sampled once and reused for classification, queue
         // limits, ordering, DRR cost, and counters.
-        let context = SchedulingContext::new(request, workers);
+        let eligibility = request.eligibility().with_allowed_workers(allowed_workers);
+        let context = SchedulingContext::with_eligibility(request, workers, eligibility);
         QueueSnapshot::new(request.isl_tokens, context.best_cached_tokens())
     }
 
@@ -1267,7 +1301,10 @@ impl<
                 &active_tokens,
                 &configs,
                 class,
-                queued.request.eligibility(),
+                queued
+                    .request
+                    .eligibility()
+                    .with_allowed_workers(queued.allowed_workers.as_ref()),
             )
         })
     }
@@ -1307,7 +1344,10 @@ impl<
                         &active_tokens,
                         &configs,
                         class,
-                        queued.request.eligibility(),
+                        queued
+                            .request
+                            .eligibility()
+                            .with_allowed_workers(queued.allowed_workers.as_ref()),
                     )
                 })
             };
@@ -1372,6 +1412,7 @@ impl<
                 request,
                 queued.attempt_tx,
                 queued.lifecycle_transfer,
+                queued.allowed_workers.as_ref(),
                 admit_now,
             );
         }
@@ -1380,6 +1421,7 @@ impl<
     fn select_worker_for_request(
         &self,
         request: &mut SchedulingRequest,
+        allowed_workers: Option<&HashSet<WorkerWithDpRank>>,
         decay_now: Instant,
     ) -> Result<SelectedWorkerForRequest, KvSchedulerError> {
         request.worker_loads = self
@@ -1398,6 +1440,7 @@ impl<
                 .and_then(|provider| provider());
             let mut eligibility = request
                 .eligibility_with_overloaded(overloaded_worker_ids.as_ref())
+                .with_allowed_workers(allowed_workers)
                 .with_available_workers(available_worker_ids.as_deref());
             if self.selector.uses_exclusive_affinity_target()
                 && let Some(target) = request.affinity_target
@@ -1456,7 +1499,7 @@ impl<
         mut request: SchedulingRequest,
         decay_now: Instant,
     ) -> Result<AdvisorySchedulingResponse, KvSchedulerError> {
-        let selected = self.select_worker_for_request(&mut request, decay_now)?;
+        let selected = self.select_worker_for_request(&mut request, None, decay_now)?;
         let target_cached_prefix_blocks =
             target_cached_prefix_blocks(&request, selected.selection.worker);
 
@@ -1481,16 +1524,18 @@ impl<
         mut request: SchedulingRequest,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
         lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
+        allowed_workers: Option<&HashSet<WorkerWithDpRank>>,
         decay_now: Instant,
     ) -> bool {
-        let selected = match self.select_worker_for_request(&mut request, decay_now) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("scheduling failed: {e}");
-                request.respond(Err(e));
-                return false;
-            }
-        };
+        let selected =
+            match self.select_worker_for_request(&mut request, allowed_workers, decay_now) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("scheduling failed: {e}");
+                    request.respond(Err(e));
+                    return false;
+                }
+            };
 
         let target_cached_prefix_blocks =
             target_cached_prefix_blocks(&request, selected.selection.worker);
@@ -2523,13 +2568,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_queueing_has_no_cancellation_lease() {
+    async fn disabled_queueing_retains_cancellation_handoff() {
         let (queue, _slots) = make_queue(1, 16, 64, None);
 
         assert!(
             queue
                 .new_request_lifecycle_lease(Some("default-path"))
-                .is_none()
+                .is_some()
         );
     }
 
@@ -3847,6 +3892,137 @@ policy_classes:
 
         queued_rx.await.unwrap().unwrap();
         slots.free(&"queued".to_owned(), decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn saturated_advisory_wake_releases_immediate_lifecycle_booking() {
+        let block_size = 16u32;
+        let isl = 64usize;
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+        let (queue, slots) =
+            make_queue_with_blocking_refresher(2, block_size, isl, Some(0.0), refresher.clone(), 1);
+
+        let (mut cancelled, cancelled_rx) = make_request("cancelled-immediate", isl);
+        cancelled.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: "cancelled-immediate".to_string(),
+        };
+        let lease = queue
+            .new_request_lifecycle_lease(Some("cancelled-immediate"))
+            .unwrap();
+        let lease = queue
+            .enqueue_with_block_hashes_and_lease(cancelled, None, Some(lease))
+            .await
+            .unwrap();
+        cancelled_rx.await.unwrap().unwrap();
+
+        let (occupying, occupying_rx) = make_request("occupying", isl);
+        queue.enqueue(occupying).await;
+        occupying_rx.await.unwrap().unwrap();
+
+        let (refreshing, refreshing_rx) = make_request("refreshing", isl);
+        queue
+            .enqueue_with_block_hashes(refreshing, Some(vec![LocalBlockHash(42)]))
+            .await;
+        assert_eq!(queue.pending_count(), 1);
+
+        slots.free(&"occupying".to_string(), decay_now()).unwrap();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        let update = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move { queue.update().await })
+        };
+        refresher.wait_for_calls(1).await;
+
+        let (advisory, _advisory_rx) = make_request("advisory", isl);
+        let advisory = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move { queue.select_without_admission(advisory).await })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(
+            queue.admission_tx.capacity(),
+            0,
+            "test must saturate the actor command channel"
+        );
+
+        drop(lease);
+        assert!(queue.cleanup.pending.load(AtomicOrdering::Acquire));
+        refresher.release_one();
+        update.await.unwrap();
+        advisory.await.unwrap().unwrap();
+
+        assert_eq!(
+            slots.request_worker(&"cancelled-immediate".to_string()),
+            None
+        );
+        refreshing_rx.await.unwrap().unwrap();
+        slots.free(&"refreshing".to_string(), decay_now()).unwrap();
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn saturated_advisory_wake_retracts_queued_lifecycle_request() {
+        let block_size = 16u32;
+        let isl = 64usize;
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+        let (queue, slots) =
+            make_queue_with_blocking_refresher(1, block_size, isl, Some(0.0), refresher.clone(), 1);
+
+        let (active, active_rx) = make_request("active", isl);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        let (refreshing, refreshing_rx) = make_request("refreshing", isl);
+        queue
+            .enqueue_with_block_hashes(refreshing, Some(vec![LocalBlockHash(42)]))
+            .await;
+
+        let (mut cancelled, cancelled_rx) = make_request("cancelled-queued", isl);
+        cancelled.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: "cancelled-queued".to_string(),
+        };
+        let lease = queue
+            .new_request_lifecycle_lease(Some("cancelled-queued"))
+            .unwrap();
+        let lease = queue
+            .enqueue_with_block_hashes_and_lease(cancelled, None, Some(lease))
+            .await
+            .unwrap();
+        assert_eq!(queue.pending_count(), 2);
+
+        slots.free(&"active".to_string(), decay_now()).unwrap();
+        tokio::time::advance(Duration::from_secs(11)).await;
+        let update = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move { queue.update().await })
+        };
+        refresher.wait_for_calls(1).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        let (advisory, _advisory_rx) = make_request("advisory", isl);
+        let advisory = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move { queue.select_without_admission(advisory).await })
+        };
+        tokio::task::yield_now().await;
+        assert_eq!(
+            queue.admission_tx.capacity(),
+            0,
+            "test must saturate the actor command channel"
+        );
+
+        drop(cancelled_rx);
+        drop(lease);
+        assert!(queue.cleanup.pending.load(AtomicOrdering::Acquire));
+        refresher.release_one();
+        update.await.unwrap();
+        advisory.await.unwrap().unwrap();
+
+        assert_eq!(queue.pending_count(), 0);
+        assert_eq!(slots.request_worker(&"cancelled-queued".to_string()), None);
+        refreshing_rx.await.unwrap().unwrap();
+        slots.free(&"refreshing".to_string(), decay_now()).unwrap();
         slots.assert_completely_drained(decay_now());
     }
 

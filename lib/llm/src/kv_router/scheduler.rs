@@ -290,6 +290,19 @@ where
         response
     }
 
+    pub(super) async fn schedule_request_for_workers(
+        &self,
+        request: ScheduleRequest,
+        allowed_workers: HashSet<WorkerWithDpRank>,
+    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
+        let response = self
+            .inner
+            .schedule_request_for_workers(request, allowed_workers)
+            .await;
+        self.observe_schedule_result(&response);
+        response
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub async fn schedule(
         &self,

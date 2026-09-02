@@ -458,6 +458,10 @@ where
         }
     }
 
+    pub(crate) fn router_mode(&self) -> RouterMode {
+        self.inner.router_mode()
+    }
+
     #[cfg(test)]
     pub(crate) fn occupancy_for_test(&self, worker_id: u64) -> u64 {
         self.inner.occupancy_for_test(worker_id)

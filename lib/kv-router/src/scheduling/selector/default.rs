@@ -791,6 +791,46 @@ mod tests {
     }
 
     #[test]
+    fn exact_worker_rank_filter_excludes_a_stronger_cache_match() {
+        let selected_rank = WorkerWithDpRank::new(7, 1);
+        let excluded_rank = WorkerWithDpRank::new(7, 0);
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let workers = HashMap::from([(
+            7,
+            crate::test_utils::SimpleWorkerConfig {
+                data_parallel_size: 2,
+                ..Default::default()
+            },
+        )]);
+        let mut request = base_request(64);
+        request.allowed_worker_ids = Some(HashSet::from([7]));
+        let allowed_workers = HashSet::from([selected_rank]);
+        request.overlap.effective_overlap_blocks =
+            HashMap::from([(excluded_rank, 100.0), (selected_rank, 1.0)]);
+        request.overlap.effective_cached_tokens =
+            HashMap::from([(excluded_rank, 1_600), (selected_rank, 16)]);
+
+        let result = selector
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request
+                    .eligibility()
+                    .with_allowed_workers(Some(&allowed_workers)),
+                16,
+            ))
+            .unwrap();
+
+        assert_eq!(result.worker, selected_rank);
+    }
+
+    #[test]
     fn seeded_selector_is_stable_for_ties_and_temperature_sampling() {
         use crate::test_utils::SimpleWorkerConfig;
 

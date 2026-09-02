@@ -201,6 +201,45 @@ pub enum RouterMode {
     DeviceAwareWeighted,
 }
 
+/// Whether an exact-dispatch failure happened before the request crossed the
+/// transport seam or after delivery became uncertain.
+///
+/// Callers coordinating another worker can safely roll back that worker on
+/// [`Self::NotSent`]. They must conservatively retain or clean it up on
+/// [`Self::DeliveryUnknown`].
+#[derive(Debug)]
+pub enum ExactDispatchError {
+    NotSent(Error),
+    DeliveryUnknown(Error),
+}
+
+impl ExactDispatchError {
+    pub fn into_inner(self) -> Error {
+        match self {
+            Self::NotSent(error) | Self::DeliveryUnknown(error) => error,
+        }
+    }
+}
+
+impl std::fmt::Display for ExactDispatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSent(error) => write!(formatter, "request was not sent: {error}"),
+            Self::DeliveryUnknown(error) => {
+                write!(formatter, "request delivery is unknown: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExactDispatchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(match self {
+            Self::NotSent(error) | Self::DeliveryUnknown(error) => error.as_ref(),
+        })
+    }
+}
+
 #[derive(Clone, Copy)]
 enum TransportFallback<'a> {
     Allow,
@@ -814,9 +853,9 @@ where
             self.router_mode
         );
 
-        let state = self.occupancy_state()?;
         if let Some(worker_id) = pinned_worker {
             self.ensure_routable(worker_id)?;
+            let state = self.occupancy_state()?;
             let selection = self.device_aware_candidates(request, &[worker_id]);
             let is_cpu = selection
                 .candidates
@@ -840,6 +879,40 @@ where
         if instance_ids.is_empty() {
             return Err(self.empty_free_pool_error(&routing_instances));
         }
+        self.select_device_aware_candidates_and_reserve(request, instance_ids)
+    }
+
+    /// Select and reserve from a caller-supplied subset of currently selectable workers.
+    pub fn select_device_aware_from_candidates_and_reserve(
+        &self,
+        request: &T,
+        instance_ids: &[u64],
+    ) -> anyhow::Result<DeviceAwareSelection> {
+        anyhow::ensure!(
+            self.router_mode == RouterMode::DeviceAwareWeighted,
+            "{:?} routing is not DeviceAwareWeighted",
+            self.router_mode
+        );
+        let routing_instances = self.client.routing_instances();
+        anyhow::ensure!(
+            !instance_ids.is_empty(),
+            "DeviceAwareWeighted routing has no eligible workers"
+        );
+        anyhow::ensure!(
+            instance_ids
+                .iter()
+                .all(|worker_id| routing_instances.free_ids().contains(worker_id)),
+            "DeviceAwareWeighted candidate set contains an unavailable worker"
+        );
+        self.select_device_aware_candidates_and_reserve(request, instance_ids)
+    }
+
+    fn select_device_aware_candidates_and_reserve(
+        &self,
+        request: &T,
+        instance_ids: &[u64],
+    ) -> anyhow::Result<DeviceAwareSelection> {
+        let state = self.occupancy_state()?;
         let selection = self.device_aware_candidates(request, instance_ids);
         let (decision, counter) = state
             .select_and_admit(
@@ -847,7 +920,7 @@ where
                 CandidateView::DeviceAware(&selection.candidates),
                 selection.context,
             )
-            .ok_or_else(|| self.empty_free_pool_error(&routing_instances))?;
+            .ok_or_else(|| anyhow::anyhow!("DeviceAwareWeighted routing has no candidates"))?;
         let worker_id = decision.target.worker_id;
         let is_cpu = selection.candidates.iter().any(|candidate| {
             candidate.target.worker_id == worker_id && candidate.device == RouteDevice::Cpu
@@ -1170,16 +1243,50 @@ where
         request: SingleIn<T>,
         instance_id: u64,
     ) -> anyhow::Result<ManyOut<U>> {
+        self.dispatch_kv_admitted_classified(request, instance_id)
+            .await
+            .map_err(ExactDispatchError::into_inner)
+    }
+
+    /// Dispatch an already-admitted KV request and preserve whether a failure
+    /// happened before or after the request crossed the transport seam.
+    pub async fn dispatch_kv_admitted_classified(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+    ) -> Result<ManyOut<U>, ExactDispatchError> {
         if !self.router_mode.is_kv_routing() {
-            anyhow::bail!("admitted dispatch is only valid in KV routing mode");
+            return Err(ExactDispatchError::NotSent(anyhow::anyhow!(
+                "admitted dispatch is only valid in KV routing mode"
+            )));
         }
-        self.generate_with_fault_detection_inner(
+        self.generate_with_fault_detection_prepared_classified(
             instance_id,
             request,
             TransportFallback::Deny,
             OverloadCheck::AlreadyAdmitted,
+            |_, _| Ok(()),
         )
         .await
+        .map(|(_, stream)| stream)
+    }
+
+    /// Dispatch to exactly one worker and preserve whether a failure happened
+    /// before or after the request crossed the transport seam.
+    pub async fn dispatch_exact_classified(
+        &self,
+        request: SingleIn<T>,
+        instance_id: u64,
+    ) -> Result<ManyOut<U>, ExactDispatchError> {
+        self.generate_with_fault_detection_prepared_classified(
+            instance_id,
+            request,
+            TransportFallback::Deny,
+            OverloadCheck::Required,
+            |_, _| Ok(()),
+        )
+        .await
+        .map(|(_, stream)| stream)
     }
 
     /// Select and book one worker, prepare the request for that exact worker,
@@ -1710,11 +1817,33 @@ where
     async fn generate_with_fault_detection_prepared_inner<M, F>(
         &self,
         instance_id: u64,
-        mut request: SingleIn<T>,
+        request: SingleIn<T>,
         fallback: TransportFallback<'_>,
         overload_check: OverloadCheck,
         prepare: F,
     ) -> anyhow::Result<(M, ManyOut<U>)>
+    where
+        F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
+    {
+        self.generate_with_fault_detection_prepared_classified(
+            instance_id,
+            request,
+            fallback,
+            overload_check,
+            prepare,
+        )
+        .await
+        .map_err(ExactDispatchError::into_inner)
+    }
+
+    async fn generate_with_fault_detection_prepared_classified<M, F>(
+        &self,
+        instance_id: u64,
+        mut request: SingleIn<T>,
+        fallback: TransportFallback<'_>,
+        overload_check: OverloadCheck,
+        prepare: F,
+    ) -> Result<(M, ManyOut<U>), ExactDispatchError>
     where
         F: FnOnce(&mut T, u64) -> anyhow::Result<M>,
     {
@@ -1750,7 +1879,7 @@ where
             Err(error) => {
                 record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
                 record_route_error(&route_span, error.as_ref());
-                return Err(error);
+                return Err(ExactDispatchError::NotSent(error));
             }
         };
         record_route_span_start(&route_span, route_trace_context.as_deref(), instance_id);
@@ -1758,14 +1887,14 @@ where
             && let Err(error) = self.check_workers_available(instance_id, &request_id)
         {
             record_route_error(&route_span, error.as_ref());
-            return Err(error);
+            return Err(ExactDispatchError::NotSent(error));
         }
 
         let metadata = match prepare(&mut request, instance_id) {
             Ok(metadata) => metadata,
             Err(error) => {
                 record_route_error(&route_span, error.as_ref());
-                return Err(error);
+                return Err(ExactDispatchError::NotSent(error));
             }
         };
         let request = request.map(|req| AddressedRequest::with_instance(req, address, instance));
@@ -1780,7 +1909,9 @@ where
             .generate(request)
             .instrument(route_span.clone())
             .await;
-        let stream = self.wrap_with_fault_detection(stream, instance_id, route_span)?;
+        let stream = self
+            .wrap_with_fault_detection(stream, instance_id, route_span)
+            .map_err(ExactDispatchError::DeliveryUnknown)?;
         Ok((metadata, stream))
     }
 
@@ -2218,7 +2349,7 @@ impl<U: Data + MaybeError> crate::engine::AsyncEngineStream<U> for OccupancyTrac
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use crate::{
         DistributedRuntime, Runtime,
@@ -3493,6 +3624,7 @@ mod tests {
         bidi: std::sync::Mutex<Vec<(String, u64)>>,
         added: std::sync::Mutex<Vec<u64>>,
         removed: std::sync::Mutex<Vec<u64>>,
+        fail_unary: AtomicBool,
     }
 
     impl RecordingDispatch {
@@ -3517,6 +3649,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((payload, address, instance.map(|i| i.id())));
+            if self.fail_unary.load(Ordering::Acquire) {
+                anyhow::bail!("injected post-seam dispatch failure");
+            }
             Ok(Self::canned_stream())
         }
 
@@ -3542,6 +3677,55 @@ mod tests {
     /// The transport seam must deliver to a caller-supplied `StreamingDispatch`:
     /// unary and bidirectional requests arrive with the selected address and
     /// instance, and discovery removal/re-addition reach its lifecycle hooks.
+    #[tokio::test]
+    async fn classified_exact_dispatch_preserves_transport_boundary() {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("test_classified_exact_dispatch".to_string())
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap()
+            .endpoint("generate".to_string());
+        let client = endpoint.client().await.unwrap();
+        let dispatch = Arc::new(RecordingDispatch::default());
+        let router = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            client.clone(),
+            RouterMode::Direct,
+            dispatch.clone(),
+        )
+        .await
+        .unwrap();
+
+        match router.dispatch_exact_classified(SingleIn::new(1), 7).await {
+            Err(ExactDispatchError::NotSent(_)) => {}
+            Err(ExactDispatchError::DeliveryUnknown(error)) => {
+                panic!("preflight failure was misclassified: {error}")
+            }
+            Ok(_) => panic!("missing worker unexpectedly accepted dispatch"),
+        }
+        assert!(dispatch.unary.lock().unwrap().is_empty());
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+        dispatch.fail_unary.store(true, Ordering::Release);
+        match router
+            .dispatch_exact_classified(SingleIn::new(2), instance_id)
+            .await
+        {
+            Err(ExactDispatchError::DeliveryUnknown(_)) => {}
+            Err(ExactDispatchError::NotSent(error)) => {
+                panic!("post-seam failure was misclassified: {error}")
+            }
+            Ok(_) => panic!("injected transport failure unexpectedly succeeded"),
+        }
+        assert_eq!(dispatch.unary.lock().unwrap().len(), 1);
+
+        runtime.shutdown();
+    }
+
     #[tokio::test]
     async fn from_client_with_dispatch_delivers_requests_and_lifecycle() {
         let rt = Runtime::from_current().unwrap();
@@ -3672,11 +3856,19 @@ mod tests {
             .await
             .unwrap();
         while stream.next().await.is_some() {}
+        let mut classified_stream = router
+            .dispatch_kv_admitted_classified(SingleIn::new(43), instance_id)
+            .await
+            .unwrap();
+        while classified_stream.next().await.is_some() {}
         let unary = dispatch.unary.lock().unwrap();
-        assert_eq!(unary.len(), 1);
+        assert_eq!(unary.len(), 2);
         assert_eq!(unary[0].0, 42);
         assert!(!unary[0].1.is_empty());
         assert_eq!(unary[0].2, Some(instance_id));
+        assert_eq!(unary[1].0, 43);
+        assert!(!unary[1].1.is_empty());
+        assert_eq!(unary[1].2, Some(instance_id));
         drop(unary);
 
         rt.shutdown();

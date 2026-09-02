@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
@@ -16,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
+    external_speculation::{SpeculationChooser, SpeculationCompositionSnapshot},
     kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
@@ -173,6 +175,12 @@ pub struct WorkerSet {
     /// deactivation/reactivation when Encode workers leave or rejoin.
     pub(crate) encoder_router: Option<Arc<EncoderRouter>>,
 
+    /// Atomically committed target/draft composition. The cell is shared with
+    /// the speculative request router built before discovery publication.
+    speculation_composition: Arc<ArcSwapOption<SpeculationCompositionSnapshot>>,
+    speculation_chooser: Option<Arc<dyn SpeculationChooser>>,
+    external_speculation_router_active: bool,
+
     /// Watcher for available instance IDs (from the Client's discovery watch).
     /// None for in-process models (http/grpc) which don't have a discovery client.
     instance_count_rx: Option<watch::Receiver<Vec<u64>>>,
@@ -208,6 +216,9 @@ impl WorkerSet {
             load_thresholds: None,
             prefill_router: None,
             encoder_router: None,
+            speculation_composition: Arc::new(ArcSwapOption::empty()),
+            speculation_chooser: None,
+            external_speculation_router_active: false,
             instance_count_rx: None,
             lifecycle_cancellation: None,
             allocator_trim: None,
@@ -235,6 +246,11 @@ impl WorkerSet {
     #[cfg(test)]
     pub(crate) fn load_context(&self) -> Option<&Arc<RoutingLoadContext>> {
         self.load_context.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_endpoint_id_for_test(&mut self, endpoint_id: EndpointId) {
+        self.endpoint_id = Some(endpoint_id);
     }
 
     pub(crate) fn topology_endpoint(&self) -> Option<&Endpoint> {
@@ -344,11 +360,53 @@ impl WorkerSet {
         )
     }
 
+    /// Whether this is an internal speculative-draft set. Drafts never expose
+    /// a model surface and must not fall through the legacy prefill heuristic.
+    pub fn is_speculative_draft_set(&self) -> bool {
+        matches!(
+            self.card.worker_role,
+            crate::worker_role::WorkerRole::SpeculativeDraft
+        )
+    }
+
     /// Whether this set tracks a prefill model (no engine, just
     /// lifecycle). Excludes Encode sets, which also lack engines but
     /// are not gated through PrefillRouter.
     pub fn is_prefill_set(&self) -> bool {
-        !self.is_encode_set() && !self.has_any_serving_engine()
+        !self.is_encode_set() && !self.is_speculative_draft_set() && !self.has_any_serving_engine()
+    }
+
+    pub fn speculation_composition(&self) -> Option<Arc<SpeculationCompositionSnapshot>> {
+        self.speculation_composition.load_full()
+    }
+
+    pub(crate) fn speculation_composition_cell(
+        &self,
+    ) -> Arc<ArcSwapOption<SpeculationCompositionSnapshot>> {
+        self.speculation_composition.clone()
+    }
+
+    pub(crate) fn set_speculation_composition(
+        &self,
+        composition: Option<Arc<SpeculationCompositionSnapshot>>,
+    ) {
+        self.speculation_composition.store(composition);
+    }
+
+    pub(crate) fn set_speculation_chooser(&mut self, chooser: Arc<dyn SpeculationChooser>) {
+        self.speculation_chooser = Some(chooser);
+    }
+
+    pub(crate) fn speculation_chooser(&self) -> Option<Arc<dyn SpeculationChooser>> {
+        self.speculation_chooser.clone()
+    }
+
+    pub(crate) fn mark_external_speculation_router_active(&mut self) {
+        self.external_speculation_router_active = true;
+    }
+
+    pub(crate) fn has_external_speculation_router(&self) -> bool {
+        self.external_speculation_router_active
     }
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
@@ -374,6 +432,12 @@ impl WorkerSet {
             Some(rx) => rx.borrow().len(),
             None => 1,
         }
+    }
+
+    pub(crate) fn available_instance_ids(&self) -> Option<Vec<u64>> {
+        self.instance_count_rx
+            .as_ref()
+            .map(|receiver| receiver.borrow().clone())
     }
 
     /// Store the instance watcher from the Client's discovery system.
@@ -452,6 +516,9 @@ impl WorkerSet {
             load_thresholds: self.load_thresholds.clone(),
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
+            speculation_composition: self.speculation_composition.clone(),
+            speculation_chooser: self.speculation_chooser.clone(),
+            external_speculation_router_active: self.external_speculation_router_active,
             instance_count_rx: self.instance_count_rx.clone(),
             lifecycle_cancellation: None,
             allocator_trim: None,
@@ -624,6 +691,17 @@ mod tests {
         assert!(!ws.has_generate_engine());
         assert!(!ws.has_decode_engine());
         assert!(ws.is_prefill_set());
+    }
+
+    #[test]
+    fn speculative_draft_is_never_classified_as_prefill() {
+        let mut card = ModelDeploymentCard::default();
+        card.worker_role = crate::worker_role::WorkerRole::SpeculativeDraft;
+        let ws = WorkerSet::new("ns1".to_string(), "abc123".to_string(), card);
+
+        assert!(ws.is_speculative_draft_set());
+        assert!(!ws.is_prefill_set());
+        assert!(!ws.has_any_serving_engine());
     }
 
     /// `is_prefill_set` must exclude every serving-engine field on `WorkerSet`. If a new

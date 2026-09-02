@@ -34,6 +34,7 @@ use dynamo_runtime::{
 };
 
 use crate::{
+    external_speculation::{SpeculationCompositionRegistry, SpeculationCompositionSnapshot},
     kv_router::{
         KvEventSourceRequirement, KvRouter, router_endpoint_id, scheduler::DefaultWorkerSelector,
         shared_cache::HicacheSharedKvCache,
@@ -45,6 +46,7 @@ use crate::{
     lora::state_tracker::LoraWorkerProjection,
     lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
     model_card::{LoraInfo, ModelDeploymentCard},
+    protocols::external_speculation::DraftTransportDescriptorV1,
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
@@ -57,6 +59,7 @@ use crate::{
             videos::OpenAIVideosStreamingEngine,
         },
     },
+    worker_role::WorkerRole,
     worker_type::WorkerType,
 };
 
@@ -134,6 +137,16 @@ struct CommittedDiscoveryGroup {
     adapters: HashMap<String, ModelDeploymentCard>,
     representative: ModelDeploymentCard,
     worker_set: Arc<WorkerSet>,
+    published: bool,
+}
+
+#[derive(Clone)]
+struct SpeculationGroupSnapshot {
+    group_id: String,
+    endpoint: EndpointId,
+    representative: ModelDeploymentCard,
+    cards: HashMap<String, ModelDeploymentCard>,
+    worker_set: Arc<WorkerSet>,
 }
 
 #[derive(Default)]
@@ -168,6 +181,9 @@ pub struct ModelManager {
 
     /// Controller-owned committed groups, keyed by the controller's stable GroupKey encoding.
     discovery_groups: DashMap<String, CommittedDiscoveryGroup>,
+
+    /// Cross-endpoint speculative composition state.
+    speculation_compositions: SpeculationCompositionRegistry,
 
     /// Per-endpoint runtime config watchers. Keyed by EndpointId (includes namespace).
     ///
@@ -218,6 +234,7 @@ impl ModelManager {
             catalog: ArcSwap::from_pointee(CommittedCatalog::default()),
             cards: DashMap::new(),
             discovery_groups: DashMap::new(),
+            speculation_compositions: SpeculationCompositionRegistry::default(),
             runtime_configs: DashMap::new(),
             hicache_caches: DashMap::new(),
             kv_source_memberships: DashMap::new(),
@@ -637,6 +654,403 @@ impl ModelManager {
         removed
     }
 
+    fn affected_speculative_targets_locked(
+        &self,
+        group_id: &str,
+        representative: &ModelDeploymentCard,
+        endpoint: Option<&EndpointId>,
+    ) -> HashSet<String> {
+        let mut affected = endpoint
+            .map(|endpoint| self.speculation_compositions.dependent_targets(endpoint))
+            .unwrap_or_default();
+        if matches!(representative.worker_role, WorkerRole::SpeculativeTarget(_)) {
+            affected.insert(group_id.to_string());
+        }
+        affected
+    }
+
+    fn invalidate_external_speculation_groups_locked(
+        &self,
+        group_ids: impl IntoIterator<Item = String>,
+    ) {
+        for group_id in group_ids {
+            if let Some(group) = self.discovery_groups.get(&group_id) {
+                group.worker_set.set_speculation_composition(None);
+            }
+            self.detach_discovery_group_public_locked(&group_id);
+        }
+    }
+
+    fn attach_discovery_group_public_locked(
+        &self,
+        group_id: &str,
+        composition: Option<Arc<SpeculationCompositionSnapshot>>,
+    ) {
+        let Some(group) = self.discovery_groups.get(group_id) else {
+            return;
+        };
+        if group.published {
+            group.worker_set.set_speculation_composition(composition);
+            return;
+        }
+        let primary = group.primary.clone();
+        let aliases = group.aliases.clone();
+        let worker_set_key = group.worker_set_key.clone();
+        let worker_set = group.worker_set.clone();
+        let cards = group.cards.clone();
+        let adapters = group.adapters.clone();
+        drop(group);
+
+        worker_set.set_speculation_composition(composition);
+        self.get_or_create_model(&primary)
+            .add_worker_set(worker_set_key.clone(), worker_set.clone());
+        for alias in &aliases {
+            self.alias_to_primary.insert(alias.clone(), primary.clone());
+            self.get_or_create_model(alias)
+                .add_worker_set(worker_set_key.clone(), worker_set.clone());
+        }
+        for adapter in adapters.values() {
+            let adapter_view = Arc::new(worker_set.adapter_view(adapter.clone()));
+            self.get_or_create_model(adapter.name())
+                .add_worker_set(worker_set_key.clone(), adapter_view);
+        }
+        for (key, card) in cards.iter().chain(adapters.iter()) {
+            self.cards.insert(key.clone(), Arc::new(card.clone()));
+        }
+        if let Some(mut group) = self.discovery_groups.get_mut(group_id) {
+            group.published = true;
+        }
+    }
+
+    fn detach_discovery_group_public_locked(&self, group_id: &str) {
+        let Some(group) = self.discovery_groups.get(group_id) else {
+            return;
+        };
+        if !group.published {
+            return;
+        }
+        let primary = group.primary.clone();
+        let aliases = group.aliases.clone();
+        let worker_set_key = group.worker_set_key.clone();
+        let cards = group.cards.keys().cloned().collect::<Vec<_>>();
+        let adapters = group.adapters.values().cloned().collect::<Vec<_>>();
+        drop(group);
+
+        if let Some(model) = self.models.get(&primary) {
+            model.remove_worker_set(&worker_set_key);
+        }
+        self.remove_model_if_empty(&primary);
+        for alias in &aliases {
+            if let Some(model) = self.models.get(alias) {
+                model.remove_worker_set(&worker_set_key);
+            }
+            self.remove_model_if_empty(alias);
+            if self.models.get(alias).is_none_or(|model| model.is_empty()) {
+                self.alias_to_primary
+                    .remove_if(alias, |_, owner| owner == &primary);
+            }
+        }
+        for adapter in &adapters {
+            if let Some(model) = self.models.get(adapter.name()) {
+                model.remove_worker_set(&worker_set_key);
+            }
+            self.remove_model_if_empty(adapter.name());
+        }
+        for key in cards {
+            self.cards.remove(&key);
+        }
+        for key in self
+            .discovery_groups
+            .get(group_id)
+            .into_iter()
+            .flat_map(|group| group.adapters.keys().cloned().collect::<Vec<_>>())
+        {
+            self.cards.remove(&key);
+        }
+        if let Some(mut group) = self.discovery_groups.get_mut(group_id) {
+            group.published = false;
+        }
+    }
+
+    fn speculation_group_snapshots_locked(&self) -> HashMap<String, SpeculationGroupSnapshot> {
+        self.discovery_groups
+            .iter()
+            .filter_map(|group| {
+                let Some(endpoint) = group.worker_set.endpoint_id().cloned() else {
+                    if !group.representative.worker_role.is_standard() {
+                        tracing::warn!(
+                            group = group.key(),
+                            role = group.representative.worker_role.as_str(),
+                            "External-speculation discovery group has no exact endpoint"
+                        );
+                    }
+                    return None;
+                };
+                Some((
+                    group.key().clone(),
+                    SpeculationGroupSnapshot {
+                        group_id: group.key().clone(),
+                        endpoint,
+                        representative: group.representative.clone(),
+                        cards: group.cards.clone(),
+                        worker_set: group.worker_set.clone(),
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    fn speculation_ranks(
+        group: &SpeculationGroupSnapshot,
+        binding: &crate::worker_role::ExternalDraftBinding,
+        draft: bool,
+    ) -> anyhow::Result<(
+        HashSet<WorkerWithDpRank>,
+        HashMap<WorkerWithDpRank, DraftTransportDescriptorV1>,
+    )> {
+        anyhow::ensure!(
+            group.worker_set.worker_count() > 0,
+            "endpoint {} has no live workers",
+            group.endpoint
+        );
+        let live_ids = group
+            .worker_set
+            .available_instance_ids()
+            .map(|ids| ids.into_iter().collect::<HashSet<_>>());
+        if let Some(live_ids) = &live_ids {
+            anyhow::ensure!(
+                !live_ids.is_empty(),
+                "endpoint {} has no live worker IDs",
+                group.endpoint
+            );
+        }
+
+        let mut rank_counts = HashMap::<WorkerWithDpRank, usize>::new();
+        let mut draft_transport_candidates = HashMap::new();
+        let mut described_workers = HashSet::new();
+        for (instance_path, card) in &group.cards {
+            let mcid = ModelCardInstanceId::from_path(instance_path).map_err(|error| {
+                anyhow::anyhow!(
+                    "invalid external-speculation instance path {instance_path:?}: {error}"
+                )
+            })?;
+            if live_ids
+                .as_ref()
+                .is_some_and(|live_ids| !live_ids.contains(&mcid.instance_id))
+            {
+                continue;
+            }
+            described_workers.insert(mcid.instance_id);
+            match (&card.worker_role, draft) {
+                (WorkerRole::SpeculativeDraft, true) => {}
+                (WorkerRole::SpeculativeTarget(card_binding), false) => {
+                    anyhow::ensure!(
+                        card_binding == binding,
+                        "target workers disagree on the external draft binding"
+                    );
+                }
+                _ => anyhow::bail!("external-speculation group contains mixed worker roles"),
+            }
+
+            let rank_end = card
+                .runtime_config
+                .data_parallel_start_rank
+                .checked_add(card.runtime_config.data_parallel_size)
+                .ok_or_else(|| anyhow::anyhow!("data-parallel rank range overflows u32"))?;
+            for dp_rank in card.runtime_config.data_parallel_start_rank..rank_end {
+                let worker = WorkerWithDpRank::new(mcid.instance_id, dp_rank);
+                *rank_counts.entry(worker).or_default() += 1;
+                if draft {
+                    let transport = card
+                        .runtime_config
+                        .external_draft_transports
+                        .get(&dp_rank)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "draft worker {} rank {dp_rank} has no transport descriptor",
+                                mcid.instance_id
+                            )
+                        })?
+                        .clone();
+                    transport.validate()?;
+                    anyhow::ensure!(
+                        transport.protocol == binding.protocol,
+                        "draft transport protocol does not match the target binding"
+                    );
+                    draft_transport_candidates.insert(worker, transport);
+                }
+            }
+        }
+
+        if let Some(live_ids) = live_ids {
+            anyhow::ensure!(
+                described_workers == live_ids,
+                "endpoint {} does not have a model card for every live worker",
+                group.endpoint
+            );
+        }
+
+        let ranks = rank_counts
+            .into_iter()
+            .filter_map(|(worker, count)| {
+                if count == 1 {
+                    Some(worker)
+                } else {
+                    tracing::warn!(
+                        endpoint = %group.endpoint,
+                        worker_id = worker.worker_id,
+                        dp_rank = worker.dp_rank,
+                        registrations = count,
+                        "Excluding ambiguous speculative worker rank"
+                    );
+                    None
+                }
+            })
+            .collect::<HashSet<_>>();
+        let draft_transports = draft_transport_candidates
+            .into_iter()
+            .filter(|(worker, _)| ranks.contains(worker))
+            .collect::<HashMap<_, _>>();
+        anyhow::ensure!(
+            !ranks.is_empty(),
+            "endpoint {} has no selectable external-speculation ranks",
+            group.endpoint
+        );
+        Ok((ranks, draft_transports))
+    }
+
+    fn build_speculation_composition(
+        &self,
+        target: &SpeculationGroupSnapshot,
+        groups: &HashMap<String, SpeculationGroupSnapshot>,
+        endpoint_groups: &HashMap<EndpointId, HashSet<String>>,
+    ) -> anyhow::Result<Arc<SpeculationCompositionSnapshot>> {
+        let WorkerRole::SpeculativeTarget(binding) = &target.representative.worker_role else {
+            anyhow::bail!("composition target does not have the speculative-target role");
+        };
+        anyhow::ensure!(
+            target.worker_set.has_external_speculation_router(),
+            "target pipeline has no dedicated external-speculation router"
+        );
+        anyhow::ensure!(
+            binding.router_hint_schema_version
+                == crate::worker_role::ExternalDraftBinding::ROUTER_HINT_SCHEMA_VERSION,
+            "target requires an unsupported speculative router-hint schema"
+        );
+        let draft_group_ids = endpoint_groups
+            .get(&binding.endpoint)
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            draft_group_ids.len() == 1,
+            "draft endpoint {} resolves to {} worker sets; expected exactly one speculative-draft worker set",
+            binding.endpoint,
+            draft_group_ids.len()
+        );
+        let draft = &groups[draft_group_ids[0]];
+        anyhow::ensure!(
+            matches!(
+                draft.representative.worker_role,
+                WorkerRole::SpeculativeDraft
+            ),
+            "bound draft endpoint {} does not resolve to a speculative-draft worker set",
+            binding.endpoint
+        );
+        let (target_workers, _) = Self::speculation_ranks(target, binding, false)?;
+        let (_, draft_transports) = Self::speculation_ranks(draft, binding, true)?;
+        let target_chooser = target
+            .worker_set
+            .speculation_chooser()
+            .ok_or_else(|| anyhow::anyhow!("target worker set has no speculation chooser"))?;
+        let draft_chooser = draft
+            .worker_set
+            .speculation_chooser()
+            .ok_or_else(|| anyhow::anyhow!("draft worker set has no speculation chooser"))?;
+        SpeculationCompositionSnapshot::new(
+            target.endpoint.clone(),
+            draft.endpoint.clone(),
+            binding.clone(),
+            target_workers,
+            draft_transports,
+            target_chooser,
+            draft_chooser,
+        )
+    }
+
+    fn reconcile_external_speculation_locked(&self) {
+        let groups = self.speculation_group_snapshots_locked();
+        let mut endpoint_groups: HashMap<EndpointId, HashSet<String>> = HashMap::new();
+        let mut draft_dependents: HashMap<EndpointId, HashSet<String>> = HashMap::new();
+        for group in groups.values() {
+            endpoint_groups
+                .entry(group.endpoint.clone())
+                .or_default()
+                .insert(group.group_id.clone());
+            if let WorkerRole::SpeculativeTarget(binding) = &group.representative.worker_role {
+                draft_dependents
+                    .entry(binding.endpoint.clone())
+                    .or_default()
+                    .insert(group.group_id.clone());
+            }
+        }
+
+        let mut ready_targets = HashSet::new();
+        for target in groups.values().filter(|group| {
+            matches!(
+                group.representative.worker_role,
+                WorkerRole::SpeculativeTarget(_)
+            )
+        }) {
+            match self.build_speculation_composition(target, &groups, &endpoint_groups) {
+                Ok(composition) => {
+                    target
+                        .worker_set
+                        .set_speculation_composition(Some(composition.clone()));
+                    self.attach_discovery_group_public_locked(&target.group_id, Some(composition));
+                    ready_targets.insert(target.group_id.clone());
+                }
+                Err(error) => {
+                    target.worker_set.set_speculation_composition(None);
+                    self.detach_discovery_group_public_locked(&target.group_id);
+                    tracing::info!(
+                        group = target.group_id,
+                        target_endpoint = %target.endpoint,
+                        error = %error,
+                        "Speculative target is not ready"
+                    );
+                }
+            }
+        }
+        for draft in groups.values().filter(|group| {
+            matches!(
+                group.representative.worker_role,
+                WorkerRole::SpeculativeDraft
+            )
+        }) {
+            draft.worker_set.set_speculation_composition(None);
+            self.detach_discovery_group_public_locked(&draft.group_id);
+        }
+        self.speculation_compositions
+            .replace(endpoint_groups, draft_dependents, ready_targets);
+        let (endpoint_count, dependency_count, ready_count) =
+            self.speculation_compositions.counts();
+        tracing::debug!(
+            endpoint_count,
+            dependency_count,
+            ready_count,
+            "Reconciled external-speculation compositions"
+        );
+    }
+
+    pub(crate) fn committed_discovery_cards(&self) -> HashMap<String, ModelDeploymentCard> {
+        self.discovery_groups
+            .iter()
+            .filter(|group| group.published)
+            .map(|group| (group.key().clone(), group.representative.clone()))
+            .collect()
+    }
+
     /// Commit a complete discovery group atomically.
     ///
     pub(crate) fn commit_discovery_group(
@@ -660,6 +1074,9 @@ impl ModelManager {
             .collect::<Vec<_>>();
         let namespace = worker_set.namespace().to_string();
         let representative = representative.clone();
+        let is_external = !representative.worker_role.is_standard();
+        let reserves_public_name =
+            !matches!(representative.worker_role, WorkerRole::SpeculativeDraft);
 
         let _reservation = self.reservation_lock.lock();
         let lora_before = self.lora_projection_locked();
@@ -667,63 +1084,87 @@ impl ModelManager {
             !self.discovery_groups.contains_key(group_id),
             "discovery group {group_id:?} is already committed"
         );
-        if let Some(owner) = self.alias_to_primary.get(&primary) {
-            anyhow::bail!(
-                "model name {primary:?} is reserved as an alias of {:?}",
-                owner.value()
-            );
-        }
-        anyhow::ensure!(
-            !self.discovery_groups.iter().any(|entry| entry
-                .adapters
-                .values()
-                .any(|adapter| adapter.name() == primary)),
-            "model name {primary:?} is reserved by a LoRA adapter"
-        );
-
-        for alias in &aliases {
-            if let Some(owner) = self.alias_to_primary.get(alias)
-                && owner.value() != &primary
-            {
-                anyhow::bail!("alias {alias:?} is already reserved by {:?}", owner.value());
-            }
-            let is_other_primary = self
-                .models
-                .get(alias)
-                .is_some_and(|model| !model.is_empty())
-                && self
-                    .alias_to_primary
-                    .get(alias)
-                    .is_none_or(|owner| owner.value() != &primary);
+        if is_external {
             anyhow::ensure!(
-                !is_other_primary,
-                "alias {alias:?} collides with a registered primary model"
+                adapters.is_empty(),
+                "external-speculation worker roles do not support LoRA adapter discovery"
             );
         }
-        self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
-
-        let worker_set = Arc::new(worker_set);
-        self.get_or_create_model(&primary)
-            .add_worker_set(worker_set_key.to_string(), worker_set.clone());
-        for alias in &aliases {
-            self.alias_to_primary.insert(alias.clone(), primary.clone());
-            self.get_or_create_model(alias)
-                .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+        if matches!(representative.worker_role, WorkerRole::SpeculativeDraft) {
+            anyhow::ensure!(
+                aliases.is_empty(),
+                "speculative drafts must not reserve public model aliases"
+            );
         }
-        for (_, adapter) in &adapters {
-            let adapter_view = Arc::new(worker_set.adapter_view(adapter.clone()));
-            self.get_or_create_model(adapter.name())
-                .add_worker_set(worker_set_key.to_string(), adapter_view);
+        if reserves_public_name {
+            if let Some(owner) = self.alias_to_primary.get(&primary) {
+                anyhow::bail!(
+                    "model name {primary:?} is reserved as an alias of {:?}",
+                    owner.value()
+                );
+            }
+            anyhow::ensure!(
+                !self.discovery_groups.iter().any(|entry| entry
+                    .adapters
+                    .values()
+                    .any(|adapter| adapter.name() == primary)),
+                "model name {primary:?} is reserved by a LoRA adapter"
+            );
+
+            for alias in &aliases {
+                if let Some(owner) = self.alias_to_primary.get(alias)
+                    && owner.value() != &primary
+                {
+                    anyhow::bail!("alias {alias:?} is already reserved by {:?}", owner.value());
+                }
+                let collides_with_unpublished_primary = self.discovery_groups.iter().any(|entry| {
+                    !matches!(
+                        entry.representative.worker_role,
+                        WorkerRole::SpeculativeDraft
+                    ) && entry.primary != primary
+                        && entry.primary == *alias
+                });
+                let is_other_primary = (self
+                    .models
+                    .get(alias)
+                    .is_some_and(|model| !model.is_empty())
+                    && self
+                        .alias_to_primary
+                        .get(alias)
+                        .is_none_or(|owner| owner.value() != &primary))
+                    || collides_with_unpublished_primary;
+                anyhow::ensure!(
+                    !is_other_primary,
+                    "alias {alias:?} collides with a registered primary model"
+                );
+            }
+            let primary_is_unpublished_alias = self.discovery_groups.iter().any(|entry| {
+                !matches!(
+                    entry.representative.worker_role,
+                    WorkerRole::SpeculativeDraft
+                ) && entry.primary != primary
+                    && entry.aliases.iter().any(|alias| alias == &primary)
+            });
+            anyhow::ensure!(
+                !primary_is_unpublished_alias,
+                "model name {primary:?} is reserved as an alias by another discovery group"
+            );
+            self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
         }
 
         let cards = members.into_iter().collect::<HashMap<_, _>>();
-        for (key, card) in &cards {
-            self.cards.insert(key.clone(), Arc::new(card.clone()));
-        }
         let adapters = adapters.into_iter().collect::<HashMap<_, _>>();
-        for (key, card) in &adapters {
-            self.cards.insert(key.clone(), Arc::new(card.clone()));
+        let affected_speculative_targets = self.affected_speculative_targets_locked(
+            group_id,
+            &representative,
+            worker_set.endpoint_id(),
+        );
+        if !affected_speculative_targets.is_empty() {
+            self.invalidate_external_speculation_groups_locked(
+                affected_speculative_targets.iter().cloned(),
+            );
         }
+        let worker_set = Arc::new(worker_set);
         self.discovery_groups.insert(
             group_id.to_string(),
             CommittedDiscoveryGroup {
@@ -735,11 +1176,22 @@ impl ModelManager {
                 adapters,
                 representative,
                 worker_set,
+                published: false,
             },
         );
+        if is_external {
+            self.reconcile_external_speculation_locked();
+        } else {
+            self.attach_discovery_group_public_locked(group_id, None);
+            if !affected_speculative_targets.is_empty() {
+                self.reconcile_external_speculation_locked();
+            }
+        }
         let lora_after = self.lora_projection_locked();
         self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
-        self.reconcile_discovery_topology(&primary, &namespace);
+        if !is_external {
+            self.reconcile_discovery_topology(&primary, &namespace);
+        }
         self.publish_catalog_locked();
         self.publish_lora_projection_locked(lora_after);
         Ok(())
@@ -796,6 +1248,13 @@ impl ModelManager {
         let primary = group.primary.clone();
         let worker_set_key = group.worker_set_key.clone();
         let worker_set = group.worker_set.clone();
+        let is_external = !group.representative.worker_role.is_standard();
+        let worker_role = group.representative.worker_role.clone();
+        let affected_speculative_targets = self.affected_speculative_targets_locked(
+            group_id,
+            &group.representative,
+            group.worker_set.endpoint_id(),
+        );
         let previous_member_keys = group.cards.keys().cloned().collect::<HashSet<_>>();
         let previous_adapter_keys = group.adapters.keys().cloned().collect::<HashSet<_>>();
         let previous_adapter_names = group
@@ -809,7 +1268,25 @@ impl ModelManager {
             !members.is_empty(),
             "cannot replace with an empty discovery group"
         );
-        self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
+        if is_external {
+            anyhow::ensure!(
+                adapters.is_empty(),
+                "external-speculation worker roles do not support LoRA adapter discovery"
+            );
+            anyhow::ensure!(
+                members
+                    .iter()
+                    .all(|(_, card)| card.worker_role == worker_role),
+                "external-speculation discovery replacement cannot change worker role or target binding"
+            );
+        } else {
+            self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
+        }
+        if !affected_speculative_targets.is_empty() {
+            self.invalidate_external_speculation_groups_locked(
+                affected_speculative_targets.iter().cloned(),
+            );
+        }
         let members = members.into_iter().collect::<HashMap<_, _>>();
         let adapters = adapters.into_iter().collect::<HashMap<_, _>>();
         let desired_member_keys = members.keys().cloned().collect::<HashSet<_>>();
@@ -829,14 +1306,16 @@ impl ModelManager {
             .collect::<HashMap<_, _>>();
         let lora_before = self.lora_projection_locked();
 
-        for key in previous_member_keys.difference(&desired_member_keys) {
-            self.cards.remove(key);
-        }
-        for key in previous_adapter_keys.difference(&desired_adapter_keys) {
-            self.cards.remove(key);
-        }
-        for (key, card) in members.iter().chain(adapters.iter()) {
-            self.cards.insert(key.clone(), Arc::new(card.clone()));
+        if !is_external {
+            for key in previous_member_keys.difference(&desired_member_keys) {
+                self.cards.remove(key);
+            }
+            for key in previous_adapter_keys.difference(&desired_adapter_keys) {
+                self.cards.remove(key);
+            }
+            for (key, card) in members.iter().chain(adapters.iter()) {
+                self.cards.insert(key.clone(), Arc::new(card.clone()));
+            }
         }
 
         let mut group = self
@@ -852,15 +1331,22 @@ impl ModelManager {
         group.adapters = adapters;
         drop(group);
 
-        for (name, adapter_view) in adapter_views {
-            self.get_or_create_model(&name)
-                .add_worker_set(worker_set_key.clone(), adapter_view);
-        }
-        for name in previous_adapter_names.difference(&desired_adapter_names) {
-            if let Some(model) = self.models.get(name) {
-                model.remove_worker_set(&worker_set_key);
+        if !is_external {
+            for (name, adapter_view) in adapter_views {
+                self.get_or_create_model(&name)
+                    .add_worker_set(worker_set_key.clone(), adapter_view);
             }
-            self.remove_model_if_empty(name);
+            for name in previous_adapter_names.difference(&desired_adapter_names) {
+                if let Some(model) = self.models.get(name) {
+                    model.remove_worker_set(&worker_set_key);
+                }
+                self.remove_model_if_empty(name);
+            }
+        } else {
+            self.reconcile_external_speculation_locked();
+        }
+        if !is_external && !affected_speculative_targets.is_empty() {
+            self.reconcile_external_speculation_locked();
         }
         let lora_after = self.lora_projection_locked();
         self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
@@ -881,6 +1367,19 @@ impl ModelManager {
     pub(crate) fn remove_discovery_group(&self, group_id: &str) -> Option<RemovedDiscoveryGroup> {
         let _reservation = self.reservation_lock.lock();
         let lora_before = self.lora_projection_locked();
+        let group = self.discovery_groups.get(group_id)?;
+        let is_external = !group.representative.worker_role.is_standard();
+        let affected_speculative_targets = self.affected_speculative_targets_locked(
+            group_id,
+            &group.representative,
+            group.worker_set.endpoint_id(),
+        );
+        drop(group);
+        if !affected_speculative_targets.is_empty() {
+            self.invalidate_external_speculation_groups_locked(
+                affected_speculative_targets.iter().cloned(),
+            );
+        }
         let (_, group) = self.discovery_groups.remove(group_id)?;
         let representative = group.representative.clone();
         let topology_namespace = group.namespace.clone();
@@ -924,7 +1423,12 @@ impl ModelManager {
         };
         let lora_after = self.lora_projection_locked();
         self.publish_lora_projection_locked(Self::union_lora_projection(&lora_before, &lora_after));
-        self.reconcile_discovery_topology(&group.primary, &topology_namespace);
+        if !affected_speculative_targets.is_empty() {
+            self.reconcile_external_speculation_locked();
+        }
+        if !is_external {
+            self.reconcile_discovery_topology(&group.primary, &topology_namespace);
+        }
         self.publish_catalog_locked();
         self.publish_lora_projection_locked(lora_after);
         Some(removed)
@@ -2614,14 +3118,22 @@ mod tests {
         DistributedRuntime, Runtime,
         discovery::{Discovery, MockDiscovery, SharedMockRegistry},
         distributed::DistributedConfig,
-        pipeline::RouterMode,
+        pipeline::{RouterMode, SingleIn},
         transports::event_plane::EventScope,
     };
 
     use crate::model_card::ModelDeploymentCard;
     use crate::{
         discovery::{KvEventSource, KvSourceStatus},
+        external_speculation::{SpeculationChooser, SpeculationSelection},
         local_model::runtime_config::ModelRuntimeConfig,
+        model_type::ModelType,
+        protocols::{
+            common::preprocessor::PreprocessedRequest,
+            external_speculation::DraftTransportDescriptorV1,
+        },
+        worker_role::{ExternalDraftBinding, WorkerRole},
+        worker_type::WorkerType,
     };
 
     fn make_worker_set(namespace: &str, mdcsum: &str) -> WorkerSet {
@@ -2630,6 +3142,100 @@ mod tests {
             mdcsum.to_string(),
             ModelDeploymentCard::default(),
         )
+    }
+
+    struct TestSpeculationChooser;
+
+    #[async_trait::async_trait]
+    impl SpeculationChooser for TestSpeculationChooser {
+        async fn select_and_reserve(
+            &self,
+            _request_id: &str,
+            _request: &SingleIn<PreprocessedRequest>,
+            _candidates: &HashSet<WorkerWithDpRank>,
+        ) -> anyhow::Result<SpeculationSelection> {
+            unreachable!("composition tests do not route requests")
+        }
+
+        async fn release(
+            &self,
+            _request_id: &str,
+            _worker: WorkerWithDpRank,
+            _attempt: dynamo_kv_router::scheduling::AdmissionAttempt,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        fn router_mode(&self) -> RouterMode {
+            RouterMode::KV
+        }
+    }
+
+    fn speculative_target_card(draft_endpoint: EndpointId) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only("spec-target");
+        card.model_type = ModelType::Chat;
+        card.model_input = crate::model_type::ModelInput::Tokens;
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.migration_limit = 0;
+        card.worker_role = WorkerRole::SpeculativeTarget(ExternalDraftBinding {
+            endpoint: draft_endpoint,
+            protocol: "test-zmq-v1".into(),
+            router_hint_schema_version: 1,
+        });
+        card.runtime_config.data_parallel_size = 1;
+        card
+    }
+
+    fn speculative_draft_card(
+        name: &str,
+        draft_incarnation: u64,
+        _cache_incarnation: u64,
+    ) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only(name);
+        card.model_type = ModelType::empty();
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.worker_role = WorkerRole::SpeculativeDraft;
+        card.runtime_config.data_parallel_size = 1;
+        card.runtime_config.external_draft_transports.insert(
+            0,
+            DraftTransportDescriptorV1 {
+                protocol: "test-zmq-v1".into(),
+                address: format!("tcp://draft-{draft_incarnation}:50051"),
+                draft_incarnation_id: draft_incarnation,
+                orphan_cleanup_timeout_ms: 1_000,
+            },
+        );
+        card
+    }
+
+    fn external_worker_set(
+        card: &ModelDeploymentCard,
+        endpoint: EndpointId,
+        worker_id: u64,
+    ) -> (WorkerSet, String) {
+        let mut worker_set = WorkerSet::new(
+            endpoint.namespace.clone(),
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        worker_set.set_endpoint_id_for_test(endpoint.clone());
+        if matches!(card.worker_role, WorkerRole::SpeculativeTarget(_)) {
+            worker_set.mark_external_speculation_router_active();
+        }
+        if !card.worker_role.is_standard() {
+            worker_set.set_speculation_chooser(Arc::new(TestSpeculationChooser));
+        }
+        let (_instances_tx, instances_rx) = tokio::sync::watch::channel(vec![worker_id]);
+        worker_set.set_instance_watcher(instances_rx);
+        let path = ModelCardInstanceId {
+            namespace: endpoint.namespace,
+            component: endpoint.component,
+            endpoint: endpoint.name,
+            instance_id: worker_id,
+            model_suffix: None,
+        }
+        .to_path();
+        (worker_set, path)
     }
 
     fn insert_runtime_configs(
@@ -3327,6 +3933,287 @@ mod tests {
         assert!(manager.get_model("committed").is_none());
         assert!(manager.get_model("alias").is_none());
         assert_eq!(manager.resolve_canonical_name("alias"), "alias");
+    }
+
+    #[test]
+    fn speculative_composition_is_atomic_private_and_incarnation_fenced() {
+        let manager = ModelManager::new();
+        let target_endpoint = EndpointId::from("spec.target.generate");
+        let draft_endpoint = EndpointId::from("spec.draft.generate");
+        let target_card = speculative_target_card(draft_endpoint.clone());
+        let (target_worker_set, target_path) =
+            external_worker_set(&target_card, target_endpoint.clone(), 11);
+
+        manager
+            .commit_discovery_group(
+                "target-group",
+                "target-workers",
+                target_worker_set,
+                vec![(target_path, target_card.clone())],
+                Vec::new(),
+            )
+            .unwrap();
+
+        assert!(manager.get_committed_model("spec-target").is_none());
+        assert!(manager.get_model_cards().is_empty());
+        assert_eq!(
+            manager
+                .speculation_compositions
+                .dependent_count_for_endpoint(&draft_endpoint),
+            1
+        );
+
+        let draft_card = speculative_draft_card("spec-draft-a", 201, 301);
+        let (draft_worker_set, draft_path) =
+            external_worker_set(&draft_card, draft_endpoint.clone(), 21);
+        manager
+            .commit_discovery_group(
+                "draft-group-a",
+                "draft-workers-a",
+                draft_worker_set,
+                vec![(draft_path, draft_card)],
+                Vec::new(),
+            )
+            .unwrap();
+
+        let target_worker_set = manager
+            .get_committed_model("spec-target")
+            .and_then(|model| model.get_worker_set("target-workers"))
+            .expect("complete composition must publish the target");
+        assert!(manager.get_committed_model("spec-draft-a").is_none());
+        assert_eq!(manager.get_model_cards().len(), 1);
+        assert!(manager.speculation_compositions.is_ready("target-group"));
+        let first = target_worker_set
+            .speculation_composition()
+            .expect("published target must retain its composition");
+        assert!(first.target_workers.contains(&WorkerWithDpRank::new(11, 0)));
+        assert_eq!(
+            first
+                .draft_transports
+                .get(&WorkerWithDpRank::new(21, 0))
+                .unwrap()
+                .draft_incarnation_id,
+            201
+        );
+
+        let overlapping_card = speculative_draft_card("spec-draft-b", 202, 302);
+        let (overlapping_worker_set, overlapping_path) =
+            external_worker_set(&overlapping_card, draft_endpoint.clone(), 22);
+        manager
+            .commit_discovery_group(
+                "draft-group-b",
+                "draft-workers-b",
+                overlapping_worker_set,
+                vec![(overlapping_path, overlapping_card)],
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(manager.get_committed_model("spec-target").is_none());
+        assert!(target_worker_set.speculation_composition().is_none());
+        assert_eq!(
+            manager
+                .speculation_compositions
+                .group_count_for_endpoint(&draft_endpoint),
+            2
+        );
+
+        manager.remove_discovery_group("draft-group-a").unwrap();
+        let replacement = manager
+            .get_committed_model("spec-target")
+            .and_then(|model| model.get_worker_set("target-workers"))
+            .and_then(|worker_set| worker_set.speculation_composition())
+            .expect("one unambiguous replacement draft must restore readiness");
+        assert_eq!(
+            replacement
+                .draft_transports
+                .get(&WorkerWithDpRank::new(22, 0))
+                .unwrap()
+                .draft_incarnation_id,
+            202
+        );
+    }
+
+    #[test]
+    fn speculative_group_replacement_rejects_binding_changes() {
+        let manager = ModelManager::new();
+        let target_endpoint = EndpointId::from("spec.target.generate");
+        let draft_endpoint = EndpointId::from("spec.draft.generate");
+        let target_card = speculative_target_card(draft_endpoint);
+        let (target_worker_set, target_path) =
+            external_worker_set(&target_card, target_endpoint, 11);
+        manager
+            .commit_discovery_group(
+                "target-group",
+                "target-workers",
+                target_worker_set,
+                vec![(target_path.clone(), target_card.clone())],
+                Vec::new(),
+            )
+            .unwrap();
+
+        let mut changed = target_card;
+        let WorkerRole::SpeculativeTarget(binding) = &mut changed.worker_role else {
+            unreachable!();
+        };
+        binding.endpoint = EndpointId::from("spec.other-draft.generate");
+
+        assert!(
+            manager
+                .replace_discovery_group("target-group", vec![(target_path, changed)], Vec::new(),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ambiguous_rank_is_excluded_without_hiding_healthy_ranks() {
+        let manager = ModelManager::new();
+
+        let target_endpoint = EndpointId::from("spec.target.generate");
+        let draft_endpoint = EndpointId::from("spec.draft.generate");
+        let target_card = speculative_target_card(draft_endpoint.clone());
+        let (target_worker_set, target_path) =
+            external_worker_set(&target_card, target_endpoint, 11);
+        manager
+            .commit_discovery_group(
+                "target-group",
+                "target-workers",
+                target_worker_set,
+                vec![(target_path, target_card)],
+                Vec::new(),
+            )
+            .unwrap();
+
+        let healthy = speculative_draft_card("spec-draft", 201, 301);
+        let first_overlap = speculative_draft_card("spec-draft", 202, 302);
+        let second_overlap = speculative_draft_card("spec-draft", 203, 303);
+        let mut draft_worker_set = WorkerSet::new(
+            draft_endpoint.namespace.clone(),
+            healthy.mdcsum().to_string(),
+            healthy.clone(),
+        );
+        draft_worker_set.set_endpoint_id_for_test(draft_endpoint.clone());
+        draft_worker_set.set_speculation_chooser(Arc::new(TestSpeculationChooser));
+        let (_instances_tx, instances_rx) = tokio::sync::watch::channel(vec![21, 22]);
+        draft_worker_set.set_instance_watcher(instances_rx);
+        let path = |worker_id, model_suffix| {
+            ModelCardInstanceId {
+                namespace: draft_endpoint.namespace.clone(),
+                component: draft_endpoint.component.clone(),
+                endpoint: draft_endpoint.name.clone(),
+                instance_id: worker_id,
+                model_suffix,
+            }
+            .to_path()
+        };
+
+        manager
+            .commit_discovery_group(
+                "draft-group",
+                "draft-workers",
+                draft_worker_set,
+                vec![
+                    (path(21, None), healthy),
+                    (path(22, None), first_overlap),
+                    (path(22, Some("overlap".into())), second_overlap),
+                ],
+                Vec::new(),
+            )
+            .unwrap();
+
+        let composition = manager
+            .get_committed_model("spec-target")
+            .and_then(|model| model.get_worker_set("target-workers"))
+            .and_then(|worker_set| worker_set.speculation_composition())
+            .expect("the healthy draft rank must keep the composition ready");
+        assert_eq!(composition.draft_transports.len(), 1);
+        assert!(
+            composition
+                .draft_transports
+                .contains_key(&WorkerWithDpRank::new(21, 0))
+        );
+    }
+
+    #[test]
+    fn standard_endpoint_collisions_invalidate_only_bound_targets() {
+        let manager = ModelManager::new();
+
+        let target_endpoint = EndpointId::from("spec.target.generate");
+        let draft_endpoint = EndpointId::from("spec.draft.generate");
+        let target_card = speculative_target_card(draft_endpoint.clone());
+        let (target_worker_set, target_path) =
+            external_worker_set(&target_card, target_endpoint, 11);
+        manager
+            .commit_discovery_group(
+                "target-group",
+                "target-workers",
+                target_worker_set,
+                vec![(target_path, target_card)],
+                Vec::new(),
+            )
+            .unwrap();
+        let draft_card = speculative_draft_card("spec-draft", 201, 301);
+        let (draft_worker_set, draft_path) =
+            external_worker_set(&draft_card, draft_endpoint.clone(), 21);
+        manager
+            .commit_discovery_group(
+                "draft-group",
+                "draft-workers",
+                draft_worker_set,
+                vec![(draft_path, draft_card)],
+                Vec::new(),
+            )
+            .unwrap();
+        let ready_before = manager
+            .get_committed_model("spec-target")
+            .and_then(|model| model.get_worker_set("target-workers"))
+            .and_then(|worker_set| worker_set.speculation_composition())
+            .expect("target must be ready before unrelated discovery changes");
+
+        let unrelated_endpoint = EndpointId::from("other.standard.generate");
+        let unrelated_card = ModelDeploymentCard::with_name_only("unrelated-standard");
+        let (unrelated_worker_set, unrelated_path) =
+            external_worker_set(&unrelated_card, unrelated_endpoint, 31);
+        manager
+            .commit_discovery_group(
+                "unrelated-group",
+                "unrelated-workers",
+                unrelated_worker_set,
+                vec![(unrelated_path, unrelated_card)],
+                Vec::new(),
+            )
+            .unwrap();
+        let ready_after = manager
+            .get_committed_model("spec-target")
+            .and_then(|model| model.get_worker_set("target-workers"))
+            .and_then(|worker_set| worker_set.speculation_composition())
+            .expect("unrelated endpoint must not unpublish the target");
+        assert!(Arc::ptr_eq(&ready_before, &ready_after));
+
+        let collision_card = ModelDeploymentCard::with_name_only("standard-collision");
+        let (collision_worker_set, collision_path) =
+            external_worker_set(&collision_card, draft_endpoint, 32);
+        manager
+            .commit_discovery_group(
+                "collision-group",
+                "collision-workers",
+                collision_worker_set,
+                vec![(collision_path, collision_card)],
+                Vec::new(),
+            )
+            .unwrap();
+        assert!(manager.get_committed_model("spec-target").is_none());
+        assert!(!manager.speculation_compositions.is_ready("target-group"));
+
+        manager.remove_discovery_group("collision-group").unwrap();
+        assert!(
+            manager
+                .get_committed_model("spec-target")
+                .and_then(|model| model.get_worker_set("target-workers"))
+                .and_then(|worker_set| worker_set.speculation_composition())
+                .is_some(),
+            "removing the endpoint collision must restore the target"
+        );
+        assert!(manager.get_committed_model("unrelated-standard").is_some());
     }
 
     #[test]

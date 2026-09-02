@@ -170,7 +170,16 @@ where
         request: &SingleIn<PreprocessedRequest>,
         target_constraint: Option<AffinityTarget>,
         affinity_target: Option<AffinityTarget>,
+        candidate_worker_ids: Option<&[u64]>,
     ) -> Result<HostedSelection, Error> {
+        anyhow::ensure!(
+            target_constraint.is_none() || candidate_worker_ids.is_none(),
+            "target constraints and candidate subsets are mutually exclusive"
+        );
+        anyhow::ensure!(
+            affinity_target.is_none() || candidate_worker_ids.is_none(),
+            "affinity targets and candidate subsets are mutually exclusive"
+        );
         let preferred_worker = || match affinity_target {
             Some(target) => self.inner.with_selectable_worker_ids(|ids| {
                 ids.binary_search(&target.worker_id)
@@ -210,6 +219,7 @@ where
                         target_constraint
                             .map(|target| target.worker_id)
                             .or(preferred_worker),
+                        candidate_worker_ids,
                     )?;
                     Ok(HostedSelection {
                         initial_worker: selection.worker_id,
@@ -225,10 +235,19 @@ where
                             self.inner.ensure_routable(target.worker_id)?;
                             target.worker_id
                         }
-                        None => self.inner.with_selectable_worker_ids(|ids| {
-                            if let Some(worker_id) = preferred_worker {
-                                Ok(worker_id)
-                            } else {
+                        None => match (preferred_worker, candidate_worker_ids) {
+                            (Some(worker_id), _) => worker_id,
+                            (None, Some(candidates)) => {
+                                selector
+                                    .select_worker(
+                                        dynamo_kv_router::selector::WorkerSelectionInput::hosted(
+                                            candidates, None,
+                                        ),
+                                    )?
+                                    .worker
+                                    .worker_id
+                            }
+                            (None, None) => self.inner.with_selectable_worker_ids(|ids| {
                                 selector
                                     .select_worker(
                                         dynamo_kv_router::selector::WorkerSelectionInput::hosted(
@@ -236,8 +255,8 @@ where
                                         ),
                                     )
                                     .map(|selection| selection.worker.worker_id)
-                            }
-                        })??,
+                            })??,
+                        },
                     };
                     Ok(HostedSelection {
                         initial_worker: worker_id,
@@ -251,12 +270,25 @@ where
             }
             RoutingPolicy::DeviceAwareWeighted => {
                 let preferred_worker = preferred_worker()?;
-                let selection = self.inner.select_device_aware_and_reserve(
-                    request.content(),
-                    target_constraint
-                        .map(|target| target.worker_id)
-                        .or(preferred_worker),
-                )?;
+                let pinned_worker = target_constraint
+                    .map(|target| target.worker_id)
+                    .or(preferred_worker);
+                let selection = match pinned_worker {
+                    Some(worker_id) => self
+                        .inner
+                        .select_device_aware_and_reserve(request.content(), Some(worker_id))?,
+                    None => match candidate_worker_ids {
+                        Some(candidates) => {
+                            self.inner.select_device_aware_from_candidates_and_reserve(
+                                request.content(),
+                                candidates,
+                            )?
+                        }
+                        None => self
+                            .inner
+                            .select_device_aware_and_reserve(request.content(), None)?,
+                    },
+                };
                 let initial_worker = selection.worker_id();
                 let candidate_count = selection.candidate_count();
                 let selected_occupancy = Some(selection.load());
@@ -275,6 +307,43 @@ where
                 })
             }
         }
+    }
+
+    /// Select one worker with the configured ordinary policy without dispatching it.
+    ///
+    /// External speculative routing must choose its target and draft independently before it
+    /// can exact-dispatch the target. The returned occupancy reservation keeps load-aware policy
+    /// accounting live until that paired request finishes or rolls back.
+    pub(crate) fn select_for_external_speculation(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        candidates: &HashSet<WorkerWithDpRank>,
+    ) -> Result<(u64, Option<dynamo_runtime::pipeline::OccupancyReservation>), Error> {
+        anyhow::ensure!(
+            matches!(
+                &self.policy,
+                RoutingPolicy::Builtin(_) | RoutingPolicy::DeviceAwareWeighted
+            ),
+            "external speculation requires an ordinary selecting router policy"
+        );
+        let candidate_worker_ids = self.inner.with_selectable_worker_ids(|selectable| {
+            selectable
+                .iter()
+                .copied()
+                .filter(|worker_id| {
+                    candidates
+                        .iter()
+                        .any(|worker| worker.worker_id == *worker_id)
+                })
+                .collect::<Vec<_>>()
+        })?;
+        anyhow::ensure!(
+            !candidate_worker_ids.is_empty(),
+            "no committed speculative workers are currently selectable"
+        );
+        let selection =
+            self.select_hosted_worker(request, None, None, Some(&candidate_worker_ids))?;
+        Ok((selection.initial_worker, selection.occupancy_reservation))
     }
 
     pub(super) async fn select_and_dispatch_builtin<M, F>(
@@ -329,7 +398,7 @@ where
                     (None, SessionAffinityMode::Soft) => target,
                     _ => None,
                 };
-                ready(self.select_hosted_worker(&request, pinned_target, affinity_target))
+                ready(self.select_hosted_worker(&request, pinned_target, affinity_target, None))
             })
             .await?
         };

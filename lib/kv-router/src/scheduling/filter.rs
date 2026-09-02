@@ -37,6 +37,7 @@ pub enum WorkerEligibilityError {
 #[derive(Clone, Copy)]
 pub struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
+    allowed_workers: Option<&'a HashSet<WorkerWithDpRank>>,
     overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
     available_worker_ids: Option<&'a HashSet<WorkerId>>,
     pinned_worker: Option<WorkerWithDpRank>,
@@ -54,6 +55,7 @@ impl<'a> RoutingEligibility<'a> {
     ) -> Self {
         Self {
             allowed_worker_ids,
+            allowed_workers: None,
             overloaded_worker_ids,
             available_worker_ids: None,
             pinned_worker,
@@ -65,6 +67,16 @@ impl<'a> RoutingEligibility<'a> {
     #[inline]
     pub(crate) fn with_affinity_target(mut self, target: WorkerAffinityTarget) -> Self {
         self.affinity_target = Some(target);
+        self
+    }
+
+    /// Restrict eligibility to exact worker/rank pairs in addition to worker-level filters.
+    #[inline]
+    pub(crate) fn with_allowed_workers(
+        mut self,
+        allowed_workers: Option<&'a HashSet<WorkerWithDpRank>>,
+    ) -> Self {
+        self.allowed_workers = allowed_workers;
         self
     }
 
@@ -108,6 +120,23 @@ impl<'a> RoutingEligibility<'a> {
     }
 
     #[inline]
+    pub(crate) fn caller_allows_worker(&self, worker: WorkerWithDpRank) -> bool {
+        self.caller_allows_worker_id(worker.worker_id)
+            && self
+                .allowed_workers
+                .is_none_or(|workers| workers.contains(&worker))
+    }
+
+    #[inline]
+    fn caller_allows_any_rank<C: WorkerConfigLike>(&self, worker_id: WorkerId, config: &C) -> bool {
+        self.allowed_workers.is_none_or(|workers| {
+            let start = config.data_parallel_start_rank();
+            let end = start + config.data_parallel_size();
+            (start..end).any(|dp_rank| workers.contains(&WorkerWithDpRank::new(worker_id, dp_rank)))
+        })
+    }
+
+    #[inline]
     pub fn is_worker_overloaded(&self, worker_id: WorkerId) -> bool {
         self.overloaded_worker_ids
             .is_some_and(|worker_ids| worker_ids.contains(&worker_id))
@@ -127,6 +156,7 @@ impl<'a> RoutingEligibility<'a> {
         config: &C,
     ) -> bool {
         self.matches_worker_id_constraints(worker_id)
+            && self.caller_allows_any_rank(worker_id, config)
             && self.is_worker_available(worker_id)
             && self
                 .routing_constraints
@@ -135,10 +165,8 @@ impl<'a> RoutingEligibility<'a> {
 
     #[inline]
     pub fn allows_worker<C: WorkerConfigLike>(&self, worker_id: WorkerId, config: &C) -> bool {
-        self.allows_worker_id(worker_id)
-            && self
-                .routing_constraints
-                .is_compatible_with_worker_taints(config.taints())
+        self.allows_worker_ignoring_overload(worker_id, config)
+            && !self.is_worker_overloaded(worker_id)
     }
 
     #[inline]
@@ -204,6 +232,11 @@ impl<'a> RoutingEligibility<'a> {
         }
 
         let config = worker_config_for_rank(workers, worker)?;
+        if !self.caller_allows_worker(worker) {
+            return Err(WorkerEligibilityError::WorkerNotAllowed {
+                worker_id: worker.worker_id,
+            });
+        }
         if !self
             .routing_constraints
             .is_compatible_with_worker_taints(config.taints())
@@ -249,11 +282,14 @@ impl<'a> RoutingEligibility<'a> {
             let dp_start = config.data_parallel_start_rank();
             let dp_end = dp_start + config.data_parallel_size();
             if let Some(dp_rank) = target.dp_rank {
+                let worker = WorkerWithDpRank::new(target.worker_id, dp_rank);
                 return (dp_start..dp_end).contains(&dp_rank)
-                    && predicate(WorkerWithDpRank::new(target.worker_id, dp_rank), config);
+                    && self.caller_allows_worker(worker)
+                    && predicate(worker, config);
             }
             for dp_rank in dp_start..dp_end {
-                if predicate(WorkerWithDpRank::new(target.worker_id, dp_rank), config) {
+                let worker = WorkerWithDpRank::new(target.worker_id, dp_rank);
+                if self.caller_allows_worker(worker) && predicate(worker, config) {
                     return true;
                 }
             }
@@ -268,7 +304,8 @@ impl<'a> RoutingEligibility<'a> {
             let dp_start = config.data_parallel_start_rank();
             let dp_end = dp_start + config.data_parallel_size();
             for dp_rank in dp_start..dp_end {
-                if predicate(WorkerWithDpRank::new(worker_id, dp_rank), config) {
+                let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+                if self.caller_allows_worker(worker) && predicate(worker, config) {
                     return true;
                 }
             }
@@ -288,11 +325,17 @@ impl<'a> RoutingEligibility<'a> {
         if !self.allows_worker(target.worker_id, config) {
             return false;
         }
-        let ranks = config.data_parallel_start_rank()
-            ..config.data_parallel_start_rank() + config.data_parallel_size();
-        target
-            .dp_rank
-            .map_or(!ranks.is_empty(), |rank| ranks.contains(&rank))
+        let start = config.data_parallel_start_rank();
+        let end = start + config.data_parallel_size();
+        match target.dp_rank {
+            Some(rank) => {
+                let worker = WorkerWithDpRank::new(target.worker_id, rank);
+                (start..end).contains(&rank) && self.caller_allows_worker(worker)
+            }
+            None => (start..end).any(|rank| {
+                self.caller_allows_worker(WorkerWithDpRank::new(target.worker_id, rank))
+            }),
+        }
     }
 
     pub fn for_each_eligible_worker_rank<C, F>(&self, workers: &HashMap<WorkerId, C>, mut visit: F)
@@ -312,7 +355,9 @@ impl<'a> RoutingEligibility<'a> {
             return Ok(());
         };
 
-        if self.matches_worker_id_constraints(pinned_worker.worker_id) {
+        if self.matches_worker_id_constraints(pinned_worker.worker_id)
+            && self.caller_allows_worker(pinned_worker)
+        {
             return Ok(());
         }
 
@@ -598,6 +643,28 @@ mod tests {
                 WorkerWithDpRank::new(7, 4),
             ]
         );
+    }
+
+    #[test]
+    fn routing_eligibility_restricts_selection_to_exact_worker_ranks() {
+        let workers = workers();
+        let allowed_ids = HashSet::from([7]);
+        let allowed_workers = HashSet::from([WorkerWithDpRank::new(7, 3)]);
+        let constraints = RoutingConstraints::default();
+        let eligibility = RoutingEligibility::new(Some(&allowed_ids), None, None, &constraints)
+            .with_allowed_workers(Some(&allowed_workers));
+        let mut ranks = Vec::new();
+
+        eligibility.for_each_eligible_worker_rank(&workers, |worker, _| ranks.push(worker));
+
+        assert_eq!(ranks, vec![WorkerWithDpRank::new(7, 3)]);
+        assert_eq!(
+            eligibility
+                .validate_worker_rank(&workers, WorkerWithDpRank::new(7, 2))
+                .err(),
+            Some(WorkerEligibilityError::WorkerNotAllowed { worker_id: 7 })
+        );
+        assert!(eligibility.has_eligible_worker(workers.iter().map(|(&id, config)| (id, config))));
     }
 
     #[test]

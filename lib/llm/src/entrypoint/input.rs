@@ -14,8 +14,10 @@ use std::{
 };
 
 mod common;
-pub(crate) use common::build_preprocessed_routing_with_selector;
 pub use common::{PreprocessedRouting, build_preprocessed_routing};
+pub(crate) use common::{
+    build_external_speculation_routing_with_selector, build_preprocessed_routing_with_selector,
+};
 pub mod endpoint;
 pub mod grpc;
 pub mod http;

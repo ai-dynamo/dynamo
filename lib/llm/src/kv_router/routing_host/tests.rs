@@ -31,6 +31,7 @@ use tokio::sync::watch;
 
 use super::*;
 use crate::{
+    external_speculation::{PolicySpeculationChooser, SpeculationChooser, SpeculationPool},
     http::service::metrics::Metrics,
     kv_router::RoutingLoadContext,
     local_model::runtime_config::ModelRuntimeConfig,
@@ -136,7 +137,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
         .hosted_occupancy
         .as_ref()
         .unwrap()
-        .select_and_reserve(&host.inner, selector, Some(1))
+        .select_and_reserve(&host.inner, selector, Some(1), None)
         .unwrap();
     assert_eq!(selection.worker_id, 1);
     assert_eq!(selection.occupancy, 1);
@@ -181,10 +182,10 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
     };
     let occupancy = host.hosted_occupancy.as_ref().unwrap();
     let first = occupancy
-        .select_and_reserve(&host.inner, selector, Some(1))
+        .select_and_reserve(&host.inner, selector, Some(1), None)
         .unwrap();
     let second = occupancy
-        .select_and_reserve(&host.inner, selector, None)
+        .select_and_reserve(&host.inner, selector, None, None)
         .unwrap();
 
     assert_eq!(first.worker_id, 1);
@@ -195,6 +196,148 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
     drop(second);
     drop(first);
     drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn external_speculation_target_honors_committed_candidates_and_request_allowlist() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("external-speculation-candidates".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap();
+    let candidates = HashSet::from([WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(2, 0)]);
+
+    for (index, mode) in [
+        RouterMode::RoundRobin,
+        RouterMode::Random,
+        RouterMode::PowerOfTwoChoices,
+        RouterMode::LeastLoaded,
+        RouterMode::DeviceAwareWeighted,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let endpoint = component.endpoint(format!("mode-{index}"));
+        let client = endpoint.client().await.unwrap();
+        let load_context = test_load_context(&client).await;
+        let inner = PushRouter::from_client(client.clone(), mode).await.unwrap();
+        client.override_discovered_instances(vec![1, 2]);
+        client.override_instance_avail(vec![1, 2]);
+        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+        let mut input = request();
+        input.routing_mut().allowed_worker_ids = Some(HashSet::from([2]));
+        let request = Context::new(input);
+        let chooser = PolicySpeculationChooser::new(host, SpeculationPool::Target);
+
+        let selection = chooser
+            .select_and_reserve("target", &request, &candidates)
+            .await
+            .unwrap();
+        assert_eq!(
+            selection.worker,
+            WorkerWithDpRank::new(2, 0),
+            "mode={mode:?}"
+        );
+        assert_eq!(
+            selection.occupancy.is_some(),
+            mode.requires_occupancy(),
+            "mode={mode:?}"
+        );
+        drop(selection);
+    }
+
+    let endpoint = component.endpoint("direct");
+    let client = endpoint.client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    let inner = PushRouter::from_client(client, RouterMode::Direct)
+        .await
+        .unwrap();
+    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+    assert!(
+        host.select_for_external_speculation(&Context::new(request()), &candidates)
+            .is_err()
+    );
+
+    drop(host);
+    runtime.shutdown();
+}
+
+#[tokio::test]
+async fn external_speculation_round_robin_choosers_advance_independently() {
+    let runtime = Runtime::from_current().unwrap();
+    let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
+        .await
+        .unwrap();
+    let component = distributed
+        .namespace("external-speculation-independent-choosers".to_string())
+        .unwrap()
+        .component("workers".to_string())
+        .unwrap();
+    let candidates = HashSet::from([WorkerWithDpRank::new(1, 0), WorkerWithDpRank::new(2, 0)]);
+    let client = component.endpoint("generate").client().await.unwrap();
+    let load_context = test_load_context(&client).await;
+    let target_router = PushRouter::from_client(client.clone(), RouterMode::RoundRobin)
+        .await
+        .unwrap();
+    let draft_router = PushRouter::from_client(client.clone(), RouterMode::RoundRobin)
+        .await
+        .unwrap();
+    client.override_discovered_instances(vec![1, 2]);
+    client.override_instance_avail(vec![1, 2]);
+    let target = PolicySpeculationChooser::new(
+        RoutingHost::<DefaultWorkerSelector>::new_builtin(target_router, load_context.clone())
+            .unwrap(),
+        SpeculationPool::Target,
+    );
+    let draft = PolicySpeculationChooser::new(
+        RoutingHost::<DefaultWorkerSelector>::new_builtin(draft_router, load_context).unwrap(),
+        SpeculationPool::Draft,
+    );
+
+    let request_context = Context::new(request());
+    assert_eq!(
+        target
+            .select_and_reserve("target-1", &request_context, &candidates)
+            .await
+            .unwrap()
+            .worker,
+        WorkerWithDpRank::new(1, 0)
+    );
+    assert_eq!(
+        target
+            .select_and_reserve("target-2", &request_context, &candidates)
+            .await
+            .unwrap()
+            .worker,
+        WorkerWithDpRank::new(2, 0)
+    );
+    assert_eq!(
+        draft
+            .select_and_reserve("draft-1", &request_context, &candidates)
+            .await
+            .unwrap()
+            .worker,
+        WorkerWithDpRank::new(1, 0)
+    );
+
+    let mut constrained_input = request();
+    constrained_input.routing_mut().allowed_worker_ids = Some(HashSet::from([2]));
+    let constrained_request = Context::new(constrained_input);
+    let draft_candidates = HashSet::from([WorkerWithDpRank::new(1, 0)]);
+    assert_eq!(
+        draft
+            .select_and_reserve("draft-2", &constrained_request, &draft_candidates)
+            .await
+            .unwrap()
+            .worker,
+        WorkerWithDpRank::new(1, 0)
+    );
+
     runtime.shutdown();
 }
 
@@ -568,10 +711,20 @@ async fn builtin_hard_affinity_ignores_overload_while_soft_affinity_falls_back()
     let request = Context::new(request());
 
     let hard = host
-        .select_hosted_worker(&request, Some(AffinityTarget::worker(worker_id)), None)
+        .select_hosted_worker(
+            &request,
+            Some(AffinityTarget::worker(worker_id)),
+            None,
+            None,
+        )
         .unwrap();
     let soft = host
-        .select_hosted_worker(&request, None, Some(AffinityTarget::worker(worker_id)))
+        .select_hosted_worker(
+            &request,
+            None,
+            Some(AffinityTarget::worker(worker_id)),
+            None,
+        )
         .unwrap();
 
     assert_eq!(hard.initial_worker, worker_id);

@@ -12,6 +12,7 @@ use crate::{
     discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
+    external_speculation::{ExternalSpeculationRouter, SpeculationCompositionSnapshot},
     http::service::metrics::Metrics,
     kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{
@@ -34,6 +35,7 @@ use crate::{
     },
 };
 
+use arc_swap::ArcSwapOption;
 use dynamo_kv_router::{
     config::min_initial_workers_from_env,
     selector::{DefaultWorkerSelector, WorkerSelector},
@@ -48,6 +50,7 @@ use dynamo_runtime::{
     },
 };
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
@@ -60,6 +63,7 @@ where
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     prefill_router: Arc<PrefillRouter<Sel>>,
     encoder_router: Arc<EncoderRouter>,
+    external_speculation: bool,
 }
 
 pub struct PreparedEngine {
@@ -330,7 +334,52 @@ where
         backend_engine,
         prefill_router,
         encoder_router,
+        external_speculation: false,
     })
+}
+
+pub(crate) async fn build_external_speculation_routing_with_selector<Sel>(
+    client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
+    composition: Arc<ArcSwapOption<SpeculationCompositionSnapshot>>,
+    cancellation: CancellationToken,
+) -> anyhow::Result<PreprocessedRouting<Sel>>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
+    let min_initial_workers = min_initial_workers_from_env()?;
+    wait_for_min_initial_workers(client, min_initial_workers).await?;
+    let router = ExternalSpeculationRouter::new(client.clone(), composition, cancellation).await?;
+    let backend_engine: ServiceEngine<
+        SingleIn<PreprocessedRequest>,
+        ManyOut<Annotated<LLMEngineOutput>>,
+    > = Arc::new(router);
+    Ok(PreprocessedRouting {
+        backend_engine,
+        prefill_router: PrefillRouter::<Sel>::disabled_with_selector(
+            model_manager,
+            RouterMode::Direct,
+            None,
+            SessionAffinityMode::Hard,
+        ),
+        encoder_router: EncoderRouter::disabled(),
+        external_speculation: true,
+    })
+}
+
+fn validate_external_speculation_migration_config(
+    migration_limit: u32,
+    migration_max_seq_len: Option<u32>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        migration_limit == 0,
+        "external speculative decoding does not support request migration"
+    );
+    anyhow::ensure!(
+        migration_max_seq_len.is_none(),
+        "external speculative decoding does not support migration-specific configuration"
+    );
+    Ok(())
 }
 
 /// Turns an EngineConfig into an OpenAI chat-completions and completions supported StreamingEngine.
@@ -507,6 +556,20 @@ where
                 Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
             >,
     {
+        if self.external_speculation {
+            validate_external_speculation_migration_config(migration_limit, migration_max_seq_len)?;
+            let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
+            let preprocessor_op = preprocessor.into_operator();
+            let token_backend = Backend::from_tokenizer(tokenizer).into_operator();
+            let backend = ServiceBackend::from_engine(self.backend_engine.clone());
+            return Ok(frontend
+                .link(preprocessor_op.forward_edge())?
+                .link(token_backend.forward_edge())?
+                .link(backend)?
+                .link(token_backend.backward_edge())?
+                .link(preprocessor_op.backward_edge())?
+                .link_terminal(frontend)?);
+        }
         let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
         let preprocessor_op = preprocessor.into_operator();
         let token_backend = Backend::from_tokenizer(tokenizer).into_operator();
@@ -544,6 +607,15 @@ where
     ) -> anyhow::Result<
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
     > {
+        if self.external_speculation {
+            validate_external_speculation_migration_config(migration_limit, migration_max_seq_len)?;
+            let frontend = SegmentSource::<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<LLMEngineOutput>>,
+            >::new();
+            let backend = ServiceBackend::from_engine(self.backend_engine.clone());
+            return Ok(frontend.link(backend)?.link_terminal(frontend)?);
+        }
         let frontend = SegmentSource::<
             SingleIn<PreprocessedRequest>,
             ManyOut<Annotated<LLMEngineOutput>>,
@@ -571,6 +643,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_speculation_rejects_every_migration_setting() {
+        assert!(validate_external_speculation_migration_config(0, None).is_ok());
+        assert!(validate_external_speculation_migration_config(1, None).is_err());
+        assert!(validate_external_speculation_migration_config(0, Some(1)).is_err());
+        assert!(validate_external_speculation_migration_config(1, Some(1)).is_err());
+    }
 
     #[test]
     fn test_validate_router_mode_for_lora() {

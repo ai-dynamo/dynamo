@@ -75,6 +75,27 @@ impl HttpFrontend {
         distributed_runtime: DistributedRuntime,
         engine_config: EngineConfig,
     ) -> anyhow::Result<()> {
+        self.run_inner(distributed_runtime, engine_config, None)
+            .await
+    }
+
+    /// Run the frontend on a caller-provided pre-bound listener until it exits.
+    pub async fn run_with_listener(
+        self,
+        distributed_runtime: DistributedRuntime,
+        engine_config: EngineConfig,
+        listener: tokio::net::TcpListener,
+    ) -> anyhow::Result<()> {
+        self.run_inner(distributed_runtime, engine_config, Some(listener))
+            .await
+    }
+
+    async fn run_inner(
+        self,
+        distributed_runtime: DistributedRuntime,
+        engine_config: EngineConfig,
+        listener: Option<tokio::net::TcpListener>,
+    ) -> anyhow::Result<()> {
         if self.worker_selection_policy_factory.is_some()
             && !matches!(&engine_config, EngineConfig::Dynamic { .. })
         {
@@ -91,6 +112,7 @@ impl HttpFrontend {
                     self.frontend_route_extensions,
                     true,
                     factory,
+                    listener,
                 )
                 .await
             }
@@ -106,6 +128,7 @@ impl HttpFrontend {
                             worker_type.default_selector_label(),
                         )
                     }),
+                    listener,
                 )
                 .await
             }
@@ -141,6 +164,7 @@ async fn run_with_worker_selector_factory<Sel>(
     frontend_route_extensions: Vec<FrontendRouteExtension>,
     require_typed_worker_role: bool,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    listener: Option<tokio::net::TcpListener>,
 ) -> anyhow::Result<()>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
@@ -284,9 +308,18 @@ where
             .collect::<Vec<String>>()
     );
 
-    http_service
-        .run(distributed_runtime.primary_token())
-        .await?;
+    match listener {
+        Some(listener) => {
+            http_service
+                .run_with_listener(distributed_runtime.primary_token(), listener)
+                .await?;
+        }
+        None => {
+            http_service
+                .run(distributed_runtime.primary_token())
+                .await?;
+        }
+    }
 
     distributed_runtime.shutdown(); // Cancel primary token
     Ok(())
