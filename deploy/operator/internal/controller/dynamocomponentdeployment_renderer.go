@@ -411,9 +411,19 @@ func isSynthesizedLeaderCliqueTerm(term corev1.PodAffinityTerm) bool {
 // advertises an NVLink partition.
 //
 // Until a leader pod is scheduled there is nothing to compare against, so the answer is
-// "not yet" and the term is dropped. That is self-correcting: the follower rests at zero
-// replicas, and every reconcile re-renders it, so once the leader is placed on a labelled
-// node a later reconcile restores the affinity before anything scales the follower up.
+// "not yet" and the term is dropped.
+//
+// Recovery is not prompt. Nothing watches the leader's pods on the follower's behalf, and
+// the rendered Deployment is rewritten only when the follower's own DCD spec changes, on
+// the cache resync, or when the operator restarts. A term dropped during the window before
+// the leader is scheduled therefore persists well past the moment it could be satisfied.
+// Verified on dynamo-aws-gb300: with the leader already placed on a labelled node,
+// annotating the DGD and annotating the DCD both left the term absent, and only an operator
+// restart restored it.
+//
+// Latent today, because the follower rests at zero replicas and nothing scales it. A future
+// scaler must not assume this affinity is current -- re-render before scaling up, or watch
+// the leader's pods.
 func (r *dcdWorkloadRenderer) leaderHasNVLinkDomain(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
