@@ -17,7 +17,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0@sha256:8401411dc8e968eff9310462102491509e3f93d3ce03d6febc8d5566f067a7b1
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.0
           imagePullPolicy: Always
           workingDir: /workspace
           command:

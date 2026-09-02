@@ -38,7 +38,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-f9e5a1b4111dbb0c6d24700da30557dc6503822b-vllm-runtime
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.2
               imagePullPolicy: Always
               workingDir: /workspace
               env:
@@ -109,7 +109,7 @@ spec:
                 sizeLimit: 200Gi
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-f9e5a1b4111dbb0c6d24700da30557dc6503822b-vllm-runtime
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-f9e5a1b4111dbb0c6d24700da30557dc6503822b-vllm-runtime@sha256:428a72d7d9c4e90267c931ac9e35ef8eb3949b7299a246f2e54a98ce7bfba200
               imagePullPolicy: Always
               workingDir: /workspace/examples/backends/vllm
               volumeMounts:
