@@ -3,7 +3,8 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap};
-use std::time::Instant;
+
+use tokio::time::Instant;
 
 use ordered_float::OrderedFloat;
 use rustc_hash::{FxHashMap, FxHashSet};

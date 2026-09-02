@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant as StdInstant};
+use std::time::Duration;
 
 use crossbeam_queue::SegQueue;
 use parking_lot::Mutex;
@@ -61,7 +61,7 @@ struct QueuedRequest {
     attempt_tx: Option<oneshot::Sender<AttemptId>>,
     lifecycle_transfer: Option<Arc<AdmissionLifecycleTransfer>>,
     enqueue_at: Instant,
-    due_at: Option<StdInstant>,
+    due_at: Option<Instant>,
     block_hashes: Option<Vec<LocalBlockHash>>,
 }
 
@@ -452,7 +452,7 @@ pub struct SchedulerQueue<
     slots: Arc<ActiveSequencesMultiWorker<P>>,
     workers_with_configs: watch::Receiver<HashMap<WorkerId, C>>,
     profile: PolicyProfile,
-    start_time: StdInstant,
+    start_time: Instant,
     queueing_enabled: bool,
     supports_overlap_refresh: bool,
     non_max_overlap_selection_observer: Arc<OnceLock<NonMaxOverlapSelectionObserver>>,
@@ -579,7 +579,7 @@ impl<
         let (admission_tx, admission_rx) = mpsc::channel(admission_channel_capacity);
         let cleanup = Arc::new(AdmissionCleanup::default());
         let non_max_overlap_selection_observer = Arc::new(OnceLock::new());
-        let start_time = StdInstant::now();
+        let start_time = Instant::now();
         let actor = SchedulerQueueActor {
             pending,
             cleanup: Arc::clone(&cleanup),
@@ -791,6 +791,33 @@ impl<
         }
     }
 
+    /// Test-only producer for `due_at`: nothing in this crate sets a due time
+    /// yet, but the actor-side expiry paths must stay covered until the
+    /// classifier PR lands the production producer.
+    #[cfg(test)]
+    pub(crate) async fn enqueue_with_due_at_for_test(
+        &self,
+        request: SchedulingRequest,
+        due_at: Instant,
+    ) {
+        let mut queue_metadata = self.default_queue_metadata(&request);
+        queue_metadata.due_at = Some(due_at);
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let command = AdmissionCommand::Enqueue {
+            request,
+            attempt_tx: None,
+            block_hashes: None,
+            queue_metadata,
+            lease: None,
+            ack_tx,
+        };
+        self.admission_tx
+            .send(command)
+            .await
+            .expect("scheduler queue actor gone");
+        let _ = ack_rx.await;
+    }
+
     fn default_queue_metadata(&self, request: &SchedulingRequest) -> QueueMetadata {
         let workers = self.workers_with_configs.borrow();
         let snapshot = QueueSnapshot::new(
@@ -983,7 +1010,7 @@ impl<
                 Some(due_at) => {
                     tokio::select! {
                         command = rx.recv() => command,
-                        _ = tokio::time::sleep_until(Instant::from_std(due_at)) => {
+                        _ = tokio::time::sleep_until(due_at) => {
                             self.handle_update(None).await;
                             continue;
                         }
@@ -1112,7 +1139,7 @@ impl<
         let decay_now = Instant::now();
         if queue_metadata
             .due_at
-            .is_some_and(|due_at| due_at <= decay_now.into_std())
+            .is_some_and(|due_at| due_at <= decay_now)
         {
             request.respond(Err(KvSchedulerError::DueTimeExpired));
             return false;
@@ -1183,7 +1210,7 @@ impl<
         true
     }
 
-    fn reject_expired(&mut self, now: StdInstant) {
+    fn reject_expired(&mut self, now: Instant) {
         for entry in self.pending.take_expired(now) {
             let class_index = entry.class_index();
             self.subtract_pending_counters(class_index, entry.snapshot());
@@ -1318,7 +1345,7 @@ impl<
     }
 
     async fn handle_update(&mut self, worker: Option<WorkerWithDpRank>) {
-        self.reject_expired(Instant::now().into_std());
+        self.reject_expired(Instant::now());
         if !self.pending.has_ready() {
             return;
         }
@@ -1386,7 +1413,7 @@ impl<
             .await;
             if queued
                 .due_at
-                .is_some_and(|due_at| due_at <= Instant::now().into_std())
+                .is_some_and(|due_at| due_at <= Instant::now())
             {
                     let mut request = popped.into_payload().request;
                 request.respond(Err(KvSchedulerError::DueTimeExpired));
@@ -2364,6 +2391,42 @@ mod tests {
             resp_tx: Some(tx),
         };
         (req, rx)
+    }
+
+    #[tokio::test]
+    async fn expired_due_time_is_rejected_at_enqueue() {
+        let (queue, _slots) = make_queue(1, 16, 64, Some(0.0));
+        let (request, response_rx) = make_request("expired-on-arrival", 64);
+        queue
+            .enqueue_with_due_at_for_test(request, Instant::now())
+            .await;
+        assert!(matches!(
+            response_rx.await.unwrap(),
+            Err(KvSchedulerError::DueTimeExpired)
+        ));
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn parked_request_expires_via_actor_timer() {
+        let (queue, _slots) = make_queue(1, 16, 64, Some(0.0));
+        let (active, active_rx) = make_request("active", 64);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        // The worker is busy, so the deadline-bearing request parks; the actor
+        // timer must fire at due_at and reject it without any further command.
+        let (parked, parked_rx) = make_request("parked-deadline", 64);
+        queue
+            .enqueue_with_due_at_for_test(parked, Instant::now() + Duration::from_secs(5))
+            .await;
+        assert_eq!(queue.pending_count(), 1);
+
+        assert!(matches!(
+            parked_rx.await.unwrap(),
+            Err(KvSchedulerError::DueTimeExpired)
+        ));
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[tokio::test]
