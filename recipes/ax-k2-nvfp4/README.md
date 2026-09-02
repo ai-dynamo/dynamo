@@ -19,6 +19,7 @@ independent TP4 workers behind the Dynamo KV-aware router.
 | Weight precision | NVFP4 |
 | KV-cache precision | `auto` (BF16 for this checkpoint/backend) |
 | Attention | `FLASHINFER_MLA_SPARSE` |
+| Speculative decoding | `skt/A.X-K2-EAGLE3`, EAGLE3, k=3 |
 | Routing | KV-aware, vLLM prefix-cache events, 64-token blocks |
 | Context | 262,144 tokens |
 | Reasoning parser | `deepseek_v3` |
@@ -36,6 +37,11 @@ fix as source-only patches. It deliberately excludes the native FP8 DS-MLA
 scale-writer patch and does not rebuild vLLM. This recipe keeps
 `--kv-cache-dtype auto`, so the deployment remains on the validated BF16-KV
 path and does not require that native FP8 KV-cache change.
+
+The EAGLE3 draft is revision-pinned and loaded through vLLM's real speculative
+decoder with `num_speculative_tokens=3`. This is not the synthetic-acceptance
+benchmark mode. The draft is trained for A.X-K2's 262,144-token context and
+must not be paired with a different target architecture or RoPE configuration.
 
 ## Prerequisites
 
@@ -64,7 +70,9 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
 ## Deploy
 
 Edit `model-cache/model-cache.yaml` and select a ReadWriteMany storage class,
-then create the cache and download the revision-pinned model snapshot:
+then create the cache and download the revision-pinned target and EAGLE3 draft
+snapshots. The download Job runs the two `hf download` calls sequentially into
+the same `HF_HOME=/model-cache` used by the offline worker:
 
 ```bash
 kubectl apply -f model-cache/model-cache.yaml -n "${NAMESPACE}"
@@ -101,6 +109,9 @@ trace at concurrency 32 with AIPerf 0.12.0. See
   cache state.
 - Async scheduling and CUDA graphs remain enabled. `--enforce-eager` and
   `--no-async-scheduling` are intentionally absent.
+- EAGLE3 uses the production acceptance path with three proposed tokens per
+  step. The draft revision is pinned to
+  `24958e91737d760908f73a8af4b6e06080fc5c1d`.
 - Each TP4 worker requests 400 GiB of host memory, matching the proven A.X-K2
   TP4 cluster deployment while allowing both replicas to schedule.
 - This branch-specific image is experimental and hosted under `nvstaging`.
