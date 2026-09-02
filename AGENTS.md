@@ -151,7 +151,7 @@ Sibling repositories this repo integrates with:
 |------|------|
 | [NIXL](https://github.com/ai-dynamo/nixl) | High-throughput inference data-transfer library (KV-cache transfer over RDMA/NVLink) that underpins disaggregated serving |
 | [AIPerf](https://github.com/ai-dynamo/aiperf) | Benchmarking and load-generation tool used by the benchmarking guides |
-| [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) | Simulates thousands of deployment configs to find an optimal serving config before spending GPU-hours |
+| [AISimulate](https://pypi.org/project/aisimulate/) | Predicts serving behavior and searches deployment configurations offline without requiring a GPU cluster |
 | [ModelExpress](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL for fast replica cold-start |
 | [Grove](https://github.com/ai-dynamo/grove) | Kubernetes operator for topology-aware gang scheduling |
 

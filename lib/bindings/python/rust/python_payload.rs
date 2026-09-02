@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::OnceLock;
+
 use bytes::Bytes;
 use dynamo_runtime::pipeline::PipelineError;
 use dynamo_runtime::pipeline::network::{
@@ -117,18 +119,8 @@ impl IngressResponseEncoder<PythonResponseItem> for PythonIngressPayloadAdapter 
         complete_final: bool,
     ) -> Result<EncodedResponseFrame, PipelineError> {
         if complete_final {
-            let wrapper = NetworkStreamWrapper::<Annotated<()>> {
-                data: None,
-                complete_final: true,
-            };
-            let bytes = payload_codec.encode(&wrapper).map_err(|error| {
-                PipelineError::SerializationError(format!(
-                    "Failed serializing {} request-plane final response: {error}",
-                    payload_codec.name()
-                ))
-            })?;
             return Ok(EncodedResponseFrame {
-                bytes: bytes.into(),
+                bytes: terminal_frame_bytes(payload_codec)?,
                 is_error: false,
                 stop_stream: false,
             });
@@ -169,18 +161,8 @@ impl IngressResponseEncoder<crate::push_egress::PushFrame> for PythonIngressPayl
         complete_final: bool,
     ) -> Result<EncodedResponseFrame, PipelineError> {
         if complete_final {
-            let wrapper = NetworkStreamWrapper::<Annotated<()>> {
-                data: None,
-                complete_final: true,
-            };
-            let bytes = payload_codec.encode(&wrapper).map_err(|error| {
-                PipelineError::SerializationError(format!(
-                    "Failed serializing {} push-egress final response: {error}",
-                    payload_codec.name()
-                ))
-            })?;
             return Ok(EncodedResponseFrame {
-                bytes: bytes.into(),
+                bytes: terminal_frame_bytes(payload_codec)?,
                 is_error: false,
                 stop_stream: false,
             });
@@ -233,6 +215,35 @@ pub(crate) fn write_annotated_response<T: Serialize, W: std::io::Write>(
     };
     codec.encode_into(&wrapper, writer)?;
     Ok(is_error)
+}
+
+/// Memoized separately per codec, since encoding is codec-specific.
+fn terminal_frame_bytes(codec: RequestPlanePayloadCodec) -> Result<Bytes, PipelineError> {
+    static JSON: OnceLock<Bytes> = OnceLock::new();
+    static MSGPACK: OnceLock<Bytes> = OnceLock::new();
+
+    let cell = match codec {
+        RequestPlanePayloadCodec::Json => &JSON,
+        RequestPlanePayloadCodec::Msgpack => &MSGPACK,
+    };
+    if let Some(bytes) = cell.get() {
+        return Ok(bytes.clone());
+    }
+
+    let wrapper = NetworkStreamWrapper::<Annotated<()>> {
+        data: None,
+        complete_final: true,
+    };
+    let bytes: Bytes = codec
+        .encode(&wrapper)
+        .map_err(|error| {
+            PipelineError::SerializationError(format!(
+                "Failed serializing {} request-plane final response: {error}",
+                codec.name()
+            ))
+        })?
+        .into();
+    Ok(cell.get_or_init(|| bytes).clone())
 }
 
 fn encode_python_response(
@@ -361,7 +372,48 @@ mod tests {
 
     use super::{
         Annotated, NetworkStreamWrapper, RequestPlanePayloadCodec, encode_annotated_response,
+        terminal_frame_bytes,
     };
+
+    /// Each codec's terminal frame must decode back to `data: None,
+    /// complete_final: true` — the contract both egress paths rely on to
+    /// signal end-of-stream.
+    #[test]
+    fn terminal_frame_bytes_decodes_to_complete_final() {
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let bytes = terminal_frame_bytes(codec).unwrap();
+            let wrapper: NetworkStreamWrapper<Annotated<serde_json::Value>> =
+                codec.decode(&bytes).unwrap();
+            assert!(wrapper.complete_final, "codec={}", codec.name());
+            assert!(wrapper.data.is_none(), "codec={}", codec.name());
+        }
+    }
+
+    /// Two calls for the same codec must return the same cached `Bytes`
+    /// storage, not just equal contents. `assert_eq!` alone would still pass
+    /// if a bug re-encoded a byte-identical buffer on every call; comparing
+    /// `as_ptr()` is what actually pins the memoization.
+    #[test]
+    fn terminal_frame_bytes_is_memoized_per_codec() {
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let first = terminal_frame_bytes(codec).unwrap();
+            let second = terminal_frame_bytes(codec).unwrap();
+            assert!(!first.is_empty(), "codec={}", codec.name());
+            assert_eq!(first, second, "codec={}", codec.name());
+            assert_eq!(
+                first.as_ptr(),
+                second.as_ptr(),
+                "codec={} must reuse the cached Bytes storage",
+                codec.name()
+            );
+        }
+    }
 
     // ── encode_annotated_response contract ───────────────────────────────────
     //
