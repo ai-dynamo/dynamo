@@ -2187,24 +2187,16 @@ impl KvRouter {
     ) -> PyResult<Bound<'p, PyAny>> {
         match response_buffer_mode {
             ResponseBufferMode::Rendezvous => {
-                demand_driven::process_request_to_stream(
-                    py,
-                    inner,
-                    request,
-                    tracker,
-                    dispatch_span,
-                )
+                demand_driven::process_request_to_stream(py, inner, request, tracker, dispatch_span)
             }
-            ResponseBufferMode::Buffered(capacity) => {
-                Self::process_request_to_stream(
-                    py,
-                    inner,
-                    request,
-                    tracker,
-                    capacity,
-                    dispatch_span,
-                )
-            }
+            ResponseBufferMode::Buffered(capacity) => Self::process_request_to_stream(
+                py,
+                inner,
+                request,
+                tracker,
+                capacity,
+                dispatch_span,
+            ),
         }
     }
 }
@@ -2464,9 +2456,9 @@ impl KvRouter {
             }
         };
         let request = crate::create_request_context(request, &context);
-        let dispatch_span = context.as_ref().map(|context| {
-            crate::get_span_for_context(context, "kv_router.generate_from_request")
-        });
+        let dispatch_span = context
+            .as_ref()
+            .map(|context| crate::get_span_for_context(context, "kv_router.generate_from_request"));
 
         // Use the helper method to process the request
         Self::dispatch_request_to_stream(
