@@ -36,7 +36,7 @@ ISL, 400 median OSL, 90% KV cache hit):
 | **Precision**            | NVFP4 (ModelOpt), BF16 KV       | NVFP4 (ModelOpt), BF16 KV       |
 | **Parallelism**          | TP4                             | TP4 per worker                  |
 | **MoE runner backend**   | FLASHINFER_TRTLLM               | FLASHINFER_TRTLLM               |
-| **AllReduce backend**    | FlashInfer                      | FlashInfer (MNNVL)              |
+| **AllReduce backend**    | vLLM default                    | FlashInfer (MNNVL)              |
 | **Context length**       | 1,048,576                       | 1,048,576                       |
 | **Speculative decoding** | MTP, 8 draft tokens             | MTP, 8 draft tokens             |
 | **Routing**              | KV-aware                        | KV-aware                        |
@@ -160,6 +160,7 @@ Inkling reasons before answering, so a small `max_tokens` is spent entirely on r
 returns empty `content` with `finish_reason: "length"`. The answer may also land in
 `reasoning_content` rather than `content`.
 
+> [!NOTE]
 > The image and audio tests below need the **SGLang B200** profile. On vLLM GB300 they are rejected
 > with `Received multimodal data but multimodal processing is not enabled` — that is expected; see
 > [Known Issues](#known-issues).

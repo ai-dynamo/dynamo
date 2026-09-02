@@ -18,8 +18,9 @@ SPDX-License-Identifier: Apache-2.0
   A recipe matrix at `.kustomize-matrix.yaml` has an explicit `source`, a
   `nameTemplate`, and a `matrix` mapping whose values contain a `name` and a
   `components` list. The matrix, recipe-local base and Components, and shared
-  Components are source. A dimension value may also select `templates` and set
-  `values`. Each template selection has a source relative to the matrix and a
+  Components are source. A dimension value may also select `templates`, set
+  `values`, and set `sortOptions` to order the resources in its own generated
+  overlay. Each template selection has a source relative to the matrix and a
   generated `path` under the overlay's `components/` directory. Generated paths
   selected by one variant must be unique and non-overlapping. Shared
   template sources live in `recipes/kustomize/templates/`. A selected template

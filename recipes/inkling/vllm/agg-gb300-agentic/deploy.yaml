@@ -9,7 +9,7 @@
 # decode; the frontend routes on KV cache locality using the events each worker
 # publishes.
 #
-# Weights come from the `model-cache` PVC — see ../../model-cache/.
+# Weights come from the `model-cache` PVC — see recipes/inkling/model-cache/.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -27,7 +27,7 @@ spec:
         spec:
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-d5bc5814213ffd862783ad01bfee1ddcc3f5f3e4-vllm-runtime
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-inkling-dev.1
               imagePullPolicy: Always
               command: [python3, -m, dynamo.frontend]
               args:
@@ -74,9 +74,16 @@ spec:
           hostIPC: true
           nodeSelector:
             nvidia.com/gpu.product: NVIDIA-GB300
+          # Some clusters taint their GPU nodes. This toleration is inert
+          # where they do not.
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
           containers:
             - name: main
-              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.5.0-ci-d5bc5814213ffd862783ad01bfee1ddcc3f5f3e4-vllm-runtime
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-inkling-dev.1
               imagePullPolicy: Always
               command: [python3, -m, dynamo.vllm]
               args:

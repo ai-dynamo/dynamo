@@ -2,15 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 source: kustomize/base
 nameTemplate: "${variant}"
-# Emit the ResourceClaimTemplate and ComputeDomain ahead of the DGD, so a single
-# `kubectl apply -f` creates the claims the workers reference before the DGD that
-# references them. Under the default fifo order the Component's claim template
-# lands last, which surfaces a transient resource-claim-template-not-found event.
-sortOptions:
-  order: legacy
-  legacySortOptions:
-    orderFirst: [ResourceClaimTemplate, ComputeDomain]
-    orderLast: []
 matrix:
   variant:
     - name: generic
@@ -18,3 +9,11 @@ matrix:
     - name: aws-roce
       components:
         - kustomize/components/aws-roce-dra
+      # Put the ResourceClaimTemplate before the DGD that claims it. The default
+      # fifo order emits the Component's claim template last, so `kubectl apply`
+      # reports a transient resource-claim-template-not-found event.
+      sortOptions:
+        order: legacy
+        legacySortOptions:
+          orderFirst: [ResourceClaimTemplate, ComputeDomain]
+          orderLast: []

@@ -76,6 +76,10 @@ class MatrixValue:
     components: tuple[Path, ...]
     templates: tuple[TemplateSelection, ...]
     values: dict[str, Any]
+    sort_options: str | None = None
+
+
+DEFAULT_SORT_OPTIONS = "sortOptions:\n  order: fifo"
 
 
 @dataclass(frozen=True)
@@ -84,9 +88,11 @@ class MatrixVariant:
     components: tuple[Path, ...]
     templates: tuple[TemplateSelection, ...]
     values: dict[str, Any]
-
-
-DEFAULT_SORT_OPTIONS = "sortOptions:\n  order: fifo"
+    # Rendered `sortOptions:` block for this variant's generated overlay.
+    # Kustomize reads sortOptions from the kustomization it builds, so a base
+    # cannot set them -- only the generated overlay can. Per variant, not per
+    # matrix: only the variant that needs an order pays for one.
+    sort_options: str = DEFAULT_SORT_OPTIONS
 
 
 @dataclass(frozen=True)
@@ -95,11 +101,6 @@ class MatrixConfig:
     source: Path
     name_template: str
     dimensions: tuple[tuple[str, tuple[MatrixValue, ...]], ...]
-    # Rendered `sortOptions:` block for this matrix's generated overlays. Kustomize
-    # applies sortOptions from the kustomization being built, so a base cannot set
-    # them -- only the generated overlay can. Defaults to the repository-wide
-    # `order: fifo`; a matrix opts out only by declaring its own `sortOptions`.
-    sort_options: str = DEFAULT_SORT_OPTIONS
 
     @property
     def recipe_root(self) -> Path:
@@ -247,7 +248,7 @@ def load_matrix(path: str) -> MatrixConfig:
         raise ValueError(f"matrix file does not exist: {path}")
 
     data = load_yaml_mapping(matrix_path)
-    unknown_keys = set(data) - {"source", "nameTemplate", "matrix", "sortOptions"}
+    unknown_keys = set(data) - {"source", "nameTemplate", "matrix"}
     if unknown_keys:
         raise ValueError(
             f"unsupported matrix key in {display_path(matrix_path)}: {min(unknown_keys)}"
@@ -285,6 +286,7 @@ def load_matrix(path: str) -> MatrixConfig:
                 "components",
                 "templates",
                 "values",
+                "sortOptions",
             }
             if unknown_value_keys:
                 raise ValueError(
@@ -316,6 +318,11 @@ def load_matrix(path: str) -> MatrixConfig:
                     values=load_variant_values(
                         raw_value.get("values"), f"{context}.values"
                     ),
+                    sort_options=(
+                        parse_sort_options(raw_value["sortOptions"])
+                        if "sortOptions" in raw_value
+                        else None
+                    ),
                 )
             )
         dimensions.append((dimension, tuple(values)))
@@ -335,7 +342,6 @@ def load_matrix(path: str) -> MatrixConfig:
         source=source,
         name_template=name_template,
         dimensions=tuple(dimensions),
-        sort_options=parse_sort_options(data.get("sortOptions")),
     )
 
 
@@ -394,12 +400,25 @@ def expand_matrix(config: MatrixConfig) -> list[MatrixVariant]:
                         f"variant {name!r} defines value {key!r} more than once"
                     )
                 variant_values[key] = template_value
+        selected_sort_options = [
+            value.sort_options for value in values if value.sort_options is not None
+        ]
+        if len(set(selected_sort_options)) > 1:
+            raise ValueError(
+                f"variant {name!r} selects conflicting sortOptions from more than "
+                f"one dimension"
+            )
         variants.append(
             MatrixVariant(
                 name=name,
                 components=components,
                 templates=templates,
                 values=variant_values,
+                sort_options=(
+                    selected_sort_options[0]
+                    if selected_sort_options
+                    else DEFAULT_SORT_OPTIONS
+                ),
             )
         )
 
@@ -810,7 +829,7 @@ def unfolded_kustomization(
         "",
         "apiVersion: kustomize.config.k8s.io/v1beta1",
         "kind: Kustomization",
-        *config.sort_options.split("\n"),
+        *variant.sort_options.split("\n"),
         "resources:",
         f"  - {json.dumps(relative_path(config.source, overlay_dir))}",
     ]

@@ -18,7 +18,7 @@ metadata:
   name: inkling-bench
 spec:
   backoffLimit: 1
-  activeDeadlineSeconds: 10800
+  activeDeadlineSeconds: 21600
   completions: 1
   parallelism: 1
   template:
@@ -40,9 +40,11 @@ spec:
               - key: nvidia.com/dynamo-graph-deployment-name
                 operator: In
                 values:
+                # Must match ENDPOINT below. Two entries let the Job sit
+                # beside the frontend it does not measure.
                 - inkling-vllm-gb300-agg-agentic
-                - inkling-vllm-gb300-disagg-agentic
             topologyKey: kubernetes.io/hostname
+      # tolerations: # Uncomment and populate for tainted frontend nodes.
       containers:
       - name: perf
         image: nvcr.io/nvidia/ai-dynamo/aiperf:0.11.0
@@ -66,7 +68,7 @@ spec:
 
           endpoint = os.environ["ENDPOINT"]
           model = os.environ["TARGET_MODEL"]
-          max_attempts = int(os.environ.get("WAIT_FOR_MODEL_MAX_ATTEMPTS", "720"))
+          max_attempts = int(os.environ.get("WAIT_FOR_MODEL_MAX_ATTEMPTS", "2160"))
           url = f"http://{endpoint}/v1/models"
 
           print(f"Waiting for model '{model}' at {url} (max {max_attempts} attempts) ...")
@@ -165,6 +167,9 @@ spec:
         - name: CONCURRENCY
           value: "20"
         # --- The remainder is shared across both variants. ---
+        # 2160 x 5s = 3h, matching the worker startupProbe budget.
+        - name: WAIT_FOR_MODEL_MAX_ATTEMPTS
+          value: "2160"
         - name: TRACE_FILE
           value: /model-cache/traces/mooncake_agentic.jsonl
         - name: TARGET_MODEL
