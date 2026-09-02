@@ -11,6 +11,7 @@ from typing import Optional
 import tritonclient.grpc.model_config_pb2 as mc
 import uvloop
 from google.protobuf import text_format
+from tritonserver import Model as TritonModel
 from tritonserver import Server as TritonServer
 
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
@@ -51,6 +52,27 @@ def _triton_supports_log_callback() -> bool:
     return (year, month) >= _LOG_CALLBACK_MIN_VERSION
 
 
+def _read_model_config(
+    model: TritonModel, model_name: str, repository_path: str
+) -> str:
+    model_config = None if model is None else model.config()
+    if model_config is None or len(model_config) == 0:
+        logger.debug("Failed to read model config from Triton.")
+        # Read Triton model config from config.pbtxt
+        config_path = f"{repository_path}/{model_name}/config.pbtxt"
+        with open(config_path, "r") as f:
+            model_config = text_format.Parse(f.read(), mc.ModelConfig())
+            serialized_config = model_config.SerializeToString()
+            logger.info(f"Loaded model config from {config_path}")
+            logger.debug(serialized_config)
+            return serialized_config
+    else:
+        serialized_config = str(model_config)
+        logger.info("Read model config from Triton.")
+        logger.debug(serialized_config)
+        return serialized_config
+
+
 async def _register_and_serve(
     runtime: DistributedRuntime,
     config: DynamoTritonConfig,
@@ -74,23 +96,18 @@ async def _register_and_serve(
         f"✓ Created endpoint '{endpoint_path.replace('.', '/')}' for model '{model_name}'"
     )
 
-    model = server.model(model_name)  # type: TritonModel
+    model = server.model(model_name)
     logger.info(f"✓ Model '{model_name}' loaded")
 
-    # Read Triton model config from config.pbtxt
-    config_path = f"{model_repository}/{model_name}/config.pbtxt"
-    with open(config_path, "r") as f:
-        triton_model_config = text_format.Parse(f.read(), mc.ModelConfig())
-
-    logger.info(f"Loaded model config from {config_path}")
+    triton_model_config = _read_model_config(model, model_name, model_repository)
 
     # Model metadata for the KServe frontend. register_model reads the tensor
     # protocol layout for tensor-based models from tensor_model_config.
-    model_config = {
+    tensor_model_config = {
         "name": "",
         "inputs": [],
         "outputs": [],
-        "triton_model_config": triton_model_config.SerializeToString(),
+        "triton_model_config": triton_model_config,
     }
 
     logger.info(f"Attempting to register model '{model_name}' with Dynamo runtime...")
@@ -101,7 +118,7 @@ async def _register_and_serve(
         endpoint,
         model_name,  # model_path (used as display name for tensor-based models)
         worker_type=WorkerType.Aggregated,
-        tensor_model_config=model_config,
+        tensor_model_config=tensor_model_config,
     )
     logger.info(
         f"✓ Successfully registered model '{model_name}' with endpoint "
@@ -235,7 +252,11 @@ async def worker() -> None:
         cleanup_callback=_stop_server,
     )
 
-    await init_worker(runtime, config, worker_state)
+    try:
+        await init_worker(runtime, config, worker_state)
+    except Exception:
+        await _stop_server()
+        raise
 
 
 def main():

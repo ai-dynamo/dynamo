@@ -3,7 +3,8 @@
 
 """Integration-style coverage for one native planner tick."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -12,6 +13,7 @@ from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.adapters import AggPlanner
 from dynamo.planner.core.types import PlannerEffects, ScalingDecision, ScheduledTick
 from dynamo.planner.environment.state import DeploymentState
+from dynamo.planner.errors import GPUShapeUnavailableError
 from dynamo.planner.monitoring.traffic_metrics import Metrics
 from dynamo.planner.monitoring.worker_info import WorkerInfo
 from dynamo.planner.plugins.builtins.observe import (
@@ -124,3 +126,97 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
     else:
         assert applied_targets == []
     assert events == expected_events
+
+
+@pytest.mark.asyncio
+async def test_run_retries_authoritative_zero_shape_without_shutting_down():
+    environment = MagicMock()
+    config = PlannerConfig(
+        mode="agg",
+        namespace="test-namespace",
+        load_adjustment_interval_seconds=5,
+        metric_reporting_prometheus_port=0,
+        live_dashboard_port=0,
+        report_interval_hours=None,
+    )
+    with patch(
+        "dynamo.planner.core.base.PlannerPrometheusMetrics",
+        return_value=MagicMock(),
+    ):
+        planner = AggPlanner(None, config, environment)
+
+    engine = MagicMock()
+    current_tick = ScheduledTick(at_s=0.0)
+    next_tick = ScheduledTick(at_s=0.0)
+    engine.initial_tick.return_value = current_tick
+    planner._engine = engine
+    planner._run_one_tick = AsyncMock(
+        side_effect=[
+            GPUShapeUnavailableError(
+                "decode", "operator published an authoritative zero-GPU shape"
+            ),
+            next_tick,
+            asyncio.CancelledError(),
+        ]
+    )
+    planner._shutdown_runtime = AsyncMock()
+
+    with (
+        patch("dynamo.planner.core.base.time.time", return_value=100.0),
+        patch(
+            "dynamo.planner.core.base.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep,
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await planner.run()
+
+    assert planner._run_one_tick.await_args_list == [
+        call(engine, current_tick),
+        call(engine, current_tick),
+        call(engine, next_tick),
+    ]
+    sleep.assert_awaited_once_with(0.5)
+    planner._shutdown_runtime.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_repeated_gpu_shape_errors_wait_and_cancel_cleanly():
+    environment = MagicMock()
+    config = PlannerConfig(
+        mode="agg",
+        namespace="test-namespace",
+        load_adjustment_interval_seconds=100,
+        metric_reporting_prometheus_port=0,
+        live_dashboard_port=0,
+        report_interval_hours=None,
+    )
+    with patch(
+        "dynamo.planner.core.base.PlannerPrometheusMetrics",
+        return_value=MagicMock(),
+    ):
+        planner = AggPlanner(None, config, environment)
+
+    engine = MagicMock()
+    current_tick = ScheduledTick(at_s=0.0)
+    engine.initial_tick.return_value = current_tick
+    planner._engine = engine
+    planner._run_one_tick = AsyncMock(
+        side_effect=[
+            GPUShapeUnavailableError("decode", "still stale"),
+            GPUShapeUnavailableError("decode", "still stale"),
+            asyncio.CancelledError(),
+        ]
+    )
+    planner._shutdown_runtime = AsyncMock()
+
+    with (
+        patch("dynamo.planner.core.base.time.time", return_value=100.0),
+        patch(
+            "dynamo.planner.core.base.asyncio.sleep", new_callable=AsyncMock
+        ) as sleep,
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await planner.run()
+
+    assert sleep.await_args_list == [call(5.0), call(5.0)]
+    planner._shutdown_runtime.assert_awaited_once()

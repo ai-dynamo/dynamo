@@ -138,6 +138,8 @@ dynamo:
       # series goes missing. Applies only to the endpoints that scrape a frontend
       # HTTP service; the system port always serves /metrics.
       frontendPath: /metrics
+      # -- Extra labels to add to every PodMonitor resource.
+      labels: {}
       # -- Enable the NIXL telemetry metrics collection on workers.
       # Requires workers with NIXL_TELEMETRY_ENABLE=y in their environment
       nixlTelemetry: false
@@ -172,6 +174,19 @@ natsAddr: ""
 etcdAddr: ""
 
 modelExpressURL: ""
+
+# TLS configuration for inter-component encryption.
+# Paths are injected into all DGD pods via InfrastructureConfiguration.
+natsTLSCAPath: ""
+natsTLSClientCertPath: ""
+natsTLSClientKeyPath: ""
+tcpTLSCertPath: ""
+tcpTLSKeyPath: ""
+tcpTLSCAPath: ""
+tcpTLSClientCertPath: ""
+tcpTLSClientKeyPath: ""
+tcpTLSClientCAPath: ""
+tcpTLSServerName: ""
 
 # Checkpoint configuration for fast pod restore.
 # In legacy agentMount mode, install the snapshot chart in each workload

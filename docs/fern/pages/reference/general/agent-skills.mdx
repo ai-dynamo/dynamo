@@ -1,0 +1,84 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Agent Skills
+subtitle: Reference for the repository-native skills available to AI coding agents working with Dynamo.
+---
+
+Dynamo includes agent skills for development, documentation, deployment, operations, and
+performance optimization. Compatible coding agents discover the skills from the repository and
+select them based on your request. Describe the outcome you want; you do not normally need to name
+a skill explicitly.
+
+The canonical sources live in
+[`.agents/skills/`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills). The `skills/` and
+`.claude/skills/` directories are compatibility symlinks to the same content.
+
+## Development and Documentation Skills
+
+<SearchableTable placeholder="Search development skills...">
+
+| Skill | Use for |
+| --- | --- |
+| [`debug-session`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/debug-session) | Start a structured Dynamo bug investigation and maintain a persistent worklog. |
+| [`dep-create`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dep-create) | Create or update a Dynamo Enhancement Proposal (DEP), implementation plan, or retroactive DEP. |
+| [`dep-status`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dep-status) | Check DEP status, list DEPs by lifecycle or area, and find related proposals. |
+| [`dep-update`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dep-update) | Triage a DEP, assign a person in charge, or advance its review and approval state. |
+| [`dynamo-agent-harness`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-agent-harness) | Drive persistent Claude Code, Codex, or OpenCode sessions through a Dynamo endpoint over Agent Client Protocol (ACP). |
+| [`dynamo-clone-hotpath-audit`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-clone-hotpath-audit) | Audit Rust hot-path `.clone()` calls and, when requested, remove unnecessary clones. |
+| [`dynamo-docs`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-docs) | Add, update, move, or remove Dynamo docs, examples, recipes, and translations. |
+| [`dynamo-frontend-benchmark`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-frontend-benchmark) | Benchmark and profile the Dynamo frontend against mock workers. |
+| [`dynamo-kv-replay-parity`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-kv-replay-parity) | Validate byte parity and paired performance for offline KV-aware replay changes. |
+| [`fern-components`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/fern-components) | Select and use Fern MDX components when authoring or reviewing docs pages. |
+| [`fern-navigation`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/fern-navigation) | Design or change Fern navigation, tabs, sections, slugs, versions, and redirects. |
+| [`graham-code-review`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/graham-code-review) | Review Rust, systems, networking, or performance-critical changes with strict Dynamo standards. |
+| [`pr-monitor`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/pr-monitor) | Check pull request continuous integration (CI) health, diagnose failed jobs, distinguish regressions from flakes, and flag unexpected skips. |
+| [`visual-review`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/visual-review) | Build an interactive HTML code-review dashboard for a pull request, branch diff, or unified diff. |
+
+</SearchableTable>
+
+## Deployment and Operations Skills
+
+| Skill | Use for |
+| --- | --- |
+| [`deploy-dynamo-recipe`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/deploy-dynamo-recipe) | Deploy an assigned DynamoGraphDeployment and verify it with an OpenAI-compatible smoke test. |
+| [`dynamo-interconnect-check`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-interconnect-check) | Validate NIXL, Unified Communication X (UCX), and NVIDIA Collective Communications Library (NCCL) readiness for disaggregated serving over remote direct memory access (RDMA) or NVLink. |
+| [`dynamo-router-starter`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/dynamo-router-starter) | Start or patch round-robin, KV-aware, least-loaded, or device-aware routing and run endpoint checks. |
+| [`troubleshoot-dynamo`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/troubleshoot-dynamo) | Diagnose failed or unhealthy deployments, pods, model caches, workers, endpoints, or benchmark jobs. |
+
+## Performance Optimization Skills
+
+These skills form the optimization workflow. The loop also uses `deploy-dynamo-recipe` to deploy the
+confirmed baseline and each approved candidate.
+
+<SearchableTable placeholder="Search optimization skills...">
+
+| Phase | Skill | Use for |
+| --- | --- | --- |
+| Workload contract | [`synthesize-user-workload`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/synthesize-user-workload) | Capture the workload requirements and immutable user-provided or confirmed baseline deployment. |
+| Baseline authoring | [`author-baseline-dgd`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/author-baseline-dgd) | Draft a baseline when no catalog recipe matches, then present it for explicit user confirmation. |
+| Benchmark configuration | [`configure-aiperf-benchmark`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/configure-aiperf-benchmark) | Freeze the AIPerf workload, objective, load policy, and Kubernetes execution manifest. |
+| Benchmark execution | [`run-aiperf-benchmark`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/run-aiperf-benchmark) | Launch, monitor, debug, and collect one run-scoped AIPerf benchmark. |
+| Results analysis | [`analyze-aiperf-results`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/analyze-aiperf-results) | Validate and normalize results, evaluate SLOs, and compare compatible candidates. |
+| Proposal selection | [`consult-perf-knowledge`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/consult-perf-knowledge) | Select one evidence-backed optimization proposal from the performance rules and engine guidance. |
+| Candidate creation | [`create-optimization-hypothesis`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/create-optimization-hypothesis) | Apply only the selected change to create a challenger-ready deployment draft. |
+| Adversarial review | [`perform-adversarial-review`](https://github.com/ai-dynamo/dynamo/tree/main/.agents/skills/perform-adversarial-review) | Review a candidate for correctness, comparability, feasibility, attribution, and worthwhile GPU spend. |
+
+</SearchableTable>
+
+See the
+[optimization loop](https://github.com/ai-dynamo/dynamo/blob/main/agent-docs/guides/optimization/optimize-loop.md)
+for the full sequence and the
+[evidence rules](https://github.com/ai-dynamo/dynamo/tree/main/agent-docs/rules) for benchmark
+validity requirements.
+
+## Usage Notes
+
+- **Invoke by intent.** Ask for the result you need, such as deploying a model, investigating a
+  regression, reviewing a pull request, or optimizing against a Service Level Objective (SLO).
+- **Set budgets for optimization.** State GPU-hour, wall-clock, and failed-deployment limits before
+  starting a long-running optimization loop.
+- **Use goal mode for unattended runs.** Answer the agent's workload questions before enabling the
+  harness's goal or budget mode.
+- **Protect credentials.** Do not provide secrets in prompts or allow credentials into generated run
+  artifacts.

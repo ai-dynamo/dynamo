@@ -46,7 +46,7 @@ Each row links to its tracking issue under the [Dynamo Triton Runtime — Improv
 
 | Triton release tag                      |  CUDA  | NVIDIA driver |
 | :-------------------------------------- | :----: | :-----------: |
-| `nvcr.io/nvidia/tritonserver:26.07-py3` | `13.2` |  `610.43.02`  |
+| `nvcr.io/nvidia/tritonserver:26.07-py3` | `13.2` |  `610.43.02`  | <!-- Update version with each Triton release. -->
 
 The Triton release is pinned in [`container/context.yaml`](../../../container/context.yaml) under `triton.cuda13.2` (`runtime_image_tag`/`base_image_tag`), the same way the other framework runtimes pin their image.
 
@@ -223,7 +223,7 @@ graph LR
     B --> C["Dynamo Triton Runtime"]
 ```
 
-The worker ([`components/src/dynamo/triton/main.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/triton/main.py)):
+The worker ([`components/src/dynamo/triton/main.py`](blob/main/components/src/dynamo/triton/main.py)):
 1. Starts an in-process server object
 2. Loads all models from the model repository
 3. Reads each model's configuration (`config.pbtxt`)

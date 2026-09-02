@@ -50,14 +50,18 @@ class RequestHandler:
         inference_responses = self._model.async_infer(inference_request)
         async for inference_response in inference_responses:
             response_tensors = []
-            for output_name, triton_dtype in self._output_dtypes.items():
-                out_tensor = inference_response.outputs[output_name]
+            for output_name, output_tensor in inference_response.outputs:
+                triton_dtype = self._output_dtypes[output_name]
+                if triton_dtype not in TRITON_TO_DYNAMO_DTYPE.keys():
+                    raise TypeError(
+                        f"Requested dtype '{triton_dtype}', for output '{output_name}', is not supported."
+                    )
                 if triton_dtype == "BYTES":
                     # String/BYTES tensors are not DLPack-compatible; pull them as
                     # an object array of bytes via the Triton Tensor API.
-                    response_arr = out_tensor.to_bytes_array()
+                    response_arr = output_tensor.to_bytes_array()
                 else:
-                    response_arr = np.from_dlpack(out_tensor)
+                    response_arr = np.from_dlpack(output_tensor)
                 dtype_str = TRITON_TO_DYNAMO_DTYPE.get(triton_dtype, triton_dtype)
                 response_tensors.append(
                     {

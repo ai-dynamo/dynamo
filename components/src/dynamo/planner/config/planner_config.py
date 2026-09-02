@@ -422,9 +422,10 @@ class PlannerConfig(BaseModel):
     planner pins the per-DGD total and only redistributes replicas between
     prefill and decode. Tolerance band:
     ``[min_gpu_budget - tolerance, max_gpu_budget + tolerance]`` where
-    ``tolerance = max(prefill_engine_num_gpu, decode_engine_num_gpu)`` —
-    needed because integer worker steps from pools with different per-replica
-    GPU counts can't always exactly cancel.
+    ``tolerance`` is the largest effective per-replica GPU cost among the
+    pools being adjusted. It can exceed the inference-engine width when a
+    replica contains independently allocated GPU sidecars. Integer worker
+    steps from pools with different costs cannot always exactly cancel.
 
     This is per-DGD scope. The GlobalPlanner has a separate cluster-wide
     ``min_total_gpus`` flag for cross-DGD enforcement; the two are
