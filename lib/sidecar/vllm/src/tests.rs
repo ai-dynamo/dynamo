@@ -1069,6 +1069,29 @@ fn token_native_compatibility_envelope_forwards_text_controls() {
     assert_eq!(response.skip_special_tokens, Some(false));
 }
 
+#[test]
+fn token_native_compatibility_envelope_accepts_null_cache_salt() {
+    let mut request = request();
+    request.routing.as_mut().expect("routing").cache_namespace = None;
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {"cache_salt": null},
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("null cache salt should be treated as absent");
+
+    assert_eq!(wire.kv.expect("kv parameters").cache_salt, "");
+}
+
 #[tokio::test]
 async fn aggregated_generation_converts_request_stream_and_usage() {
     let server = FakeServer::start(FakeVllm::default()).await;
