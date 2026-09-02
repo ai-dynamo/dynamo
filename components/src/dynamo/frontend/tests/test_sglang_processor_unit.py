@@ -1928,7 +1928,28 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
         assert len(with_tools.prompt_token_ids) > len(without_tools.prompt_token_ids)
         assert with_tools.tool_call_parser is not None
 
-    def test_response_format_takes_precedence_over_tool_guidance(
+    @pytest.mark.parametrize("tools", [None, []], ids=["missing", "empty"])
+    def test_required_tool_choice_rejects_missing_tools(self, tools):
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "response_format": {"type": "json_object"},
+            "tool_choice": "required",
+        }
+        if tools is not None:
+            request["tools"] = tools
+
+        with pytest.raises(
+            PreprocessError, match='tool_choice is "required" but tools is empty'
+        ):
+            preprocess_chat_request(
+                request,
+                tokenizer=None,
+                tool_call_parser_name="hermes",
+                reasoning_parser_name=None,
+            )
+
+    def test_forced_tool_guidance_takes_precedence_over_response_format(
         self, tokenizer, caplog
     ):
         result = preprocess_chat_request(
@@ -1955,13 +1976,14 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             reasoning_parser_name=None,
         )
 
-        assert result.guided_decoding == {"json": {"type": "object"}}
+        assert result.guided_decoding is not None
+        assert result.guided_decoding["json"]["type"] == "array"
         assert (
-            "Tool-call guided decoding will be ignored because of response_format already exists."
+            "response_format guided decoding will be ignored because tool_choice is forced."
             in caplog.text
         )
 
-    def test_response_format_disables_named_zero_arg_tool_reconstruction(
+    def test_named_zero_arg_tool_guidance_takes_precedence_over_response_format(
         self, tokenizer
     ):
         result = preprocess_chat_request(
@@ -1992,8 +2014,8 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             reasoning_parser_name=None,
         )
 
-        assert result.guided_decoding == {"json": {"type": "object"}}
-        assert result.named_zero_arg_tool is None
+        assert result.guided_decoding == {"regex": r"\{\}"}
+        assert result.named_zero_arg_tool == "get_server_time"
 
     def test_assistant_tool_calls_with_string_arguments(self, tokenizer):
         """Multi-turn with prior assistant tool_calls renders without raising.
