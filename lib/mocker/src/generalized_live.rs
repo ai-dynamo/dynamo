@@ -115,6 +115,7 @@ enum BoundaryRequest {
     },
     Finish {
         enqueued_at: Instant,
+        sender_thread_id: std::thread::ThreadId,
         reply: oneshot::Sender<BoundaryFinishAck>,
     },
 }
@@ -124,6 +125,8 @@ struct BoundaryFinishAck {
     actor_wake: Duration,
     completion_boundary: Duration,
     acknowledged_at: Instant,
+    sender_thread_id: std::thread::ThreadId,
+    actor_thread_id: std::thread::ThreadId,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -131,9 +134,12 @@ pub(crate) struct BoundaryFinishTiming {
     pub(crate) admission: Duration,
     pub(crate) reserve: Duration,
     pub(crate) reserve_waited: bool,
+    pub(crate) send_sync: Duration,
     pub(crate) actor_wake: Duration,
+    pub(crate) actor_same_thread: bool,
     pub(crate) completion_boundary: Duration,
     pub(crate) return_wake: Duration,
+    pub(crate) return_same_thread: bool,
 }
 
 /// Adapter-owned handle that keeps a completed pass at its publication
@@ -176,19 +182,30 @@ impl GroupedPassBoundary {
             }
         };
         let (reply, acknowledged) = oneshot::channel();
+        let sender_thread_id = std::thread::current().id();
         let enqueued_at = Instant::now();
-        permit.send(BoundaryRequest::Finish { enqueued_at, reply });
+        permit.send(BoundaryRequest::Finish {
+            enqueued_at,
+            sender_thread_id,
+            reply,
+        });
+        let send_sync = enqueued_at.elapsed();
         let admission = enqueued_at.saturating_duration_since(admission_started_at);
         let acknowledged = acknowledged
             .await
             .context("grouped live engine stopped before acknowledging pass-boundary finish")?;
+        let return_wake = acknowledged.acknowledged_at.elapsed();
+        let return_thread_id = std::thread::current().id();
         Ok(BoundaryFinishTiming {
             admission,
             reserve,
             reserve_waited,
+            send_sync,
             actor_wake: acknowledged.actor_wake,
+            actor_same_thread: acknowledged.actor_thread_id == acknowledged.sender_thread_id,
             completion_boundary: acknowledged.completion_boundary,
-            return_wake: acknowledged.acknowledged_at.elapsed(),
+            return_wake,
+            return_same_thread: return_thread_id == acknowledged.actor_thread_id,
         })
     }
 }
@@ -674,14 +691,21 @@ impl GroupedLiveActor {
                         .apply_command_effects(command, self.elapsed_ms());
                     let _ = reply.send(result);
                 }
-                BoundaryRequest::Finish { enqueued_at, reply } => {
+                BoundaryRequest::Finish {
+                    enqueued_at,
+                    sender_thread_id,
+                    reply,
+                } => {
                     let acknowledged_at = Instant::now();
+                    let actor_thread_id = std::thread::current().id();
                     let completion_boundary =
                         acknowledged_at.saturating_duration_since(completion_started_at);
                     let _ = reply.send(BoundaryFinishAck {
                         actor_wake: acknowledged_at.saturating_duration_since(enqueued_at),
                         completion_boundary,
                         acknowledged_at,
+                        sender_thread_id,
+                        actor_thread_id,
                     });
                     return Ok(Some(completion_boundary));
                 }
@@ -1058,6 +1082,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn boundary_finish_classifies_a_dedicated_actor_thread_as_cross_thread() {
+        let (boundary_tx, boundary_rx) = std::sync::mpsc::sync_channel(1);
+        let actor = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let (request_tx, request_rx) = mpsc::channel(1);
+                let completion_started_at = Instant::now();
+                boundary_tx
+                    .send(GroupedPassBoundary { request_tx })
+                    .unwrap();
+                let (event_tx, _events) = mpsc::channel(1);
+                let mut live_actor = ready_actor(event_tx, CancellationToken::new());
+                live_actor
+                    .serve_pass_boundary(request_rx, completion_started_at)
+                    .await
+                    .unwrap()
+            })
+        });
+        let boundary = boundary_rx.recv().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let finish = runtime.block_on(boundary.finish()).unwrap();
+
+        assert!(!finish.actor_same_thread);
+        assert!(!finish.return_same_thread);
+        assert!(actor.join().unwrap().is_some());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn attention_dp_releases_completion_only_at_the_shared_boundary() {
         let GroupedLiveRuntime {
@@ -1100,7 +1159,10 @@ mod tests {
             panic!("expected grouped pass completion");
         };
         assert_eq!(completed.effects.by_rank.len(), 2);
-        boundary.finish().await.unwrap();
+        let finish = boundary.finish().await.unwrap();
+        assert!(finish.actor_same_thread);
+        assert!(finish.return_same_thread);
+        assert!(finish.send_sync <= finish.actor_wake);
 
         handle.shutdown();
         actor.await.unwrap().unwrap();

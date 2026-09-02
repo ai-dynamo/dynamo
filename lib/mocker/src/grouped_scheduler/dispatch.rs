@@ -85,8 +85,15 @@ struct CompletionPassTiming {
     body_residual_ms: f64,
     finish_admission: std::time::Duration,
     finish_reserve: std::time::Duration,
+    finish_send_sync: std::time::Duration,
+    finish_actor_same_thread_send_sync: std::time::Duration,
+    finish_actor_cross_thread_send_sync: std::time::Duration,
     finish_actor_wake: std::time::Duration,
+    finish_actor_same_thread_wake: std::time::Duration,
+    finish_actor_cross_thread_wake: std::time::Duration,
     finish_return_wake: std::time::Duration,
+    finish_return_same_thread_wake: std::time::Duration,
+    finish_return_cross_thread_wake: std::time::Duration,
     boundary_identity_residual_ms: f64,
     rank_batches: u64,
     event_reserve_waited_passes: u64,
@@ -108,6 +115,10 @@ struct CompletionPassTiming {
     deferred_kv_events: u64,
     lifecycle_events: u64,
     finish_reserve_waited_passes: u64,
+    finish_actor_same_thread_passes: u64,
+    finish_actor_cross_thread_passes: u64,
+    finish_return_same_thread_passes: u64,
+    finish_return_cross_thread_passes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -152,6 +163,32 @@ impl CompletionPassTiming {
                 (timing.route_wall.as_secs_f64() - cpu.as_secs_f64()) * 1_000.0;
         } else {
             self.route_cpu_invalid_batches += 1;
+        }
+    }
+
+    fn record_finish(&mut self, timing: BoundaryFinishTiming) {
+        self.completion_boundary = timing.completion_boundary;
+        self.finish_admission = timing.admission;
+        self.finish_reserve = timing.reserve;
+        self.finish_reserve_waited_passes = u64::from(timing.reserve_waited);
+        self.finish_send_sync = timing.send_sync;
+        self.finish_actor_wake = timing.actor_wake;
+        if timing.actor_same_thread {
+            self.finish_actor_same_thread_passes = 1;
+            self.finish_actor_same_thread_send_sync = timing.send_sync;
+            self.finish_actor_same_thread_wake = timing.actor_wake;
+        } else {
+            self.finish_actor_cross_thread_passes = 1;
+            self.finish_actor_cross_thread_send_sync = timing.send_sync;
+            self.finish_actor_cross_thread_wake = timing.actor_wake;
+        }
+        self.finish_return_wake = timing.return_wake;
+        if timing.return_same_thread {
+            self.finish_return_same_thread_passes = 1;
+            self.finish_return_same_thread_wake = timing.return_wake;
+        } else {
+            self.finish_return_cross_thread_passes = 1;
+            self.finish_return_cross_thread_wake = timing.return_wake;
         }
     }
 }
@@ -210,8 +247,31 @@ impl CompletionTimingDiagnostics {
             finish_admission_nonreserve_total_ms = duration_ms(
                 timing.finish_admission.saturating_sub(timing.finish_reserve)
             ),
+            finish_send_sync_total_ms = duration_ms(timing.finish_send_sync),
+            finish_actor_same_thread_send_sync_total_ms = duration_ms(
+                timing.finish_actor_same_thread_send_sync
+            ),
+            finish_actor_cross_thread_send_sync_total_ms = duration_ms(
+                timing.finish_actor_cross_thread_send_sync
+            ),
+            finish_send_sync_thread_identity_residual_total_ms = duration_ms(
+                timing.finish_send_sync
+            ) - duration_ms(timing.finish_actor_same_thread_send_sync)
+                - duration_ms(timing.finish_actor_cross_thread_send_sync),
             finish_actor_wake_total_ms = duration_ms(timing.finish_actor_wake),
+            finish_actor_same_thread_wake_total_ms = duration_ms(
+                timing.finish_actor_same_thread_wake
+            ),
+            finish_actor_cross_thread_wake_total_ms = duration_ms(
+                timing.finish_actor_cross_thread_wake
+            ),
             finish_return_wake_total_ms = duration_ms(timing.finish_return_wake),
+            finish_return_same_thread_wake_total_ms = duration_ms(
+                timing.finish_return_same_thread_wake
+            ),
+            finish_return_cross_thread_wake_total_ms = duration_ms(
+                timing.finish_return_cross_thread_wake
+            ),
             boundary_identity_residual_total_ms = timing.boundary_identity_residual_ms,
             rank_batches = timing.rank_batches,
             event_reserve_waited_passes = timing.event_reserve_waited_passes,
@@ -233,6 +293,24 @@ impl CompletionTimingDiagnostics {
             deferred_kv_events = timing.deferred_kv_events,
             lifecycle_events = timing.lifecycle_events,
             finish_reserve_waited_passes = timing.finish_reserve_waited_passes,
+            finish_actor_same_thread_passes = timing.finish_actor_same_thread_passes,
+            finish_actor_cross_thread_passes = timing.finish_actor_cross_thread_passes,
+            finish_actor_thread_count_identity_residual = self.interval_passes as i64
+                - timing.finish_actor_same_thread_passes as i64
+                - timing.finish_actor_cross_thread_passes as i64,
+            finish_actor_thread_wake_identity_residual_total_ms = duration_ms(
+                timing.finish_actor_wake
+            ) - duration_ms(timing.finish_actor_same_thread_wake)
+                - duration_ms(timing.finish_actor_cross_thread_wake),
+            finish_return_same_thread_passes = timing.finish_return_same_thread_passes,
+            finish_return_cross_thread_passes = timing.finish_return_cross_thread_passes,
+            finish_return_thread_count_identity_residual = self.interval_passes as i64
+                - timing.finish_return_same_thread_passes as i64
+                - timing.finish_return_cross_thread_passes as i64,
+            finish_return_thread_wake_identity_residual_total_ms = duration_ms(
+                timing.finish_return_wake
+            ) - duration_ms(timing.finish_return_same_thread_wake)
+                - duration_ms(timing.finish_return_cross_thread_wake),
             "mocker completion timing interval"
         );
 
@@ -277,8 +355,15 @@ impl CompletionPassTiming {
         self.body_residual_ms += other.body_residual_ms;
         self.finish_admission += other.finish_admission;
         self.finish_reserve += other.finish_reserve;
+        self.finish_send_sync += other.finish_send_sync;
+        self.finish_actor_same_thread_send_sync += other.finish_actor_same_thread_send_sync;
+        self.finish_actor_cross_thread_send_sync += other.finish_actor_cross_thread_send_sync;
         self.finish_actor_wake += other.finish_actor_wake;
+        self.finish_actor_same_thread_wake += other.finish_actor_same_thread_wake;
+        self.finish_actor_cross_thread_wake += other.finish_actor_cross_thread_wake;
         self.finish_return_wake += other.finish_return_wake;
+        self.finish_return_same_thread_wake += other.finish_return_same_thread_wake;
+        self.finish_return_cross_thread_wake += other.finish_return_cross_thread_wake;
         self.boundary_identity_residual_ms += other.boundary_identity_residual_ms;
         self.rank_batches += other.rank_batches;
         self.event_reserve_waited_passes += other.event_reserve_waited_passes;
@@ -300,6 +385,10 @@ impl CompletionPassTiming {
         self.deferred_kv_events += other.deferred_kv_events;
         self.lifecycle_events += other.lifecycle_events;
         self.finish_reserve_waited_passes += other.finish_reserve_waited_passes;
+        self.finish_actor_same_thread_passes += other.finish_actor_same_thread_passes;
+        self.finish_actor_cross_thread_passes += other.finish_actor_cross_thread_passes;
+        self.finish_return_same_thread_passes += other.finish_return_same_thread_passes;
+        self.finish_return_cross_thread_passes += other.finish_return_cross_thread_passes;
     }
 }
 
@@ -558,12 +647,7 @@ async fn dispatch_pass_completion(
             let Some(finish) = finish_result? else {
                 return Ok(None);
             };
-            timing.completion_boundary = finish.completion_boundary;
-            timing.finish_admission = finish.admission;
-            timing.finish_reserve = finish.reserve;
-            timing.finish_reserve_waited_passes = u64::from(finish.reserve_waited);
-            timing.finish_actor_wake = finish.actor_wake;
-            timing.finish_return_wake = finish.return_wake;
+            timing.record_finish(finish);
             let boundary_accounted = timing
                 .event
                 .admission
@@ -928,6 +1012,63 @@ impl RankDispatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn finish_timing(
+        actor_same_thread: bool,
+        return_same_thread: bool,
+        actor_wake_ms: u64,
+        return_wake_ms: u64,
+    ) -> BoundaryFinishTiming {
+        BoundaryFinishTiming {
+            admission: std::time::Duration::from_millis(1),
+            reserve: std::time::Duration::ZERO,
+            reserve_waited: false,
+            send_sync: std::time::Duration::from_millis(1),
+            actor_wake: std::time::Duration::from_millis(actor_wake_ms),
+            actor_same_thread,
+            completion_boundary: std::time::Duration::from_millis(20),
+            return_wake: std::time::Duration::from_millis(return_wake_ms),
+            return_same_thread,
+        }
+    }
+
+    #[test]
+    fn finish_thread_path_totals_form_additive_identities() {
+        let mut aggregate = CompletionPassTiming::default();
+        let mut same_actor_cross_return = CompletionPassTiming::default();
+        same_actor_cross_return.record_finish(finish_timing(true, false, 3, 5));
+        aggregate.add_assign(same_actor_cross_return);
+        let mut cross_actor_same_return = CompletionPassTiming::default();
+        cross_actor_same_return.record_finish(finish_timing(false, true, 7, 11));
+        aggregate.add_assign(cross_actor_same_return);
+
+        assert_eq!(
+            aggregate.finish_actor_same_thread_passes + aggregate.finish_actor_cross_thread_passes,
+            2
+        );
+        assert_eq!(
+            aggregate.finish_actor_same_thread_wake + aggregate.finish_actor_cross_thread_wake,
+            aggregate.finish_actor_wake
+        );
+        assert_eq!(
+            aggregate.finish_actor_same_thread_send_sync
+                + aggregate.finish_actor_cross_thread_send_sync,
+            aggregate.finish_send_sync
+        );
+        assert_eq!(
+            aggregate.finish_return_same_thread_passes
+                + aggregate.finish_return_cross_thread_passes,
+            2
+        );
+        assert_eq!(
+            aggregate.finish_return_same_thread_wake + aggregate.finish_return_cross_thread_wake,
+            aggregate.finish_return_wake
+        );
+        assert_eq!(
+            aggregate.finish_send_sync,
+            std::time::Duration::from_millis(2)
+        );
+    }
 
     #[tokio::test]
     async fn ready_boundary_error_wins_over_cancellation() {
