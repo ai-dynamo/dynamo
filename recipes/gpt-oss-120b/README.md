@@ -32,6 +32,13 @@ Dynamo + vLLM deployment profiles for the Mooncake agentic trace (64k/400/90%-KV
 - Reasoning (`gpt_oss` parser)
 - Tool / function calling (`harmony` tool-call parser) — `tool_calls` populates, `finish_reason: tool_calls`
 
+## Experimental Snapshot + GMS
+
+[vllm/agg-snapshot-gms](vllm/agg-snapshot-gms/) checkpoints a single B200 vLLM
+worker and restores it with Dynamo Snapshot and GPU Memory Service. It is
+experimental and has extra DRA, driver, storage, and image-build prerequisites
+in its leaf README.
+
 ## Prerequisites
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx). The recipes pull
@@ -113,4 +120,3 @@ Measured 2026-07-09 on the agentic 15% trace (see [perf/README.md](perf/README.m
 
 1. Structured output (`response_format: json_object` / `json_schema`) is not working — may return invalid
    JSON while speculative decoding is enabled; use tool calling or validate client-side.
-
