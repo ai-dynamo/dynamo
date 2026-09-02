@@ -142,6 +142,13 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 				wantErr: "not operator-stamped",
 			},
 			{
+				name: "missing component type stamp",
+				mutate: func(pod *corev1.Pod) {
+					delete(pod.Labels, consts.KubeLabelDynamoComponentType)
+				},
+				wantErr: "not operator-stamped",
+			},
+			{
 				name: "unsupported workload entrypoint",
 				mutate: func(pod *corev1.Pod) {
 					pod.Spec.Containers[1].Command = []string{"serve-model"}
@@ -271,10 +278,11 @@ func nativeRestoreCandidatePod(snapshot *snapshotv1alpha1.PodSnapshot) *corev1.P
 			Name:      "worker-0",
 			Namespace: snapshot.Namespace,
 			Labels: map[string]string{
-				consts.KubeLabelDynamoComponent:  "worker",
-				consts.KubeLabelDynamoNamespace:  "default-worker",
-				consts.KubeLabelDynamoSelector:   "worker",
-				consts.KubeLabelDynamoWorkerHash: "worker-v1",
+				consts.KubeLabelDynamoComponent:     "worker",
+				consts.KubeLabelDynamoComponentType: consts.ComponentTypeWorker,
+				consts.KubeLabelDynamoNamespace:     "default-worker",
+				consts.KubeLabelDynamoSelector:      "worker",
+				consts.KubeLabelDynamoWorkerHash:    "worker-v1",
 			},
 			Annotations: map[string]string{
 				consts.CheckpointRestoreCandidateAnnotation:       consts.KubeLabelValueTrue,

@@ -77,9 +77,14 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodFailed,
-			Conditions: []corev1.PodCondition{{
-				Type: corev1.PodReady, Status: corev1.ConditionTrue,
-			}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				{
+					Type:   corev1.PodConditionType(podcontract.RestoredCondition),
+					Status: corev1.ConditionTrue,
+					Reason: podcontract.RestoreReasonSucceeded,
+				},
+			},
 			ContainerStatuses: []corev1.ContainerStatus{{
 				Name: ContainerNameProfiler,
 				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{

@@ -290,6 +290,26 @@ const testCases = [
     expect: { snapshot: true, deploy: true },
     desc: 'Checkpoint deploy test triggers shared snapshot integration'
   },
+  {
+    file: 'deploy/operator/api/v1beta1/dynamographdeployment_types.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Operator API changes trigger snapshot contract tests'
+  },
+  {
+    file: 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployments.yaml',
+    expect: { snapshot: true, operator: true },
+    desc: 'Operator CRD changes trigger snapshot contract tests'
+  },
+  {
+    file: 'deploy/operator/config/rbac/role.yaml',
+    expect: { snapshot: true, operator: true },
+    desc: 'Operator RBAC changes trigger snapshot contract tests'
+  },
+  {
+    file: 'deploy/helm/charts/platform/components/operator/templates/deployment.yaml',
+    expect: { snapshot: true, deploy: true, operator: true },
+    desc: 'Operator Helm changes trigger snapshot integration'
+  },
 ];
 
 // Print available filters

@@ -79,6 +79,10 @@ func isGMSPodReplacementEligible(pod *corev1.Pod) bool {
 	if pod.Annotations[podcontract.RestoreFromAnnotation] == "" {
 		return false
 	}
+	switch podcontract.ClassifyRestoreOutcome(pod.Status.Conditions) {
+	case podcontract.RestoreOutcomeFailed, podcontract.RestoreOutcomePartiallySucceeded:
+		return false
+	}
 	return hasRestartedNativeGMSServer(pod)
 }
 

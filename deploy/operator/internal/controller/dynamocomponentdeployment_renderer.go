@@ -285,12 +285,17 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 		}
 	} else {
 		var err error
+		workerHash := dynamo.GetDCDEffectiveWorkerHash(dcd)
+		var expectedWorkerHash *string
+		if dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			expectedWorkerHash = &workerHash
+		}
 		info, err = checkpoint.ResolvePodSnapshotForService(
 			ctx,
 			r.reader,
 			dcd.Namespace,
 			alphaCheckpointConfig,
-			dynamo.GetDCDEffectiveWorkerHash(dcd),
+			expectedWorkerHash,
 		)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")

@@ -33,14 +33,14 @@ import (
 func TestGMSPodReplacementPredicate(t *testing.T) {
 	pred := gmsPodReplacementPredicate()
 
-	t.Run("retains terminal restore failures without a GMS restart", func(t *testing.T) {
+	t.Run("retains terminal restore failures after a GMS restart", func(t *testing.T) {
 		for _, reason := range []string{
 			podcontract.RestoreReasonFailed,
 			podcontract.RestoreReasonPartiallySucceeded,
 		} {
 			t.Run(reason, func(t *testing.T) {
-				t.Log("Build an owned native restore Pod with a terminal outcome and no GMS restart")
-				pod := gmsPodReplacementTestPod("pod-uid", 0)
+				t.Log("Build an owned native restore Pod with a terminal outcome and a GMS restart")
+				pod := gmsPodReplacementTestPod("pod-uid", 1)
 				pod.Status.Conditions = []corev1.PodCondition{{
 					Type:   corev1.PodConditionType(podcontract.RestoredCondition),
 					Status: corev1.ConditionFalse,

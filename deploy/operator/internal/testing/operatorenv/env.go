@@ -500,7 +500,8 @@ func crdDirectoryPaths(opts Options) []string {
 
 // defaultSnapshotCRDs installs the exact CRDs shipped by the Snapshot API
 // dependency. Explicit CRD directory overrides remain authoritative for tests
-// that intentionally construct a narrower environment.
+// that intentionally construct a narrower environment. A nil configuration or
+// a disabled checkpoint gate installs no Snapshot CRDs.
 func defaultSnapshotCRDs(
 	opts Options,
 	config *configv1alpha1.OperatorConfiguration,

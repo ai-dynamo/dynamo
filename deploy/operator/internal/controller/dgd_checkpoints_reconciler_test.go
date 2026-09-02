@@ -244,6 +244,33 @@ func TestDGDCheckpointsReconciler_SnapshotJobPreservesGMSSaverClient(t *testing.
 	assert.Equal(t, job.Name, controllerRef.Name)
 }
 
+func TestPrepareCheckpointGMSPodTemplateRejectsMissingClient(t *testing.T) {
+	t.Log("Build a capture Pod template that omits a requested GMS client")
+	podTemplate := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+		Containers: []corev1.Container{{Name: commonconsts.MainContainerName}},
+	}}
+	gmsSpec := &v1alpha1.GPUMemoryServiceSpec{
+		Enabled:               true,
+		Mode:                  v1alpha1.GMSModeIntraPod,
+		ExtraClientContainers: []string{"missing-saver"},
+	}
+
+	t.Log("Render the GMS capture wiring")
+	err := prepareCheckpointGMSPodTemplate(
+		podTemplate,
+		commonconsts.MainContainerName,
+		"checkpoint-id",
+		gmsSpec,
+	)
+
+	t.Log("Verify the typo fails before partially mutating the Pod template")
+	require.ErrorContains(t, err, `gpuMemoryService client container "missing-saver"`)
+	require.ErrorContains(t, err, `pod spec has no container named "missing-saver"`)
+	assert.Empty(t, podTemplate.Spec.InitContainers)
+	assert.Empty(t, podTemplate.Spec.ResourceClaims)
+	assert.Empty(t, podTemplate.Spec.Volumes)
+}
+
 func TestDGDCheckpointsReconciler_SyncGMSResourceClaimTemplateUsesTemporaryDGDOwner(t *testing.T) {
 	t.Log("Build a DGD and the GPU DeviceClass required by the checkpoint template")
 	ctx := context.Background()
@@ -535,6 +562,64 @@ func TestDGDCheckpointsReconciler_AutomaticCaptureWaitsForActiveWorkerHash(t *te
 	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
 	require.Len(t, jobs.Items, 1)
 	assert.Equal(t, workerHash, jobs.Items[0].Labels[commonconsts.KubeLabelDynamoWorkerHash])
+}
+
+func TestDGDCheckpointsReconciler_ExplicitRestoreWaitsForActiveWorkerHash(t *testing.T) {
+	t.Log("Build a first-generation worker with an explicit reference before its active hash is initialized")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(testScheme).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
+	}
+	ref := friendlyCheckpointName
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd",
+			Namespace: "default",
+			UID:       types.UID("dgd-uid"),
+		},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{Checkpoint: &v1beta1.ComponentCheckpointConfig{
+					Enabled:       true,
+					CheckpointRef: &ref,
+				}},
+			}},
+		},
+	}
+
+	t.Log("Reconcile while the worker generation has no durable identity")
+	result, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	require.NoError(t, err)
+
+	t.Log("Verify explicit restore remains fail-closed instead of failing reconciliation or cold-starting")
+	info := result.Infos["worker"]
+	require.NotNil(t, info)
+	assert.Equal(t, ref, info.CheckpointName)
+	assert.False(t, info.Exists)
+	assert.False(t, info.Ready)
+	assert.Equal(t, v1alpha1.CheckpointStartupPolicyWaitForCheckpoint, info.StartupPolicy)
+
+	t.Log("Record the active hash and create its compatible referenced PodSnapshot")
+	workerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: workerHash}
+	referenced := dgdTestPodSnapshot(ref, workerHash, true)
+	require.NoError(t, reconciler.Create(ctx, referenced))
+
+	t.Log("Verify the same explicit reference resolves once compatibility identity is available")
+	result, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	require.NoError(t, err)
+	info = result.Infos["worker"]
+	require.NotNil(t, info)
+	assert.True(t, info.Exists)
+	assert.True(t, info.Ready)
+	require.NotNil(t, info.NativeSnapshot)
+	assert.Equal(t, referenced.UID, info.NativeSnapshot.UID)
 }
 
 func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(t *testing.T) {
@@ -1139,7 +1224,7 @@ func TestDGDCheckpointsReconciler_AutomaticCaptureReportsSnapshotJobFailure(t *t
 		context.Background(),
 		job,
 		&v1alpha1.ServiceCheckpointConfig{},
-		"worker-hash",
+		ptr.To("worker-hash"),
 		v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
 	)
 
@@ -1267,28 +1352,31 @@ func TestDGDCheckpointsReconciler_RetainProtectsArtifactCreatedDuringFinalizatio
 		Namespace: "default",
 		UID:       types.UID("dgd-uid"),
 	}}
-	job := &snapshotv1alpha1.SnapshotJob{ObjectMeta: metav1.ObjectMeta{
-		Name:      "retained-job",
-		Namespace: dgd.Namespace,
-		UID:       types.UID("retained-job-uid"),
-		Labels: map[string]string{
-			commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+	job := &snapshotv1alpha1.SnapshotJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "retained-job",
+			Namespace: dgd.Namespace,
+			UID:       types.UID("retained-job-uid"),
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			},
+			Annotations: map[string]string{
+				commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+				commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyRetain),
+				commonconsts.CheckpointOwnerUIDAnnotation:       string(dgd.UID),
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: v1beta1.GroupVersion.String(),
+				Kind:       "DynamoGraphDeployment",
+				Name:       dgd.Name,
+				UID:        dgd.UID,
+				Controller: ptr.To(true),
+			}},
 		},
-		Annotations: map[string]string{
-			commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
-			commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyRetain),
-			commonconsts.CheckpointOwnerUIDAnnotation:       string(dgd.UID),
-		},
-		OwnerReferences: []metav1.OwnerReference{{
-			APIVersion: v1beta1.GroupVersion.String(),
-			Kind:       "DynamoGraphDeployment",
-			Name:       dgd.Name,
-			UID:        dgd.UID,
-			Controller: ptr.To(true),
-		}},
-	}}
+		Status: snapshotv1alpha1.SnapshotJobStatus{PodSnapshotName: "retained-artifact"},
+	}
 	snapshot := &snapshotv1alpha1.PodSnapshot{ObjectMeta: metav1.ObjectMeta{
-		Name:      job.Name,
+		Name:      job.Status.PodSnapshotName,
 		Namespace: dgd.Namespace,
 		Labels: map[string]string{
 			commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,

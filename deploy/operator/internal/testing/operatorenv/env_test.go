@@ -40,6 +40,7 @@ func TestWebhookSetupIsRequired(t *testing.T) {
 }
 
 func TestDefaultSnapshotCRDs(t *testing.T) {
+	t.Log("Verify checkpoint-disabled environments do not install Snapshot CRDs")
 	disabled, err := defaultSnapshotCRDs(Options{}, &configv1alpha1.OperatorConfiguration{})
 	if err != nil {
 		t.Fatalf("load disabled Snapshot CRDs: %v", err)
@@ -51,6 +52,7 @@ func TestDefaultSnapshotCRDs(t *testing.T) {
 	config := &configv1alpha1.OperatorConfiguration{
 		Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true},
 	}
+	t.Log("Verify checkpoint-enabled environments install the embedded Snapshot CRDs")
 	crds, err := defaultSnapshotCRDs(Options{}, config)
 	if err != nil {
 		t.Fatalf("load default Snapshot CRDs: %v", err)
@@ -59,6 +61,7 @@ func TestDefaultSnapshotCRDs(t *testing.T) {
 		t.Fatalf("Snapshot CRDs = %d, want 3", len(crds))
 	}
 
+	t.Log("Verify explicit CRD directory configuration remains authoritative")
 	overridden, err := defaultSnapshotCRDs(Options{CRDDirectoryPaths: []string{"testdata"}}, config)
 	if err != nil {
 		t.Fatalf("load Snapshot CRDs with directory override: %v", err)

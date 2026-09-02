@@ -26,6 +26,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 )
@@ -100,6 +101,7 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 	}
 	if pod.Labels == nil ||
 		pod.Labels[consts.KubeLabelDynamoComponent] == "" ||
+		pod.Labels[consts.KubeLabelDynamoComponentType] == "" ||
 		pod.Labels[consts.KubeLabelDynamoNamespace] == "" ||
 		pod.Labels[consts.KubeLabelDynamoSelector] == "" {
 		return admission.Denied("restore candidate is not operator-stamped")
@@ -129,7 +131,11 @@ func (h *PodCheckpointRestoreMutator) buildNativeRestorePod(
 	podNamespace string,
 ) (*corev1.Pod, error) {
 	snapshotName := pod.Annotations[consts.CheckpointNameAnnotation]
-	expectedWorkerHash := pod.Labels[consts.KubeLabelDynamoWorkerHash]
+	workerHash := pod.Labels[consts.KubeLabelDynamoWorkerHash]
+	var expectedWorkerHash *string
+	if dynamo.IsWorkerComponent(pod.Labels[consts.KubeLabelDynamoComponentType]) {
+		expectedWorkerHash = &workerHash
+	}
 	config := &nvidiacomv1alpha1.ServiceCheckpointConfig{
 		Enabled:       true,
 		CheckpointRef: &snapshotName,

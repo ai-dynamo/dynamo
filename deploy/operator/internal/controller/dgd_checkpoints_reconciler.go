@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/imdario/mergo"
@@ -118,19 +119,29 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		if err != nil {
 			return dgdCheckpointsResult{}, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
 		}
+		workerComponent := dynamo.IsWorkerComponent(string(component.ComponentType))
+		var expectedWorkerHash *string
+		if workerComponent {
+			expectedWorkerHash = &workerHash
+		}
 
 		var info *checkpoint.CheckpointInfo
-		if !hasCheckpointRef &&
-			dynamo.IsWorkerComponent(string(component.ComponentType)) &&
-			workerHash == "" {
+		if workerComponent && workerHash == "" {
 			// Grove records the active worker generation after synchronizing its
-			// first PodCliqueSet. Do not start a generation-less capture while
-			// that durable identity is still being initialized.
-			logger.Info("Waiting for active worker hash before automatic capture", "component", componentName)
+			// first PodCliqueSet. Do not capture or resolve a generation-less
+			// worker while that durable identity is still being initialized.
+			logger.Info("Waiting for active worker hash before checkpoint reconciliation", "component", componentName)
 			info = &checkpoint.CheckpointInfo{
-				Enabled:          true,
-				AutomaticCapture: true,
-				StartupPolicy:    startupPolicy,
+				Enabled:        true,
+				CheckpointName: strings.TrimSpace(ptr.Deref(checkpointConfig.CheckpointRef, "")),
+				StartupPolicy:  startupPolicy,
+			}
+			if hasCheckpointRef {
+				// Explicit restore must remain fail-closed while compatibility
+				// identity is unavailable, even when Immediate was requested.
+				info.StartupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint
+			} else {
+				info.AutomaticCapture = true
 			}
 		} else if !hasCheckpointRef {
 			info, err = r.reconcileAutomaticSnapshotJob(
@@ -148,7 +159,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 				r.Client,
 				dgd.Namespace,
 				alphaCheckpointConfig,
-				workerHash,
+				expectedWorkerHash,
 			)
 		}
 		if err != nil {
@@ -156,7 +167,9 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			return dgdCheckpointsResult{}, fmt.Errorf("failed to resolve checkpoint for component %s: %w", componentName, err)
 		}
 
-		info.StartupPolicy = startupPolicy
+		if info.StartupPolicy == "" {
+			info.StartupPolicy = startupPolicy
+		}
 		if len(info.RestoreTargetContainers) == 0 && alphaCheckpointConfig.TargetContainerName != "" {
 			info.RestoreTargetContainers = []string{alphaCheckpointConfig.TargetContainerName}
 		}
@@ -326,11 +339,15 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		return nil, err
 	}
 
+	var expectedWorkerHash *string
+	if dynamo.IsWorkerComponent(string(component.ComponentType)) {
+		expectedWorkerHash = &workerHash
+	}
 	return r.resolveAutomaticSnapshotJob(
 		ctx,
 		snapshotJob,
 		dynamo.ToAlphaCheckpointConfig(checkpointConfig),
-		workerHash,
+		expectedWorkerHash,
 		startupPolicy,
 	)
 }
@@ -481,8 +498,11 @@ func (r *dgdCheckpointsReconciler) syncAutomaticPodSnapshotLifecycle(
 	job *snapshotv1alpha1.SnapshotJob,
 	deletionPolicy nvidiacomv1alpha1.CheckpointDeletionPolicy,
 ) error {
+	if job.Status.PodSnapshotName == "" {
+		return nil
+	}
 	snapshot := &snapshotv1alpha1.PodSnapshot{}
-	key := client.ObjectKey{Namespace: job.Namespace, Name: job.Name}
+	key := client.ObjectKey{Namespace: job.Namespace, Name: job.Status.PodSnapshotName}
 	if err := r.Get(ctx, key, snapshot); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
@@ -526,7 +546,7 @@ func (r *dgdCheckpointsReconciler) resolveAutomaticSnapshotJob(
 	ctx context.Context,
 	snapshotJob *snapshotv1alpha1.SnapshotJob,
 	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
-	workerHash string,
+	expectedWorkerHash *string,
 	startupPolicy nvidiacomv1alpha1.CheckpointStartupPolicy,
 ) (*checkpoint.CheckpointInfo, error) {
 	info := &checkpoint.CheckpointInfo{
@@ -559,7 +579,7 @@ func (r *dgdCheckpointsReconciler) resolveAutomaticSnapshotJob(
 		r.Client,
 		snapshotJob.Namespace,
 		refConfig,
-		workerHash,
+		expectedWorkerHash,
 	)
 	if apierrors.IsNotFound(err) {
 		return info, nil
@@ -677,6 +697,11 @@ func prepareCheckpointGMSPodTemplate(
 	targetContainer, err := findPodTemplateContainer(podTemplate, targetContainerName)
 	if err != nil {
 		return err
+	}
+	for _, clientContainerName := range gmsSpec.ExtraClientContainers {
+		if _, err := findPodTemplateContainer(podTemplate, clientContainerName); err != nil {
+			return fmt.Errorf("gpuMemoryService client container %q: %w", clientContainerName, err)
+		}
 	}
 	ensureCheckpointGMSPodClaim(&podTemplate.Spec, checkpointGMSResourceClaimTemplateName(checkpointID))
 	checkpoint.EnsureIntraPodGPUMemoryService(

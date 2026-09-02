@@ -232,6 +232,7 @@ func hasContainerNamed(containers []corev1.Container, name string) bool {
 }
 
 func containerIndexByName(containers []corev1.Container, name string) int {
+	// Return the first exact match so callers can update that container in place.
 	for i := range containers {
 		if containers[i].Name == name {
 			return i

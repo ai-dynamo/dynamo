@@ -49,9 +49,7 @@ TRTLLM_HF_HOME = f"{CHECKPOINT_STORAGE_MOUNT_PATH}/trtllm-hf-cache"
 SNAPSHOT_JOB_OWNER_LABEL = "nvidia.com/snapshot-job"
 RESTORE_FROM_ANNOTATION = "nvidia.com/restore-from"
 RESTORED_CONDITION = "nvidia.com/Restored"
-RESTORE_FAILURE_REASONS = frozenset(
-    {"RestoreFailed", "RestorePartiallySucceeded"}
-)
+RESTORE_FAILURE_REASONS = frozenset({"RestoreFailed", "RestorePartiallySucceeded"})
 
 # CUDA checkpointing can OOM on 10GB MIG slices; run this test on full GPUs.
 GPU_NODE_SELECTOR = {
@@ -375,8 +373,10 @@ async def _wait_for_checkpoint_ready(
             snapshot = await _get_snapshot_resource(
                 deployment, POD_SNAPSHOT_PLURAL, snapshot_name
             )
-            snapshot_job_name = snapshot.get("metadata", {}).get("labels", {}).get(
-                SNAPSHOT_JOB_OWNER_LABEL
+            snapshot_job_name = (
+                snapshot.get("metadata", {})
+                .get("labels", {})
+                .get(SNAPSHOT_JOB_OWNER_LABEL)
             )
             if snapshot_job_name:
                 snapshot_job = await _get_snapshot_resource(
@@ -447,11 +447,7 @@ def _runtime_decode_pods(
     pods = deployment.get_pods([backend.decode_component]).get(
         backend.decode_component, []
     )
-    return [
-        pod
-        for pod in pods
-        if not _is_snapshot_job_source(pod)
-    ]
+    return [pod for pod in pods if not _is_snapshot_job_source(pod)]
 
 
 async def _scale_decode_component(

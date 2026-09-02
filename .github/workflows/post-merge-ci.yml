@@ -1103,6 +1103,7 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           storage_class: azurefile-csi
+          storage_size: 64Gi
 
   deploy-snapshot-agent-checkpoint-sglang:
     name: SGLang Snapshot Agent Setup
@@ -1149,6 +1150,7 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           storage_class: azurefile-csi
+          storage_size: 64Gi
 
   deploy-snapshot-agent-checkpoint-trtllm:
     name: TRTLLM Snapshot Agent Setup
@@ -1195,6 +1197,7 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           storage_class: azurefile-csi
+          storage_size: 64Gi
 
   deploy-test-checkpoint-vllm:
     name: vLLM Snapshot Deploy Test
@@ -1243,6 +1246,7 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           storage_class: azurefile-csi
+          storage_size: 64Gi
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
@@ -1307,6 +1311,7 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           storage_class: azurefile-csi
+          storage_size: 64Gi
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
@@ -1371,6 +1376,7 @@ jobs:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
           storage_class: azurefile-csi
+          storage_size: 64Gi
       - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:

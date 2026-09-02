@@ -29,7 +29,7 @@ func TestResolvePodSnapshotForService(t *testing.T) {
 		config := nativeTestCheckpointConfig(snapshot.Name)
 
 		t.Log("When the explicit reference is resolved for the same worker generation")
-		info, err := ResolvePodSnapshotForService(context.Background(), reader, snapshot.Namespace, config, "worker-v1")
+		info, err := ResolvePodSnapshotForService(context.Background(), reader, snapshot.Namespace, config, ptr.To("worker-v1"))
 
 		t.Log("Then the resolver returns the bound native artifact identity and source container")
 		require.NoError(t, err)
@@ -58,7 +58,7 @@ func TestResolvePodSnapshotForService(t *testing.T) {
 			reader,
 			snapshot.Namespace,
 			nativeTestCheckpointConfig(snapshot.Name),
-			"worker-v1",
+			ptr.To("worker-v1"),
 		)
 
 		t.Log("Then reconciliation can retain the UID while keeping the workload gated")
@@ -92,7 +92,7 @@ func TestResolvePodSnapshotForService(t *testing.T) {
 					reader,
 					snapshot.Namespace,
 					nativeTestCheckpointConfig(snapshot.Name),
-					"worker-v1",
+					ptr.To("worker-v1"),
 				)
 
 				t.Log("Then Dynamo reconstructs only the compatibility topology for later client overlay")
@@ -102,6 +102,46 @@ func TestResolvePodSnapshotForService(t *testing.T) {
 				assert.Equal(t, test.want, info.GPUMemoryService.Mode)
 			})
 		}
+	})
+
+	t.Run("resolves a non-worker snapshot without a worker hash", func(t *testing.T) {
+		t.Log("Given a compatible non-worker PodSnapshot with no worker generation")
+		snapshot := nativeTestPodSnapshot()
+		delete(snapshot.Annotations, consts.SnapshotWorkerHashAnnotation)
+		reader := fake.NewClientBuilder().WithScheme(nativeTestScheme(t)).WithObjects(snapshot).Build()
+
+		t.Log("When the reference is resolved without a worker hash contract")
+		info, err := ResolvePodSnapshotForService(
+			context.Background(),
+			reader,
+			snapshot.Namespace,
+			nativeTestCheckpointConfig(snapshot.Name),
+			nil,
+		)
+
+		t.Log("Then the remaining native compatibility contract is still enforced")
+		require.NoError(t, err)
+		assert.True(t, info.Ready)
+		require.NotNil(t, info.NativeSnapshot)
+		assert.Equal(t, snapshot.UID, info.NativeSnapshot.UID)
+	})
+
+	t.Run("rejects a worker restore before its hash is available", func(t *testing.T) {
+		t.Log("Given a worker restore whose generation identity is not initialized")
+		snapshot := nativeTestPodSnapshot()
+		reader := fake.NewClientBuilder().WithScheme(nativeTestScheme(t)).WithObjects(snapshot).Build()
+
+		t.Log("When resolution requires an empty worker hash")
+		_, err := ResolvePodSnapshotForService(
+			context.Background(),
+			reader,
+			snapshot.Namespace,
+			nativeTestCheckpointConfig(snapshot.Name),
+			ptr.To(""),
+		)
+
+		t.Log("Then resolution fails closed until the worker generation is known")
+		require.ErrorContains(t, err, "worker compatibility hash is required")
 	})
 }
 
@@ -178,7 +218,7 @@ func TestResolvePodSnapshotForServiceRejectsIncompatibleReferences(t *testing.T)
 				reader,
 				snapshot.Namespace,
 				nativeTestCheckpointConfig(snapshot.Name),
-				"worker-v1",
+				ptr.To("worker-v1"),
 			)
 
 			t.Log("Then the resolver fails closed with the violated invariant")
