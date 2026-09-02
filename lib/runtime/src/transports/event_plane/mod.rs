@@ -935,17 +935,23 @@ mod tests {
         let second = codec
             .encode_envelope_parts(7, 12, 2, "events", b"second")
             .unwrap();
+        let other_publisher = codec
+            .encode_envelope_parts(8, 11, 3, "events", b"other")
+            .unwrap();
         let expected_first = first.clone();
         let expected_second = second.clone();
+        let expected_other = other_publisher.clone();
         let inner: WireStream = Box::pin(futures::stream::iter(vec![
             Ok(first.clone()),
             Ok(first),
             Ok(second),
+            Ok(other_publisher),
         ]));
         let mut stream = DeduplicatingStream::new(inner, codec, 16);
 
         assert_eq!(stream.next().await.unwrap().unwrap(), expected_first);
         assert_eq!(stream.next().await.unwrap().unwrap(), expected_second);
+        assert_eq!(stream.next().await.unwrap().unwrap(), expected_other);
         assert!(stream.next().await.is_none());
     }
 

@@ -382,7 +382,13 @@ impl ZmqSubTransport {
         rcvhwm: i32,
     ) -> Result<ZmqWireStream> {
         let socket = Self::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
-        Self::single_consumer_stream(socket, topic, rcvhwm, 1)
+        tracing::info!(
+            endpoint,
+            topic,
+            rcvhwm,
+            "ZMQ single-consumer stream connected"
+        );
+        Self::single_consumer_stream(socket, topic)
     }
 
     /// Connect one consumer directly to multiple ZMQ endpoints.
@@ -393,34 +399,29 @@ impl ZmqSubTransport {
         endpoints: &[String],
         topic: &str,
     ) -> Result<ZmqWireStream> {
-        let mut endpoints = endpoints.iter();
-        let Some(first_endpoint) = endpoints.next() else {
+        let mut endpoint_iter = endpoints.iter();
+        let Some(first_endpoint) = endpoint_iter.next() else {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let endpoint_count = endpoints.len() + 1;
+        let endpoint_count = endpoints.len();
         let socket = Self::connect_socket(first_endpoint, topic)?;
-        for endpoint in endpoints {
+        for endpoint in endpoint_iter {
             socket.get_socket().connect(endpoint)?;
         }
-
-        Self::single_consumer_stream(socket, topic, ZMQ_RCVHWM, endpoint_count)
-    }
-
-    fn single_consumer_stream(
-        mut socket: Subscribe,
-        topic: &str,
-        rcvhwm: i32,
-        endpoint_count: usize,
-    ) -> Result<ZmqWireStream> {
-        let expected_topic = topic.as_bytes().to_vec();
 
         tracing::info!(
             endpoint_count,
             topic,
-            rcvhwm,
-            "ZMQ single-consumer stream connected"
+            rcvhwm = ZMQ_RCVHWM,
+            "ZMQ single-consumer stream connected to multiple endpoints"
         );
+        tracing::debug!(?endpoints, topic, "ZMQ single-consumer stream endpoints");
+        Self::single_consumer_stream(socket, topic)
+    }
+
+    fn single_consumer_stream(mut socket: Subscribe, topic: &str) -> Result<ZmqWireStream> {
+        let expected_topic = topic.as_bytes().to_vec();
 
         let stream = stream! {
             while let Some(result) = socket.next().await {

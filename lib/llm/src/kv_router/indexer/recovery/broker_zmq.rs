@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     future::Future,
     sync::Arc,
     time::Duration,
@@ -16,6 +16,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
     transports::event_plane::{Codec, EventEnvelope, EventSubscriber},
 };
+use futures::future::join_all;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -46,10 +47,17 @@ enum ScopeExit {
     Stop,
 }
 
+enum MembershipUpdate {
+    View(Box<KvSourceMembershipView>),
+    Rebind,
+    Stop,
+}
+
 struct PublisherLane {
     sender: mpsc::Sender<EventEnvelope>,
     cancel: CancellationToken,
     handle: JoinHandle<()>,
+    queue_full_warned: bool,
 }
 
 trait PublisherBatchConsumer: Clone + Send + Sync + 'static {
@@ -91,16 +99,24 @@ impl<T: RecoveryTarget> PublisherBatchConsumer for KvBatchConsumer<T> {
 
 struct PublisherLanes<C: PublisherBatchConsumer> {
     lanes: HashMap<u64, PublisherLane>,
+    retired: Vec<JoinHandle<()>>,
     consumer: C,
     metrics: Arc<KvZmqIngressMetrics>,
+    cancellation_token: CancellationToken,
 }
 
 impl<C: PublisherBatchConsumer> PublisherLanes<C> {
-    fn new(consumer: C, metrics: Arc<KvZmqIngressMetrics>) -> Self {
+    fn new(
+        consumer: C,
+        metrics: Arc<KvZmqIngressMetrics>,
+        supervisor_token: &CancellationToken,
+    ) -> Self {
         Self {
             lanes: HashMap::new(),
+            retired: Vec::new(),
             consumer,
             metrics,
+            cancellation_token: supervisor_token.child_token(),
         }
     }
 
@@ -111,77 +127,130 @@ impl<C: PublisherBatchConsumer> PublisherLanes<C> {
             return;
         }
 
-        if !self.lanes.contains_key(&publisher_id) {
-            self.lanes.insert(publisher_id, self.spawn(publisher_id));
-        }
+        let consumer = self.consumer.clone();
+        let metrics = self.metrics.clone();
+        let cancellation_token = self.cancellation_token.child_token();
+        let lane = match self.lanes.entry(publisher_id) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(spawn_publisher_lane(
+                publisher_id,
+                consumer,
+                metrics,
+                cancellation_token,
+            )),
+        };
 
-        let result = self
-            .lanes
-            .get(&publisher_id)
-            .expect("publisher lane was just inserted")
-            .sender
-            .try_send(envelope);
-        match result {
-            Ok(()) => {}
+        let closed = match lane.sender.try_send(envelope) {
+            Ok(()) => false,
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.metrics.increment_lifecycle("queue_full");
+                if !lane.queue_full_warned {
+                    tracing::warn!(
+                        publisher_id,
+                        capacity = PUBLISHER_LANE_CAPACITY,
+                        "Brokered-ZMQ publisher lane is full; dropping the newest batch"
+                    );
+                    lane.queue_full_warned = true;
+                }
+                false
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.metrics.increment_lifecycle("lane_closed");
-                if let Some(lane) = self.lanes.remove(&publisher_id) {
-                    lane.cancel.cancel();
-                    lane.handle.abort();
-                    self.metrics.decrement_sources("active");
-                }
+                true
             }
+        };
+        if closed {
+            self.retire(publisher_id);
         }
     }
 
-    fn spawn(&self, publisher_id: u64) -> PublisherLane {
-        let (sender, receiver) = mpsc::channel(PUBLISHER_LANE_CAPACITY);
-        let cancel = CancellationToken::new();
-        let handle = tokio::spawn(run_publisher_lane(
-            publisher_id,
-            receiver,
-            self.consumer.clone(),
-            self.metrics.clone(),
-            cancel.clone(),
-        ));
-        self.metrics.increment_sources("active");
-        self.metrics.increment_lifecycle("started");
-        PublisherLane {
-            sender,
-            cancel,
-            handle,
-        }
-    }
-
-    async fn reconcile(&mut self, active_publishers: &HashSet<u64>) {
+    fn reconcile(&mut self, active_publishers: &HashSet<u64>) {
         let obsolete = self
             .lanes
             .keys()
             .filter(|publisher_id| !active_publishers.contains(publisher_id))
             .copied()
             .collect::<Vec<_>>();
-        self.stop(obsolete).await;
+        for publisher_id in obsolete {
+            self.retire(publisher_id);
+        }
     }
 
     async fn shutdown(mut self) {
+        self.cancellation_token.cancel();
         let publisher_ids = self.lanes.keys().copied().collect::<Vec<_>>();
-        self.stop(publisher_ids).await;
-    }
-
-    async fn stop(&mut self, publisher_ids: Vec<u64>) {
-        let mut removed = Vec::with_capacity(publisher_ids.len());
         for publisher_id in publisher_ids {
-            if let Some(lane) = self.lanes.remove(&publisher_id) {
-                lane.cancel.cancel();
-                removed.push(lane);
+            self.retire(publisher_id);
+        }
+
+        let handles = std::mem::take(&mut self.retired);
+        if handles.is_empty() {
+            return;
+        }
+        match tokio::time::timeout(PUBLISHER_JOIN_TIMEOUT, join_all(handles)).await {
+            Ok(results) => {
+                for result in results {
+                    if let Err(error) = result
+                        && !error.is_cancelled()
+                    {
+                        tracing::warn!(%error, "Brokered-ZMQ publisher lane failed");
+                    }
+                }
+            }
+            Err(_) => {
+                // Dropping JoinHandle detaches the task. It may finish its current batch,
+                // but it is never aborted between index admission and state commit.
+                self.metrics.increment_lifecycle("join_timeout");
             }
         }
-        for lane in removed {
-            stop_publisher_lane(lane, &self.metrics).await;
+    }
+
+    fn retire(&mut self, publisher_id: u64) {
+        if let Some(lane) = self.lanes.remove(&publisher_id) {
+            lane.cancel.cancel();
+            self.retired.push(lane.handle);
         }
+    }
+}
+
+impl<C: PublisherBatchConsumer> Drop for PublisherLanes<C> {
+    fn drop(&mut self) {
+        self.cancellation_token.cancel();
+    }
+}
+
+fn spawn_publisher_lane<C: PublisherBatchConsumer>(
+    publisher_id: u64,
+    consumer: C,
+    metrics: Arc<KvZmqIngressMetrics>,
+    cancellation_token: CancellationToken,
+) -> PublisherLane {
+    let (sender, receiver) = mpsc::channel(PUBLISHER_LANE_CAPACITY);
+    metrics.increment_sources("active");
+    metrics.increment_lifecycle("started");
+    let metrics_guard = LaneMetricsGuard(metrics.clone());
+    let handle = tokio::spawn(run_publisher_lane(
+        publisher_id,
+        receiver,
+        consumer,
+        metrics,
+        cancellation_token.clone(),
+        metrics_guard,
+    ));
+    PublisherLane {
+        sender,
+        cancel: cancellation_token,
+        handle,
+        queue_full_warned: false,
+    }
+}
+
+struct LaneMetricsGuard(Arc<KvZmqIngressMetrics>);
+
+impl Drop for LaneMetricsGuard {
+    fn drop(&mut self) {
+        self.0.decrement_sources("active");
+        self.0.increment_lifecycle("stopped");
     }
 }
 
@@ -254,8 +323,7 @@ pub(super) async fn run_broker_zmq_supervisor(
             None
         };
 
-        let current_view = membership_watch.borrow().clone();
-        if current_view.resolved_kv_state_endpoint()
+        if membership_watch.borrow().resolved_kv_state_endpoint()
             != subscriber.as_ref().map(|(endpoint, _)| endpoint)
         {
             continue;
@@ -345,30 +413,43 @@ async fn consume_scope<T: RecoveryTarget>(
         client: client.clone(),
         metrics: ingress_metrics.clone(),
     };
-    let mut lanes = PublisherLanes::new(consumer, ingress_metrics.clone());
+    let mut lanes = PublisherLanes::new(consumer, ingress_metrics.clone(), cancellation_token);
+    let membership_cancel = cancellation_token.child_token();
+    let (membership_tx, mut membership_rx) = mpsc::channel(1);
+    let membership_handle = tokio::spawn(run_membership_updates(
+        client.clone(),
+        membership_watch.fork_receiver(),
+        kv_state_endpoint.clone(),
+        membership_tx,
+        membership_cancel.clone(),
+    ));
     let exit = loop {
         tokio::select! {
-            biased;
             _ = cancellation_token.cancelled() => break ScopeExit::Stop,
-            changed = membership_watch.changed() => {
-                if changed.is_err() {
-                    break ScopeExit::Stop;
+            update = membership_rx.recv() => {
+                if update.is_some() {
+                    membership_watch.borrow_and_update();
                 }
-                membership_watch.borrow_and_update();
-                let view = client.sync_membership().await;
-                update_mismatch_metric(
-                    status_metrics,
-                    &view,
-                    model,
-                    worker_type,
-                    serving_endpoint,
-                    metric_scope,
-                );
-                if view.resolved_kv_state_endpoint() != Some(kv_state_endpoint) {
-                    break ScopeExit::Rebind;
+                match update {
+                    Some(MembershipUpdate::View(view)) => {
+                        update_mismatch_metric(
+                            status_metrics,
+                            &view,
+                            model,
+                            worker_type,
+                            serving_endpoint,
+                            metric_scope,
+                        );
+                        active_publishers = self::active_publishers(&view);
+                        lanes.reconcile(&active_publishers);
+                    }
+                    Some(MembershipUpdate::Rebind) => break ScopeExit::Rebind,
+                    Some(MembershipUpdate::Stop) => break ScopeExit::Stop,
+                    None => {
+                        tracing::error!(%kv_state_endpoint, "Brokered KV membership task ended unexpectedly");
+                        break ScopeExit::Retry;
+                    }
                 }
-                active_publishers = self::active_publishers(&view);
-                lanes.reconcile(&active_publishers).await;
             }
             result = subscriber.next() => {
                 let Some(result) = result else {
@@ -379,15 +460,63 @@ async fn consume_scope<T: RecoveryTarget>(
                 match result {
                     Ok(envelope) => lanes.dispatch(envelope, &active_publishers),
                     Err(error) => {
-                        tracing::warn!(%error, %kv_state_endpoint, "Failed to decode brokered KV event envelope");
-                        ingress_metrics.increment_lifecycle("envelope_decode_error");
+                        tracing::warn!(%error, %kv_state_endpoint, "Failed to receive or decode brokered KV event envelope");
+                        ingress_metrics.increment_lifecycle("stream_error");
                     }
                 }
             }
         }
     };
+    membership_cancel.cancel();
+    drop(membership_rx);
+    if let Err(error) = membership_handle.await
+        && !error.is_cancelled()
+    {
+        tracing::warn!(%error, "Brokered KV membership task failed");
+    }
     lanes.shutdown().await;
     exit
+}
+
+async fn run_membership_updates<T: RecoveryTarget>(
+    client: Arc<WorkerQueryClient<T>>,
+    mut membership_watch: KvSourceMembershipWatch,
+    kv_state_endpoint: EndpointId,
+    updates: mpsc::Sender<MembershipUpdate>,
+    cancellation_token: CancellationToken,
+) {
+    loop {
+        let changed = tokio::select! {
+            _ = cancellation_token.cancelled() => return,
+            changed = membership_watch.changed() => changed,
+        };
+        if changed.is_err() {
+            let _ = updates.send(MembershipUpdate::Stop).await;
+            return;
+        }
+
+        membership_watch.borrow_and_update();
+        if membership_watch.borrow().resolved_kv_state_endpoint() != Some(&kv_state_endpoint) {
+            let _ = updates.send(MembershipUpdate::Rebind).await;
+            return;
+        }
+
+        // This may reset or recover ranks. Keep it outside the socket reader and do not
+        // cancel it between index admission and the matching state commit.
+        let view = client.sync_membership().await;
+        let update = if view.resolved_kv_state_endpoint() == Some(&kv_state_endpoint) {
+            MembershipUpdate::View(Box::new(view))
+        } else {
+            MembershipUpdate::Rebind
+        };
+        let sent = tokio::select! {
+            _ = cancellation_token.cancelled() => return,
+            sent = updates.send(update) => sent,
+        };
+        if sent.is_err() {
+            return;
+        }
+    }
 }
 
 async fn run_publisher_lane<C: PublisherBatchConsumer>(
@@ -396,6 +525,7 @@ async fn run_publisher_lane<C: PublisherBatchConsumer>(
     consumer: C,
     metrics: Arc<KvZmqIngressMetrics>,
     cancellation_token: CancellationToken,
+    _metrics_guard: LaneMetricsGuard,
 ) {
     let mut high_watermark = None;
     loop {
@@ -419,25 +549,26 @@ fn observe_sequence(
     sequence: u64,
     high_watermark: &mut Option<u64>,
     metrics: &KvZmqIngressMetrics,
-) {
-    match *high_watermark {
+) -> (u64, bool) {
+    let observation = match *high_watermark {
         None => {
-            if sequence > 0 {
-                metrics.increment_lifecycle_by("sequence_gap", sequence);
-            }
             *high_watermark = Some(sequence);
+            (0, false)
         }
-        Some(previous) if sequence <= previous => {
-            metrics.increment_lifecycle("out_of_order");
-        }
+        Some(previous) if sequence <= previous => (0, true),
         Some(previous) => {
             let missing = sequence - previous - 1;
-            if missing > 0 {
-                metrics.increment_lifecycle_by("sequence_gap", missing);
-            }
             *high_watermark = Some(sequence);
+            (missing, false)
         }
+    };
+    if observation.0 > 0 {
+        metrics.increment_lifecycle_by("sequence_gap", observation.0);
     }
+    if observation.1 {
+        metrics.increment_lifecycle("out_of_order");
+    }
+    observation
 }
 
 fn active_publishers(view: &KvSourceMembershipView) -> HashSet<u64> {
@@ -446,21 +577,6 @@ fn active_publishers(view: &KvSourceMembershipView) -> HashSet<u64> {
         .filter_map(|status| status.active_source())
         .map(|source| source.publisher_id)
         .collect()
-}
-
-async fn stop_publisher_lane(mut lane: PublisherLane, metrics: &KvZmqIngressMetrics) {
-    match tokio::time::timeout(PUBLISHER_JOIN_TIMEOUT, &mut lane.handle).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) if error.is_cancelled() => {}
-        Ok(Err(error)) => tracing::warn!(%error, "Brokered-ZMQ publisher lane failed"),
-        Err(_) => {
-            lane.handle.abort();
-            let _ = lane.handle.await;
-            metrics.increment_lifecycle("forced_abort");
-        }
-    }
-    metrics.decrement_sources("active");
-    metrics.increment_lifecycle("stopped");
 }
 
 async fn wait_for_retry(
@@ -547,7 +663,8 @@ mod tests {
     #[tokio::test]
     async fn slow_publisher_does_not_block_sibling_and_order_is_preserved() {
         let consumer = TestConsumer::new(Some(1));
-        let mut lanes = PublisherLanes::new(consumer.clone(), test_metrics().await);
+        let cancel = CancellationToken::new();
+        let mut lanes = PublisherLanes::new(consumer.clone(), test_metrics().await, &cancel);
         let active = HashSet::from([1, 2]);
 
         lanes.dispatch(envelope(1, 0), &active);
@@ -582,7 +699,8 @@ mod tests {
     #[tokio::test]
     async fn full_lane_drops_only_its_newest_batch() {
         let consumer = TestConsumer::new(Some(1));
-        let mut lanes = PublisherLanes::new(consumer.clone(), test_metrics().await);
+        let cancel = CancellationToken::new();
+        let mut lanes = PublisherLanes::new(consumer.clone(), test_metrics().await, &cancel);
         let active = HashSet::from([1]);
 
         lanes.dispatch(envelope(1, 0), &active);
@@ -617,18 +735,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn membership_reconcile_removes_inactive_lane() {
+    async fn membership_reconcile_finishes_current_batch_without_blocking() {
+        let consumer = TestConsumer::new(Some(7));
+        let cancel = CancellationToken::new();
+        let mut lanes = PublisherLanes::new(consumer.clone(), test_metrics().await, &cancel);
+        lanes.dispatch(envelope(7, 0), &HashSet::from([7]));
+        tokio::time::timeout(Duration::from_secs(1), consumer.blocked_started.notified())
+            .await
+            .unwrap();
+
+        lanes.reconcile(&HashSet::new());
+        assert!(lanes.lanes.is_empty());
+        lanes.dispatch(envelope(7, 1), &HashSet::new());
+        assert!(lanes.lanes.is_empty());
+
+        consumer.blocked_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if consumer.seen.lock().await.contains(&(7, 0)) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the admitted batch should finish after its lane is retired");
+        lanes.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn supervisor_cancellation_reaches_publisher_lanes() {
         let consumer = TestConsumer::new(None);
-        let mut lanes = PublisherLanes::new(consumer.clone(), test_metrics().await);
+        let cancel = CancellationToken::new();
+        let mut lanes = PublisherLanes::new(consumer.clone(), test_metrics().await, &cancel);
         lanes.dispatch(envelope(7, 0), &HashSet::from([7]));
         tokio::time::timeout(Duration::from_secs(1), consumer.other_admitted.notified())
             .await
             .unwrap();
 
-        lanes.reconcile(&HashSet::new()).await;
-        assert!(lanes.lanes.is_empty());
-        lanes.dispatch(envelope(7, 1), &HashSet::new());
-        assert!(lanes.lanes.is_empty());
+        cancel.cancel();
+        assert!(lanes.lanes.get(&7).unwrap().cancel.is_cancelled());
         lanes.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn first_sequence_seeds_watermark_without_counting_a_gap() {
+        let metrics = test_metrics().await;
+        let mut high_watermark = None;
+
+        assert_eq!(
+            observe_sequence(1_000_000, &mut high_watermark, &metrics),
+            (0, false)
+        );
+        assert_eq!(
+            observe_sequence(1_000_003, &mut high_watermark, &metrics),
+            (2, false)
+        );
+        assert_eq!(
+            observe_sequence(1_000_002, &mut high_watermark, &metrics),
+            (0, true)
+        );
+        assert_eq!(high_watermark, Some(1_000_003));
     }
 }
