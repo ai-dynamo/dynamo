@@ -40,7 +40,7 @@ class TritonMetricsBridge:
             self._active = False
 
 
-def create_metrics_endpoint_url(runtime: DistributedRuntime, config: Config) -> str:
+def create_metrics_endpoint_url(config: Config) -> str:
     return f"{config.namespace}.{config.server_id}._metrics"
 
 
@@ -53,7 +53,7 @@ def _register_triton_metrics_bridge(
     # The endpoint owns a single process-wide callback and is never served
     # or registered in discovery. Model endpoints use a hash suffix from
     # endpoint_slug, ensuring this reserved name does not conflict with them.
-    metrics_endpoint = runtime.endpoint(create_metrics_endpoint_url(runtime, config))
+    metrics_endpoint = runtime.endpoint(create_metrics_endpoint_url(config))
     metrics_bridge = TritonMetricsBridge(server)
     metrics_endpoint.metrics.register_prometheus_expfmt_callback(metrics_bridge.collect)
 

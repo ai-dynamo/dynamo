@@ -124,7 +124,7 @@ class DynamoTritonArgGroup(DynamoArgGroup):
             env_var="DYN_TRITON_MODEL_REPOSITORY",
             default="/models",
             help="Model repository directory. "
-            "Required (validated below); the worker is model-agnostic and does not assume a bundled repo.",
+            "Required (default: /models); the worker is model-agnostic and does not assume a bundled repo.",
         )
         add_argument(
             repo_group,

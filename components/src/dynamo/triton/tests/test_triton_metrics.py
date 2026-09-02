@@ -143,7 +143,7 @@ def test_register_creates_metrics_only_endpoint():
 
     # Confirm the reserved metrics-only endpoint is used, and not served.
     runtime.endpoint.assert_called_once_with(
-        metrics.create_metrics_endpoint_url(runtime, config)
+        metrics.create_metrics_endpoint_url(config)
     )
     endpoint.serve_endpoint.assert_not_called()
 
