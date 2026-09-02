@@ -170,7 +170,7 @@ KV hit rate 和 speculative decode accept length 是引擎/Router 运行时信�
 
 Planner 监听 `127.0.0.1:<control_api_port>`，并在 `/v1/min-endpoints` 支持 `GET` 和部分 `PATCH`。该 API 不提供认证，也不会通过 Kubernetes Service 暴露。分离模式使用 `prefill_min_endpoint` 和 `decode_min_endpoint`；单组件模式只使用当前组件对应的字段；聚合模式使用 `min_endpoint`。所有模式也都接受 `min_gpu_budget` 和 `max_gpu_budget`。响应包含当前模式的端点字段和两个 GPU budget。更新仅作用于当前进程，不会写回 Planner ConfigMap，并会在下一个 planner tick 生效。
 
-在 Kubernetes 中，先 port-forward 到 Planner pod，再修改当前模式对应的字段：
+在 Kubernetes 中，先 port-forward 到 Planner pod，再修改当前模式对应的字段。以下示例更新 `disagg` 模式的 Planner：
 
 ```bash
 kubectl port-forward pod/<planner-pod> 9086:9086

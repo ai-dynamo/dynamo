@@ -179,7 +179,7 @@ KV hit rate and speculative decode accept length are runtime engine/router signa
 
 The Planner listens on `127.0.0.1:<control_api_port>` and supports `GET` and partial `PATCH` requests at `/v1/min-endpoints`. The API has no authentication and is not exposed by a Kubernetes Service. It uses `prefill_min_endpoint` and `decode_min_endpoint` in disaggregated mode, the active component's field in single-component mode, and `min_endpoint` in aggregated mode. Every mode also accepts `min_gpu_budget` and `max_gpu_budget`. A response includes the active endpoint fields and both GPU budgets. Updates are process-local, are not written back to the Planner ConfigMap, and apply to the next planner tick.
 
-In Kubernetes, port-forward to the Planner pod and patch the active mode's field:
+In Kubernetes, port-forward to the Planner pod and patch the active mode's field. The following example updates a Planner in `disagg` mode:
 
 ```bash
 kubectl port-forward pod/<planner-pod> 9086:9086

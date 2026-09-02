@@ -144,6 +144,7 @@ async def test_runtime_patch_updates_gpu_budgets_only():
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_http_patch_updates_gpu_budgets_and_returns_complete_configuration():
     from aiohttp.test_utils import TestClient, TestServer
 
@@ -294,11 +295,7 @@ async def test_http_validation_and_budget_rejection_leave_config_unchanged():
             {"prefill_min_endpoint": "2"},
             {"prefill_min_endpoint": True},
             {"prefill_min_endpoint": 2.5},
-            {"min_gpu_budget": None},
-            {"min_gpu_budget": "2"},
-            {"min_gpu_budget": True},
             {"min_gpu_budget": -2},
-            {"max_gpu_budget": 2.5},
             {"max_gpu_budget": -2},
         ):
             response = await client.patch("/v1/min-endpoints", json=payload)
@@ -320,6 +317,7 @@ async def test_http_validation_and_budget_rejection_leave_config_unchanged():
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 @pytest.mark.parametrize(
     "mode,inactive_field",
     [

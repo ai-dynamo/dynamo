@@ -36,6 +36,7 @@ pytestmark = [
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 @pytest.mark.parametrize("advisory", [False, True])
 async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
     events = []
@@ -135,6 +136,7 @@ async def test_complete_tick_applies_scaling_only_when_not_advisory(advisory):
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_runtime_patch_queued_during_decision_discards_stale_effects():
     state = DeploymentState()
     state.decode.info = WorkerInfo(k8s_name="decode-worker")
@@ -200,6 +202,7 @@ async def test_runtime_patch_queued_during_decision_discards_stale_effects():
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_stalled_effect_ack_keeps_runtime_api_available_without_duplicate():
     state = DeploymentState()
     state.decode.info = WorkerInfo(k8s_name="decode-worker")
@@ -282,6 +285,7 @@ async def test_stalled_effect_ack_keeps_runtime_api_available_without_duplicate(
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_late_submission_error_after_timeout_fails_closed_without_retry(caplog):
     state = DeploymentState()
     state.decode.info = WorkerInfo(k8s_name="decode-worker")
