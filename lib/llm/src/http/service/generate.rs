@@ -1782,6 +1782,62 @@ mod tests {
     }
 
     #[test]
+    fn sampling_params_cache_salt_becomes_canonical_routing_salt() {
+        let raw = serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {"cache_salt": "policy-7"}
+        });
+        let request: GenerateRequest =
+            serde_json::from_value(raw.clone()).expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.cache_namespace.as_deref()),
+            Some("policy-7")
+        );
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra.get("vllm_tito"))
+                .expect("vllm_tito envelope")["sampling_params"]["cache_salt"],
+            raw["sampling_params"]["cache_salt"]
+        );
+    }
+
+    #[test]
+    fn conflicting_cache_salt_spellings_are_rejected_before_routing() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "cache_salt": "policy-7",
+            "sampling_params": {"cache_salt": "policy-8"}
+        }))
+        .expect("deserialize request");
+
+        let error = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect_err("conflicting cache salts must fail");
+
+        assert!(error.to_string().contains("cache_salt"));
+    }
+
+    #[test]
     fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
         let hash_a = "a".repeat(64);
         let hash_b = "b".repeat(64);
