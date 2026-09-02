@@ -207,13 +207,32 @@ pub(crate) fn encode_annotated_response<T: Serialize>(
     codec: RequestPlanePayloadCodec,
     annotated: Annotated<T>,
 ) -> Result<(Vec<u8>, bool), anyhow::Error> {
+    // `with_capacity`, not `new`: this is still the pull path's encoder, and
+    // `serde_json::to_vec` — which it used before — starts at 128 bytes. Growing
+    // from zero here would regress JSON responses to pay the reallocations this
+    // change exists to remove.
+    let mut bytes = Vec::with_capacity(128);
+    let is_error = write_annotated_response(codec, annotated, &mut bytes)?;
+    Ok((bytes, is_error))
+}
+
+/// Encode the canonical non-terminal wrapper into a caller-owned writer, so the
+/// push path can reuse one allocation across a request's frames.
+///
+/// The wrapper shape is defined here and nowhere else; `encode_annotated_response`
+/// delegates to it, so the two cannot disagree.
+pub(crate) fn write_annotated_response<T: Serialize, W: std::io::Write>(
+    codec: RequestPlanePayloadCodec,
+    annotated: Annotated<T>,
+    writer: &mut W,
+) -> Result<bool, anyhow::Error> {
     let is_error = annotated.is_error();
     let wrapper = NetworkStreamWrapper {
         data: Some(annotated),
         complete_final: false,
     };
-    let bytes = codec.encode(&wrapper)?;
-    Ok((bytes, is_error))
+    codec.encode_into(&wrapper, writer)?;
+    Ok(is_error)
 }
 
 fn encode_python_response(

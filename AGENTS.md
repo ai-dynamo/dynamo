@@ -23,6 +23,16 @@ holds the operator, Helm charts, and gateway integration. Treat any change that 
 these boundaries as non-trivial. Dynamo also sits inside a wider `ai-dynamo` ecosystem of
 sibling repos (below) that it integrates with rather than vendors.
 
+## Agent Instruction Files
+
+- `AGENTS.md` is the canonical and only source of agent instructions at every
+  repository scope.
+- Every `AGENTS.md` must have a sibling `CLAUDE.md` containing exactly
+  `@AGENTS.md` so Claude loads the same instructions.
+- Do not put independent instructions in `CLAUDE.md`, and do not make
+  `AGENTS.md` a symlink to `CLAUDE.md`.
+- Add, move, or remove each `AGENTS.md` and `CLAUDE.md` pair together.
+
 ## Skills
 
 Skills live canonically in `.agents/skills/`; `skills/` and `.claude/skills/` are symlinks
@@ -43,11 +53,13 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `dynamo-agent-harness` — drive persistent Claude Code, Codex, or OpenCode sessions through Dynamo over ACP
 - `graham-code-review` — strict Rust/systems review in Graham King's style
 - `pr-monitor` — CI health check, failure root-cause, and skip analysis
+- `repo-codeowners` — who reviews a change, fixing a failing `codeowners` check, changing review routing
 - `visual-review` — interactive HTML code-review dashboards with diagrams and annotated diffs
 
 **For deploying and operating Dynamo:**
 
-- `synthesize-user-workload` — interview the user, capture their DGD, and create the canonical workload contract
+- `synthesize-user-workload` — interview the user, capture their confirmed baseline DGD, and create the canonical workload contract
+- `author-baseline-dgd` — draft a baseline DGD from interview requirements when no recipe matches, for the user's confirmation
 - `consult-perf-knowledge` — select one evidence-backed optimization proposal and write its reasoning record
 - `create-optimization-hypothesis` — materialize a performance consultation as a challenger-ready DGD draft
 - `perform-adversarial-review` — challenge a generated DGD candidate before it consumes GPU time
@@ -81,17 +93,25 @@ write and requires operator consent. Rules:
 
 ## Optimization Role Dispatch
 
-When the first user message starts a new Dynamo recipe optimization run, dispatch `user_interviewer` before any other
-specialized role. It must invoke `synthesize-user-workload` and produce a validated
-`<EXP_ROOT>/user_workload.yaml` plus an immutable `<EXP_ROOT>/inputs/user_provided_dgd.yaml` copied from the DGD the
-user supplied. Do not dispatch `recipe_deployer`, `perf_analyzer`, `hypothesis_generator`, or
+When the first user message starts a new Dynamo recipe optimization run, FIRST read
+`agent-docs/guides/optimization/optimize-loop.md` end to end - the individual SKILL.md files are auto-discoverable,
+but the loop's sequencing, state machine, and stopping rules live only in that guide - then dispatch
+`user_interviewer` before any other specialized role. It must invoke `synthesize-user-workload` and produce a validated
+`<EXP_ROOT>/user_workload.yaml` plus an immutable `<EXP_ROOT>/inputs/user_provided_dgd.yaml` copied from the baseline the
+user supplied or explicitly confirmed. Do not dispatch `recipe_deployer`, `perf_analyzer`, `hypothesis_generator`, or
 `hypothesis_challenger` until both exact paths and SHA256 values are available. Pass both inputs directly to
 `recipe_deployer`; pass the same immutable workload path and hash to every later role. Do not insert a recipe
-exploration or selection step before the baseline deployment.
+exploration or selection step after the interview: the baseline-source ladder
+(`agents/user-interviewer/AGENTS.md`) is the only place selection or authoring happens, always with the user's
+explicit confirmation, and always before the loop starts.
 
 ## Long-Running Runs And Harness Compatibility
 
-An optimization loop is long-running, unattended work. An interactive harness ends its turn whenever the agent stops
+An optimization loop is long-running, unattended work. Know which harness you are in: in a SINGLE-SHOT harness
+(headless `-p`/print mode, one-turn API calls), background-job completion notifications can never reach you - the
+session is gone when your turn ends. There, poll synchronously with bounded loops and never park the engagement on
+a wake-up you cannot receive; parking is only valid where the harness can re-invoke you (interactive sessions, goal
+mode). An interactive harness ends its turn whenever the agent stops
 calling tools — a turn that ends on narrated intent ("now I'll test disagg") silently stalls the loop until a human
 notices. Two rules:
 
@@ -131,7 +151,7 @@ Sibling repositories this repo integrates with:
 |------|------|
 | [NIXL](https://github.com/ai-dynamo/nixl) | High-throughput inference data-transfer library (KV-cache transfer over RDMA/NVLink) that underpins disaggregated serving |
 | [AIPerf](https://github.com/ai-dynamo/aiperf) | Benchmarking and load-generation tool used by the benchmarking guides |
-| [AIConfigurator](https://github.com/ai-dynamo/aiconfigurator) | Simulates thousands of deployment configs to find an optimal serving config before spending GPU-hours |
+| [AISimulate](https://pypi.org/project/aisimulate/) | Predicts serving behavior and searches deployment configurations offline without requiring a GPU cluster |
 | [ModelExpress](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL for fast replica cold-start |
 | [Grove](https://github.com/ai-dynamo/grove) | Kubernetes operator for topology-aware gang scheduling |
 
@@ -143,8 +163,8 @@ Sibling repositories this repo integrates with:
 | `components/src/dynamo/` | Python packages: `frontend`, `planner`, `router`, `vllm`/`sglang`/`trtllm` backends, `mocker`, `profiler`, and more |
 | `deploy/` | Kubernetes `operator`, Helm charts, `inference-gateway` ext-proc, `observability` |
 | `container/` | Dockerfiles and build scripts for runtime and dev images |
-| `docs/`, `fern/` | Documentation sources and the Fern docs-site config — read [`docs/AGENTS.md`](docs/fern/AGENTS.md) before editing |
-| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/AGENTS.md`](docs/fern/AGENTS.md) |
+| `docs/fern/` | Fern docs site: `pages/` holds every page, the rest is site config (`index.yml`, `docs.yml`, `main.css`, `components/`, `scripts/`, `translations/`). Read [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) before editing, and [`docs/fern/pages/AGENTS.md`](docs/fern/pages/AGENTS.md) before adding a page |
+| `examples/`, `recipes/` | Runnable examples and deployment recipes — also covered by [`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) |
 | `benchmarks/`, `tests/` | Benchmark harnesses and the top-level pytest suite |
 | `.ai/` | Agent topic guidelines: `bash-launch-guidelines.md`, `ci-guidelines.md`, `linear-ticket-refs.md`, `pytest-guidelines.md`, `python-guidelines.md`, `test-model-size-guardrails.md` |
 | `.agents/skills/` | Agent skills (see [Skills](#skills)) |
@@ -152,7 +172,7 @@ Sibling repositories this repo integrates with:
 ## Build
 
 System prerequisites (Rust toolchain, `uv`, system libraries) and the VS Code / Cursor
-devcontainer are covered in [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md).
+devcontainer are covered in [the contribution guide](docs/fern/pages/community/contributing/overview.md).
 
 Python dev build (bindings + wheel, editable):
 
@@ -179,6 +199,10 @@ cargo test                  # Rust
 pytest -m unit tests/       # Python unit tests
 ```
 
+On macOS, run `dynamo-llm` checks and targeted tests with `--no-default-features` unless the
+target explicitly requires `block-manager`. The default feature enables Linux/CUDA-oriented NIXL,
+NUMA, and `O_DIRECT` code that is not a valid general-purpose macOS validation path.
+
 Markers are strict (`--strict-markers`); the full marker list lives in
 [`pyproject.toml`](pyproject.toml) `[tool.pytest.ini_options]`, including GPU gating
 (`gpu_0` … `gpu_8`). Read [`.ai/pytest-guidelines.md`](.ai/pytest-guidelines.md) and
@@ -200,23 +224,47 @@ cargo fmt --all && cargo clippy --workspace
   `style`, and `build`.
 - PR descriptions must include `Summary` and `Validation`.
 - Sign every commit with DCO: `git commit -s`.
+- For fork PRs that qualify for automatic trusted-CI approval, every commit must have a
+  cryptographic signature that GitHub reports as `Verified`; a DCO sign-off alone does not
+  satisfy this requirement. Signing commits does not itself qualify a PR for automatic approval;
+  a maintainer can manually approve the current head with `/ok to test <sha>`.
+- Do not hand-edit a generated artifact — change its source and regenerate. A
+  generated file says so in a `do not edit` marker, and its generator has a
+  `--check` mode that fails when the committed output is stale. Resolve a
+  conflict in a generated file by regenerating rather than editing the
+  conflict — a hand-resolved artifact passes review and then fails the next
+  `--check` — and resolve one in an aggregate list, such as a coverage set or
+  a filter list, as the union of both sides.
 - Do not hand-edit the root `CODEOWNERS` — it is generated. To change review
   routing, edit `.github/codeowners/areas.yaml` and regenerate; CI gates 100%
   coverage and `CODEOWNERS`↔`areas.yaml` drift. See
-  `.github/codeowners/README.md` (use `who_owns.py` to check who reviews a path).
+  `.github/codeowners/README.md`. To check who reviews your PR:
+  `python .github/codeowners/who_owns.py --codeowners CODEOWNERS --changed`
+  (`--people` expands teams to members for org members).
+  If the `codeowners` check fails after adding a new directory, claim it with
+  one line under the owning area in `areas.yaml`, regenerate, and commit both
+  files together. External contributors earn area-scoped co-ownership via
+  `.github/codeowners/external_contributors.yaml`. The `repo-codeowners`
+  skill automates all of this.
 - Full CI on a PR runs only after a maintainer comments `/ok to test <sha>` with the short
   SHA of the latest commit; copy-pr-bot then creates the `pull-request/N` branch that
-  triggers it. Fix failures before requesting human review.
+  triggers it. For an eligible fork PR, the automatic approval flow posts that command only
+  after every PR commit is GitHub-verified. Fix failures before requesting human review.
 - Architecture changes require a Dynamo Enhancement Proposal (DEP), filed as a GitHub
   issue on `ai-dynamo/dynamo` with `dep:*` labels (the `dep-create` skill automates this).
 
-See [`docs/contribution-guide.md`](docs/fern/pages/community/contributing/overview.md) for the full workflow
+See [the contribution guide](docs/fern/pages/community/contributing/overview.md) for the full workflow
 (issue sizing, CODEOWNERS, review process).
 
 ## Docs, Examples, Recipes
 
 Any change under `docs/`, `examples/`, or `recipes/` must follow
-[`docs/AGENTS.md`](docs/fern/AGENTS.md) and the
+[`docs/fern/AGENTS.md`](docs/fern/AGENTS.md) and the
 [documentation style guide](docs/fern/pages/community/contributing/documentation/documentation-style-guide.md): SPDX headers, Fern
 frontmatter (no body `# H1`), GitHub-style admonitions, and backend casing
 (vLLM / SGLang / TensorRT-LLM). The deterministic subset is enforced pre-merge.
+
+The docs site is tab-based: `docs/fern/pages/` splits into `kubernetes/` and `cli/` (parallel
+guides for two readers), plus `use-cases/`, `recipes/`, `developer-guide/`, `reference/`, `blog/`,
+and `community/`. Read [`docs/fern/pages/AGENTS.md`](docs/fern/pages/AGENTS.md) to pick the right
+tab before adding a page — a misplaced page costs a move plus a redirect.

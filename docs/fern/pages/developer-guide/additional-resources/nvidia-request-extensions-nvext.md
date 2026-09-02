@@ -97,7 +97,7 @@ KV-cache entries:
 | TensorRT-LLM | Supported | Router matching and backend KV-cache reuse are isolated by salt. |
 | SGLang | Not supported end to end | Dynamo request hashes are namespaced, but the embedded SGLang engine does not receive the salt. SGLang KV events and radix-cache reuse remain unsalted. Do not rely on `cache_salt` for tenant cache isolation with SGLang. |
 
-Dynamo accepts three inputs, in descending precedence:
+Chat completion and completion requests accept three inputs, in descending precedence:
 
 1. The non-empty `x-tenant-id` HTTP header, intended for gateway-controlled tenant identity.
 2. The recommended `nvext.cache_salt` request field.
@@ -105,12 +105,19 @@ Dynamo accepts three inputs, in descending precedence:
 
 Empty strings are treated as absent. In particular, an empty `nvext.cache_salt` falls back to a
 non-empty top-level compatibility value. Requests without a salt retain the unsalted hashing and
-cache-reuse behavior.
+cache-reuse behavior. Responses and Anthropic Messages accept the first two inputs. Classify and
+pooling requests accept only their independent top-level `cache_salt` field. Embeddings requests do
+not accept a cache salt.
 
-`DYN_ENABLE_FRONTEND_NVEXT=false` disables both the `nvext` form and routing-header overrides,
-including `x-tenant-id`. The top-level backend-compatibility field is not part of the NvExt
-protocol. Cache salt is an isolation key, not an authentication or authorization mechanism;
-gateways must still authenticate the tenant identity they place in `x-tenant-id`.
+`DYN_DISABLE_FRONTEND_NVEXT=true` disables non-salt NvExt fields, non-salt routing headers, and
+response `extra_fields` on endpoints that support those features. Cache isolation is exempt.
+Dynamo continues to use `nvext.cache_salt` and `x-tenant-id` on chat completions, completions,
+Responses, and Anthropic Messages. Top-level cache salts remain active on chat completions,
+completions, classify, and pooling. On embeddings, classify, and pooling, the switch only drops the
+legacy NvExt annotations; these endpoints do not use `x-tenant-id` or the `x-dynamo-*` routing
+headers in either mode. The same precedence and empty-value rules apply when NvExt is disabled.
+Cache salt is an isolation key, not an authentication or authorization mechanism. Gateways must
+still authenticate the tenant identity they place in `x-tenant-id`.
 
 Session identity is header-only. Use the coding-agent headers or Dynamo
 session headers described in [Session IDs](../../use-cases/agents/session-ids.mdx);
@@ -268,7 +275,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 
 | Document | Description |
 |----------|-------------|
-| [Frontend Guide](../knowledge-base/modular-components/frontend/frontend-guide.md) | KServe gRPC configuration and integration |
+| [KServe gRPC Frontend](../knowledge-base/modular-components/frontend/frontend-guide.md) | KServe endpoints, backend registration, and flow-control tuning |
 | [Reinforcement Learning Integration](../../use-cases/reinforcement-learning/overview.md) | Token-level rollout data, worker discovery, direct engine routes, and SGLang metadata upload |
 | [Configuration and Tuning](../knowledge-base/modular-components/router/configuration-and-tuning.md) | Full router configuration and CLI arguments |
 | [Session IDs](../../use-cases/agents/session-ids.mdx) | Passive session identity |

@@ -34,6 +34,11 @@ skills:
 
 # Hypothesis Generator
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 You are the evidence-driven configuration hypothesis generator for the Dynamo optimization loop. You own the first
 proposal after `perf-analyzer` finishes, not its approval or execution.
 
@@ -54,6 +59,14 @@ Do:
 
 - Base the proposal on valid AIPerf analysis and applicable performance guidance. Use same-series runs for direct
   comparisons and cross-series results only as context.
+- When a candidate changes topology or config family, re-locate that family's SLO frontier (highest measured
+  operating point that still passes) before judging it: families are compared by each family's own same-series
+  best-under-SLO result, per `tuning-hierarchy.md` (a recommendation-level comparison, not a cross-series
+  delta claim). A family that wins at one fixed operating point but breaches the
+  SLO earlier than its rival is not the winner. For a family with no measured frontier yet, the first
+  experiment may be proposed precisely to establish it - frontier establishment is an experiment outcome,
+  not a precondition for proposing the experiment; what stays inadmissible is adopting or rejecting the
+  family before its frontier exists.
 - Select one independently testable knob, or one justified coupled mechanism.
 - State the knob owner and exact target setting so the change can be materialized without guessing.
 - State the performance question the candidate should answer, its target operating region, and the expected measurable
@@ -89,6 +102,14 @@ Do not:
 Require a successful smoke test and a benchmark audit whose status is `valid` or `valid_with_recovery`. If the
 analysis is missing, invalid, or relies on a direct comparison across benchmark series, stop rather than manufacturing
 a proposal.
+
+## Baseline Provenance
+
+Read `deployment.origin` from the workload contract. When it is `recipe-confirmed` or `agent-authored`, the
+baseline itself is a hypothesis: every lever family starts genuinely untested (no production history is implied),
+topology-first scrutiny per `tuning-hierarchy.md` applies with full force, and nothing inherited from the baseline
+counts as `tested` without a same-series measurement. When it is `user`, no special handling applies: treat the
+baseline as the user's own configuration and generate hypotheses exactly as this contract describes elsewhere.
 
 ## Outputs
 

@@ -138,6 +138,16 @@ func (in *ComponentReplicaStatus) DeepCopyInto(out *ComponentReplicaStatus) {
 		*out = make([]string, len(*in))
 		copy(*out, *in)
 	}
+	if in.GPUsPerEngine != nil {
+		in, out := &in.GPUsPerEngine, &out.GPUsPerEngine
+		*out = new(int64)
+		**out = **in
+	}
+	if in.GPUsPerReplica != nil {
+		in, out := &in.GPUsPerReplica, &out.GPUsPerReplica
+		*out = new(int64)
+		**out = **in
+	}
 	if in.ReadyReplicas != nil {
 		in, out := &in.ReadyReplicas, &out.ReadyReplicas
 		*out = new(int32)
@@ -919,6 +929,11 @@ func (in *FeaturesSpec) DeepCopyInto(out *FeaturesSpec) {
 		in, out := &in.Planner, &out.Planner
 		*out = new(runtime.RawExtension)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.KVRouter != nil {
+		in, out := &in.KVRouter, &out.KVRouter
+		*out = new(KVRouterSpec)
+		**out = **in
 	}
 	if in.Mocker != nil {
 		in, out := &in.Mocker, &out.Mocker

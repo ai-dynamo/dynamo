@@ -14,6 +14,11 @@ metadata:
 
 # Run AIPerf Benchmark
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 Execute the configured Job and preserve operational evidence. Do not interpret performance.
 
 Read `agent-docs/rules/execution/deployment.md`, `agent-docs/rules/execution/logging.md`,

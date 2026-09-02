@@ -28,7 +28,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Error;
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
@@ -76,6 +76,103 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+// ── Encode buffer ────────────────────────────────────────────────────────────
+
+/// One request's reusable frame-encoding buffer.
+///
+/// Rather than allocating a buffer per frame, every frame is written into one
+/// large `BytesMut` chunk and then handed out using [`BytesMut::split`] — the
+/// `bytes` crate method that returns the bytes written so far as a separate
+/// handle and leaves `buf` empty but still holding the rest of the chunk's
+/// capacity. The allocator is therefore touched about once per chunk instead of
+/// once per frame.
+///
+/// `split` is `O(1)` and copies nothing: both handles point into the same
+/// allocation and share a reference count. A chunk is only freed once every
+/// frame taken from it has been sent and dropped. The response channel bounds
+/// how many can be in flight at a time and a chunk is small, so that retention
+/// is not worth designing around.
+struct EncodeBuffer {
+    buf: BytesMut,
+    /// Frames within one stream are all about the same size, so the last one is
+    /// a good predictor of how much room the next one needs.
+    last_frame_len: usize,
+}
+
+impl EncodeBuffer {
+    /// How much is allocated at a time. Sized to cover a full in-flight window:
+    /// `engine::RESPONSE_CHANNEL_DEPTH` frames of a few dozen bytes each is well
+    /// under 8 KiB, so a chunk retires at roughly the rate its frames drain.
+    /// Raising it trades resident memory per in-flight request for allocator
+    /// calls that are already amortized over ~150 frames.
+    const CHUNK: usize = 8 * 1024;
+    /// Floor on the predicted frame size, so an unusually small frame does not
+    /// make the next one ask for less room than any frame could need.
+    const MIN_RESERVE: usize = 64;
+    /// Starting capacity for the private buffer a re-entrant `send` falls back
+    /// to. Matches what `encode_annotated_response` gives the pull path, so the
+    /// fallback does not grow from zero.
+    const SCRATCH_CAPACITY: usize = 128;
+
+    fn new() -> Self {
+        Self {
+            buf: BytesMut::new(),
+            last_frame_len: 0,
+        }
+    }
+
+    /// Make room for another frame, allocating a fresh chunk only once the
+    /// leftover capacity in the current one runs short.
+    ///
+    /// Two things this deliberately does not do:
+    ///
+    /// It does not commit a chunk for the first frame. Encode, prefill and short
+    /// decode requests often produce exactly one frame, and chunking those would
+    /// swap a small allocation for an 8 KiB one that is never reused. Until a
+    /// second frame proves the request is streaming, `BytesMut` sizes the frame
+    /// itself.
+    ///
+    /// It does not let the predictor exceed one chunk. One oversized frame must
+    /// not pin an oversized buffer for the rest of the request. An outsized frame
+    /// still encodes fine — `BytesMut` grows on write, and `split` hands that
+    /// large allocation away with the frame rather than retaining it.
+    fn reserve(&mut self) {
+        if self.last_frame_len == 0 {
+            return;
+        }
+        let needed = self.last_frame_len.clamp(Self::MIN_RESERVE, Self::CHUNK);
+        if self.buf.capacity() < needed {
+            self.buf.reserve(Self::CHUNK);
+        }
+    }
+
+    /// Hand out the frame just written as its own `Bytes`, and remember its
+    /// length so the next [`Self::reserve`] knows what to expect. `buf` is left
+    /// empty, with whatever is left of the chunk still available to the frame
+    /// after this one.
+    fn take(&mut self) -> Bytes {
+        self.last_frame_len = self.buf.len();
+        self.buf.split().freeze()
+    }
+
+    /// Drop a partially written frame after an encode failure, so the next
+    /// frame does not inherit its bytes.
+    ///
+    /// An oversized partial frame also has to give its allocation back. On the
+    /// success path `split` hands that memory away with the frame, but a
+    /// discarded frame has nothing to hand it to — and `clear` keeps capacity,
+    /// which [`Self::reserve`] then sees as "already big enough" and never
+    /// replaces. Without this the buffer would stay oversized for the rest of
+    /// the request.
+    fn discard(&mut self) {
+        if self.buf.capacity() > Self::CHUNK {
+            self.buf = BytesMut::new();
+        } else {
+            self.buf.clear();
+        }
+    }
+}
+
 // ── Wire frame ───────────────────────────────────────────────────────────────
 
 /// One response, already encoded for the request plane.
@@ -85,13 +182,14 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// straight into the codec in one pass, exactly as on the pull path, and
 /// nothing the codec can represent is narrowed on the way.
 ///
-/// `codec` records which codec produced `bytes`. `send` has no request in hand,
-/// so it uses the process-global [`RequestPlanePayloadCodec::configured`] — the
-/// value this worker advertises in its instance record, which is where callers
-/// read the codec they address it with. The two agree except against a caller
-/// old enough to predict neither, which falls back to JSON;
-/// [`PushFrame::into_encoded`] re-encodes for that case rather than putting the
-/// wrong bytes on the wire.
+/// `codec` records which codec produced `bytes`. `send` has no request in hand
+/// to read the codec from, so the sink captures the process-global
+/// [`RequestPlanePayloadCodec::configured`] once per request. That is the value
+/// this worker advertises in its instance record, which is also where callers
+/// look up the codec to address it with — so the two normally agree. The one
+/// exception is a caller old enough to predict neither, which falls back to
+/// JSON. [`PushFrame::into_encoded`] re-encodes for that case rather than
+/// putting the wrong bytes on the wire.
 pub(crate) struct PushFrame {
     bytes: Bytes,
     is_error: bool,
@@ -112,9 +210,69 @@ impl PushFrame {
     /// Encode one Python response object, with the GIL held by the caller.
     ///
     /// Both steps are shared with the pull path — `parse_python_response`
-    /// interprets the object, `encode_annotated_response` produces the bytes —
-    /// so the two cannot drift.
-    fn encode(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+    /// interprets the object, `write_annotated_response` produces the bytes — so
+    /// the two cannot drift. The only change from the pull path is where those
+    /// bytes land: a buffer reused across this request's frames, rather than a
+    /// fresh `Vec` each time.
+    ///
+    /// ## Why `try_lock` rather than `lock`
+    ///
+    /// [`Self::write`] walks `obj`, and walking a Python object can run arbitrary
+    /// Python: `__bool__` when an envelope is tested for truthiness, `__iter__` or
+    /// `__len__` during the pythonize walk. That Python is free to call `send`
+    /// again on this same sender.
+    ///
+    /// The mutex is not reentrant, so blocking here would deadlock the event-loop
+    /// thread *while it holds the GIL*, stalling every request in the interpreter.
+    /// Instead a re-entrant call falls back to its own private buffer — slower for
+    /// that one frame, which is a good trade against a hang.
+    ///
+    /// Either way the lock is released before returning, and so before the
+    /// caller's enqueue, which can block.
+    fn encode(
+        py: Python<'_>,
+        obj: &Bound<'_, PyAny>,
+        codec: RequestPlanePayloadCodec,
+        buffer: &parking_lot::Mutex<EncodeBuffer>,
+    ) -> PyResult<Self> {
+        let Some(mut pooled) = buffer.try_lock() else {
+            // Sized, not `new()`: growing from zero is the cost this whole
+            // change exists to remove, and the fallback should not quietly
+            // reintroduce it for the frame that takes it.
+            let mut scratch = BytesMut::with_capacity(EncodeBuffer::SCRATCH_CAPACITY);
+            let is_error = Self::write(py, obj, codec, &mut scratch)?;
+            return Ok(Self {
+                bytes: scratch.freeze(),
+                is_error,
+                codec,
+            });
+        };
+
+        pooled.reserve();
+        match Self::write(py, obj, codec, &mut pooled.buf) {
+            Ok(is_error) => Ok(Self {
+                bytes: pooled.take(),
+                is_error,
+                codec,
+            }),
+            Err(error) => {
+                // The frame may be half-written. Drop those bytes so the next
+                // frame does not inherit them.
+                pooled.discard();
+                Err(error)
+            }
+        }
+    }
+
+    /// Write one response's frame into `out`, returning whether it is an error
+    /// frame. On failure `out` may be left holding a partial frame, so the
+    /// caller must discard it.
+    fn write(
+        py: Python<'_>,
+        obj: &Bound<'_, PyAny>,
+        codec: RequestPlanePayloadCodec,
+        out: &mut BytesMut,
+    ) -> PyResult<bool> {
         let annotated =
             python_payload::parse_python_response(obj.clone().unbind(), py).map_err(|error| {
                 PyValueError::new_err(format!(
@@ -122,19 +280,14 @@ impl PushFrame {
                      application-logic-mismatch: {error}"
                 ))
             })?;
-        let codec = RequestPlanePayloadCodec::configured();
-        let (bytes, is_error) = python_payload::encode_annotated_response(codec, annotated)
-            .map_err(|error| {
+        python_payload::write_annotated_response(codec, annotated, &mut out.writer()).map_err(
+            |error| {
                 PyValueError::new_err(format!(
                     "critical error: failed serializing python response as {}: {error}",
                     codec.name()
                 ))
-            })?;
-        Ok(Self {
-            bytes: bytes.into(),
-            is_error,
-            codec,
-        })
+            },
+        )
     }
 
     /// Encode a terminal error frame. Pure Rust — no Python object involved —
@@ -214,6 +367,14 @@ struct ResponseSink {
     /// response stream would leave the handler generating into nothing until it
     /// noticed the send error on its own.
     ctx: Arc<dyn AsyncEngineContext>,
+    /// Read once per request instead of once per frame. It is backed by a
+    /// `OnceLock` (see [`RequestPlanePayloadCodec::configured`]), so reading it
+    /// again later could only ever return this same value.
+    codec: RequestPlanePayloadCodec,
+    /// Reused across this request's frames. Behind a mutex because `send` takes
+    /// `&self`. Uncontended in practice: one request's handler pushes from a
+    /// single event-loop thread.
+    encode_buffer: parking_lot::Mutex<EncodeBuffer>,
 }
 
 impl ResponseSink {
@@ -248,7 +409,7 @@ impl ResponseSink {
         // The whole Python->Rust crossing for one response: the encode plus the
         // enqueue. Unlike the pull path neither step acquires the GIL — the
         // Python handler already holds it.
-        let frame = PushFrame::encode(py, obj)?;
+        let frame = PushFrame::encode(py, obj, self.codec, &self.encode_buffer)?;
 
         let Some(tx) = self.sender() else {
             return Err(PyRuntimeError::new_err(
@@ -426,6 +587,8 @@ pub(crate) fn response_channel(
         sink: Arc::new(ResponseSink {
             tx: Mutex::new(Some(tx)),
             ctx,
+            codec: RequestPlanePayloadCodec::configured(),
+            encode_buffer: parking_lot::Mutex::new(EncodeBuffer::new()),
         }),
     };
 
@@ -575,11 +738,157 @@ mod tests {
     //! `send`/`close` and `handler_supports_push` are not; they are covered by
     //! pytest against the built `.so`.  Gaps are documented at the bottom.
 
-    use super::PushFrame;
+    use super::{EncodeBuffer, PushFrame};
     use crate::engine::RESPONSE_CHANNEL_DEPTH;
+    use bytes::BufMut;
     use dynamo_runtime::pipeline::network::{NetworkStreamWrapper, RequestPlanePayloadCodec};
     use dynamo_runtime::protocols::annotated::Annotated;
     use tokio::sync::mpsc;
+
+    // ── EncodeBuffer ─────────────────────────────────────────────────────────
+    //
+    // `PushFrame::encode` itself cannot be tested here — it takes `Python<'_>`
+    // and a `Bound<'_, PyAny>`, which would pull the Python C API into the test
+    // binary (see the module note above). But the buffer it drives is pure Rust,
+    // and the buffer is where every failure mode of this change lives: frames
+    // leaking into one another, a partial frame surviving, and the sizing policy.
+
+    /// Write `n` bytes of `fill` as one frame would.
+    fn write_frame(buffer: &mut EncodeBuffer, fill: u8, n: usize) {
+        buffer.reserve();
+        buffer.buf.put_slice(&vec![fill; n]);
+    }
+
+    /// Consecutive frames must come out independent and intact. `split` leaves
+    /// them sharing one allocation, so a bad index would show up as one frame
+    /// carrying another's bytes.
+    #[test]
+    fn consecutive_frames_are_independent() {
+        let mut buffer = EncodeBuffer::new();
+        let mut frames = Vec::new();
+        for i in 0..64u8 {
+            write_frame(&mut buffer, i, 50 + usize::from(i));
+            frames.push(buffer.take());
+        }
+        for (i, frame) in frames.iter().enumerate() {
+            let i = u8::try_from(i).expect("fits");
+            assert_eq!(frame.len(), 50 + usize::from(i), "frame {i} wrong length");
+            assert!(
+                frame.iter().all(|b| *b == i),
+                "frame {i} carries another frame's bytes"
+            );
+        }
+    }
+
+    /// A frame abandoned partway through must not survive into the next one.
+    /// This is the `discard` path taken when encoding fails mid-write.
+    #[test]
+    fn discard_drops_a_partial_frame() {
+        let mut buffer = EncodeBuffer::new();
+        write_frame(&mut buffer, 0xAA, 40); // partial frame, then failure
+        buffer.discard();
+
+        write_frame(&mut buffer, 0xBB, 30);
+        let frame = buffer.take();
+        assert_eq!(frame.len(), 30, "next frame inherited the discarded bytes");
+        assert!(frame.iter().all(|b| *b == 0xBB));
+    }
+
+    /// A request that sends exactly one frame — encode, prefill, short decode —
+    /// must not be charged a full chunk it never reuses.
+    #[test]
+    fn first_frame_does_not_commit_a_chunk() {
+        let mut buffer = EncodeBuffer::new();
+        buffer.reserve();
+        assert!(
+            buffer.buf.capacity() < EncodeBuffer::CHUNK,
+            "first frame pre-allocated a whole chunk: {}",
+            buffer.buf.capacity()
+        );
+    }
+
+    /// Once a request is known to be streaming, chunking kicks in.
+    #[test]
+    fn second_frame_commits_a_chunk() {
+        let mut buffer = EncodeBuffer::new();
+        write_frame(&mut buffer, 1, 52);
+        let _ = buffer.take();
+        buffer.reserve();
+        assert!(
+            buffer.buf.capacity() >= EncodeBuffer::CHUNK,
+            "streaming request did not chunk: {}",
+            buffer.buf.capacity()
+        );
+    }
+
+    /// One oversized frame must not pin an oversized buffer for the rest of the
+    /// request. The large allocation leaves with the frame; the next reserve is
+    /// capped at a chunk.
+    #[test]
+    fn an_oversized_frame_does_not_pin_capacity() {
+        let mut buffer = EncodeBuffer::new();
+        write_frame(&mut buffer, 1, 52);
+        let _ = buffer.take();
+
+        let huge = 4 * 1024 * 1024;
+        write_frame(&mut buffer, 2, huge);
+        let big = buffer.take();
+        assert_eq!(big.len(), huge);
+
+        buffer.reserve();
+        assert!(
+            buffer.buf.capacity() <= EncodeBuffer::CHUNK,
+            "an oversized frame pinned {} bytes for the rest of the request",
+            buffer.buf.capacity()
+        );
+    }
+
+    /// A frame that fails partway through must give its allocation back too,
+    /// not just its bytes. `clear()` alone keeps capacity, and `reserve()` reads
+    /// a large capacity as "already big enough" — so an oversized *failed* frame
+    /// would pin its buffer for the rest of the request, which is the same leak
+    /// `an_oversized_frame_does_not_pin_capacity` rules out on the success path.
+    #[test]
+    fn discard_releases_an_oversized_buffer() {
+        let mut buffer = EncodeBuffer::new();
+        write_frame(&mut buffer, 1, 52);
+        let _ = buffer.take();
+
+        // A large frame that fails mid-encode rather than being handed out.
+        write_frame(&mut buffer, 2, 4 * 1024 * 1024);
+        buffer.discard();
+
+        assert!(
+            buffer.buf.capacity() <= EncodeBuffer::CHUNK,
+            "a discarded oversized frame pinned {} bytes for the rest of the request",
+            buffer.buf.capacity()
+        );
+
+        // And the buffer must still be usable afterwards.
+        write_frame(&mut buffer, 3, 40);
+        let frame = buffer.take();
+        assert_eq!(frame.len(), 40);
+        assert!(
+            frame.iter().all(|b| *b == 3),
+            "discard leaked bytes forward"
+        );
+    }
+
+    /// The re-entrancy fallback in `PushFrame::encode` depends on `try_lock`
+    /// failing rather than blocking when the buffer is already held. Encoding a
+    /// frame can run arbitrary Python that re-enters `send`, and blocking there
+    /// would deadlock the event-loop thread with the GIL held.
+    #[test]
+    fn try_lock_fails_instead_of_blocking_when_held() {
+        let buffer = parking_lot::Mutex::new(EncodeBuffer::new());
+        let outer = buffer.lock();
+        assert!(
+            buffer.try_lock().is_none(),
+            "try_lock must decline a held buffer so encode can fall back"
+        );
+        drop(outer);
+        assert!(buffer.try_lock().is_some(), "lock must be reusable after");
+    }
 
     /// Decode a frame's bytes back to the wire envelope, as the caller does.
     fn decode(

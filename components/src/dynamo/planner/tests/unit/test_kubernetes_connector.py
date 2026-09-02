@@ -28,6 +28,7 @@ from dynamo.planner.errors import (
     DynamoGraphDeploymentNotFoundError,
     DynamoGraphDeploymentNotReadyError,
     EmptyTargetReplicasError,
+    GPUShapeUnavailableError,
     ModelNameNotFoundError,
     PlannerError,
     SubComponentNotFoundError,
@@ -1053,7 +1054,7 @@ def test_service_get_gpu_count_missing_raises_error():
 
 
 def test_service_get_gpu_count_invalid_raises_error():
-    """Test that get_gpu_count raises ValueError for invalid GPU count"""
+    """An invalid scalar GPU count fails before legacy shape fallback."""
     service = Service(
         name="test-service",
         service={
@@ -1156,6 +1157,214 @@ def test_get_gpu_counts_decode_only(kubernetes_connector, mock_kube_api):
     assert decode_gpu == 4
 
 
+def test_get_gpu_shapes_from_operator_resolved_dra_status(
+    kubernetes_connector, mock_kube_api
+):
+    """DRA-backed workers use the current operator-projected GPU shape."""
+    mock_deployment = _deployment(_component("decode-worker", "decode", replicas=1))
+    mock_deployment["metadata"]["generation"] = 2
+    mock_deployment["status"] = {
+        "observedGeneration": 2,
+        "components": {"decode-worker": {"gpusPerEngine": 2, "gpusPerReplica": 3}},
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    assert kubernetes_connector.get_gpu_counts(
+        require_prefill=False, require_decode=True
+    ) == (0, 2)
+    _, decode_shape = kubernetes_connector.get_gpu_shapes(
+        require_prefill=False, require_decode=True
+    )
+    assert decode_shape.gpus_per_engine == 2
+    assert decode_shape.gpus_per_replica == 3
+
+
+@pytest.mark.parametrize("replica_cost", [4, 5])
+def test_get_gpu_shapes_separates_engine_width_from_sidecar_cost(
+    kubernetes_connector, mock_kube_api, replica_cost
+):
+    mock_deployment = _deployment(_component("decode-worker", "decode", replicas=1))
+    mock_deployment["metadata"]["generation"] = 2
+    mock_deployment["status"] = {
+        "observedGeneration": 2,
+        "components": {
+            "decode-worker": {
+                "gpusPerEngine": 4,
+                "gpusPerReplica": replica_cost,
+            }
+        },
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    _, decode_shape = kubernetes_connector.get_gpu_shapes(
+        require_prefill=False, require_decode=True
+    )
+
+    assert decode_shape.gpus_per_engine == 4
+    assert decode_shape.gpus_per_replica == replica_cost
+
+
+@pytest.mark.parametrize("sidecar_gpu", [0, 1])
+def test_missing_shape_falls_back_only_for_zero_gpu_sidecar(
+    kubernetes_connector, mock_kube_api, sidecar_gpu
+):
+    component = _component("decode-worker", "decode", replicas=1, gpu=4)
+    component["podTemplate"]["spec"]["containers"].append(
+        {
+            "name": "sidecar",
+            "resources": {"limits": {"nvidia.com/gpu": str(sidecar_gpu)}},
+        }
+    )
+    deployment = _deployment(component)
+    deployment["status"] = {"state": "failed", "components": {"decode-worker": {}}}
+    mock_kube_api.get_graph_deployment.return_value = deployment
+
+    if sidecar_gpu == 0:
+        assert kubernetes_connector.get_gpu_counts(
+            require_prefill=False, require_decode=True
+        ) == (0, 4)
+    else:
+        with pytest.raises(GPUShapeUnavailableError, match="auxiliary-GPU"):
+            kubernetes_connector.get_gpu_shapes(
+                require_prefill=False, require_decode=True
+            )
+
+
+def test_missing_shape_for_pure_dra_worker_fails_closed(
+    kubernetes_connector, mock_kube_api
+):
+    component = _component("decode-worker", "decode", replicas=1)
+    component["podTemplate"] = {
+        "spec": {
+            "resourceClaims": [
+                {"name": "gpu", "resourceClaimTemplateName": "gpu-template"}
+            ],
+            "containers": [
+                {"name": "main", "resources": {"claims": [{"name": "gpu"}]}}
+            ],
+        }
+    }
+    deployment = _deployment(component)
+    deployment["status"] = {"state": "failed", "components": {"decode-worker": {}}}
+    mock_kube_api.get_graph_deployment.return_value = deployment
+
+    with pytest.raises(GPUShapeUnavailableError, match="DRA"):
+        kubernetes_connector.get_gpu_shapes(require_prefill=False, require_decode=True)
+
+
+@pytest.mark.parametrize("sidecar_gpu", [0, 1])
+def test_missing_shape_falls_back_only_for_zero_gpu_native_sidecar(
+    kubernetes_connector, mock_kube_api, sidecar_gpu
+):
+    component = _component("decode-worker", "decode", replicas=1, gpu=4)
+    component["podTemplate"]["spec"]["initContainers"] = [
+        {
+            "name": "native-sidecar",
+            "restartPolicy": "Always",
+            "resources": {"limits": {"nvidia.com/gpu": str(sidecar_gpu)}},
+        }
+    ]
+    deployment = _deployment(component)
+    deployment["status"] = {"state": "failed", "components": {"decode-worker": {}}}
+    mock_kube_api.get_graph_deployment.return_value = deployment
+
+    if sidecar_gpu == 0:
+        assert kubernetes_connector.get_gpu_counts(
+            require_prefill=False, require_decode=True
+        ) == (0, 4)
+    else:
+        with pytest.raises(GPUShapeUnavailableError, match="auxiliary-GPU"):
+            kubernetes_connector.get_gpu_shapes(
+                require_prefill=False, require_decode=True
+            )
+
+
+@pytest.mark.parametrize("init_gpu", [0, 8])
+def test_missing_shape_falls_back_only_for_zero_gpu_one_shot_init(
+    kubernetes_connector, mock_kube_api, init_gpu
+):
+    component = _component("decode-worker", "decode", replicas=1, gpu=4)
+    component["podTemplate"]["spec"]["initContainers"] = [
+        {
+            "name": "one-shot-init",
+            "resources": {"limits": {"nvidia.com/gpu": str(init_gpu)}},
+        }
+    ]
+    deployment = _deployment(component)
+    deployment["status"] = {"state": "failed", "components": {"decode-worker": {}}}
+    mock_kube_api.get_graph_deployment.return_value = deployment
+
+    if init_gpu == 0:
+        assert kubernetes_connector.get_gpu_counts(
+            require_prefill=False, require_decode=True
+        ) == (0, 4)
+    else:
+        with pytest.raises(GPUShapeUnavailableError, match="auxiliary-GPU"):
+            kubernetes_connector.get_gpu_shapes(
+                require_prefill=False, require_decode=True
+            )
+
+
+def test_typed_worker_with_explicit_zero_shape_is_rejected(
+    kubernetes_connector, mock_kube_api
+):
+    deployment = _deployment(_component("decode-worker", "decode", replicas=1))
+    deployment["metadata"]["generation"] = 2
+    deployment["status"] = {
+        "observedGeneration": 2,
+        "components": {"decode-worker": {"gpusPerEngine": 0, "gpusPerReplica": 0}},
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+
+    with pytest.raises(GPUShapeUnavailableError, match="authoritative zero-GPU"):
+        kubernetes_connector.get_gpu_shapes(require_prefill=False, require_decode=True)
+
+
+def test_typed_mocker_worker_with_zero_physical_shape_uses_configured_fallback(
+    kubernetes_connector, mock_kube_api
+):
+    component = _component(
+        "decode-worker",
+        "decode",
+        replicas=1,
+        args=["-m", "dynamo.mocker", "--model-name", "test-model"],
+    )
+    deployment = _deployment(component)
+    deployment["metadata"]["generation"] = 2
+    deployment["status"] = {
+        "observedGeneration": 2,
+        "components": {"decode-worker": {"gpusPerEngine": 0, "gpusPerReplica": 0}},
+    }
+    mock_kube_api.get_graph_deployment.return_value = deployment
+
+    assert kubernetes_connector.get_gpu_shapes(
+        require_prefill=False, require_decode=True
+    ) == (None, None)
+    with pytest.raises(DeploymentValidationError, match="configured logical GPU"):
+        kubernetes_connector.get_gpu_counts(
+            require_prefill=False, require_decode=True, deployment=deployment
+        )
+
+
+@pytest.mark.parametrize("observed_generation", [1, 3])
+def test_get_gpu_counts_rejects_noncurrent_dra_status(
+    kubernetes_connector, mock_kube_api, observed_generation
+):
+    """Only the current generation's resolved count can authorize GPU budget."""
+    mock_deployment = _deployment(_component("decode-worker", "decode", replicas=1))
+    mock_deployment["metadata"]["generation"] = 2
+    mock_deployment["status"] = {
+        "observedGeneration": observed_generation,
+        "components": {"decode-worker": {"gpusPerEngine": 2, "gpusPerReplica": 2}},
+    }
+    mock_kube_api.get_graph_deployment.return_value = mock_deployment
+
+    with pytest.raises(
+        GPUShapeUnavailableError, match="Resolved GPU shape.*not current"
+    ):
+        kubernetes_connector.get_gpu_counts(require_prefill=False, require_decode=True)
+
+
 def test_get_gpu_counts_missing_gpu_raises_error(kubernetes_connector, mock_kube_api):
     """Test get_gpu_counts raises DeploymentValidationError when GPU count missing"""
     mock_deployment = _deployment(
@@ -1167,7 +1376,7 @@ def test_get_gpu_counts_missing_gpu_raises_error(kubernetes_connector, mock_kube
     with pytest.raises(DeploymentValidationError) as exc_info:
         kubernetes_connector.get_gpu_counts()
 
-    assert "prefill GPU count" in str(exc_info.value)
+    assert "prefill GPU shape" in str(exc_info.value)
 
 
 def test_get_gpu_counts_service_not_found_raises_error(
@@ -1182,7 +1391,7 @@ def test_get_gpu_counts_service_not_found_raises_error(
     with pytest.raises(DeploymentValidationError) as exc_info:
         kubernetes_connector.get_gpu_counts()
 
-    assert "decode GPU count" in str(exc_info.value)
+    assert "decode GPU shape" in str(exc_info.value)
 
 
 # Tests for get_actual_worker_counts

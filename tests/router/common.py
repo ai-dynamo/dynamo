@@ -2730,6 +2730,7 @@ def _test_router_decisions(
     standalone_selector_url: Optional[str] = None,
     router_aic_config: Optional[dict[str, Any]] = None,
     router_predicted_ttl_secs: Optional[float] = None,
+    router_approximate_cache_policy: str = "ttl",
     initial_wait: float = 0.25,
 ):
     """Validate cross-worker routing decisions based on longest prefix match.
@@ -2753,8 +2754,9 @@ def _test_router_decisions(
         test_dp_rank: If True, also forces and validates dp_rank routing (for data parallel setups)
         block_size: KV cache block size. Defaults to 8.
         use_kv_events: If True (default), uses KV events from workers. If False, uses
-            approximate routing with TTL-based expiration (--no-kv-events mode).
+            approximate routing with the configured retention policy (--no-kv-events mode).
         router_aic_config: Optional AIC router perf-model config for direct KvRouter tests.
+        router_approximate_cache_policy: Retention policy for the local approximate indexer.
 
     Raises:
         AssertionError: If routing decisions don't match expected prefix logic
@@ -2778,6 +2780,7 @@ def _test_router_decisions(
                 "aic" if router_aic_config is not None else "none"
             ),
             router_predicted_ttl_secs=router_predicted_ttl_secs,
+            router_approximate_cache_policy=router_approximate_cache_policy,
         )
         aic_perf_config = (
             AicPerfConfig(**router_aic_config)
