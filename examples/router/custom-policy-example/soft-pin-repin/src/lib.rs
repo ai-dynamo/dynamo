@@ -112,7 +112,6 @@ fn provider(
     ))
 }
 
-/// Register the `soft-pin-repin` policy type.
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {
@@ -259,7 +258,8 @@ mod tests {
     #[test]
     fn retains_the_only_eligible_affinity_target() {
         let workers = HashMap::from([(29, TestWorker)]);
-        let request = request(Some(WorkerWithDpRank::from_worker_id(29).into()));
+        let mut request = request(Some(WorkerWithDpRank::from_worker_id(29).into()));
+        set_active_requests(&mut request, WorkerWithDpRank::from_worker_id(29), 1);
         let selected = policy(0)
             .select_worker(WorkerSelectionInput::configured(
                 &workers,
