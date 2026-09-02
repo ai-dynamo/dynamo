@@ -57,6 +57,7 @@ use builtin::BuiltinWorkerSelector;
 use cancellation::cancel_on_stop;
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
+pub(crate) use request_guard::prompt_private_blocks;
 use request_guard::{KvRequestCleanup, LoraLoadGuard, RequestGuard};
 
 const OUTPUT_REPLAY_ID_ANNOTATION_KEY: &str = "output_replay_id";
@@ -246,7 +247,7 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) async fn abort(mut self) {
+    pub(crate) async fn abort(self) {
         self.cleanup.finish().await;
     }
 }

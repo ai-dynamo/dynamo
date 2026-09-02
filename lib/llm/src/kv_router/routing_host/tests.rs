@@ -681,8 +681,8 @@ async fn terminal_item_does_not_skip_transport_eof() {
         Arc::clone(&router.request_metrics),
         "terminal-drain".to_string(),
         WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
-        false,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);

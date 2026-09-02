@@ -10,7 +10,7 @@ use dynamo_kv_router::{
         BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
     },
     router_hint::RouterHint,
-    scheduling::{AdvisoryWorkerLoad, QueueRejection, RoutingEligibility},
+    scheduling::{AdmissionAttempt, AdvisoryWorkerLoad, QueueRejection, RoutingEligibility},
     selector::WorkerSelector,
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
@@ -31,6 +31,7 @@ use crate::{
 
 pub(super) struct WorkerSelection {
     pub(super) worker: WorkerWithDpRank,
+    pub(super) attempt: AdmissionAttempt,
     pub(super) overlap_amount: u32,
     pub(super) effective_overlap_blocks: f64,
     pub(super) cached_tokens: usize,
@@ -128,7 +129,7 @@ where
             )
             .await?;
         match outcome {
-            FindBestMatchInnerOutcome::WithAdmission(outcome) => match outcome {
+            FindBestMatchInnerOutcome::WithAdmission(admitted) => match admitted.outcome {
                 FindBestMatchOutcome::Routed {
                     worker,
                     overlap_blocks,
@@ -139,6 +140,7 @@ where
                     router_hint,
                 } => Ok(SelectionOutcome::Routed(WorkerSelection {
                     worker,
+                    attempt: admitted.attempt,
                     overlap_amount: overlap_blocks,
                     effective_overlap_blocks,
                     cached_tokens,
@@ -162,6 +164,7 @@ where
                     routing_hashes,
                 } => Ok(SelectionOutcome::Routed(WorkerSelection {
                     worker,
+                    attempt: AdmissionAttempt::Untracked,
                     overlap_amount: overlap_blocks,
                     effective_overlap_blocks,
                     cached_tokens,

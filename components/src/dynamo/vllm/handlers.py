@@ -358,8 +358,14 @@ async def _deferred_abort_guard(
 
 
 class VllmEnginePauseController:
-    def __init__(self, engine_client: Any):
+    def __init__(
+        self,
+        engine_client: Any,
+        *,
+        prepare_for_process_checkpoint: bool = False,
+    ):
         self._engine_client = engine_client
+        self._prepare_for_process_checkpoint = prepare_for_process_checkpoint
         self._is_paused = False
         self._generation_paused = False
 
@@ -392,6 +398,11 @@ class VllmEnginePauseController:
                     "Failed to resume generation after native vLLM sleep failure"
                 )
             raise
+        # Prepare before recording the pause: a failed prepare must not leave
+        # the controller claiming paused, or the next resume would issue a
+        # checkpoint_restore with no matching prepare.
+        if self._prepare_for_process_checkpoint:
+            await self._engine_client.checkpoint_prepare()
         self._is_paused = True
         return True
 
@@ -400,6 +411,8 @@ class VllmEnginePauseController:
             return False
 
         if self._is_paused:
+            if self._prepare_for_process_checkpoint:
+                await self._engine_client.checkpoint_restore()
             if tags is None:
                 await self._engine_client.wake_up()
             else:

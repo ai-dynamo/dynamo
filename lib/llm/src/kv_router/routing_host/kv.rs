@@ -183,7 +183,7 @@ where
                 Arc::clone(self.kv_router()),
                 request.context().id().to_string(),
                 selection.worker,
-                true,
+                selection.attempt,
             ),
             selection,
             affinity,
@@ -301,8 +301,8 @@ where
                 self.request_metrics.clone(),
                 context_id.clone(),
                 selected_worker,
+                selection.attempt,
                 request,
-                !is_query_only,
             ),
         };
 
