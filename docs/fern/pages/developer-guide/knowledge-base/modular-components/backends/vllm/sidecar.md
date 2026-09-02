@@ -19,7 +19,7 @@ architecture.
 
 | Deployment path | Aggregated | P+D | E+PD | E+P+D |
 |---|---|---|---|---|
-| Local launcher | Validated on one GPU | Validated on two GPUs with NIXL | Validated on two GPUs with EC transfer | Validated on three GPUs with EC transfer and NIXL |
+| Local launcher | Validated on one GPU | Validated on two GPUs with NIXL | Validated on two GPUs with Embedding Cache transfer | Validated on three GPUs with Embedding Cache transfer and NIXL |
 | Kubernetes example | Validated | Validated with NIXL | Not available | Not available |
 
 This table covers launch topology only. The
