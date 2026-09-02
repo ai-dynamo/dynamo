@@ -14,6 +14,7 @@ on:
         options:
           - active-active
           - west-disabled
+          - west-capacity-blocked
 
 permissions:
   contents: read
@@ -24,6 +25,7 @@ concurrency:
 
 jobs:
   burst:
+    if: inputs.scenario != 'west-capacity-blocked'
     name: ${{ inputs.scenario }} shard ${{ matrix.shard }}
     strategy:
       fail-fast: false
@@ -59,4 +61,30 @@ jobs:
             us-east-1|us-west-2) ;;
             *) printf 'unexpected POC_AWS_REGION\n' >&2; exit 1 ;;
           esac
+          head -c 33554432 /dev/zero | sha256sum
+
+  blocked-west:
+    if: inputs.scenario == 'west-capacity-blocked'
+    name: West capacity-blocked recovery
+    runs-on:
+      group: dynamo-ci-west-poc
+      labels: poc-active-active-cpu-v1
+    timeout-minutes: 15
+    container:
+      image: ubuntu:24.04
+      env:
+        HOME: /tmp
+        USER: runner
+    steps:
+      - name: Report recovered west assignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'scenario=%s\n' '${{ inputs.scenario }}'
+          printf 'requested_group=%s\n' 'dynamo-ci-west-poc'
+          printf 'requested_scale_set=%s\n' 'poc-active-active-cpu-v1'
+          printf 'runner_name=%s\n' "${RUNNER_NAME}"
+          printf 'poc_aws_region=%s\n' "${POC_AWS_REGION:-missing}"
+          printf 'cpu_count=%s\n' "$(getconf _NPROCESSORS_ONLN)"
+          test "${POC_AWS_REGION:-missing}" = us-west-2
           head -c 33554432 /dev/zero | sha256sum
