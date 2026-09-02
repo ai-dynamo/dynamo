@@ -15,6 +15,7 @@ pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.pre_merge,
     pytest.mark.integration,
+    pytest.mark.timeout(30),
 ]
 
 
@@ -56,7 +57,7 @@ async def run_client(example_dir):
         ["python3", "-u", "client.py"],
         cwd=example_dir,
         stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
         text=True,
     )
 
@@ -65,16 +66,16 @@ async def run_client(example_dir):
 
     # Terminate the client
     client_proc.terminate()
-    stdout, _ = client_proc.communicate(timeout=1)
+    stdout, stderr = client_proc.communicate(timeout=1)
 
-    return stdout
+    return stdout, stderr
 
 
 @pytest.mark.asyncio
 async def test_hello_world(example_dir, server_process):
     """Test that hello_world starts and its client produces the expected output sequence"""
     # Run the client for 5 seconds
-    client_output = await run_client(example_dir)
+    client_output, client_logs = await run_client(example_dir)
 
     # Split output into lines and strip whitespace, filter out empty lines
     lines = [line.strip() for line in client_output.split("\n") if line.strip()]
@@ -85,5 +86,7 @@ async def test_hello_world(example_dir, server_process):
     expected_lines = ["Hello world!", "Hello sun!", "Hello moon!", "Hello star!"]
     for expected_line in expected_lines:
         assert expected_line in lines, (
-            f"Expected line '{expected_line}' not found in output.\n" f"Lines: {lines}"
+            f"Expected line '{expected_line}' not found in output.\n"
+            f"Lines: {lines}\n"
+            f"Client logs: {client_logs}"
         )
