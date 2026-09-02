@@ -16,6 +16,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from gpu_memory_service.cli.snapshot import run_per_device
 from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.common.vmm import VMMDeviceType, get_vmm, init_vmm
 from gpu_memory_service.snapshot.backends.sharded_ssd import (
@@ -116,10 +117,20 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=[d.value for d in VMMDeviceType],
         help="VMM device type (default: cuda).",
     )
+    parser.add_argument(
+        "--device",
+        type=int,
+        default=None,
+        help="Device ordinal. Default: every visible GPU.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        run_per_device("gpu_memory_service.v1.snapshot.saver", argv)
+        return
+
     parser = _build_parser()
     args = parser.parse_args(argv)
     if not args.checkpoint_dir:
@@ -136,6 +147,10 @@ def main(argv: list[str] | None = None) -> None:
     vmm = get_vmm()
     vmm.ensure_initialized()
     devices = vmm.list_devices()
+    if args.device is not None:
+        if args.device not in devices:
+            parser.error(f"--device {args.device} is not visible (visible={devices})")
+        devices = [args.device]
     logger.info(
         "Starting GMS save for %d devices lock_timeout_ms=%d sharded_ssd_roots=%s",
         len(devices),

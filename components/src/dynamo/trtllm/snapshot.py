@@ -13,6 +13,20 @@ from dynamo.trtllm.constants import DisaggregationMode, Modality
 _EXTERNAL_MODEL_LOAD_FORMATS = {"gms"}
 
 
+def _configure_trtllm_snapshot_capture_env() -> None:
+    """Disable TRT-LLM's NCCL registered window before engine creation."""
+    env_name = "TLLM_NCCL_SYMMETRIC_ZERO_COPY"
+    configured = os.environ.get(env_name)
+    if configured and configured != "0":
+        logging.getLogger(__name__).warning(
+            "Overriding %s=%r with '0' for snapshot mode because "
+            "cuda-checkpoint cannot capture NCCL registered windows",
+            env_name,
+            configured,
+        )
+    os.environ[env_name] = "0"
+
+
 def _should_prefetch_model_for_snapshot(config: Any) -> bool:
     if os.path.exists(config.model):
         return False
@@ -100,6 +114,7 @@ class _SnapshotRuntimeProxy:
         self._snapshot_config = snapshot_config
         self._argv = list(argv) if argv is not None else None
         self._runtime: Any | None = None
+        self._failover_lock: Any | None = None
 
     async def snapshot_before_endpoint(self, engine: Any, config: Any) -> None:
         if self._runtime is not None:
@@ -139,6 +154,9 @@ class _SnapshotRuntimeProxy:
             request_plane=config.request_plane,
             event_plane=config.event_plane,
         )
+        from dynamo.common.snapshot.lifecycle import elect_and_wake
+
+        self._failover_lock = await elect_and_wake(pause_controller, self._runtime)
         logging.info("Dynamo runtime created after TRT-LLM snapshot restore")
 
     def _require_runtime(self) -> Any:

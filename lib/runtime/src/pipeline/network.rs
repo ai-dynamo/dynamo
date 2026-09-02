@@ -106,6 +106,22 @@ impl RequestPlanePayloadCodec {
         }
     }
 
+    /// Encode into a caller-owned writer, so a hot path can reuse one buffer
+    /// across frames instead of allocating per frame.
+    ///
+    /// Emits the same bytes as [`Self::encode`], which
+    /// `encode_into_matches_encode_byte_for_byte` pins for both codecs.
+    pub fn encode_into<T, W>(&self, value: &T, writer: &mut W) -> Result<()>
+    where
+        T: Serialize + ?Sized,
+        W: std::io::Write,
+    {
+        match self {
+            Self::Json => Ok(serde_json::to_writer(writer, value)?),
+            Self::Msgpack => Ok(rmp_serde::encode::write_named(writer, value)?),
+        }
+    }
+
     pub fn decode<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T> {
         match self {
             Self::Json => Ok(serde_json::from_slice(bytes)?),
@@ -200,7 +216,7 @@ impl Drop for Cleanup {
 }
 
 /// Awaitable handle for a stream sender or receiver. Drop without calling
-/// [`into_parts()`] runs the optional cleanup closure, removing the
+/// `into_parts()` runs the optional cleanup closure, removing the
 /// registration from the stream server's maps.
 pub struct RegisteredStream<T> {
     pub connection_info: ConnectionInfo,
@@ -485,6 +501,30 @@ mod tests {
     }
 
     #[test]
+    fn encode_into_matches_encode_byte_for_byte() {
+        let payload = NetworkStreamWrapper {
+            data: Some(TestPayload {
+                id: 7,
+                text: "hello".to_string(),
+                tokens: vec![1, 200, 70_000],
+            }),
+            complete_final: false,
+        };
+
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let expected = codec.encode(&payload).expect("encode");
+            let mut actual = Vec::new();
+            codec
+                .encode_into(&payload, &mut actual)
+                .expect("encode_into");
+            assert_eq!(expected, actual, "codec={}", codec.name());
+        }
+    }
+
+    #[test]
     fn stream_options_send_buffer_count_defaults_to_64() {
         let context = Context::new(());
         let options = StreamOptions::builder()
@@ -513,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn request_control_message_defaults_missing_metadata() {
+    fn legacy_frontend_control_message_defaults_payload_codec_to_json() {
         let json = r#"{
             "id": "request-123",
             "request_type": "single_in",
@@ -535,6 +575,20 @@ mod tests {
         assert_eq!(message.connection_info.info, "{}");
         assert!(message.metadata.is_empty());
         assert!(message.frontend_send_ts_ns.is_none());
+
+        let payload = br#"{"id":7,"text":"legacy","tokens":[1,2]}"#;
+        let decoded: TestPayload = message
+            .payload_codec
+            .decode(payload)
+            .expect("worker should decode the legacy frontend's JSON payload");
+        assert_eq!(
+            decoded,
+            TestPayload {
+                id: 7,
+                text: "legacy".to_string(),
+                tokens: vec![1, 2],
+            }
+        );
     }
 
     #[test]
@@ -813,7 +867,7 @@ where
         let backend = ServiceBackend::from_engine(engine);
 
         // create the pipeline
-        let pipeline = frontend.link(backend)?.link(frontend)?;
+        let pipeline = frontend.link(backend)?.link_terminal(frontend)?;
 
         let ingress = Ingress::new_with_adapter(payload_adapter);
         ingress.attach(pipeline)?;

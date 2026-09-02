@@ -16,11 +16,11 @@
 #   3. No stale reference/(support|feature)-matrix repo links outside the
 #      allowed remnants.
 #   4. Every absolute /dynamo/dev/reference/... href in components, the data
-#      module, generated assets, and reference pages resolves to a URL the
-#      index.yml Reference General variant actually publishes. Catches nav
+#      module, and reference pages resolves to a URL the
+#      index.yml reference tab actually publishes. Catches nav
 #      restructures (e.g. pages moving under a new section slug) that
 #      fern broken-links cannot see because the hrefs live in TSX/JSON.
-#   5. Fern broken-links contains zero errors inside reference/ pages
+#   5. Fern broken-links contains zero errors inside pages/reference/ pages
 #      (skipped with a warning if the fern CLI is unavailable).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -67,27 +67,42 @@ def collect(items, prefix, urls):
             urls.add(f"{prefix}/{slug}")
         elif "section" in item:
             slug = item.get("slug") or kebab(item["section"])
+            # A section carrying a path publishes a page at its own URL.
+            if "path" in item:
+                urls.add(f"{prefix}/{slug}")
             collect(item.get("contents", []), f"{prefix}/{slug}", urls)
 
 
-general = next(
-    variant
-    for tab in nav["navigation"]
-    if tab.get("tab") == "reference"
-    for variant in tab.get("variants", [])
-    if variant.get("title") == "General"
+reference = next(
+    (tab for tab in nav["navigation"] if tab.get("tab") == "reference"), None
 )
+if reference is None:
+    sys.exit("index.yml has no reference tab")
+
+# The reference tab holds its nav in a direct `layout`; it used to hold it in
+# a `variants` entry titled General, so keep reading that shape too.
+layout = reference.get("layout")
+if layout is None:
+    layout = next(
+        (
+            variant.get("layout")
+            for variant in reference.get("variants", [])
+            if variant.get("title") == "General"
+        ),
+        None,
+    )
+if layout is None:
+    sys.exit("reference tab has neither a layout nor a General variant")
+
 valid: set[str] = set()
-collect(general["layout"], "/dynamo/dev/reference", valid)
+collect(layout, "/dynamo/dev/reference", valid)
 
 href_re = re.compile(r"/dynamo/dev/reference/[a-z0-9/-]+")
 sources = [
     *pathlib.Path("components").glob("*.tsx"),
     pathlib.Path("components/releases.data.ts"),
     pathlib.Path("scripts/gen_llms_tables.py"),
-    *pathlib.Path("reference").rglob("*.mdx"),
-    pathlib.Path("assets/releases.json"),
-    pathlib.Path("assets/releases-atom.xml"),
+    *pathlib.Path("pages/reference").rglob("*.mdx"),
 ]
 bad = []
 for source in sources:
@@ -108,11 +123,11 @@ PY
 echo "== 5/5 fern broken-links (reference/ scope) =="
 if command -v fern >/dev/null 2>&1; then
   out=$(fern docs broken-links 2>&1 || true)
-  scoped=$(echo "$out" | grep -cE "fix here: reference/" || true)
+  scoped=$(echo "$out" | grep -cE "fix here: pages/reference/" || true)
   total=$(echo "$out" | grep -c "\[error\]" || true)
   echo "total site errors: ${total} (pre-existing baseline elsewhere); in reference/: ${scoped}"
   if [[ "${scoped}" != "0" ]]; then
-    echo "$out" | grep -B2 "fix here: reference/" | head -30
+    echo "$out" | grep -B2 "fix here: pages/reference/" | head -30
     fail=1
   fi
 else

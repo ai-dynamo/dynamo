@@ -5,9 +5,10 @@
 
 The ``run_aic_interpolation`` sweep itself is tested in a separate follow-up
 file once that module lands; this file covers the pure-Python helpers that
-don't require ``aiconfigurator`` to be installed.
+don't require ``aiconfigurator-core`` to be installed.
 """
 
+import builtins
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from dynamo.planner.config.parallelization import (
     PickedParallelConfig,
     picked_to_aic_model_config_kwargs,
 )
+from dynamo.planner.monitoring import aic_estimator
 from dynamo.planner.monitoring import aic_interpolation as aic_mod
 
 pytestmark = [
@@ -25,6 +27,56 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.unit,
 ]
+
+
+def test_estimator_loader_does_not_import_upper_aiconfigurator(monkeypatch):
+    """Planner modeling must remain usable with only the core wheel."""
+    pytest.importorskip("aiconfigurator_core")
+    real_import = builtins.__import__
+
+    def reject_upper_package(name, *args, **kwargs):
+        """Reject accidental imports of the upper AIC distribution."""
+        if name == "aiconfigurator" or name.startswith("aiconfigurator."):
+            raise AssertionError(f"planner imported upper package: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", reject_upper_package)
+    loaded = aic_estimator._try_import_aiconfigurator_core()
+
+    assert loaded.__name__ == "aiconfigurator_core"
+
+
+def test_estimator_passes_backend_name_to_model_factory():
+    """The model factory expects the backend name, not the backend object."""
+    aic_core = MagicMock()
+    aic_core.sdk.perf_database.get_latest_database_version.return_value = "1.0"
+    aic_core.sdk.perf_database.get_database.return_value = MagicMock()
+    backend = MagicMock(name="backend")
+    aic_core.sdk.backends.factory.get_backend.return_value = backend
+    model_config = MagicMock(name="model_config")
+    aic_core.sdk.config.ModelConfig.return_value = model_config
+    expected_model = MagicMock(name="model")
+    aic_core.sdk.models.get_model.return_value = expected_model
+
+    with patch.object(
+        aic_estimator,
+        "_try_import_aiconfigurator_core",
+        return_value=aic_core,
+    ):
+        estimator = aic_estimator.AIConfiguratorPerfEstimator(
+            "Qwen/Qwen3-32B",
+            "h200_sxm",
+            "trtllm",
+        )
+        model = estimator._get_model(tp_size=8)
+
+    assert estimator.backend is backend
+    assert model is expected_model
+    aic_core.sdk.models.get_model.assert_called_once_with(
+        "Qwen/Qwen3-32B",
+        model_config,
+        "trtllm",
+    )
 
 
 def _make_spec(
@@ -57,7 +109,7 @@ def _patch_estimator(
     decode_tpot_ms: float = 20.0,
     per_rank_max_kv: int = 100_000,
 ):
-    """Patch AIConfiguratorPerfEstimator so tests don't need aiconfigurator.
+    """Patch AIConfiguratorPerfEstimator so tests don't need aiconfigurator-core.
 
     ``aic_interpolation`` imports the estimator class inside ``run_*`` for
     lazy loading, so we patch at the source module.

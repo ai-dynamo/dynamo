@@ -230,6 +230,16 @@ def pytest_configure(config: pytest.Config) -> None:
         "elastic_ep: marks vLLM elastic expert-parallelism (ePLB) scaling tests "
         "(scale_elastic_ep over the Ray DP backend)",
     )
+    config.addinivalue_line(
+        "markers",
+        "token_budget_parity: compares native backend and Dynamo prompt/output "
+        "overflow behavior",
+    )
+    config.addinivalue_line(
+        "markers",
+        "framework_with_efa: marks deployment tests that require an EFA-capable "
+        "cluster and an -efa image",
+    )
 
     models_dir = config.getoption("--models-dir", default=None)
     if models_dir and not Path(models_dir).is_dir():
@@ -653,7 +663,12 @@ def pytest_collection_modifyitems(config, items):
     This function is called to modify the list of tests to run.
     """
     _check_sglang_mm_hashes_present(items)
-    # Auto-skip tests marked with a framework marker when the framework is not installed
+    # Auto-skip tests marked with a framework marker when the framework is not
+    # installed. Framework markers are also how CI selects which container runs a
+    # test, so a test that inspects the container itself must carry every
+    # framework marker to be selected everywhere -- and would then be skipped
+    # everywhere, since no image ships all of them. framework_agnostic opts such
+    # a test out of the skip while leaving its selection markers intact.
     framework_markers = {
         "trtllm": "tensorrt_llm",
         "vllm": "vllm",
@@ -665,7 +680,9 @@ def pytest_collection_modifyitems(config, items):
         if importlib.util.find_spec(module_name) is None:
             skip = pytest.mark.skip(reason=f"{module_name} is not installed")
             for item in items:
-                if _item_has_marker(item, marker_name):
+                if _item_has_marker(item, marker_name) and not _item_has_marker(
+                    item, "framework_agnostic"
+                ):
                     item.add_marker(skip)
 
     # Deselect tests based on --max-vram-gib:

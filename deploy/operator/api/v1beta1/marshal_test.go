@@ -49,6 +49,74 @@ func TestNormalizeJSON_OuterFieldWinsEmbeddedCollision(t *testing.T) {
 	}
 }
 
+func TestRootMarshal_PreservesEmptyMetadata(t *testing.T) {
+	tests := []struct {
+		name string
+		obj  any
+	}{
+		{
+			name: "DynamoGraphDeployment",
+			obj: &DynamoGraphDeployment{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "nvidia.com/v1beta1",
+					Kind:       "DynamoGraphDeployment",
+				},
+			},
+		},
+		{
+			name: "DynamoComponentDeployment",
+			obj: &DynamoComponentDeployment{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "nvidia.com/v1beta1",
+					Kind:       "DynamoComponentDeployment",
+				},
+			},
+		},
+		{
+			name: "DynamoGraphDeploymentRequest",
+			obj: &DynamoGraphDeploymentRequest{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "nvidia.com/v1beta1",
+					Kind:       "DynamoGraphDeploymentRequest",
+				},
+			},
+		},
+		{
+			name: "DynamoGraphDeploymentScalingAdapter",
+			obj: &DynamoGraphDeploymentScalingAdapter{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "nvidia.com/v1beta1",
+					Kind:       "DynamoGraphDeploymentScalingAdapter",
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Marshal a v1beta1 root object with empty metadata")
+			raw, err := json.Marshal(tt.obj)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+
+			t.Log("Verify the root metadata envelope is preserved")
+			root := unmarshalToMap(t, raw)
+			metadata, found := root["metadata"]
+			if !found {
+				t.Fatalf("root metadata is missing from %s", raw)
+			}
+			metadataMap, ok := metadata.(map[string]any)
+			if !ok {
+				t.Fatalf("root metadata has type %T, want object", metadata)
+			}
+			if len(metadataMap) != 0 {
+				t.Fatalf("root metadata = %v, want empty object", metadataMap)
+			}
+		})
+	}
+}
+
 // TestDGDMarshal_StripsEmptyPodTemplateMetadata locks in the fix for the
 // kubectl-apply generation-bump regression: when the stored v1alpha1 object
 // has no ExtraPodMetadata, the v1beta1 projection built by buildPodTemplateTo

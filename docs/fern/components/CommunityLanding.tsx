@@ -3,15 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-"use client";
-
-import { useEffect, useState } from "react";
+// Server component: the calendar's "today" now comes from the generated
+// GENERATED_ON rather than a post-hydration `new Date()`, and nothing else in
+// this file uses hooks, state, or browser APIs.
 
 import {
   UPCOMING_EVENTS,
   PAST_EVENTS,
   type DynamoEvent,
 } from "./events.generated";
+import {
+  MONTH_INDEX,
+  resolveCalendarMonth,
+  resolveToday,
+} from "./calendar-today";
 
 const CALENDAR_URL =
   "https://calendar.google.com/calendar/u/0/r?cid=Y19jMjQ0OGQyZWZiMDllYWMyZGRlZTFmMzQ1MjQxMjQxMzViZDNmNDU1NDg2ODc2OTA1OTEwNWUxOGUxYjk3ZThmQGdyb3VwLmNhbGVuZGFyLmdvb2dsZS5jb20";
@@ -36,10 +41,6 @@ const MONTHS = [
   "December",
 ] as const;
 
-const MONTH_INDEX = Object.fromEntries(
-  MONTHS.map((month, index) => [month.slice(0, 3), index]),
-);
-
 const CHANNELS = [
   {
     name: "GitHub",
@@ -56,13 +57,6 @@ const CHANNELS = [
     icon: "comments",
   },
   {
-    name: "Discord",
-    label: "Chat with builders in real time",
-    href: "https://discord.gg/D92uqZRjCZ",
-    tone: "discord",
-    icon: "discord",
-  },
-  {
     name: "AI Dynamo Slack",
     label: "Join the dedicated Dynamo workspace",
     href: "http://ai-dynamo.org/slack",
@@ -70,18 +64,11 @@ const CHANNELS = [
     icon: "slack",
   },
   {
-    name: "YouTube",
-    label: "Meetings, talks, and demos",
-    href: "https://www.youtube.com/@ai-dynamo-community",
+    name: "Office Hours",
+    label: "Recordings and demos",
+    href: "https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X",
     tone: "youtube",
     icon: "youtube",
-  },
-  {
-    name: "Calendar",
-    label: "Meetups and community calls",
-    href: CALENDAR_URL,
-    tone: "calendar",
-    icon: "calendar",
   },
 ] as const;
 
@@ -95,10 +82,6 @@ const FONT_AWESOME_ICONS = {
     viewBox: "0 0 576 512",
     path: "M384 144c0 97.2-86 176-192 176-26.7 0-52.1-5-75.2-14L35.2 349.2c-9.3 4.9-20.7 3.2-28.2-4.2s-9.2-18.9-4.2-28.2l35.6-67.2C14.3 220.2 0 183.6 0 144 0 46.8 86-32 192-32S384 46.8 384 144zm0 368c-94.1 0-172.4-62.1-188.8-144 120-1.5 224.3-86.9 235.8-202.7 83.3 19.2 145 88.3 145 170.7 0 39.6-14.3 76.2-38.4 105.6l35.6 67.2c4.9 9.3 3.2 20.7-4.2 28.2s-18.9 9.2-28.2 4.2L459.2 498c-23.1 9-48.5 14-75.2 14z",
   },
-  discord: {
-    viewBox: "0 0 576 512",
-    path: "M492.5 69.8c-.2-.3-.4-.6-.8-.7-38.1-17.5-78.4-30-119.7-37.1-.4-.1-.8 0-1.1 .1s-.6 .4-.8 .8c-5.5 9.9-10.5 20.2-14.9 30.6-44.6-6.8-89.9-6.8-134.4 0-4.5-10.5-9.5-20.7-15.1-30.6-.2-.3-.5-.6-.8-.8s-.7-.2-1.1-.2c-41.3 7.1-81.6 19.6-119.7 37.1-.3 .1-.6 .4-.8 .7-76.2 113.8-97.1 224.9-86.9 334.5 0 .3 .1 .5 .2 .8s.3 .4 .5 .6c44.4 32.9 94 58 146.8 74.2 .4 .1 .8 .1 1.1 0s.7-.4 .9-.7c11.3-15.4 21.4-31.8 30-48.8 .1-.2 .2-.5 .2-.8s0-.5-.1-.8-.2-.5-.4-.6-.4-.3-.7-.4c-15.8-6.1-31.2-13.4-45.9-21.9-.3-.2-.5-.4-.7-.6s-.3-.6-.3-.9 0-.6 .2-.9 .3-.5 .6-.7c3.1-2.3 6.2-4.7 9.1-7.1 .3-.2 .6-.4 .9-.4s.7 0 1 .1c96.2 43.9 200.4 43.9 295.5 0 .3-.1 .7-.2 1-.2s.7 .2 .9 .4c2.9 2.4 6 4.9 9.1 7.2 .2 .2 .4 .4 .6 .7s.2 .6 .2 .9-.1 .6-.3 .9-.4 .5-.6 .6c-14.7 8.6-30 15.9-45.9 21.8-.2 .1-.5 .2-.7 .4s-.3 .4-.4 .7-.1 .5-.1 .8 .1 .5 .2 .8c8.8 17 18.8 33.3 30 48.8 .2 .3 .6 .6 .9 .7s.8 .1 1.1 0c52.9-16.2 102.6-41.3 147.1-74.2 .2-.2 .4-.4 .5-.6s.2-.5 .2-.8c12.3-126.8-20.5-236.9-86.9-334.5zm-302 267.7c-29 0-52.8-26.6-52.8-59.2s23.4-59.2 52.8-59.2c29.7 0 53.3 26.8 52.8 59.2 0 32.7-23.4 59.2-52.8 59.2zm195.4 0c-29 0-52.8-26.6-52.8-59.2s23.4-59.2 52.8-59.2c29.7 0 53.3 26.8 52.8 59.2 0 32.7-23.2 59.2-52.8 59.2z",
-  },
   slack: {
     viewBox: "0 0 448 512",
     path: "M94.1 315.1c0 25.9-21.2 47.1-47.1 47.1S0 341 0 315.1 21.2 268 47.1 268l47.1 0 0 47.1zm23.7 0c0-25.9 21.2-47.1 47.1-47.1S212 289.2 212 315.1l0 117.8c0 25.9-21.2 47.1-47.1 47.1s-47.1-21.2-47.1-47.1l0-117.8zm47.1-189c-25.9 0-47.1-21.2-47.1-47.1S139 32 164.9 32 212 53.2 212 79.1l0 47.1-47.1 0zm0 23.7c25.9 0 47.1 21.2 47.1 47.1S190.8 244 164.9 244L47.1 244C21.2 244 0 222.8 0 196.9s21.2-47.1 47.1-47.1l117.8 0zm189 47.1c0-25.9 21.2-47.1 47.1-47.1S448 171 448 196.9 426.8 244 400.9 244l-47.1 0 0-47.1zm-23.7 0c0 25.9-21.2 47.1-47.1 47.1S236 222.8 236 196.9l0-117.8C236 53.2 257.2 32 283.1 32s47.1 21.2 47.1 47.1l0 117.8zm-47.1 189c25.9 0 47.1 21.2 47.1 47.1S309 480 283.1 480 236 458.8 236 432.9l0-47.1 47.1 0zm0-23.7c-25.9 0-47.1-21.2-47.1-47.1S257.2 268 283.1 268l117.8 0c25.9 0 47.1 21.2 47.1 47.1s-21.2 47.1-47.1 47.1l-117.8 0z",
@@ -106,10 +89,6 @@ const FONT_AWESOME_ICONS = {
   youtube: {
     viewBox: "0 0 576 512",
     path: "M549.7 124.1C543.5 100.4 524.9 81.8 501.4 75.5 458.9 64 288.1 64 288.1 64S117.3 64 74.7 75.5C51.2 81.8 32.7 100.4 26.4 124.1 15 167 15 256.4 15 256.4s0 89.4 11.4 132.3c6.3 23.6 24.8 41.5 48.3 47.8 42.6 11.5 213.4 11.5 213.4 11.5s170.8 0 213.4-11.5c23.5-6.3 42-24.2 48.3-47.8 11.4-42.9 11.4-132.3 11.4-132.3s0-89.4-11.4-132.3zM232.2 337.6l0-162.4 142.7 81.2-142.7 81.2z",
-  },
-  calendar: {
-    viewBox: "0 0 448 512",
-    path: "M128 0c17.7 0 32 14.3 32 32l0 32 128 0 0-32c0-17.7 14.3-32 32-32s32 14.3 32 32l0 32 32 0c35.3 0 64 28.7 64 64l0 288c0 35.3-28.7 64-64 64L64 480c-35.3 0-64-28.7-64-64L0 128C0 92.7 28.7 64 64 64l32 0 0-32c0-17.7 14.3-32 32-32zM64 240l0 32c0 8.8 7.2 16 16 16l32 0c8.8 0 16-7.2 16-16l0-32c0-8.8-7.2-16-16-16l-32 0c-8.8 0-16 7.2-16 16zm128 0l0 32c0 8.8 7.2 16 16 16l32 0c8.8 0 16-7.2 16-16l0-32c0-8.8-7.2-16-16-16l-32 0c-8.8 0-16 7.2-16 16zm144-16c-8.8 0-16 7.2-16 16l0 32c0 8.8 7.2 16 16 16l32 0c8.8 0 16-7.2 16-16l0-32c0-8.8-7.2-16-16-16l-32 0zM64 368l0 32c0 8.8 7.2 16 16 16l32 0c8.8 0 16-7.2 16-16l0-32c0-8.8-7.2-16-16-16l-32 0c-8.8 0-16 7.2-16 16zm144-16c-8.8 0-16 7.2-16 16l0 32c0 8.8 7.2 16 16 16l32 0c8.8 0 16-7.2 16-16l0-32c0-8.8-7.2-16-16-16l-32 0zm112 16l0 32c0 8.8 7.2 16 16 16l32 0c8.8 0 16-7.2 16-16l0-32c0-8.8-7.2-16-16-16l-32 0c-8.8 0-16 7.2-16 16z",
   },
 } as const;
 
@@ -154,36 +133,21 @@ function buildMonthCells(year: number, month: number) {
   return cells;
 }
 
-interface CalendarDate {
-  year: number;
-  month: number;
-  day: number;
-}
-
-function getPacificDate(date: Date): CalendarDate {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Los_Angeles",
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-  }).formatToParts(date);
-  const value = (type: "year" | "month" | "day") =>
-    Number(parts.find((part) => part.type === type)?.value);
-
-  return { year: value("year"), month: value("month") - 1, day: value("day") };
-}
-
 function FullCalendar() {
-  const [today, setToday] = useState<CalendarDate | null>(null);
-  const focusEvent = UPCOMING_EVENTS[0] ?? PAST_EVENTS[0];
-  const year = Number(focusEvent?.year ?? new Date().getUTCFullYear());
-  const month = MONTH_INDEX[focusEvent?.month ?? "Jan"] ?? 0;
+  // Today's month when it has events, else the nearest event's month. Keying
+  // it off UPCOMING_EVENTS[0] meant an empty calendar fell back to
+  // PAST_EVENTS[0] and sat on a month that had already gone by -- and because
+  // the today marker was resolved independently, it then matched no cell in the
+  // month on show, so the grid lost its highlight entirely. Resolving both from
+  // one helper keeps them in agreement; falling back to the nearest event keeps
+  // this grid, which renders full event slots, from shipping empty whenever the
+  // next event is in another month.
+  const { year, month } = resolveCalendarMonth();
+  const today = resolveToday();
   const events = [...UPCOMING_EVENTS, ...PAST_EVENTS].filter(
     (event) => Number(event.year) === year && MONTH_INDEX[event.month] === month,
   );
   const eventsByDay = new Map<number, DynamoEvent[]>();
-
-  useEffect(() => setToday(getPacificDate(new Date())), []);
 
   events.forEach((event) => {
     const day = Number(event.day);
@@ -215,10 +179,16 @@ function FullCalendar() {
         <div className="dynamo-community-calendar__grid">
           {buildMonthCells(year, month).map((day, index) => {
             const dayEvents = day === null ? [] : eventsByDay.get(day) ?? [];
-            const isToday = day !== null
-              && today?.year === year
-              && today.month === month
-              && today.day === day;
+            // The grid does not always render today's own month, so the month
+            // has to match too -- otherwise the highlight lands on the
+            // same-numbered day of whichever month is on show. A null `today`
+            // (stale or malformed GENERATED_ON) marks nothing at all.
+            const isToday =
+              day !== null &&
+              today !== null &&
+              today.year === year &&
+              today.month === month &&
+              day === today.day;
             return (
               <div
                 className={`dynamo-community-calendar__day${day === null ? ' is-empty' : ''}${dayEvents.length ? ' has-event' : ''}${isToday ? ' is-today' : ''}`}

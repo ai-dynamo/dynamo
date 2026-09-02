@@ -139,7 +139,7 @@ jobs:
     name: ${{ inputs.test_type }} ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}, ${{ matrix.platform }}
     runs-on: ${{ matrix.platform == 'amd64' && inputs.amd_runner || 'prod-tester-arm-v2' }}
     container:
-      image: ${{ vars.RUNNERS_REGISTRY }}/ai-dynamo/dynamo:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
+      image: ${{ vars.ECR_REGISTRY }}/${{ vars.ECR_REPOSITORY }}:${{ inputs.source_ref != '' && inputs.source_ref || github.sha }}-${{ inputs.target_tag_plain }}${{ (matrix.cuda_version != '' && !startsWith(matrix.cuda_version, '13.')) && format('-cuda{0}', startsWith(matrix.cuda_version, '12.') && '12' || matrix.cuda_version) || '' }}${{ inputs.image_tag_suffix }}-test
       env:
         # The image creates user 'dynamo' at uid 1000, but the ARC k8s runner
         # executes the job pod as uid 1001 (runner's uid). Overriding HOME and
@@ -149,8 +149,11 @@ jobs:
         HOME: /__w/dynamo/dynamo
         USER: dynamo
         # Datadog Test Optimization scoping (settings are per service+env).
+        DD_SERVICE: ai-dynamo
         DD_ENV: ${{ inputs.dd_env }}
+        DD_TAGS: 'team:dynamo'
         DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
+        DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '2'
         # dynamo tests run product code in subprocesses, so ddtrace's in-process
         # coverage.py collects nothing ("No data was collected" warnings) and TIA
         # gets no signal. Disable ITR (skips the settings API, coverage, skipping).
@@ -159,7 +162,7 @@ jobs:
       contents: read
     services:
       minio:
-        image: ${{ vars.RUNNERS_REGISTRY }}/quay/minio/minio:latest
+        image: ${{ vars.ECR_REGISTRY }}/quay/minio/minio:latest
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
@@ -185,7 +188,7 @@ jobs:
         with:
           languages: python
           api_key: ${{ secrets.DD_API_KEY }}
-          site: us3.datadoghq.com
+          site: datadoghq.com
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash
@@ -206,7 +209,7 @@ jobs:
       - name: Run CPU-only tests (parallelized)
         if: ${{ inputs.run_cpu_only_tests }}
         timeout-minutes: ${{ inputs.cpu_only_test_timeout_minutes }}
-        uses: ./.github/actions/pytest-local
+        uses: $/.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ inputs.cpu_only_test_markers }}
@@ -220,7 +223,7 @@ jobs:
       - name: Run GPU tests (parallel)
         timeout-minutes: ${{ inputs.gpu_test_timeout_minutes }}
         if: ${{ matrix.platform == 'amd64' && inputs.run_gpu_tests && inputs.run_gpu_parallel_tests }}
-        uses: ./.github/actions/pytest-local
+        uses: $/.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ inputs.gpu_test_markers }}
@@ -241,7 +244,7 @@ jobs:
         # container/pod never coming online) skips this step cleanly instead of trying
         # to run the local pytest-local action against an un-checked-out workspace.
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && matrix.platform == 'amd64' && inputs.run_gpu_tests }}
-        uses: ./.github/actions/pytest-local
+        uses: $/.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
           # When the parallel stage runs, exclude profiled tests here so they don't run twice.

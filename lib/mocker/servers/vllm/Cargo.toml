@@ -9,7 +9,7 @@ authors.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Mocker-backed implementation of vLLM's native Generate gRPC API"
+description = "Mocker-backed implementation of vLLM's native gRPC API"
 readme = "README.md"
 
 [[bin]]
@@ -28,6 +28,7 @@ futures = { workspace = true }
 prost-types = { workspace = true }
 tokio = { workspace = true }
 tonic = { workspace = true }
+tonic-health = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }

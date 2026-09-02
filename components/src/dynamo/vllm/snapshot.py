@@ -3,6 +3,7 @@
 
 import gc
 import logging
+import os
 from collections.abc import Callable
 
 from dynamo.common.snapshot.lifecycle import (
@@ -38,14 +39,31 @@ async def prepare_snapshot_engine(
     config.engine_args.enable_sleep_mode = True
 
     engine = setup_vllm_engine(config)
+    # Decide before the first pause: reaching this at pause time would raise
+    # after sleep() had already released the engine's memory.
+    checkpoint_hooks = all(
+        hasattr(engine[0], hook)
+        for hook in ("checkpoint_prepare", "checkpoint_restore")
+    )
+    if not checkpoint_hooks:
+        logger.warning(
+            "This vLLM build has no AsyncLLM.checkpoint_prepare/checkpoint_restore; "
+            "snapshotting without communicator checkpointing. "
+            "Requires vLLM 0.27.0 or newer."
+        )
+
     gc.collect()
     snapshot_controller = EngineSnapshotController(
         engine=engine,
-        pause_controller=VllmEnginePauseController(engine[0]),
+        pause_controller=VllmEnginePauseController(
+            engine[0],
+            prepare_for_process_checkpoint=checkpoint_hooks,
+        ),
         snapshot_config=snapshot_config,
         pause_args=(None,),
     )
     if not await snapshot_controller.wait_for_restore():
-        raise SystemExit(0)
+        logger.info("vLLM snapshot captured successfully")
+        os._exit(0)
 
     return snapshot_controller

@@ -38,7 +38,10 @@ from transformers import AutoConfig
 import dynamo.nixl_connect as nixl_connect
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
+from dynamo.common.configuration.groups.router_args import build_router_config
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.media_decoder import build_frontend_image_decoder_options
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
@@ -67,7 +70,11 @@ from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
-from dynamo.trtllm.utils.trtllm_utils import deep_update, get_spec_decode_runtime_data
+from dynamo.trtllm.utils.trtllm_utils import (
+    deep_update,
+    get_spec_decode_runtime_data,
+    publish_trtllm_token_budget,
+)
 
 try:
     # Available only when the bindings include the `mm-routing` feature.
@@ -166,6 +173,31 @@ def _sync_config_from_engine_args(config: Config, engine_args: dict) -> None:
     for field_name in ("max_seq_len", "max_num_tokens", "max_batch_size"):
         if field_name in engine_args:
             setattr(config, field_name, engine_args[field_name])
+
+
+def _strip_postprocess_workers(engine_args: dict) -> None:
+    """Remove num_postprocess_workers from engine args, warning if it was > 0.
+
+    Dynamo manages its own post-processing pipeline; TRT-LLM's
+    num_postprocess_workers is not effective in this context.
+    """
+    value = engine_args.pop("num_postprocess_workers", None)
+    if value is None:
+        return
+    try:
+        if int(value) > 0:
+            logging.warning(
+                "num_postprocess_workers=%r was set in engine config but will be ignored: "
+                "Dynamo manages its own post-processing pipeline and does not make "
+                "TRT-LLM's num_postprocess_workers effective. The setting has been removed.",
+                value,
+            )
+    except (TypeError, ValueError):
+        logging.warning(
+            "num_postprocess_workers=%r was set in engine config with an unrecognised value "
+            "and has been removed.",
+            value,
+        )
 
 
 def _populate_kv_cache_capacity(
@@ -321,6 +353,20 @@ async def init_llm_worker(
         "max_seq_len": config.max_seq_len,
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
+        # Engine-level perf metrics turn on the PyExecutor detailed per-step timing
+        # collector: growing `step_metrics` / `ctx_chunk_metrics` lists that get
+        # attached to the final response, then pickled for the rank gather and again
+        # for worker->proxy IPC under attention DP. Nothing in Dynamo reads
+        # `time_breakdown_metrics`, so default it off rather than tying it to
+        # publishing. This is a default, not a hard disable: `--extra-engine-args`
+        # and `--override-engine-args` are merged over `arg_map` below and can set
+        # it back to true for custom instrumentation.
+        "return_perf_metrics": False,
+        # enable_iter_perf_stats is required for PyTorch backend to compute iteration-level
+        # stats (KV cache utilization, hit rate). TensorRT backend always has this enabled.
+        # See TRT-LLM PR #11243: MetricsCollector.log_iteration_stats() needs these stats.
+        # KV-event publication must not enable it implicitly.
+        "enable_iter_perf_stats": False,
         "kv_connector_config": kv_connector_config,
     }
 
@@ -371,6 +417,7 @@ async def init_llm_worker(
     )
 
     _sync_config_from_engine_args(config, arg_map)
+    _strip_postprocess_workers(arg_map)
 
     event_buffer_max_size = 0
     if config.publish_events_and_metrics:
@@ -486,9 +533,18 @@ async def init_llm_worker(
         )
     default_sampling_params = SamplingParams()
 
-    # Enable perf metrics so prompt_tokens_details can be returned
+    # Request-level perf metrics are a *separate* switch that merely shares the
+    # engine flag's name. Tie it to KV-event publishing, not to the engine flag
+    # (which now defaults to False above): its one consumer is the KV-transfer
+    # histogram in HandlerBase, whose AdditionalMetricsCollector is built only under
+    # `if config.publish_events_and_metrics`. So with publishing off nothing reads
+    # `request_perf_metrics` and filling it is pure waste. `cached_tokens` is
+    # unaffected either way -- it comes from `res.cached_tokens`, not from
+    # `request_perf_metrics`. An explicit engine-level override still forces these
+    # back on: TRT-LLM resolves the effective value as `sampling or engine` in
+    # `LLM._prepare_sampling_params`.
     if hasattr(default_sampling_params, "return_perf_metrics"):
-        default_sampling_params.return_perf_metrics = True
+        default_sampling_params.return_perf_metrics = config.publish_events_and_metrics
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode. Prefill and encode workers
@@ -638,6 +694,7 @@ async def init_llm_worker(
         runtime_config = ModelRuntimeConfig()
         runtime_config.kv_state_endpoint = config.kv_state_endpoint
         runtime_config.context_length = config.max_seq_len
+        publish_trtllm_token_budget(runtime_config, config.max_seq_len)
 
         kv_cache_block_size = config.kv_block_size
         if config.disaggregation_mode != DisaggregationMode.ENCODE:
@@ -660,6 +717,11 @@ async def init_llm_worker(
         runtime_config.max_num_batched_tokens = engine_args["max_num_tokens"]
         runtime_config.reasoning_parser = config.dyn_reasoning_parser
         runtime_config.tool_call_parser = config.dyn_tool_call_parser
+        if config.dyn_default_thinking_mode is not None:
+            runtime_config.set_engine_specific(
+                "default_thinking_mode",
+                json.dumps(config.dyn_default_thinking_mode),
+            )
         runtime_config.exclude_tools_when_tool_choice_none = (
             config.exclude_tools_when_tool_choice_none
         )
@@ -784,13 +846,16 @@ async def init_llm_worker(
             max_seq_len=config.max_seq_len,
             disagg_machine_id=int(endpoint.connection_id()) % 1021,
             conversation_affinity=config.conversation_affinity,
+            conversation_affinity_dp_rank_source=(
+                config.conversation_affinity_dp_rank_source
+            ),
         )
 
         media_decoder = None
         media_fetcher = None
         if config.frontend_decoding:
             media_decoder = MediaDecoder()
-            media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+            media_decoder.enable_image(build_frontend_image_decoder_options())
             media_fetcher = MediaFetcher()
             media_fetcher.timeout_ms(30000)
             allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
@@ -829,6 +894,10 @@ async def init_llm_worker(
         else:
             needs = [needs_set] if needs_set else []
 
+        handler_config.first_token_source = await endpoint.first_token_source(
+            worker_type
+        )
+
         await register_model(
             model_input,
             model_type,
@@ -842,7 +911,13 @@ async def init_llm_worker(
             media_fetcher=media_fetcher,
             worker_type=worker_type,
             needs=needs,
+            # Advertise this worker set's own routing strategy when --router-mode
+            # is set; None inherits the frontend's global mode. Combined with
+            # worker_type, this is what lets a disaggregated deployment route to
+            # its prefill and decode tiers differently.
+            router_config=build_router_config(config.router_advertisement),
         )
+        register_model_taint_route(runtime, endpoint)
 
         health_check_payload = TrtllmHealthCheckPayload(
             tokenizer=tokenizer,

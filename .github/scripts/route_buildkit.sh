@@ -11,10 +11,18 @@
 # Routing is optimized for Docker layer caching, linear scaling, and
 # 100% pod utilization across any number of BuildKit pods.
 #
-# CACHE GROUPS (3 distinct groups, one cache domain per framework):
-#   - Group 0 (vllm):                 vLLM
-#   - Group 1 (sglang):               SGLang
-#   - Group 2 (general-trt-combined): TRT-LLM & General Builds
+# CACHE GROUPS (3 groups, one cache domain per dynamo_base image tag):
+#   - Group 0 (vllm-sglang): vLLM & SGLang                    (cuda13.0 base)
+#   - Group 1 (general):     dynamo runtime, planner, frontend,
+#                            operator, snapshot, power-agent  (cuda13.0 base)
+#   - Group 2 (trtllm):      TRT-LLM runtime / dev / efa      (cuda13.1 base)
+#
+# Groups follow the dynamo_base image tag, not the framework: that is where the
+# rendered Dockerfiles diverge, since manylinux_${ARCH}, wheel_builder_base and
+# runtime_wheel_builder are shared by every build kind. TRT-LLM is the only
+# build on a different base, so it gets its own group. vLLM and SGLang share
+# one because their build filters differ, and a dedicated pool for either would
+# idle whenever only the other changed.
 #
 # ALGORITHM:
 # 1. SCORING: Each group key is hashed with every active pod index (SHA-256)
@@ -28,19 +36,19 @@
 #    This guarantees every active pod appears in at least one group's pool.
 # 5. RANDOM PICK: ONE pod is randomly selected from the candidate pool.
 #
-# LOAD DISTRIBUTION (cksum-based, all pods utilized):
+# LOAD DISTRIBUTION (example: amd64; arm64 ranks differently, all pods utilized):
 # +------+------+-------------------+-------------------+---------------------+
-# | Pods | Pool | G0: vLLM          | G1: SGLang        | G2: TRT-LLM/General |
+# | Pods | Pool | G0: vLLM/SGLang   | G1: General       | G2: TRT-LLM         |
 # +------+------+-------------------+-------------------+---------------------+
-# |  1   |  1   | {0}               | {0}               | {0}                 |
-# |  2   |  1   | {0}               | {1}               | {1}                 |
-# |  3   |  1   | {0}               | {2}               | {1}                 |
-# |  4   |  2   | {0, 3}            | {2, 1}            | {1, 2}             |
-# |  5   |  2   | {0, 3}            | {2, 4}            | {1, 2}             |
-# |  6   |  2   | {0, 3}            | {5, 1}            | {2, 4}             |
-# |  7   |  3   | {0, 3, 4}         | {5, 1, 2}         | {2, 6, 5}          |
-# |  8   |  3   | {7, 0, 3}         | {5, 1, 4}         | {2, 6, 5}          |
-# |  9   |  3   | {7, 0, 3}         | {8, 5, 1}         | {2, 6, 4}          |
+# | 1    | 1    | {0}               | {0}               | {0}                 |
+# | 2    | 1    | {0}               | {1}               | {1}                 |
+# | 3    | 1    | {2}               | {0}               | {1}                 |
+# | 4    | 2    | {2, 0}            | {3, 2}            | {1, 2}              |
+# | 5    | 2    | {4, 0}            | {2, 3}            | {1, 4}              |
+# | 6    | 2    | {4, 0}            | {2, 3}            | {1, 5}              |
+# | 7    | 3    | {4, 2, 0}         | {6, 3, 2}         | {1, 5, 4}           |
+# | 8    | 3    | {7, 4, 0}         | {6, 2, 3}         | {1, 5, 4}           |
+# | 9    | 3    | {7, 4, 8}         | {6, 2, 3}         | {1, 5, 0}           |
 # +------+------+-------------------+-------------------+---------------------+
 #
 # =============================================================================
@@ -144,9 +152,12 @@ else
 fi
 
 # --- CONFIGURATION ---
-NAMESPACE="buildkit"
+NAMESPACE="${BUILDKIT_NAMESPACE:?BUILDKIT_NAMESPACE must be set}"
 PORT="1234"
-MAX_POD_CHECK=10
+# Highest buildkit pod ordinal to probe, exclusive. Must be >= the KEDA
+# maxReplicaCount for the buildkit StatefulSet, or pods above this ordinal are
+# never discovered and sit idle while builds queue on the pods below it.
+MAX_POD_CHECK=${MAX_POD_CHECK:-16}
 # ---------------------
 
 if ! command -v nslookup &> /dev/null; then
@@ -184,17 +195,17 @@ get_active_indices() {
   echo "${active_indices[@]}"
 }
 
-GROUP_KEYS=("vllm" "sglang" "general-trt-combined")
+# Group keys are SHA-256 salt: renaming one reshuffles that group's pod pool and
+# cold-starts its cache.
+GROUP_KEYS=("vllm-sglang" "general" "trtllm")
 
-# Map a flavor to a group index (0, 1, or 2). One cache domain per framework:
-# vLLM and SGLang each get a dedicated group; TRT-LLM and general builds share
-# the third.
+# Map a flavor to a group index (0, 1, or 2).
 flavor_to_group() {
   local flavor=$1
   case "$flavor" in
-    vllm)  echo 0 ;;
-    sglang) echo 1 ;;
-    trtllm|general|*) echo 2 ;;
+    vllm|sglang) echo 0 ;;
+    trtllm) echo 2 ;;
+    general|*) echo 1 ;;
   esac
 }
 

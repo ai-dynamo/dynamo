@@ -10,6 +10,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
+use dynamo_runtime::error::{DynamoError, ErrorType};
 #[cfg(test)]
 use dynamo_runtime::pipeline::RequestStream;
 use dynamo_runtime::pipeline::{Error, ManyIn, ManyOut, SingleIn};
@@ -433,7 +434,11 @@ where
 
         // Validate the request first
         if let Err(validation_error) = request.validate() {
-            return Err(anyhow::anyhow!("Validation failed: {}", validation_error));
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(format!("Validation failed: {validation_error}"))
+                .build()
+                .into());
         }
 
         // Forward to inner engine if validation passes
@@ -560,8 +565,29 @@ impl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::error::{ErrorType, match_error_chain};
     use dynamo_runtime::pipeline::Context;
     use futures::stream;
+
+    struct RejectingRequest;
+
+    impl ValidateRequest for RejectingRequest {
+        fn validate(&self) -> Result<(), anyhow::Error> {
+            anyhow::bail!("bad request")
+        }
+    }
+
+    struct NeverCalledEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<RejectingRequest>, ManyOut<Annotated<()>>, Error> for NeverCalledEngine {
+        async fn generate(
+            &self,
+            _request: SingleIn<RejectingRequest>,
+        ) -> Result<ManyOut<Annotated<()>>, Error> {
+            panic!("invalid requests must not reach the inner engine")
+        }
+    }
 
     fn make_input(events: Vec<RealtimeClientEvent>) -> ManyIn<RealtimeClientEvent> {
         Context::new(RequestStream::new(Box::pin(stream::iter(events))))
@@ -597,5 +623,19 @@ mod tests {
             }
             other => panic!("expected error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn validate_engine_classifies_request_errors_as_invalid_argument() {
+        let error = ValidateEngine::new(NeverCalledEngine)
+            .generate(Context::new(RejectingRequest))
+            .await
+            .expect_err("invalid request must fail validation");
+
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
     }
 }

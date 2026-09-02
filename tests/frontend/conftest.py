@@ -230,7 +230,7 @@ def start_services_with_grpc(
 class MockerWorkerProcess(ManagedProcess):
     """Shared mocker worker process for frontend tests.
 
-    Uses dynamo.mocker with configurable model and speedup ratio.
+    Uses the internal Mocker worker launcher with configurable model and speedup ratio.
     Can be used by any frontend test that needs a fast mock backend.
     """
 
@@ -252,7 +252,7 @@ class MockerWorkerProcess(ManagedProcess):
         command = [
             "python3",
             "-m",
-            "dynamo.mocker",
+            "dynamo.mocker._worker",
             "--model-path",
             model,
             "--speedup-ratio",
@@ -286,7 +286,7 @@ class MockerWorkerProcess(ManagedProcess):
             display_output=True,
             terminate_all_matching_process_names=False,
             stragglers=["VLLM::EngineCore"],
-            straggler_commands=["-m dynamo.mocker"],
+            straggler_commands=["-m dynamo.mocker._worker"],
             log_dir=log_dir,
         )
 
@@ -339,14 +339,13 @@ def start_services_with_mocker(
 
 
 class SampleUnifiedWorkerProcess(ManagedProcess):
-    """Unified-backend sample worker (`dynamo.common.backend.sample_main`).
+    """Backend SDK sample worker (`dynamo.common.backend.sample_main`).
 
-    CPU-only Python reference engine that exercises the unified backend's
-    `Worker.run()` path — the same code path real backends (vllm/trtllm/
-    sglang) go through. Useful for tests that need to validate the unified
-    Worker/EngineAdapter pipeline without a GPU.
+    CPU-only Python reference engine that exercises the `Worker.run()` path.
+    Useful for tests that validate the Worker/EngineAdapter pipeline without a
+    GPU.
 
-    Mirrors `MockerWorkerProcess` but uses the unified entry point. Accepts
+    Mirrors `MockerWorkerProcess` but uses the Backend SDK entry point. Accepts
     `extra_env` for tests that need to inject telemetry / tracing env vars
     (e.g. `OTEL_EXPORT_ENABLED=1`, `DYN_LOGGING_JSONL=1`).
     """

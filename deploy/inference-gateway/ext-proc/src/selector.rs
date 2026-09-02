@@ -9,16 +9,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 
-use dynamo_kv_router::config::{KvRouterConfig, kv_router_config_from_dynamo_env};
+use dynamo_kv_router::WorkerType;
+use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::services::selection::{
     PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest, SelectionError,
     SelectionService, SelectionServiceBuilder, WorkerLifecycle, WorkerRequest as CoreWorkerRequest,
+    WorkerSelectionPolicyRegistry, warn_for_unserved_worker_selection_policies,
 };
+use kube::Client;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -80,10 +82,6 @@ pub struct Selector {
     /// `Drop` tears down its core + replica-sync tasks.
     cancel: CancellationToken,
     reconcile_state: Mutex<ReconcileState>,
-    /// Peer-discovery readiness in replicated mode: `None` when replication is
-    /// disabled (single replica, always ready), or `Some(flag)` that latches
-    /// `true` once the initial peer-set sync completes. ANDed into EPP health.
-    peer_ready: Option<Arc<AtomicBool>>,
 }
 
 /// Local bookkeeping for desired-state reconciliation.
@@ -99,18 +97,84 @@ struct ReconcileState {
 }
 
 impl Selector {
-    pub async fn new(cfg: &EppStandaloneConfig) -> Result<Self> {
-        Self::new_with_kv_router_config(cfg, kv_router_config_from_dynamo_env()).await
+    pub async fn new(
+        cfg: &EppStandaloneConfig,
+        policy_registry: WorkerSelectionPolicyRegistry,
+    ) -> Result<Self> {
+        let kv_router_config =
+            try_kv_router_config_from_dynamo_env().map_err(anyhow::Error::msg)?;
+        Self::new_with_kv_router_config(cfg, kv_router_config, policy_registry).await
     }
 
     async fn new_with_kv_router_config(
         cfg: &EppStandaloneConfig,
         kv_router_config: KvRouterConfig,
+        policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
-        let cancel = CancellationToken::new();
+        Self::validate_queueing_worker_capacity(cfg, &kv_router_config)?;
 
-        // If queueing is enabled, we need to validate that the max_num_batched_tokens is set.
-        // Done once at startup to avoid validating on every reconcile.
+        warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
+        let peer_replication = cfg.peer_replication.as_ref();
+        let peer_client = if peer_replication.is_some() {
+            Some(
+                Client::try_default()
+                    .await
+                    .context("building Kubernetes client for EPP peer replication")?,
+            )
+        } else {
+            None
+        };
+        if let (Some(peer_client), Some(peer_replication)) = (&peer_client, peer_replication) {
+            crate::peer_discovery::ensure_peer_service_exists(
+                peer_client.clone(),
+                &cfg.namespace,
+                &peer_replication.service_name,
+            )
+            .await?;
+        }
+
+        let mut builder =
+            SelectionServiceBuilder::new(kv_router_config, WorkerType::Aggregated, policy_registry)
+                .indexer_threads(cfg.selector_threads);
+        if let Some(peer_replication) = peer_replication {
+            builder = builder.replica_sync(peer_replication.sync_port, Vec::new());
+        }
+        let service = Arc::new(
+            builder
+                .build()
+                .await
+                .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
+        );
+
+        let cancel = CancellationToken::new();
+        if let (Some(peer_client), Some(peer_replication)) = (peer_client, peer_replication) {
+            crate::peer_discovery::spawn(
+                peer_client,
+                service.clone(),
+                &cfg.namespace,
+                &peer_replication.service_name,
+                peer_replication.sync_port,
+                peer_replication.pod_ip.clone(),
+                cancel.clone(),
+            )
+            .await?;
+        }
+        tracing::info!(
+            replicated = peer_replication.is_some(),
+            "Initialized in-process selection service"
+        );
+
+        Ok(Self {
+            service,
+            cancel,
+            reconcile_state: Mutex::new(ReconcileState::default()),
+        })
+    }
+
+    fn validate_queueing_worker_capacity(
+        cfg: &EppStandaloneConfig,
+        kv_router_config: &KvRouterConfig,
+    ) -> Result<()> {
         let queueing_enabled = kv_router_config
             .queueing_enabled(Some(&cfg.model_name))
             .map_err(|e| anyhow!("resolving router policy for model {}: {e}", cfg.model_name))?;
@@ -122,73 +186,7 @@ impl Selector {
                 cfg.model_name
             );
         }
-
-        let mut builder =
-            SelectionServiceBuilder::new(kv_router_config).indexer_threads(cfg.selector_threads);
-
-        let replication: Option<(String, u16)> = match &cfg.peer_service {
-            Some(name) => Some((
-                name.clone(),
-                crate::peer_discovery::resolve_replica_sync_port(&cfg.namespace, name).await?,
-            )),
-            None => None,
-        };
-
-        if let Some((_, peer_sync_port)) = &replication {
-            builder = builder.replica_sync(*peer_sync_port, Vec::new());
-        }
-
-        let service = Arc::new(
-            builder
-                .build()
-                .await
-                .map_err(|e| anyhow!("building embedded selection service: {e}"))?,
-        );
-
-        let peer_ready = if let Some((service_name, peer_sync_port)) = replication {
-            // In replicated mode, we need to exclude ourselves from the peer set which requires the POD_IP
-            let self_ip = std::env::var("POD_IP")
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    anyhow!(
-                        "DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; inject POD_IP \
-                         via the downward API (fieldRef status.podIP) so this replica can \
-                         exclude itself from its peer set"
-                    )
-                })?;
-            Some(
-                crate::peer_discovery::spawn(
-                    service.clone(),
-                    &cfg.namespace,
-                    &service_name,
-                    peer_sync_port,
-                    self_ip,
-                    cancel.clone(),
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-
-        tracing::info!(
-            indexer_threads = cfg.selector_threads,
-            replicated = cfg.peer_service.is_some(),
-            "Initialized in-process selection service"
-        );
-
-        Ok(Self {
-            service,
-            cancel,
-            reconcile_state: Mutex::new(ReconcileState::default()),
-            peer_ready,
-        })
-    }
-
-    pub fn peer_ready(&self) -> Option<Arc<AtomicBool>> {
-        self.peer_ready.clone()
+        Ok(())
     }
 
     fn worker_request(reg: &WorkerRegistration) -> CoreWorkerRequest {
@@ -294,6 +292,7 @@ impl Selector {
             session_id: None,
             priority_jump: req.priority_jump,
             strict_priority: req.strict_priority,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: req.allowed_worker_ids,
             routing_constraints: RoutingConstraints::default(),
@@ -356,6 +355,14 @@ impl Drop for Selector {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use dynamo_kv_router::services::selection::WorkerSelectionPolicyParameters;
+    use dynamo_kv_router::{
+        WorkerInputView, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicy,
+        WorkerSelectionPolicyError, WorkerSelectionPolicyFactory,
+    };
+
     use super::*;
 
     fn model_policy_file() -> tempfile::NamedTempFile {
@@ -404,7 +411,7 @@ models:
     fn test_config() -> EppStandaloneConfig {
         EppStandaloneConfig {
             selector_threads: 1,
-            peer_service: None,
+            peer_replication: None,
             inference_pool_name: "test-pool".to_string(),
             namespace: "test-ns".to_string(),
             model_name: "test-model".to_string(),
@@ -477,7 +484,7 @@ models:
     /// Reconcile a single schedulable worker into a fresh selector, asserting the
     /// core admitted it (so the reserve paths below actually book).
     async fn selector_with_schedulable_worker() -> Selector {
-        let selector = Selector::new(&test_config())
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
         selector
@@ -489,6 +496,88 @@ models:
             "a complete worker must be schedulable in-process"
         );
         selector
+    }
+
+    #[tokio::test]
+    async fn registered_policy_runs_through_reservation() {
+        struct FirstEligiblePicker;
+
+        impl WorkerPicker for FirstEligiblePicker {
+            fn pick(
+                &mut self,
+                _context: &WorkerSelectionContext<'_>,
+                input: WorkerInputView<'_>,
+            ) -> Result<usize, WorkerSelectionPolicyError> {
+                assert!(!input.candidates().is_empty());
+                Ok(0)
+            }
+        }
+
+        let policy_file = tempfile::NamedTempFile::new().expect("create policy file");
+        std::fs::write(
+            policy_file.path(),
+            r#"
+worker_selection:
+  aggregated: first-eligible
+  instances:
+    - name: first-eligible
+      type: first-eligible
+      parameters: {}
+"#,
+        )
+        .expect("write policy file");
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = WorkerSelectionPolicyRegistry::default();
+        registry
+            .register(
+                "first-eligible",
+                Arc::new({
+                    let provider_calls = Arc::clone(&provider_calls);
+                    let factory_calls = Arc::clone(&factory_calls);
+                    move |_parameters: &WorkerSelectionPolicyParameters| {
+                        provider_calls.fetch_add(1, Ordering::Relaxed);
+                        let factory_calls = Arc::clone(&factory_calls);
+                        let factory: WorkerSelectionPolicyFactory =
+                            Arc::new(move |config, worker_type, _partition| {
+                                factory_calls.fetch_add(1, Ordering::Relaxed);
+                                assert_eq!(worker_type, WorkerType::Aggregated);
+                                WorkerSelectionPolicy::new(
+                                    config.clone(),
+                                    worker_type.as_str(),
+                                    Vec::new(),
+                                    Box::new(FirstEligiblePicker),
+                                )
+                            });
+                        Ok(factory)
+                    }
+                }),
+            )
+            .expect("register policy provider");
+        let selector = Selector::new_with_kv_router_config(
+            &test_config(),
+            router_config_with_policy(&policy_file),
+            registry,
+        )
+        .await
+        .expect("custom selection service should build");
+        assert_eq!(provider_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 0);
+        selector
+            .reconcile(&[schedulable_registration(1)])
+            .await
+            .expect("worker should register");
+        assert_eq!(factory_calls.load(Ordering::Relaxed), 1);
+
+        let response = selector
+            .select_and_reserve(select_request("custom-policy"))
+            .await
+            .expect("custom policy should select and reserve");
+        assert_eq!(response.worker_id, 1);
+        selector
+            .free_reservation("custom-policy")
+            .await
+            .expect("custom-policy reservation should be releasable");
     }
 
     /// Item 1: a successful reserve books load, and the final free releases it.
@@ -612,7 +701,7 @@ models:
     /// so a worker exists in the catalog but is never schedulable.
     #[tokio::test]
     async fn select_and_reserve_errors_without_a_schedulable_worker() {
-        let selector = Selector::new(&test_config())
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
         selector
@@ -638,7 +727,7 @@ models:
     /// `prefill_complete` treat an unknown id as success (NotFound → Ok).
     #[tokio::test]
     async fn free_and_prefill_of_unknown_reservation_are_noops() {
-        let selector = Selector::new(&test_config())
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
         selector
@@ -653,7 +742,7 @@ models:
 
     #[tokio::test]
     async fn incomplete_worker_is_not_cached_as_reconciled() {
-        let selector = Selector::new(&test_config())
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
 
@@ -689,7 +778,7 @@ models:
 
     #[tokio::test]
     async fn stale_incomplete_worker_is_deleted() {
-        let selector = Selector::new(&test_config())
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
 
@@ -715,17 +804,34 @@ models:
     }
 
     #[tokio::test]
-    async fn queueing_model_requires_max_num_batched_tokens_at_startup() {
+    async fn selector_without_peer_replication_disables_replica_sync() {
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
+            .await
+            .expect("selector should build");
+
+        assert_eq!(selector.service.replica_sync_port(), None);
+    }
+
+    #[tokio::test]
+    async fn queueing_model_rejects_missing_capacity_before_peer_discovery() {
         let policy_file = model_policy_file();
         let mut cfg = test_config();
         cfg.model_name = "queueing-model".to_string();
         cfg.max_num_batched_tokens = None;
+        cfg.peer_replication = Some(crate::epp_standalone_config::PeerReplicationConfig {
+            service_name: "unreachable-peer-service".to_string(),
+            pod_ip: "10.0.0.10".to_string(),
+            sync_port: 9092,
+        });
 
-        let error =
-            Selector::new_with_kv_router_config(&cfg, router_config_with_policy(&policy_file))
-                .await
-                .err()
-                .expect("queueing model must reject missing capacity");
+        let error = Selector::new_with_kv_router_config(
+            &cfg,
+            router_config_with_policy(&policy_file),
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .await
+        .err()
+        .expect("queueing model must reject missing capacity");
         assert!(
             error
                 .to_string()
@@ -741,14 +847,18 @@ models:
         cfg.model_name = "threshold-free-model".to_string();
         cfg.max_num_batched_tokens = None;
 
-        Selector::new_with_kv_router_config(&cfg, router_config_with_policy(&policy_file))
-            .await
-            .expect("threshold-free model should allow missing capacity");
+        Selector::new_with_kv_router_config(
+            &cfg,
+            router_config_with_policy(&policy_file),
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .await
+        .expect("threshold-free model should allow missing capacity");
     }
 
     #[tokio::test]
     async fn duplicate_worker_ids_are_rejected_before_reconciliation() {
-        let selector = Selector::new(&test_config())
+        let selector = Selector::new(&test_config(), WorkerSelectionPolicyRegistry::default())
             .await
             .expect("selector should build");
         let duplicate = incomplete_registration(1);

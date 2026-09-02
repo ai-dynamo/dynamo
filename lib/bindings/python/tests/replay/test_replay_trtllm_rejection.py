@@ -87,6 +87,7 @@ def test_offline_replay_rejects_oversized_request_without_hanging(tmp_path):
         replay_mode="offline",
         trace_block_size=512,
     )
+    report = report.summary
 
     assert report["num_requests"] == 2, "both requests arrived"
     assert report["completed_requests"] == 1, (

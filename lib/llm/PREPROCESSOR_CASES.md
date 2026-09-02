@@ -48,7 +48,7 @@ the request. The exact arg name and value varies per family:
 
 - `kimi_k25` — `thinking: false`
 - `nemotron_nano` / `nemotron3` / `nemotron_v3` —
-  `enable_thinking: false` OR `force_nonempty_content: true`
+  `enable_thinking: false`; `force_nonempty_content: true` keeps parsing enabled and defers reasoning until content is known
 - `deepseek_r1` / `deepseek_v4` — `thinking: false` OR
   `thinking_mode: "chat"` (matches V4 formatter's `resolve_thinking_mode`
   convention; keeps parser and prompt synchronized)
@@ -118,9 +118,7 @@ included here as a baseline reminder that the preprocessor owns this.
 **Function:** `OpenAIPreprocessor::strip_leading_reasoning_start_from_stream`
 
 When PRE.2 disables a Nemotron force-reasoning parser, Dynamo must not
-run the reasoning parser. However, vLLM-compatible Nemotron templates can
-still produce a leading `<think>` in disabled-thinking modes such as
-`force_nonempty_content=true`. The preprocessor strips only that leading
+run the reasoning parser. However, vLLM-compatible Nemotron templates can still produce a leading `<think>` when thinking is explicitly disabled. The preprocessor strips only that leading
 marker, buffers split prefixes like `"<thi"` + `"nk>answer"`, tracks
 state per streamed choice, and emits the remaining bytes as normal
 `content`.
@@ -148,7 +146,7 @@ if you know the answer, fill it in.
 | `deepseek_v3_2` / `deepseek_v4` (DSML) | ? — DSML markers (`<｜DSML｜tool_calls>`); likely YES | `thinking=false` / `thinking_mode=chat` | — | **NEEDS ON** even when last_is_tool (V4 formatter seeds `<think>`); see #8901 | DSv3.2 / DSv4 grammar. |
 | `deepseek_r1` (reasoning) | NO (uses plain `<think>`) | `thinking=false` | — | — | DeepSeek-R1. |
 | `nemotron_deci` (tool) | ? | — | — | — | Nemotron tool parser. |
-| `nemotron_nano` / `nemotron3` / `nemotron_v3` (reasoning) | ? | `enable_thinking=false` / `force_nonempty_content=true` | YES when PRE.2 disables reasoning | — | Dynamically distinguish bare guided JSON from `reasoning</think>JSON`; `nemotron_v3` is the vLLM-compatible alias. |
+| `nemotron_nano` / `nemotron3` / `nemotron_v3` (reasoning) | ? | `enable_thinking=false`; `force_nonempty_content=true` keeps parsing enabled | YES when explicit thinking disablement fires PRE.2 | — | Dynamically distinguish bare guided JSON from `reasoning</think>JSON`; `nemotron_v3` is the vLLM-compatible alias. |
 | `llama3_json` (tool) | ? — `<\|python_tag\|>` is a special token, likely YES | — | — | — | Llama 3.x. |
 | `hermes` (tool) | NO | — | — | — | Plain XML `<tool_call>...</tool_call>`. |
 | `qwen3_coder` (tool) | NO | — | — | — | Plain XML `<tool_call><function=...>`. |

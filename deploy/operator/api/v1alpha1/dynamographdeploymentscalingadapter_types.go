@@ -67,7 +67,6 @@ type DynamoGraphDeploymentScalingAdapterStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
 // +kubebuilder:deprecatedversion:warning="nvidia.com/v1alpha1 DynamoGraphDeploymentScalingAdapter is deprecated; use nvidia.com/v1beta1 DynamoGraphDeploymentScalingAdapter"
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
@@ -99,10 +98,6 @@ type DynamoGraphDeploymentScalingAdapterList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoGraphDeploymentScalingAdapter `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeploymentScalingAdapter{}, &DynamoGraphDeploymentScalingAdapterList{})
 }
 
 // IsReady returns true if the adapter has active replicas and a selector

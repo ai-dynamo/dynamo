@@ -83,8 +83,13 @@ pub struct RuntimeConfig {
 
     /// Maximum number of blocking threads
     /// Blocking threads are used for blocking operations, this value must be greater than 0.
-    /// Set this at runtime with environment variable DYN_RUNTIME_MAX_BLOCKING_THREADS. Defaults to
-    /// 512.
+    /// Set this at runtime with environment variable DYN_RUNTIME_MAX_BLOCKING_THREADS.
+    ///
+    /// Defaults to the core count (`impl Default`). The `#[builder(default = "512")]` below
+    /// applies only when building through `RuntimeConfigBuilder` without setting this field.
+    ///
+    /// This is a ceiling, not a preallocation: Tokio spawns blocking threads on demand and reaps
+    /// them when idle, so measure at steady state under load.
     #[validate(range(min = 1))]
     #[builder(default = "512")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
@@ -364,8 +369,13 @@ impl RuntimeConfig {
         }
     }
 
-    /// Create a new default runtime configuration
-    pub(crate) fn create_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
+    /// The Tokio builder for this config, not yet built.
+    ///
+    /// Separate from [`Self::create_runtime`] because the pyo3 bridge builds its own runtime:
+    /// `pyo3_async_runtimes::tokio::init` takes a builder and calls `build()` later. Handing it
+    /// this builder is the only way to bound that runtime's size. Both paths go through here so
+    /// they cannot drift apart.
+    pub fn tokio_builder(&self) -> tokio::runtime::Builder {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder
             .worker_threads(
@@ -381,7 +391,12 @@ impl RuntimeConfig {
             );
             builder.enable_metrics_poll_time_histogram();
         }
-        builder.build()
+        builder
+    }
+
+    /// Create a new default runtime configuration
+    pub(crate) fn create_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
+        self.tokio_builder().build()
     }
 }
 
@@ -427,10 +442,70 @@ pub use dynamo_truthy::{
     env_is_falsey, env_is_truthy, is_falsey, is_truthy, parse_bool, parse_bool_opt,
 };
 
-/// Check whether JSONL logging enabled
-/// Set the `DYN_LOGGING_JSONL` environment variable a [`is_truthy`] value
-pub fn jsonl_logging_enabled() -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleLogFormat {
+    Readable,
+    Jsonl,
+}
+
+impl ConsoleLogFormat {
+    fn from_env_value(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "readable" => Some(Self::Readable),
+            "jsonl" => Some(Self::Jsonl),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Readable => "readable",
+            Self::Jsonl => "jsonl",
+        }
+    }
+}
+
+/// Return whether the legacy `DYN_LOGGING_JSONL` switch is enabled.
+///
+/// This remains a separate compatibility signal because older deployments
+/// also use it to enable local trace-context propagation.
+pub(crate) fn legacy_jsonl_logging_enabled() -> bool {
     env_is_truthy(environment_names::logging::DYN_LOGGING_JSONL)
+}
+
+/// Return the console log format.
+///
+/// `DYN_LOGGING_CONSOLE_FORMAT` takes precedence. `DYN_LOGGING_JSONL` remains
+/// supported as a legacy fallback when the new setting is unset or blank.
+pub fn console_log_format() -> ConsoleLogFormat {
+    let legacy_format = || {
+        if legacy_jsonl_logging_enabled() {
+            ConsoleLogFormat::Jsonl
+        } else {
+            ConsoleLogFormat::Readable
+        }
+    };
+
+    match std::env::var(environment_names::logging::DYN_LOGGING_CONSOLE_FORMAT) {
+        Ok(value) if value.trim().is_empty() => legacy_format(),
+        Ok(value) => match ConsoleLogFormat::from_env_value(value.trim()) {
+            Some(format) => format,
+            None => {
+                eprintln!(
+                    "Invalid {} value '{}'; using readable console logs",
+                    environment_names::logging::DYN_LOGGING_CONSOLE_FORMAT,
+                    value
+                );
+                ConsoleLogFormat::Readable
+            }
+        },
+        Err(_) => legacy_format(),
+    }
+}
+
+/// Return whether the effective console log format is JSONL.
+pub fn jsonl_logging_enabled() -> bool {
+    console_log_format() == ConsoleLogFormat::Jsonl
 }
 
 /// Check whether logging with ANSI terminal escape codes and colors is disabled.
@@ -468,6 +543,122 @@ mod tests {
         assert_eq!(config.system_host, "127.0.0.1");
         assert_eq!(config.system_port, 9090);
         Ok(())
+    }
+
+    /// Both thread-pool variables must survive `from_settings()`.
+    ///
+    /// Covers parsing on its own, so if a frontend's thread count ignores
+    /// `DYN_RUNTIME_MAX_BLOCKING_THREADS` the cause is wiring rather than parsing.
+    ///
+    /// `temp_env::with_vars` restores the old values on the way out, including on panic.
+    #[test]
+    fn test_from_settings_reads_both_thread_env_vars() {
+        const WORKERS: &str = "DYN_RUNTIME_NUM_WORKER_THREADS";
+        const BLOCKING: &str = "DYN_RUNTIME_MAX_BLOCKING_THREADS";
+
+        temp_env::with_vars([(WORKERS, Some("7")), (BLOCKING, Some("11"))], || {
+            let config = RuntimeConfig::from_settings().expect("from_settings failed");
+            assert_eq!(config.num_worker_threads, Some(7), "{WORKERS} was not read");
+            assert_eq!(config.max_blocking_threads, 11, "{BLOCKING} was not read");
+        });
+    }
+
+    /// The builder given to the pyo3 bridge must carry the configured worker count.
+    ///
+    /// The bridge calls `build()` itself, so nothing on our side sees the resulting runtime. If
+    /// this stopped applying the config, a bridge-built runtime would quietly go back to one
+    /// worker per CPU — the original bug, in a place no other test looks.
+    #[test]
+    fn test_tokio_builder_applies_configured_worker_threads() -> Result<()> {
+        let config = RuntimeConfig::builder()
+            .num_worker_threads(Some(3))
+            .max_blocking_threads(5)
+            .build()?;
+
+        let runtime = config.tokio_builder().build()?;
+        assert_eq!(runtime.metrics().num_workers(), 3);
+        Ok(())
+    }
+
+    /// With `num_worker_threads` unset, the builder falls back to the core count.
+    #[test]
+    fn test_tokio_builder_defaults_worker_threads_to_core_count() -> Result<()> {
+        let config = RuntimeConfig {
+            num_worker_threads: None,
+            ..RuntimeConfig::default()
+        };
+
+        let runtime = config.tokio_builder().build()?;
+        assert_eq!(
+            runtime.metrics().num_workers(),
+            std::thread::available_parallelism()?.get()
+        );
+        Ok(())
+    }
+
+    /// `max_blocking_threads` must actually cap concurrent blocking work.
+    ///
+    /// This is the setting whose effect on a frontend's thread count could not be observed, and
+    /// `num_workers()` cannot show it — Tokio counts blocking threads separately and only
+    /// exposes that count under `tokio_unstable`. Measuring concurrency works on stable instead:
+    /// blocking threads are spawned on demand up to the cap, so queueing more tasks than the cap
+    /// must serialize them.
+    ///
+    /// Only the upper bound is asserted. A missing cap shows up as a peak near the task count,
+    /// while asserting a lower bound would make the test depend on the scheduler overlapping
+    /// tasks, which a loaded CI machine need not do.
+    #[test]
+    fn test_tokio_builder_applies_max_blocking_threads() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const CAP: usize = 2;
+
+        let config = RuntimeConfig::builder()
+            .num_worker_threads(Some(2))
+            .max_blocking_threads(CAP)
+            .build()?;
+        let runtime = config.tokio_builder().build()?;
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+
+        runtime.block_on(async {
+            let tasks: Vec<_> = (0..CAP * 4)
+                .map(|_| {
+                    let in_flight = Arc::clone(&in_flight);
+                    let peak = Arc::clone(&peak);
+                    tokio::task::spawn_blocking(move || {
+                        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        // Long enough that tasks overlap if the cap allows it.
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        in_flight.fetch_sub(1, Ordering::SeqCst);
+                    })
+                })
+                .collect();
+
+            for task in tasks {
+                task.await.expect("blocking task panicked");
+            }
+        });
+
+        let observed = peak.load(Ordering::SeqCst);
+        assert!(
+            observed <= CAP,
+            "{observed} blocking tasks ran at once, but the cap was {CAP}"
+        );
+        Ok(())
+    }
+
+    /// `Default` sets `max_blocking_threads` to the core count, not the `#[builder(default)]`
+    /// of 512 — that applies only when building through `RuntimeConfigBuilder`.
+    #[test]
+    fn test_default_max_blocking_threads_is_core_count() {
+        let cores = std::thread::available_parallelism().unwrap().get();
+        let config = RuntimeConfig::default();
+        assert_eq!(config.max_blocking_threads, cores);
+        assert_eq!(config.num_worker_threads, Some(cores));
     }
 
     #[test]
@@ -511,5 +702,36 @@ mod tests {
         // Test opposite behavior
         assert!(!is_truthy("0"));
         assert!(!is_falsey("1"));
+    }
+
+    #[test]
+    fn test_console_log_format() {
+        use environment_names::logging;
+
+        for (console_format, legacy_jsonl, expected) in [
+            (None, None, ConsoleLogFormat::Readable),
+            (None, Some("true"), ConsoleLogFormat::Jsonl),
+            (Some(""), Some("true"), ConsoleLogFormat::Jsonl),
+            (Some("   "), Some("true"), ConsoleLogFormat::Jsonl),
+            (Some(" jsonl "), Some("false"), ConsoleLogFormat::Jsonl),
+            (Some("readable"), Some("true"), ConsoleLogFormat::Readable),
+            (Some("jsonl"), Some("false"), ConsoleLogFormat::Jsonl),
+            (
+                Some("unsupported"),
+                Some("true"),
+                ConsoleLogFormat::Readable,
+            ),
+        ] {
+            temp_env::with_vars(
+                [
+                    (logging::DYN_LOGGING_CONSOLE_FORMAT, console_format),
+                    (logging::DYN_LOGGING_JSONL, legacy_jsonl),
+                ],
+                || {
+                    assert_eq!(console_log_format(), expected);
+                    assert_eq!(jsonl_logging_enabled(), expected == ConsoleLogFormat::Jsonl);
+                },
+            );
+        }
     }
 }

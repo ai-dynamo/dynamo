@@ -6,8 +6,9 @@
 //! The crate hosts the Mooncake replay JSONL schema and helpers, plus the
 //! Dynamo request-trace loader and transient lowering used to build mocker
 //! replay models in memory. Direct Dynamo request-trace replay does not write
-//! an intermediate Mooncake file. Shared row types keep trace producers and
-//! consumers in lockstep.
+//! an intermediate Mooncake file; the opt-in `dynamo-bench` exporter writes
+//! one when needed. Shared row types keep trace producers and consumers in
+//! lockstep.
 
 pub mod mooncake;
 pub mod request_trace;

@@ -9,6 +9,8 @@ pub mod payload;
 pub(crate) mod payload_stream;
 mod record;
 mod replay;
+#[cfg(feature = "request-trace-s3")]
+mod s3_sink;
 pub mod sink;
 mod tool_relay;
 pub mod types;

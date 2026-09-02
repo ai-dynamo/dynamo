@@ -4,15 +4,20 @@
 use std::sync::Arc;
 
 use futures::{SinkExt, StreamExt};
-use tokio::io::{AsyncReadExt, ReadHalf, WriteHalf};
+use rustls::pki_types::ServerName;
+use tokio::io::AsyncReadExt;
 use tokio::{
-    io::AsyncWriteExt,
     net::TcpStream,
     time::{self, Duration, Instant},
 };
+use tokio_rustls::TlsConnector;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+type BoxRead = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+type BoxWrite = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+
 use prometheus::IntCounter;
+use tracing::Instrument;
 
 use super::{CallHomeHandshake, ControlMessage, TcpStreamConnectionInfo};
 use crate::engine::AsyncEngineContext;
@@ -26,6 +31,18 @@ use anyhow::{Context, Result, anyhow as error}; // Import SinkExt to use the `se
 #[allow(dead_code)]
 pub struct TcpClient {
     worker_id: String,
+}
+
+fn record_upstream_cancellation(context: &dyn AsyncEngineContext, signal: &'static str) {
+    tracing::info!(
+        target: "request_span",
+        {
+            request_id = context.id(),
+            { "cancellation.signal" } = signal,
+            { "cancellation.source" } = "upstream"
+        },
+        "request cancellation received"
+    );
 }
 
 impl Default for TcpClient {
@@ -62,6 +79,40 @@ impl TcpClient {
         }
     }
 
+    /// Connect to `address` and return split, boxed read/write halves.
+    /// When any TCP TLS env var is configured the connection is upgraded to TLS,
+    /// using the process-global connector (built once from the environment).
+    async fn connect_and_split(address: &str) -> anyhow::Result<(BoxRead, BoxWrite)> {
+        Self::connect_and_split_with_connector(address, get_tls_connector()?.as_ref()).await
+    }
+
+    /// Like [`connect_and_split`], but with an explicitly supplied TLS connector
+    /// instead of the process-global `OnceCell`. Lets tests drive the real client
+    /// handshake + boxed-I/O path deterministically (the `OnceCell` can only be
+    /// initialized once per process). Mirrors the request-plane client's
+    /// `connect_with_connector`.
+    async fn connect_and_split_with_connector(
+        address: &str,
+        connector: Option<&TlsConnector>,
+    ) -> anyhow::Result<(BoxRead, BoxWrite)> {
+        let stream = TcpClient::connect(address).await?;
+        if let Some(connector) = connector {
+            let server_name = tls_server_name(address)?;
+            let tls_stream = tokio::time::timeout(
+                crate::tls_utils::handshake_timeout(),
+                connector.connect(server_name, stream),
+            )
+            .await
+            .with_context(|| format!("TLS handshake timed out connecting to {address}"))?
+            .with_context(|| format!("TLS handshake failed connecting to {address}"))?;
+            let (r, w) = tokio::io::split(tls_stream);
+            Ok((Box::new(r), Box::new(w)))
+        } else {
+            let (r, w) = tokio::io::split(stream);
+            Ok((Box::new(r), Box::new(w)))
+        }
+    }
+
     pub async fn create_response_stream(
         context: Arc<dyn AsyncEngineContext>,
         info: ConnectionInfo,
@@ -86,9 +137,7 @@ impl TcpClient {
             ));
         }
 
-        let stream = TcpClient::connect(&info.address).await?;
-        let peer_port = stream.peer_addr().ok().map(|addr| addr.port());
-        let (read_half, write_half) = tokio::io::split(stream);
+        let (read_half, write_half) = TcpClient::connect_and_split(&info.address).await?;
 
         let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
         let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
@@ -100,12 +149,16 @@ impl TcpClient {
         // captured by the monitor task
         let (alive_tx, alive_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let reader_task = tokio::spawn(handle_reader(
-            framed_reader,
-            context.clone(),
-            alive_tx,
-            cancellation_counter,
-        ));
+        let reader_span = tracing::Span::current();
+        let reader_task = tokio::spawn(
+            handle_reader(
+                framed_reader,
+                context.clone(),
+                alive_tx,
+                cancellation_counter,
+            )
+            .instrument(reader_span),
+        );
 
         // transport specific handshake message
         let handshake = CallHomeHandshake {
@@ -146,14 +199,9 @@ impl TcpClient {
         // Spawn the connection monitor; errors are already logged inside
         // wait_for_connection_tasks, so the Result is intentionally dropped.
         tokio::spawn(async move {
-            let _ = wait_for_connection_tasks(
-                reader_task,
-                writer_task,
-                monitor_context,
-                peer_port,
-                subject,
-            )
-            .await;
+            let _ =
+                wait_for_connection_tasks(reader_task, writer_task, monitor_context, None, subject)
+                    .await;
         });
 
         // set up the prologue for the stream
@@ -206,8 +254,7 @@ impl TcpClient {
             ));
         }
 
-        let stream = TcpClient::connect(&info.address).await?;
-        let (read_half, write_half) = tokio::io::split(stream);
+        let (read_half, write_half) = TcpClient::connect_and_split(&info.address).await?;
 
         let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
         let mut framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
@@ -232,19 +279,108 @@ impl TcpClient {
 
         let (bytes_tx, bytes_rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(64);
 
-        tokio::spawn(handle_request_reader(
-            framed_reader,
-            bytes_tx,
-            context,
-            cancellation_counter,
-        ));
+        let reader_span = tracing::Span::current();
+        tokio::spawn(
+            handle_request_reader(framed_reader, bytes_tx, context, cancellation_counter)
+                .instrument(reader_span),
+        );
 
         Ok(StreamReceiver { rx: bytes_rx })
     }
 }
 
+/// Cached TCP TLS connector — built once from env vars on first TCP connection, reused for every
+/// subsequent connection. `None` means plaintext; `Some(connector)` means TLS.
+///
+/// The connector itself is immutable after the first build (`rustls::ClientConfig` is cheaply
+/// `Arc`-cloned per-connection). The client *identity* it presents still hot-reloads from disk via
+/// `ReloadingCertifiedKey`, so rotating the client cert/key needs no restart; only the trust
+/// anchors (CA / insecure flag) are fixed at first build and require a restart to change.
+static TCP_TLS_CONNECTOR: once_cell::sync::OnceCell<Option<TlsConnector>> =
+    once_cell::sync::OnceCell::new();
+
+/// Return the process-wide `TlsConnector`, initialising it on first call.
+///
+/// Fails fast if any TLS env var is present but the configuration is incomplete
+/// (e.g. cert without key, or client cert without CA / insecure flag).
+fn get_tls_connector() -> anyhow::Result<&'static Option<TlsConnector>> {
+    TCP_TLS_CONNECTOR.get_or_try_init(build_tls_connector_from_env)
+}
+
+fn build_tls_connector_from_env() -> anyhow::Result<Option<TlsConnector>> {
+    use crate::config::environment_names::tcp_response_stream::tls as env;
+    let ca_cert_path = std::env::var(env::DYN_TCP_TLS_CA_CERT_PATH).ok();
+    let insecure = crate::config::env_is_truthy(env::DYN_TCP_TLS_INSECURE);
+    let client_cert = std::env::var(env::DYN_TCP_TLS_CLIENT_CERT_PATH).ok();
+    let client_key = std::env::var(env::DYN_TCP_TLS_CLIENT_KEY_PATH).ok();
+
+    let tls_requested =
+        ca_cert_path.is_some() || insecure || client_cert.is_some() || client_key.is_some();
+    if !tls_requested {
+        // Warn if the server side has TLS configured — a plaintext client connecting to a
+        // TLS server will fail with an opaque framing error rather than a clear TLS error.
+        let server_tls_set = std::env::var(env::DYN_TCP_TLS_CERT_PATH).is_ok();
+        if server_tls_set {
+            tracing::warn!(
+                "TCP client is running in plaintext mode but {} is set. \
+                 Set {} (or {} for dev) to enable client-side TLS.",
+                env::DYN_TCP_TLS_CERT_PATH,
+                env::DYN_TCP_TLS_CA_CERT_PATH,
+                env::DYN_TCP_TLS_INSECURE,
+            );
+        }
+        return Ok(None);
+    }
+    // Validate the client identity pair before the CA check so a lone cert/key
+    // produces the accurate "set both" error rather than a misleading CA error.
+    if client_cert.is_some() != client_key.is_some() {
+        anyhow::bail!(
+            "both {} and {} must be set together to present a client identity",
+            env::DYN_TCP_TLS_CLIENT_CERT_PATH,
+            env::DYN_TCP_TLS_CLIENT_KEY_PATH,
+        );
+    }
+    if !insecure && ca_cert_path.is_none() {
+        anyhow::bail!(
+            "TCP TLS is enabled but {} is not set and {} is not true; \
+             provide a CA cert or set insecure mode for development",
+            env::DYN_TCP_TLS_CA_CERT_PATH,
+            env::DYN_TCP_TLS_INSECURE,
+        );
+    }
+
+    let tls_config = crate::tls_utils::client_tls_config(
+        ca_cert_path.as_deref().map(std::path::Path::new),
+        insecure,
+        client_cert.as_deref().map(std::path::Path::new),
+        client_key.as_deref().map(std::path::Path::new),
+    )?;
+    Ok(Some(TlsConnector::from(Arc::new(tls_config))))
+}
+
+/// Extract the TLS `ServerName` for an outbound connection.
+///
+/// Checks `DYN_TCP_TLS_SERVER_NAME` first (explicit override), then falls back
+/// to the host part of `address`. Handles both IPv4 and IPv6 socket addresses.
+fn tls_server_name(address: &str) -> anyhow::Result<ServerName<'static>> {
+    use crate::config::environment_names::tcp_response_stream::tls as env;
+    let name = std::env::var(env::DYN_TCP_TLS_SERVER_NAME).unwrap_or_else(|_| {
+        // Parse as SocketAddr first — handles IPv6 like [::1]:443 correctly.
+        if let Ok(sock_addr) = address.parse::<std::net::SocketAddr>() {
+            sock_addr.ip().to_string()
+        } else {
+            // host:port string — strip the last colon-delimited segment.
+            match address.rfind(':') {
+                Some(pos) => address[..pos].to_owned(),
+                None => address.to_owned(),
+            }
+        }
+    });
+    ServerName::try_from(name).map_err(|e| anyhow::anyhow!("invalid TLS server name: {e}"))
+}
+
 async fn handle_request_reader(
-    mut framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
+    mut framed_reader: FramedRead<BoxRead, TwoPartCodec>,
     bytes_tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
     context: Arc<dyn AsyncEngineContext>,
     cancellation_counter: Option<IntCounter>,
@@ -304,11 +440,13 @@ async fn handle_request_reader(
                                 match ctrl {
                                     ControlMessage::Stop => {
                                         cancellation_seen = true;
+                                        record_upstream_cancellation(context.as_ref(), "stop");
                                         context.stop();
                                         break;
                                     }
                                     ControlMessage::Kill => {
                                         cancellation_seen = true;
+                                        record_upstream_cancellation(context.as_ref(), "kill");
                                         context.kill();
                                         break;
                                     }
@@ -367,8 +505,8 @@ async fn handle_request_reader(
 }
 
 async fn wait_for_connection_tasks(
-    reader_task: tokio::task::JoinHandle<FramedRead<ReadHalf<TcpStream>, TwoPartCodec>>,
-    writer_task: tokio::task::JoinHandle<Result<FramedWrite<WriteHalf<TcpStream>, TwoPartCodec>>>,
+    reader_task: tokio::task::JoinHandle<FramedRead<BoxRead, TwoPartCodec>>,
+    writer_task: tokio::task::JoinHandle<Result<FramedWrite<BoxWrite, TwoPartCodec>>>,
     context: Arc<dyn AsyncEngineContext>,
     peer_port: Option<u16>,
     subject: String,
@@ -390,8 +528,17 @@ async fn wait_for_connection_tasks(
         }
     };
 
-    let writer = match writer_task.await {
-        Ok(writer) => writer,
+    match writer_task.await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tracing::error!(
+                subject = %subject,
+                peer_port = ?peer_port,
+                err = ?e,
+                "writer task returned error"
+            );
+            return Err(e);
+        }
         Err(writer_err) => {
             tracing::error!(
                 subject = %subject,
@@ -401,28 +548,16 @@ async fn wait_for_connection_tasks(
             );
             return Err(writer_err.into());
         }
-    };
+    }
 
-    let reader = reader.into_inner();
-    let writer = match writer {
-        Ok(writer) => writer.into_inner(),
-        Err(e) => {
-            tracing::error!(
-                subject = %subject,
-                peer_port = ?peer_port,
-                err = ?e,
-                "writer task returned error"
-            );
-            return Err(e);
-        }
-    };
-
-    let stream = reader.unsplit(writer);
-    wait_for_server_shutdown(stream, context).await
+    // Drain the read half until the server closes the connection (FIN).
+    // The write half is dropped above when the FramedWrite is discarded.
+    let read_half = reader.into_inner();
+    wait_for_server_shutdown(read_half, context).await
 }
 
 async fn wait_for_server_shutdown(
-    mut stream: TcpStream,
+    mut reader: BoxRead,
     context: Arc<dyn AsyncEngineContext>,
 ) -> Result<()> {
     // `handle_writer` skips the closing sentinel on both `killed` and
@@ -438,7 +573,7 @@ async fn wait_for_server_shutdown(
     let mut buf = [0u8; 1024];
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let n = time::timeout_at(deadline, stream.read(&mut buf))
+        let n = time::timeout_at(deadline, reader.read(&mut buf))
             .await
             .inspect_err(|_| {
                 tracing::debug!("server did not close socket within the deadline");
@@ -456,11 +591,11 @@ async fn wait_for_server_shutdown(
 }
 
 async fn handle_reader(
-    framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
+    framed_reader: FramedRead<BoxRead, TwoPartCodec>,
     context: Arc<dyn AsyncEngineContext>,
     alive_tx: tokio::sync::oneshot::Sender<()>,
     cancellation_counter: Option<IntCounter>,
-) -> FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec> {
+) -> FramedRead<BoxRead, TwoPartCodec> {
     let mut framed_reader = framed_reader;
     let mut alive_tx = alive_tx;
     // Set on every cancellation arm; counted once after the loop.
@@ -494,10 +629,12 @@ async fn handle_reader(
                                 match msg {
                                     ControlMessage::Stop => {
                                         cancellation_seen = true;
+                                        record_upstream_cancellation(context.as_ref(), "stop");
                                         context.stop();
                                     }
                                     ControlMessage::Kill => {
                                         cancellation_seen = true;
+                                        record_upstream_cancellation(context.as_ref(), "kill");
                                         context.kill();
                                     }
                                     ControlMessage::Sentinel => {
@@ -530,7 +667,6 @@ async fn handle_reader(
                     }
                     None => {
                         tracing::debug!("tcp stream closed by server");
-                        cancellation_seen = true;
                         break;
                     }
                 }
@@ -547,11 +683,11 @@ async fn handle_reader(
 }
 
 async fn handle_writer(
-    mut framed_writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
+    mut framed_writer: FramedWrite<BoxWrite, TwoPartCodec>,
     mut bytes_rx: tokio::sync::mpsc::Receiver<TwoPartMessage>,
     alive_rx: tokio::sync::oneshot::Receiver<()>,
     context: Arc<dyn AsyncEngineContext>,
-) -> Result<FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>> {
+) -> Result<FramedWrite<BoxWrite, TwoPartCodec>> {
     // Keep one cancellation future per stream. Recreating these futures for every queued
     // frame repeatedly clones the context's watch receivers and churns Notify state.
     let killed = context.killed();
@@ -616,15 +752,90 @@ mod tests {
     use crate::pipeline::network::tcp::test_utils::create_tcp_pair;
     use bytes::Bytes;
     use futures::StreamExt;
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::sync::{mpsc, oneshot};
     use tokio_util::codec::FramedRead;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::{Context as TraceContext, SubscriberExt};
+    use tracing_subscriber::registry::LookupSpan;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    type CapturedCancellationEvent = (HashMap<String, String>, Option<String>);
+
+    #[derive(Default)]
+    struct CancellationEventCapture(Mutex<Vec<CapturedCancellationEvent>>);
+
+    struct EventFieldVisitor<'a>(&'a mut HashMap<String, String>);
+
+    impl Visit for EventFieldVisitor<'_> {
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
+
+    struct CancellationEventLayer(Arc<CancellationEventCapture>);
+
+    impl<S> Layer<S> for CancellationEventLayer
+    where
+        S: tracing::Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, ctx: TraceContext<'_, S>) {
+            if event.metadata().target() != "request_span" {
+                return;
+            }
+            let mut fields = HashMap::new();
+            event.record(&mut EventFieldVisitor(&mut fields));
+            if fields
+                .get("message")
+                .is_none_or(|message| message.trim_matches('"') != "request cancellation received")
+            {
+                return;
+            }
+            let parent = ctx.event_span(event).map(|span| span.name().to_string());
+            self.0.0.lock().unwrap().push((fields, parent));
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_cancellation_event_is_parented_to_worker_request_span() {
+        let captured = Arc::new(CancellationEventCapture::default());
+        let _subscriber = tracing_subscriber::registry()
+            .with(CancellationEventLayer(captured.clone()))
+            .set_default();
+        let controller = Arc::new(Controller::new("request-123".to_string()));
+        let span = tracing::info_span!(target: "request_span", "handle_payload");
+
+        async {
+            record_upstream_cancellation(controller.as_ref(), "stop");
+        }
+        .instrument(span)
+        .await;
+
+        let events = captured.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].0.get("cancellation.signal").map(String::as_str),
+            Some("stop")
+        );
+        assert_eq!(
+            events[0].0.get("cancellation.source").map(String::as_str),
+            Some("upstream")
+        );
+        assert_eq!(events[0].1.as_deref(), Some("handle_payload"));
+    }
 
     struct WriterHarness {
         server: tokio::net::TcpStream,
-        framed_writer: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        framed_writer: FramedWrite<BoxWrite, TwoPartCodec>,
         bytes_tx: mpsc::Sender<TwoPartMessage>,
         bytes_rx: mpsc::Receiver<TwoPartMessage>,
         alive_tx: oneshot::Sender<()>,
@@ -636,7 +847,8 @@ mod tests {
     async fn writer_harness() -> WriterHarness {
         let (client, server) = create_tcp_pair().await;
         let (_, write_half) = tokio::io::split(client);
-        let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+        let framed_writer =
+            FramedWrite::new(Box::new(write_half) as BoxWrite, TwoPartCodec::default());
 
         let (bytes_tx, bytes_rx) = mpsc::channel(64);
         let (alive_tx, alive_rx) = oneshot::channel::<()>();
@@ -779,6 +991,56 @@ mod tests {
                 .any(|w| w == sentinel_json.as_slice()),
             "Buffer should contain sentinel message. Buffer: {:?}",
             String::from_utf8_lossy(&buffer[..n])
+        );
+    }
+
+    /// A normally completed response stream sends Sentinel, receives the
+    /// server's FIN, and leaves the cancellation metric unchanged.
+    #[tokio::test]
+    async fn test_normal_response_stream_completion_does_not_count_cancellation() {
+        let (client, server) = create_tcp_pair().await;
+        let (read_half, write_half) = tokio::io::split(client);
+        let framed_reader =
+            FramedRead::new(Box::new(read_half) as BoxRead, TwoPartCodec::default());
+        let framed_writer =
+            FramedWrite::new(Box::new(write_half) as BoxWrite, TwoPartCodec::default());
+        let (bytes_tx, bytes_rx) = mpsc::channel(64);
+        let (alive_tx, alive_rx) = oneshot::channel::<()>();
+        let controller = Arc::new(Controller::default());
+        let cancellation_counter = IntCounter::new(
+            "tcp_client_normal_completion_cancellations_test",
+            "test cancellation counter",
+        )
+        .unwrap();
+
+        let reader_context = controller.clone();
+        let counter_clone = cancellation_counter.clone();
+        let reader_task = tokio::spawn(async move {
+            handle_reader(framed_reader, reader_context, alive_tx, Some(counter_clone)).await
+        });
+        let writer_context = controller.clone();
+        let writer_task = tokio::spawn(async move {
+            handle_writer(framed_writer, bytes_rx, alive_rx, writer_context).await
+        });
+
+        drop(bytes_tx);
+
+        let mut server_reader = FramedRead::new(server, TwoPartCodec::default());
+        let sentinel = recv_msg(&mut server_reader).await;
+        assert_sentinel_message(sentinel);
+        drop(server_reader);
+
+        writer_task.await.unwrap().unwrap();
+        reader_task.await.unwrap();
+
+        assert!(
+            !controller.is_stopped() && !controller.is_killed(),
+            "normal response completion must not cancel the context"
+        );
+        assert_eq!(
+            cancellation_counter.get(),
+            0,
+            "normal response completion must not increment the cancellation counter"
         );
     }
 
@@ -1015,7 +1277,7 @@ mod tests {
             let context: Arc<dyn AsyncEngineContext> = controller;
             let result = tokio::time::timeout(
                 std::time::Duration::from_millis(50),
-                wait_for_server_shutdown(client, context),
+                wait_for_server_shutdown(Box::new(client), context),
             )
             .await;
 
@@ -1032,8 +1294,10 @@ mod tests {
     async fn test_connection_monitor_skips_fin_wait_after_read_error_kills_context() {
         let (client, mut server) = create_tcp_pair().await;
         let (read_half, write_half) = tokio::io::split(client);
-        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
-        let framed_writer = FramedWrite::new(write_half, TwoPartCodec::default());
+        let framed_reader =
+            FramedRead::new(Box::new(read_half) as BoxRead, TwoPartCodec::default());
+        let framed_writer =
+            FramedWrite::new(Box::new(write_half) as BoxWrite, TwoPartCodec::default());
         let (_bytes_tx, bytes_rx) = mpsc::channel(64);
         let (alive_tx, alive_rx) = oneshot::channel::<()>();
         let controller = Arc::new(Controller::default());
@@ -1090,22 +1354,20 @@ mod tests {
         // Reader task that panics immediately. The explicit JoinHandle type
         // pins the inferred return type to the one wait_for_connection_tasks
         // expects; `panic!` is type `!`, which coerces to that type.
-        let reader_task: tokio::task::JoinHandle<
-            FramedRead<ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
-        > = tokio::spawn(async {
-            panic!("simulated reader panic to trigger JoinError");
-        });
+        let reader_task: tokio::task::JoinHandle<FramedRead<BoxRead, TwoPartCodec>> =
+            tokio::spawn(async {
+                panic!("simulated reader panic to trigger JoinError");
+            });
 
         // Writer task that would block indefinitely waiting on application
         // bytes. Under the pre-fix `tokio::join!` implementation, this would
         // prevent the function from returning when the reader panicked.
         // After the fix, the abort drives this task to completion promptly.
-        let writer_task: tokio::task::JoinHandle<
-            Result<FramedWrite<WriteHalf<tokio::net::TcpStream>, TwoPartCodec>>,
-        > = tokio::spawn(async {
-            std::future::pending::<()>().await;
-            unreachable!()
-        });
+        let writer_task: tokio::task::JoinHandle<Result<FramedWrite<BoxWrite, TwoPartCodec>>> =
+            tokio::spawn(async {
+                std::future::pending::<()>().await;
+                unreachable!()
+            });
 
         let controller = Arc::new(Controller::default());
         let context: Arc<dyn AsyncEngineContext> = controller.clone();
@@ -1142,8 +1404,8 @@ mod tests {
     // ==================== handle_reader tests ====================
 
     struct ReaderHarness {
-        framed_server: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
-        framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        framed_server: FramedWrite<BoxWrite, TwoPartCodec>,
+        framed_reader: FramedRead<BoxRead, TwoPartCodec>,
         alive_tx: oneshot::Sender<()>,
         alive_rx: oneshot::Receiver<()>,
         controller: Arc<Controller>,
@@ -1155,8 +1417,10 @@ mod tests {
         let (read_half, _write_half) = tokio::io::split(client);
         let (_server_read, server_write) = tokio::io::split(server);
 
-        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
-        let framed_server = FramedWrite::new(server_write, TwoPartCodec::default());
+        let framed_reader =
+            FramedRead::new(Box::new(read_half) as BoxRead, TwoPartCodec::default());
+        let framed_server =
+            FramedWrite::new(Box::new(server_write) as BoxWrite, TwoPartCodec::default());
         let (alive_tx, alive_rx) = oneshot::channel::<()>();
         let controller = Arc::new(Controller::default());
 
@@ -1275,9 +1539,10 @@ mod tests {
         );
     }
 
-    /// Test that handle_reader exits when TCP stream is closed
+    /// Response-stream EOF is the normal server FIN after a closing Sentinel.
+    /// It must not be counted as a cancellation by itself.
     #[tokio::test]
-    async fn test_handle_reader_exits_on_stream_closed() {
+    async fn test_handle_reader_eof_does_not_count_cancellation() {
         let ReaderHarness {
             mut framed_server,
             framed_reader,
@@ -1285,12 +1550,24 @@ mod tests {
             alive_rx: _alive_rx,
             controller,
         } = reader_harness().await;
+        let cancellation_counter = IntCounter::new(
+            "tcp_client_reader_clean_eof_cancellations_test",
+            "test cancellation counter",
+        )
+        .unwrap();
 
         // Spawn the reader task
-        let reader_handle =
-            tokio::spawn(
-                async move { handle_reader(framed_reader, controller, alive_tx, None).await },
-            );
+        let counter_clone = cancellation_counter.clone();
+        let controller_clone = controller.clone();
+        let reader_handle = tokio::spawn(async move {
+            handle_reader(
+                framed_reader,
+                controller_clone,
+                alive_tx,
+                Some(counter_clone),
+            )
+            .await
+        });
 
         // Close the framed server to signal EOF to the client
         framed_server.close().await.unwrap();
@@ -1301,6 +1578,15 @@ mod tests {
         assert!(
             result.is_ok(),
             "handle_reader should exit when stream is closed"
+        );
+        assert!(
+            !controller.is_stopped() && !controller.is_killed(),
+            "response-stream EOF must not cancel the context"
+        );
+        assert_eq!(
+            cancellation_counter.get(),
+            0,
+            "response-stream EOF must not increment the cancellation counter"
         );
     }
 
@@ -1498,8 +1784,8 @@ mod tests {
     // ==================== handle_request_reader tests ====================
 
     struct RequestReaderHarness {
-        framed_server: FramedWrite<tokio::io::WriteHalf<tokio::net::TcpStream>, TwoPartCodec>,
-        framed_reader: FramedRead<tokio::io::ReadHalf<tokio::net::TcpStream>, TwoPartCodec>,
+        framed_server: FramedWrite<BoxWrite, TwoPartCodec>,
+        framed_reader: FramedRead<BoxRead, TwoPartCodec>,
         bytes_tx: mpsc::Sender<Bytes>,
         bytes_rx: mpsc::Receiver<Bytes>,
         controller: Arc<Controller>,
@@ -1510,8 +1796,10 @@ mod tests {
         let (read_half, _write_half) = tokio::io::split(client);
         let (_server_read, server_write) = tokio::io::split(server);
 
-        let framed_reader = FramedRead::new(read_half, TwoPartCodec::default());
-        let framed_server = FramedWrite::new(server_write, TwoPartCodec::default());
+        let framed_reader =
+            FramedRead::new(Box::new(read_half) as BoxRead, TwoPartCodec::default());
+        let framed_server =
+            FramedWrite::new(Box::new(server_write) as BoxWrite, TwoPartCodec::default());
         let (bytes_tx, bytes_rx) = mpsc::channel::<Bytes>(64);
         let controller = Arc::new(Controller::default());
 
@@ -1831,6 +2119,234 @@ mod tests {
             counter.get(),
             0,
             "consumer drop must not count as cancellation"
+        );
+    }
+
+    // ── TLS connector and SNI tests ──────────────────────────────────────────
+
+    fn make_ca_file() -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(cert.pem().as_bytes()).unwrap();
+        f
+    }
+
+    #[test]
+    fn connector_no_env_vars_is_plaintext() {
+        // Clear every var the builder reads, incl. the client-identity vars, so
+        // ambient mTLS settings can't flip this to "TLS requested".
+        temp_env::with_vars_unset(
+            [
+                "DYN_TCP_TLS_CA_CERT_PATH",
+                "DYN_TCP_TLS_INSECURE",
+                "DYN_TCP_TLS_CLIENT_CERT_PATH",
+                "DYN_TCP_TLS_CLIENT_KEY_PATH",
+            ],
+            || {
+                assert!(build_tls_connector_from_env().unwrap().is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn connector_insecure_is_tls() {
+        temp_env::with_vars(
+            [
+                ("DYN_TCP_TLS_INSECURE", Some("true")),
+                ("DYN_TCP_TLS_CA_CERT_PATH", None),
+            ],
+            || assert!(build_tls_connector_from_env().unwrap().is_some()),
+        );
+    }
+
+    #[test]
+    fn connector_with_ca_is_tls() {
+        let ca = make_ca_file();
+        temp_env::with_vars(
+            [(
+                "DYN_TCP_TLS_CA_CERT_PATH",
+                Some(ca.path().to_str().unwrap()),
+            )],
+            || assert!(build_tls_connector_from_env().unwrap().is_some()),
+        );
+    }
+
+    // Self-signed cert + matching key, for use as a client identity.
+    fn make_identity_files() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
+        use std::io::Write;
+        let key_pair = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key_pair)
+            .unwrap();
+        let mut cert_file = tempfile::NamedTempFile::new().unwrap();
+        cert_file.write_all(cert.pem().as_bytes()).unwrap();
+        let mut key_file = tempfile::NamedTempFile::new().unwrap();
+        key_file
+            .write_all(key_pair.serialize_pem().as_bytes())
+            .unwrap();
+        (cert_file, key_file)
+    }
+
+    // CA + server leaf (SAN=localhost, serverAuth) + client leaf (clientAuth),
+    // both signed by the CA. Returns (ca, server_cert, server_key, client_cert,
+    // client_key) PEM temp files.
+    #[allow(clippy::type_complexity)]
+    fn make_mtls_chain() -> (
+        tempfile::NamedTempFile,
+        tempfile::NamedTempFile,
+        tempfile::NamedTempFile,
+        tempfile::NamedTempFile,
+        tempfile::NamedTempFile,
+    ) {
+        use std::io::Write;
+        fn write_pem(contents: &str) -> tempfile::NamedTempFile {
+            let mut f = tempfile::NamedTempFile::new().unwrap();
+            f.write_all(contents.as_bytes()).unwrap();
+            f
+        }
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let server_key = rcgen::KeyPair::generate().unwrap();
+        let mut server_params =
+            rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        server_params
+            .extended_key_usages
+            .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
+        let server_cert = server_params
+            .signed_by(&server_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        let client_key = rcgen::KeyPair::generate().unwrap();
+        let mut client_params =
+            rcgen::CertificateParams::new(vec!["dynamo-client".to_string()]).unwrap();
+        client_params
+            .extended_key_usages
+            .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
+        let client_cert = client_params
+            .signed_by(&client_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        (
+            write_pem(&ca_cert.pem()),
+            write_pem(&server_cert.pem()),
+            write_pem(&server_key.serialize_pem()),
+            write_pem(&client_cert.pem()),
+            write_pem(&client_key.serialize_pem()),
+        )
+    }
+
+    /// Live mTLS handshake over the **real** response-stream client path:
+    /// `TcpClient::connect_and_split` (via an injected connector) performs the
+    /// handshake against a server that requires a client certificate, then a
+    /// payload round-trips over the boxed split halves. Exercises the client
+    /// handshake + boxed I/O with mutual authentication, not a builder round-trip.
+    #[tokio::test]
+    async fn response_stream_client_mtls_handshake() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let (ca, server_cert, server_key, client_cert, client_key) = make_mtls_chain();
+
+        // mTLS server acceptor: requires a client cert signed by the CA.
+        let server_config = crate::tls_utils::server_tls_config(
+            server_cert.path(),
+            server_key.path(),
+            Some(ca.path()),
+        )
+        .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut tls = acceptor.accept(tcp).await.expect("server mTLS handshake");
+            let mut buf = [0u8; 5];
+            tls.read_exact(&mut buf).await.unwrap();
+            tls.write_all(&buf).await.unwrap();
+            tls.flush().await.unwrap();
+        });
+
+        // Real client path with an injected connector (bypasses the OnceCell);
+        // dial by "localhost" so SNI matches the server cert's DNS SAN.
+        let client_config = crate::tls_utils::client_tls_config(
+            Some(ca.path()),
+            false,
+            Some(client_cert.path()),
+            Some(client_key.path()),
+        )
+        .unwrap();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+        let (mut reader, mut writer) = TcpClient::connect_and_split_with_connector(
+            &format!("localhost:{port}"),
+            Some(&connector),
+        )
+        .await
+        .expect("client mTLS connect + handshake");
+
+        writer.write_all(b"hello").await.unwrap();
+        writer.flush().await.unwrap();
+        let mut got = [0u8; 5];
+        reader.read_exact(&mut got).await.unwrap();
+        assert_eq!(
+            &got, b"hello",
+            "payload should round-trip over the mutually-authenticated response-stream client path"
+        );
+    }
+
+    #[test]
+    fn connector_partial_client_identity_errors() {
+        // A client cert without its key must fail closed (pair validation).
+        let ca = make_ca_file();
+        let (client_cert, _client_key) = make_identity_files();
+        temp_env::with_vars(
+            [
+                (
+                    "DYN_TCP_TLS_CA_CERT_PATH",
+                    Some(ca.path().to_str().unwrap()),
+                ),
+                (
+                    "DYN_TCP_TLS_CLIENT_CERT_PATH",
+                    Some(client_cert.path().to_str().unwrap()),
+                ),
+                ("DYN_TCP_TLS_CLIENT_KEY_PATH", None),
+            ],
+            || assert!(build_tls_connector_from_env().is_err()),
+        );
+    }
+
+    #[test]
+    fn sni_parsing() {
+        temp_env::with_var_unset("DYN_TCP_TLS_SERVER_NAME", || {
+            assert!(matches!(
+                tls_server_name("127.0.0.1:8080").unwrap(),
+                ServerName::IpAddress(_)
+            ));
+            assert!(matches!(
+                tls_server_name("worker-0.dynamo-system.svc.cluster.local:8080").unwrap(),
+                ServerName::DnsName(_)
+            ));
+            assert!(matches!(
+                tls_server_name("[::1]:8080").unwrap(),
+                ServerName::IpAddress(_)
+            ));
+        });
+        temp_env::with_var(
+            "DYN_TCP_TLS_SERVER_NAME",
+            Some("my-server.example.com"),
+            || {
+                assert!(matches!(
+                    tls_server_name("127.0.0.1:8080").unwrap(),
+                    ServerName::DnsName(_)
+                ));
+            },
         );
     }
 }

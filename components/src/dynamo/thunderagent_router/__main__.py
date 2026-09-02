@@ -15,7 +15,9 @@ are routed via plain KvRouter with no lifecycle.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Any, Optional
 
 import uvloop
@@ -37,10 +39,20 @@ from dynamo.thunderagent_router.args import (
     parse_args,
 )
 from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
+from dynamo.thunderagent_router.program_state import ReplicaKey
 from dynamo.thunderagent_router.router import ThunderAgentScheduler
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+def _publish_sglang_generate_capability(
+    runtime_config: ModelRuntimeConfig,
+) -> None:
+    """Advertise native SGLang generate without importing SGLang by default."""
+    from dynamo.sglang.engine_generate import SGLANG_GENERATE_CAPABILITY
+
+    runtime_config.set_engine_specific(SGLANG_GENERATE_CAPABILITY, "true")
 
 
 def _extract_program_id(request: dict[str, Any]) -> Optional[str]:
@@ -57,6 +69,22 @@ def _is_session_final(request: dict[str, Any]) -> bool:
     """``x-dynamo-session-final`` marks a session's last turn internally."""
     ctx = request.get("agent_context")
     return isinstance(ctx, dict) and bool(ctx.get("session_final"))
+
+
+def _nvext_extra_field_requested(request: dict[str, Any], field: str) -> bool:
+    """Return whether the raw or preprocessed request opted into an nvext field."""
+    sources: list[Any] = [request.get("nvext")]
+    extra_args = request.get("extra_args")
+    if isinstance(extra_args, dict):
+        sources.append(extra_args.get("nvext"))
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        extra_fields = source.get("extra_fields")
+        if isinstance(extra_fields, list) and field in extra_fields:
+            return True
+    return False
 
 
 def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
@@ -87,6 +115,23 @@ def _wrap_preprocessed_request(request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _inject_thunderagent_route_proof(
+    chunk: Any,
+    proof: dict[str, Any],
+) -> None:
+    if not isinstance(chunk, dict):
+        return
+
+    engine_data = chunk.get("engine_data")
+    if engine_data is None:
+        engine_data = {}
+    elif not isinstance(engine_data, dict):
+        engine_data = {"backend_engine_data": engine_data}
+
+    engine_data["thunderagent"] = dict(proof)
+    chunk["engine_data"] = engine_data
+
+
 class ThunderAgentRouterHandler:
     def __init__(
         self,
@@ -99,6 +144,12 @@ class ThunderAgentRouterHandler:
         self._capacity: Optional[WorkerCapacityProvider] = None
         self._scheduler: Optional[ThunderAgentScheduler] = None
         self._worker_id_extract_warned = False
+        self._unpinned_warned_at = 0.0
+        self._stat_requests_total = 0
+        self._stat_program_requests = 0
+        self._stat_passthrough_requests = 0
+        self._stat_session_final_requests = 0
+        self._stat_unpinned_turns = 0
 
     async def initialize(self) -> None:
         # Endpoint shape was validated by ThunderAgentRouterConfig.validate()
@@ -112,7 +163,8 @@ class ThunderAgentRouterHandler:
             aic_perf_config=build_aic_perf_config(self._config),
         )
 
-        self._capacity = WorkerCapacityProvider(worker_endpoint)
+        worker_client = await worker_endpoint.client()
+        self._capacity = WorkerCapacityProvider(worker_endpoint, worker_client)
         self._capacity.start()
 
         self._scheduler = ThunderAgentScheduler(
@@ -120,12 +172,18 @@ class ThunderAgentRouterHandler:
             config=self._config.to_thunderagent_config(),
         )
         self._scheduler.start()
+        logger.info(
+            "ThunderAgent Router initialized (worker_endpoint=%s, block_size=%s)",
+            self._config.endpoint,
+            self._config.router_block_size,
+        )
 
     async def shutdown(self) -> None:
         if self._scheduler is not None:
             await self._scheduler.stop()
         if self._capacity is not None:
             self._capacity.stop()
+        logger.info("ThunderAgent Router shutdown complete")
 
     async def generate(self, request: dict[str, Any]):
         if self._scheduler is None or self._kv_router is None:
@@ -133,23 +191,55 @@ class ThunderAgentRouterHandler:
                 "ThunderAgentRouterHandler used before initialize() was called"
             )
         program_id = _extract_program_id(request)
+        want_route_proof = _nvext_extra_field_requested(request, "engine_data")
+        self._stat_requests_total += 1
 
         # A request marked session_final just releases the program from the
         # table and is NOT forwarded to the engine (short-circuit).
         if program_id is not None and _is_session_final(request):
-            await self._scheduler.end_program(program_id)
+            self._stat_session_final_requests += 1
+            released = await self._scheduler.end_program(program_id)
+            logger.info(
+                "thunderagent.route path=session_final program=%s released=%s",
+                program_id,
+                released,
+            )
             return
 
         # Path A: no program_id -> behave like the standalone router.
         if program_id is None:
+            self._stat_passthrough_requests += 1
+            logger.debug(
+                "thunderagent.route path=passthrough model=%s", request.get("model")
+            )
             preprocessed = _wrap_preprocessed_request(request)
+            proof: Optional[dict[str, Any]] = (
+                {
+                    "handled_by": "thunderagent_router",
+                    "path": "passthrough",
+                    "program_id": None,
+                    "session_final": False,
+                }
+                if want_route_proof
+                else None
+            )
+            first_chunk = True
             async for chunk in await self._kv_router.generate_from_request(
                 preprocessed  # type: ignore[arg-type]
             ):
+                if proof is not None:
+                    if first_chunk:
+                        first_chunk = False
+                        selected_replica = self._extract_replica(chunk)
+                        if selected_replica is not None:
+                            proof["selected_worker_id"] = selected_replica[0]
+                            proof["selected_dp_rank"] = selected_replica[1]
+                    _inject_thunderagent_route_proof(chunk, proof)
                 yield chunk
             return
 
         # Path B: program lifecycle.
+        self._stat_program_requests += 1
         token_ids = request["token_ids"]
         estimated_prompt_tokens = len(token_ids) if isinstance(token_ids, list) else 0
 
@@ -157,7 +247,19 @@ class ThunderAgentRouterHandler:
             program_id,
             estimated_prompt_tokens=estimated_prompt_tokens,
         )
-        worker_pin = decision.assigned_worker_hint
+        replica_pin = decision.assigned_replica_hint
+        logger.debug(
+            "thunderagent.route path=program program=%s prompt_tokens=%d "
+            "replica_hint=%s waited_seconds=%.4f was_paused=%s "
+            "soft_demoted=%s priority_jump=%.3f",
+            program_id,
+            estimated_prompt_tokens,
+            replica_pin,
+            decision.waited_seconds,
+            decision.was_paused,
+            decision.was_soft_demoted,
+            decision.priority_jump,
+        )
 
         preprocessed = _wrap_preprocessed_request(request)
         if decision.priority_jump != 0.0:
@@ -166,24 +268,69 @@ class ThunderAgentRouterHandler:
             routing["priority_jump"] = float(existing) + decision.priority_jump
             preprocessed["routing"] = routing
 
-        if worker_pin is not None:
+        if replica_pin is not None:
             routing = preprocessed.get("routing") or {}
-            routing["backend_instance_id"] = worker_pin
+            # RoutingHints reads (backend_instance_id, dp_rank) together, and the pin is
+            # only ever a complete replica, so both go out or neither does.
+            routing["backend_instance_id"] = replica_pin[0]
+            routing["dp_rank"] = replica_pin[1]
             preprocessed["routing"] = routing
+        else:
+            # Not placed yet. Counted and warned: a session that quietly lost sticky KV
+            # affinity is otherwise indistinguishable from one still pinned.
+            self._stat_unpinned_turns += 1
+            self._warn_unpinned_turn(program_id)
 
         prompt_tokens_seen = 0
         completion_tokens_seen = 0
         usage_completion_seen = False
         first_chunk = True
+        selected_worker_id = None
+        proof = (
+            {
+                "handled_by": "thunderagent_router",
+                "path": "program",
+                "program_id": program_id,
+                "session_final": False,
+                "was_paused": decision.was_paused,
+                "was_soft_demoted": decision.was_soft_demoted,
+                "waited_seconds": decision.waited_seconds,
+                "priority_jump": decision.priority_jump,
+                "assigned_worker_hint": None if replica_pin is None else replica_pin[0],
+                "assigned_dp_rank_hint": (
+                    None if replica_pin is None else replica_pin[1]
+                ),
+            }
+            if want_route_proof
+            else None
+        )
         try:
             async for chunk in await self._kv_router.generate_from_request(
                 preprocessed  # type: ignore[arg-type]
             ):
-                if first_chunk and worker_pin is None:
+                # Cold start: admission had no MDC, so take the replica the engine used.
+                # Only a complete one is usable -- see assign_worker.
+                if first_chunk and replica_pin is None:
                     first_chunk = False
-                    selected_worker = self._extract_worker_id(chunk)
-                    if selected_worker is not None:
-                        await self._scheduler.assign_worker(program_id, selected_worker)
+                    selected_replica = self._extract_replica(chunk)
+                    recorded = await self._scheduler.assign_worker(
+                        program_id,
+                        selected_replica,
+                        admission_epoch=decision.admission_epoch,
+                    )
+                    # ``recorded`` already implies a complete replica; the explicit check
+                    # is what lets the unpack below be typed.
+                    if recorded and selected_replica is not None:
+                        selected_worker_id, selected_dp_rank = selected_replica
+                        if proof is not None:
+                            proof["selected_worker_id"] = selected_worker_id
+                            proof["selected_dp_rank"] = selected_dp_rank
+                        logger.debug(
+                            "thunderagent.route_selected program=%s replica=%s "
+                            "source=first_chunk",
+                            program_id,
+                            selected_replica,
+                        )
 
                 usage = (
                     chunk.get("completion_usage") if isinstance(chunk, dict) else None
@@ -205,6 +352,8 @@ class ThunderAgentRouterHandler:
                         completion_tokens_seen += len(token_ids_out)
                     self._scheduler.record_output_tokens(program_id, len(token_ids_out))
 
+                if proof is not None:
+                    _inject_thunderagent_route_proof(chunk, proof)
                 yield chunk
         finally:
             # Fall back to len(token_ids) if the engine didn't report usage --
@@ -216,12 +365,65 @@ class ThunderAgentRouterHandler:
                 prompt_tokens_seen,
                 completion_tokens_seen,
             )
+            logger.debug(
+                "thunderagent.request_complete program=%s prompt_tokens=%d "
+                "completion_tokens=%d replica_hint=%s selected_worker=%s",
+                program_id,
+                prompt_tokens_seen,
+                completion_tokens_seen,
+                replica_pin,
+                selected_worker_id,
+            )
 
-    def _extract_worker_id(self, chunk: Any) -> Optional[int]:
-        # Expects the shape set by ``inject_worker_id_from_tracker`` in the Python
-        # bindings: worker attribution rides ``routing_data.worker_id``. Log once if the
-        # shape no longer matches; silent extraction failure here means we lose
-        # worker-affinity on pin.
+    async def status(self, request: Optional[dict[str, Any]] = None):
+        scheduler_status = (
+            await self._scheduler.status_snapshot()
+            if self._scheduler is not None
+            else None
+        )
+        yield {
+            "status": "ready" if self._scheduler is not None else "starting",
+            "component": "thunderagent_router",
+            "namespace": self._config.namespace,
+            "worker_endpoint": self._config.endpoint,
+            "scheduler": scheduler_status,
+            "requests": {
+                "total": self._stat_requests_total,
+                "program": self._stat_program_requests,
+                "passthrough": self._stat_passthrough_requests,
+                "session_final": self._stat_session_final_requests,
+                "unpinned_turns": self._stat_unpinned_turns,
+            },
+        }
+
+    async def metrics(self, request: Optional[dict[str, Any]] = None):
+        scheduler_metrics = (
+            await self._scheduler.metrics_snapshot()
+            if self._scheduler is not None
+            else {"counters": {}, "gauges": {}, "workers": {}}
+        )
+        counters = {
+            **scheduler_metrics["counters"],
+            "requests_total": self._stat_requests_total,
+            "program_requests_total": self._stat_program_requests,
+            "passthrough_requests_total": self._stat_passthrough_requests,
+            "session_final_requests_total": self._stat_session_final_requests,
+            "unpinned_turns_total": self._stat_unpinned_turns,
+        }
+        yield {
+            "component": "thunderagent_router",
+            "namespace": self._config.namespace,
+            "counters": counters,
+            "gauges": scheduler_metrics["gauges"],
+            "workers": scheduler_metrics["workers"],
+        }
+
+    def _extract_replica(self, chunk: Any) -> Optional[ReplicaKey]:
+        """``(worker_id, dp_rank)`` of the replica that served this chunk.
+
+        Both halves from the *same* phase, decode preferred: ``decode_dp_rank`` is written
+        only when a rank was supplied, so per-field fallback can fabricate a replica.
+        """
         if not isinstance(chunk, dict):
             self._warn_unexpected_chunk_shape("not a dict")
             return None
@@ -230,19 +432,36 @@ class ThunderAgentRouterHandler:
             self._warn_unexpected_chunk_shape("no routing_data dict")
             return None
         info = routing_data.get("worker_id")
-        if isinstance(info, dict):
-            # ``WorkerIdInfo`` carries prefill/decode IDs (and DP ranks); there is no
-            # nested ``worker_id`` key. The sticky pin is applied as
-            # ``backend_instance_id``, which the frontend resolves to the decode/backend
-            # worker, so prefer ``decode_worker_id`` and fall back to ``prefill_worker_id``
-            # (identical in aggregated mode).
-            worker_id = info.get("decode_worker_id")
-            if not isinstance(worker_id, int):
-                worker_id = info.get("prefill_worker_id")
-            if isinstance(worker_id, int):
-                return worker_id
-        self._warn_unexpected_chunk_shape("worker_id payload shape changed")
+        if not isinstance(info, dict):
+            self._warn_unexpected_chunk_shape("worker_id payload shape changed")
+            return None
+        for id_key, rank_key in (
+            ("decode_worker_id", "decode_dp_rank"),
+            ("prefill_worker_id", "prefill_dp_rank"),
+        ):
+            worker_id = info.get(id_key)
+            dp_rank = info.get(rank_key)
+            if isinstance(worker_id, int) and isinstance(dp_rank, int):
+                return (worker_id, dp_rank)
         return None
+
+    def _warn_unpinned_turn(self, program_id: str) -> None:
+        """Warn that a turn went out without a pin, at most once a minute.
+
+        Rate-limited, not once-only: this comes and goes, so a single start-up warning would
+        not say it is happening now. Exact count is ``unpinned_turns_total``.
+        """
+        now = time.monotonic()
+        if now - self._unpinned_warned_at < 60.0:
+            return
+        self._unpinned_warned_at = now
+        logger.warning(
+            "ThunderAgent turn sent without a sticky pin (program=%s, %d so far): the "
+            "program has no replica yet, so this turn routes by KV overlap and its "
+            "tokens are not charged to any replica.",
+            program_id,
+            self._stat_unpinned_turns,
+        )
 
     def _warn_unexpected_chunk_shape(self, reason: str) -> None:
         if self._worker_id_extract_warned:
@@ -286,6 +505,9 @@ async def worker(runtime: DistributedRuntime) -> None:
             runtime_cfg.tool_call_parser = config.tool_call_parser
         if config.reasoning_parser:
             runtime_cfg.reasoning_parser = config.reasoning_parser
+        if config.publish_sglang_generate:
+            _publish_sglang_generate_capability(runtime_cfg)
+            logger.info("Published SGLang engine-native generate capability")
         await register_model(
             model_input=ModelInput.Tokens,
             model_type=ModelType.Chat | ModelType.Completions,
@@ -298,11 +520,35 @@ async def worker(runtime: DistributedRuntime) -> None:
             worker_type=WorkerType.Aggregated,
         )
 
+    status_endpoint = runtime.endpoint(f"{config.namespace}.thunderagent_router.status")
+    metrics_endpoint = runtime.endpoint(
+        f"{config.namespace}.thunderagent_router.metrics"
+    )
+
+    logger.info(
+        "ThunderAgent Router serving endpoints: generate=%s status=%s metrics=%s",
+        f"{config.namespace}.thunderagent_router.generate",
+        f"{config.namespace}.thunderagent_router.status",
+        f"{config.namespace}.thunderagent_router.metrics",
+    )
+
     try:
-        await generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=[("service", "thunderagent_router")],
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "thunderagent_router")],
+            ),
+            status_endpoint.serve_endpoint(
+                handler.status,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "thunderagent_router")],
+            ),
+            metrics_endpoint.serve_endpoint(
+                handler.metrics,
+                graceful_shutdown=True,
+                metrics_labels=[("service", "thunderagent_router")],
+            ),
         )
     finally:
         await handler.shutdown()

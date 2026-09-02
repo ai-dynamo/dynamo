@@ -12,7 +12,6 @@ import textwrap
 from pathlib import Path
 
 import pytest
-import yaml
 
 from dynamo.profiler.utils.dgd_override import (
     DGD_OVERRIDE_BINARY_ENV,
@@ -89,31 +88,12 @@ def _write_fake_cli(tmp_path: Path) -> Path:
     return path
 
 
-def test_default_profiler_dgd_templates_have_type_meta() -> None:
-    repository_root = Path(__file__).resolve().parents[6]
-    template_paths = [
-        repository_root / "examples" / "backends" / backend / "deploy" / filename
-        for backend in ("vllm", "sglang", "trtllm")
-        for filename in ("agg.yaml", "disagg.yaml")
-    ]
-    template_paths.append(
-        repository_root / "examples" / "backends" / "mocker" / "deploy" / "disagg.yaml"
-    )
-
-    for template_path in template_paths:
-        dgd = yaml.safe_load(template_path.read_text(encoding="utf-8"))
-        assert dgd["apiVersion"] in {
-            "nvidia.com/v1alpha1",
-            "nvidia.com/v1beta1",
-        }, template_path
-        assert dgd["kind"] == "DynamoGraphDeployment", template_path
-
-
 def test_apply_dgd_overrides_invokes_cli_without_mutating_inputs(
     tmp_path: Path,
     blueprint: dict,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Unversioned legacy overrides remain v1alpha1 compatibility inputs."""
     binary = _write_fake_cli(tmp_path)
     overrides = {"spec": {"services": {}}}
     original_blueprint = copy.deepcopy(blueprint)

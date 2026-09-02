@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
- * Hardware-aware local install selector. Unsupported Intel XPU combinations
+ * Hardware-aware install selector. Unsupported Intel XPU combinations
  * stay visible but disabled so readers can understand the support boundary.
  */
 "use client";
@@ -158,21 +158,26 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
   const title = channel === "stable"
     ? `Dynamo ${entry?.dynamo}`
     : channel === "nightly"
-      ? "Latest nightly"
+      ? entry?.latest
+        ? "Latest nightly"
+        : `Nightly ${entry?.dynamo}`
       : "Build Dynamo from source";
   const role = channel === "stable"
     ? "Latest stable release that supports this version"
     : channel === "nightly"
-      ? "Latest nightly build"
+      ? entry?.latest
+        ? "Latest nightly build"
+        : "Pinned nightly wheel build"
       : "Intel XPU local runtime";
   const hardwareLabel = activeHardware === "nvidia" ? "NVIDIA GPU" : "Intel XPU";
+  const versionRowLabel = channel === "nightly" ? "Dynamo nightly" : `${INSTALL_DATA[backend].label} version`;
 
   return (
     <>
       <style>{LOCAL_SELECTOR_CSS}</style>
       <section className="lqs-panel" aria-label="Dynamo install selector">
         <div className="lqs-head">
-          <h3>Choose your local build</h3>
+          <h3>Choose your build</h3>
           <p>Unavailable combinations remain visible to show the current support boundary.</p>
         </div>
 
@@ -205,25 +210,35 @@ export function InstallSelector({ hardware = "all" }: { hardware?: "all" | "nvid
 
         {entry && (
           <div className="lqs-row">
-            <span className="lqs-label">{INSTALL_DATA[backend].label} version</span>
-            <div className="lqs-options" role="group" aria-label={`${INSTALL_DATA[backend].label} version`}>
-              {entries.map((version, index) => (
-                <button
-                  key={`${version.backend_version}-${version.dynamo ?? index}`}
-                  type="button"
-                  className="lqs-chip"
-                  aria-pressed={versionIndex === index}
-                  onClick={() => {
-                    setVersionIndex(index);
-                    setForm("container");
-                  }}
-                >
-                  {version.backend_version}
-                  <span className="lqs-chip-sub">
-                    {version.source ? "from main" : version.latest ? "latest nightly" : `Dynamo ${version.dynamo}`}
-                  </span>
-                </button>
-              ))}
+            <span className="lqs-label">{versionRowLabel}</span>
+            <div className="lqs-options" role="group" aria-label={versionRowLabel}>
+              {entries.map((version, index) => {
+                const hasContainer = Boolean(version.commands.container);
+                const hasWheel = Boolean(version.commands.wheel);
+                const displayVersion = channel === "nightly" && version.dynamo ? version.dynamo : version.backend_version;
+                const displayMeta = version.source
+                  ? "from main"
+                  : channel === "nightly"
+                    ? version.latest
+                      ? "latest nightly"
+                      : version.date ?? "nightly wheel"
+                    : `Dynamo ${version.dynamo}`;
+                return (
+                  <button
+                    key={`${version.backend_version}-${version.dynamo ?? index}`}
+                    type="button"
+                    className="lqs-chip"
+                    aria-pressed={versionIndex === index}
+                    onClick={() => {
+                      setVersionIndex(index);
+                      setForm(hasContainer ? "container" : hasWheel ? "wheel" : "container");
+                    }}
+                  >
+                    {displayVersion}
+                    <span className="lqs-chip-sub">{displayMeta}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}

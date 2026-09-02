@@ -7,7 +7,23 @@ import json
 import logging
 from typing import Any
 
+from dynamo.common.token_budget import TokenBudget, publish_token_budget
+
 logger = logging.getLogger(__name__)
+
+
+def publish_vllm_token_budget(runtime_config: Any, max_model_len: int | None) -> None:
+    """Publish vLLM's request-overflow contract to the Dynamo frontend."""
+    if max_model_len is None:
+        return
+    publish_token_budget(
+        runtime_config,
+        TokenBudget(
+            combined_limit=max_model_len,
+            reject_prompt_overflow=True,
+            reject_total_overflow=True,
+        ),
+    )
 
 
 def per_rank_kv_blocks(

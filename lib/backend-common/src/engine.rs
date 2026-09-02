@@ -21,6 +21,7 @@ use tokio::sync::watch;
 
 use crate::error::DynamoError;
 
+pub use dynamo_llm::first_token::FirstTokenNotifier;
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
 pub use dynamo_llm::protocols::common::llm_backend::{
     LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
@@ -39,9 +40,7 @@ pub use dynamo_runtime::engine::AsyncEngineContext;
 /// `dyn AsyncEngineContext` so engine code uses it transparently.
 pub struct GenerateContext {
     inner: Arc<dyn AsyncEngineContext>,
-    /// Decode-mode first-token signal. `Some` only on decode-mode requests;
-    /// `None` otherwise.
-    first_token: Option<watch::Sender<bool>>,
+    first_token: Option<FirstTokenNotifier>,
     metadata: BTreeMap<String, String>,
 }
 
@@ -52,7 +51,7 @@ impl GenerateContext {
     ) -> Self {
         Self {
             inner,
-            first_token,
+            first_token: FirstTokenNotifier::for_request(first_token, None, "", None),
             metadata: BTreeMap::new(),
         }
     }
@@ -60,6 +59,19 @@ impl GenerateContext {
     pub fn with_metadata(
         inner: Arc<dyn AsyncEngineContext>,
         first_token: Option<watch::Sender<bool>>,
+        metadata: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            inner,
+            first_token: FirstTokenNotifier::for_request(first_token, None, "", None),
+            metadata,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_first_token_notifier(
+        inner: Arc<dyn AsyncEngineContext>,
+        first_token: Option<FirstTokenNotifier>,
         metadata: BTreeMap<String, String>,
     ) -> Self {
         Self {
@@ -75,21 +87,25 @@ impl GenerateContext {
         self.inner.clone()
     }
 
-    /// Fire the first-token signal. Idempotent; no-op on non-decode
-    /// requests. Engines normally don't need this — the framework
-    /// auto-fires on the first non-empty chunk. Use only when first-token
-    /// is observable via a side channel before the main stream yields.
+    /// Fire the shared first-token notifier. This idempotently releases a decode worker's
+    /// deferred abort and publishes worker-side prefill completion when configured. Engines
+    /// normally don't need this because the framework auto-fires on the first non-empty chunk.
     pub fn notify_first_token(&self) {
-        if let Some(tx) = &self.first_token {
-            let _ = tx.send(true);
+        if let Some(notifier) = &self.first_token {
+            notifier.notify();
         }
     }
 
-    /// Framework-internal: borrow the underlying Sender for cross-boundary
-    /// threading (PyO3 mirrors this handle into Python's `Context` so
-    /// `notify_first_token()` fires the same signal). Rust engines should
-    /// call [`notify_first_token`](Self::notify_first_token) instead.
+    /// Framework-internal compatibility accessor for the decode abort sender. Lifecycle-aware
+    /// bridges must clone [`Self::first_token_notifier`] so all actions share the same gate.
     pub fn first_token_sender(&self) -> Option<&watch::Sender<bool>> {
+        self.first_token
+            .as_ref()
+            .and_then(FirstTokenNotifier::abort_sender)
+    }
+
+    #[doc(hidden)]
+    pub fn first_token_notifier(&self) -> Option<&FirstTokenNotifier> {
         self.first_token.as_ref()
     }
 
@@ -129,13 +145,12 @@ pub struct LlmRegistration {
     /// load from it.
     pub data_parallel_size: Option<u32>,
     /// First DP rank this worker hosts (default 0). Non-zero only when a worker
-    /// owns a sub-range (vLLM hybrid/external LB, multi-node SGLang
-    /// DP-attention); the router enumerates `[start, start + data_parallel_size)`.
+    /// owns a sub-range; the router enumerates
+    /// `[start, start + data_parallel_size)`.
     pub data_parallel_start_rank: Option<u32>,
-    /// Bootstrap host advertised to decode peers — only for Dynamo-handshake
-    /// backends (SGLang); internal-KV-transport backends (TRT-LLM, vLLM
-    /// `NixlConnector`) leave it `None`. When host+port are set, `Worker`
-    /// publishes them for the frontend's `PrefillRouter` Bootstrap path.
+    /// Bootstrap host advertised to decode peers. Backends with an internal
+    /// KV-transport handshake leave it `None`. When host+port are set, `Worker`
+    /// publishes them for the frontend's `PrefillRouter` bootstrap path.
     pub bootstrap_host: Option<String>,
     /// Bootstrap port for disaggregated KV transfer. See `bootstrap_host`.
     pub bootstrap_port: Option<u16>,
@@ -145,15 +160,17 @@ pub struct LlmRegistration {
 ///
 /// `Worker` consumes this to build a `ModelDeploymentCard` and register the
 /// model with discovery. The neutral fields (`model`, `served_model_name`,
-/// `runtime_data`) apply to every modality; the token-pipeline metadata lives
-/// in the optional [`llm`](Self::llm) sub-record, which raw media engines
-/// leave `None`.
+/// `model_aliases`, `runtime_data`) apply to every modality; the token-pipeline
+/// metadata lives in the optional [`llm`](Self::llm) sub-record, which raw
+/// media engines leave `None`.
 #[derive(Clone, Debug, Default)]
 pub struct EngineConfig {
     /// Canonical model identifier (e.g. HF repo name).
     pub model: String,
     /// Public-facing model name advertised to clients. Defaults to `model`.
     pub served_model_name: Option<String>,
+    /// Additional public-facing model names accepted by the engine.
+    pub model_aliases: Vec<String>,
     /// Engine-specific metadata copied into `ModelRuntimeConfig.runtime_data`.
     pub runtime_data: HashMap<String, serde_json::Value>,
     /// Token-pipeline registration metadata (KV cache, DP, bootstrap).
@@ -180,11 +197,10 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// `worker_id` is an opaque, runtime-allocated unique identifier for
     /// this worker. It is stable from `start()` onward for the worker's
     /// lifetime and unique across replicas in the cluster. Engines that
-    /// need a per-worker key for cluster-wide bookkeeping (e.g. TRT-LLM's
-    /// 10-bit `disagg_machine_id` snowflake field) should derive it from
-    /// this value rather than hashing host/pid or asking operators for a
-    /// CLI override. The internal mechanism (discovery instance ID) is
-    /// not part of the contract — engines should treat it as opaque.
+    /// need a per-worker key for cluster-wide bookkeeping should derive it
+    /// from this value rather than hashing host/pid or asking operators for a
+    /// CLI override. The internal mechanism (discovery instance ID) is not
+    /// part of the contract — engines should treat it as opaque.
     ///
     /// `start()` is async and may take minutes for real backends (e.g.
     /// compiling a model graph on an accelerator). Emit
@@ -329,12 +345,29 @@ pub trait LLMEngine: Send + Sync + 'static {
     ///
     /// Engines advertise control keys and implement them via
     /// [`LLMEngine::engine_control`]. Mapping those keys onto runtime routes is
-    /// owned by the unified backend layer.
+    /// owned by the Backend SDK layer.
     async fn supported_controls(&self) -> Result<Vec<String>, DynamoError> {
         Ok(Vec::new())
     }
 
+    /// Validate an engine-control request before the Backend SDK applies any
+    /// discovery lifecycle policy. Implementations must not mutate engine
+    /// state. Override this for controls whose request fields can be rejected
+    /// before an `UnregisterBefore` transition.
+    fn validate_engine_control(
+        &self,
+        _control: &str,
+        _body: &serde_json::Value,
+    ) -> Result<(), DynamoError> {
+        Ok(())
+    }
+
     /// Handle one semantic engine-control request.
+    ///
+    /// Wake/resume controls whose Backend SDK policy re-registers the serving
+    /// endpoint must return `is_sleeping: true` whenever the engine is not yet
+    /// serving-ready (for example, after a partial wake). A non-error response
+    /// without that field is treated as ready and allows endpoint registration.
     async fn engine_control(
         &self,
         control: String,
@@ -349,11 +382,11 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// Semantic engine updates this engine supports. Empty by default.
     ///
     /// Updates are a sibling surface to [`supported_controls`](LLMEngine::supported_controls)
-    /// for operations that mutate engine-managed assets (e.g. vLLM dynamic
-    /// LoRA load/unload/list) rather than the engine's serving lifecycle.
+    /// for operations that mutate engine-managed assets rather than the
+    /// engine's serving lifecycle.
     /// Keeping them separate avoids inflating the control surface. Engines
     /// advertise update keys and implement them via [`LLMEngine::engine_update`];
-    /// the unified backend maps each key onto an `/engine/update/{key}` route.
+    /// the Backend SDK maps each key onto an `/engine/update/{key}` route.
     async fn supported_updates(&self) -> Result<Vec<String>, DynamoError> {
         Ok(Vec::new())
     }
@@ -373,9 +406,8 @@ pub trait LLMEngine: Send + Sync + 'static {
     /// Hand the engine its runtime serving [`Endpoint`](dynamo_runtime::component::Endpoint),
     /// exactly once, after it exists and before serving begins. Default no-op.
     ///
-    /// Engines that publish their own discovery records (e.g. vLLM dynamic
-    /// LoRA via `register_model`) stash it here for later use from
-    /// [`engine_update`](LLMEngine::engine_update). Mirrors the
+    /// Engines that publish their own discovery records stash it here for
+    /// later use from [`engine_update`](LLMEngine::engine_update). Mirrors the
     /// [`on_publisher_ready`](MetricsBindings::on_publisher_ready) handoff idiom.
     /// Errors abort startup; `cleanup` runs on the partial state.
     async fn on_endpoint_ready(
@@ -516,10 +548,7 @@ pub struct ComponentSnapshot {
     ///   gauge is NOT updated — distinguishes "0% hits" (which is a
     ///   legitimate measurement) from "we never measured."
     ///
-    /// Each backend computes from its native counters
-    /// (vLLM: `PrefixCacheStats.hits/queries`,
-    ///  SGLang: `kv_metrics.cache_hit_rate_perc`,
-    ///  TRT-LLM: `kv_stats["cacheHitRate"]`).
+    /// Each backend computes the value from its native counters.
     pub kv_cache_hit_rate: Option<f32>,
     pub dp_rank: u32,
 }
@@ -535,7 +564,7 @@ pub struct MetricsCtx<'a> {
     pub metrics: &'a crate::metrics::EngineMetrics,
 }
 
-/// Invoked once with a freshly-built [`SnapshotPublisher`]; engine drives
+/// Invoked once with a freshly-built [`SnapshotPublisher`](crate::SnapshotPublisher); engine drives
 /// `publish(rank, snapshot)` from its own stat-logger threads thereafter.
 ///
 /// Mirror of [`OnPublisherReady`] for the KV-event Push flavor — same
@@ -640,6 +669,20 @@ pub fn usage(prompt_tokens: u32, completion_tokens: u32) -> CompletionUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_token_notifier_is_one_shot() {
+        let (tx, mut rx) = watch::channel(false);
+        let notifier =
+            FirstTokenNotifier::for_request(Some(tx), None, "", None).expect("abort action exists");
+
+        notifier.notify();
+        assert!(rx.has_changed().unwrap());
+        assert!(*rx.borrow_and_update());
+
+        notifier.notify();
+        assert!(!rx.has_changed().unwrap());
+    }
 
     #[test]
     fn chunk_token_sets_only_token_ids() {

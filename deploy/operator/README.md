@@ -103,4 +103,4 @@ operator_version: "0.0.0-dev"  # Override operator version (default: from Chart.
 
 ### Install
 
-See [Dynamo Kubernetes Platform Installation Guide](../../docs/fern/kubernetes/installation-guide.md) for installation instructions.
+See [Dynamo Kubernetes Platform Installation Guide](../../docs/fern/pages/kubernetes/installation/install-dynamo.md) for installation instructions.

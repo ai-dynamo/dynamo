@@ -5,17 +5,24 @@ import os
 
 import pytest
 
+from dynamo.common.multimodal.nvdec_decoder import nvdec_available
+from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
 from dynamo.common.utils.paths import WORKSPACE_DIR
+from tests.serve.conftest import MULTIMODAL_VIDEO_EXPECTED
 from tests.utils.multimodal import (
     MmCase,
     MultimodalModelProfile,
     TopologyConfig,
     make_audio_payload,
     make_custom_encoder_payload,
+    make_h264_video_payload,
+    make_hevc_video_payload,
     make_image_payload,
     make_image_payload_b64,
     make_image_payload_cached_tokens,
     make_image_payload_uuid_passthrough,
+    make_qwen35_custom_encoder_multi_image_payload,
+    make_qwen35_custom_encoder_payload,
     make_video_payload,
 )
 from tests.utils.payload_builder import (
@@ -23,6 +30,15 @@ from tests.utils.payload_builder import (
     chat_payload_default,
     image_token_metrics_payload,
 )
+
+# NVDEC H.264/H.265 serve cases hardware-decode via libnvcuvid, which needs the
+# container's driver "video" capability (NVIDIA_DRIVER_CAPABILITIES=...,video).
+# Runners without it can't decode H.264/H.265 and the codec-compliant image
+# ships no software fallback, so skip rather than fail. Evaluated once at
+# collection; mirrors the guard in
+# components/src/dynamo/common/tests/multimodal/test_nvdec_decoder_gpu.py.
+# NVDEC is still validated on gpu-ts.
+_NVDEC_UNAVAILABLE = not nvdec_available()
 
 # LLaVA 1.5 color-identification reference set: the model legitimately
 # emits these colors (though the order/subset varies across CUDA backends
@@ -49,6 +65,8 @@ _LLAVA_EXPECTED_COLORS = [
 VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "agg": "agg_multimodal.sh",
     "agg_video": "agg_multimodal.sh",
+    # H.264/H.265 (NVDEC hardware decode) reuse the same aggregated script.
+    "agg_video_nvdec": "agg_multimodal.sh",
     # Aggregated MM-aware router. Default uses the Rust frontend with the
     # `mm-routing` feature; the `_chat_processor` variant uses the vLLM
     # Python preprocessor (`--dyn-chat-processor=vllm`) to enable the
@@ -62,10 +80,11 @@ VLLM_TOPOLOGY_SCRIPTS: dict[str, str] = {
     "epd": "disagg_multimodal_epd.sh",
     "epd_video": "disagg_multimodal_epd.sh",
     "p_d": "disagg_multimodal_p_d.sh",
-    # CustomEncoder: a custom in-process vision encoder on a text-only LM
+    # CustomEncoder: a custom in-process vision encoder beside the decoder
     # (no separate encode worker, no NIXL). Lives in examples/custom_encoder,
     # not examples/backends/vllm — the TopologyConfig sets `directory` to match.
     "agg_custom": "agg_custom.sh",
+    "agg_custom_qwen3_5": "agg_qwen3_5_native.sh",
 }
 
 VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
@@ -106,12 +125,71 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
             ),
             "agg_video": TopologyConfig(
-                marks=[pytest.mark.pre_merge],
+                marks=[pytest.mark.pre_merge, pytest.mark.installs_extra_dependencies],
                 timeout_s=600,
                 delayed_start=60,
                 profiled_vram_gib=8.2,
                 requested_vllm_kv_cache_bytes=1_719_075_000,
-                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
+                # Backend video decode goes through vLLM's VideoMediaIO (opencv);
+                # the shipped image omits it as a media-codec carrier, so install
+                # it for this test only. See common._install_test_only_packages.
+                # installs_extra_dependencies: this VP9 case therefore proves the routing
+                # works *given* a decoder, not that VP9 decodes in a shipped
+                # image -- it does not, until the opt-in decoders land.
+                env={
+                    # The validated, version-bounded spec -- a floating install
+                    # here would test a decoder version no deployment gets.
+                    "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS[
+                        "opencv-python-headless"
+                    ],
+                    # Frontend decoding fetches the VP9 fixture from the local
+                    # image server and samples four frames in the Rust decoder.
+                    "DYN_MM_ALLOW_INTERNAL": "1",
+                    "DYN_MM_VIDEO_NUM_FRAMES": "4",
+                },
+                tests=[
+                    MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED)),
+                    MmCase(
+                        suffix="frontend_decoding",
+                        payload=make_video_payload(
+                            MULTIMODAL_VIDEO_EXPECTED, frontend_decoding=True
+                        ),
+                        extra_script_args=["--frontend-decoding"],
+                    ),
+                ],
+            ),
+            # NVDEC hardware-decode path: H.264/H.265 video input decoded on the
+            # GPU (PyNvVideoCodec, baked into the image) — no per-test decoder
+            # install, unlike the VP9 agg_video case above. Clips are served over
+            # http so the NVDEC route triggers (file:// video is not
+            # hardware-decoded). Skips when the runner lacks the driver "video"
+            # capability that libnvcuvid requires (see _NVDEC_UNAVAILABLE); NVDEC
+            # is validated on gpu-ts.
+            "agg_video_nvdec": TopologyConfig(
+                marks=[
+                    pytest.mark.post_merge,
+                    pytest.mark.skipif(
+                        _NVDEC_UNAVAILABLE,
+                        reason=(
+                            "NVDEC/PyNvVideoCodec unavailable; needs the driver "
+                            "'video' capability (NVIDIA_DRIVER_CAPABILITIES)"
+                        ),
+                    ),
+                ],
+                timeout_s=600,
+                delayed_start=60,
+                profiled_vram_gib=8.2,
+                requested_vllm_kv_cache_bytes=1_719_075_000,
+                tests=[
+                    MmCase(
+                        suffix="h264",
+                        payload=make_h264_video_payload(MULTIMODAL_VIDEO_EXPECTED),
+                    ),
+                    MmCase(
+                        suffix="h265",
+                        payload=make_hevc_video_payload(MULTIMODAL_VIDEO_EXPECTED),
+                    ),
+                ],
             ),
             # Post_merge MM-routing coverage for the Qwen3-VL family — the
             # smaller Qwen3.5-0.8B (`agg_router` below) is the pre_merge gater.
@@ -174,23 +252,51 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 single_gpu=True,
                 profiled_vram_gib=15.0,
                 requested_vllm_kv_cache_bytes=4_096_361_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                tests=[
+                    MmCase(payload=make_image_payload(["green"])),
+                    # Rust frontend decode -> NIXL RGB transfer -> separate
+                    # encode worker -> embedding transfer -> colocated PD.
+                    MmCase(
+                        suffix="b64_frontend_decoding",
+                        payload=make_image_payload_b64(["green"]),
+                        extra_script_args=["--frontend-decoding"],
+                    ),
+                ],
             ),
             "epd": TopologyConfig(
                 marks=[pytest.mark.post_merge],
                 timeout_s=300,
                 single_gpu=True,
-                requested_vllm_kv_cache_bytes=1_714_881_000,
-                tests=[MmCase(payload=make_image_payload(["green"]))],
+                profiled_vram_gib=18.7,
+                requested_vllm_kv_cache_bytes=536_870_912,
+                tests=[
+                    MmCase(payload=make_image_payload(["green"])),
+                    # Rust frontend decode -> NIXL RGB transfer -> Encode ->
+                    # Prefill embedding handoff -> Decode generation.
+                    MmCase(
+                        suffix="b64_frontend_decoding",
+                        payload=make_image_payload_b64(["green"]),
+                        extra_script_args=["--frontend-decoding"],
+                    ),
+                ],
             ),
             "epd_video": TopologyConfig(
-                marks=[pytest.mark.post_merge],
+                marks=[pytest.mark.post_merge, pytest.mark.installs_extra_dependencies],
                 timeout_s=600,
                 delayed_start=60,
                 single_gpu=True,
                 profiled_vram_gib=19.7,
                 requested_vllm_kv_cache_bytes=1_714_881_000,
-                tests=[MmCase(payload=make_video_payload(["red", "static", "still"]))],
+                # See agg_video: install the opencv backend decoder for this test
+                # only, so this is likewise a installs_extra_dependencies case.
+                env={
+                    # The validated, version-bounded spec -- a floating install
+                    # here would test a decoder version no deployment gets.
+                    "DYN_TEST_ONLY_PIP_INSTALL": VALIDATED_SPECS[
+                        "opencv-python-headless"
+                    ],
+                },
+                tests=[MmCase(payload=make_video_payload(MULTIMODAL_VIDEO_EXPECTED))],
             ),
             "p_d": TopologyConfig(
                 marks=[pytest.mark.post_merge],
@@ -310,6 +416,27 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                     )
                 ],
             ),
+            "agg_custom_qwen3_5": TopologyConfig(
+                marks=[pytest.mark.nightly],
+                timeout_s=900,
+                profiled_vram_gib=4.7,
+                # Reuse the aggregate profile's 2x-safe KV cache cap.
+                requested_vllm_kv_cache_bytes=920_126_000,
+                directory=os.path.join(WORKSPACE_DIR, "examples/custom_encoder"),
+                env={
+                    "PYTHONPATH": str(WORKSPACE_DIR),
+                },
+                tests=[
+                    MmCase(
+                        suffix="single_image",
+                        payload=make_qwen35_custom_encoder_payload(),
+                    ),
+                    MmCase(
+                        suffix="multi_image",
+                        payload=make_qwen35_custom_encoder_multi_image_payload(),
+                    ),
+                ],
+            ),
         },
     ),
     # Audio: uses agg topology with DYN_CHAT_PROCESSOR=vllm because the Rust
@@ -422,7 +549,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                profiled_vram_gib=19.2,
+                # No profiled_vram_gib: multi-GPU scheduling is not supported
+                # in the VRAM-parallel stage yet, so this runs sequentially
+                # if the skip is removed.
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-1.5 (placeholder-template `<image>` path).
@@ -477,11 +606,8 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.nightly],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                # Profiled with `tests/utils/profile_pytest.py --gpus 0,1` on
-                # 2x RTX 6000 Ada (48 GB each). Encoder GPU peaked ~13.5 GB
-                # (static, full model fp16 load); PD GPU peaked ~19 GB
-                # (weights + KV @ 4 GB cap + activations). 2x safety on KV.
-                profiled_vram_gib=19.0,
+                # No profiled_vram_gib: multi-GPU scheduling is not supported
+                # in the VRAM-parallel stage yet, so this runs sequentially.
                 requested_vllm_kv_cache_bytes=4_308_848_000,
                 tests=[
                     MmCase(
@@ -548,7 +674,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                profiled_vram_gib=19.2,
+                # No profiled_vram_gib: multi-GPU scheduling is not supported
+                # in the VRAM-parallel stage yet, so this runs sequentially
+                # if the skip is removed.
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-NeXT (anyres multi-crop processor).

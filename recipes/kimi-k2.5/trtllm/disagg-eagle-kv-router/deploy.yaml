@@ -261,7 +261,6 @@ data:
     moe_expert_parallel_size: 4
     enable_attention_dp: true
     pipeline_parallel_size: 1
-    num_postprocess_workers: 4
     print_iter_log: true
     stream_interval: 100
     trust_remote_code: true
@@ -315,7 +314,6 @@ data:
         - cutlass
         - cublaslt
         - cuda_core
-    num_postprocess_workers: 8
     print_iter_log: true
     stream_interval: 10
     tensor_parallel_size: 4

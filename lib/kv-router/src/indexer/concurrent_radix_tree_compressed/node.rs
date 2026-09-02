@@ -711,6 +711,16 @@ impl Node {
             state.edge[depth - 1].1
         };
 
+        if let Some(block_hashes) = input.router_hint_root_chain.as_deref_mut() {
+            block_hashes.extend(
+                state
+                    .edge
+                    .iter()
+                    .take(edge_match_len)
+                    .map(|(_, block_hash)| *block_hash),
+            );
+        }
+
         if input.first_node {
             *input.active = state.full_edge_workers.clone();
             for (&worker, &cutoff) in &state.worker_cutoffs {

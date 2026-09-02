@@ -174,7 +174,6 @@ data:
         - cutlass
         - cublaslt
         - cuda_core
-    num_postprocess_workers: 8
     print_iter_log: true
     stream_interval: 10
     tensor_parallel_size: 8

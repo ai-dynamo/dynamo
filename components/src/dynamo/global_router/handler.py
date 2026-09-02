@@ -6,7 +6,7 @@ Global Router Handler for hierarchical routing to worker pools.
 
 Supports two modes:
 - "disagg": Routes prefill and decode requests to separate pool types
-  based on (ISL, TTFT) and (context_length, ITL) respectively.
+  based on (ISL, TTFT) and (request token count, ITL) respectively.
 - "agg": Routes generate requests to unified pools that handle both
   prefill and decode, based on (TTFT, ITL) or optionally (ISL, TTFT, ITL).
 
@@ -269,17 +269,16 @@ class GlobalRouterHandler:
         """
         Handle decode requests from the frontend (disagg mode).
 
-        Selects the appropriate decode pool based on context length, ITL target,
+        Selects the appropriate decode pool based on request token count, ITL target,
         and optional priority, then forwards the request to the local
         router in that pool.
         """
         assert self.config.decode_pool_selection_strategy is not None
         assert self.config.decode_pool_dynamo_namespaces is not None
 
-        # Extract context length (input tokens + any previously generated)
+        # The strategy field retains the context_length name, but decode routing
+        # currently sees the request token IDs before generation begins.
         token_ids = request.get("token_ids", [])
-        # context_length should be averaged ISL + OSL // 2
-        # TODO: predict OSL based on ISL
         context_length = len(token_ids)
 
         router_params = request.get("router") or {}

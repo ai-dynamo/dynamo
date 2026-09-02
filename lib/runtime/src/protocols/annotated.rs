@@ -3,7 +3,7 @@
 
 use super::maybe_error::MaybeError;
 use crate::error::DynamoError;
-use anyhow::{Result, anyhow as error};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub trait AnnotationsProvider {
@@ -33,6 +33,20 @@ pub struct Annotated<R> {
 }
 
 impl<R> Annotated<R> {
+    fn cloned_error(&self) -> Option<DynamoError> {
+        self.is_error().then(|| {
+            self.error.clone().unwrap_or_else(|| {
+                DynamoError::msg(
+                    self.comment
+                        .as_ref()
+                        .filter(|comments| !comments.is_empty())
+                        .map(|comments| comments.join(", "))
+                        .unwrap_or_else(|| "unknown error".to_string()),
+                )
+            })
+        })
+    }
+
     /// Create a new annotated stream from the given error string
     pub fn from_error(error: impl Into<String>) -> Self {
         Self {
@@ -74,19 +88,19 @@ impl<R> Annotated<R> {
     /// Convert to a [`Result<Self, String>`]
     /// If [`Self::event`] is "error", return an error message
     pub fn ok(self) -> Result<Self, String> {
-        if let Some(event) = &self.event
-            && event == "error"
-        {
-            // First check DynamoError, then fallback to comment
-            if let Some(ref err) = self.error {
-                return Err(err.to_string());
-            }
-            return Err(self
-                .comment
-                .unwrap_or(vec!["unknown error".to_string()])
-                .join(", "));
+        if let Some(error) = self.cloned_error() {
+            return Err(error.to_string());
         }
         Ok(self)
+    }
+
+    /// Consume the annotation and return its optional payload while preserving
+    /// structured errors.
+    pub fn into_data(self) -> Result<Option<R>, DynamoError> {
+        if let Some(error) = self.cloned_error() {
+            return Err(error);
+        }
+        Ok(self.data)
     }
 
     pub fn is_ok(&self) -> bool {
@@ -130,24 +144,7 @@ impl<R> Annotated<R> {
     }
 
     pub fn into_result(self) -> Result<Option<R>> {
-        match self.data {
-            Some(data) => Ok(Some(data)),
-            None => match self.event {
-                Some(event) if event == "error" => {
-                    // First check DynamoError, then fallback to comment
-                    if let Some(ref err) = self.error {
-                        Err(error!("{}", err))?
-                    } else {
-                        Err(error!(
-                            self.comment
-                                .unwrap_or(vec!["unknown error".to_string()])
-                                .join(", ")
-                        ))?
-                    }
-                }
-                _ => Ok(None),
-            },
-        }
+        self.into_data().map_err(anyhow::Error::new)
     }
 }
 
@@ -168,22 +165,7 @@ where
     }
 
     fn err(&self) -> Option<DynamoError> {
-        if self.is_error() {
-            // First check DynamoError field
-            if let Some(ref error) = self.error {
-                return Some(error.clone());
-            }
-
-            // Fallback to comment-based error
-            if let Some(comment) = &self.comment
-                && !comment.is_empty()
-            {
-                return Some(DynamoError::msg(comment.join("; ")));
-            }
-            Some(DynamoError::msg("unknown error"))
-        } else {
-            None
-        }
+        self.cloned_error()
     }
 }
 
@@ -214,6 +196,27 @@ mod tests {
         assert!(annotated.is_err());
         let err = annotated.err().unwrap();
         assert!(err.to_string().contains("connection lost"));
+    }
+
+    #[test]
+    fn test_comment_only_error_fallback() {
+        for (comments, expected) in [
+            (vec![], "unknown error"),
+            (
+                vec!["first".to_string(), "second".to_string()],
+                "first, second",
+            ),
+        ] {
+            let annotated = Annotated::<String> {
+                data: None,
+                id: None,
+                event: Some("error".to_string()),
+                comment: Some(comments),
+                error: None,
+            };
+
+            assert_eq!(annotated.err().unwrap().message(), expected);
+        }
     }
 
     #[test]
@@ -252,6 +255,24 @@ mod tests {
         let result = annotated.ok();
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("connection lost"));
+    }
+
+    #[test]
+    fn test_into_data_preserves_error_type() {
+        use crate::error::{BackendError, ErrorType};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+            .message("invalid request")
+            .build();
+        let annotated = Annotated::<String>::from_err(error);
+
+        let error = annotated.into_data().unwrap_err();
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(error.message(), "invalid request");
     }
 
     #[test]

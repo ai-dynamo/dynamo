@@ -14,81 +14,89 @@
 #
 # Matches the pattern in: examples/backends/vllm/launch/lora/multimodal/lora_agg.sh
 
-apiVersion: nvidia.com/v1alpha1
+apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: agg-qwen-multimodal-lora
 spec:
-  services:
-    Frontend:
-      envFromSecret: hf-token-secret
-      componentType: frontend
-      replicas: 1
-      extraPodSpec:
-        mainContainer:
+  components:
+  - name: Frontend
+    podTemplate:
+      spec:
+        containers:
+        - env:
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: MODEL_PATH
+            value: Qwen/Qwen3-VL-2B-Instruct
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          env:
-            - name: DYN_REQUEST_PLANE
-              value: tcp
-            - name: MODEL_PATH
-              value: Qwen/Qwen3-VL-2B-Instruct
-    VllmWorker:
-      envFromSecret: hf-token-secret
-      componentType: worker
-      replicas: 1
-      resources:
-        limits:
-          gpu: "1"
-      modelRef:
-        name: Qwen/Qwen3-VL-2B-Instruct
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          env:
-            - name: DYN_REQUEST_PLANE
-              value: tcp
-            - name: MODEL_PATH
-              value: Qwen/Qwen3-VL-2B-Instruct
-            - name: DYN_LORA_ENABLED
-              value: "true"
-            - name: DYN_LORA_PATH
-              value: "/tmp/dynamo_loras_multimodal"
-            - name: DYN_SYSTEM_ENABLED
-              value: "true"
-            - name: DYN_SYSTEM_PORT
-              value: "9090"
-            - name: AWS_ENDPOINT
-              value: "http://minio:9000"
-            - name: AWS_ACCESS_KEY_ID
-              valueFrom:
-                secretKeyRef:
-                  name: minio-secret
-                  key: AWS_ACCESS_KEY_ID
-            - name: AWS_SECRET_ACCESS_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: minio-secret
-                  key: AWS_SECRET_ACCESS_KEY
-            - name: AWS_REGION
-              value: "us-east-1"
-            - name: AWS_ALLOW_HTTP
-              value: "true"
-            - name: BUCKET_NAME
-              value: "my-loras"
+          name: main
+    replicas: 1
+    type: frontend
+  - modelRef:
+      name: Qwen/Qwen3-VL-2B-Instruct
+    name: VllmWorker
+    podTemplate:
+      spec:
+        containers:
+        - args:
+          - --enable-multimodal
+          - --model
+          - Qwen/Qwen3-VL-2B-Instruct
+          - --enable-lora
+          - --max-lora-rank
+          - "64"
+          - --gpu-memory-utilization
+          - "0.85"
+          - --max-model-len
+          - "8192"
+          - --max-num-batched-tokens
+          - "8192"
           command:
-            - python3
-            - -m
-            - dynamo.vllm
-          args:
-            - --enable-multimodal
-            - --model
-            - Qwen/Qwen3-VL-2B-Instruct
-            - --enable-lora
-            - --max-lora-rank
-            - "64"
-            - --gpu-memory-utilization
-            - "0.85"
-            - --max-model-len
-            - "8192"
-            - --max-num-batched-tokens
-            - "8192"
+          - python3
+          - -m
+          - dynamo.vllm
+          env:
+          - name: DYN_REQUEST_PLANE
+            value: tcp
+          - name: MODEL_PATH
+            value: Qwen/Qwen3-VL-2B-Instruct
+          - name: DYN_LORA_ENABLED
+            value: "true"
+          - name: DYN_LORA_PATH
+            value: /tmp/dynamo_loras_multimodal
+          - name: DYN_SYSTEM_ENABLED
+            value: "true"
+          - name: DYN_SYSTEM_PORT
+            value: "9090"
+          - name: AWS_ENDPOINT
+            value: http://minio:9000
+          - name: AWS_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                key: AWS_ACCESS_KEY_ID
+                name: minio-secret
+          - name: AWS_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                key: AWS_SECRET_ACCESS_KEY
+                name: minio-secret
+          - name: AWS_REGION
+            value: us-east-1
+          - name: AWS_ALLOW_HTTP
+            value: "true"
+          - name: BUCKET_NAME
+            value: my-loras
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          name: main
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+    replicas: 1
+    type: worker

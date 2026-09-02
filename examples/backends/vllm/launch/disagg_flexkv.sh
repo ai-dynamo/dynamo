@@ -17,7 +17,7 @@ print_launch_banner "Launching Disaggregated Serving + FlexKV (2 GPUs)" "$MODEL"
 python -m dynamo.frontend &
 
 # Run decode worker without FlexKV
-CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --model $MODEL --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
+CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --model $MODEL --disaggregation-mode decode --disable-hybrid-kv-cache-manager --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both"}' &
 
 # Run prefill worker with FlexKV
 DYN_VLLM_KV_EVENT_PORT=20081 \
@@ -28,6 +28,7 @@ CUDA_VISIBLE_DEVICES=1 \
   python -m dynamo.vllm \
   --model $MODEL \
   --disaggregation-mode prefill \
+  --disable-hybrid-kv-cache-manager \
   --kv-transfer-config '{"kv_connector":"PdConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"},{"kv_connector":"NixlConnector","kv_role":"kv_both"}]},"kv_connector_module_path":"kvbm.vllm_integration.connector"}' \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081","enable_kv_cache_events":true}' &
 

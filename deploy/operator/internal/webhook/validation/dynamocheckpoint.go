@@ -80,13 +80,6 @@ func (v *dynamoCheckpointValidation) validateDynamoCheckpointSpec(
 	gpuMemoryServicePath := fldPath.Child("gpuMemoryService")
 
 	if gpuMemoryService := spec.GPUMemoryService; gpuMemoryService != nil && gpuMemoryService.Enabled {
-		if !features.MustGateFrom(v.ctx).Enabled(features.GMSSnapshot) {
-			allErrs = append(allErrs, field.Forbidden(
-				gpuMemoryServicePath,
-				"GMS + Snapshot is temporarily disabled; disable gpuMemoryService or enable the internal GMS + Snapshot gate",
-			))
-		}
-
 		switch gpuMemoryService.Mode {
 		case "", nvidiacomv1alpha1.GMSModeIntraPod:
 			containers := spec.Job.PodTemplateSpec.Spec.Containers

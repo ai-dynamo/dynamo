@@ -4,6 +4,7 @@
 """Router CLI parsing, config, and assembly for the standalone router."""
 
 import argparse
+import os
 from typing import Optional
 
 from dynamo.common.configuration.arg_group import ArgGroup
@@ -16,6 +17,7 @@ from dynamo.common.configuration.groups.kv_router_args import (
     KvRouterConfigBase,
 )
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.utils.namespace import get_worker_namespace
 from dynamo.llm import AicPerfConfig, KvRouterConfig
 
 
@@ -42,7 +44,13 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
                 f"Invalid endpoint format: {self.endpoint!r}. "
                 "Expected format: namespace.component.endpoint"
             )
-        self.namespace = parts[0]
+        endpoint_namespace, component, endpoint_name = parts
+        self.namespace = os.environ.get("DYN_NAMESPACE") or endpoint_namespace
+
+        worker_namespace = get_worker_namespace(self.namespace)
+        if worker_namespace != endpoint_namespace:
+            self.endpoint = f"{worker_namespace}.{component}.{endpoint_name}"
+
         if self.serve_indexer and self.use_remote_indexer:
             raise ValueError(
                 "--serve-indexer and --use-remote-indexer are mutually exclusive"
@@ -66,6 +74,15 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
                     "--router-prefill-load-model=aic requires "
                     "--router-track-prefill-tokens"
                 )
+        if (
+            self.conditional_disagg_enabled
+            or self.conditional_disagg_config is not None
+        ):
+            raise ValueError(
+                "--router-conditional-disagg is only supported by dynamo.frontend "
+                "disaggregated serving; standalone dynamo.router does not run "
+                "conditional disaggregation"
+            )
 
 
 class DynamoRouterArgGroup(ArgGroup):

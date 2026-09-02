@@ -38,21 +38,26 @@ This example shows how to run Triton Server models through Dynamo's distributed 
 From the Dynamo repository root:
 
 ```bash
-# Build the base Dynamo image
+# Build the base Dynamo image (CUDA 13.0)
 python container/render.py --framework=dynamo --target=runtime --output-short-filename
 docker build -f container/rendered.Dockerfile -t dynamo-base:latest .
 
-# Build the Triton worker image
-cd examples/backends/tritonserver
-docker build -t dynamo-triton:latest .
+# Build the Triton worker image (defaults to tritonserver:25.10-py3, CUDA 13-compatible)
+docker build \
+  --build-arg DYNAMO_BASE_IMAGE=dynamo-base:latest \
+  -t dynamo-triton:latest \
+  examples/backends/tritonserver/
 ```
+
+> [!NOTE]
+> The default `TRITON_SERVER_IMAGE` is `nvcr.io/nvidia/tritonserver:25.10-py3`
 
 #### Step 2: Run the Container
 
 ```bash
 docker run --rm -it --gpus all --network host \
   dynamo-triton:latest \
-  ./examples/backends/tritonserver/launch/identity.sh
+  /workspace/launch/identity.sh
 ```
 
 #### Step 3: Test the Deployment
@@ -224,6 +229,6 @@ To add other backends (TensorRT, ONNX, Python, etc.), edit the Makefile's `build
 
 ## Related Documentation
 
-- [Dynamo Backend Guide](../../../docs/fern/development/backend-guide.md)
+- [Dynamo Backend Guide](../../../docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-python-workers.md)
 - [Triton Inference Server](https://github.com/triton-inference-server/server)
 - [KServe Protocol](https://kserve.github.io/website/latest/modelserving/data_plane/v2_protocol/)

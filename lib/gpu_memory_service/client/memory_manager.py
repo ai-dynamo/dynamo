@@ -140,6 +140,17 @@ class LocalMapping:
         )
 
 
+@dataclass(frozen=True)
+class LayoutCommit:
+    """What :meth:`GMSClientMemoryManager.commit_layout` did to this session.
+
+    Committing narrows the caller's grant, so the call hands back what it now holds.
+    """
+
+    memory_layout_hash: str
+    granted_lock_type: GrantedLockType
+
+
 class GMSClientMemoryManager:
     """Unified memory manager for GPU Memory Service.
 
@@ -343,6 +354,32 @@ class GMSClientMemoryManager:
         self._client = None
         self._granted_lock_type = None
         return True
+
+    def commit_layout(self) -> "LayoutCommit":
+        """Seal the allocation set: the shape is final, the pages outlive this session.
+
+        The counterpart to :meth:`commit`, which publishes *contents*: it unmaps the
+        writer, closes the session, and lets readers attach. This publishes only the
+        *shape*, leaving mappings and session intact so the caller keeps writing.
+
+        Call it once the pool is built. That call is the atomic boundary: die before it
+        and the half-built pool is discarded, die after and a standby can adopt it.
+
+        The session is narrowed to RW_DATA, so allocate and free now raise. Reconnect
+        with RW to build a different layout.
+        """
+        self._require_rw()
+        # Publish barrier, matching commit(): make this process's GPU writes visible
+        # before the layout is advertised as reattachable.
+        self._vmm.synchronize()
+        response = self._client.commit_layout()
+        # The server decides what we hold now; read it back rather than assuming.
+        self._granted_lock_type = self._client.lock_type
+        self._last_memory_layout_hash = response.memory_layout_hash
+        return LayoutCommit(
+            memory_layout_hash=response.memory_layout_hash,
+            granted_lock_type=self._granted_lock_type,
+        )
 
     def get_memory_layout_hash(self) -> str:
         return self._client_rpc.get_memory_layout_hash()
@@ -796,9 +833,15 @@ class GMSClientMemoryManager:
 
             state = _tag_states.get(self.tag)
             if state is not None and state.manager is self:
-                if self.granted_lock_type != GrantedLockType.RW:
+                # RW_DATA counts: an adopting standby must move the same bookkeeping
+                # before it can remap, and this touches neither driver nor server. The
+                # server still refuses the allocations that routing would request.
+                if self.granted_lock_type not in (
+                    GrantedLockType.RW,
+                    GrantedLockType.RW_DATA,
+                ):
                     raise RuntimeError(
-                        "prepare_scratch_for_reallocation requires RW grant "
+                        "prepare_scratch_for_reallocation requires a writer grant "
                         "before disabling scratch routing: "
                         f"tag={self.tag!r} "
                         f"granted_lock_type={self.granted_lock_type}"

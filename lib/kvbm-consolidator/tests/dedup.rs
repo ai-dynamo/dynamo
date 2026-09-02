@@ -55,6 +55,8 @@ fn bs_event(
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
     }
 }
 
@@ -65,6 +67,8 @@ fn br_event(hashes: Vec<u64>) -> RawKvEvent {
         group_idx: None,
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
+        locality: None,
+        ownership: None,
     }
 }
 
@@ -342,7 +346,11 @@ async fn clear_all_propagates() {
         assert_eq!(stores_count, 3, "expected 3 initial STOREs");
 
         // Send ClearAll.
-        let clear = TestBatch(2.0, vec![RawKvEvent::AllBlocksCleared], None);
+        let clear = TestBatch(
+            2.0,
+            vec![RawKvEvent::AllBlocksCleared { ownership: None }],
+            None,
+        );
         pub_handle.send_batch(&clear).await.expect("send clear");
 
         let msgs2 = sub

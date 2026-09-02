@@ -11,6 +11,7 @@ from tests.utils.payloads import (
     CachedTokensChatPayload,
     ChatPayload,
     ChatPayloadWithLogprobs,
+    ClassifyPayload,
     ClearKVBlocksPayload,
     CompletionPayload,
     CompletionPayloadWithLogprobs,
@@ -22,6 +23,7 @@ from tests.utils.payloads import (
     KvEventMetricsPayload,
     LMCacheMetricsPayload,
     MetricsPayload,
+    PoolingPayload,
     ResponsesPayload,
     ResponsesStreamPayload,
     RouterNvextChatPayload,
@@ -47,7 +49,7 @@ for seeking out Aeloria, their skills and weaknesses, and any personal connectio
 
 # Deliberately distinct from other cache-test prompts and long enough to span
 # multiple vLLM cache blocks.
-CLEAR_KV_BLOCKS_PROMPT = """This is the unified vLLM block-clearing verification prompt, identified by the unique \
+CLEAR_KV_BLOCKS_PROMPT = """This is the vLLM block-clearing verification prompt, identified by the unique \
 phrase cobalt-orchid-riverstone. Imagine a research station built beside a quiet polar observatory where engineers \
 catalog unusual signals from distant stars. Describe how the team prepares its instruments, checks redundant clocks, \
 records atmospheric conditions, and compares each observation with the previous night. Include the roles of the lead \
@@ -158,7 +160,7 @@ def clear_kv_blocks_payload(
     max_tokens: int = 16,
     timeout: int = 60,
 ) -> ClearKVBlocksPayload:
-    """Create an admin-then-infer payload for unified vLLM cache clearing."""
+    """Create an admin-then-infer payload for vLLM cache clearing."""
     return ClearKVBlocksPayload(
         body={
             "messages": [{"role": "user", "content": CLEAR_KV_BLOCKS_PROMPT}],
@@ -526,6 +528,64 @@ def embedding_payload(
         expected_log=expected_log or [],
         expected_response=expected_response
         or [f"Generated {expected_count} embeddings with dimension"],
+    )
+
+
+PoolingInput = Union[str, List[str], List[int], List[List[int]]]
+
+
+def _pooling_input_count(input_data: PoolingInput) -> int:
+    if isinstance(input_data, str):
+        return 1
+    if input_data and isinstance(input_data[0], int):
+        return 1
+    return len(input_data)
+
+
+def classify_payload(
+    input_data: PoolingInput,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    expected_prompt_tokens: Optional[int] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> ClassifyPayload:
+    body: Dict[str, Any] = {"input": input_data}
+    if extra_body:
+        body.update(extra_body)
+    expected_count = _pooling_input_count(input_data)
+
+    return ClassifyPayload(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response or [f"Classified {expected_count} inputs"],
+        expected_prompt_tokens=expected_prompt_tokens,
+    )
+
+
+def pooling_payload(
+    input_data: PoolingInput,
+    task: Optional[str] = None,
+    repeat_count: int = 1,
+    expected_response: Optional[List[str]] = None,
+    expected_log: Optional[List[str]] = None,
+    expected_prompt_tokens: Optional[int] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+) -> PoolingPayload:
+    body: Dict[str, Any] = {"input": input_data}
+    if task is not None:
+        body["task"] = task
+    if extra_body:
+        body.update(extra_body)
+    expected_count = _pooling_input_count(input_data)
+
+    return PoolingPayload(
+        body=body,
+        repeat_count=repeat_count,
+        expected_log=expected_log or [],
+        expected_response=expected_response or [f"Pooled {expected_count} inputs"],
+        expected_prompt_tokens=expected_prompt_tokens,
     )
 
 
