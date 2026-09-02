@@ -246,6 +246,28 @@ impl<'a> VllmTitoEnvelope<'a> {
     }
 }
 
+fn canonical_generate_cache_salt(request: &GenerateRequest) -> anyhow::Result<Option<String>> {
+    let nested = match request
+        .sampling_params
+        .as_value()
+        .as_object()
+        .and_then(|sampling| sampling.get("cache_salt"))
+    {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => Some(value.as_str()),
+        Some(_) => anyhow::bail!("sampling_params.cache_salt must be a string or null"),
+    };
+
+    match (request.cache_salt.as_deref(), nested) {
+        (Some(top_level), Some(nested)) if top_level != nested => {
+            anyhow::bail!("cache_salt conflicts with sampling_params.cache_salt")
+        }
+        (Some(top_level), _) => Ok(Some(top_level.to_string())),
+        (None, Some(nested)) => Ok(Some(nested.to_string())),
+        (None, None) => Ok(None),
+    }
+}
+
 type MmPlaceholderRange = (usize, usize, u64, Option<Vec<bool>>);
 
 #[derive(Debug)]
@@ -565,6 +587,7 @@ fn preprocessed_from_generate_with_tracker(
         lora_name,
     } = routing_metadata;
     let sampling = &request.sampling_params;
+    let cache_salt = canonical_generate_cache_salt(&request)?;
     let max_tokens = sampling.max_tokens();
     let stop_conditions = sampling.project_stop_conditions();
     let sampling_options = sampling
@@ -607,11 +630,7 @@ fn preprocessed_from_generate_with_tracker(
         );
     }
     let mm_routing_info = mm_routing.map(|projection| projection.info);
-    let GenerateRequest {
-        token_ids,
-        cache_salt,
-        ..
-    } = request;
+    let GenerateRequest { token_ids, .. } = request;
 
     PreprocessedRequest::builder()
         .model(model.to_string())

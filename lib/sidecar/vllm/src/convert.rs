@@ -367,7 +367,7 @@ fn validate_compat_cache_salt(
     canonical: Option<&str>,
     path: &str,
 ) -> Result<(), DynamoError> {
-    let Some(value) = value else {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
         return Ok(());
     };
     let Some(value) = value.as_str() else {
