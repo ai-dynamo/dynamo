@@ -218,12 +218,40 @@ jobs:
 
       # Experimental: trialing Datadog Test Visibility. Remove if not kept.
       - name: Configure Datadog Test Visibility
+        id: dd_setup
         continue-on-error: true
         uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
         with:
           languages: python
           api_key: ${{ secrets.DD_API_KEY }}
           site: datadoghq.com
+      # `continue-on-error: true` above means a failed setup is silent: the
+      # job runs its tests, uploads nothing, and looks green. That is not
+      # hypothetical — `dynamo-runtime / test / *` reaches this workflow with
+      # secrets: inherit like every other caller, yet contributes zero test
+      # sessions (measured on main over 14 days: 259 test-producing jobs in
+      # the job index, 197 with Datadog sessions; the ~62 missing are these
+      # lanes). Nothing in CI surfaces that today.
+      #
+      # Warn rather than fail: reporting is best-effort and must never break a
+      # test job. The annotation just makes the gap findable in the run log.
+      - name: Check Datadog instrumentation took effect
+        if: ${{ always() }}
+        shell: bash
+        env:
+          DD_SETUP_OUTCOME: ${{ steps.dd_setup.outcome }}
+          DD_API_KEY_SET: ${{ secrets.DD_API_KEY != '' }}
+        run: |
+          set -uo pipefail
+          if [ "${DD_API_KEY_SET}" != "true" ]; then
+            echo "::warning title=Datadog::DD_API_KEY is empty for this job; no test sessions will be uploaded."
+          elif [ "${DD_SETUP_OUTCOME}" != "success" ]; then
+            echo "::warning title=Datadog::Test Visibility setup outcome='${DD_SETUP_OUTCOME}'; no test sessions will be uploaded."
+          elif [ -z "${DD_CIVISIBILITY_AGENTLESS_ENABLED:-}${PYTEST_ADDOPTS:-}${DD_TRACE_DEBUG:-}" ]; then
+            echo "::warning title=Datadog::Setup reported success but injected no tracer env; pytest will run uninstrumented."
+          else
+            echo "Datadog Test Visibility configured (lane: ${DD_TAGS:-unset})."
+          fi
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash
