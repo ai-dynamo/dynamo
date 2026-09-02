@@ -1413,6 +1413,10 @@ func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
 // rendered into a pod. That rewrite replaces Command with /bin/sh -c and rebuilds Args,
 // which changes the pod template and therefore rolls a serving deployment -- the exact
 // thing an operator upgrade must not do on its own.
+//
+// Verified by mutation: dropping the gate from VLLMBackend.elasticEPRayLaunch fails this
+// on the command assertion. If you change what this asserts, re-run that check -- a guard
+// that no longer fails when the gate is removed is decoration, not coverage.
 func TestVLLMBackend_ElasticEPRayPoCGateOffLeavesContainerUntouched(t *testing.T) {
 	newContainer := func() *corev1.Container {
 		return &corev1.Container{

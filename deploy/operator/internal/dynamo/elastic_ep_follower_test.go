@@ -579,6 +579,10 @@ func elasticEPDGDForGate() *v1beta1.DynamoGraphDeployment {
 // operator for an unrelated fix must not lose their engines to it. Asserting the
 // gated-off render is byte-identical to a graph that never mentioned elastic EP is the
 // only way that property survives changes nobody has written yet.
+//
+// Verified by mutation: neutering the gate check in IsSinglePodElasticEPLeader fails this
+// on three separate assertions. If you change what this asserts, re-run that check --
+// a guard that no longer fails when the gate is removed is decoration, not coverage.
 func TestElasticEPRayPoCGateIsUpgradeSafe(t *testing.T) {
 	t.Log("Generate an existing elastic-EP graph with the gate off, as a fresh upgrade would")
 	off, err := GenerateDynamoComponentsDeployments(elasticEPDGDForGate(), nil, nil, RollingUpdateContext{}, false)

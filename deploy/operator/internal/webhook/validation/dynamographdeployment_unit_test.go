@@ -329,3 +329,36 @@ func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
 		t.Fatalf("Validate() error = %v, want elastic-EP command requirement", err)
 	}
 }
+
+// TestDynamoGraphDeploymentSkipsElasticEPRulesWhenGated proves the review's third
+// gate-off requirement: a gated-off operator applies no Ray-specific admission rules.
+//
+// It matters because both rules would otherwise reject a deployment that works. Gated
+// off nothing wraps the user's command and no Service or follower is derived, so vLLM
+// starts a private in-process Ray and the component serves normally. Rejecting it would
+// break a running deployment to enforce a rule about a feature nobody enabled -- and on
+// update it would freeze the object, since admission runs over the whole spec.
+func TestDynamoGraphDeploymentSkipsElasticEPRulesWhenGated(t *testing.T) {
+	// Both rules at once: elastic-EP Ray flags, no explicit command, and replicas > 1.
+	dgd := newBetaDGDForValidation()
+	dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = nil
+	dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = []string{
+		"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep",
+	}
+	dgd.Spec.Components[1].Replicas = k8sptr.To(int32(2))
+
+	validator := newDynamoGraphDeploymentTestValidator(t)
+
+	t.Log("Gate off: the graph is accepted, because neither rule applies")
+	offCtx := features.WithGate(context.Background(), features.Gates{Grove: true})
+	if _, err := validator.Validate(offCtx, dgd, runtimeVersionSourceV1Beta1); err != nil {
+		t.Fatalf("gate off rejected a config it does not manage: %v", err)
+	}
+
+	t.Log("Gate on: the same graph is rejected, so the skip is the gate and not a broken rule")
+	onCtx := features.WithGate(context.Background(), features.Gates{Grove: true, ElasticEPRayPoC: true})
+	_, err := validator.Validate(onCtx, dgd, runtimeVersionSourceV1Beta1)
+	if err == nil || !k8serrors.IsInvalid(err) {
+		t.Fatalf("gate on error = %v, want invalid field error", err)
+	}
+}

@@ -830,12 +830,22 @@ func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *tes
 	tests := []struct {
 		name       string
 		mutate     func(*v1alpha1.DynamoComponentDeployment)
+		gateOff    bool
 		wantDelete bool
 	}{
 		{
 			name:       "emits for a single-pod elastic-EP leader",
 			mutate:     func(*v1alpha1.DynamoComponentDeployment) {},
 			wantDelete: false,
+		},
+		{
+			// The review requires that a gated-off operator create no Ray Services. The
+			// delete stub is what makes that true on upgrade *and* on disable: the same
+			// return both skips creation and removes one a previous operator emitted.
+			name:       "deletes when the ElasticEPRayPoC gate is off",
+			mutate:     func(*v1alpha1.DynamoComponentDeployment) {},
+			gateOff:    true,
+			wantDelete: true,
 		},
 		{
 			name: "deletes for replicas > 1",
@@ -906,7 +916,7 @@ func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *tes
 					Discovery:       configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 					ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: true},
 				},
-				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: !tt.gateOff}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
 				},
