@@ -1175,11 +1175,17 @@ impl<
         let class_index = queue_metadata.class_index;
         let snapshot = queue_metadata.snapshot;
         let class = self.profile.class(class_index);
-        // A zero-limit class never queues: keep the pre-policy-queue direct
+        // With zero discovered workers every per-worker limit scales to zero and
+        // `queue_rejection` would reject with `limit: 0`. Admit directly instead
+        // so selection reports the real condition, `NoEndpoints`.
+        if self.workers_with_configs.borrow().is_empty() {
+            return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
+        }
+        // A class with any zero per-worker limit never queues: keep the direct
         // admission semantics by admitting while a worker has prefill capacity,
         // and otherwise fall through so `queue_rejection` produces the same
         // limit-zero rejection the queued path always has.
-        if class.request_queue_limit_per_worker == Some(0) {
+        if class.never_queues() {
             let should_queue = class.queueing_enabled()
                 && (self.pending.has_backlog(class_index) || {
                     let active_tokens = self.slots.active_tokens(decay_now);
@@ -2479,6 +2485,73 @@ policy_classes:
             .free(&"admitted-idle".to_string(), decay_now())
             .unwrap();
         slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test]
+    async fn zero_token_queue_limit_admits_idle_workers() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+    raw_isl_token_queue_limit_per_worker: 0
+"#,
+        );
+        let (queue, _slots) = make_queue_with_profile(1, 16, 64, profile);
+
+        // A zero token limit means the class can never hold a queued entry, so
+        // an idle worker must still admit directly instead of tripping the
+        // limit-zero rejection.
+        let (admitted, admitted_rx) = make_request("admitted-idle-token-limit", 64);
+        queue.enqueue(admitted).await;
+        admitted_rx.await.unwrap().unwrap();
+        assert_eq!(queue.pending_count(), 0);
+
+        let (rejected, rejected_rx) = make_request("rejected-busy-token-limit", 64);
+        queue.enqueue(rejected).await;
+        assert!(matches!(
+            rejected_rx.await.unwrap(),
+            Err(KvSchedulerError::QueueRejected(_))
+        ));
+        assert_eq!(queue.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn zero_workers_report_no_endpoints_not_queue_rejection() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: capped
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: capped
+    policy_family: capped
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+    request_queue_limit_per_worker: 4
+"#,
+        );
+        let (queue, _slots) = make_queue_with_profile(0, 16, 64, profile);
+
+        // With zero discovered workers every per-worker limit scales to zero;
+        // the request must surface the real condition instead of a
+        // `QueueRejected { limit: 0 }`.
+        let (request, response_rx) = make_request("no-workers", 64);
+        queue.enqueue(request).await;
+        assert!(matches!(
+            response_rx.await.unwrap(),
+            Err(KvSchedulerError::NoEndpoints)
+        ));
+        assert_eq!(queue.pending_count(), 0);
     }
 
     #[test]
