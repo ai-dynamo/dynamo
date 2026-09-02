@@ -255,7 +255,7 @@ impl SamplingParams {
 fn project_logprob_count(value: Option<i32>, field: &str) -> Result<Option<u32>, String> {
     match value {
         None => Ok(None),
-        Some(-1) => Ok(Some(u32::MAX)),
+        Some(-1) => Ok(Some(OutputOptions::ALL_LOGPROBS)),
         Some(value) if value >= 0 => Ok(Some(value as u32)),
         Some(value) => Err(format!(
             "sampling_params.{field} must be non-negative or -1, got {value}"
