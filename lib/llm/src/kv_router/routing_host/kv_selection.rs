@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
+use std::time::Instant;
 
 use dynamo_kv_router::{
     RouterConfigOverride,
@@ -82,6 +83,7 @@ pub(super) struct SelectionOptions {
 
 struct BestMatchArgs<'a> {
     context_id: &'a str,
+    ingress_at: Instant,
     routing_parts: RoutingRequestParts<'a>,
     router_config_override: Option<&'a RouterConfigOverride>,
     update_states: bool,
@@ -109,6 +111,7 @@ where
             .kv_router()
             .find_best_match_details_with_policy_class_inner(
                 Some(args.context_id),
+                args.ingress_at,
                 args.routing_parts.token_ids,
                 args.routing_parts.block_mm_infos,
                 args.router_config_override,
@@ -191,6 +194,10 @@ where
         options: SelectionOptions,
     ) -> Result<SelectionOutcome, Error> {
         let _nvtx_select = dynamo_nvtx_range!("route.select_worker");
+        let ingress_at = request
+            .tracker
+            .as_deref()
+            .map_or_else(Instant::now, |tracker| tracker.request_received());
         let routing = request.routing.as_ref();
         let explicit_pin = pinned_worker_hint(phase, routing);
         let lora_name = routing.and_then(|routing| routing.lora_name.clone());
@@ -297,6 +304,7 @@ where
             let selection = self
                 .select_best_match(BestMatchArgs {
                     context_id,
+                    ingress_at,
                     routing_parts,
                     router_config_override: request.router_config_override.as_ref(),
                     update_states: !is_query_only,
@@ -365,6 +373,7 @@ where
 
         self.select_best_match(BestMatchArgs {
             context_id,
+            ingress_at,
             routing_parts,
             router_config_override: request.router_config_override.as_ref(),
             update_states: !is_query_only,
