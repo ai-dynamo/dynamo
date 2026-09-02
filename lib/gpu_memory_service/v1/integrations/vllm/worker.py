@@ -3,9 +3,7 @@
 
 """Ownership-based GMS V1 worker for vLLM's normal model loader.
 
-Select explicitly with::
-
-    --worker-cls gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker
+Dynamo selects this worker when ``DYN_GMS_USE_V1=true``.
 """
 
 from __future__ import annotations
