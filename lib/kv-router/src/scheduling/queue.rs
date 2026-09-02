@@ -1046,9 +1046,10 @@ impl<
                         queue_metadata,
                     );
                     let cleanup_ready = drain_cleanup && self.drain_cleanup();
-                    let made_ready = enqueue_ready || cleanup_ready;
-                    if made_ready {
+                    if cleanup_ready {
                         self.handle_update(None).await;
+                    } else if enqueue_ready {
+                        self.handle_enqueued().await;
                     }
                     let _ = ack_tx.send(lease);
                 }
@@ -1358,9 +1359,29 @@ impl<
             self.pending.recheck_all_workers();
         }
 
+        self.drain_ready().await;
+    }
+
+    /// Drain after an enqueue. An arrival adds work but never frees worker
+    /// capacity, so the blocked-lane recheck is skipped: every capacity change
+    /// (update, prefill completion, cleanup) arrives with its own recheck, and
+    /// shared-lane heads are re-evaluated against the dispatch predicate on
+    /// every pop regardless.
+    async fn handle_enqueued(&mut self) {
+        self.reject_expired(Instant::now());
+        if !self.pending.has_ready() {
+            return;
+        }
+        self.drain_ready().await;
+    }
+
+    async fn drain_ready(&mut self) {
         // Continuation draining stays actor-local; never self-send through the
         // bounded command channel while processing an update.
         loop {
+            if !self.pending.has_ready() {
+                break;
+            }
             let decay_now = Instant::now();
             let active_tokens = self.slots.active_tokens(decay_now);
             let popped = {
