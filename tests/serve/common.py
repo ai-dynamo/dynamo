@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any, Dict, Iterator, Optional
@@ -341,12 +341,14 @@ def run_serve_deployment(
     *,
     ports: ServicePorts | None = None,  # pass `dynamo_dynamic_ports` here
     extra_env: Optional[Dict[str, str]] = None,
+    post_validation: Optional[Callable[[], None]] = None,
 ) -> None:
     """Run a standard serve deployment test for any EngineConfig.
 
     - Launches the engine via EngineProcess.from_script
     - Builds a payload (with optional override/mutator)
     - Iterates configured endpoints and validates responses and logs
+    - Optionally runs a final assertion while the deployment is still alive
     """
 
     logger = logging.getLogger(request.node.name)
@@ -488,6 +490,8 @@ def run_serve_deployment(
                 if hasattr(payload, "final_validation"):
                     payload.final_validation()
 
+            if post_validation is not None:
+                post_validation()
     finally:
         _cleanup_prepared_deployment(prep)
 
