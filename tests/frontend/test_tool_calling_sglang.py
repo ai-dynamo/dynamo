@@ -338,7 +338,7 @@ TOOLS_WEATHER = [
                     },
                 },
                 "required": ["city"],
-                "additionalProperties": True,
+                "additionalProperties": False,
             },
         },
     }
