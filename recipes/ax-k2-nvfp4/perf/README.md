@@ -33,6 +33,15 @@ traffic.
 Deploy the DGD as described in the [model README](../README.md), then apply the
 runner and Job:
 
+For throughput-only speculative-decoding measurements at the measured
+acceptance proxy, change the worker `SPECULATIVE_CONFIG` ConfigMap key in
+`../vllm/agg-b200-chat/deploy.yaml` from `speculative-config` to
+`speculative-config-synthetic` before deploying. This enables vLLM's
+`rejection_sample_method: synthetic` with
+`synthetic_acceptance_length: 2.12`. Keep the production key for functional or
+quality validation because synthetic rejection sampling intentionally forces
+acceptance behavior.
+
 ```bash
 export NAMESPACE=your-namespace
 kubectl apply -f runner.configmap.yaml -n "${NAMESPACE}"
