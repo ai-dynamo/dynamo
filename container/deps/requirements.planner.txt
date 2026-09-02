@@ -3,10 +3,8 @@
 
 # Dependencies required by the planner, profiler, and global_planner services.
 
-# Keep both layers on the same published AIC dev release.
-aiconfigurator==0.11.0.dev20260728
-
-aiconfigurator-core==0.11.0.dev20260728
+# AIC application and perf-model compatibility namespaces are provided by the
+# separately staged AISimulate wheel.
 aiofiles<=25.1.0
 aiohttp>=3.14.3,<4.0  # see overrides.planner.txt: aiperf pins aiohttp~=3.13.3
 filterpy==1.4.5
@@ -15,7 +13,7 @@ filterpy==1.4.5
 grpcio>=1.63.0
 kubernetes==32.0.1
 kubernetes_asyncio==32.0.0
-# aiconfigurator calls the top-level plotext.plot_size, removed in plotext 6.
+# AISimulate's compatibility application calls plotext.plot_size, removed in plotext 6.
 plotext<6
 plotly>=6.0.1
 pmdarima==2.1.1

@@ -409,6 +409,43 @@ def test_project_scale_to_applies_final_gpu_budget_to_external_proposal():
     assert dec.num_prefill + dec.num_decode <= 4
 
 
+@pytest.mark.parametrize(
+    ("gpu_cost_per_replica", "expected_replicas"),
+    [
+        pytest.param(None, 2, id="legacy-fallback"),
+        pytest.param(4, 2, id="zero-gpu-sidecar"),
+        pytest.param(5, 1, id="one-gpu-sidecar"),
+    ],
+)
+def test_final_gpu_budget_uses_replica_cost(
+    gpu_cost_per_replica: int | None, expected_replicas: int
+):
+    """Auxiliary GPUs affect the final clamp, not the engine width."""
+
+    config = PlannerConfig(
+        mode="agg",
+        enable_load_scaling=True,
+        enable_throughput_scaling=True,
+        optimization_target="sla",
+        served_model_name="test",
+        max_gpu_budget=8,
+        min_gpu_budget=-1,
+    )
+    capabilities = WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=4,
+            gpu_cost_per_replica=gpu_cost_per_replica,
+            max_num_batched_tokens=2048,
+            max_kv_tokens=16384,
+        )
+    )
+    adapter = OrchestratorEngineAdapter(config, capabilities)
+
+    assert adapter._apply_gpu_final_budget(
+        None, 3, WorkerCounts(ready_num_decode=1)
+    ) == (None, expected_replicas)
+
+
 def test_project_scale_to_budget_preserves_single_component_target_mask():
     """Decode-only proposal: residual GPU clamp must not invent a prefill target.
 
