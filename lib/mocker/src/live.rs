@@ -10,6 +10,7 @@
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
 use dashmap::mapref::entry::Entry;
@@ -838,6 +839,13 @@ impl LiveRequest {
 
     pub async fn recv(&mut self) -> Option<OutputSignal> {
         self.recv_observed().await.map(|output| output.event)
+    }
+
+    /// Receive an output signal with the time it waited after route delivery.
+    pub async fn recv_with_observation_delay(&mut self) -> Option<(OutputSignal, Duration)> {
+        self.recv_observed()
+            .await
+            .map(|output| (output.event, output.observed_at.elapsed()))
     }
 
     pub(crate) async fn recv_observed(&mut self) -> Option<ObservedOutput> {

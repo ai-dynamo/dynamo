@@ -293,6 +293,8 @@ pub fn spawn_grouped_live_engine(
             cancel_token: actor_cancel_token,
             clock_origin,
             deferred_commands: VecDeque::new(),
+            timing_diagnostics: LiveTimingDiagnostics::default(),
+            last_pass_finished_ms: None,
         }
         .run()
         .await
@@ -319,6 +321,97 @@ struct GroupedLiveActor {
     cancel_token: CancellationToken,
     clock_origin: Instant,
     deferred_commands: VecDeque<ControlEnvelope>,
+    timing_diagnostics: LiveTimingDiagnostics,
+    last_pass_finished_ms: Option<f64>,
+}
+
+const LIVE_TIMING_LOG_INTERVAL_PASSES: u64 = 512;
+
+#[derive(Debug, Default)]
+struct LiveTimingDiagnostics {
+    total_passes: u64,
+    interval_passes: u64,
+    pre_pass_work_ms: f64,
+    modeled_ms: f64,
+    execute_pass_ms: f64,
+    pass_started_publish_ms: f64,
+    wake_overshoot_ms: f64,
+    complete_pass_ms: f64,
+    completion_boundary_ms: f64,
+    post_pass_controls_ms: f64,
+    cycle_overhead_ms: f64,
+    non_modeled_overhead_ms: f64,
+    max_wake_overshoot_ms: f64,
+    max_completion_boundary_ms: f64,
+    max_cycle_overhead_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LivePassTiming {
+    pre_pass_work_ms: f64,
+    modeled_ms: f64,
+    execute_pass_ms: f64,
+    pass_started_publish_ms: f64,
+    wake_overshoot_ms: f64,
+    complete_pass_ms: f64,
+    completion_boundary_ms: f64,
+    post_pass_controls_ms: f64,
+    cycle_overhead_ms: f64,
+    non_modeled_overhead_ms: f64,
+}
+
+impl LiveTimingDiagnostics {
+    fn record(&mut self, timing: LivePassTiming) {
+        self.total_passes += 1;
+        self.interval_passes += 1;
+        self.pre_pass_work_ms += timing.pre_pass_work_ms;
+        self.modeled_ms += timing.modeled_ms;
+        self.execute_pass_ms += timing.execute_pass_ms;
+        self.pass_started_publish_ms += timing.pass_started_publish_ms;
+        self.wake_overshoot_ms += timing.wake_overshoot_ms;
+        self.complete_pass_ms += timing.complete_pass_ms;
+        self.completion_boundary_ms += timing.completion_boundary_ms;
+        self.post_pass_controls_ms += timing.post_pass_controls_ms;
+        self.cycle_overhead_ms += timing.cycle_overhead_ms;
+        self.non_modeled_overhead_ms += timing.non_modeled_overhead_ms;
+        self.max_wake_overshoot_ms = self.max_wake_overshoot_ms.max(timing.wake_overshoot_ms);
+        self.max_completion_boundary_ms = self
+            .max_completion_boundary_ms
+            .max(timing.completion_boundary_ms);
+        self.max_cycle_overhead_ms = self.max_cycle_overhead_ms.max(timing.cycle_overhead_ms);
+
+        if self.interval_passes < LIVE_TIMING_LOG_INTERVAL_PASSES {
+            return;
+        }
+
+        let count = self.interval_passes as f64;
+        tracing::info!(
+            target: "dynamo_mocker::live_timing",
+            event = "mocker_live_timing",
+            total_passes = self.total_passes,
+            interval_passes = self.interval_passes,
+            pre_pass_work_mean_ms = self.pre_pass_work_ms / count,
+            modeled_mean_ms = self.modeled_ms / count,
+            execute_pass_mean_ms = self.execute_pass_ms / count,
+            pass_started_publish_mean_ms = self.pass_started_publish_ms / count,
+            wake_overshoot_mean_ms = self.wake_overshoot_ms / count,
+            complete_pass_mean_ms = self.complete_pass_ms / count,
+            completion_boundary_mean_ms = self.completion_boundary_ms / count,
+            post_pass_controls_mean_ms = self.post_pass_controls_ms / count,
+            cycle_overhead_mean_ms = self.cycle_overhead_ms / count,
+            non_modeled_overhead_mean_ms = self.non_modeled_overhead_ms / count,
+            wake_overshoot_max_ms = self.max_wake_overshoot_ms,
+            completion_boundary_max_ms = self.max_completion_boundary_ms,
+            cycle_overhead_max_ms = self.max_cycle_overhead_ms,
+            "mocker live timing interval"
+        );
+
+        let total_passes = self.total_passes;
+        *self = Self {
+            total_passes,
+            ..Self::default()
+        };
+    }
 }
 
 #[derive(Debug)]
@@ -362,19 +455,26 @@ impl GroupedLiveActor {
             }
 
             let started_at_ms = self.elapsed_ms();
+            let pre_pass_work_ms = self
+                .last_pass_finished_ms
+                .map_or(0.0, |finished_ms| (started_at_ms - finished_ms).max(0.0));
             let Some(started) = self.engine.execute_pass(started_at_ms)? else {
                 continue;
             };
+            let execute_pass_finished_ms = self.elapsed_ms();
             let pass_id = started.pass_id;
             let end_ms = started.end_ms;
             let zero_duration = end_ms <= started_at_ms;
             self.publish(GroupedLiveEvent::PassStarted(started)).await?;
+            let pass_started_published_ms = self.elapsed_ms();
 
             if !self.wait_for_pass_boundary(end_ms).await? {
                 return Ok(());
             }
-            let completed_at_ms = self.elapsed_ms().max(end_ms);
+            let woke_at_ms = self.elapsed_ms();
+            let completed_at_ms = woke_at_ms.max(end_ms);
             let completed = self.engine.complete_pass(pass_id, completed_at_ms)?;
+            let complete_pass_finished_ms = self.elapsed_ms();
             let (boundary_tx, boundary_rx) = mpsc::channel(1);
             self.publish(GroupedLiveEvent::PassCompleted {
                 completed,
@@ -386,7 +486,29 @@ impl GroupedLiveActor {
             if !self.serve_pass_boundary(boundary_rx).await? {
                 return Ok(());
             }
+            let completion_boundary_finished_ms = self.elapsed_ms();
             self.apply_post_pass_controls().await?;
+            let post_pass_controls_finished_ms = self.elapsed_ms();
+
+            let cycle_overhead_ms = (post_pass_controls_finished_ms - end_ms).max(0.0);
+            self.timing_diagnostics.record(LivePassTiming {
+                pre_pass_work_ms,
+                modeled_ms: (end_ms - started_at_ms).max(0.0),
+                execute_pass_ms: (execute_pass_finished_ms - started_at_ms).max(0.0),
+                pass_started_publish_ms: (pass_started_published_ms - execute_pass_finished_ms)
+                    .max(0.0),
+                wake_overshoot_ms: (woke_at_ms - end_ms).max(0.0),
+                complete_pass_ms: (complete_pass_finished_ms - woke_at_ms).max(0.0),
+                completion_boundary_ms: (completion_boundary_finished_ms
+                    - complete_pass_finished_ms)
+                    .max(0.0),
+                post_pass_controls_ms: (post_pass_controls_finished_ms
+                    - completion_boundary_finished_ms)
+                    .max(0.0),
+                cycle_overhead_ms,
+                non_modeled_overhead_ms: pre_pass_work_ms + cycle_overhead_ms,
+            });
+            self.last_pass_finished_ms = Some(post_pass_controls_finished_ms);
 
             // A zero-duration engine can remain continuously ready. Yielding
             // keeps cancellation and sibling tasks responsive without adding
@@ -759,6 +881,8 @@ mod tests {
             cancel_token,
             clock_origin: Instant::now(),
             deferred_commands: VecDeque::new(),
+            timing_diagnostics: LiveTimingDiagnostics::default(),
+            last_pass_finished_ms: None,
         }
     }
 
@@ -1025,6 +1149,8 @@ mod tests {
             cancel_token: CancellationToken::new(),
             clock_origin: Instant::now() - Duration::from_millis(200),
             deferred_commands: VecDeque::new(),
+            timing_diagnostics: LiveTimingDiagnostics::default(),
+            last_pass_finished_ms: None,
         };
         assert!(actor.wait_for_pass_boundary(started.end_ms).await.unwrap());
         response

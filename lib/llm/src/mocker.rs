@@ -14,7 +14,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::backend::ExecutionContext;
@@ -60,6 +60,11 @@ use self::handoff::{
 use self::metrics::NativeMockerMetrics;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
+
+const RESPONSE_WAKE_LOG_INTERVAL_SIGNALS: u64 = 65_536;
+static RESPONSE_WAKE_SIGNALS: AtomicU64 = AtomicU64::new(0);
+static RESPONSE_WAKE_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+static RESPONSE_WAKE_MAX_NS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Deserialize)]
 struct ResponseReplayTraceRow {
@@ -256,6 +261,29 @@ async fn send_response(
         }
         result = async { stream_tx.send(output) } => result.is_ok(),
     }
+}
+
+fn record_response_wake_delay(delay: Duration) {
+    let delay_ns = u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX);
+    let total_ns = RESPONSE_WAKE_TOTAL_NS
+        .fetch_add(delay_ns, Ordering::Relaxed)
+        .saturating_add(delay_ns);
+    RESPONSE_WAKE_MAX_NS.fetch_max(delay_ns, Ordering::Relaxed);
+    let signals = RESPONSE_WAKE_SIGNALS
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    if signals % RESPONSE_WAKE_LOG_INTERVAL_SIGNALS != 0 {
+        return;
+    }
+
+    tracing::info!(
+        target: "dynamo_mocker::response_timing",
+        event = "mocker_response_wake_timing",
+        signals,
+        mean_ms = total_ns as f64 / signals as f64 / 1_000_000.0,
+        max_ms = RESPONSE_WAKE_MAX_NS.load(Ordering::Relaxed) as f64 / 1_000_000.0,
+        "mocker response wake timing"
+    );
 }
 
 struct MockerExecutionContext {
@@ -1081,8 +1109,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             None => destination_error_rx = None,
                         }
                     }
-                    maybe_signal = live_request.recv() => {
-                        let Some(signal) = maybe_signal else {
+                    maybe_signal = live_request.recv_with_observation_delay() => {
+                        let Some((signal, response_wake_delay)) = maybe_signal else {
                             let _ = send_response(
                                 &stream_tx,
                                 LLMEngineOutput::error("All output transmitters closed".to_string()),
@@ -1090,6 +1118,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             ).await;
                             break;
                         };
+                        record_response_wake_delay(response_wake_delay);
 
                         // A terminally rejected request never ran because it violated
                         // a worker admission limit. Emit no token and do not complete
