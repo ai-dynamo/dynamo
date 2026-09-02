@@ -106,7 +106,6 @@ spec:
                     --served-model-name skt/A.X-K2-NVFP4 \
                     --tensor-parallel-size 4 \
                     --data-parallel-size 1 \
-                    --enable-expert-parallel \
                     --attention-backend FLASHINFER_MLA_SPARSE \
                     --kv-cache-dtype auto \
                     --max-model-len 262144 \
