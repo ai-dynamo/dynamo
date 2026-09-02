@@ -17,7 +17,7 @@ metadata:
   name: dsv4-pro-0813-bench
 spec:
   backoffLimit: 1
-  activeDeadlineSeconds: 28800
+  activeDeadlineSeconds: 86400
   completions: 1
   parallelism: 1
   template:
@@ -123,7 +123,7 @@ spec:
         - name: CONCURRENCY
           value: "6"
         - name: REQUEST_TIMEOUT_SECONDS
-          value: "1200"
+          value: "3600"
         - name: AIPERF_VERSION
           value: "0.10.0"
         - name: AIPERF_API_PORT
