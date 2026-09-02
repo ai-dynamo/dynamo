@@ -1,7 +1,15 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Mocker engine
 
-The canonical user-facing documentation for the mocker lives at
-[`docs/dynosim/mocker.md`](../../../../docs/fern/pages/kubernetes/operations/dynosim/mocker-live-simulation.mdx).
+The public `python -m dynamo.mocker` CLI is removed while online simulation is unavailable. The
+engine and private worker launcher remain for Dynamo internals, tests, and managed templates.
+
+The user-facing availability notice lives at
+[Simulate a Kubernetes Deployment with Mocker](../../../../docs/fern/pages/kubernetes/operations/simulation-with-dynosim/mocker-live-simulation.mdx).
 
 Useful adjacent references:
 

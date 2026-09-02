@@ -260,8 +260,8 @@ it, transfers fall back to TCP and KV movement can dominate TTFT and throughput.
 Multi-node adds RDMA fields to each worker (`rdma/ib` resource requests, the
 `IPC_LOCK` capability, and `UCX_*` transport env vars) plus an RDMA device plugin
 on the cluster. That setup is out of scope here — see the
-[Disaggregated Communication Guide](../../developer-guide/knowledge-base/kubernetes/kubernetes-operator/disagg-communication.md)
-for the transport configuration and [Multinode Deployments](../model-deployment/multinode-deployments.md)
+[RDMA Setup](../installation/rdma-setup/overview.md)
+for the transport configuration and [Multinode Orchestration](../installation/multinode-orchestration.md)
 for spanning workers across machines.
 
 </Step>
