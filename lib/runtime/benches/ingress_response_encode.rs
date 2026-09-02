@@ -3,31 +3,10 @@
 
 //! Per-frame cost of the ingress response encode.
 //!
-//! `Ingress::pump_response_stream` encodes one frame per item the engine yields,
-//! so for a streaming response this runs once per generated token. Each frame is
-//! encoded into its own buffer, which makes the buffer's starting capacity — not
-//! just the allocation count — the thing that decides how much work a frame
-//! costs.
-//!
-//! Three arms encode an identical frame and differ only in where the bytes land:
-//!
-//! - `encode` builds a `Vec` inside the codec. `serde_json::to_vec` pre-sizes
-//!   that `Vec`; `rmp_serde::to_vec_named` starts it at zero capacity, so the
-//!   two codecs are expected to diverge here and only here.
-//! - `encode_into_zero_capacity` writes into a caller-owned `Vec` that also
-//!   starts empty. It isolates the writer change from the sizing change, so a
-//!   difference between this arm and the next is attributable to capacity alone.
-//! - `encode_into_presized` is what the encoder does now: a caller-owned `Vec`
-//!   started at [`RESPONSE_ENCODE_CAPACITY_HINT`].
-//!
-//! Every arm allocates and frees within the timed region, so the numbers include
-//! the buffer's whole lifetime rather than just the serialization.
-//!
-//! The arms are asserted byte-identical before any of them is timed — a hot path
-//! that quietly emitted different bytes would surface only as a decode failure at
-//! the peer. That the real encoder agrees with the `encode_into_presized` arm is
-//! pinned separately by `serde_ingress_encoder_matches_encode_byte_for_byte` in
-//! `pipeline::network`.
+//! Three arms encode an identical frame and differ only in buffer capacity:
+//! `encode` (codec-internal `Vec`), `encode_into_zero_capacity` (caller `Vec`
+//! started empty), and `encode_into_presized` (caller `Vec` started at
+//! [`RESPONSE_ENCODE_CAPACITY_HINT`], what the encoder does now).
 //!
 //! Run with: cargo bench --bench ingress_response_encode
 

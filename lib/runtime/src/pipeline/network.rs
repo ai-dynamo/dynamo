@@ -132,14 +132,8 @@ impl RequestPlanePayloadCodec {
 
 /// Starting capacity for a buffer that one response frame is encoded into.
 ///
-/// Where that buffer starts decides how many times it regrows before the frame
-/// fits, and a streaming response encodes a frame per generated token. The two
-/// codecs disagree on the default: `serde_json::to_vec` starts at 128 bytes,
-/// while `rmp_serde::to_vec_named` starts at zero — so msgpack, the default
-/// codec, pays that regrowth on every frame unless the caller sizes the buffer
-/// itself. Matching the JSON figure keeps both codecs starting from the same
-/// place. A frame larger than this still encodes correctly; it just grows as it
-/// would have anyway.
+/// Matches `serde_json::to_vec`'s own default so msgpack — which otherwise
+/// starts at zero — stops regrowing its buffer on every streamed frame.
 pub const RESPONSE_ENCODE_CAPACITY_HINT: usize = 128;
 
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
@@ -674,12 +668,7 @@ mod tests {
         }
     }
 
-    /// The ingress response encoder builds its frame with `encode_into` against a
-    /// pre-sized buffer rather than `encode`. Nothing local reads that frame back
-    /// — it is decoded by the peer — so a byte-level divergence would surface as
-    /// a decode failure at the caller, far from the change that caused it. Pin
-    /// the equivalence here instead, across both codecs and all three frame
-    /// shapes the encoder produces.
+    /// `encode_into` must stay byte-compatible with `encode` for both codecs.
     #[tokio::test]
     async fn serde_ingress_encoder_matches_encode_byte_for_byte() {
         let data = Annotated::from_data(serde_json::json!({
