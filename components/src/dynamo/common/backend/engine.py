@@ -131,6 +131,11 @@ class LlmRegistration:
     # them so the frontend's PrefillRouter can take its bootstrap path.
     bootstrap_host: Optional[str] = None
     bootstrap_port: Optional[int] = None
+    # Maximum adapters the engine can keep resident on GPU. The base-model
+    # registration advertises this before adapter-specific siblings exist.
+    # Appended rather than grouped with the other capacity fields: inserting
+    # mid-dataclass would silently rebind every existing positional caller.
+    max_gpu_lora_count: Optional[int] = None
 
 
 @dataclass

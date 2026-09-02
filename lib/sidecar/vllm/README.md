@@ -30,14 +30,51 @@ It is a standalone Rust executable and is also compiled into
 - Data-parallel rank routing and KV-event source discovery
 - Capability-gated RL pause/resume, sleep/wake, weight-transfer, and weight-version controls through native gRPC
 - Image, video, and audio URL and data-URI inputs; cache UUIDs remain image-only
+- Dynamic LoRA load, unload, list, discovery, and request selection when vLLM enables LoRA
 
 Audio and video inputs currently require the `connorcarpenter15/vllm:feat/grpc-audio-video-combined` review branch at commit [`236caaec7221842c307e87e05ea3356539be6b20`](https://github.com/connorcarpenter15/vllm/commit/236caaec7221842c307e87e05ea3356539be6b20), tracked by [connorcarpenter15/vllm#32](https://github.com/connorcarpenter15/vllm/pull/32). The fork's current `main` and stock vLLM releases do not contain this support while that PR remains open.
 
-The protocol does not support LoRA, encode workers, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, audio/video cache UUIDs, or EPD. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
+The protocol does not support encode workers, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, audio/video cache UUIDs, or EPD. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
 
 In prefill/decode deployments, both engines independently prepare the original media. Reusing only the prefill-expanded prompt IDs is insufficient because KV transfer does not carry model-specific multimodal position metadata.
 
 The official `Qwen/Qwen3-ASR-1.7B` repository currently needs Rust-frontend-compatible tokenizer and config metadata (`tokenizer.json` and a top-level `vocab_size`). Dynamo's Rust chat renderer also does not yet insert the model-native audio placeholder for `audio_url` content parts; callers can supply those prompt token IDs through `nvext.token_data`. These are model-loading and request-rendering gaps rather than sidecar media-transport limitations.
+
+### LoRA
+
+LoRA management is exposed only when `DYN_LORA_ENABLED` permits it, vLLM advertises
+`supports_lora`, and the server reports `max_loras > 0`.
+
+The sidecar resolves `file://`, `hf://`, and `s3://` LoRA sources through Dynamo's shared
+LoRA downloader. Local `file://` adapters pass through at their canonical absolute path,
+S3 adapters use `DYN_LORA_PATH`, and Hugging Face adapters use an immutable snapshot under
+the configured Hugging Face cache. vLLM and the sidecar must see every resolved directory at
+the same absolute path, so mount all local paths and cache roots identically when they run in
+separate containers. Set vLLM's `VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES` to a platform
+path-list containing those shared roots, for example
+`/shared/local-loras:/shared/dynamo-loras:/shared/huggingface` on Linux.
+
+Three behaviors intentionally differ from the legacy Python vLLM worker, because the gRPC
+control surface does not expose the primitives they need:
+
+- **Adapter IDs are server-assigned and opaque.** The Python worker derives the ID
+  deterministically from the adapter name; `LoadLora` assigns it instead. Dynamo always
+  reports the ID returned by vLLM and never generates or infers one.
+- **Prefill workers load adapters eagerly.** The Python worker can defer loading until a
+  request arrives because it forwards an adapter path in its internal `LoRARequest`.
+  `GenerateRequest` carries only `lora_name`, and vLLM rejects names it has not already
+  loaded, so every worker that may receive the adapter must load it up front.
+- **Hot swap is not supported.** The Python worker removes, reloads, resets the prefix cache,
+  and rolls back atomically. The gRPC API has no atomic replace and no cache-reset operation;
+  emulating it with `UnloadLora` followed by `LoadLora` would open a routing outage and leave
+  rollback unsafe. Loading a name that is already loaded is idempotent and returns the
+  existing ID, and `hot_swap` is reported as `false`.
+
+Custom Python-only LoRA source schemes are not available in the sidecar implementation.
+
+Runnable examples: [`launch/agg_lora.sh`](launch/agg_lora.sh) and
+[`launch/disagg_lora.sh`](launch/disagg_lora.sh). Both require a vLLM build containing
+[vllm-project/vllm#52840](https://github.com/vllm-project/vllm/pull/52840).
 
 ## Run
 
