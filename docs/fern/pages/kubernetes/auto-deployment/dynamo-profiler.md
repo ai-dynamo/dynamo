@@ -173,7 +173,7 @@ spec:
       enabled: true
 ```
 
-Mocker is a testing and experimentation path, not a serving deployment. It is independent of `searchStrategy` — enabling it does not change or override rapid versus thorough, and the profiler still runs the search strategy you set. The one interaction is with the Planner: when you enable mocker **alongside the Planner**, the Planner's pre-deployment sweeping cannot be `none`, because the mocker needs the simulated performance data that sweeping produces. Without a Planner, mocker carries no such requirement. For how the simulated backend works and how it models performance, see [Live Simulation with Mocker](../operations/simulation-with-dynosim/mocker-live-simulation.mdx).
+Mocker is a testing and experimentation path, not a serving deployment. It is independent of `searchStrategy` — enabling it does not change or override rapid versus thorough, and the profiler still runs the search strategy you set. The one interaction is with the Planner: when you enable mocker **alongside the Planner**, the Planner's pre-deployment sweeping cannot be `none`, because the mocker needs the simulated performance data that sweeping produces. Without a Planner, mocker carries no such requirement. The public direct Mocker CLI is removed, but Profiler-managed Mocker deployments continue to use the retained internal worker runtime.
 
 ## Accessing profiling artifacts
 
@@ -211,5 +211,5 @@ The interpolation `.npz` files are the same data the Planner consumes for autosc
 | Full field table and lifecycle | [DGDR Reference](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx) |
 | Copy-ready DGDR manifests | [DGDR Templates](../../recipes/kubernetes-templates/dgdr.mdx) |
 | Runtime autoscaling from profiling data | [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md) |
-| Simulate engines without GPUs | [Live Simulation with Mocker](../operations/simulation-with-dynosim/mocker-live-simulation.mdx) |
+| Simulate engines without GPUs | [Run a DynoSim Simulation](../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx) |
 | Profiling algorithm internals and interpolation schema | [Profiler Guide](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) |

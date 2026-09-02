@@ -824,7 +824,9 @@ def test_chat_only_aggregated_with_test_logits_processor(
 @pytest.mark.trtllm
 @pytest.mark.core
 @pytest.mark.nightly
-@pytest.mark.profiled_vram_gib(3.9)
+# Concurrent TRT-LLM MPI engine startups can stall before endpoint registration;
+# keep this startup-sensitive test in the sequential GPU stage.
+# @pytest.mark.profiled_vram_gib(3.9)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(300)
 @pytest.mark.parametrize("num_system_ports", [1], indirect=True)

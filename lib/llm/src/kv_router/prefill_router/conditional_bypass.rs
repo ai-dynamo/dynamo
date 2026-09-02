@@ -1,57 +1,25 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
-
 use anyhow::Result;
 use dynamo_kv_router::conditional_disagg::ConditionalDisaggDecisionInput;
-use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::selector::WorkerSelector;
-use dynamo_runtime::pipeline::{Context, SingleIn};
+use dynamo_runtime::pipeline::SingleIn;
 
 use super::PrefillRouter;
-use crate::kv_router::to_worker_selection_session_context;
+use crate::kv_router::routing_host::{RoutePlan, RoutePlanSignals, is_cancelled};
 use crate::local_model::runtime_config::ModelRuntimeConfig;
-use crate::protocols::common::{
-    extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
-    llm_backend::PreprocessedRequest,
-    preprocessor::RoutingHints,
-    timing::RequestPhase,
-};
-use crate::session_affinity::AffinityTarget;
+use crate::protocols::common::{llm_backend::PreprocessedRequest, timing::RequestPhase};
 
-/// Conditional-disagg decision: which decode worker to pin the request to,
-/// plus diagnostic counts for logging.
-pub(super) struct ConditionalDisaggDecodeDecision {
-    pub worker: WorkerWithDpRank,
+/// An admitted decode route selected by `RoutingHost` together with the
+/// conditional-disagg policy's diagnostic signals.
+pub(super) struct ConditionalDisaggDecodeDecision<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    pub plan: RoutePlan<Sel>,
     pub overlap_tokens: usize,
     pub net_new_tokens: usize,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum DecodePinResolution {
-    None,
-    Resolved(WorkerWithDpRank),
-    Unresolved { worker_id: u64 },
-}
-
-fn resolve_request_decode_pin(
-    routing: Option<&RoutingHints>,
-    unique_dp_rank_for_worker: impl Fn(u64) -> Option<u32>,
-) -> DecodePinResolution {
-    let Some(routing) = routing else {
-        return DecodePinResolution::None;
-    };
-    let Some(worker_id) = routing.decode_worker_id.or(routing.backend_instance_id) else {
-        return DecodePinResolution::None;
-    };
-    let Some(dp_rank) = routing
-        .dp_rank
-        .or_else(|| unique_dp_rank_for_worker(worker_id))
-    else {
-        return DecodePinResolution::Unresolved { worker_id };
-    };
-    DecodePinResolution::Resolved(WorkerWithDpRank::new(worker_id, dp_rank))
 }
 
 fn decode_gate_allows_bypass(
@@ -66,28 +34,24 @@ impl<Sel> PrefillRouter<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    /// Peek the decode router to see which decode worker would be picked, then
-    /// consult the configured conditional-disagg policy.
-    pub(super) async fn select_decode_worker_for_conditional_disagg(
+    /// Preview one decode route, then admit it only when the topology policy
+    /// chooses local decode.
+    pub(super) async fn plan_conditional_disagg_decode(
         &self,
-        req: &PreprocessedRequest,
+        request: &SingleIn<PreprocessedRequest>,
         request_id: &str,
-        policy_class: Option<String>,
-        session_affinity: Option<&SessionAffinityId>,
-        decode_affinity_target: Option<AffinityTarget>,
-    ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
-        // Conditional disagg peeks the decode router to find the cache-hot
-        // decode worker, so it needs the *decode* set in KV mode. A KV prefill
-        // hop in front of a non-KV decode set cannot make this decision.
+    ) -> Result<Option<ConditionalDisaggDecodeDecision<Sel>>> {
+        // Conditional disagg chooses a cache-hot decode worker, so it only
+        // applies to a KV-routed decode set.
         if !self.decode_router_mode.is_kv_routing() {
             return Ok(None);
         }
 
-        let has_explicit_prefill_pin = req
+        if request
             .routing
             .as_ref()
-            .is_some_and(|routing| routing.prefill_worker_id.is_some());
-        if has_explicit_prefill_pin {
+            .is_some_and(|routing| routing.prefill_worker_id.is_some())
+        {
             tracing::debug!(
                 request_id,
                 "Skipping conditional disagg because request has a preselected prefill worker"
@@ -95,137 +59,38 @@ where
             return Ok(None);
         }
 
-        let Some(decode_router) = self.decode_router.as_ref() else {
+        let Some(decode_host) = self.decode_routing_host.get() else {
             tracing::debug!(
                 request_id,
-                "Skipping conditional disagg because decode router is unavailable"
+                "Skipping conditional disagg because decode RoutingHost is unavailable"
             );
             return Ok(None);
         };
 
-        let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
+        let (routing_token_ids, _) = request.block_mm_routing_info();
         if routing_token_ids.is_empty() {
             return Ok(None);
         }
 
-        let lora_name = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.lora_name.clone());
-        let cache_namespace = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.cache_namespace.clone());
-        let priority_jump = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.priority_jump)
-            .unwrap_or(0.0);
-        let strict_priority = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.strict_priority)
-            .unwrap_or(0);
-        let expected_output_tokens = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.expected_output_tokens);
-        let allowed_worker_ids = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.allowed_worker_ids.clone());
-        let session_context = req
-            .agent_context
-            .as_ref()
-            .map(to_worker_selection_session_context);
-        let request_pinned_worker = match resolve_request_decode_pin(req.routing.as_ref(), |id| {
-            decode_router.unique_dp_rank_for_worker(id)
-        }) {
-            DecodePinResolution::None => None,
-            DecodePinResolution::Resolved(worker) => Some(worker),
-            DecodePinResolution::Unresolved { worker_id } => {
-                tracing::debug!(
-                    request_id,
-                    worker_id,
-                    "Skipping conditional disagg because request has an explicit decode worker with no resolved DP rank"
-                );
-                return Ok(None);
-            }
-        };
-        let pinned_worker = match request_pinned_worker {
-            Some(worker) => Some(worker),
-            None => match decode_affinity_target {
-                Some(target) => {
-                    let Some(dp_rank) = target
-                        .dp_rank
-                        .or_else(|| decode_router.unique_dp_rank_for_worker(target.worker_id))
-                    else {
-                        tracing::debug!(
-                            request_id,
-                            worker_id = target.worker_id,
-                            "Skipping conditional disagg because decode affinity target has no resolved DP rank"
-                        );
-                        return Ok(None);
-                    };
-                    Some(WorkerWithDpRank::new(target.worker_id, dp_rank))
-                }
-                None => None,
-            },
-        };
-        let routing_constraints = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.routing_constraints.clone())
-            .unwrap_or_default();
-
-        let outcome = decode_router
-            .find_best_match_details_without_admission(
-                Some(request_id),
-                routing_token_ids,
-                block_mm_infos,
-                req.router_config_override.as_ref(),
-                false,
-                lora_name,
-                cache_namespace,
-                priority_jump,
-                strict_priority,
-                policy_class.clone(),
-                session_context,
-                expected_output_tokens,
-                pinned_worker,
-                allowed_worker_ids,
-                routing_constraints,
-            )
+        let preview = decode_host
+            .preview_kv_route(request, RequestPhase::Decode)
             .await?;
-        let (worker, overlap_blocks, cached_tokens, potential_decode_blocks, decode_load) =
-            match outcome {
-                crate::kv_router::FindBestMatchAdvisoryOutcome::Routed {
-                    worker,
-                    overlap_blocks,
-                    cached_tokens,
-                    potential_decode_blocks,
-                    selected_worker_load,
-                    ..
-                } => (
-                    worker,
-                    overlap_blocks,
-                    cached_tokens,
-                    potential_decode_blocks,
-                    selected_worker_load,
-                ),
-                crate::kv_router::FindBestMatchAdvisoryOutcome::QueueRejected { .. } => {
-                    return Ok(None);
+        let signals = preview.signals();
+        let mut input =
+            ConditionalDisaggDecisionInput::new(routing_token_ids.len(), signals.cached_tokens);
+        if self.conditional_disagg_policy.needs_prefill_worker_busy() {
+            let busy = match self.peek_prefill_chosen_worker_busy(request).await {
+                Ok(busy) => busy,
+                Err(error) if is_cancelled(&error) => return Err(error),
+                Err(error) => {
+                    tracing::debug!(
+                        request_id,
+                        %error,
+                        "Conditional disagg prefill-load probe failed; treating load as unavailable"
+                    );
+                    None
                 }
             };
-
-        let block_size = decode_router.block_size() as usize;
-        let prompt_tokens = routing_token_ids.len();
-
-        let mut input = ConditionalDisaggDecisionInput::new(prompt_tokens, cached_tokens);
-        if self.conditional_disagg_policy.needs_prefill_worker_busy() {
-            let busy = self
-                .peek_prefill_chosen_worker_busy(req, policy_class, session_affinity)
-                .await;
             tracing::debug!(
                 request_id,
                 prefill_chosen_worker_busy = ?busy,
@@ -234,26 +99,17 @@ where
             input = input.with_prefill_chosen_worker_busy(busy);
         }
         let net_new_tokens = input.net_new_tokens();
-        let overlap_tokens = (overlap_blocks as usize) * block_size;
+        let overlap_tokens =
+            (signals.overlap_blocks as usize) * (decode_host.kv_router().block_size() as usize);
 
         let policy_says_bypass = self
             .conditional_disagg_policy
             .should_bypass_remote_prefill(input)
             .await;
-
-        // This gate is advisory, not a decode-capacity reservation. Normal
-        // decode routing books scheduler state before returning a routing
-        // decision; conditional-disagg is still deciding whether to enter that
-        // decode path, so booking here would double-count unless we added a
-        // reservation handoff to the downstream decode router. Use the selected
-        // worker's projected decode load, including this request, but allow for
-        // concurrent bypass decisions to race the same threshold.
         let decode_gate_configured = self.conditional_disagg_decode_busy_threshold.is_some();
         let decode_busy = if policy_says_bypass {
             self.conditional_disagg_decode_busy_threshold
-                .and_then(|threshold| {
-                    decode_load.decode_load_exceeds(potential_decode_blocks, threshold)
-                })
+                .and_then(|threshold| signals.decode_load_exceeds(threshold))
         } else {
             None
         };
@@ -273,26 +129,24 @@ where
             "bypass_allowed_decode_not_busy"
         };
 
-        tracing::debug!(
+        log_conditional_disagg_decision(
             request_id,
-            worker_id = worker.worker_id,
-            dp_rank = worker.dp_rank,
-            prompt_tokens,
+            signals,
             net_new_tokens,
             overlap_tokens,
-            prefill_chosen_worker_busy = ?input.prefill_chosen_worker_busy,
-            decode_chosen_worker_busy = ?decode_busy,
-            cached_tokens,
-            potential_decode_blocks,
-            decode_busy_threshold = ?self.conditional_disagg_decode_busy_threshold,
+            input,
+            decode_busy,
+            self.conditional_disagg_decode_busy_threshold,
             decode_gate_decision,
             bypass,
-            "Conditional disagg decision"
         );
 
         if bypass {
+            let plan = decode_host
+                .plan_kv_route_from_preview(request, preview)
+                .await?;
             return Ok(Some(ConditionalDisaggDecodeDecision {
-                worker,
+                plan,
                 overlap_tokens,
                 net_new_tokens,
             }));
@@ -303,160 +157,56 @@ where
 
     async fn peek_prefill_chosen_worker_busy(
         &self,
-        req: &PreprocessedRequest,
-        policy_class: Option<String>,
-        session_affinity: Option<&SessionAffinityId>,
-    ) -> Option<bool> {
-        let threshold = self.conditional_disagg_prefill_busy_threshold?;
-        let binding = self.binding.load_full()?;
-        let router = &binding.router;
-        let kv_router = router.kv_router_if_enabled()?;
-
-        let lora_name = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.lora_name.clone());
-        let cache_namespace = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.cache_namespace.clone());
-        let priority_jump = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.priority_jump)
-            .unwrap_or(0.0);
-        let strict_priority = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.strict_priority)
-            .unwrap_or(0);
-        let expected_output_tokens = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.expected_output_tokens);
-        let mut allowed_worker_ids = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.allowed_worker_ids.clone());
-        let routing_constraints = req
-            .routing
-            .as_ref()
-            .and_then(|routing| routing.routing_constraints.clone())
-            .unwrap_or_default();
-        let (routing_token_ids, block_mm_infos) = req.block_mm_routing_info();
-        let mut probe_context: SingleIn<PreprocessedRequest> = Context::new(req.clone());
-        if let Some(session_affinity) = session_affinity {
-            probe_context.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
-        }
-        let affinity_target = router
-            .query_affinity_target(&probe_context, RequestPhase::Prefill)
-            .ok()
-            .flatten();
-        if let Some(AffinityTarget {
-            worker_id,
-            dp_rank: None,
-        }) = affinity_target
-        {
-            match &mut allowed_worker_ids {
-                Some(allowed_workers) => allowed_workers.retain(|id| *id == worker_id),
-                None => allowed_worker_ids = Some(HashSet::from([worker_id])),
-            }
-        }
-        let pinned_worker = affinity_target.and_then(|target| {
-            target
-                .dp_rank
-                .map(|dp_rank| WorkerWithDpRank::new(target.worker_id, dp_rank))
-        });
-
-        let outcome = kv_router
-            .find_best_match_details_without_admission(
-                None,
-                routing_token_ids,
-                block_mm_infos,
-                req.router_config_override.as_ref(),
-                false,
-                lora_name,
-                cache_namespace,
-                priority_jump,
-                strict_priority,
-                policy_class,
-                req.agent_context
-                    .as_ref()
-                    .map(to_worker_selection_session_context),
-                expected_output_tokens,
-                pinned_worker,
-                allowed_worker_ids,
-                routing_constraints,
-            )
-            .await
-            .ok()?;
-
-        match outcome {
-            crate::kv_router::FindBestMatchAdvisoryOutcome::Routed {
-                selected_worker_load,
-                ..
-            } => Some(selected_worker_load.prefill_load_exceeds(threshold)),
-            crate::kv_router::FindBestMatchAdvisoryOutcome::QueueRejected { .. } => Some(true),
-        }
+        request: &SingleIn<PreprocessedRequest>,
+    ) -> Result<Option<bool>> {
+        let Some(threshold) = self.conditional_disagg_prefill_busy_threshold else {
+            return Ok(None);
+        };
+        let Some(binding) = self.binding.load_full() else {
+            return Ok(None);
+        };
+        Ok(Some(
+            binding
+                .router
+                .prefill_worker_busy(request, threshold)
+                .await?,
+        ))
     }
+}
+
+#[expect(clippy::too_many_arguments)]
+fn log_conditional_disagg_decision(
+    request_id: &str,
+    signals: RoutePlanSignals,
+    net_new_tokens: usize,
+    overlap_tokens: usize,
+    input: ConditionalDisaggDecisionInput,
+    decode_busy: Option<bool>,
+    decode_busy_threshold: Option<f64>,
+    decode_gate_decision: &str,
+    bypass: bool,
+) {
+    tracing::debug!(
+        request_id,
+        worker_id = signals.worker.worker_id,
+        dp_rank = signals.worker.dp_rank,
+        prompt_tokens = input.prompt_tokens,
+        net_new_tokens,
+        overlap_tokens,
+        prefill_chosen_worker_busy = ?input.prefill_chosen_worker_busy,
+        decode_chosen_worker_busy = ?decode_busy,
+        cached_tokens = signals.cached_tokens,
+        potential_decode_blocks = signals.potential_decode_blocks,
+        decode_busy_threshold = ?decode_busy_threshold,
+        decode_gate_decision,
+        bypass,
+        "Conditional disagg decision"
+    );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodePinResolution, decode_gate_allows_bypass, resolve_request_decode_pin};
-    use crate::protocols::common::preprocessor::RoutingHints;
-    use dynamo_kv_router::protocols::WorkerWithDpRank;
-
-    #[test]
-    fn request_decode_pin_resolves_explicit_rank() {
-        let routing = RoutingHints {
-            decode_worker_id: Some(7),
-            dp_rank: Some(2),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            resolve_request_decode_pin(Some(&routing), |_| Some(0)),
-            DecodePinResolution::Resolved(WorkerWithDpRank::new(7, 2))
-        );
-    }
-
-    #[test]
-    fn request_decode_pin_resolves_unique_worker_rank() {
-        let routing = RoutingHints {
-            backend_instance_id: Some(7),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            resolve_request_decode_pin(Some(&routing), |worker_id| {
-                assert_eq!(worker_id, 7);
-                Some(3)
-            }),
-            DecodePinResolution::Resolved(WorkerWithDpRank::new(7, 3))
-        );
-    }
-
-    #[test]
-    fn request_decode_pin_keeps_unresolved_explicit_pin_distinct() {
-        let routing = RoutingHints {
-            decode_worker_id: Some(7),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            resolve_request_decode_pin(Some(&routing), |_| None),
-            DecodePinResolution::Unresolved { worker_id: 7 }
-        );
-    }
-
-    #[test]
-    fn request_decode_pin_is_none_without_decode_target() {
-        assert_eq!(
-            resolve_request_decode_pin(Some(&RoutingHints::default()), |_| Some(0)),
-            DecodePinResolution::None
-        );
-    }
+    use super::decode_gate_allows_bypass;
 
     #[test]
     fn decode_gate_calm_and_policy_bypass_allows_bypass() {
