@@ -29,6 +29,14 @@ permissions:
   contents: write
   actions:  write
 
+# A capture holds a scarce runner for tens of minutes, so never run two at once
+# for the same ref. Queue rather than cancel: a half-finished capture wastes the
+# scan it already paid for, and the branch idempotency check makes the second
+# run cheap anyway.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # The matrix is single-entry, which is what makes the job outputs below
   # well-defined: a matrix job's outputs are last-writer-wins across instances.
