@@ -764,11 +764,11 @@ def preprocess_chat_request(
     # Convert tools to SGLang format (done once, shared with parser creation)
     sglang_tools = convert_tools(request.get("tools"))
 
-    # Reject a named tool_choice whose function is missing from tools —
-    # otherwise the chat template would render with zero tools while
-    # guided decoding still constrains the output to that function's
-    # schema, producing confusing model behavior.
+    # Reject a forced tool_choice that cannot be satisfied by the provided tools.
+    # Otherwise the chat template and guided decoding cannot enforce the request.
     tool_choice = request.get("tool_choice", "auto")
+    if tool_choice == "required" and not sglang_tools:
+        raise PreprocessError('tool_choice is "required" but tools is empty')
     if _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
         available_names = {t.function.name for t in (sglang_tools or [])}
