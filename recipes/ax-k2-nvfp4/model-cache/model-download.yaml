@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: axk2-model-download
+  labels:
+    app.kubernetes.io/name: axk2-model-download
+    app.kubernetes.io/part-of: ax-k2-nvfp4
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: axk2-model-download
+        app.kubernetes.io/part-of: ax-k2-nvfp4
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              python3 -m pip install --no-cache-dir huggingface_hub==1.16.4
+              hf download skt/A.X-K2-NVFP4 \
+                --revision 9e2e804e80f8d1b3afba5d7938173cec1ed46b49
+          env:
+            - name: HF_HOME
+              value: /model-cache
+            - name: HF_XET_HIGH_PERFORMANCE
+              value: "1"
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+            limits:
+              cpu: "16"
+              memory: 32Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-cache
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: model-cache
