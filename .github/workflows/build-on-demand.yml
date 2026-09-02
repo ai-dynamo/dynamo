@@ -72,7 +72,7 @@ jobs:
       framework: sglang
       target: runtime
       cuda_version: '["13.0"]'
-      platform: 'linux/amd64,linux/arm64'
+      platform: 'linux/amd64'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
     secrets: inherit
@@ -108,6 +108,7 @@ jobs:
     with:
       target_tag_plain: ${{ needs.sglang-build.outputs.target_tag_plain }}
       cuda_version: '["13.0"]'
+      override_arch: amd64 # This branch builds the Qwen Flash Next SGLang runtime only for AWS H100 amd64 tests.
       copy_timeout_minutes: 20
     secrets: inherit
 
