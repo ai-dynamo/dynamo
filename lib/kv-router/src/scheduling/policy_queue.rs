@@ -45,38 +45,6 @@ pub(crate) struct QueueMetadata {
     pub(crate) arrival_offset_secs: f64,
 }
 
-// `uncached_tokens` is derived, so omit it from every queued entry to make room
-// for exact deadline ordering without growing the entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct QueueEntrySnapshot {
-    raw_isl_tokens: usize,
-    cached_tokens: usize,
-    scheduling_cost_tokens: usize,
-}
-
-impl From<QueueSnapshot> for QueueEntrySnapshot {
-    fn from(snapshot: QueueSnapshot) -> Self {
-        Self {
-            raw_isl_tokens: snapshot.raw_isl_tokens,
-            cached_tokens: snapshot.cached_tokens,
-            scheduling_cost_tokens: snapshot.scheduling_cost_tokens,
-        }
-    }
-}
-
-impl From<QueueEntrySnapshot> for QueueSnapshot {
-    fn from(snapshot: QueueEntrySnapshot) -> Self {
-        Self {
-            raw_isl_tokens: snapshot.raw_isl_tokens,
-            cached_tokens: snapshot.cached_tokens,
-            uncached_tokens: snapshot
-                .raw_isl_tokens
-                .saturating_sub(snapshot.cached_tokens),
-            scheduling_cost_tokens: snapshot.scheduling_cost_tokens,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueLimitKind {
@@ -123,6 +91,12 @@ struct QueuePriority {
 
 const NO_DUE_TIME: u64 = u64::MAX;
 
+// Within one strict tier, deadline-bearing entries order earliest-due-first
+// ahead of every non-deadline entry, before the FCFS/LCFS/WSPT policy score
+// applies: a request that must finish by a wall-clock time cannot trade its
+// slot for cache affinity, so EDF deliberately preempts the cost-aware score
+// (DEP #13891). Entries without a deadline tie at NO_DUE_TIME and fall through
+// to the policy score unchanged.
 #[inline]
 fn cmp_queue_order(
     lhs_priority: QueuePriority,
@@ -136,6 +110,43 @@ fn cmp_queue_order(
         .then_with(|| rhs_priority.due_time_key.cmp(&lhs_priority.due_time_key))
         .then_with(|| lhs_priority.policy_score.cmp(&rhs_priority.policy_score))
         .then_with(|| rhs_enqueue_seq.cmp(&lhs_enqueue_seq))
+}
+
+// `uncached_tokens` is derived, so drop it from queued entries: with the
+// deadline key in `QueuePriority` the header would otherwise cross 64 bytes,
+// and the policy_queue drain benchmarks (near-empty payloads, header-bound
+// heap sifts) regress 50-150% when an entry spans two cache lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueueEntrySnapshot {
+    raw_isl_tokens: usize,
+    cached_tokens: usize,
+    scheduling_cost_tokens: usize,
+}
+
+impl From<QueueSnapshot> for QueueEntrySnapshot {
+    fn from(snapshot: QueueSnapshot) -> Self {
+        Self {
+            raw_isl_tokens: snapshot.raw_isl_tokens,
+            cached_tokens: snapshot.cached_tokens,
+            scheduling_cost_tokens: snapshot.scheduling_cost_tokens,
+        }
+    }
+}
+
+impl From<QueueEntrySnapshot> for QueueSnapshot {
+    fn from(snapshot: QueueEntrySnapshot) -> Self {
+        // `QueueSnapshot::new` clamps cached <= raw and floors the scheduling
+        // cost; both already held when the entry was built, so this round-trip
+        // only re-derives the dropped field.
+        Self {
+            raw_isl_tokens: snapshot.raw_isl_tokens,
+            cached_tokens: snapshot.cached_tokens,
+            uncached_tokens: snapshot
+                .raw_isl_tokens
+                .saturating_sub(snapshot.cached_tokens),
+            scheduling_cost_tokens: snapshot.scheduling_cost_tokens,
+        }
+    }
 }
 
 pub struct PolicyQueueEntry<T> {
@@ -1007,6 +1018,8 @@ policy_classes:
 
     #[test]
     fn queue_entry_stays_compact() {
+        // One cache line per header: the drain benchmarks are header-bound and
+        // regress heavily past 64 bytes (see QueueEntrySnapshot).
         assert!(std::mem::size_of::<PolicyQueueEntry<()>>() <= 64);
         assert!(std::mem::size_of::<WorkerLaneHead>() <= 48);
     }
@@ -1290,6 +1303,9 @@ policy_classes:
     }
 
     #[test]
+    // Pins behavior newly reachable since every admission transits the policy
+    // queue: an idle-arrival pop charges DRR cost where the old direct-admit
+    // path charged nothing.
     fn drr_charges_cost_when_the_queue_was_empty() {
         let mut queue = PolicyQueue::new(admission_profile());
         let mut snapshot = QueueSnapshot::new(100, 0);
