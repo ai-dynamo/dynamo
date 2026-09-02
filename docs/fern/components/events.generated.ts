@@ -22,7 +22,7 @@ export interface DynamoEvent {
 }
 
 /** Generation date in Pacific, YYYY-MM-DD. The calendar grid treats this as "today". */
-export const GENERATED_ON = "2026-09-01";
+export const GENERATED_ON = "2026-09-02";
 
 export const UPCOMING_EVENTS: DynamoEvent[] = [
   {

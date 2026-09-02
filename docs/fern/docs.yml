@@ -215,7 +215,7 @@ redirects:
     destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-readableoperation"
   - source: "/dynamo/dev/reference/nixl-connect/writable-operation"
     destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-writableoperation"
-  # AI Simulate's experimental Spica package was renamed to Sweeper on dev only.
+  # AISimulate's experimental Spica package was renamed to Sweeper on dev only.
   - source: "/dynamo/dev/knowledge-base/modular-components/ai-simulate/spica"
     destination: "/dynamo/dev/knowledge-base/concepts/simulation/ai-simulate/sweeper/overview"
   - source: "/dynamo/dev/knowledge-base/modular-components/ai-simulate/spica/overview"

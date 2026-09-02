@@ -40,6 +40,14 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+try:
+    from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang.srt.utils.server_args_config_parser":
+        raise
+    # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
+    from sglang.srt.server_args_config_parser import ConfigArgumentMerger
+
 
 @lru_cache(maxsize=1)
 def _warn_require_reasoning_unsupported() -> None:
@@ -210,8 +218,10 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
 
 
 __all__ = [
+    "ConfigArgumentMerger",
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
     "override_server_args",
     "require_reasoning_kwargs",
+    "resolved_server_args",
 ]

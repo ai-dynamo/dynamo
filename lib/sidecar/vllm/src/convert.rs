@@ -437,7 +437,7 @@ fn structured_output(
     };
     if guided.backend.is_some() || guided.whitespace_pattern.is_some() {
         return Err(client::invalid_argument(
-            "guided decoding backend and whitespace_pattern are not supported by vLLM gRPC v0.25.1",
+            "guided decoding backend and whitespace_pattern are not supported by vLLM gRPC",
         ));
     }
 
@@ -492,7 +492,7 @@ fn build_kv_parameters(
                 "bypass_prefix_cache" | "skip_reading_prefix_cache" | "kv_transfer_params"
             ) {
                 return Err(client::invalid_argument(format!(
-                    "extra_args.{key} is not supported by vLLM gRPC v0.25.1"
+                    "extra_args.{key} is not supported by vLLM gRPC"
                 )));
             }
         }
@@ -614,7 +614,7 @@ fn validate_request(
     }
     if request.prompt_embeds.is_some() {
         return Err(client::invalid_argument(
-            "prompt embeddings are not supported by vLLM gRPC v0.25.1",
+            "prompt embeddings are not supported by vLLM gRPC",
         ));
     }
     if request.mm_processor_kwargs.is_some() {
@@ -654,7 +654,7 @@ fn validate_request(
         .is_some_and(|name| !name.is_empty())
     {
         return Err(client::invalid_argument(
-            "LoRA request selection is not supported by vLLM gRPC v0.25.1",
+            "LoRA request selection is not supported by vLLM gRPC",
         ));
     }
     if request.bootstrap_info.is_some() {
@@ -669,17 +669,17 @@ fn validate_request(
         .is_some_and(|ids| !ids.is_empty())
     {
         return Err(client::invalid_argument(
-            "visible stop token IDs are not supported by vLLM gRPC v0.25.1",
+            "visible stop token IDs are not supported by vLLM gRPC",
         ));
     }
     if request.stop_conditions.max_thinking_tokens.is_some() {
         return Err(client::invalid_argument(
-            "max_thinking_tokens is not supported by vLLM gRPC v0.25.1",
+            "max_thinking_tokens is not supported by vLLM gRPC",
         ));
     }
     if request.output_options.skip_special_tokens == Some(false) {
         return Err(client::invalid_argument(
-            "skip_special_tokens=false is not supported by vLLM gRPC v0.25.1",
+            "skip_special_tokens=false is not supported by vLLM gRPC",
         ));
     }
     let sampling = &request.sampling_options;

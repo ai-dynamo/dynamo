@@ -343,7 +343,7 @@ navigation:
                   - page: Benchmark Planner Decisions
                     slug: planner-replay
                     path: pages/kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx
-                  - section: AI Simulate (Experimental)
+                  - section: AISimulate (Experimental)
                     slug: ai-simulate
                     collapsed: true
                     contents:
