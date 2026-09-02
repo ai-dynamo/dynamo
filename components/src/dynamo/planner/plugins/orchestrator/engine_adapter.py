@@ -1048,8 +1048,6 @@ class OrchestratorEngineAdapter:
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)
 
     def _gpu_budget_reconcile_needed(self, worker_counts: WorkerCounts) -> bool:
-        """Return whether stable ready counts are outside the active GPU band."""
-
         min_gpus = self._config.min_gpu_budget
         max_gpus = self._config.max_gpu_budget
         if min_gpus < 0 and max_gpus < 0:
@@ -1057,16 +1055,16 @@ class OrchestratorEngineAdapter:
 
         mode = self._config.mode
         if mode == "prefill":
-            components = (
+            components = [
                 (worker_counts.ready_num_prefill, self._capabilities.prefill),
-            )
+            ]
         elif mode in ("decode", "agg"):
-            components = ((worker_counts.ready_num_decode, self._capabilities.decode),)
+            components = [(worker_counts.ready_num_decode, self._capabilities.decode)]
         elif mode == "disagg":
-            components = (
+            components = [
                 (worker_counts.ready_num_prefill, self._capabilities.prefill),
                 (worker_counts.ready_num_decode, self._capabilities.decode),
-            )
+            ]
         else:
             return False
 
