@@ -30,6 +30,7 @@ from sglang.srt.parser.reasoning_parser import ReasoningParser
 
 from dynamo.common.utils.engine_response import trailing_stop_prefix_len
 from dynamo.common.utils.guided_json import admits_only_empty_object
+from dynamo.llm.exceptions import InvalidArgument
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import PreprocessError, legacy_guided_decoding, random_call_id
@@ -747,6 +748,17 @@ def preprocess_chat_request(
     """
     request = _with_thinking_template_kwargs(request, default_thinking_mode)
     legacy_guidance = legacy_guided_decoding(request)
+    # A forced tool choice constrains the same token stream a legacy guided_*
+    # constraint would, so only one of them can be honored. Reject rather than
+    # drop one silently, matching prepost.py and preprocessor/tool_choice.rs.
+    tool_choice = request.get("tool_choice")
+    if legacy_guidance and (
+        tool_choice == "required" or _is_named_tool_choice(tool_choice)
+    ):
+        raise InvalidArgument(
+            "tool_choice forces a tool call and cannot be combined with an "
+            "explicit guided_* constraint."
+        )
     messages = _materialize_messages(request.get("messages", []))
 
     # Generation mode is independent of whether the client wants reasoning
@@ -845,8 +857,6 @@ def preprocess_chat_request(
     # message the model returns to the user, not to tool calls, so the tool
     # constraint is the one that must survive.
     #
-    # Explicit legacy constraints take precedence over automatic guidance, matching
-    # the vLLM processor's request precedence.
     if (
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None
@@ -854,6 +864,9 @@ def preprocess_chat_request(
         logger.warning(
             "Tool-call guided decoding will be ignored because of response_format already exists."
         )
+    # Explicit legacy constraints outrank automatic guidance, matching the vLLM
+    # processor. The forced-tool-choice collision is rejected above rather than
+    # resolved here, so anything reaching this point is safe to order.
     guided_decoding = (
         legacy_guidance or response_format_guided_decoding or tool_call_guided_decoding
     )

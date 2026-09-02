@@ -1874,6 +1874,45 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
             )
 
     @pytest.mark.parametrize(
+        "tool_choice",
+        ["required", {"type": "function", "function": {"name": "get_weather"}}],
+    )
+    def test_legacy_guided_constraint_conflicts_with_forced_tool_choice(
+        self, tokenizer, tool_choice
+    ):
+        """A forced tool choice and a legacy guided_* constrain the same tokens.
+
+        Honoring the guided_* constraint would drop the tool constraint while the
+        forced-tool response parser stays selected, so the model's output could not
+        satisfy the parser. prepost.py and preprocessor/tool_choice.rs both reject
+        this combination; SGLang must agree.
+        """
+        with pytest.raises(
+            InvalidArgument,
+            match="tool_choice forces a tool call",
+        ):
+            preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "parameters": {"type": "object", "properties": {}},
+                            },
+                        }
+                    ],
+                    "tool_choice": tool_choice,
+                    "guided_regex": "foo",
+                },
+                tokenizer=tokenizer,
+                tool_call_parser_name=None,
+                reasoning_parser_name=None,
+            )
+
+    @pytest.mark.parametrize(
         ("payload", "expected"),
         [
             (
