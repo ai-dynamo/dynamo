@@ -18,13 +18,6 @@ SNAPSHOT_CONTROL_DIR = "/snapshot-control"
 SNAPSHOT_RESTORE_CONTEXT_FILE = "restore-context.json"
 SNAPSHOT_RESTORE_STANDBY_ENV = "SNAPSHOT_RESTORE_STANDBY"
 
-# Upper bound on the post-CRIU resume path (communicator restore, engine
-# wake-up, generation resume). The backend engine monitor is constructed only
-# after this path returns, so a deadline is required to make a stuck resume
-# fail the worker instead of serving 503 indefinitely.
-SNAPSHOT_RESUME_TIMEOUT_ENV = "DYN_SNAPSHOT_RESUME_TIMEOUT_SEC"
-SNAPSHOT_RESUME_TIMEOUT_SEC = 600.0
-
 # Must match the public file-name constants in
 # github.com/ai-dynamo/snapshot/api/podcontract.
 SNAPSHOT_COMPLETE_FILE = "snapshot-complete"

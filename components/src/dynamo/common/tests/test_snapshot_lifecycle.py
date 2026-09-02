@@ -12,15 +12,8 @@ from dynamo.common.snapshot.constants import (
     READY_FOR_SNAPSHOT_FILE,
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_CONTROL_DIR_ENV,
-    SNAPSHOT_RESUME_TIMEOUT_ENV,
-    SNAPSHOT_RESUME_TIMEOUT_SEC,
 )
-from dynamo.common.snapshot.lifecycle import (
-    EngineSnapshotController,
-    SnapshotConfig,
-    _snapshot_resume_timeout_sec,
-    elect_and_wake,
-)
+from dynamo.common.snapshot.lifecycle import SnapshotConfig, elect_and_wake
 
 pytestmark = [pytest.mark.unit, pytest.mark.gpu_0, pytest.mark.pre_merge]
 
@@ -111,54 +104,6 @@ async def test_elect_and_wake_resumes_without_lock(monkeypatch):
 
     assert lock is None
     assert controller.resumed is True
-
-
-async def test_snapshot_resume_is_bounded(monkeypatch, tmp_path):
-    class BlockingController(_PauseController):
-        def __init__(self) -> None:
-            super().__init__()
-            self.cancelled = False
-
-        async def resume(self) -> None:
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                self.cancelled = True
-                raise
-
-    monkeypatch.setenv(SNAPSHOT_RESUME_TIMEOUT_ENV, "0.01")
-    controller = BlockingController()
-    snapshot_controller = EngineSnapshotController(
-        engine=object(),
-        pause_controller=controller,
-        snapshot_config=SnapshotConfig(str(tmp_path)),
-    )
-
-    with pytest.raises(asyncio.TimeoutError, match="engine resume exceeded 0.01s"):
-        await snapshot_controller.resume_after_restore()
-
-    assert controller.cancelled is True
-
-
-async def test_failover_resume_does_not_use_snapshot_timeout(monkeypatch):
-    class SlowController(_PauseController):
-        async def resume(self) -> None:
-            await asyncio.sleep(0.02)
-            self.resumed = True
-
-    monkeypatch.setenv(SNAPSHOT_RESUME_TIMEOUT_ENV, "0.001")
-    controller = SlowController()
-
-    await elect_and_wake(controller)
-
-    assert controller.resumed is True
-
-
-@pytest.mark.parametrize("value", ["invalid", "nan", "inf", "-1"])
-def test_invalid_snapshot_resume_timeout_uses_default(monkeypatch, value):
-    monkeypatch.setenv(SNAPSHOT_RESUME_TIMEOUT_ENV, value)
-
-    assert _snapshot_resume_timeout_sec() == SNAPSHOT_RESUME_TIMEOUT_SEC
 
 
 def _patch_flock_lock(monkeypatch, fake_lock):

@@ -10,6 +10,7 @@ import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
@@ -78,7 +79,9 @@ async def worker(argv: list[str] | None = None):
 
     # Keep the flock alive for process lifetime. Linux releases it on exit.
     if snapshot_controller is not None:
-        _failover_lock = await snapshot_controller.resume_after_restore(runtime)
+        _failover_lock = await elect_and_wake(
+            snapshot_controller.pause_controller, runtime
+        )
 
     run_deferred_handlers = install_graceful_shutdown(
         loop, runtime, shutdown_endpoints, shutdown_event
