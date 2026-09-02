@@ -84,7 +84,8 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	validation := &dynamoComponentDeploymentValidation{
 		sharedValidation: sharedValidation{
 			ctx:                                ctx,
-			runtimeVersionSource:               runtimeVersionSourceDisabled,
+			runtimeVersionSource:               runtimeVersionSource,
+			ratchetRuntimeVersion:              true,
 			allowMissingRuntimeVersionOverride: true,
 		},
 	}
@@ -96,9 +97,8 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	}
 	allErrs = append(allErrs, validation.validateDynamoComponentDeploymentV1alpha1(newAlpha)...)
 
-	// Re-enable source-version runtime validation for the old/new ratchet.
-	validation.runtimeVersionSource = runtimeVersionSource
-	if validation.validatesRuntimeVersionFor(runtimeVersionSourceV1Alpha1) {
+	// Run the source-version old/new ratchet after the stateless traversal.
+	if validation.hasRuntimeVersionSource(runtimeVersionSourceV1Alpha1) {
 		oldAlpha, err := alphaDynamoComponentDeploymentForValidation(oldDCD)
 		if err != nil {
 			return nil, fmt.Errorf("cannot validate old preserved v1alpha1 DynamoComponentDeployment fields: %w", err)

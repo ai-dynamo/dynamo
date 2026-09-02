@@ -33,7 +33,7 @@ release containing standalone mode has not been published yet, build the EPP fro
 revision and push it to a registry that every cluster node can pull from:
 
 ```bash
-export EPP_IMAGE=registry.example.com/your-project/dynamo-rust-epp:standalone
+export EPP_IMAGE=registry.example.com/your-project/dynamo-epp:standalone
 
 make -C ../.. IMAGE_TAG="$EPP_IMAGE" image-push
 ```

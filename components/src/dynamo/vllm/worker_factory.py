@@ -22,6 +22,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from dynamo import prometheus_names
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
+from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -1075,37 +1076,20 @@ class WorkerFactory:
         failover_metrics=None,
     ) -> bool:
         # Shadow mode: sleep → probe → block on lock → wake. True only for a real
-        # (contended) failover, not the initial bootup.
+        # (contended) failover, not the initial bootup. The election itself is
+        # shared with the snapshot restore path, which arrives already paused;
+        # a cold-start engine is awake, so it sleeps here first.
         if config.gms_shadow_mode is not True:
             return False
 
         await handler._pause_controller.pause(1)
-        if failover_metrics is not None:
-            failover_metrics.set_state("standby")
-
-        runtime.set_health_status(True)
-        logger.info(
-            "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+        lock = await elect_and_wake(
+            handler._pause_controller,
+            runtime,
+            lock_path=os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock"),
+            failover_metrics=failover_metrics,
         )
-
-        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
-
-        lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
-        engine_id = os.environ.get("ENGINE_ID", "0")
-        lock = FlockFailoverLock(lock_path)
-        await lock.acquire(engine_id=f"engine-{engine_id}")
-        was_failover = lock.was_contended
-        logger.info("[Shadow] Lock acquired, waking engine")
-        if failover_metrics is not None:
-            failover_metrics.set_state("waking")
-            if was_failover:
-                # Only a contended acquire is a failover; a bootup is not a switch.
-                failover_metrics.record_switch_attempt()
-
-        await handler._pause_controller.resume()
-        handler._pause_controller.mark_resumed()
-        logger.info("[Shadow] Engine awake, registering with discovery")
-        return was_failover
+        return lock is not None and lock.was_contended
 
     async def _create_decode_worker(
         self,
@@ -1318,9 +1302,11 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
-        was_failover = await self._maybe_wait_for_failover_lock(
-            handler, runtime, config, failover_metrics
-        )
+        was_failover = False
+        if snapshot_engine is None:
+            was_failover = await self._maybe_wait_for_failover_lock(
+                handler, runtime, config, failover_metrics
+            )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -1594,9 +1580,11 @@ class WorkerFactory:
             lora_enabled=config.engine_args.enable_lora,
         )
 
-        was_failover = await self._maybe_wait_for_failover_lock(
-            handler, runtime, config, failover_metrics
-        )
+        was_failover = False
+        if snapshot_engine is None:
+            was_failover = await self._maybe_wait_for_failover_lock(
+                handler, runtime, config, failover_metrics
+            )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")

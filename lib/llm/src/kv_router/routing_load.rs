@@ -1,13 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use dashmap::DashMap;
 use dynamo_kv_router::protocols::WorkerWithDpRank;
 use dynamo_kv_router::sequences::SchedulerLoadSnapshot;
-use tokio::sync::{Notify, mpsc};
+use parking_lot::Mutex;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::component::Client;
@@ -82,29 +83,91 @@ impl SchedulerLoadCommand {
     }
 }
 
+struct PendingSchedulerLoads {
+    capacity: usize,
+    queued: VecDeque<SchedulerLoadCommand>,
+    overflow_order: VecDeque<WorkerWithDpRank>,
+    overflow: HashMap<WorkerWithDpRank, SchedulerLoadSnapshot>,
+}
+
+impl PendingSchedulerLoads {
+    fn new(capacity: usize) -> Self {
+        assert!(
+            capacity > 0,
+            "scheduler-load channel capacity must be positive"
+        );
+        Self {
+            capacity,
+            queued: VecDeque::with_capacity(capacity),
+            overflow_order: VecDeque::new(),
+            overflow: HashMap::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queued.is_empty() && self.overflow.is_empty()
+    }
+
+    fn enqueue(&mut self, command: SchedulerLoadCommand) -> bool {
+        if self.overflow.is_empty() && self.queued.len() < self.capacity {
+            self.queued.push_back(command);
+            return false;
+        }
+
+        for snapshot in command.into_snapshots() {
+            let worker = snapshot.worker;
+            if !self.overflow.contains_key(&worker) {
+                self.overflow_order.push_back(worker);
+            }
+            self.overflow.insert(worker, snapshot);
+        }
+        true
+    }
+
+    fn pop(&mut self) -> Option<Vec<SchedulerLoadSnapshot>> {
+        if let Some(command) = self.queued.pop_front() {
+            return Some(command.into_snapshots());
+        }
+        if self.overflow.is_empty() {
+            return None;
+        }
+
+        Some(
+            self.overflow_order
+                .drain(..)
+                .map(|worker| {
+                    self.overflow
+                        .remove(&worker)
+                        .expect("scheduler-load overflow order and values must stay synchronized")
+                })
+                .collect(),
+        )
+    }
+}
+
 struct SchedulerLoadShared {
-    overflow: DashMap<WorkerWithDpRank, SchedulerLoadSnapshot>,
-    overflow_wake: Notify,
+    pending: Mutex<PendingSchedulerLoads>,
     coalesced_commands: AtomicU64,
     unexpected_closed: AtomicU64,
 }
 
 impl SchedulerLoadShared {
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
-            overflow: DashMap::new(),
-            overflow_wake: Notify::new(),
+            pending: Mutex::new(PendingSchedulerLoads::new(capacity)),
             coalesced_commands: AtomicU64::new(0),
             unexpected_closed: AtomicU64::new(0),
         }
     }
 
-    fn coalesce(&self, command: SchedulerLoadCommand) {
-        for snapshot in command.into_snapshots() {
-            self.overflow.insert(snapshot.worker, snapshot);
-        }
-        self.overflow_wake.notify_one();
+    fn enqueue(&self, command: SchedulerLoadCommand) -> (bool, bool) {
+        let mut pending = self.pending.lock();
+        let should_wake = pending.is_empty();
+        let coalesced = pending.enqueue(command);
+        (should_wake, coalesced)
+    }
 
+    fn record_coalesced(&self) {
         let count = self.coalesced_commands.fetch_add(1, Ordering::Relaxed) + 1;
         if count.is_power_of_two() {
             tracing::warn!(
@@ -124,24 +187,15 @@ impl SchedulerLoadShared {
         }
     }
 
-    fn drain_overflow(&self, snapshots: &mut Vec<SchedulerLoadSnapshot>) {
-        let workers = self
-            .overflow
-            .iter()
-            .map(|entry| *entry.key())
-            .collect::<Vec<_>>();
-        for worker in workers {
-            if let Some((_, snapshot)) = self.overflow.remove(&worker) {
-                snapshots.push(snapshot);
-            }
-        }
+    fn pop(&self) -> Option<Vec<SchedulerLoadSnapshot>> {
+        self.pending.lock().pop()
     }
 }
 
 /// Nonblocking scheduler-load publication handle owned by one routing load context.
 #[derive(Clone)]
 pub struct SchedulerLoadSender {
-    tx: Option<mpsc::Sender<SchedulerLoadCommand>>,
+    wake_tx: Option<mpsc::Sender<()>>,
     shared: Arc<SchedulerLoadShared>,
     source: RouterLoadSource,
     cancellation_token: CancellationToken,
@@ -153,8 +207,8 @@ impl SchedulerLoadSender {
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
-            tx: None,
-            shared: Arc::new(SchedulerLoadShared::new()),
+            wake_tx: None,
+            shared: Arc::new(SchedulerLoadShared::new(SCHEDULER_LOAD_CHANNEL_CAPACITY)),
             source,
             cancellation_token,
         }
@@ -176,17 +230,31 @@ impl SchedulerLoadSender {
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.tx.is_some()
+        self.wake_tx.is_some()
     }
 
     fn try_publish(&self, command: SchedulerLoadCommand) {
-        let Some(tx) = &self.tx else {
+        let Some(wake_tx) = &self.wake_tx else {
             return;
         };
-        match tx.try_send(command) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(command)) => self.shared.coalesce(command),
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+        if wake_tx.is_closed() {
+            if !self.cancellation_token.is_cancelled() {
+                self.shared.record_unexpected_closed();
+            }
+            return;
+        }
+
+        let (should_wake, coalesced) = self.shared.enqueue(command);
+        if coalesced {
+            self.shared.record_coalesced();
+        }
+        if !should_wake {
+            return;
+        }
+
+        match wake_tx.try_send(()) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => {}
+            Err(mpsc::error::TrySendError::Closed(())) => {
                 if !self.cancellation_token.is_cancelled() {
                     self.shared.record_unexpected_closed();
                 }
@@ -196,27 +264,17 @@ impl SchedulerLoadSender {
 }
 
 pub(crate) struct SchedulerLoadReceiver {
-    rx: mpsc::Receiver<SchedulerLoadCommand>,
+    wake_rx: mpsc::Receiver<()>,
     shared: Arc<SchedulerLoadShared>,
 }
 
 impl SchedulerLoadReceiver {
     pub(crate) async fn recv(&mut self) -> Option<Vec<SchedulerLoadSnapshot>> {
         loop {
-            tokio::select! {
-                command = self.rx.recv() => {
-                    let mut snapshots = command?.into_snapshots();
-                    self.shared.drain_overflow(&mut snapshots);
-                    return Some(snapshots);
-                }
-                _ = self.shared.overflow_wake.notified() => {
-                    let mut snapshots = Vec::new();
-                    self.shared.drain_overflow(&mut snapshots);
-                    if !snapshots.is_empty() {
-                        return Some(snapshots);
-                    }
-                }
+            if let Some(snapshots) = self.shared.pop() {
+                return Some(snapshots);
             }
+            self.wake_rx.recv().await?;
         }
     }
 }
@@ -237,16 +295,16 @@ fn scheduler_load_channel_with_capacity(
     cancellation_token: CancellationToken,
     capacity: usize,
 ) -> (SchedulerLoadSender, SchedulerLoadReceiver) {
-    let (tx, rx) = mpsc::channel(capacity);
-    let shared = Arc::new(SchedulerLoadShared::new());
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let shared = Arc::new(SchedulerLoadShared::new(capacity));
     (
         SchedulerLoadSender {
-            tx: Some(tx),
+            wake_tx: Some(wake_tx),
             shared: shared.clone(),
             source,
             cancellation_token,
         },
-        SchedulerLoadReceiver { rx, shared },
+        SchedulerLoadReceiver { wake_rx, shared },
     )
 }
 
@@ -426,6 +484,32 @@ mod tests {
 
         sender.publish(snapshot(1, 0));
         assert_eq!(receiver.recv().await.unwrap(), vec![snapshot(1, 0)]);
+    }
+
+    #[tokio::test]
+    async fn saturated_channel_preserves_queued_updates_before_coalesced_updates() {
+        let token = CancellationToken::new();
+        let (sender, mut receiver) =
+            scheduler_load_channel_with_capacity(RouterLoadSource::Decode, token, 2);
+
+        sender.publish(snapshot(2, 20));
+        sender.publish(snapshot(1, 10));
+        sender.publish(snapshot(1, 30));
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let mut received = Vec::new();
+            while received.len() < 3 {
+                received.extend(receiver.recv().await.unwrap());
+            }
+            received
+        })
+        .await
+        .expect("queued and coalesced scheduler snapshots were not received");
+
+        assert_eq!(
+            received,
+            vec![snapshot(2, 20), snapshot(1, 10), snapshot(1, 30)]
+        );
     }
 
     #[tokio::test]

@@ -518,6 +518,15 @@ impl Client {
         self.instances().into_iter().map(|ep| ep.id()).collect()
     }
 
+    /// Whether the latest discovery snapshot contains this instance, including inhibited workers.
+    pub fn is_instance_discovered(&self, instance_id: u64) -> bool {
+        self.routing_instances
+            .snapshot()
+            .discovered_ids()
+            .binary_search(&instance_id)
+            .is_ok()
+    }
+
     pub fn instance_ids_avail(&self) -> Vec<u64> {
         self.routing_instances.routable_ids()
     }

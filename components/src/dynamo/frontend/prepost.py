@@ -1514,10 +1514,8 @@ class StreamingPostProcessor:
                 if len(delta) > 1:
                     choice = self._build_choice(output, delta)
             elif delta_message.tool_calls:
-                if output.finish_reason and self.in_progress_tool_calls:
-                    # Tool calls and finish_reason arrived in the same chunk.
-                    # Emit now — there will be no subsequent process_output call
-                    # to drain the buffer.
+                if self.in_progress_tool_calls:
+                    # Emit each parser delta instead of waiting for a quiet chunk.
                     choice = self._emit_tool_calls_choice(output)
             elif self.in_progress_tool_calls:
                 choice = self._emit_tool_calls_choice(output)
