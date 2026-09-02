@@ -496,7 +496,6 @@ mod tests {
             "unloading one adapter must leave /v1/responses serving the base model"
         );
 
-        // The last chat-shaped model going away must still retract the endpoints.
         manager.remove_model("base-model");
         update_http_endpoints(service.clone(), ModelUpdate::Removed(base_card)).unwrap();
         assert!(

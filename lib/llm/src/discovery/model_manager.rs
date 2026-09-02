@@ -3787,9 +3787,7 @@ mod tests {
         );
     }
 
-    /// Stand-in engine for registration-only tests; never invoked. One blanket
-    /// implementation covers every single-in/many-out engine alias, so occupying one more
-    /// model type below costs a registration call rather than another engine impl.
+    /// Stand-in engine for registration-only tests; never invoked.
     struct UncalledEngine;
 
     #[async_trait::async_trait]
@@ -3847,19 +3845,10 @@ mod tests {
         true
     }
 
-    /// `has_models_of_type` is a hand-maintained chain over the per-type model lists, and
-    /// `ModelType` is a `bitflags!` type rather than an enum, so a unit left out of that
-    /// chain draws no exhaustiveness error. It is instead reported as never occupied, and
-    /// the HTTP frontend then retracts that unit's endpoint on the first removal carrying
-    /// the bit even though models are still registered — the same 404 class of bug the
-    /// catalog-derived retraction was added to fix.
-    ///
-    /// This walks every `ModelType` unit that maps onto at least one `EndpointType`,
-    /// registers a model that occupies it, and requires `has_models_of_type` to say so. A
-    /// future endpoint-backed unit fails here either because there is no way to register a
-    /// model of it or because the chain does not answer it. `register_model_occupying` is
-    /// itself a hand-maintained list, but an omission there is loud where an omission in
-    /// the production chain is silent.
+    /// `ModelType` is a `bitflags!` type, so a unit left out of the hand-maintained
+    /// `has_models_of_type` chain draws no exhaustiveness error and is silently reported as
+    /// never occupied. Every unit that maps onto an `EndpointType` must therefore be
+    /// registrable here and answered as occupied once a model of it exists.
     #[test]
     fn has_models_of_type_answers_every_endpoint_backed_model_type() {
         for unit in ModelType::all().units() {
