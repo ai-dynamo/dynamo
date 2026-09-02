@@ -302,7 +302,7 @@ python -m dynamo.frontend \
 In the second terminal, start two aggregated Mocker workers:
 
 ```bash
-python -c 'from dynamo.mocker.main import main; main()' \
+python -m dynamo.mocker._worker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --num-workers 2
@@ -354,7 +354,7 @@ The two flags override `worker_selection.prefill` and `worker_selection.decode`.
 In the second terminal, start two prefill Mocker workers:
 
 ```bash
-python -c 'from dynamo.mocker.main import main; main()' \
+python -m dynamo.mocker._worker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --disaggregation-mode prefill \
@@ -367,7 +367,7 @@ python -c 'from dynamo.mocker.main import main; main()' \
 In the third terminal, start two decode Mocker workers:
 
 ```bash
-python -c 'from dynamo.mocker.main import main; main()' \
+python -m dynamo.mocker._worker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --disaggregation-mode decode \
