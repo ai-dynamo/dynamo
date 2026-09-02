@@ -38,6 +38,18 @@ pub enum PrefillContinueSkip {
     BudgetAboveCap,
     /// The request has no bounded budget, so the commitment cannot be bounded.
     BudgetUnbounded,
+    /// The request asks for several sequences.
+    ///
+    /// Two reasons, and the second is why this refusal is permanent rather
+    /// than a placeholder. A continuation's stream carries no sequence index,
+    /// so the sequences would merge and the first to finish would end the
+    /// response for all of them — that part is a few lines of Python away from
+    /// being fixed. But the token budget is *per sequence*: `n` sequences
+    /// commit the worker to `n` times the request's `max_tokens`, while the
+    /// budget this policy reads reports one times. Emitting the index without
+    /// also fixing that would give a correct-looking answer backed by a
+    /// commitment nothing bounds, which is worse than refusing.
+    MultipleSequences,
     /// The prefill worker already holds its maximum concurrent continuations.
     ConcurrencyCapReached,
     /// A cap is configured but the running count could not be read. Refuse
@@ -61,6 +73,7 @@ impl PrefillContinueSkip {
         Self::PrefillLoadUnknown,
         Self::BudgetAboveCap,
         Self::BudgetUnbounded,
+        Self::MultipleSequences,
         Self::ConcurrencyCapReached,
         Self::ConcurrencyUnknown,
     ];
@@ -80,6 +93,7 @@ impl PrefillContinueSkip {
             Self::PrefillLoadUnknown => "prefill_load_unknown",
             Self::BudgetAboveCap => "budget_above_cap",
             Self::BudgetUnbounded => "budget_unbounded",
+            Self::MultipleSequences => "multiple_sequences",
             Self::ConcurrencyCapReached => "concurrency_cap_reached",
             Self::ConcurrencyUnknown => "concurrency_unknown",
         }
@@ -133,6 +147,11 @@ pub struct PrefillContinueDecisionInput {
     /// count was unavailable, which is refused when a cap is configured.
     pub active_continuations: Option<usize>,
 
+    /// Sequences the engine will run for this request: the larger of `n` and
+    /// `best_of`, because `best_of` generates sequences that `n` does not
+    /// return. `None` means one.
+    pub sequences: Option<u8>,
+
     /// KV block size in tokens, used to convert the output reserve into blocks.
     pub block_size: usize,
 }
@@ -165,6 +184,7 @@ impl PrefillContinueDecisionInput {
             prefill_worker_busy: None,
             remaining_budget_tokens: None,
             active_continuations: None,
+            sequences: None,
             block_size,
         }
     }
@@ -181,6 +201,11 @@ impl PrefillContinueDecisionInput {
 
     pub fn with_active_continuations(mut self, active: Option<usize>) -> Self {
         self.active_continuations = active;
+        self
+    }
+
+    pub fn with_sequences(mut self, sequences: Option<u8>) -> Self {
+        self.sequences = sequences;
         self
     }
 }
@@ -260,6 +285,7 @@ impl PrefillContinuePolicy {
         &self,
         remaining_budget_tokens: Option<u32>,
         active_continuations: Option<usize>,
+        sequences: Option<u8>,
     ) -> Option<PrefillContinueSkip> {
         use PrefillContinueSkip as Skip;
 
@@ -280,6 +306,12 @@ impl PrefillContinuePolicy {
         };
         if self.max_budget_tokens.is_some_and(|cap| budget > cap) {
             return Some(Skip::BudgetAboveCap);
+        }
+
+        // A handoff response carries a sequence index on every chunk; a
+        // forwarded continuation carries none.
+        if sequences.is_some_and(|count| count > 1) {
+            return Some(Skip::MultipleSequences);
         }
 
         if let Some(max) = self.max_concurrent {
@@ -309,9 +341,11 @@ impl PrefillContinuePolicy {
     pub fn decide(&self, input: PrefillContinueDecisionInput) -> PrefillContinueDecision {
         use PrefillContinueSkip as Skip;
 
-        if let Some(skip) =
-            self.preflight(input.remaining_budget_tokens, input.active_continuations)
-        {
+        if let Some(skip) = self.preflight(
+            input.remaining_budget_tokens,
+            input.active_continuations,
+            input.sequences,
+        ) {
             return PrefillContinueDecision::Skip(skip);
         }
 
@@ -754,6 +788,35 @@ mod tests {
         // Off: there is no decision to interlock.
         assert!(!probes(false, Some(0.4), None));
     }
+
+    #[test]
+    fn several_sequences_cannot_continue() {
+        // A forwarded stream carries no sequence index, so `n` sequences would
+        // merge and the first to finish would end the response for all.
+        let policy = policy(0.9);
+        for sequences in [Some(2), Some(8)] {
+            let several = PrefillContinueDecisionInput {
+                sequences,
+                ..decode_load(99, 100)
+            };
+
+            assert_eq!(
+                skip(policy.decide(several)),
+                PrefillContinueSkip::MultipleSequences,
+                "{sequences:?}"
+            );
+        }
+
+        // One, and unset meaning one, both continue.
+        for sequences in [None, Some(1)] {
+            let input = PrefillContinueDecisionInput {
+                sequences,
+                ..decode_load(99, 100)
+            };
+            assert!(policy.decide(input).should_continue(), "{sequences:?}");
+        }
+    }
+
     #[test]
     fn skip_labels_are_stable_and_distinct() {
         // These are Prometheus label values. A rename breaks an operator's
@@ -774,6 +837,7 @@ mod tests {
             ),
             (PrefillContinueSkip::BudgetAboveCap, "budget_above_cap"),
             (PrefillContinueSkip::BudgetUnbounded, "budget_unbounded"),
+            (PrefillContinueSkip::MultipleSequences, "multiple_sequences"),
             (
                 PrefillContinueSkip::ConcurrencyCapReached,
                 "concurrency_cap_reached",
@@ -812,11 +876,12 @@ mod tests {
                 | PrefillContinueSkip::PrefillLoadUnknown
                 | PrefillContinueSkip::BudgetAboveCap
                 | PrefillContinueSkip::BudgetUnbounded
+                | PrefillContinueSkip::MultipleSequences
                 | PrefillContinueSkip::ConcurrencyCapReached
                 | PrefillContinueSkip::ConcurrencyUnknown => {}
             }
         }
-        assert_eq!(PrefillContinueSkip::ALL.len(), 10);
+        assert_eq!(PrefillContinueSkip::ALL.len(), 11);
     }
 
     #[test]
@@ -830,30 +895,34 @@ mod tests {
 
         for budget in [None, Some(64), Some(4096)] {
             for active in [None, Some(0), Some(2), Some(9)] {
-                let input = PrefillContinueDecisionInput::new(Some(0), Some(100), 16)
-                    .with_remaining_budget_tokens(budget)
-                    .with_active_continuations(active);
+                for sequences in [None, Some(1), Some(2)] {
+                    let input = PrefillContinueDecisionInput::new(Some(0), Some(100), 16)
+                        .with_remaining_budget_tokens(budget)
+                        .with_active_continuations(active)
+                        .with_sequences(sequences);
 
-                let preflight = policy.preflight(budget, active);
-                let decided = policy.decide(input).skip_reason();
-                match preflight {
-                    Some(reason) => assert_eq!(
-                        decided,
-                        Some(reason),
-                        "preflight refused {budget:?}/{active:?} but decide did not agree"
-                    ),
-                    // decide may still refuse later, on a gate preflight does
-                    // not cover; it must not refuse for a cheap-gate reason.
-                    None => assert!(
-                        !matches!(
+                    let preflight = policy.preflight(budget, active, sequences);
+                    let decided = policy.decide(input).skip_reason();
+                    match preflight {
+                        Some(reason) => assert_eq!(
                             decided,
-                            Some(PrefillContinueSkip::BudgetAboveCap)
-                                | Some(PrefillContinueSkip::BudgetUnbounded)
-                                | Some(PrefillContinueSkip::ConcurrencyCapReached)
-                                | Some(PrefillContinueSkip::ConcurrencyUnknown)
+                            Some(reason),
+                            "preflight refused {budget:?}/{active:?} but decide did not agree"
                         ),
-                        "preflight passed {budget:?}/{active:?} but decide refused on a cheap gate"
-                    ),
+                        // decide may still refuse later, on a gate preflight does
+                        // not cover; it must not refuse for a cheap-gate reason.
+                        None => assert!(
+                            !matches!(
+                                decided,
+                                Some(PrefillContinueSkip::BudgetAboveCap)
+                                    | Some(PrefillContinueSkip::BudgetUnbounded)
+                                    | Some(PrefillContinueSkip::MultipleSequences)
+                                    | Some(PrefillContinueSkip::ConcurrencyCapReached)
+                                    | Some(PrefillContinueSkip::ConcurrencyUnknown)
+                            ),
+                            "preflight passed {budget:?}/{active:?} but decide refused on a cheap gate"
+                        ),
+                    }
                 }
             }
         }

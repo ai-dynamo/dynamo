@@ -426,9 +426,16 @@ where
         }
 
         // Cheap gates first. Each probe below costs a scheduler selection, and
-        // a request the budget or the cap already refuses must not pay for one.
+        // a request a cheap gate already refuses must not pay for one.
         // At a cap of zero that would be every request.
         let budget = request.stop_conditions.max_tokens;
+        // `best_of` generates sequences that `n` does not return, so it is the
+        // larger of the two that decides how many actually run. Request tracing
+        // refuses both for the same reason.
+        let sequences = request
+            .sampling_options
+            .n
+            .max(request.sampling_options.best_of);
         // An externally routed request already names its worker, so ask that
         // worker rather than the pool. Otherwise the emptiest worker's count
         // is the only honest answer available before selection.
@@ -436,7 +443,10 @@ where
             Some(worker_id) => Some(self.continuations.in_flight(worker_id)),
             None => self.continuations.min_in_flight(&routable),
         };
-        if let Some(reason) = self.prefill_continue_policy.preflight(budget, active) {
+        if let Some(reason) = self
+            .prefill_continue_policy
+            .preflight(budget, active, sequences)
+        {
             PREFILL_CONTINUE_METRICS.record_decision(reason.as_str());
             tracing::debug!(
                 request_id,
@@ -456,7 +466,8 @@ where
         let input = measured
             .with_prefill_worker_busy(self.peek_prefill_busy(request, binding, request_id).await)
             .with_remaining_budget_tokens(budget)
-            .with_active_continuations(active);
+            .with_active_continuations(active)
+            .with_sequences(sequences);
 
         let decision = self.prefill_continue_policy.decide(input);
         match decision.skip_reason() {

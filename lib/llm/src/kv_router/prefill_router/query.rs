@@ -531,6 +531,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_request_asking_for_several_sequences_does_not_continue() {
+        // A forwarded stream carries no sequence index, so the sequences would
+        // merge and the first to finish would end the response for all of them.
+        let runtime = Runtime::from_current().unwrap();
+        let discovery_root = tempfile::tempdir().unwrap();
+        let dispatch = Arc::new(RecordingDispatch::completed());
+        let (_shared, prefill_router, worker_runtimes, _workers) = shared_router(
+            &runtime,
+            discovery_root.path(),
+            "prefill-continuation-multi-seq",
+            RouterMode::KV,
+            dispatch.clone(),
+            Some(&continue_config(Some(2))),
+            PoolSupport::Unanimous,
+        )
+        .await;
+
+        // Both shapes: several returned sequences, and `best_of` running
+        // several while returning one. Keying on `n` alone would miss the
+        // second, so the router has to read both fields.
+        for (n, best_of) in [(Some(2), None), (Some(1), Some(2))] {
+            let mut request = request();
+            request.stop_conditions.max_tokens = Some(256);
+            request.sampling_options.n = n;
+            request.sampling_options.best_of = best_of;
+
+            let (_, next) = counting_decode_host();
+            let _ = Operator::generate(prefill_router.as_ref(), Context::new(request), next).await;
+        }
+
+        assert_eq!(
+            *dispatch.dispatched_max_tokens.lock().unwrap(),
+            vec![Some(1), Some(1)],
+            "several sequences must take today's handoff, however they are asked for"
+        );
+        assert_eq!(
+            *dispatch.dispatched_annotations.lock().unwrap(),
+            vec![Vec::<String>::new(), Vec::<String>::new()],
+            "and the marker must never reach the worker"
+        );
+
+        drop(worker_runtimes);
+        runtime.shutdown();
+    }
+
+    #[tokio::test]
     async fn without_a_readable_decode_pool_nothing_continues() {
         // The other continuation tests set `force`, which waives the
         // decode-load test and nothing else. Drop it and the decision has to
