@@ -8,21 +8,6 @@ use axum::http::{HeaderMap, uri::Authority};
 
 pub const PREFILLER_HOST_PORT: &str = "x-prefiller-host-port";
 
-const EPP_ONLY_HEADERS: &[&str] = &[
-    PREFILLER_HOST_PORT,
-    "x-gateway-destination-endpoint",
-    "x-gateway-destination-endpoint-served",
-    "x-gateway-destination-endpoint-subset",
-    "x-gateway-inference-fairness-id",
-    "x-gateway-inference-objective",
-    "x-gateway-model-name-rewrite",
-    "x-dynamo-worker-instance-id",
-    "x-dynamo-prefill-instance-id",
-    "x-dynamo-dp-rank",
-    "x-dynamo-prefill-dp-rank",
-    "x-dynamo-routing-mode",
-];
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrefillEndpoint(Authority);
 
@@ -63,9 +48,7 @@ impl fmt::Display for PrefillEndpoint {
 pub struct InvalidEppMetadata;
 
 pub fn strip_epp_headers(headers: &mut HeaderMap) {
-    for header in EPP_ONLY_HEADERS {
-        headers.remove(*header);
-    }
+    headers.remove(PREFILLER_HOST_PORT);
 }
 
 #[cfg(test)]
@@ -126,7 +109,7 @@ mod tests {
     }
 
     #[test]
-    fn strips_all_epp_owned_headers() {
+    fn strips_only_prefill_endpoint_header() {
         let mut headers = HeaderMap::new();
         headers.insert(
             PREFILLER_HOST_PORT,
@@ -141,7 +124,7 @@ mod tests {
         strip_epp_headers(&mut headers);
 
         assert!(!headers.contains_key(PREFILLER_HOST_PORT));
-        assert!(!headers.contains_key("x-gateway-destination-endpoint"));
+        assert_eq!(headers["x-gateway-destination-endpoint"], "decode:8000");
         assert_eq!(headers["authorization"], "Bearer token");
     }
 }

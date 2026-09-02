@@ -11,9 +11,11 @@ const SIDECAR_PORT_ENV: &str = "DYN_SIDECAR_PORT";
 const DECODE_ENGINE_PORT_ENV: &str = "DYN_DECODE_ENGINE_PORT";
 const CONNECT_TIMEOUT_MS_ENV: &str = "DYN_SIDECAR_CONNECT_TIMEOUT_MS";
 const READ_TIMEOUT_MS_ENV: &str = "DYN_SIDECAR_READ_TIMEOUT_MS";
+const DRAIN_TIMEOUT_MS_ENV: &str = "DYN_SIDECAR_DRAIN_TIMEOUT_MS";
 
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_READ_TIMEOUT_MS: u64 = 300_000;
+const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -23,6 +25,8 @@ pub struct Config {
     pub connect_timeout: Duration,
     /// Maximum idle time between reads from a streaming decode response.
     pub read_timeout: Duration,
+    /// Maximum time to drain active requests before forcing their streams closed.
+    pub drain_timeout: Duration,
 }
 
 impl Config {
@@ -35,6 +39,7 @@ impl Config {
                 .context("failed to construct local decode-engine URL")?,
             connect_timeout: duration_from_env(CONNECT_TIMEOUT_MS_ENV, DEFAULT_CONNECT_TIMEOUT_MS)?,
             read_timeout: duration_from_env(READ_TIMEOUT_MS_ENV, DEFAULT_READ_TIMEOUT_MS)?,
+            drain_timeout: duration_from_env(DRAIN_TIMEOUT_MS_ENV, DEFAULT_DRAIN_TIMEOUT_MS)?,
         })
     }
 }

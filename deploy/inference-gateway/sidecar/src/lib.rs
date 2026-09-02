@@ -12,25 +12,48 @@ pub use error::SidecarError;
 pub use metadata::{PREFILLER_HOST_PORT, PrefillEndpoint};
 pub use server::{PdAdapter, SidecarState, UnavailablePdAdapter, router};
 
+use std::future::IntoFuture;
 use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 
 pub async fn run(config: Config, adapter: Arc<dyn PdAdapter>) -> Result<()> {
     let listener = TcpListener::bind(config.listen_addr).await?;
     tracing::info!(listen_addr = %config.listen_addr, "Starting EPP decode sidecar");
-    axum::serve(
+    let graceful_shutdown = CancellationToken::new();
+    let force_shutdown = CancellationToken::new();
+    let drain_timeout = config.drain_timeout;
+    let server = axum::serve(
         listener,
         router(SidecarState::new(
             config.decode_engine_url,
             config.connect_timeout,
             config.read_timeout,
             adapter,
+            force_shutdown.clone(),
         )?),
     )
-    .with_graceful_shutdown(shutdown_signal())
-    .await?;
+    .with_graceful_shutdown(graceful_shutdown.clone().cancelled_owned())
+    .into_future();
+    tokio::pin!(server);
+
+    tokio::select! {
+        result = &mut server => result?,
+        () = shutdown_signal() => {
+            tracing::info!(?drain_timeout, "Shutdown signal received; draining requests");
+            graceful_shutdown.cancel();
+            match tokio::time::timeout(drain_timeout, &mut server).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    tracing::warn!(?drain_timeout, "Drain deadline reached; closing active streams");
+                    force_shutdown.cancel();
+                    server.await?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 

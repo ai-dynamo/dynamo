@@ -80,11 +80,12 @@ pub struct PickResult {
     /// Extra headers to inject into the forwarded request.
     /// Used by Dynamo for routing metadata (worker IDs, DP ranks, routing mode).
     pub headers: Vec<(String, String)>,
-    /// EPP-selected prefill endpoint for standalone disaggregated routing.
+    /// Callable prefill endpoint selected by standalone EPP.
     ///
-    /// This is deliberately separate from `headers`: the ext-proc boundary
-    /// drops client-supplied values and emits at most one authoritative
-    /// `x-prefiller-host-port` value from this field.
+    /// Runtime EPP carries its authoritative selection as worker identity and
+    /// rank routing headers. Standalone EPP instead needs a callable host and
+    /// port, so ext-proc emits `x-prefiller-host-port` from this field. Neither
+    /// form accepts client input.
     pub selected_prefill_endpoint: Option<String>,
     /// Pre-computed token IDs from the picker's tokenization.
     /// Injected into the request body as `nvext.token_data` so the backend

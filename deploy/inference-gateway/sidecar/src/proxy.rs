@@ -5,18 +5,20 @@ use axum::body::Body;
 use axum::http::{HeaderMap, Request, Response, header};
 use futures::{Stream, StreamExt};
 use reqwest::{Client, Url};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 use crate::error::SidecarError;
 
-const HOP_BY_HOP_HEADERS: &[axum::http::HeaderName] = &[
-    header::CONNECTION,
-    header::PROXY_AUTHENTICATE,
-    header::PROXY_AUTHORIZATION,
-    header::TE,
-    header::TRAILER,
-    header::TRANSFER_ENCODING,
-    header::UPGRADE,
+const HOP_BY_HOP_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
 ];
 
 pub async fn forward(
@@ -75,20 +77,23 @@ fn strip_proxy_headers(headers: &mut HeaderMap) {
         headers.remove(name);
     }
     for name in HOP_BY_HOP_HEADERS {
-        headers.remove(name);
+        headers.remove(*name);
     }
 }
 
 pub struct CancelOnDropStream<S> {
     inner: S,
     cancellation: CancellationToken,
+    cancelled: std::pin::Pin<Box<WaitForCancellationFutureOwned>>,
 }
 
 impl<S> CancelOnDropStream<S> {
     pub fn new(inner: S, cancellation: CancellationToken) -> Self {
+        let cancelled = Box::pin(cancellation.clone().cancelled_owned());
         Self {
             inner,
             cancellation,
+            cancelled,
         }
     }
 }
@@ -100,6 +105,9 @@ impl<S: Stream + Unpin> Stream for CancelOnDropStream<S> {
         mut self: std::pin::Pin<&mut Self>,
         context: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
+        if std::future::Future::poll(self.cancelled.as_mut(), context).is_ready() {
+            return std::task::Poll::Ready(None);
+        }
         self.inner.poll_next_unpin(context)
     }
 }
@@ -121,6 +129,8 @@ pub fn cancel_on_response_drop(
 
 #[cfg(test)]
 mod tests {
+    use axum::http::HeaderValue;
+
     use super::*;
 
     #[test]
@@ -132,5 +142,23 @@ mod tests {
             target_url(&base_url, &request_uri).as_str(),
             "http://decode:8001/engine/v1/chat/completions?stream=true"
         );
+    }
+
+    #[test]
+    fn strips_standard_and_connection_nominated_hop_by_hop_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONNECTION, HeaderValue::from_static("x-remove"));
+        headers.insert("x-remove", HeaderValue::from_static("value"));
+        headers.insert("keep-alive", HeaderValue::from_static("timeout=5"));
+        headers.insert("proxy-connection", HeaderValue::from_static("keep-alive"));
+        headers.insert("x-preserved", HeaderValue::from_static("value"));
+
+        strip_proxy_headers(&mut headers);
+
+        assert!(!headers.contains_key(header::CONNECTION));
+        assert!(!headers.contains_key("x-remove"));
+        assert!(!headers.contains_key("keep-alive"));
+        assert!(!headers.contains_key("proxy-connection"));
+        assert_eq!(headers["x-preserved"], "value");
     }
 }

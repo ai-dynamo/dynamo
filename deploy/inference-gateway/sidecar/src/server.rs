@@ -9,7 +9,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, Response};
-use axum::routing::any;
+use axum::routing::{get, post};
 use reqwest::{Client, Url};
 use tokio_util::sync::CancellationToken;
 
@@ -47,6 +47,7 @@ pub struct SidecarState {
     client: Client,
     decode_engine_url: Url,
     adapter: Arc<dyn PdAdapter>,
+    force_shutdown: CancellationToken,
 }
 
 impl SidecarState {
@@ -55,6 +56,7 @@ impl SidecarState {
         connect_timeout: Duration,
         read_timeout: Duration,
         adapter: Arc<dyn PdAdapter>,
+        force_shutdown: CancellationToken,
     ) -> Result<Self, reqwest::Error> {
         Ok(Self {
             client: Client::builder()
@@ -64,12 +66,17 @@ impl SidecarState {
                 .build()?,
             decode_engine_url,
             adapter,
+            force_shutdown,
         })
     }
 }
 
 pub fn router(state: SidecarState) -> Router {
-    Router::new().fallback(any(handle)).with_state(state)
+    Router::new()
+        .route("/health", get(handle))
+        .route("/ready", get(handle))
+        .route("/v1/chat/completions", post(handle))
+        .with_state(state)
 }
 
 async fn handle(
@@ -80,7 +87,7 @@ async fn handle(
     let prefill_endpoint = PrefillEndpoint::parse_headers(request.headers())?;
     strip_epp_headers(request.headers_mut());
 
-    let cancellation = CancellationToken::new();
+    let cancellation = state.force_shutdown.child_token();
     // If the handler future is dropped before it can return a response (for
     // example because the Gateway disconnected during adapter dispatch), the
     // guard cancels backend work. Once a response exists, ownership moves to
@@ -202,13 +209,69 @@ mod tests {
     }
 
     fn test_state(adapter: Arc<dyn PdAdapter>, decode_engine_url: reqwest::Url) -> SidecarState {
+        test_state_with_shutdown(adapter, decode_engine_url, CancellationToken::new())
+    }
+
+    fn test_state_with_shutdown(
+        adapter: Arc<dyn PdAdapter>,
+        decode_engine_url: reqwest::Url,
+        force_shutdown: CancellationToken,
+    ) -> SidecarState {
         SidecarState::new(
             decode_engine_url,
             Duration::from_secs(10),
             Duration::from_secs(300),
             adapter,
+            force_shutdown,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn exposes_only_supported_routes_and_methods() {
+        let upstream = Router::new().fallback(any(|| async { StatusCode::NO_CONTENT }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let app = router(test_state(
+            Arc::new(UnavailablePdAdapter),
+            reqwest::Url::parse(&format!("http://{address}")).unwrap(),
+        ));
+
+        for (method, path) in [
+            (Method::GET, "/health"),
+            (Method::GET, "/ready"),
+            (Method::POST, "/v1/chat/completions"),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::NO_CONTENT
+            );
+        }
+
+        let unknown_path = Request::builder()
+            .uri("/v1/completions")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(unknown_path).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+
+        let wrong_method = Request::builder()
+            .uri("/v1/chat/completions")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.oneshot(wrong_method).await.unwrap().status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        server.abort();
     }
 
     #[tokio::test]
@@ -218,6 +281,7 @@ mod tests {
             reqwest::Url::parse("http://localhost:8001").unwrap(),
         ));
         let request = Request::builder()
+            .method(Method::POST)
             .uri("/v1/chat/completions")
             .header(PREFILLER_HOST_PORT, "prefill:8001,other:8001")
             .body(Body::empty())
@@ -269,12 +333,11 @@ mod tests {
         assert_eq!(request.body, r#"{"model":"test"}"#);
         assert_eq!(request.headers["authorization"], "Bearer token");
         assert!(!request.headers.contains_key(PREFILLER_HOST_PORT));
-        assert!(
-            !request
-                .headers
-                .contains_key("x-gateway-destination-endpoint")
+        assert_eq!(
+            request.headers["x-gateway-destination-endpoint"],
+            "decode:8000"
         );
-        assert!(!request.headers.contains_key("x-dynamo-routing-mode"));
+        assert_eq!(request.headers["x-dynamo-routing-mode"], "disaggregated");
     }
 
     #[tokio::test]
@@ -309,7 +372,7 @@ mod tests {
         ));
         let request = Request::builder()
             .method(Method::POST)
-            .uri("/v1/completions?stream=true")
+            .uri("/v1/chat/completions?stream=true")
             .header("content-type", "application/json")
             .header("x-gateway-destination-endpoint", "decode:8000")
             .header("x-custom", "preserved")
@@ -326,10 +389,13 @@ mod tests {
 
         let (parts, body) = observed_rx.await.unwrap();
         assert_eq!(parts.method, Method::POST);
-        assert_eq!(parts.uri.path(), "/v1/completions");
+        assert_eq!(parts.uri.path(), "/v1/chat/completions");
         assert_eq!(parts.uri.query(), Some("stream=true"));
         assert_eq!(parts.headers["x-custom"], "preserved");
-        assert!(!parts.headers.contains_key("x-gateway-destination-endpoint"));
+        assert_eq!(
+            parts.headers["x-gateway-destination-endpoint"],
+            "decode:8000"
+        );
         assert_eq!(body, "original-body");
         server.abort();
     }
@@ -348,6 +414,7 @@ mod tests {
             reqwest::Url::parse("http://localhost:8001").unwrap(),
         ));
         let request = Request::builder()
+            .method(Method::POST)
             .uri("/v1/chat/completions")
             .header(PREFILLER_HOST_PORT, "prefill:8001")
             .body(Body::empty())
@@ -366,6 +433,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn force_shutdown_ends_active_response_stream() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let (cancellation_tx, cancellation_rx) = oneshot::channel();
+        let adapter = Arc::new(RecordingAdapter {
+            observed,
+            cancellation_tx: Mutex::new(Some(cancellation_tx)),
+            pending_stream: true,
+        });
+        let force_shutdown = CancellationToken::new();
+        let app = router(test_state_with_shutdown(
+            adapter,
+            reqwest::Url::parse("http://localhost:8001").unwrap(),
+            force_shutdown.clone(),
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header(PREFILLER_HOST_PORT, "prefill:8001")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = app.oneshot(request).await.unwrap();
+        let cancellation = cancellation_rx.await.unwrap();
+        let mut stream = response.into_body().into_data_stream();
+        assert_eq!(stream.next().await.unwrap().unwrap(), "data: first\n\n");
+
+        force_shutdown.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), cancellation.cancelled())
+            .await
+            .expect("force shutdown must cancel adapter work");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("force shutdown must end the response stream")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn dropping_request_during_dispatch_propagates_cancellation() {
         let (cancellation_tx, cancellation_rx) = oneshot::channel();
         let adapter = Arc::new(BlockingAdapter {
@@ -376,6 +483,7 @@ mod tests {
             reqwest::Url::parse("http://localhost:8001").unwrap(),
         ));
         let request = Request::builder()
+            .method(Method::POST)
             .uri("/v1/chat/completions")
             .header(PREFILLER_HOST_PORT, "prefill:8001")
             .body(Body::empty())
@@ -398,6 +506,7 @@ mod tests {
             reqwest::Url::parse("http://localhost:8001").unwrap(),
         ));
         let mut request = Request::builder()
+            .method(Method::POST)
             .uri("/v1/chat/completions")
             .body(Body::empty())
             .unwrap();

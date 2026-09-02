@@ -11,8 +11,8 @@ Gateway and selects one of two paths:
 
 - Without `x-prefiller-host-port`, it proxies the request to the local decode
   engine.
-- With exactly one valid `x-prefiller-host-port`, it removes EPP-owned headers
-  and invokes the configured backend P/D adapter.
+- With exactly one valid `x-prefiller-host-port`, it removes that header and
+  invokes the configured backend P/D adapter.
 
 Empty, malformed, repeated, or comma-separated prefill endpoint values return
 `502 Bad Gateway` with the OpenAI-style error code `invalid_epp_metadata`.
@@ -23,7 +23,9 @@ The binary listens on `0.0.0.0:8000` and proxies to
 after 10 seconds by default, and stalled response reads time out after 300
 seconds without imposing a deadline on the full response stream. Configure
 these values in milliseconds with `DYN_SIDECAR_CONNECT_TIMEOUT_MS` and
-`DYN_SIDECAR_READ_TIMEOUT_MS`.
+`DYN_SIDECAR_READ_TIMEOUT_MS`. Active requests drain for 30 seconds during
+shutdown before their streams are forced closed. Configure this deadline with
+`DYN_SIDECAR_DRAIN_TIMEOUT_MS`.
 
 Backend-specific P/D execution is implemented separately. Until an adapter is
 linked, requests containing a valid prefill endpoint return `501 Not
