@@ -26,11 +26,14 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 
 | Crate | Use it for |
 |---|---|
+| `soft-pin-repin` | Retain a soft session-affinity target until its active-request load exceeds a threshold, then repin |
 | `simple-filter-score-pick` | One filter, one scorer, and one picker show the complete policy flow |
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
 
 The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
+
+The `soft-pin-repin` policy has no filter or scorer. Its picker requests `WorkerInputs::LOAD` and selects the least-loaded worker for a new session. For a session with an advisory `affinity_target()`, it retains that worker while `active_requests()` is at or below `max_active_requests`. When the target exceeds the threshold, the picker selects the least-loaded alternative and Dynamo commits that dispatched worker as the new soft binding. The policy retains an overloaded target when it is the only eligible candidate.
 
 The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Its factory matches the routing stage and calls separate prefill and decode policy builders. Each builder shows the complete filter, scorer, and picker composition for that stage.
 
@@ -171,6 +174,10 @@ worker_selection:
     - name: simple-stacked-score-pick
       type: simple-stacked-score-pick
       parameters: {}
+    - name: soft-pin-repin
+      type: soft-pin-repin
+      parameters:
+        max_active_requests: 0
 ```
 
 - `type` selects a registered provider.
@@ -192,6 +199,7 @@ Run these commands from the Dynamo repository root:
 
 ```bash
 cargo test \
+  -p dynamo-custom-policy-example-soft-pin-repin \
   -p dynamo-custom-policy-example-simple-filter-score-pick \
   -p dynamo-custom-policy-example-disagg-filter-score-pick \
   -p dynamo-custom-policy-example-simple-stacked-score-pick \
@@ -268,15 +276,55 @@ The [custom routing API reference](../../../docs/fern/pages/developer-guide/adva
 ## Try the Policies End to End With Mocker
 
 > [!WARNING]
-> Online simulation with Mocker is temporarily unavailable. The `python -m dynamo.mocker` commands
-> in this section do not run in this release. This workflow will return through the unified
-> AISimulate surface in a future release.
+> Online simulation with Mocker is temporarily unavailable as a public CLI. The source-development commands in this section call Dynamo's private worker launcher directly. Do not use that launcher as a deployment interface. This workflow will return through the unified AISimulate surface in a future release.
 
 Use the embedded Python frontend for this local test. The standalone EPP uses Kubernetes `InferencePool` discovery. Complete [Run With the Python Frontend](#run-with-the-python-frontend) first so that the extension links this example catalog.
 
 Create `/tmp/worker-selection.yaml` with the policy instances from [Configure a Policy Instance](#5-configure-a-policy-instance).
 
 Use `min_device_overlap_blocks: 0` for this test. A positive threshold can reject every worker on a cold request or a replay path without raw tier data.
+
+### Soft Affinity Repin Policy
+
+Start the frontend with soft session affinity and the committed policy configuration:
+
+```bash
+DYN_ROUTER_WORKER_SELECTION_POLICY=soft-pin-repin \
+python -m dynamo.frontend \
+  --router-mode kv \
+  --router-policy-config examples/router/custom-policy-example/soft-pin-repin/worker-selection.yaml \
+  --router-session-affinity-ttl-secs 60 \
+  --router-session-affinity-mode soft \
+  --discovery-backend file \
+  --http-port 8000
+```
+
+In a second terminal, start exactly two aggregated Mocker workers through the retained internal launcher:
+
+```bash
+python -c 'from dynamo.mocker.main import main; main()' \
+  --model-path Qwen/Qwen3-0.6B \
+  --discovery-backend file \
+  --decode-speedup-ratio 0.1 \
+  --num-workers 2
+```
+
+The decode slowdown keeps the first request active long enough for the verification script to cross the configured `max_active_requests: 0` threshold deterministically.
+
+After both workers register, run the assertion script. It requires `curl` and `jq`:
+
+```bash
+examples/router/custom-policy-example/soft-pin-repin/verify-repin.sh
+```
+
+The script starts a long streaming request with one `X-Dynamo-Session-ID` and waits until worker A is attributed. While that request remains active, it sends a second request with the same session ID. The configured threshold is zero, so A's active-request count triggers selection of B and Dynamo rebinds the session. After both requests drain, a third request must retain B:
+
+```text
+selected workers: A -> B -> B
+the overload threshold repinned the session and the new soft pin was retained
+```
+
+The second request proves that the policy can override an overloaded advisory target. The third request proves that Dynamo replaced the stored target with B and that the policy retains the new target after its load drains.
 
 ### Aggregated Policy
 
@@ -294,7 +342,7 @@ python -m dynamo.frontend \
 In the second terminal, start two aggregated Mocker workers:
 
 ```bash
-python -m dynamo.mocker \
+python -c 'from dynamo.mocker.main import main; main()' \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --num-workers 2
@@ -346,7 +394,7 @@ The two flags override `worker_selection.prefill` and `worker_selection.decode`.
 In the second terminal, start two prefill Mocker workers:
 
 ```bash
-python -m dynamo.mocker \
+python -c 'from dynamo.mocker.main import main; main()' \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --disaggregation-mode prefill \
@@ -359,7 +407,7 @@ python -m dynamo.mocker \
 In the third terminal, start two decode Mocker workers:
 
 ```bash
-python -m dynamo.mocker \
+python -c 'from dynamo.mocker.main import main; main()' \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --disaggregation-mode decode \
