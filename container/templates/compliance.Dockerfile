@@ -74,18 +74,22 @@ ENV PYTHONPATH=/opt
 # creates the dir, so this COPY never fails even for wheel-less targets.
 COPY --from=wheel_builder /opt/dynamo/rust-licenses /tmp/rust-licenses
 {% if target == "frontend" %}
-# EPP's Go compliance SBOM + harvested module LICENSE files, read from the build
-# CONTEXT (.epp-sbom/) rather than COPY --from the EPP image. The CI EPP-build
-# step exports them there via `make sbom-export` while the build cache is warm
-# (see deploy/inference-gateway/epp/Dockerfile sbom-export stage). This avoids
-# re-pulling the pushed EPP image — whose runtime layer could be served from a
-# stale cache and miss these files after the BuildKit builder is refreshed. The
-# SBOM is exported once on amd64; EPP's Go module set doesn't vary by GOARCH
-# (linux only), so the amd64 export is authoritative for all frontend arches.
-COPY .epp-sbom/sbom-go.cdx.json /tmp/sbom-go-epp.cdx.json
-# Real Go module LICENSE files so the go generator inlines upstream license text
-# instead of canonical SPDX fallback.
-COPY .epp-sbom/sbom-go-licenses /tmp/go-licenses
+# The frontend copies /epp out of the EPP image (see frontend.Dockerfile), so
+# that binary ships here without going through a wheel and the rust generator's
+# site-packages scan cannot see it. Take its SBOM + harvested crate LICENSE
+# texts from the same stage the binary itself came from, so the two cannot
+# drift: a layer missing the SBOM fails this COPY rather than silently
+# producing NOTICES that omit every crate linked into /epp.
+#
+# ext-proc is a member of the ROOT cargo workspace while lib/bindings/python is
+# deliberately outside it, so the two resolve their shared crates against
+# different lockfiles. Attributing /epp from the wheel's SBOM would therefore
+# record the wrong VERSION for dozens of crates even where the name matches --
+# hence a separate SBOM rather than reuse of the wheel's.
+COPY --from=epp /sbom-rust-epp.cdx.json /tmp/sbom-rust-epp.cdx.json
+# Merges into the wheel_builder harvest above; same "<name>-<version>" keying,
+# so it only adds the crate versions unique to /epp.
+COPY --from=epp /rust-licenses /tmp/rust-licenses
 {% endif %}
 
 # BASELINE_SBOM_FILE: the per-arch baseline SBOM *stem* (e.g.
@@ -108,8 +112,7 @@ RUN {% if framework == "sglang" %}PKG_ARG="--site-packages $(python3 -c 'import 
     python3 -m compliance.generators \
     --ecosystem {{ compliance_ecosystems }} \
     ${PKG_ARG} \
-{% if target == "frontend" %}    --go-sbom /tmp/sbom-go-epp.cdx.json \
-    --go-licenses-dir /tmp/go-licenses \
+{% if target == "frontend" %}    --rust-sbom /tmp/sbom-rust-epp.cdx.json \
 {% endif %}    --rust-licenses-dir /tmp/rust-licenses \
     --output-dir /legal \
     --policy /opt/compliance/policy/licenses.toml \
@@ -176,6 +179,13 @@ COPY --chown=root:0 container/compliance /opt/compliance
 ENV PYTHONPATH=/opt
 COPY --from=wheel_builder /tmp/native-sources/ /opt/native-sources/
 COPY --from=wheel_builder /tmp/dynamo-vendor-full/ /opt/dynamo-vendor-full/
+{% if target == "frontend" %}
+# Same SBOM the licenses stage uses, here to select /epp's crates out of the
+# vendor tree. They are already vendored -- wheel_builder runs `cargo vendor`
+# over the whole root workspace, of which ext-proc is a member -- so without
+# this the sources are present but never picked.
+COPY --from=epp /sbom-rust-epp.cdx.json /tmp/sbom-rust-epp.cdx.json
+{% endif %}
 
 ARG ENABLE_SOURCE_ARCHIVAL=false
 ARG BASELINE_SBOM_FILE="{{ compliance_baseline_sbom }}"
@@ -188,7 +198,8 @@ RUN if [ "$ENABLE_SOURCE_ARCHIVAL" = "true" ]; then \
             --sources-root /sources \
             --native-source-dir /opt/native-sources \
             ${RUST_PKG_ARG} \
-            --rust-vendor-full /opt/dynamo-vendor-full \
+{% if target == "frontend" %}            --rust-sbom /tmp/sbom-rust-epp.cdx.json \
+{% endif %}            --rust-vendor-full /opt/dynamo-vendor-full \
             ${BASELINE_SBOM_FILE:+--baseline-sbom /opt/compliance/base_sboms/${BASELINE_SBOM_FILE}-${TARGETARCH}.cdx.json} \
             -v ; \
     else \

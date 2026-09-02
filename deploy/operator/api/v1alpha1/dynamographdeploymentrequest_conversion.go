@@ -233,7 +233,9 @@ func restoreDGDRHubSpec(raw string) (v1beta1.DynamoGraphDeploymentRequestSpec, b
 	if !ok {
 		return spec, false
 	}
-	migrateLegacyUnnamedProfilerInOverrides(spec.Overrides)
+	if spec.Overrides != nil && spec.Overrides.ProfilingJob != nil {
+		migrateLegacyUnnamedProfilerContainers(spec.Overrides.ProfilingJob.Template.Spec.Containers)
+	}
 	return spec, true
 }
 
@@ -788,20 +790,19 @@ func dgdrHubOnlyProfilingJob(src *batchv1.JobSpec) *batchv1.JobSpec {
 		return nil
 	}
 	save := src.DeepCopy()
+
+	// Canonicalize leftover name:"" profiler entries on the save copy only.
 	migrateLegacyUnnamedProfilerContainers(save.Template.Spec.Containers)
+
 	if idx := dgdrProfilerContainerIndex(save.Template.Spec.Containers); idx >= 0 {
-		hadProjectedResources := !apiequality.Semantic.DeepEqual(
-			save.Template.Spec.Containers[idx].Resources,
-			corev1.ResourceRequirements{},
-		)
-		save.Template.Spec.Containers[idx].Resources = corev1.ResourceRequirements{}
-		// Omit only when alpha alone reconstructs the same ordered list: a sole
-		// profiler whose only projected field was resources. An explicit
-		// name-only profiler (no resources) must remain in the annotation.
-		if hadProjectedResources &&
-			dgdrIsNameOnlyProfiler(save.Template.Spec.Containers[idx]) &&
-			len(save.Template.Spec.Containers) == 1 {
-			save.Template.Spec.Containers = slices.Delete(save.Template.Spec.Containers, idx, idx+1)
+		// A live name-only profiler is hub-only: v1alpha1 cannot represent the
+		// container name, so keep the entry. Drop the sole profiler only when
+		// every remaining field was alpha-representable and was stripped.
+		if !dgdrIsNameOnlyProfiler(save.Template.Spec.Containers[idx]) {
+			save.Template.Spec.Containers[idx].Resources = corev1.ResourceRequirements{}
+			if len(save.Template.Spec.Containers) == 1 && dgdrIsNameOnlyProfiler(save.Template.Spec.Containers[idx]) {
+				save.Template.Spec.Containers = slices.Delete(save.Template.Spec.Containers, idx, idx+1)
+			}
 		}
 	}
 	save.Template.Spec.Tolerations = nil
@@ -863,22 +864,29 @@ func dgdrProfilerContainerIndex(containers []corev1.Container) int {
 	return -1
 }
 
+// dgdrLiveProfilerContainerIndex reads a live v1beta1 profiling-job container
+// list. Prefer name:profiler. If none exists, treat a leftover name:"" entry as
+// the profiler. When both exist they are distinct map-list elements and only
+// name:profiler is the profiler. Does not mutate the list.
+func dgdrLiveProfilerContainerIndex(containers []corev1.Container) int {
+	if idx := dgdrProfilerContainerIndex(containers); idx >= 0 {
+		return idx
+	}
+	for i := range containers {
+		if containers[i].Name == "" {
+			return i
+		}
+	}
+	return -1
+}
+
 func dgdrIsNameOnlyProfiler(c corev1.Container) bool {
 	return apiequality.Semantic.DeepEqual(c, corev1.Container{Name: dgdrProfilerContainerName})
 }
 
-// migrateLegacyUnnamedProfilerInOverrides renames a legacy name:"" profiler
-// placeholder in restored hub annotations before map-list merging.
-func migrateLegacyUnnamedProfilerInOverrides(overrides *v1beta1.OverridesSpec) {
-	if overrides == nil || overrides.ProfilingJob == nil {
-		return
-	}
-	migrateLegacyUnnamedProfilerContainers(overrides.ProfilingJob.Template.Spec.Containers)
-}
-
-// migrateLegacyUnnamedProfilerContainers implements the narrow decode-time
-// migration for old nvidia.com/dgdr-spec payloads that used an unnamed
-// synthetic profiler entry:
+// migrateLegacyUnnamedProfilerContainers rewrites a leftover unnamed synthetic
+// profiler entry to name:profiler. Used when decoding sparse hub payloads and
+// when building the hub-only save copy from live hub source:
 //  1. If no name:profiler exists and a name:"" entry exists, rename that entry
 //     to profiler in place (preserve position and fields).
 //  2. If name:profiler already exists, leave any additional name:"" entry as a
@@ -998,13 +1006,8 @@ func projectProfilingJobToProfilingConfig(src *v1beta1.DynamoGraphDeploymentRequ
 		return
 	}
 	podSpec := &src.Overrides.ProfilingJob.Template.Spec
-
-	// Migrate leftover unnamed profiler entries on a copy so live hub storage
-	// is not mutated. Lookup after that is strict by name.
-	containers := slices.Clone(podSpec.Containers)
-	migrateLegacyUnnamedProfilerContainers(containers)
-	if idx := dgdrProfilerContainerIndex(containers); idx >= 0 {
-		res := containers[idx].Resources
+	if idx := dgdrLiveProfilerContainerIndex(podSpec.Containers); idx >= 0 {
+		res := podSpec.Containers[idx].Resources
 		if !apiequality.Semantic.DeepEqual(res, corev1.ResourceRequirements{}) {
 			dst.ProfilingConfig.Resources = &res
 		}
