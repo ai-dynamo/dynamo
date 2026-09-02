@@ -1010,10 +1010,21 @@ pub struct KvRouterConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub prefill_continue_output_reserve_tokens: usize,
 
-    /// Back off when the prefill worker's own load exceeds this fraction. When
-    /// unset, falls back to `router_queue_threshold`. It deliberately does not
-    /// read `conditional_disagg_prefill_busy_threshold`: that would move this
-    /// feature's back-off point whenever an unrelated feature is configured.
+    /// Back off when the prefill worker's own load exceeds this fraction of one
+    /// batch's token budget. When unset, falls back to `router_queue_threshold`,
+    /// which is the same unit.
+    ///
+    /// **It must be raised as concurrency rises.** One request of ISL `n` costs
+    /// `n / max_num_batched_tokens` batches, so a value of 1.6 admits a single
+    /// in-flight request. On B200 at concurrency 128 that refused 92.8% of
+    /// requests. Size it for the prefill depth you expect, not for one request.
+    ///
+    /// This gate sees ordinary prefill work. It cannot see continuations, which
+    /// the census tracks separately and which `Skip::NoRelief` judges.
+    ///
+    /// It deliberately does not read `conditional_disagg_prefill_busy_threshold`:
+    /// that would move this feature's back-off point whenever an unrelated
+    /// feature is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_continue_prefill_busy_threshold: Option<f64>,
 

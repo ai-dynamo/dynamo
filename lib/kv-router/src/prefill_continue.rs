@@ -32,6 +32,9 @@ pub enum PrefillContinueSkip {
     DecodeLoadUnknown,
     /// The prefill worker is over its own busy line, so it has nothing to donate.
     PrefillBusy,
+    /// Decode is busy, but the prefill worker's continuations are just as
+    /// heavy, so continuing would relieve nothing.
+    NoRelief,
     /// Prefill load could not be read. An unchecked safety check is not a pass.
     PrefillLoadUnknown,
     /// The request may generate more than the continuation cap allows.
@@ -70,6 +73,7 @@ impl PrefillContinueSkip {
         Self::DecodeHasRoom,
         Self::DecodeLoadUnknown,
         Self::PrefillBusy,
+        Self::NoRelief,
         Self::PrefillLoadUnknown,
         Self::BudgetAboveCap,
         Self::BudgetUnbounded,
@@ -90,6 +94,7 @@ impl PrefillContinueSkip {
             Self::DecodeHasRoom => "decode_has_room",
             Self::DecodeLoadUnknown => "decode_load_unknown",
             Self::PrefillBusy => "prefill_busy",
+            Self::NoRelief => "no_relief",
             Self::PrefillLoadUnknown => "prefill_load_unknown",
             Self::BudgetAboveCap => "budget_above_cap",
             Self::BudgetUnbounded => "budget_unbounded",
@@ -137,8 +142,17 @@ pub struct PrefillContinueDecisionInput {
     pub total_kv_blocks: Option<usize>,
 
     /// Whether the prefill worker holding this request is over its busy line.
-    /// `None` means the signal was unavailable.
+    /// `None` means the signal was unavailable. Measures ordinary prefill work,
+    /// which the census below cannot see.
     pub prefill_worker_busy: Option<bool>,
+
+    /// KV the continuations already on that prefill worker hold, as a fraction
+    /// of its pool. `None` means unavailable.
+    ///
+    /// The same unit as the decode side, so the two compare. It comes from the
+    /// census: the prefill binding sets `router_track_active_blocks = false`,
+    /// so a route preview there sees no continuation at all.
+    pub continuation_pressure: Option<f64>,
 
     /// The request's remaining token budget. `None` means unbounded.
     pub remaining_budget_tokens: Option<u32>,
@@ -182,6 +196,7 @@ impl PrefillContinueDecisionInput {
             potential_decode_blocks,
             total_kv_blocks,
             prefill_worker_busy: None,
+            continuation_pressure: None,
             remaining_budget_tokens: None,
             active_continuations: None,
             sequences: None,
@@ -191,6 +206,11 @@ impl PrefillContinueDecisionInput {
 
     pub fn with_prefill_worker_busy(mut self, busy: Option<bool>) -> Self {
         self.prefill_worker_busy = busy;
+        self
+    }
+
+    pub fn with_continuation_pressure(mut self, pressure: Option<f64>) -> Self {
+        self.continuation_pressure = pressure;
         self
     }
 
@@ -349,8 +369,26 @@ impl PrefillContinuePolicy {
             return PrefillContinueDecision::Skip(skip);
         }
 
+        // Decode pressure is computed first because the interlock compares
+        // against it. Admission reserves the prompt only and nothing reserves
+        // what the request will generate, so a request that exactly fits is
+        // admitted and then runs out of room while decoding. Round up: a
+        // partial block still occupies a block.
+        let decode_pressure = match (input.potential_decode_blocks, input.total_kv_blocks) {
+            (Some(potential), Some(total)) if total > 0 => {
+                let reserve = match input.block_size {
+                    0 => 0,
+                    block_size => self.output_reserve_tokens.div_ceil(block_size),
+                };
+                Some(potential.saturating_add(reserve) as f64 / total as f64)
+            }
+            _ => None,
+        };
+
         // The interlock: the feature spends prefill capacity to relieve decode,
-        // so a loaded prefill worker has nothing to give.
+        // so a loaded prefill worker has nothing to give. Its threshold is a
+        // multiple of one batch's token budget, so it must be raised as
+        // concurrency rises; at 1.6 it admits a single in-flight request.
         if self.needs_prefill_worker_busy() {
             match input.prefill_worker_busy {
                 Some(true) => return PrefillContinueDecision::Skip(Skip::PrefillBusy),
@@ -359,8 +397,10 @@ impl PrefillContinuePolicy {
             }
         }
 
-        // Force is the bring-up path: it skips only the decode-load test, so a
-        // deployment whose decode pool never fills can still exercise the feature.
+        // Force is the bring-up path: it skips every decode-load test, both the
+        // threshold below and the comparison after it. On an idle deployment
+        // both pools read zero, and a comparison would refuse for want of a
+        // difference.
         if self.force {
             return PrefillContinueDecision::Continue;
         }
@@ -369,25 +409,25 @@ impl PrefillContinuePolicy {
             return PrefillContinueDecision::Skip(Skip::NoTrigger);
         };
 
-        match (input.potential_decode_blocks, input.total_kv_blocks) {
-            (Some(potential), Some(total)) if total > 0 => {
-                // Admission reserves the prompt only and nothing reserves what
-                // the request will generate, so a request that exactly fits is
-                // admitted and then runs out of room while decoding. Round up:
-                // a partial block still occupies a block.
-                let reserve = match input.block_size {
-                    0 => 0,
-                    block_size => self.output_reserve_tokens.div_ceil(block_size),
-                };
-                let projected = potential.saturating_add(reserve) as f64;
-                if projected > threshold * total as f64 {
-                    PrefillContinueDecision::Continue
-                } else {
-                    PrefillContinueDecision::Skip(Skip::DecodeHasRoom)
-                }
-            }
-            _ => PrefillContinueDecision::Skip(Skip::DecodeLoadUnknown),
+        let Some(decode_pressure) = decode_pressure else {
+            return PrefillContinueDecision::Skip(Skip::DecodeLoadUnknown);
+        };
+        if decode_pressure <= threshold {
+            return PrefillContinueDecision::Skip(Skip::DecodeHasRoom);
         }
+
+        // Decode is genuinely busy. Would moving this request to prefill relieve
+        // anything? Both sides are now the same fraction of their own KV pool,
+        // so this comparison is scale-free where the interlock above is not.
+        // Equal pressure buys nothing and still costs a transfer.
+        if input
+            .continuation_pressure
+            .is_some_and(|prefill| prefill >= decode_pressure)
+        {
+            return PrefillContinueDecision::Skip(Skip::NoRelief);
+        }
+
+        PrefillContinueDecision::Continue
     }
 }
 
@@ -550,6 +590,51 @@ mod tests {
     }
 
     #[test]
+    fn continuations_as_heavy_as_decode_relieve_nothing() {
+        let mut policy = policy(0.9);
+        policy.prefill_busy_threshold = Some(0.8);
+
+        // Ordinary prefill work is light, but this worker is already carrying
+        // as much continuation KV as decode holds, so moving another request
+        // there buys nothing and still costs a transfer.
+        let input = PrefillContinueDecisionInput {
+            prefill_worker_busy: Some(false),
+            continuation_pressure: Some(0.99),
+            ..decode_load(99, 100)
+        };
+        assert_eq!(skip(policy.decide(input)), PrefillContinueSkip::NoRelief);
+    }
+
+    #[test]
+    fn a_light_prefill_worker_relieves_a_full_decode_pool() {
+        let mut policy = policy(0.9);
+        policy.prefill_busy_threshold = Some(0.8);
+
+        // The regime the feature exists for: decode nearly full, prefill
+        // carrying almost no continuation load.
+        let input = PrefillContinueDecisionInput {
+            prefill_worker_busy: Some(false),
+            continuation_pressure: Some(0.05),
+            ..decode_load(99, 100)
+        };
+        assert_eq!(policy.decide(input), PrefillContinueDecision::Continue);
+    }
+
+    #[test]
+    fn unknown_continuation_pressure_does_not_block_the_decision() {
+        let mut policy = policy(0.9);
+        policy.prefill_busy_threshold = Some(0.8);
+
+        // The interlock above is the fail-closed gate. This comparison is
+        // advisory: with no reading it simply does not fire.
+        let input = PrefillContinueDecisionInput {
+            prefill_worker_busy: Some(false),
+            ..decode_load(99, 100)
+        };
+        assert_eq!(policy.decide(input), PrefillContinueDecision::Continue);
+    }
+
+    #[test]
     fn unknown_prefill_load_fails_closed_when_the_interlock_is_configured() {
         let mut policy = policy(0.9);
         policy.prefill_busy_threshold = Some(0.8);
@@ -566,6 +651,7 @@ mod tests {
         let policy = policy(0.9); // no interlock threshold configured
         let input = PrefillContinueDecisionInput {
             prefill_worker_busy: None,
+            continuation_pressure: None,
             ..decode_load(99, 100)
         };
         assert!(policy.decide(input).should_continue());
@@ -831,6 +917,7 @@ mod tests {
                 "decode_load_unknown",
             ),
             (PrefillContinueSkip::PrefillBusy, "prefill_busy"),
+            (PrefillContinueSkip::NoRelief, "no_relief"),
             (
                 PrefillContinueSkip::PrefillLoadUnknown,
                 "prefill_load_unknown",
@@ -873,6 +960,7 @@ mod tests {
                 | PrefillContinueSkip::DecodeHasRoom
                 | PrefillContinueSkip::DecodeLoadUnknown
                 | PrefillContinueSkip::PrefillBusy
+                | PrefillContinueSkip::NoRelief
                 | PrefillContinueSkip::PrefillLoadUnknown
                 | PrefillContinueSkip::BudgetAboveCap
                 | PrefillContinueSkip::BudgetUnbounded
@@ -881,7 +969,7 @@ mod tests {
                 | PrefillContinueSkip::ConcurrencyUnknown => {}
             }
         }
-        assert_eq!(PrefillContinueSkip::ALL.len(), 11);
+        assert_eq!(PrefillContinueSkip::ALL.len(), 12);
     }
 
     #[test]

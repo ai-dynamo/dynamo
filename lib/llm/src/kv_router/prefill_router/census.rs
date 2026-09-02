@@ -31,9 +31,22 @@ use crate::protocols::common::llm_backend::LLMEngineOutput;
 
 type LlmResponse = Annotated<LLMEngineOutput>;
 
+/// What one prefill worker is carrying: how many continuations, and the KV
+/// footprint they hold.
+#[derive(Clone, Copy, Default)]
+struct WorkerContinuations {
+    count: usize,
+    blocks: usize,
+}
+
 /// Continuations in flight, per prefill worker.
+///
+/// This is the only honest measure of continuation load on a prefill worker.
+/// The KV router cannot supply one: the prefill binding forcibly sets
+/// `router_track_active_blocks = false`, so its route preview reports no active
+/// footprint and would read near zero however many continuations are running.
 pub(super) struct ContinuationCensus {
-    in_flight: Mutex<HashMap<WorkerId, usize>>,
+    in_flight: Mutex<HashMap<WorkerId, WorkerContinuations>>,
     /// The published gauge, held rather than reached for.
     ///
     /// A census is per router but the global gauge is per process, so a test
@@ -65,26 +78,45 @@ impl ContinuationCensus {
         self: &Arc<Self>,
         worker_id: WorkerId,
         cap: usize,
+        blocks: usize,
     ) -> Option<ContinuationPermit> {
         let mut in_flight = self.in_flight.lock();
         // Read rather than `entry`, which would insert a zero row that the
         // refusal below then leaves behind.
-        let running = in_flight.get(&worker_id).copied().unwrap_or(0);
-        if running >= cap {
+        let running = in_flight.get(&worker_id).copied().unwrap_or_default();
+        if running.count >= cap {
             return None;
         }
-        in_flight.insert(worker_id, running + 1);
+        in_flight.insert(
+            worker_id,
+            WorkerContinuations {
+                count: running.count + 1,
+                blocks: running.blocks + blocks,
+            },
+        );
         // Paired with the permit this returns, not with the map, so it is
         // symmetric with the decrement in `release`.
         self.active.inc();
         Some(ContinuationPermit {
             census: Arc::clone(self),
             worker_id,
+            blocks,
         })
     }
 
     pub(super) fn in_flight(&self, worker_id: WorkerId) -> usize {
-        self.in_flight.lock().get(&worker_id).copied().unwrap_or(0)
+        self.in_flight
+            .lock()
+            .get(&worker_id)
+            .map_or(0, |running| running.count)
+    }
+
+    /// KV blocks the continuations on `worker_id` hold.
+    pub(super) fn blocks_in_flight(&self, worker_id: WorkerId) -> usize {
+        self.in_flight
+            .lock()
+            .get(&worker_id)
+            .map_or(0, |running| running.blocks)
     }
 
     /// The emptiest routable worker's count, or `None` when there is nothing to
@@ -98,11 +130,11 @@ impl ContinuationCensus {
         let in_flight = self.in_flight.lock();
         routable
             .iter()
-            .map(|worker_id| in_flight.get(worker_id).copied().unwrap_or(0))
+            .map(|worker_id| in_flight.get(worker_id).map_or(0, |running| running.count))
             .min()
     }
 
-    fn release(&self, worker_id: WorkerId) {
+    fn release(&self, worker_id: WorkerId, blocks: usize) {
         // Unconditional, and before the map: the gauge counts permits, and this
         // runs exactly once per permit. Pairing it with the map instead would
         // let the early return below skip a decrement and ratchet the gauge up
@@ -113,10 +145,11 @@ impl ContinuationCensus {
             debug_assert!(false, "a continuation permit outlived its census row");
             return;
         };
-        *running -= 1;
+        running.count -= 1;
+        running.blocks = running.blocks.saturating_sub(blocks);
         // Drop the key at zero, so a fleet that churns workers does not grow
         // this map forever.
-        if *running == 0 {
+        if running.count == 0 {
             in_flight.remove(&worker_id);
         }
     }
@@ -126,6 +159,8 @@ impl ContinuationCensus {
 pub(super) struct ContinuationPermit {
     census: Arc<ContinuationCensus>,
     worker_id: WorkerId,
+    /// Released with the permit, so the ledger cannot drift.
+    blocks: usize,
 }
 
 impl ContinuationPermit {
@@ -149,7 +184,7 @@ impl ContinuationPermit {
 
 impl Drop for ContinuationPermit {
     fn drop(&mut self) {
-        self.census.release(self.worker_id);
+        self.census.release(self.worker_id, self.blocks);
     }
 }
 
@@ -192,7 +227,7 @@ mod tests {
     fn a_permit_is_counted_until_it_is_dropped() {
         let census = census();
 
-        let permit = census.try_admit(7, 2).expect("first place is free");
+        let permit = census.try_admit(7, 2, 0).expect("first place is free");
         assert_eq!(census.in_flight(7), 1);
         assert_eq!(census.active.get(), 1, "the gauge must follow the count");
 
@@ -209,26 +244,26 @@ mod tests {
     fn the_cap_refuses_the_place_past_it() {
         let census = census();
 
-        let _first = census.try_admit(7, 2).expect("first");
-        let second = census.try_admit(7, 2).expect("second");
+        let _first = census.try_admit(7, 2, 0).expect("first");
+        let second = census.try_admit(7, 2, 0).expect("second");
         assert!(
-            census.try_admit(7, 2).is_none(),
+            census.try_admit(7, 2, 0).is_none(),
             "a third continuation must be refused at a cap of two"
         );
 
         // Releasing one frees exactly one place.
         drop(second);
-        assert!(census.try_admit(7, 2).is_some());
+        assert!(census.try_admit(7, 2, 0).is_some());
     }
 
     #[test]
     fn workers_are_counted_separately() {
         let census = census();
 
-        let _seven = census.try_admit(7, 1).expect("worker 7");
+        let _seven = census.try_admit(7, 1, 0).expect("worker 7");
         // Bound, not a temporary: a temporary would release its own place.
         let _eight = census
-            .try_admit(8, 1)
+            .try_admit(8, 1, 0)
             .expect("one worker being full must not refuse another");
 
         assert_eq!(census.in_flight(7), 1);
@@ -238,14 +273,47 @@ mod tests {
     #[test]
     fn min_in_flight_reports_the_emptiest_worker() {
         let census = census();
-        let _seven = census.try_admit(7, 4).expect("worker 7");
-        let _also_seven = census.try_admit(7, 4).expect("worker 7 again");
-        let _eight = census.try_admit(8, 4).expect("worker 8");
+        let _seven = census.try_admit(7, 4, 0).expect("worker 7");
+        let _also_seven = census.try_admit(7, 4, 0).expect("worker 7 again");
+        let _eight = census.try_admit(8, 4, 0).expect("worker 8");
 
         // 9 has never been admitted, so it is empty and it is the minimum.
         assert_eq!(census.min_in_flight(&[7, 8, 9]), Some(0));
         assert_eq!(census.min_in_flight(&[7, 8]), Some(1));
         assert_eq!(census.min_in_flight(&[7]), Some(2));
+    }
+
+    #[test]
+    fn the_ledger_rises_with_each_continuation_and_falls_when_it_ends() {
+        // The interlock reads this, not a route preview. A prefill binding sets
+        // `router_track_active_blocks = false`, so a preview reports no active
+        // footprint however many continuations are running; only the census
+        // knows.
+        let census = census();
+        assert_eq!(census.blocks_in_flight(7), 0);
+
+        let first = census.try_admit(7, 3, 40).expect("first place");
+        assert_eq!(census.blocks_in_flight(7), 40);
+        let second = census.try_admit(7, 3, 25).expect("second place");
+        assert_eq!(
+            census.blocks_in_flight(7),
+            65,
+            "blocks accumulate per worker"
+        );
+
+        // Another worker's load is its own.
+        let _other = census.try_admit(8, 3, 11).expect("worker 8");
+        assert_eq!(census.blocks_in_flight(7), 65);
+        assert_eq!(census.blocks_in_flight(8), 11);
+
+        drop(second);
+        assert_eq!(
+            census.blocks_in_flight(7),
+            40,
+            "ending one frees its blocks"
+        );
+        drop(first);
+        assert_eq!(census.blocks_in_flight(7), 0);
     }
 
     #[test]
@@ -259,7 +327,7 @@ mod tests {
     fn a_cap_of_zero_refuses_everything() {
         let census = census();
 
-        assert!(census.try_admit(7, 0).is_none());
+        assert!(census.try_admit(7, 0, 0).is_none());
         assert!(
             census.in_flight.lock().is_empty(),
             "a refused admission must not leave a row behind"

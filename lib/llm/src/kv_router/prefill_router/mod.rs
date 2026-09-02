@@ -465,6 +465,10 @@ where
         };
         let input = measured
             .with_prefill_worker_busy(self.peek_prefill_busy(request, binding, request_id).await)
+            .with_continuation_pressure(
+                self.peek_continuation_pressure(request, binding, request_id)
+                    .await,
+            )
             .with_remaining_budget_tokens(budget)
             .with_active_continuations(active)
             .with_sequences(sequences);
@@ -557,6 +561,49 @@ where
                     request_id,
                     %error,
                     "Prefill-load probe failed; treating prefill load as unavailable"
+                );
+                None
+            }
+        }
+    }
+
+    /// KV the continuations on the chosen prefill worker hold, as a fraction of
+    /// its pool.
+    ///
+    /// Read from the census, not a route preview. The prefill binding sets
+    /// `router_track_active_blocks = false`, so a preview there reports no
+    /// active footprint however many continuations are running.
+    async fn peek_continuation_pressure(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        binding: &PrefillBinding<Sel>,
+        request_id: &str,
+    ) -> Option<f64> {
+        if !self.prefill_continue_policy.needs_decode_load() {
+            return None;
+        }
+        match binding
+            .router
+            .preview_kv_route(request, RequestPhase::Prefill)
+            .await
+        {
+            Ok(preview) => {
+                let signals = preview.signals();
+                signals
+                    .total_kv_blocks
+                    .filter(|&total| total > 0)
+                    .map(|total| {
+                        self.continuations
+                            .blocks_in_flight(signals.worker.worker_id)
+                            as f64
+                            / total as f64
+                    })
+            }
+            Err(error) => {
+                tracing::debug!(
+                    request_id,
+                    %error,
+                    "Continuation-pressure probe failed; treating it as unavailable"
                 );
                 None
             }
@@ -1079,6 +1126,22 @@ where
     /// Demoting means undoing both halves of the ask: the marker comes off, so
     /// the worker builds its usual handoff, and the one-token clamp goes back
     /// on, so it stops after the token that handoff carries.
+    /// KV blocks a continuation will hold: its prompt plus everything it is
+    /// allowed to generate. The budget is a hard bound the request carries, so
+    /// this is the worst case, not a guess.
+    fn continuation_blocks(request: &PreprocessedRequest, binding: &PrefillBinding<Sel>) -> usize {
+        let Some(kv_router) = binding.router.kv_router_if_enabled() else {
+            return 0;
+        };
+        let block_size = (kv_router.block_size() as usize).max(1);
+        let budget = request.stop_conditions.max_tokens.unwrap_or(0) as usize;
+        request
+            .token_ids
+            .len()
+            .saturating_add(budget)
+            .div_ceil(block_size)
+    }
+
     fn admit_continuation(
         &self,
         request: &mut PreprocessedRequest,
@@ -1114,7 +1177,8 @@ where
             demote_to_handoff(request);
             return None;
         };
-        if let Some(permit) = self.continuations.try_admit(worker_id, cap) {
+        let blocks = Self::continuation_blocks(request, binding);
+        if let Some(permit) = self.continuations.try_admit(worker_id, cap, blocks) {
             return Some(permit);
         }
 

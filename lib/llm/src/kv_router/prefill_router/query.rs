@@ -364,7 +364,13 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, worker_id)| {
-                let mut config = ModelRuntimeConfig::default();
+                // A real vLLM worker publishes `total_kv_blocks`. The
+                // continuation-pressure probe divides by it, so a fixture
+                // without one has no denominator.
+                let mut config = ModelRuntimeConfig {
+                    total_kv_blocks: Some(1_000),
+                    ..Default::default()
+                };
                 if index < capable_workers {
                     config
                         .set_engine_specific(PREFILL_CONTINUE_CAPABILITY, true)
@@ -719,7 +725,7 @@ mod tests {
             .map(|worker_id| {
                 prefill_router
                     .continuations
-                    .try_admit(*worker_id, 1)
+                    .try_admit(*worker_id, 1, 0)
                     .expect("a fresh worker has its place free")
             })
             .collect();
