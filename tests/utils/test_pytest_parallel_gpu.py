@@ -382,25 +382,19 @@ def test_full_change_beats_status_quo():
 # --------------------------------------------------------------------------- #
 # effective_cpu_budget: don't let -n auto (host os.cpu_count) oversubscribe CPU
 # --------------------------------------------------------------------------- #
-def test_effective_cpu_budget_prefers_num_cpus_env():
-    import os
+def test_effective_cpu_budget_caps_num_cpus_at_detected_quota(monkeypatch):
+    from tests.utils import vram_utils
 
-    from tests.utils.vram_utils import effective_cpu_budget
+    monkeypatch.setattr(vram_utils, "_cgroup_cpu_budget", lambda: 1)
+    monkeypatch.setenv("NUM_CPUS", "2")
+    assert vram_utils.effective_cpu_budget() == 1
 
-    old = os.environ.get("NUM_CPUS")
-    try:
-        os.environ["NUM_CPUS"] = "4"
-        assert effective_cpu_budget() == 4
-        os.environ["NUM_CPUS"] = "7"
-        assert effective_cpu_budget() == 7
-        # Invalid value falls through to cgroup/os.cpu_count() and stays positive.
-        os.environ["NUM_CPUS"] = "bogus"
-        assert effective_cpu_budget() >= 1
-    finally:
-        if old is None:
-            os.environ.pop("NUM_CPUS", None)
-        else:
-            os.environ["NUM_CPUS"] = old
+    monkeypatch.setattr(vram_utils, "_cgroup_cpu_budget", lambda: None)
+    monkeypatch.setattr(vram_utils.os, "cpu_count", lambda: 96)
+    assert vram_utils.effective_cpu_budget() == 2
+
+    monkeypatch.setenv("NUM_CPUS", "bogus")
+    assert vram_utils.effective_cpu_budget() == 96
 
 
 def test_simulation_conserves_work_and_respects_budget():
