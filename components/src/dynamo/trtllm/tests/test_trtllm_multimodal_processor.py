@@ -4,9 +4,8 @@
 """process_openai_request must let client-error types from image loading
 propagate (so the frontend returns a 4xx) instead of swallowing them to None."""
 
-from unittest.mock import AsyncMock, MagicMock
-
 import json
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import torch
