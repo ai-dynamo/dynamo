@@ -208,3 +208,8 @@ data:
     gpu:
       discoveryEnabled: {{ .Values.gpuDiscovery.enabled }}
     {{- end }}
+    # Operator-managed Ray elastic expert parallelism. Off unless an administrator
+    # opts in: the path rewrites launch commands and synthesizes workloads, which is
+    # a grant to give rather than something to infer from a user's engine flags.
+    elasticEPRayPoC:
+      enabled: {{ .Values.elasticEPRayPoC.enabled }}
