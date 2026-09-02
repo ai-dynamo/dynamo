@@ -237,6 +237,13 @@ RUN set -eux; \
         /usr/local/lib/pkgconfig/libpostproc*.pc \
         /usr/local/lib/pkgconfig/libsw*.pc \
         /usr/local/src/ffmpeg \
+        /usr/lib/*/libx264*.so* \
+        /usr/lib/*/libx265*.so* \
+        /usr/lib/*/libopenh264*.so* \
+        /usr/lib/*/libfdk-aac*.so* \
+        /usr/lib/*/libfaac*.so* \
+        /usr/lib/*/libvo-aacenc*.so* \
+        /usr/lib/*/libaacplus*.so* \
         /root/.cache/pip; \
     ldconfig
 {% endif %}
