@@ -435,35 +435,6 @@ func TestShouldTriggerRollingUpdate_UsesResolvedRuntimeVersion(t *testing.T) {
 	}
 }
 
-func TestInitializeWorkerHashIfNeeded_MigratesOpaqueV1WithoutRollout(t *testing.T) {
-	t.Log("Build a v1-only DGD with an opaque stored worker suffix")
-	const existingHash = "existing-hash"
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {
-			ComponentType: consts.ComponentTypeWorker,
-			Envs: []corev1.EnvVar{
-				{Name: "FOO", Value: "bar"},
-			},
-		},
-	})
-	dgd.Annotations = map[string]string{
-		consts.AnnotationCurrentWorkerHash: existingHash,
-	}
-	desiredV2 := betaDGDWorkersSpecHash(t, dgd)
-
-	t.Log("Migrate the annotation state without interpreting or replacing v1")
-	r := createTestReconcilerWithStatus(dgd)
-	err := r.initializeWorkerHashIfNeeded(context.Background(), dgd)
-	require.NoError(t, err)
-	assert.Equal(t, existingHash, r.getCurrentWorkerHash(dgd))
-	assert.Equal(t, desiredV2, r.getCurrentWorkerHashV2(dgd))
-
-	t.Log("Verify recording v2 did not turn the operator upgrade into a worker rollout")
-	trigger, err := r.shouldTriggerRollingUpdate(dgd)
-	require.NoError(t, err)
-	assert.False(t, trigger)
-}
-
 func TestActiveWorkerHashCandidatesV2Only(t *testing.T) {
 	t.Log("Build a normal v2-only generation")
 	dgd := createTestDGD("test-dgd", nil)
@@ -473,105 +444,6 @@ func TestActiveWorkerHashCandidatesV2Only(t *testing.T) {
 
 	t.Log("Verify candidate lookup cannot fall back to an empty legacy hash")
 	assert.Equal(t, []string{"v2"}, activeWorkerHashCandidates(dgd, workerGenerationHashes{v2: "v2"}))
-}
-
-func TestInitializeWorkerHashIfNeeded_PreservesLegacyAlphaHash(t *testing.T) {
-	alpha := &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd",
-			Namespace: "default",
-			Annotations: map[string]string{
-				consts.AnnotationCurrentWorkerHash: "old-alpha-hash",
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"worker": {
-					ComponentType: consts.ComponentTypeWorker,
-					Envs:          []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
-					Resources: &nvidiacomv1alpha1.Resources{
-						Requests: &nvidiacomv1alpha1.ResourceItem{CPU: "1"},
-					},
-				},
-			},
-		},
-	}
-	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
-	require.NoError(t, alpha.ConvertTo(dgd))
-	legacyHash := legacyDGDWorkersSpecHash(t, dgd)
-	v2Hash := betaDGDWorkersSpecHash(t, dgd)
-	require.NotEqual(t, legacyHash, v2Hash)
-	if dgd.Annotations == nil {
-		dgd.Annotations = map[string]string{}
-	}
-	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = legacyHash
-
-	r := createTestReconcilerWithStatus(dgd)
-	err := r.initializeWorkerHashIfNeeded(context.Background(), dgd)
-	require.NoError(t, err)
-
-	assert.Equal(t, legacyHash, r.getCurrentWorkerHash(dgd))
-	assert.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-	trigger, err := r.shouldTriggerRollingUpdate(dgd)
-	require.NoError(t, err)
-	assert.False(t, trigger)
-
-	ctx, err := r.buildRollingUpdateContext(context.Background(), dgd)
-	require.NoError(t, err)
-	assert.Equal(t, legacyHash, ctx.NewWorkerHash)
-	assert.False(t, ctx.InProgress())
-	assert.NotEqual(t, v2Hash, ctx.NewWorkerHash)
-}
-
-func TestLegacyAlphaHashCompatibility_NoOpUpgradeUsesExistingWorkerGeneration(t *testing.T) {
-	alpha := &nvidiacomv1alpha1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "qwen",
-			Namespace: "default",
-			Annotations: map[string]string{
-				consts.AnnotationCurrentWorkerHash: "old-alpha-hash",
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
-			BackendFramework: "vllm",
-			Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				"VllmDecodeWorker": {
-					ComponentType:    consts.ComponentTypeWorker,
-					SubComponentType: consts.ComponentTypeDecode,
-					Envs:             []corev1.EnvVar{{Name: "MODEL_PATH", Value: "Qwen/Qwen3-0.6B"}},
-					Resources: &nvidiacomv1alpha1.Resources{
-						Requests: &nvidiacomv1alpha1.ResourceItem{GPU: "1"},
-					},
-				},
-			},
-		},
-	}
-	dgd := &nvidiacomv1beta1.DynamoGraphDeployment{}
-	require.NoError(t, alpha.ConvertTo(dgd))
-	legacyHash := legacyDGDWorkersSpecHash(t, dgd)
-	v2Hash := betaDGDWorkersSpecHash(t, dgd)
-	require.NotEqual(t, legacyHash, v2Hash)
-	if dgd.Annotations == nil {
-		dgd.Annotations = map[string]string{}
-	}
-	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = legacyHash
-
-	r := createTestReconcilerWithStatus(dgd)
-	require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))
-
-	trigger, err := r.shouldTriggerRollingUpdate(dgd)
-	require.NoError(t, err)
-	require.False(t, trigger)
-
-	rollingCtx, err := r.buildRollingUpdateContext(context.Background(), dgd)
-	require.NoError(t, err)
-	require.Equal(t, legacyHash, rollingCtx.NewWorkerHash)
-	require.False(t, rollingCtx.InProgress())
-
-	dcds, err := dynamo.GenerateDynamoComponentsDeployments(dgd, nil, nil, rollingCtx)
-	require.NoError(t, err)
-	require.Equal(t, "qwen-vllmdecodeworker-"+legacyHash, dcds["VllmDecodeWorker"].Name)
-	require.NotEqual(t, "qwen-vllmdecodeworker-"+v2Hash, dcds["VllmDecodeWorker"].Name)
 }
 
 func TestLegacyAlphaHashCompatibility_WorkerSpecChangeUsesNewV2Generation(t *testing.T) {
@@ -587,16 +459,12 @@ func TestLegacyAlphaHashCompatibility_WorkerSpecChangeUsesNewV2Generation(t *tes
 	legacyHash := legacyDGDWorkersSpecHash(t, dgd)
 	v2Hash := betaDGDWorkersSpecHash(t, dgd)
 	require.NotEqual(t, legacyHash, v2Hash)
-	if dgd.Annotations == nil {
-		dgd.Annotations = map[string]string{}
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHash:   legacyHash,
+		consts.AnnotationCurrentWorkerHashV2: v2Hash,
 	}
-	dgd.Annotations[consts.AnnotationCurrentWorkerHash] = legacyHash
 
 	r := createTestReconcilerWithStatus(dgd)
-	require.NoError(t, r.initializeWorkerHashIfNeeded(context.Background(), dgd))
-	require.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
-	require.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-
 	dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Env = append(
 		dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Env,
 		corev1.EnvVar{Name: "NEW_WORKER_SETTING", Value: "true"},
@@ -605,8 +473,6 @@ func TestLegacyAlphaHashCompatibility_WorkerSpecChangeUsesNewV2Generation(t *tes
 	newLegacyHash := legacyDGDWorkersSpecHash(t, dgd)
 	require.NotEqual(t, v2Hash, newV2Hash)
 	require.NotEqual(t, legacyHash, newLegacyHash)
-
-	require.NoError(t, r.migrateCurrentWorkerHashIfNeeded(context.Background(), dgd))
 
 	trigger, err := r.shouldTriggerRollingUpdate(dgd)
 	require.NoError(t, err)
@@ -1550,224 +1416,6 @@ func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.
 		isReady, reason := newComponentRestartProgressResolver(r.Client).checkComponentFullyUpdated(ctx, dgd, "worker")
 		assert.True(t, isReady, "worker DCD should be ready via fallback")
 		assert.Empty(t, reason)
-	})
-}
-
-func TestInitializeWorkerHashIfNeeded_LegacyMultipleWorkers(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"prefill": {
-			ComponentType: consts.ComponentTypePrefill,
-		},
-		"decode": {
-			ComponentType: consts.ComponentTypeDecode,
-		},
-		"frontend": {
-			ComponentType: consts.ComponentTypeFrontend,
-		},
-	})
-
-	// Legacy worker DCDs (no hash label)
-	legacyPrefillDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-prefill",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypePrefill,
-				ServiceName:   "prefill",
-			},
-		},
-	})
-
-	legacyDecodeDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-decode",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeDecode,
-				ServiceName:   "decode",
-			},
-		},
-	})
-
-	// Frontend DCD (not a worker, should not be touched)
-	frontendDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-dgd-frontend",
-			Namespace: "default",
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-			},
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeFrontend,
-				ServiceName:   "frontend",
-			},
-		},
-	})
-
-	r := createTestReconcilerWithStatus(dgd, withObjects(legacyPrefillDCD, legacyDecodeDCD, frontendDCD))
-	ctx := context.Background()
-
-	err := r.initializeWorkerHashIfNeeded(ctx, dgd)
-	require.NoError(t, err)
-
-	// DGD should have legacy sentinel hash
-	assert.Equal(t, consts.LegacyWorkerHash, r.getCurrentWorkerHash(dgd))
-
-	// Both worker DCDs should have hash label backfilled
-	for _, name := range []string{"test-dgd-prefill", "test-dgd-decode"} {
-		dcd := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{})
-		err = r.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, dcd)
-		require.NoError(t, err)
-		assert.Equal(t, consts.LegacyWorkerHash, dcd.Labels[consts.KubeLabelDynamoWorkerHash],
-			"Worker DCD %s should have legacy hash label", name)
-	}
-
-	// Frontend should NOT have hash label
-	fe := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{})
-	err = r.Get(ctx, types.NamespacedName{Name: "test-dgd-frontend", Namespace: "default"}, fe)
-	require.NoError(t, err)
-	assert.Empty(t, fe.Labels[consts.KubeLabelDynamoWorkerHash],
-		"Frontend DCD should not have worker hash label")
-}
-
-func TestFindLegacyWorkerDCDs(t *testing.T) {
-	t.Run("finds worker DCDs without hash label", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-			"worker": {ComponentType: consts.ComponentTypeWorker},
-		})
-
-		legacyDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-dgd-worker",
-				Namespace: "default",
-				Labels: map[string]string{
-					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				},
-			},
-			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: consts.ComponentTypeWorker,
-				},
-			},
-		})
-
-		r := createTestReconcilerWithStatus(dgd, withObjects(legacyDCD))
-		ctx := context.Background()
-
-		result, err := r.findLegacyWorkerDCDs(ctx, dgd)
-		require.NoError(t, err)
-		assert.Len(t, result, 1)
-		assert.Equal(t, "test-dgd-worker", result[0].Name)
-	})
-
-	t.Run("ignores non-worker DCDs", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-			"frontend": {ComponentType: consts.ComponentTypeFrontend},
-		})
-
-		frontendDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-dgd-frontend",
-				Namespace: "default",
-				Labels: map[string]string{
-					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-				},
-			},
-			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: consts.ComponentTypeFrontend,
-				},
-			},
-		})
-
-		r := createTestReconcilerWithStatus(dgd, withObjects(frontendDCD))
-		ctx := context.Background()
-
-		result, err := r.findLegacyWorkerDCDs(ctx, dgd)
-		require.NoError(t, err)
-		assert.Empty(t, result)
-	})
-
-	t.Run("ignores DCDs that already have hash label", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-			"worker": {ComponentType: consts.ComponentTypeWorker},
-		})
-
-		hashedDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-dgd-worker-abc12345",
-				Namespace: "default",
-				Labels: map[string]string{
-					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-					consts.KubeLabelDynamoWorkerHash:          "abc12345",
-				},
-			},
-			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: consts.ComponentTypeWorker,
-				},
-			},
-		})
-
-		r := createTestReconcilerWithStatus(dgd, withObjects(hashedDCD))
-		ctx := context.Background()
-
-		result, err := r.findLegacyWorkerDCDs(ctx, dgd)
-		require.NoError(t, err)
-		assert.Empty(t, result)
-	})
-
-	t.Run("ignores DCDs from other DGDs", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-			"worker": {ComponentType: consts.ComponentTypeWorker},
-		})
-
-		otherDGDWorkerDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "other-dgd-worker",
-				Namespace: "default",
-				Labels: map[string]string{
-					consts.KubeLabelDynamoGraphDeploymentName: "other-dgd",
-				},
-			},
-			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
-				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: consts.ComponentTypeWorker,
-				},
-			},
-		})
-
-		r := createTestReconcilerWithStatus(dgd, withObjects(otherDGDWorkerDCD))
-		ctx := context.Background()
-
-		result, err := r.findLegacyWorkerDCDs(ctx, dgd)
-		require.NoError(t, err)
-		assert.Empty(t, result)
-	})
-
-	t.Run("no DCDs at all", func(t *testing.T) {
-		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-			"worker": {ComponentType: consts.ComponentTypeWorker},
-		})
-
-		r := createTestReconcilerWithStatus(dgd)
-		ctx := context.Background()
-
-		result, err := r.findLegacyWorkerDCDs(ctx, dgd)
-		require.NoError(t, err)
-		assert.Empty(t, result)
 	})
 }
 
@@ -3589,72 +3237,183 @@ func TestBuildRollingUpdateContext_GetNewDCDError(t *testing.T) {
 		"error must originate from the new-DCD Get path, not some other call")
 }
 
-func TestManagedWorkerInventory_SemanticComparatorNormalizesGenerationIdentity(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {
-			ComponentType: consts.ComponentTypeWorker,
-			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "stable"}},
-		},
-	})
-	expected := renderManagedInventoryWorkerDCD(t, dgd)
-	observed := managedInventoryWorkerDCD(t, dgd, "opaque-h1")
+func TestManagedWorkerInventory_ResolvesHashCohorts(t *testing.T) {
+	const bridgeHash = "bridge-h"
 
-	require.True(t, workerDCDSemanticallyEqual(expected, observed))
-	observed.Spec.PodTemplate.Spec.Containers[0].Env = append(
-		observed.Spec.PodTemplate.Spec.Containers[0].Env,
-		corev1.EnvVar{Name: "WORKER_VERSION_OVERRIDE", Value: "changed"},
-	)
-	assert.False(t, workerDCDSemanticallyEqual(expected, observed))
+	tests := []struct {
+		name             string
+		annotations      func(*nvidiacomv1beta1.DynamoGraphDeployment, string)
+		observedSuffixes func(string) []string
+		mutate           func(*nvidiacomv1beta1.DynamoComponentDeployment)
+		wantBridge       bool
+		wantComplete     bool
+		wantOld          int
+	}{
+		{
+			name:             "canonical v2 target",
+			observedSuffixes: func(hash string) []string { return []string{hash} },
+			wantComplete:     true,
+		},
+		{
+			name: "persisted v1 bridge",
+			annotations: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, hash string) {
+				dgd.Annotations = map[string]string{
+					consts.AnnotationCurrentWorkerHash:   bridgeHash,
+					consts.AnnotationCurrentWorkerHashV2: hash,
+				}
+			},
+			observedSuffixes: func(string) []string { return []string{bridgeHash} },
+			wantBridge:       true,
+			wantComplete:     true,
+		},
+		{
+			name: "canonical v2 target wins over bridge",
+			annotations: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, hash string) {
+				dgd.Annotations = map[string]string{
+					consts.AnnotationCurrentWorkerHash:   bridgeHash,
+					consts.AnnotationCurrentWorkerHashV2: hash,
+				}
+			},
+			observedSuffixes: func(hash string) []string { return []string{bridgeHash, hash} },
+			wantComplete:     true,
+			wantOld:          1,
+		},
+		{
+			name: "v1 only is not a bridge",
+			annotations: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) {
+				dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHash: bridgeHash}
+			},
+			observedSuffixes: func(string) []string { return []string{bridgeHash} },
+			wantOld:          1,
+		},
+		{
+			name: "v1 suffix with a different persisted v2 is old",
+			annotations: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) {
+				dgd.Annotations = map[string]string{
+					consts.AnnotationCurrentWorkerHash:   bridgeHash,
+					consts.AnnotationCurrentWorkerHashV2: "previous-v2",
+				}
+			},
+			observedSuffixes: func(string) []string { return []string{bridgeHash} },
+			wantOld:          1,
+		},
+		{
+			name:             "canonical name ignores mutable DCD evidence",
+			observedSuffixes: func(hash string) []string { return []string{hash} },
+			mutate: func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.BackendFramework = "wrong-framework"
+				dcd.Labels[consts.KubeLabelDynamoWorkerHash] = "wrong-label"
+				dcd.Spec.PodTemplate.Labels[consts.KubeLabelDynamoWorkerHash] = "wrong-template-label"
+				for i := range dcd.Spec.PodTemplate.Spec.Containers {
+					for j := range dcd.Spec.PodTemplate.Spec.Containers[i].Env {
+						if dcd.Spec.PodTemplate.Spec.Containers[i].Env[j].Name == "DYN_NAMESPACE_WORKER_SUFFIX" {
+							dcd.Spec.PodTemplate.Spec.Containers[i].Env[j].Value = "wrong-worker-suffix"
+						}
+					}
+				}
+			},
+			wantComplete: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: consts.ComponentTypeWorker, Replicas: ptr.To(int32(1))},
+			})
+			dgd.UID = types.UID("dgd-uid")
+			desiredHash := betaDGDWorkersSpecHash(t, dgd)
+			if tt.annotations != nil {
+				tt.annotations(dgd, desiredHash)
+			}
+
+			objects := make([]runtime.Object, 0, len(tt.observedSuffixes(desiredHash)))
+			for _, suffix := range tt.observedSuffixes(desiredHash) {
+				dcd := managedInventoryWorkerDCD(t, dgd, suffix)
+				if tt.mutate != nil {
+					tt.mutate(dcd)
+				}
+				objects = append(objects, dcd)
+			}
+			reconciler := createTestReconcilerWithStatus(dgd, withObjects(objects...))
+
+			plan, err := reconciler.buildManagedWorkerRolloutPlan(context.Background(), dgd)
+			require.NoError(t, err)
+
+			wantTarget := desiredHash
+			if tt.wantBridge {
+				wantTarget = bridgeHash
+			}
+			assert.Equal(t, wantTarget, plan.inventory.targetHash)
+			assert.Equal(t, tt.wantComplete, plan.context.TargetComplete)
+			assert.Equal(t, tt.wantComplete, plan.context.MayMutateOld)
+			assert.Equal(t, wantTarget, plan.context.WorkerHashByComponent["worker"])
+			assert.Equal(t, dynamo.GetDCDResourceName(dgd, "worker", wantTarget), plan.context.TargetDCDNames["worker"])
+			assert.Len(t, plan.inventory.old, tt.wantOld)
+		})
+	}
 }
 
-func TestManagedWorkerInventory_ReconstructsStrippedAnnotationBridgeGeneration(t *testing.T) {
+func TestManagedWorkerInventory_CanonicalV2WinsPartialBridgeCohort(t *testing.T) {
+	const bridgeHash = "bridge-h"
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {
-			ComponentType: consts.ComponentTypeWorker,
-			Replicas:      ptr.To(int32(1)),
-		},
+		"prefill": {ComponentType: consts.ComponentTypePrefill, Replicas: ptr.To(int32(1))},
+		"decode":  {ComponentType: consts.ComponentTypeDecode, Replicas: ptr.To(int32(1))},
 	})
 	dgd.UID = types.UID("dgd-uid")
-	observed := managedInventoryWorkerDCD(t, dgd, "opaque-h1")
-	setInventoryWorkerDCDReady(observed)
-	reconciler := createTestReconcilerWithStatus(dgd, withObjects(observed))
+	desiredHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHash:   bridgeHash,
+		consts.AnnotationCurrentWorkerHashV2: desiredHash,
+	}
+	render := func(component, suffix string) *nvidiacomv1beta1.DynamoComponentDeployment {
+		t.Helper()
+		dcds, err := dynamo.GenerateDynamoComponentsDeployments(
+			dgd, nil, nil, dynamo.RollingUpdateContext{NewWorkerHash: desiredHash},
+		)
+		require.NoError(t, err)
+		dcd := dcds[component].DeepCopy()
+		dcd.Name = dynamo.GetDCDResourceName(dgd, component, suffix)
+		dcd.OwnerReferences = []metav1.OwnerReference{
+			*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
+		}
+		return dcd
+	}
+	target := render("prefill", desiredHash)
+	old := render("decode", bridgeHash)
+	reconciler := createTestReconcilerWithStatus(dgd, withObjects(target, old))
 
 	plan, err := reconciler.buildManagedWorkerRolloutPlan(context.Background(), dgd)
 	require.NoError(t, err)
-	assert.True(t, plan.context.TargetComplete)
-	assert.False(t, plan.context.InProgress())
-	assert.Equal(t, "opaque-h1", plan.context.WorkerHashByComponent["worker"])
-	assert.Empty(t, plan.inventory.old)
-
-	require.NoError(t, reconciler.reconcileManagedWorkerInventory(context.Background(), dgd, &dgd.Status, plan))
-	assert.Equal(t, betaDGDWorkersSpecHash(t, dgd), dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-	assert.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHash)
-}
-
-func TestManagedWorkerInventory_V1BlindChangeDoesNotMutateOldDCD(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {
-			ComponentType: consts.ComponentTypeWorker,
-			Replicas:      ptr.To(int32(1)),
-		},
-	})
-	dgd.UID = types.UID("dgd-uid")
-	dgd.Spec.BackendFramework = "vllm"
-	old := managedInventoryWorkerDCD(t, dgd, "stable-v1")
-	dgd.Spec.BackendFramework = "sglang" // unchanged v1 hash, different effective DCD spec
-	reconciler := createTestReconcilerWithStatus(dgd, withObjects(old))
-
-	plan, err := reconciler.buildManagedWorkerRolloutPlan(context.Background(), dgd)
-	require.NoError(t, err)
+	assert.Equal(t, desiredHash, plan.inventory.targetHash)
 	assert.False(t, plan.context.TargetComplete)
 	assert.False(t, plan.context.MayMutateOld)
+	assert.Equal(t, desiredHash, plan.context.WorkerHashByComponent["prefill"])
+	assert.Equal(t, desiredHash, plan.context.WorkerHashByComponent["decode"])
 	assert.Len(t, plan.inventory.old, 1)
-	require.NoError(t, reconciler.scaleOldWorkerDCDs(context.Background(), dgd, plan.context))
+}
 
-	persisted := &nvidiacomv1beta1.DynamoComponentDeployment{}
-	require.NoError(t, reconciler.Get(context.Background(), client.ObjectKeyFromObject(old), persisted))
-	require.NotNil(t, persisted.Spec.Replicas)
-	assert.Equal(t, int32(1), *persisted.Spec.Replicas)
+func TestManagedWorkerInventory_ProjectsSelectedBridgeHash(t *testing.T) {
+	const bridgeHash = "bridge-h"
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker, Replicas: ptr.To(int32(1))},
+	})
+	dgd.UID = types.UID("dgd-uid")
+	desiredHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHash:   bridgeHash,
+		consts.AnnotationCurrentWorkerHashV2: desiredHash,
+	}
+	target := managedInventoryWorkerDCD(t, dgd, bridgeHash)
+	setInventoryWorkerDCDReady(target)
+	reconciler := createTestReconcilerWithStatus(dgd, withObjects(target))
+
+	plan, err := reconciler.buildManagedWorkerRolloutPlan(context.Background(), dgd)
+	require.NoError(t, err)
+	require.Equal(t, bridgeHash, plan.inventory.targetHash)
+	require.NoError(t, reconciler.reconcileManagedWorkerInventory(context.Background(), dgd, &dgd.Status, plan))
+	assert.Equal(t, bridgeHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
+	assert.Equal(t, desiredHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 }
 
 func TestManagedWorkerInventory_ScalesObservedOldDCDDespiteDesiredHashLabel(t *testing.T) {
@@ -3680,13 +3439,13 @@ func TestManagedWorkerInventory_ScalesObservedOldDCDDespiteDesiredHashLabel(t *t
 	assertWorkerDCDReplicas(t, reconciler, old, 0)
 }
 
-func TestManagedWorkerInventory_RejectsNonmatchingDesiredNameCollision(t *testing.T) {
+func TestManagedWorkerInventory_RejectsForeignCanonicalNameCollision(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
 	dgd.UID = types.UID("dgd-uid")
 	collision := managedInventoryWorkerDCD(t, dgd, betaDGDWorkersSpecHash(t, dgd))
-	collision.Spec.BackendFramework = "different"
+	collision.OwnerReferences = nil
 	reconciler := createTestReconcilerWithStatus(dgd, withObjects(collision))
 
 	_, err := reconciler.buildManagedWorkerRolloutPlan(context.Background(), dgd)
@@ -3873,28 +3632,6 @@ func TestManagedWorkerInventory_AnnotationlessAtoBRollsOutSafely(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, reconciler.reconcileManagedWorkerInventory(ctx, dgd, &dgd.Status, final))
 	assert.Equal(t, betaDGDWorkersSpecHash(t, dgd), dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
-}
-
-func TestWorkerDCDSemanticComparatorIgnoresOnlyControllerGenerationMetadata(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	dgd.UID = types.UID("dgd-uid")
-	expected := renderManagedInventoryWorkerDCD(t, dgd)
-	observed := managedInventoryWorkerDCD(t, dgd, "opaque-h1")
-	observed.UID = types.UID("observed-uid")
-	observed.ResourceVersion = "42"
-	observed.Generation = 9
-	observed.CreationTimestamp = metav1.Now()
-	observed.ManagedFields = []metav1.ManagedFieldsEntry{{Manager: "controller"}}
-	observed.Spec.PodTemplate.Annotations[consts.RestartAnnotation] = "2026-09-02T00:00:00Z"
-	observed.Spec.PodTemplate.Annotations[consts.CheckpointRestoreCandidateAnnotation] = "true"
-	observed.Spec.PodTemplate.Annotations[consts.CheckpointNameAnnotation] = "checkpoint"
-	observed.Spec.PodTemplate.Annotations[consts.CheckpointStartupPolicyAnnotation] = "waitForCheckpoint"
-
-	assert.True(t, workerDCDSemanticallyEqual(expected, observed))
-	observed.Spec.BackendFramework = "user-visible-change"
-	assert.False(t, workerDCDSemanticallyEqual(expected, observed))
 }
 
 func assertWorkerDCDReplicas(

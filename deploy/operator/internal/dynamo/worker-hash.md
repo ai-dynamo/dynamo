@@ -46,6 +46,19 @@ about one completed generation: v2 describes the worker inputs for change detect
 the already-created DCDs.
 
 ## Migration Semantics
+## Managed DCD Cohort Recovery
+
+For the managed DCD pathway, a cohort is identified only by its exact canonical DCD name: DGD,
+component name, and suffix. A v1 suffix `H` is a bridge to a desired v2 suffix `A` only when the
+persisted annotations are exactly `{v1: H, v2: A}`:
+
+- If any canonical `A` DCD exists, `A` is the target and `H` DCDs are old.
+- If no canonical `A` DCD exists but a canonical `H` DCD exists, `H` remains the target.
+- A v1-only annotation, the `legacy` sentinel, or `{v1: H, v2: B}` for desired `A` is not a bridge;
+  the controller creates canonical `A` DCDs and rolls the old DCDs only after they are ready.
+- DCD labels, pod-template labels, the worker-suffix environment variable, and DCD spec equality are
+  not cohort identity evidence because they are mutable.
+
 
 The v1-only state is compatibility state for a DGD whose active DCDs predate v2 tracking. Migration
 runs at the beginning of reconciliation, before steady-state rollout decisions:

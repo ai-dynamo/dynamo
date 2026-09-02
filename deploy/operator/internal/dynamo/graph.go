@@ -286,10 +286,9 @@ type RollingUpdateContext struct {
 	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
 	NewWorkerHash string
 
-	// WorkerHashByComponent contains the observed suffix for a semantically
-	// matching target DCD. A component absent from this map is rendered with
-	// NewWorkerHash. This keeps an h1 bridge generation stable while allowing
-	// new generations to use the canonical v2 suffix.
+	// WorkerHashByComponent contains the suffix selected by the managed DCD
+	// inventory for each component. A component absent from this map is rendered
+	// with NewWorkerHash.
 	WorkerHashByComponent map[string]string
 
 	// TargetDCDNames is the per-component DCD name selected by the managed
