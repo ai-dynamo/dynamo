@@ -330,6 +330,10 @@ pub mod llm {
     /// value is read and cached on first use.
     pub const DYN_HTTP_OVERLOAD_STATUS_CODE: &str = "DYN_HTTP_OVERLOAD_STATUS_CODE";
 
+    /// Optional Retry-After header, in seconds, attached to frontend overload
+    /// responses. Unset, zero, or invalid disables the header.
+    pub const DYN_HTTP_OVERLOAD_RETRY_AFTER_SECS: &str = "DYN_HTTP_OVERLOAD_RETRY_AFTER_SECS";
+
     /// Optional frontend inference admission cap. When set to a positive
     /// integer, system routes stay available but inference routes reject new
     /// requests with the configured overload status once this many inference
@@ -958,6 +962,7 @@ mod tests {
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
             llm::DYN_HTTP_OVERLOAD_STATUS_CODE,
+            llm::DYN_HTTP_OVERLOAD_RETRY_AFTER_SECS,
             llm::DYN_HTTP_BACKEND_STREAM_TIMEOUT_SECS,
             llm::DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS,
             llm::DYN_LORA_ENABLED,

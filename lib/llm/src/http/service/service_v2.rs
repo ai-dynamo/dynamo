@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::Response;
+use axum::http::{HeaderValue, Response, header};
 use axum::response::IntoResponse;
 
 use super::Metrics;
@@ -114,11 +114,7 @@ async fn track_inflight_inference(
     }
 
     let Some(permit) = state.try_acquire_inflight() else {
-        return super::openai::ErrorMessage::sanitized_with_details(
-            SanitizedError::Overloaded,
-            "frontend inference inflight limit reached",
-        )
-        .into_response();
+        return overload_response("frontend inference inflight limit reached");
     };
     // Close the race where shutdown starts after the readiness check but
     // before this request is counted as inflight.
@@ -240,6 +236,51 @@ fn parse_max_inflight_inference(value: Result<String, std::env::VarError>) -> Op
 
 fn max_inflight_inference_from_env() -> Option<u64> {
     parse_max_inflight_inference(std::env::var(env_llm::DYN_HTTP_MAX_INFLIGHT_REQUESTS))
+}
+
+fn parse_overload_retry_after(value: Result<String, std::env::VarError>) -> Option<HeaderValue> {
+    let value = match value {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(error @ std::env::VarError::NotUnicode(_)) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_OVERLOAD_RETRY_AFTER_SECS,
+                %error,
+                "ignoring invalid overload Retry-After value"
+            );
+            return None;
+        }
+    };
+
+    match value.trim().parse::<u64>() {
+        Ok(0) => None,
+        Ok(seconds) => HeaderValue::from_str(&seconds.to_string()).ok(),
+        Err(error) => {
+            tracing::warn!(
+                env = env_llm::DYN_HTTP_OVERLOAD_RETRY_AFTER_SECS,
+                value,
+                %error,
+                "ignoring invalid overload Retry-After value"
+            );
+            None
+        }
+    }
+}
+
+fn overload_retry_after_from_env() -> Option<HeaderValue> {
+    parse_overload_retry_after(std::env::var(env_llm::DYN_HTTP_OVERLOAD_RETRY_AFTER_SECS))
+}
+
+fn overload_response(reason: &'static str) -> axum::response::Response {
+    let mut response =
+        super::openai::ErrorMessage::sanitized_with_details(SanitizedError::Overloaded, reason)
+            .into_response();
+    if let Some(retry_after) = overload_retry_after_from_env() {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, retry_after);
+    }
+    response
 }
 
 const DEFERRED_RESPONSE_KEEP_ALIVE: Duration = Duration::from_secs(15);
@@ -1814,6 +1855,29 @@ mod tests {
         assert_eq!(body["message"], "Service temporarily overloaded");
 
         handle.abort();
+    }
+
+    #[test]
+    fn overload_response_adds_retry_after_when_configured() {
+        temp_env::with_var(
+            env_llm::DYN_HTTP_OVERLOAD_RETRY_AFTER_SECS,
+            Some("7"),
+            || {
+                let response = overload_response("frontend inference inflight limit reached");
+
+                assert_eq!(
+                    response.status().as_u16(),
+                    super::super::error::overload_status_code().as_u16()
+                );
+                assert_eq!(
+                    response
+                        .headers()
+                        .get(header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok()),
+                    Some("7")
+                );
+            },
+        );
     }
 
     #[tokio::test]
