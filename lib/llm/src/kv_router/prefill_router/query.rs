@@ -1,19 +1,134 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use anyhow::Result;
-use dynamo_kv_router::protocols::{BlockExtraInfo, RoutingConstraints, WorkerId};
-use dynamo_kv_router::selector::WorkerSelector;
+use dynamo_kv_router::{
+    protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
+    selector::WorkerSelector,
+};
 
 use super::{PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter};
-use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::{
+    kv_router::{KvRouter, sequence::SequenceError},
+    local_model::runtime_config::ModelRuntimeConfig,
+};
+
+/// A prefill booking that remains tied to the chooser that admitted it.
+///
+/// The caller owns this value until it is released. Keeping the chooser here
+/// makes cleanup independent of a later [`PrefillRouter`] binding change.
+pub struct PrefillReservation<Sel = dynamo_kv_router::selector::DefaultWorkerSelector>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    chooser: Arc<KvRouter<Sel>>,
+    scheduler_id: String,
+    worker: WorkerWithDpRank,
+}
+
+impl<Sel> PrefillReservation<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    pub fn worker_id(&self) -> WorkerId {
+        self.worker.worker_id
+    }
+
+    pub fn dp_rank(&self) -> u32 {
+        self.worker.dp_rank
+    }
+
+    /// Free this booking from the chooser that admitted it.
+    pub async fn release(&self) -> Result<()> {
+        match self
+            .chooser
+            .free_if_worker(&self.scheduler_id, self.worker)
+            .await
+        {
+            Ok(()) | Err(SequenceError::RequestNotFound { .. }) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
 
 impl<Sel> PrefillRouter<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
+    /// Atomically select and reserve a KV-routed prefill worker.
+    ///
+    /// The returned [`PrefillReservation`] owns the exact chooser selected at
+    /// admission time. If this future is dropped while queued, the scheduler
+    /// retracts its pending admission; after success, the caller must release
+    /// the reservation on first output, terminal completion, or an abandoned
+    /// request.
+    #[expect(clippy::too_many_arguments)]
+    pub async fn reserve_prefill_worker(
+        &self,
+        reservation_id: &str,
+        token_ids: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        allowed_worker_ids: Option<HashSet<WorkerId>>,
+        routing_constraints: RoutingConstraints,
+    ) -> Result<PrefillReservation<Sel>> {
+        if reservation_id.is_empty() {
+            anyhow::bail!("prefill reservation ID must not be empty");
+        }
+        if self.lifecycle_state() != PrefillLifecycleState::Active {
+            return Err(anyhow::anyhow!(PrefillError::NotActivated));
+        }
+        let binding = self
+            .binding
+            .load_full()
+            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
+        let Some(chooser) = binding.router.kv_router_if_enabled() else {
+            anyhow::bail!("prefill reservation requires KV routing");
+        };
+        let chooser = Arc::clone(chooser);
+        let outcome = chooser
+            .find_best_match_details_with_lifecycle(
+                Some(reservation_id),
+                token_ids,
+                block_mm_infos,
+                None,
+                true,
+                false,
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                None,
+                None,
+                allowed_worker_ids,
+                routing_constraints,
+            )
+            .await?;
+        match outcome {
+            crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
+                Ok(PrefillReservation {
+                    chooser,
+                    scheduler_id: reservation_id.to_string(),
+                    worker,
+                })
+            }
+            crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
+                anyhow::bail!(
+                    "prefill router policy-class queue rejection: policy_class={}, limit_kind={}, current={}, limit={}",
+                    rejection.policy_class,
+                    rejection.limit_kind,
+                    rejection.current,
+                    rejection.limit,
+                )
+            }
+        }
+    }
+
     /// Query the best prefill worker without executing a request.
     ///
     /// This query is advisory and does not book scheduler or occupancy state;
@@ -91,11 +206,13 @@ where
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         sync::{Arc, Mutex},
         time::Duration,
     };
 
     use async_trait::async_trait;
+    use dynamo_kv_router::{config::KvRouterConfig, selector::DefaultWorkerSelector};
     use dynamo_runtime::{
         DistributedRuntime, Runtime,
         component::Instance,
@@ -110,14 +227,17 @@ mod tests {
         traits::DistributedRuntimeProvider,
     };
     use futures::{StreamExt, future::join_all};
+    use tokio::sync::watch;
 
     use super::*;
     use crate::{
         discovery::ModelManager,
-        kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext},
+        kv_router::prefill_router::PrefillBinding,
+        kv_router::{KvPushRouter, KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext},
         protocols::common::{
             FinishReason, llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
         },
+        worker_type::WorkerType,
     };
 
     type LlmResponse = dynamo_runtime::protocols::annotated::Annotated<LLMEngineOutput>;
@@ -330,6 +450,124 @@ mod tests {
         );
         worker_runtimes.push(router_runtime);
         (shared, prefill, worker_runtimes, workers)
+    }
+
+    async fn tracked_binding(
+        label: &str,
+    ) -> (
+        Arc<PrefillBinding<DefaultWorkerSelector>>,
+        Arc<KvRouter<DefaultWorkerSelector>>,
+    ) {
+        let runtime = Runtime::from_current().unwrap();
+        let distributed = DistributedRuntime::new(runtime, DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let component = distributed
+            .namespace(format!(
+                "prefill-reservation-{label}-{}",
+                uuid::Uuid::new_v4()
+            ))
+            .unwrap()
+            .component("workers".to_string())
+            .unwrap();
+        let endpoint = component.endpoint("generate");
+        let endpoint_id = endpoint.id();
+        let client = endpoint.client().await.unwrap();
+        let (_workers_tx, workers_rx) = watch::channel(HashMap::from([
+            (7, ModelRuntimeConfig::default()),
+            (8, ModelRuntimeConfig::default()),
+        ]));
+        let config = KvRouterConfig {
+            overlap_score_credit: 0.0,
+            router_temperature: 0.0,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            router_track_prefill_tokens: true,
+            skip_initial_worker_wait: true,
+            ..Default::default()
+        };
+        let chooser = Arc::new(
+            KvRouter::new_with_worker_role(
+                endpoint,
+                client.clone(),
+                workers_rx,
+                None,
+                16,
+                DefaultWorkerSelector::new(Some(config.clone()), "prefill"),
+                Some(config),
+                None,
+                Some(WorkerType::Prefill),
+                "prefill",
+                Some(format!("prefill-reservation-{label}")),
+                false,
+                None,
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let push_router =
+            PushRouter::<PreprocessedRequest, LlmResponse>::from_client(client, RouterMode::KV)
+                .await
+                .unwrap();
+        let binding = Arc::new(PrefillBinding {
+            endpoint_id,
+            router: Arc::new(KvPushRouter::new(push_router, chooser.clone(), None).unwrap()),
+            prefill_router_mode: RouterMode::KV,
+        });
+        (binding, chooser)
+    }
+
+    async fn tracked_prefill_router() -> (
+        Arc<PrefillRouter<DefaultWorkerSelector>>,
+        Arc<KvRouter<DefaultWorkerSelector>>,
+    ) {
+        let (binding, chooser) = tracked_binding("primary").await;
+        let router = PrefillRouter::disabled(Arc::new(ModelManager::new()), RouterMode::KV, None);
+        router.binding.store(Some(binding));
+        router.lifecycle.store(
+            PrefillLifecycleState::Active as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+        (router, chooser)
+    }
+
+    #[tokio::test]
+    async fn prefill_reservation_releases_the_admitting_chooser_after_rebind() {
+        let (router, original_chooser) = tracked_prefill_router().await;
+        let reservation = router
+            .reserve_prefill_worker(
+                "epp-prefill/rebind",
+                &[1u32; 64],
+                None,
+                None,
+                None,
+                0.0,
+                0,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap();
+
+        let loads = original_chooser
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            loads.iter().any(|load| load.potential_prefill_tokens > 0),
+            "reservation did not add prefill load: {loads:?}"
+        );
+
+        let (replacement, _) = tracked_binding("replacement").await;
+        router.binding.store(Some(replacement));
+        reservation.release().await.unwrap();
+
+        let loads = original_chooser
+            .get_potential_loads(&[], None, None, None, None)
+            .await
+            .unwrap();
+        assert!(loads.iter().all(|load| load.potential_prefill_tokens == 0));
     }
 
     #[tokio::test]
