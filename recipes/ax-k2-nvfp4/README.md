@@ -20,7 +20,7 @@ independent TP4 workers behind the Dynamo KV-aware router.
 | KV-cache precision | `auto` (BF16 for this checkpoint/backend) |
 | Attention | `FLASHINFER_MLA_SPARSE` |
 | Speculative decoding | `skt/A.X-K2-EAGLE3`, EAGLE3, k=3 |
-| Routing | KV-aware, vLLM prefix-cache events, 64-token blocks |
+| Routing | KV-aware, vLLM prefix-cache events, 32-token blocks |
 | Context | 262,144 tokens |
 | Reasoning parser | `deepseek_v3` |
 | Tool-call parser | `hermes` |
@@ -102,8 +102,15 @@ trace at concurrency 32 with AIPerf 0.12.0. See
 
 ## Implementation notes
 
-- Frontend and worker block sizes must match. Both are explicitly set to 64;
-  the sparse MLA backend cannot use vLLM's usual 16-token default.
+- Frontend and worker block sizes must match. On B200,
+  `FLASHINFER_MLA_SPARSE` advertises 32 and 64 as supported block sizes, so
+  vLLM 0.26.0 automatically selects 32 when the worker does not pass
+  `--block-size`. The frontend is explicitly set to 32 because its independent
+  default is 16; leaving it unset would break KV-prefix hash alignment.
+- The offline worker needs only `HF_HOME=/model-cache` and
+  `HF_HUB_OFFLINE=1` for model-cache resolution. `HF_HUB_CACHE` is derived from
+  `HF_HOME`; Xet download tuning, Transformers' legacy offline flag, explicit
+  Triton/vLLM/module cache paths, and `PYTHONHASHSEED` are unnecessary here.
 - `--enable-prefix-caching` and an explicit KV-events configuration are both
   required. Enabling only one does not give the router authoritative worker
   cache state.
