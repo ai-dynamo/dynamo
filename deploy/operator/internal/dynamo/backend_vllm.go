@@ -588,19 +588,21 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 			healthGate, leaderHostname, VLLMPort,
 		)}
 	case RoleFollower:
-		// The follower is not in the leader's gang, so it reaches the leader through the
-		// headless elastic-EP Service rather than the framework's leader hostname. It
-		// never serves -- the leader spawns the real DP-rank worker on its GPU as a Ray
-		// actor -- so the serve command is dropped for a bare Ray join, with
-		// --node-ip-address pinned to the pod IP so the leader finds this rank's GPU.
-		// The /live gate matches the worker's: join only after the leader has placed its
-		// data-parallel group.
+		// The follower lends the leader a GPU and nothing else, so it replaces the serve
+		// command with a bare Ray join. Three details make that work:
 		//
-		// leaderService is the address the synthesis stamped on this follower, resolved
-		// once by ElasticEPLeaderServiceNameForDCD. It is deliberately not recomputed
-		// here: the name is DGD- and generation-scoped and may be hash-truncated, so
-		// rebuilding it from the follower's own identity is what let the emitter and the
-		// joiner drift apart.
+		//   - It reaches the leader through the headless elastic-EP Service, not the
+		//     framework's leader hostname, because it is not in the leader's gang.
+		//   - --node-ip-address is pinned to the pod IP so the leader can find this
+		//     rank's GPU. The follower never serves; the leader spawns the real DP-rank
+		//     worker on that GPU as a Ray actor.
+		//   - The /live gate matches the worker's: join only once the leader has placed
+		//     its data-parallel group.
+		//
+		// leaderService is carried on the follower rather than rebuilt here. The name is
+		// DGD- and generation-scoped and may be hash-truncated, so deriving it from the
+		// follower's own identity is exactly what let the emitter and the joiner drift
+		// apart.
 		leaderHostname := leaderService
 		healthGate := fmt.Sprintf(
 			`i=0; until python3 -c "import urllib.request; urllib.request.urlopen('http://%s:%d/live', timeout=5)" `+

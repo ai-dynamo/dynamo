@@ -2604,29 +2604,28 @@ type cliqueParams struct {
 // injectElasticEPFollowerAffinity injects the two required placement terms an elastic-EP
 // follower needs, appending to (never overwriting) any user-supplied affinity:
 //
-//   - a pod affinity on topology key nvidia.com/gpu.clique selecting the leader, which pins
-//     the follower into the leader's NVLink partition. This is the load-bearing term: a
-//     follower in a different partition still joins the ComputeDomain and reports healthy,
-//     but has no NVLink route to the leader, so the cross-node EP collective fails only when
-//     it runs -- an apparently successful scale that serves wrong or failing inference.
+//   - a pod affinity on topology key nvidia.com/gpu.clique selecting the leader, pinning
+//     the follower into the leader's NVLink partition.
 //   - a pod anti-affinity on kubernetes.io/hostname selecting the leader, keeping the
 //     follower off the leader's node so each node-sized rank keeps its node's NVLink.
 //
-// Both select the leader component, the follower's reference point. The clique affinity
-// cannot be dropped; the hostname anti-affinity is redundant under node-sized pods and may
-// be relaxed if it ever fights the scheduler.
+// The clique affinity is the load-bearing one and cannot be dropped. A follower in a
+// different partition still joins the ComputeDomain and reports healthy, but has no NVLink
+// route to the leader, so the cross-node EP collective fails only once it runs -- an
+// apparently successful scale that then serves wrong or failing inference. The hostname
+// anti-affinity is redundant under node-sized pods and may be relaxed if it ever fights
+// the scheduler.
 func injectElasticEPFollowerAffinity(podSpec *corev1.PodSpec, leaderComponentName, dynamoNamespace, leaderDCDName string) {
 	if podSpec.Affinity == nil {
 		podSpec.Affinity = &corev1.Affinity{}
 	}
-	// Both terms position the follower relative to the leader, so both select the leader.
+	// Both terms position the follower relative to the leader, so both select it.
 	// Separate selector objects avoid aliasing one mutable struct across terms.
 	//
-	// Narrowed to one DCD generation by KubeLabelDynamoSelector, exactly as the leader's
-	// Ray Service is. The component and dynamo-namespace labels alone match every
-	// generation, so mid-rollout these terms would also select the *old* leader: the
-	// follower could be pinned into the old leader's NVLink partition while joining the
-	// new leader's Service, leaving no NVLink path between them.
+	// Narrowed to a single DCD generation by KubeLabelDynamoSelector, exactly as the
+	// leader's Ray Service is. Component and dynamo-namespace labels alone match every
+	// generation, so mid-rollout these terms would also select the old leader -- pinning
+	// the follower into its partition while it joins the new leader's Service.
 	leaderSelector := func() *metav1.LabelSelector {
 		return &metav1.LabelSelector{
 			MatchLabels: map[string]string{
@@ -2637,11 +2636,10 @@ func injectElasticEPFollowerAffinity(podSpec *corev1.PodSpec, leaderComponentNam
 		}
 	}
 
-	// Load-bearing: pin the follower into the leader's NVLink partition. The leader's
-	// nvidia.com/gpu.clique value is unknown at render time (it depends on where the
-	// leader lands), so this is an inter-pod affinity against the leader on that topology
-	// key rather than a node affinity on a literal value -- the effect is identical:
-	// "schedule me on a node whose gpu.clique equals a leader pod's node's gpu.clique".
+	// An inter-pod affinity rather than a node affinity on a literal value, because the
+	// leader's nvidia.com/gpu.clique is unknown at render time -- it depends on where the
+	// leader lands. The effect is the same: "schedule me on a node whose gpu.clique
+	// equals that of a node already running a leader pod".
 	if podSpec.Affinity.PodAffinity == nil {
 		podSpec.Affinity.PodAffinity = &corev1.PodAffinity{}
 	}
