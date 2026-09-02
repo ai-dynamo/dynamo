@@ -179,11 +179,11 @@ Follow `agent-docs/guides/knob-tuning/tuning-hierarchy.md`:
 
 1. Classify the exact model and compute memory fit, minimum parallelism, and headroom.
 2. Complete the exploration-versus-exploitation calibration and full broad-lever scan above. As part of the broad
-   scan, check whether a published recipe already answers the engagement's performance question before deriving a
-   configuration from first principles: invoke `find-serving-recipe` once per engagement (reuse its dossier on
-   later iterations) and treat any `deployable` or `hypothesis` grade candidate it returns as a mandatory entry in
-   the lever shortlist. A recipe-sourced candidate goes through this same selection and the adversarial review
-   like any other hypothesis; it never replaces the baseline.
+   scan, invoke `find-serving-recipe` once per engagement (reuse its dossier on later iterations) so that every
+   recipe-shaped candidate under consideration carries a provenance verdict: a `deployable` or `hypothesis` grade
+   candidate enters the lever shortlist with its dossier entry attached, and a `ceiling-only` candidate may inform
+   expected-performance headroom but is never shortlisted for deployment. A recipe-sourced candidate goes through
+   this same selection and the adversarial review like any other hypothesis; it never replaces the baseline.
 3. Consider topology first as a hypothesis category per the tuning hierarchy; an inherited layout is a candidate,
    not a settled decision.
 4. When topology is viable, consider Tier 2 families in default priority order, then finish screening the remaining
