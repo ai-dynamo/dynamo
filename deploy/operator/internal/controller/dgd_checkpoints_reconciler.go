@@ -31,6 +31,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -863,7 +864,7 @@ func (r *dgdCheckpointsReconciler) deleteAutomaticPodSnapshotsForDGD(
 }
 
 func snapshotAPIUnavailable(err error) bool {
-	return meta.IsNoMatchError(err) || apierrors.IsNotFound(err)
+	return runtime.IsNotRegisteredError(err) || meta.IsNoMatchError(err) || apierrors.IsNotFound(err)
 }
 
 func automaticSnapshotResourceBelongsToDGD(resource client.Object, dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
