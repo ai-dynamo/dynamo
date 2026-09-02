@@ -247,9 +247,6 @@ fn send_response(
     output: LLMEngineOutput,
     context: &Arc<dyn AsyncEngineContext>,
 ) -> bool {
-    if stream_tx.is_closed() {
-        return false;
-    }
     if context.is_stopped() {
         let _ = stream_tx.send(LLMEngineOutput::cancelled());
         return false;
@@ -1317,7 +1314,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn response_send_checks_closed_and_stopped_before_output() {
+    fn response_send_handles_stopped_and_closed_streams() {
         let context: Arc<dyn AsyncEngineContext> = Arc::new(Controller::default());
         let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
         let output = LLMEngineOutput {
