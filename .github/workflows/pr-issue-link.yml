@@ -27,7 +27,9 @@ on:
 env:
   # Referenced in the failure message; on this date the check is added to the
   # required status checks in branch protection after the announced notice.
-  BLOCKING_DATE: "2026-10-15"
+  # Set before the v1.6.0 code freeze on purpose: a date after the freeze
+  # cannot change what lands in the release, which is the point of the check.
+  BLOCKING_DATE: "2026-10-01"
 
 jobs:
   check-issue-link:

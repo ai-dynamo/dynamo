@@ -146,7 +146,7 @@ def main() -> int:
     is_untrusted_fork = head_repo.lower() != repo.lower() and not trusted_author
     gh_token = os.environ.get("GITHUB_TOKEN", "")
     linear_key = os.environ.get("LINEAR_API_KEY", "")
-    blocking_date = os.environ.get("BLOCKING_DATE", "2026-10-15")
+    blocking_date = os.environ.get("BLOCKING_DATE", "2026-10-01")
 
     if author in BOT_AUTHORS:
         print(f"Author {author} is a bot; skipping the issue-link check.")
