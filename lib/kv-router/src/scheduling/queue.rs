@@ -3179,6 +3179,65 @@ policy_classes:
         queued_second_rx.await.unwrap().unwrap();
     }
 
+    // Pins the cross-class consequence of routing every admission through the
+    // policy queue: an arrival's same-turn drain hands freed capacity to
+    // another class's queued head instead of letting the arrival bypass it,
+    // per DEP #13891's no-bypass ordering.
+    #[tokio::test]
+    async fn arrival_drains_other_class_backlog_instead_of_bypassing() {
+        let profile = policy_profile(
+            r#"
+default_policy_family: latency
+uncached_isl_buckets:
+  - min_tokens: 0
+    bucket: all
+policy_classes:
+  - name: latency
+    policy_family: latency
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 1024
+  - name: bulk
+    policy_family: bulk
+    cache_bucket: all
+    quantum: 1
+    prefill_busy_threshold: 0
+"#,
+        );
+        let (queue, slots) = make_queue_with_profile(1, 16, 64, profile);
+
+        let (mut active, active_rx) = make_request("active", 64);
+        active.policy_class = Some("latency".to_string());
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        // The bulk class sees the worker as busy, so its request parks.
+        let (mut bulk_head, mut bulk_head_rx) = make_request("bulk-head", 64);
+        bulk_head.policy_class = Some("bulk".to_string());
+        queue.enqueue(bulk_head).await;
+        assert_eq!(queue.pending_count(), 1);
+
+        // Free the worker without emitting a capacity update; the parked head
+        // stays queued until something drains.
+        slots
+            .mark_prefill_completed(&"active".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"active".to_string(), decay_now()).unwrap();
+        assert_eq!(queue.pending_count(), 1);
+
+        // A latency arrival must not bypass the bulk backlog: its enqueue-turn
+        // drain admits the parked bulk head alongside the arrival itself.
+        let (mut arrival, arrival_rx) = make_request("latency-arrival", 64);
+        arrival.policy_class = Some("latency".to_string());
+        queue.enqueue(arrival).await;
+        assert_eq!(queue.pending_count(), 0);
+        bulk_head_rx
+            .try_recv()
+            .expect("parked bulk head should drain on the arrival's turn")
+            .expect("bulk head failed");
+        arrival_rx.await.unwrap().unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn policy_families_and_cache_buckets_select_physical_queues() {
         let profile = policy_profile(
