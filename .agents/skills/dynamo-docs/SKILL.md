@@ -411,7 +411,7 @@ when the user has requested or authorized the external contribution.
 
    ```bash
    gh pr view <number-or-branch> --repo ai-dynamo/dynamo \
-     --json url,state,isDraft,body,baseRefName,headRefName,headRefOid
+     --json url,state,isDraft,body,baseRefName,headRefName,headRefOid,reviewDecision
    ```
 
    Confirm that `state` is `OPEN`, `isDraft` matches the intended draft or ready-for-review state, the
@@ -420,8 +420,16 @@ when the user has requested or authorized the external contribution.
    applicable template section, and no template placeholders. If the PR is closed, reopen it when
    appropriate or create a new PR; if it is merged, create a new PR for remaining changes or report
    that no active PR exists. Never present an inactive PR as reviewable.
-5. Report the PR's actual review and check state. Use the `pr-monitor` skill when CI diagnosis or
-   continued monitoring is requested.
+5. Query the submitted PR's current checks:
+
+   ```bash
+   gh pr checks <number-or-branch> --repo ai-dynamo/dynamo
+   ```
+
+   Report the `reviewDecision` from step 4 and the current check states from this command.
+   `gh pr checks` exits nonzero when checks are pending or failing; treat that as state to report,
+   not as a query failure. Use the `pr-monitor` skill when CI diagnosis or continued monitoring is
+   requested.
 
 ## Debugging
 
