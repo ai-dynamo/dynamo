@@ -55,6 +55,49 @@ RUN apt-get update && \
     ldconfig && \
     ldconfig -p | grep -q 'libturbojpeg.so.0'
 {% endif %}
+# The Qwen Flash Next SGLang base is published with build/debug/media tooling
+# that is not used by the text-serving runtime and trips Dynamo's shipped-image
+# license policy. Purge the rejected dpkg packages instead of carrying broad
+# license exceptions; the imports below guard the runtime paths we keep.
+{% if device == "cuda" and context[framework][device_key].runtime_image_tag == "qwen38flashnext" %}
+RUN set -eux; \
+    apt-get purge -y \
+        at-spi2-common autoconf autopoint autotools-dev bear bsdextrautils \
+        check cloc dbus-user-session dconf-gsettings-backend dconf-service debhelper \
+        dh-autoreconf dh-strip-nondeterminism dwz fakeroot gdb gdrdrv-dkms \
+        gettext gettext-base gfortran-13 gfortran-13-x86-64-linux-gnu googletest groff-base \
+        gtk-update-icon-cache hicolor-icon-theme htop humanity-icon-theme intltool-debian kmod \
+        libatk-bridge2.0-0t64 libatk1.0-0t64 libatspi2.0-0t64 libavahi-client3 libavahi-common-data libavahi-common3 \
+        libavc1394-0 libbabeltrace1 libbs2b0 libc-ares-dev libcaca0 libcdio-cdda2t64 \
+        libcdio-paranoia2t64 libcdio19t64 libchromaprint1 libcodec2-1.2 libcolord2 libdc1394-25 \
+        libdconf1 libdebhelper-perl libdebuginfod-common libdebuginfod1t64 libear libegl1 \
+        libevdev2 libevent-2.1-7t64 libevent-dev libevent-extra-2.1-7t64 libevent-openssl-2.1-7t64 libfakeroot \
+        libfile-stripnondeterminism-perl libflite1 libgd3 libgfortran-13-dev libgme0 libgrpc++-dev \
+        libgrpc-dev libgsm1 libgtest-dev libgtk-3-0t64 libgtk-3-common libheif-plugin-aomdec \
+        libheif1 libhwloc-dev libiec61883-0 libinput-bin libinput10 libjack-jackd2-0 \
+        libjs-underscore libjsoncpp-dev libltdl-dev libltdl7 liblzma-dev libmp3lame0 \
+        libnl-genl-3-200 libnotify4 libopenmpi-dev libpipeline1 libpmix-dev libpocketsphinx3 \
+        libpython3-dev libqt5core5t64 libqt5dbus5t64 libqt5gui5t64 libqt5network5t64 libqt5printsupport5t64 \
+        libqt5widgets5t64 libraw1394-11 librubberband2 libsdl2-2.0-0 libshine3 libsndfile1 \
+        libsource-highlight-common libsource-highlight4t64 libsoxr0 libsphinxbase3t64 libsrt1.5-gnutls libsvtav1enc1d1 \
+        libsystemd-dev libtirpc-common libtirpc3t64 libtool libtwolame0 libuchardet0 \
+        libudfread0 libunwind-dev libutempter0 libvidstab1.1 libwxbase3.2-1t64 libwxgtk3.2-1t64 \
+        libx265-199 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-render-util0 libxcb-util1 \
+        libxcb-xinerama0 libxcb-xinput0 libxcb-xkb1 libxkbcommon-x11-0 libzvbi-common libzvbi0t64 \
+        lsof m4 man-db mpi-default-bin mpi-default-dev nsight-systems-cli \
+        nsight-systems-cli-2026.4.1 openmpi-bin openmpi-common pahole patchutils po-debconf \
+        protobuf-compiler-grpc python3-dev silversearcher-ag tree ubuntu-mono uuid-dev \
+        wdiff zsh zsh-common; \
+    apt-get autoremove -y --purge; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/*; \
+    python3 - <<'PY'
+import torch, transformers, sglang
+import soundfile, torchaudio
+from PIL import Image
+print("qwen runtime cleanup import check ok", torch.__version__, transformers.__version__)
+PY
+{% endif %}
 
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
