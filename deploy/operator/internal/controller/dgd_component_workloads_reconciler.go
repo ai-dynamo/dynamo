@@ -41,22 +41,22 @@ import (
 type componentWorkloadsReconciler struct {
 	syncer  dgdResourceSyncer
 	rollout *dgdWorkerRolloutReconciler
-	// elasticEPRayEnabled carries features.ElasticEPRay. Gated off, generation
+	// elasticEPRayPoCEnabled carries features.ElasticEPRayPoC. Gated off, generation
 	// derives no follower, so no follower DCD, Deployment, or Service is created
 	// and an existing deployment reconciles exactly as it did before.
-	elasticEPRayEnabled bool
+	elasticEPRayPoCEnabled bool
 }
 
 func newComponentWorkloadsReconciler(
 	kubeClient client.Client,
 	recorder events.EventRecorder,
 	rollout *dgdWorkerRolloutReconciler,
-	elasticEPRayEnabled bool,
+	elasticEPRayPoCEnabled bool,
 ) *componentWorkloadsReconciler {
 	return &componentWorkloadsReconciler{
-		syncer:              newDGDResourceSyncer(kubeClient, recorder),
-		rollout:             rollout,
-		elasticEPRayEnabled: elasticEPRayEnabled,
+		syncer:                 newDGDResourceSyncer(kubeClient, recorder),
+		rollout:                rollout,
+		elasticEPRayPoCEnabled: elasticEPRayPoCEnabled,
 	}
 }
 
@@ -90,7 +90,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		restartState,
 		existingRestartAnnotations,
 		rollingUpdateCtx,
-		r.elasticEPRayEnabled,
+		r.elasticEPRayPoCEnabled,
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the DynamoComponentsDeployments")

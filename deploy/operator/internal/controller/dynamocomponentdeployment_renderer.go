@@ -53,7 +53,9 @@ const dcdWorkloadRoleLabel = "role"
 // workload programs can reuse this unit without constructing a
 // DynamoComponentDeploymentReconciler.
 type dcdWorkloadRenderer struct {
-	reader                client.Reader
+	reader client.Reader
+	// nodeReader is uncached; see DynamoComponentDeploymentReconciler.NodeReader.
+	nodeReader            client.Reader
 	config                *configv1alpha1.OperatorConfiguration
 	runtimeConfig         *commonController.RuntimeConfig
 	dockerSecretRetriever DockerSecretRetriever
@@ -61,12 +63,14 @@ type dcdWorkloadRenderer struct {
 
 func newDCDWorkloadRenderer(
 	reader client.Reader,
+	nodeReader client.Reader,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
 	dockerSecretRetriever DockerSecretRetriever,
 ) *dcdWorkloadRenderer {
 	return &dcdWorkloadRenderer{
 		reader:                reader,
+		nodeReader:            nodeReader,
 		config:                config,
 		runtimeConfig:         runtimeConfig,
 		dockerSecretRetriever: dockerSecretRetriever,
@@ -74,7 +78,7 @@ func newDCDWorkloadRenderer(
 }
 
 func (r *DynamoComponentDeploymentReconciler) workloadRenderer() *dcdWorkloadRenderer {
-	return newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
+	return newDCDWorkloadRenderer(r.Client, r.NodeReader, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
 }
 
 // renderMultinodePodTemplateSpecs renders the leader and worker pod templates
@@ -433,8 +437,18 @@ func (r *dcdWorkloadRenderer) leaderHasNVLinkDomain(
 			continue
 		}
 		node := &corev1.Node{}
-		if err := r.reader.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
-			if k8serrors.IsNotFound(err) {
+		if err := r.nodeReader.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
+			// Forbidden is treated like NotFound: both mean "cannot tell whether this is
+			// an NVLink node", and the caller already knows what to do with that -- drop
+			// the term and let the follower schedule. Namespace-restricted mode grants
+			// the manager a namespaced Role, which cannot carry a cluster-scoped Node
+			// rule at all, so failing here would wedge the whole reconcile rather than
+			// degrade the one placement decision that needs the answer.
+			if k8serrors.IsNotFound(err) || k8serrors.IsForbidden(err) {
+				log.FromContext(ctx).V(1).Info(
+					"cannot read the elastic-EP leader's node; scheduling the follower without partition affinity",
+					"node", nodeName, "reason", err.Error(),
+				)
 				continue
 			}
 			return false, err

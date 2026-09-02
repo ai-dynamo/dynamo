@@ -32,13 +32,13 @@ const (
 
 type VLLMBackend struct {
 	ParentGraphDeploymentName string
-	// ElasticEPRayEnabled carries the features.ElasticEPRay gate. When false the
+	// ElasticEPRayPoCEnabled carries the features.ElasticEPRayPoC gate. When false the
 	// backend leaves an elastic-EP container exactly as the user wrote it: no Ray
 	// head wrapped around the leader's command, no Ray-join rewrite on a follower,
 	// and none of the environment either arm injects. Rewriting the command changes
 	// the pod template, which rolls a serving deployment, so this has to be off by
 	// default rather than inferred from the engine flags.
-	ElasticEPRayEnabled bool
+	ElasticEPRayPoCEnabled bool
 }
 
 func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
@@ -623,7 +623,7 @@ func injectElasticEPRayLaunchFlags(container *corev1.Container, role Role, servi
 // half -- what the engine intends -- and the gate answers the second, which is the
 // administrator's to grant.
 func (b *VLLMBackend) elasticEPRayLaunch(container *corev1.Container) bool {
-	return b.ElasticEPRayEnabled && IsElasticEPRayLaunch(container)
+	return b.ElasticEPRayPoCEnabled && IsElasticEPRayLaunch(container)
 }
 
 // IsElasticEPRayLaunch reports whether the container asks for the elastic-EP Ray

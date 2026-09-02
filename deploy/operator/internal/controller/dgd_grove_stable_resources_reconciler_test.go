@@ -317,7 +317,7 @@ func TestGroveStableResourcesReconcilerDeletesTheExactOwnershipCheckedService(t 
 	reconciler := newGroveStableResourcesReconciler(
 		kubeClient,
 		events.NewFakeRecorder(100),
-		&configv1alpha1.OperatorConfiguration{ElasticEPRay: configv1alpha1.ElasticEPRayConfiguration{Enabled: true}},
+		&configv1alpha1.OperatorConfiguration{ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: true}},
 	)
 	if _, err := reconciler.Reconcile(ctx, dgd, dgd); err != nil {
 		t.Fatalf("Reconcile returned an error: %v", err)
@@ -395,7 +395,7 @@ func newElasticEPTestStableResourcesReconciler(
 	reconciler := newGroveStableResourcesReconciler(
 		kubeClient,
 		events.NewFakeRecorder(100),
-		&configv1alpha1.OperatorConfiguration{ElasticEPRay: configv1alpha1.ElasticEPRayConfiguration{Enabled: true}},
+		&configv1alpha1.OperatorConfiguration{ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: true}},
 	)
 	return reconciler, kubeClient
 }

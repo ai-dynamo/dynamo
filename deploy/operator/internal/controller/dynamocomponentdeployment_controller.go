@@ -77,13 +77,20 @@ type DynamoComponentDeploymentReconciler struct {
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commonController.RuntimeConfig
 	DockerSecretRetriever DockerSecretRetriever
+	// NodeReader reads Nodes straight from the API server rather than through the
+	// manager's cache. Nodes are cluster-scoped and read once per follower render, so
+	// a cached read would start a cluster-wide Node informer -- which needs a watch
+	// permission no role grants, and would hold every Node in memory for a question
+	// only GB200 elastic EP asks. Same reason TopologyLabelReconciler.NodeReader is
+	// wired this way.
+	NodeReader client.Reader
 }
 
-// elasticEPRayEnabled reports whether the operator may act on the Ray elastic-EP
+// elasticEPRayPoCEnabled reports whether the operator may act on the Ray elastic-EP
 // path. Gated off, the leader Service, the follower, and the node lookup are all
 // skipped and an elastic-EP component reconciles as an ordinary one.
-func (r *DynamoComponentDeploymentReconciler) elasticEPRayEnabled() bool {
-	return r.RuntimeConfig != nil && r.RuntimeConfig.Gate.Enabled(features.ElasticEPRay)
+func (r *DynamoComponentDeploymentReconciler) elasticEPRayPoCEnabled() bool {
+	return r.RuntimeConfig != nil && r.RuntimeConfig.Gate.Enabled(features.ElasticEPRayPoC)
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -99,7 +106,7 @@ func (r *DynamoComponentDeploymentReconciler) elasticEPRayEnabled() bool {
 // advertise an NVLink partition (nvidia.com/gpu.clique)? Without it the renderer
 // cannot tell a cluster that can satisfy the follower placement from one where it
 // would leave the pod Pending forever.
-//+kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list
+//+kubebuilder:rbac:groups=core,resources=nodes,verbs=get
 //+kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;update;patch;delete
@@ -749,7 +756,7 @@ func (r *DynamoComponentDeploymentReconciler) generateElasticEPHeadlessService(c
 	// labels, so this addresses one Ray head only while the component is one pod.
 	// replicas > 1 round-robins across independent clusters; numberOfNodes > 1 publishes
 	// workers as if they were the head.
-	if !dynamo.IsSinglePodElasticEPLeader(&dcd.Spec.DynamoComponentDeploymentSharedSpec, r.elasticEPRayEnabled()) {
+	if !dynamo.IsSinglePodElasticEPLeader(&dcd.Spec.DynamoComponentDeploymentSharedSpec, r.elasticEPRayPoCEnabled()) {
 		return deleteStub, true, nil
 	}
 	dynamoNamespace := dynamo.GetDCDDynamoNamespace(dcd)

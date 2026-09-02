@@ -476,7 +476,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
-			backend := &VLLMBackend{ElasticEPRayEnabled: true}
+			backend := &VLLMBackend{ElasticEPRayPoCEnabled: true}
 
 			initialContainerArgs := append([]string{}, tt.initialContainer.Args...)
 
@@ -532,7 +532,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 }
 
 func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
-	backend := &VLLMBackend{ElasticEPRayEnabled: true}
+	backend := &VLLMBackend{ElasticEPRayPoCEnabled: true}
 
 	tests := []struct {
 		name              string
@@ -624,7 +624,7 @@ func TestVLLMBackend_ShellCommandInjection(t *testing.T) {
 }
 
 func TestVLLMBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
-	backend := &VLLMBackend{ElasticEPRayEnabled: true}
+	backend := &VLLMBackend{ElasticEPRayPoCEnabled: true}
 
 	tests := []struct {
 		name                  string
@@ -994,7 +994,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 }
 
 func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
-	backend := &VLLMBackend{ParentGraphDeploymentName: "test-dgd", ElasticEPRayEnabled: true}
+	backend := &VLLMBackend{ParentGraphDeploymentName: "test-dgd", ElasticEPRayPoCEnabled: true}
 	mpMultinodePodSpec := func(image string) *corev1.PodSpec {
 		return &corev1.PodSpec{
 			Containers: []corev1.Container{
@@ -1350,7 +1350,7 @@ func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			backend := &VLLMBackend{ElasticEPRayEnabled: true}
+			backend := &VLLMBackend{ElasticEPRayPoCEnabled: true}
 			component := betaComponent(t, tt.component)
 			container := &corev1.Container{
 				Command: []string{"python3"},
@@ -1386,7 +1386,7 @@ func TestVLLMBackend_UpdateContainer_InterPodGMS(t *testing.T) {
 // invariant: when inter-pod GMS is not enabled, the vLLM backend must not
 // inject the inter-pod GMS load path or shadow/standby mode.
 func TestVLLMBackend_UpdateContainer_NoInterPodGMS(t *testing.T) {
-	backend := &VLLMBackend{ElasticEPRayEnabled: true}
+	backend := &VLLMBackend{ElasticEPRayPoCEnabled: true}
 	component := betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{})
 	container := &corev1.Container{
 		Command: []string{"python3"},

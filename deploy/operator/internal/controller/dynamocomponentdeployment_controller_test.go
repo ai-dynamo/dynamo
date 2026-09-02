@@ -786,7 +786,7 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -795,7 +795,7 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	}
 
 	t.Log("Render the reusable component Service and multinode pod templates directly")
-	renderer := newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
+	renderer := newDCDWorkloadRenderer(r.Client, r.NodeReader, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
 	renderedService, renderedServiceToDelete, err := renderer.generateService(context.Background(), dcd)
 	require.NoError(t, err)
 	require.False(t, renderedServiceToDelete)
@@ -900,12 +900,13 @@ func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *tes
 			dcd := betaDCD(t, alpha)
 
 			r := &DynamoComponentDeploymentReconciler{
-				Client: fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+				Client:     fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+				NodeReader: fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
 				Config: &configv1alpha1.OperatorConfiguration{
-					Discovery:    configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
-					ElasticEPRay: configv1alpha1.ElasticEPRayConfiguration{Enabled: true},
+					Discovery:       configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+					ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: true},
 				},
-				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
 				},
@@ -1094,8 +1095,9 @@ func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing
 
 			r := &DynamoComponentDeploymentReconciler{
 				Client:        fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build(),
+				NodeReader:    fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build(),
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
 				},
@@ -1186,8 +1188,9 @@ func TestDynamoComponentDeploymentReconciler_PreservesInheritedCliqueAffinity(t 
 	// That is exactly the condition under which a naive loop would take the user's too.
 	r := &DynamoComponentDeploymentReconciler{
 		Client:        fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+		NodeReader:    fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
 		},
@@ -1250,12 +1253,13 @@ func TestDynamoComponentDeploymentReconciler_DiscoveryLabelsByRole(t *testing.T)
 			})
 
 			r := &DynamoComponentDeploymentReconciler{
-				Client: fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+				Client:     fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+				NodeReader: fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
 				Config: &configv1alpha1.OperatorConfiguration{
-					Discovery:    configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
-					ElasticEPRay: configv1alpha1.ElasticEPRayConfiguration{Enabled: true},
+					Discovery:       configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+					ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: true},
 				},
-				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
 				},
@@ -1332,7 +1336,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -1508,7 +1512,7 @@ func TestDynamoComponentDeploymentReconciler_BetaPrefillWorkloadComponentType(t 
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -1628,7 +1632,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 			fields: fields{
 				Recorder:      events.NewFakeRecorder(100),
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -2004,7 +2008,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 			fields: fields{
 				Recorder:      events.NewFakeRecorder(100),
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -2157,7 +2161,7 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 		Client:        fakeKubeClient,
 		Recorder:      recorder,
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -2774,7 +2778,7 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 					Enabled: true,
 				},
 			},
-			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		}
 	}
 
@@ -2893,7 +2897,7 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 		Client:        fakeKubeClient,
 		Recorder:      recorder,
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -3147,7 +3151,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -3240,7 +3244,7 @@ func Test_reconcileLeaderWorkerSetResources_UpgradesLegacyIndexedLWSReplicas(t *
 				Build(),
 			Recorder:      events.NewFakeRecorder(100),
 			Config:        &configv1alpha1.OperatorConfiguration{},
-			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 			DockerSecretRetriever: &mockDockerSecretRetriever{
 				GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 					return []string{}, nil
@@ -3457,7 +3461,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -3543,7 +3547,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 		Client:        fakeKubeClient,
 		Recorder:      events.NewFakeRecorder(100),
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -3966,7 +3970,7 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -4035,7 +4039,7 @@ func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -4134,7 +4138,7 @@ func TestRenderMultinodePodTemplateSpecs_VLLMMultinodeDRA(t *testing.T) {
 			WithObjects(dcd, claimTemplate, deviceClass).
 			Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRay: true}},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
