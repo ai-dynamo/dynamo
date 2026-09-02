@@ -236,6 +236,7 @@ hf-hub = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
 reqwest = { workspace = true }
+rcgen = { workspace = true }
 rstest = "0.18.2"
 serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }

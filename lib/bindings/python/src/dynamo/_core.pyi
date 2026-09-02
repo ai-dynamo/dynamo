@@ -3160,6 +3160,7 @@ class EntrypointArgs:
         chat_engine_factory: Optional[Callable] = None,
         aic_perf_config: Optional[AicPerfConfig] = None,
         *,
+        tls_client_ca_cert_path: Optional[str] = None,
         metrics_prefix: Optional[str] = None,
         enable_anthropic_api: Optional[bool] = None,
         strip_anthropic_preamble: Optional[bool] = None,
@@ -3184,6 +3185,7 @@ class EntrypointArgs:
             http_metrics_port: HTTP metrics port (for gRPC service)
             tls_cert_path: TLS certificate path (PEM format)
             tls_key_path: TLS key path (PEM format)
+            tls_client_ca_cert_path: Client CA certificate path for mutual TLS (PEM format)
             extra_engine_args: Optional path to mocker engine arguments JSON
             mocker_engine_args: Typed mocker engine arguments
             runtime_config: Optional runtime configuration for discovery registration

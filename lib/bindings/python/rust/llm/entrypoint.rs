@@ -583,6 +583,7 @@ pub(crate) struct EntrypointArgs {
     frontend_api_config: Option<FrontendApiConfig>,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
+    tls_client_ca_cert_path: Option<PathBuf>,
     extra_engine_args: Option<PathBuf>,
     mocker_engine_args: Option<PyMockEngineArgs>,
     runtime_config: ModelRuntimeConfig,
@@ -600,7 +601,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, endpoint_id=None, template_file=None, router_config=None, kv_cache_block_size=None, http_host=None, http_port=None, http_metrics_port=None, tls_cert_path=None, tls_key_path=None, extra_engine_args=None, mocker_engine_args=None, runtime_config=None, namespace=None, namespace_prefix=None, is_prefill=false, is_decode=false, migration_limit=0, migration_max_seq_len=None, chat_engine_factory=None, aic_perf_config=None, *, tls_client_ca_cert_path=None, metrics_prefix=None, enable_anthropic_api=None, strip_anthropic_preamble=None, enable_streaming_tool_dispatch=None, enable_streaming_reasoning_dispatch=None, reasoning_field_name=None, tokenizer_backend=None, tokenizer_fallback=None))]
     pub fn new(
         py: Python<'_>,
         engine_type: EngineType,
@@ -626,6 +627,7 @@ impl EntrypointArgs {
         migration_max_seq_len: Option<u32>,
         chat_engine_factory: Option<PyObject>,
         aic_perf_config: Option<AicPerfConfig>,
+        tls_client_ca_cert_path: Option<PathBuf>,
         metrics_prefix: Option<String>,
         enable_anthropic_api: Option<bool>,
         strip_anthropic_preamble: Option<bool>,
@@ -641,6 +643,13 @@ impl EntrypointArgs {
         {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "tls_cert_path and tls_key_path must be provided together",
+            ));
+        }
+        if tls_client_ca_cert_path.is_some()
+            && (tls_cert_path.is_none() || tls_key_path.is_none())
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "tls_client_ca_cert_path requires tls_cert_path and tls_key_path",
             ));
         }
 
@@ -708,6 +717,7 @@ impl EntrypointArgs {
             ),
             tls_cert_path,
             tls_key_path,
+            tls_client_ca_cert_path,
             extra_engine_args,
             mocker_engine_args,
             runtime_config,
@@ -763,6 +773,7 @@ pub fn make_engine<'p>(
     builder
         .tls_cert_path(args.tls_cert_path.clone())
         .tls_key_path(args.tls_key_path.clone())
+        .tls_client_ca_cert_path(args.tls_client_ca_cert_path.clone())
         .is_mocker(matches!(args.engine_type, EngineType::Mocker))
         .extra_engine_args(args.extra_engine_args.clone())
         .runtime_config(args.runtime_config.clone().inner)

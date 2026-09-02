@@ -31,7 +31,7 @@ use crate::kv_router::metrics::{
 };
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
 use dynamo_runtime::DistributedRuntime;
@@ -629,6 +629,7 @@ pub struct HttpService {
     enable_tls: bool,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
+    tls_client_ca_cert_path: Option<PathBuf>,
     route_docs: Vec<RouteDoc>,
     /// Worker capabilities accepted by the mounted engine-native Generate routes.
     generate_engine_capabilities: Vec<&'static str>,
@@ -654,6 +655,9 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     tls_key_path: Option<PathBuf>,
+
+    #[builder(default = "None")]
+    tls_client_ca_cert_path: Option<PathBuf>,
 
     /// Metrics naming config used when initializing the HTTP service metrics registry.
     #[builder(default)]
@@ -848,16 +852,13 @@ impl HttpService {
                 .tls_key_path
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("TLS private key path not provided"))?;
-
-            // aws_lc_rs is the default but other crates pull in `ring` also,
-            // so rustls doesn't know which one to use. Tell it.
-            if let Err(e) = rustls::crypto::aws_lc_rs::default_provider().install_default() {
-                tracing::debug!("TLS crypto provider already installed: {e:?}");
-            }
-
-            let config = RustlsConfig::from_pem_file(cert_path, key_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to create TLS config: {}", e))?;
+            let server_config = dynamo_runtime::tls_utils::server_tls_config(
+                cert_path,
+                key_path,
+                self.tls_client_ca_cert_path.as_deref(),
+            )
+            .context("Failed to create TLS config")?;
+            let config = RustlsConfig::from_config(Arc::new(server_config));
 
             let handle = axum_server::Handle::new();
             let server = axum_server::bind_rustls(addr, config)
@@ -1374,6 +1375,7 @@ impl HttpServiceConfigBuilder {
             enable_tls: config.enable_tls,
             tls_cert_path: config.tls_cert_path,
             tls_key_path: config.tls_key_path,
+            tls_client_ca_cert_path: config.tls_client_ca_cert_path,
             route_docs: all_docs,
             generate_engine_capabilities,
             rl_router,
@@ -1552,8 +1554,59 @@ impl HttpServiceConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::sync::Arc;
+    use tempfile::NamedTempFile;
     use tokio_util::sync::CancellationToken;
+
+    struct MtlsTestCertificates {
+        ca: NamedTempFile,
+        server_cert: NamedTempFile,
+        server_key: NamedTempFile,
+        client_identity_pem: Vec<u8>,
+    }
+
+    fn write_pem(contents: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(contents.as_bytes()).unwrap();
+        file
+    }
+
+    fn make_mtls_test_certificates() -> MtlsTestCertificates {
+        let ca_key = rcgen::KeyPair::generate().unwrap();
+        let mut ca_params = rcgen::CertificateParams::new(Vec::new()).unwrap();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let server_key = rcgen::KeyPair::generate().unwrap();
+        let mut server_params =
+            rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+        server_params
+            .extended_key_usages
+            .push(rcgen::ExtendedKeyUsagePurpose::ServerAuth);
+        let server_cert = server_params
+            .signed_by(&server_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        let client_key = rcgen::KeyPair::generate().unwrap();
+        let mut client_params =
+            rcgen::CertificateParams::new(vec!["dynamo-client".to_string()]).unwrap();
+        client_params
+            .extended_key_usages
+            .push(rcgen::ExtendedKeyUsagePurpose::ClientAuth);
+        let client_cert = client_params
+            .signed_by(&client_key, &ca_cert, &ca_key)
+            .unwrap();
+        let client_identity_pem =
+            format!("{}{}", client_cert.pem(), client_key.serialize_pem()).into_bytes();
+
+        MtlsTestCertificates {
+            ca: write_pem(&ca_cert.pem()),
+            server_cert: write_pem(&server_cert.pem()),
+            server_key: write_pem(&server_key.serialize_pem()),
+            client_identity_pem,
+        }
+    }
 
     async fn wait_for_service_stage(state: &State, expected: ServiceStage) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
@@ -1568,6 +1621,60 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn test_http_mtls_requires_client_certificate() {
+        let certificates = make_mtls_test_certificates();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let service = HttpService::builder()
+            .host("127.0.0.1")
+            .port(port)
+            .enable_tls(true)
+            .tls_cert_path(Some(certificates.server_cert.path().to_path_buf()))
+            .tls_key_path(Some(certificates.server_key.path().to_path_buf()))
+            .tls_client_ca_cert_path(Some(certificates.ca.path().to_path_buf()))
+            .build()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let handle = service.spawn(cancel.clone()).await;
+
+        let root = reqwest::Certificate::from_pem(&std::fs::read(certificates.ca.path()).unwrap())
+            .unwrap();
+        let unauthenticated_client = reqwest::Client::builder()
+            .add_root_certificate(root.clone())
+            .build()
+            .unwrap();
+        let authenticated_client = reqwest::Client::builder()
+            .add_root_certificate(root)
+            .identity(reqwest::Identity::from_pem(&certificates.client_identity_pem).unwrap())
+            .build()
+            .unwrap();
+        let url = format!("https://127.0.0.1:{port}/live");
+
+        let response = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match authenticated_client.get(&url).send().await {
+                    Ok(response) => break response,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .expect("mTLS service did not become ready");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        assert!(unauthenticated_client.get(&url).send().await.is_err());
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("mTLS service did not stop")
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
