@@ -692,10 +692,12 @@ mod tests {
         assert!(discovery.list(intent_query()).await.unwrap().is_empty());
     }
 
+    /// A fresh in-memory discovery backend with nothing advertised.
     fn mock_discovery() -> Arc<dyn Discovery> {
         Arc::new(MockDiscovery::new(Some(1), SharedMockRegistry::new()))
     }
 
+    /// Advertise a host on the V2 topic the way `state_agent_host` would.
     async fn register_host(
         discovery: &dyn Discovery,
         publisher_id: u64,
@@ -745,6 +747,7 @@ mod tests {
         assert_eq!(found.host_instance, host().host_instance);
     }
 
+    /// A late advertisement must wake the watch and be found by the re-list.
     #[tokio::test]
     async fn host_advertised_during_the_wait_is_discovered() {
         let discovery = mock_discovery();
@@ -784,6 +787,7 @@ mod tests {
         assert!(format!("{error:#}").contains("exactly one live V2 host, found 0"));
     }
 
+    /// Ambiguity is misconfiguration: two hosts must bail without waiting.
     #[tokio::test]
     async fn two_advertised_hosts_fail_closed_before_the_deadline() {
         let discovery = mock_discovery();
