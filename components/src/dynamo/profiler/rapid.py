@@ -139,11 +139,8 @@ def _generate_dgd_from_pick(
 # Fallback backend when AIC simulation is unavailable and no concrete backend is specified.
 _DEFAULT_NAIVE_BACKEND = "vllm"
 
-# The sequence lengths build_naive_generator_params seeds its own SlaConfig with.
-# The backend rule plugins derive max_seq_len from that SlaConfig, so a declared
-# workload that never reaches the generator is silently replaced by these values
-# and the generated worker is sized for them instead. Kept here only to detect
-# and report that substitution; the declared values are always forwarded.
+# build_naive_generator_params seeds its own SlaConfig with these; kept only
+# to detect and report substitution, since the declared values are forwarded.
 _NAIVE_GENERATOR_DEFAULT_ISL = 4000
 _NAIVE_GENERATOR_DEFAULT_OSL = 1000
 
@@ -198,9 +195,8 @@ def _run_naive_fallback(
             _NAIVE_GENERATOR_DEFAULT_OSL,
         )
 
-    # The generator derives max_seq_len (and hence the worker's max-model-len)
-    # from SlaConfig during generation, so the declared workload has to be an
-    # input here — patching generator_params afterwards would be too late.
+    # The generator derives max_seq_len from SlaConfig during generation, so the
+    # declared workload must be an input; patching the params after is too late.
     generator_params = build_naive_generator_params(
         model_name=model,
         total_gpus=total_gpus,
