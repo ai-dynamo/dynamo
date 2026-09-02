@@ -835,26 +835,27 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
-    # TODO: response_format wins here even when tool_choice is "required" or names
-    # a function, so a request that demanded a tool call can come back with none
-    # -- the tool constraint is dropped and only logged. The other two paths do
-    # the opposite: preprocessor/tool_choice.rs clears the response_format JSON
-    # and keeps the tool constraint, and prepost.py does the same after narrowing
-    # its conflict check. response_format is scoped by the OpenAI spec to the
-    # message the model returns to the user, not to tool calls, so the tool
-    # constraint is the one that must survive.
-    #
-    # This path also never reads the legacy guided_json / guided_regex /
-    # guided_grammar / guided_choice fields at all, so those are dropped silently
-    # while both other paths honor them (and reject them against a forced choice).
+    # TODO: This path never reads the legacy guided_json / guided_regex /
+    # guided_grammar / guided_choice fields, so those are dropped silently while
+    # both other paths honor them (and reject them against a forced choice).
+    forced_tool_choice = tool_choice == "required" or _is_named_tool_choice(tool_choice)
     if (
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None
     ):
-        logger.warning(
-            "Tool-call guided decoding will be ignored because of response_format already exists."
-        )
-    guided_decoding = response_format_guided_decoding or tool_call_guided_decoding
+        if forced_tool_choice:
+            logger.warning(
+                "response_format guided decoding will be ignored because tool_choice is forced."
+            )
+        else:
+            logger.warning(
+                "Tool-call guided decoding will be ignored because response_format already exists."
+            )
+    guided_decoding = (
+        tool_call_guided_decoding
+        if forced_tool_choice
+        else response_format_guided_decoding or tool_call_guided_decoding
+    )
 
     return SglangPreprocessResult(
         prompt_token_ids=prompt_token_ids,
