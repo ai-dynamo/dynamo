@@ -146,6 +146,7 @@ spec:
           MODEL_BASE="${TARGET_MODEL##*/}"
           TS=$(/busybox/date +'%Y%m%d_%H%M%S')
           RUN_DIR="${ROOT_DIR}/${MODEL_BASE}_trace_c${CONCURRENCY}_${TS}"
+          CACHE_SALT=$(openssl rand -base64 4)
           /busybox/mkdir -p "$RUN_DIR"
           aiperf profile \
             -m "$TARGET_MODEL" \
@@ -161,6 +162,7 @@ spec:
             --extra-inputs ignore_eos:true \
             --concurrency "$CONCURRENCY" \
             --workers-max "$CONCURRENCY" \
+            --extra-inputs cache_salt:salt_"$CACHE_SALT" \
             --random-seed 42 \
             --ui simple \
             --artifact-dir "$RUN_DIR" \
