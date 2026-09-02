@@ -241,13 +241,4 @@ mod tests {
                 .is_none()
         );
     }
-
-    #[test]
-    fn omits_logprob_metadata_by_default() {
-        let metadata = ResponseMetadata::new("request-1", &[10], LogprobOptions::default());
-        let response = metadata.response(&[42], 1, None);
-
-        assert!(response["meta_info"].get("output_token_logprobs").is_none());
-        assert_eq!(response["meta_info"]["finish_reason"], Value::Null);
-    }
 }

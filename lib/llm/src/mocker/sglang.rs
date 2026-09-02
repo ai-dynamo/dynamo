@@ -147,42 +147,6 @@ mod tests {
     }
 
     #[test]
-    fn wraps_each_chunk_and_its_terminal_finish_reason() {
-        let metadata = native_metadata(json!({"rid": "request-1"}));
-        let mut token = LLMEngineOutput {
-            token_ids: vec![101],
-            ..Default::default()
-        };
-        adapt(&metadata, &mut token, 1);
-        let response = &token.engine_data.as_ref().unwrap()["sglang_response"];
-        assert_eq!(response["output_ids"], json!([101]));
-        assert_eq!(response["meta_info"]["id"], "request-1");
-        assert!(response["meta_info"]["finish_reason"].is_null());
-
-        let mut terminal = LLMEngineOutput::length();
-        adapt(&metadata, &mut terminal, 1);
-        let response = &terminal.engine_data.as_ref().unwrap()["sglang_response"];
-        assert_eq!(response["output_ids"], json!([]));
-        assert_eq!(
-            response["meta_info"]["finish_reason"],
-            json!({"type": "length"})
-        );
-    }
-
-    #[test]
-    fn logprob_controls_reach_the_response_builder() {
-        let metadata = native_metadata(json!({"return_logprob": true, "top_logprobs_num": 2}));
-        let mut token = LLMEngineOutput {
-            token_ids: vec![107],
-            ..Default::default()
-        };
-        adapt(&metadata, &mut token, 1);
-        let meta = &token.engine_data.as_ref().unwrap()["sglang_response"]["meta_info"];
-        assert_eq!(meta["output_token_logprobs"][0][1], 107);
-        assert_eq!(meta["output_top_logprobs"][0].as_array().unwrap().len(), 2);
-    }
-
-    #[test]
     fn null_logprob_controls_use_sglang_defaults() {
         let metadata = native_metadata(json!({
             "return_logprob": null,

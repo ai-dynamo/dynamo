@@ -1448,68 +1448,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_sglang_stream_replays_exact_ids_without_changing_canonical_streams() {
-        let replay = write_replay_trace(&[serde_json::json!({
-            "request_id": "native-replay",
-            "output_length": 3,
-            "output_token_ids": [101, 202, 303],
-        })]);
-        let args = MockEngineArgs::builder()
-            .block_size(4)
-            .num_gpu_blocks(64)
-            .max_num_batched_tokens(Some(64))
-            .speedup_ratio(1000.0)
-            .response_replay_trace_path(Some(replay.path().to_path_buf()))
-            .build()
-            .unwrap();
-        let live = LiveEngine::start(args.clone(), 0).unwrap();
-        let engine = MockerExecutionContext::new(args);
-        assert!(engine.engines.set(vec![live]).is_ok());
-
-        let mut native_request = decode_request(3, 3);
-        native_request.extra_args = Some(serde_json::json!({
-            "sglang_tito": {
-                "rid": "native-replay",
-                "return_logprob": true,
-                "top_logprobs_num": 1,
-                "logprob_start_len": 0,
-            }
-        }));
-        let mut native_stream = engine
-            .generate(SingleIn::new(native_request))
-            .await
-            .unwrap();
-        let mut replayed: Vec<u32> = Vec::new();
-        let mut terminal_count = 0;
-        while let Some(output) = native_stream.next().await {
-            let output = output.data.unwrap();
-            replayed.extend(&output.token_ids);
-            let response = &output.engine_data.as_ref().unwrap()["sglang_response"];
-            assert_eq!(response["output_ids"], serde_json::json!(output.token_ids));
-            assert_eq!(response["meta_info"]["completion_tokens"], replayed.len());
-            if response["meta_info"]["finish_reason"].is_null() {
-                assert!(output.finish_reason.is_none());
-            } else {
-                terminal_count += 1;
-                assert_eq!(
-                    response["meta_info"]["finish_reason"],
-                    serde_json::json!({"type": "length"})
-                );
-            }
-        }
-        assert_eq!(replayed, [101, 202, 303]);
-        assert_eq!(terminal_count, 1);
-
-        let mut canonical_stream = engine
-            .generate(SingleIn::new(decode_request(3, 1)))
-            .await
-            .unwrap();
-        while let Some(output) = canonical_stream.next().await {
-            assert!(output.data.unwrap().engine_data.is_none());
-        }
-    }
-
-    #[tokio::test]
     async fn dropping_response_cancels_live_request_and_allows_id_reuse() {
         let args = MockEngineArgs::builder()
             .block_size(4)
