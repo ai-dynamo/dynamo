@@ -79,6 +79,11 @@ Note that the default pip wheel built is not compatible with CUDA 13 at the mome
 | Variable | Description | Default |
 |-----------|--------------|----------|
 | `DYN_KVBM_CPU_CACHE_GB` | CPU pinned memory cache size (GB) | required |
+| `DYN_KVBM_G2_BACKING` | G2 allocation owner: `cuda` or `rcommu` | `cuda` |
+| `DYN_KVBM_RCOMMU_ENDPOINT` | rcommu owner Unix socket; required when the G2 backing is `rcommu` | none |
+| `DYN_KVBM_RCOMMU_REGION_KEY` | Exclusive region key; supports `{device_id}`, `{rank}`, and `{pid}` placeholders | none |
+| `DYN_KVBM_RCOMMU_NUMA_NODE` | Optional NUMA node on which the owner binds and prefaults the region | none |
+| `DYN_KVBM_RCOMMU_ATTACH_TIMEOUT_MS` | Timeout for each owner lifecycle request | `30000` |
 | `DYN_KVBM_DISK_CACHE_GB` | SSD Disk/Storage system cache size (GB) | optional |
 | `DYN_KVBM_DISK_CACHE_DIR` | Disk cache directory | `/tmp/` |
 | `DYN_KVBM_DISK_ZEROFILL_FALLBACK` | Enable zero-fill when `fallocate()` unsupported (e.g., Lustre) | `false` |
@@ -107,6 +112,29 @@ export DYN_KVBM_DISK_ZEROFILL_FALLBACK=true  # Enables zero-fill fallback when f
 - With `ZEROFILL_FALLBACK=true`: KVBM writes zeros using page-aligned buffers compatible with O_DIRECT requirements
 
 **Troubleshooting:** If you encounter "write all error" or EINVAL (errno 22), try disabling O_DIRECT: `export DYN_KVBM_DISK_DISABLE_O_DIRECT=true`
+
+#### rcommu-owned G2 shared memory
+
+An rcommu owner can create and retain the physical G2 region instead of letting each KVBM worker
+call `cuMemHostAlloc`. KVBM still owns all slots, keys, pins, transfers, and eviction decisions.
+The owner and worker exchange lifecycle metadata over a local Unix socket; KV payload never travels
+through that socket.
+
+Start the matching `rcommu-kvbm-shm-owner`, then configure each worker with a unique key:
+
+```bash
+export DYN_KVBM_CPU_CACHE_GB=100
+export DYN_KVBM_G2_BACKING=rcommu
+export DYN_KVBM_RCOMMU_ENDPOINT=/run/rcommu/kvbm-owner.sock
+export DYN_KVBM_RCOMMU_REGION_KEY='my-deployment/instance-0/rank-{rank}/g2'
+export DYN_KVBM_RCOMMU_NUMA_NODE=0
+```
+
+Only `FullyContiguous` host layouts are supported. Explicitly selecting `rcommu` is fail-closed:
+owner, mmap, header, CUDA registration, NIXL registration, or activation failures stop worker
+initialization and never allocate a second CUDA-owned G2 cache. While active, the worker checks the
+lease and owner epoch; loss or restart marks G2 unhealthy, rejects new host transfers, and cancels
+the worker.
 
 ### vLLM
 

@@ -8,7 +8,7 @@ use utils::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 
 use llm_rs::block_manager::distributed::{
     BlockTransferHandler as RustBlockTransferHandler, KvbmWorker as KvbmWorkerImpl,
-    KvbmWorkerConfig, NcclConfig,
+    HostMemoryBacking, KvbmWorkerConfig, NcclConfig, RcommuShmConfig,
 };
 #[cfg(feature = "nccl")]
 use llm_rs::block_manager::distributed::{NcclBootstrap, NcclCommOwned};
@@ -253,6 +253,10 @@ impl KvbmWorker {
         let nccl_config = build_nccl_config(rank, world_size, nccl_comm_ptr).map_err(to_pyerr)?;
         // When NCCL is disabled, pass None for rank/world_size so the worker is consistently in sharded mode.
         let worker_rank = if nccl_config.is_enabled() { rank } else { None };
+        let host_memory_backing = RcommuShmConfig::from_env()
+            .map_err(to_pyerr)?
+            .map(HostMemoryBacking::Rcommu)
+            .unwrap_or_default();
 
         let config = KvbmWorkerConfig::builder()
             .cancel_token(get_current_cancel_token())
@@ -271,6 +275,7 @@ impl KvbmWorker {
                     .map(|py_layout| py_layout.into())
                     .unwrap_or(LayoutType::FullyContiguous),
             )
+            .host_memory_backing(host_memory_backing)
             .disk_layout_type(
                 disk_layout_type
                     .map(|py_layout| py_layout.into())

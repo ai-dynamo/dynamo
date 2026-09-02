@@ -8,11 +8,13 @@ mod zmq;
 mod leader;
 #[cfg(feature = "nccl")]
 mod nccl_bootstrap;
+mod shared_memory;
 mod worker;
 
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 #[cfg(feature = "nccl")]
 pub use nccl_bootstrap::{NcclBootstrap, NcclCommOwned};
+pub use shared_memory::{HostMemoryBacking, RcommuShmConfig};
 pub use transfer::{BlockTransferHandler, NcclConfig};
 pub use utils::{
     BlockTransferPool, BlockTransferRequest, ConnectorRequestLeader, ConnectorTransferType,

@@ -34,6 +34,7 @@ tracing = { workspace = true }
 
 libc = { version = "0.2" }
 libloading = "0.8"
+memmap2 = "0.9"
 nix = { version = "0.30", features = ["fs"] }
 offset-allocator = "0.2"
 

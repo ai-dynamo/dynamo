@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::shared_memory::OpeningAttachment;
 use super::*;
 
 use super::zmq::*;
@@ -9,7 +10,7 @@ use transfer::*;
 use utils::*;
 
 use crate::block_manager::{
-    BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
+    BasicMetadata, BlockMetadata, LayoutConfig, LayoutConfigBuilder, NixlLayout, Storage,
     block::{
         Block, layout_to_blocks, locality,
         transfer::{PoolConfig, TransferContext},
@@ -178,21 +179,84 @@ async fn perform_allocation_and_build_handler(
     )?);
 
     // host (G2) - only allocated if should_allocate_offload
-    let host_blocks = if should_allocate_offload && leader_meta.num_host_blocks > 0 {
-        let host_allocator = Arc::new(PinnedAllocator::default());
-        let host_layout = layout_builder
-            .num_blocks(leader_meta.num_host_blocks)
-            .build()?
-            .allocate_layout(worker_config.host_layout_type, host_allocator)?;
-        Some(KvbmWorker::make_layout::<_, BasicMetadata>(
-            host_layout,
-            transfer_context.nixl_agent().as_ref(),
-            1,
-            worker_id,
-        )?)
-    } else {
-        None
-    };
+    let (host_blocks, host_attachment) =
+        if should_allocate_offload && leader_meta.num_host_blocks > 0 {
+            let host_config = layout_builder
+                .num_blocks(leader_meta.num_host_blocks)
+                .build()?;
+            match &worker_config.host_memory_backing {
+                HostMemoryBacking::CudaAllocated => {
+                    let host_allocator = Arc::new(PinnedAllocator::new(device_id)?);
+                    let host_layout = host_config
+                        .allocate_layout(worker_config.host_layout_type, host_allocator)?;
+                    let blocks = KvbmWorker::make_layout::<_, BasicMetadata>(
+                        host_layout,
+                        transfer_context.nixl_agent().as_ref(),
+                        1,
+                        worker_id,
+                    )?;
+                    (Some(blocks), None)
+                }
+                HostMemoryBacking::Rcommu(config) => {
+                    if worker_config.host_layout_type != LayoutType::FullyContiguous {
+                        anyhow::bail!("rcommu G2 backing requires a FullyContiguous host layout");
+                    }
+                    let data_len = fully_contiguous_allocation_size(&host_config)?;
+                    let fingerprint = g2_layout_fingerprint(&host_config);
+                    let config = config.for_worker(device_id, worker_config.rank);
+                    let attachment_worker_id = format!(
+                        "kvbm-device-{device_id}-rank-{}",
+                        worker_config
+                            .rank
+                            .map(|rank| rank.to_string())
+                            .unwrap_or_else(|| "sharded".into())
+                    );
+                    let (storage, mut opening) = OpeningAttachment::open(
+                        &config,
+                        attachment_worker_id,
+                        data_len,
+                        fingerprint,
+                        device_id as u32,
+                    )
+                    .await?;
+                    let host_layout = match host_config
+                        .create_layout(worker_config.host_layout_type, vec![storage])
+                    {
+                        Ok(layout) => layout,
+                        Err(error) => {
+                            opening.abort().await;
+                            return Err(error.into());
+                        }
+                    };
+                    let blocks = match KvbmWorker::make_layout::<_, BasicMetadata>(
+                        host_layout,
+                        transfer_context.nixl_agent().as_ref(),
+                        1,
+                        worker_id,
+                    ) {
+                        Ok(blocks) => blocks,
+                        Err(error) => {
+                            opening.abort().await;
+                            return Err(error);
+                        }
+                    };
+                    let attachment = match opening
+                        .activate(device_id as u32, worker_config.cancel_token.clone())
+                        .await
+                    {
+                        Ok(attachment) => attachment,
+                        Err(error) => {
+                            drop(blocks);
+                            opening.abort().await;
+                            return Err(error);
+                        }
+                    };
+                    (Some(blocks), Some(attachment))
+                }
+            }
+        } else {
+            (None, None)
+        };
     // disk (G3) - only allocated if should_allocate_offload
     let disk_blocks = if should_allocate_offload && leader_meta.num_disk_blocks > 0 {
         let disk_allocator = Arc::new(DiskAllocator::from_env()?);
@@ -210,9 +274,10 @@ async fn perform_allocation_and_build_handler(
         None
     };
 
-    let handler = BlockTransferHandler::new(
+    let handler = BlockTransferHandler::new_with_host_attachment(
         device_blocks,
         host_blocks,
+        host_attachment,
         disk_blocks,
         transfer_context,
         scheduler_client,
@@ -406,6 +471,43 @@ impl Handler for BlockTransferDispatch {
     }
 }
 
+fn g2_layout_fingerprint(config: &LayoutConfig) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"dynamo-kvbm-g2-fully-contiguous-v1");
+    for value in [
+        config.num_blocks,
+        config.num_layers,
+        config.outer_dim,
+        config.page_size,
+        config.inner_dim,
+        config.alignment,
+        config.dtype_width_bytes,
+    ] {
+        hasher.update(&(value as u64).to_le_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn fully_contiguous_allocation_size(config: &LayoutConfig) -> anyhow::Result<u64> {
+    let natural_block_stride = config
+        .num_layers
+        .checked_mul(config.outer_dim)
+        .and_then(|value| value.checked_mul(config.page_size))
+        .and_then(|value| value.checked_mul(config.inner_dim))
+        .and_then(|value| value.checked_mul(config.dtype_width_bytes))
+        .ok_or_else(|| anyhow::anyhow!("G2 block stride overflows usize"))?;
+    let block_stride = natural_block_stride
+        .checked_add(config.alignment - 1)
+        .map(|value| value & !(config.alignment - 1))
+        .ok_or_else(|| anyhow::anyhow!("aligned G2 block stride overflows usize"))?;
+    let data_bytes = (config.num_blocks - 1)
+        .checked_mul(block_stride)
+        .and_then(|value| value.checked_add(natural_block_stride))
+        .and_then(|value| value.checked_add(config.alignment - 1))
+        .ok_or_else(|| anyhow::anyhow!("G2 shared-memory size overflows usize"))?;
+    Ok(u64::try_from(data_bytes)?)
+}
+
 fn validate_page_size(value: usize) -> Result<(), validator::ValidationError> {
     if !value.is_power_of_two() {
         return Err(validator::ValidationError::new(
@@ -440,6 +542,9 @@ pub struct KvbmWorkerConfig {
 
     #[builder(default = "LayoutType::FullyContiguous")]
     host_layout_type: LayoutType,
+
+    #[builder(default)]
+    host_memory_backing: HostMemoryBacking,
 
     #[builder(default = "LayoutType::FullyContiguous")]
     disk_layout_type: LayoutType,
@@ -501,6 +606,13 @@ impl KvbmWorkerConfig {
                 );
             }
             _ => {}
+        }
+
+        if let HostMemoryBacking::Rcommu(config) = &self.host_memory_backing {
+            config.validate()?;
+            if self.host_layout_type != LayoutType::FullyContiguous {
+                anyhow::bail!("rcommu G2 backing requires a FullyContiguous host layout");
+            }
         }
 
         Ok(())
@@ -601,8 +713,12 @@ impl KvbmWorker {
             }
         };
 
-        let bytes_per_block =
-            num_layers * outer_dim * config.page_size * inner_dim * config.dtype_width_bytes;
+        let bytes_per_block = num_layers
+            .checked_mul(outer_dim)
+            .and_then(|value| value.checked_mul(config.page_size))
+            .and_then(|value| value.checked_mul(inner_dim))
+            .and_then(|value| value.checked_mul(config.dtype_width_bytes))
+            .ok_or_else(|| anyhow::anyhow!("KV bytes per block overflows usize"))?;
 
         let mut layout_builder_instance = LayoutConfigBuilder::default();
         let layout_builder = layout_builder_instance
@@ -892,6 +1008,39 @@ mod tests {
             .num_device_blocks(1)
             .build()
             .expect("base config should build")
+    }
+
+    #[test]
+    fn fully_contiguous_external_allocation_matches_layout_rules() {
+        let config = LayoutConfig::builder()
+            .num_blocks(3)
+            .num_layers(2)
+            .outer_dim(2)
+            .page_size(16)
+            .inner_dim(64)
+            .dtype_width_bytes(2)
+            .alignment(4096)
+            .build()
+            .unwrap();
+        // Natural block size is 8192, with two extra blocks and at most 4095 bytes
+        // of initial alignment padding accepted by FullyContiguous::new.
+        assert_eq!(fully_contiguous_allocation_size(&config).unwrap(), 28_671);
+    }
+
+    #[test]
+    fn rcommu_backing_rejects_layer_separate_layout() {
+        let mut config = base_config();
+        config.host_memory_backing = HostMemoryBacking::Rcommu(RcommuShmConfig {
+            endpoint: "/tmp/rcommu-owner.sock".into(),
+            region_key: "deployment/instance/rank-0/g2".into(),
+            numa_node: None,
+            attach_timeout: std::time::Duration::from_secs(1),
+            worker_epoch: 1,
+        });
+        config.host_layout_type = LayoutType::LayerSeparate {
+            outer_contiguous: false,
+        };
+        assert!(config.validate().is_err());
     }
 
     // --- outer_dim ---

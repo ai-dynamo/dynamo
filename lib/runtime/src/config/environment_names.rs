@@ -248,6 +248,24 @@ pub mod kvbm {
             "DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS";
     }
 
+    /// Owner-managed G2 shared-memory configuration.
+    pub mod shared_memory {
+        /// G2 backing implementation (`cuda` or `rcommu`).
+        pub const DYN_KVBM_G2_BACKING: &str = "DYN_KVBM_G2_BACKING";
+
+        /// Unix socket exposed by the rcommu shared-memory owner.
+        pub const DYN_KVBM_RCOMMU_ENDPOINT: &str = "DYN_KVBM_RCOMMU_ENDPOINT";
+
+        /// Exclusive owner region key for this worker and parallel rank.
+        pub const DYN_KVBM_RCOMMU_REGION_KEY: &str = "DYN_KVBM_RCOMMU_REGION_KEY";
+
+        /// Optional NUMA node on which the owner places the region.
+        pub const DYN_KVBM_RCOMMU_NUMA_NODE: &str = "DYN_KVBM_RCOMMU_NUMA_NODE";
+
+        /// Timeout in milliseconds for one owner lifecycle request.
+        pub const DYN_KVBM_RCOMMU_ATTACH_TIMEOUT_MS: &str = "DYN_KVBM_RCOMMU_ATTACH_TIMEOUT_MS";
+    }
+
     /// Disk cache configuration
     pub mod disk_cache {
         /// Disk cache size in GB
@@ -942,6 +960,11 @@ mod tests {
             kvbm::DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER,
             kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_GB,
             kvbm::cpu_cache::DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS,
+            kvbm::shared_memory::DYN_KVBM_G2_BACKING,
+            kvbm::shared_memory::DYN_KVBM_RCOMMU_ENDPOINT,
+            kvbm::shared_memory::DYN_KVBM_RCOMMU_REGION_KEY,
+            kvbm::shared_memory::DYN_KVBM_RCOMMU_NUMA_NODE,
+            kvbm::shared_memory::DYN_KVBM_RCOMMU_ATTACH_TIMEOUT_MS,
             kvbm::disk_cache::DYN_KVBM_DISK_CACHE_GB,
             kvbm::disk_cache::DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS,
             kvbm::leader::DYN_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS,

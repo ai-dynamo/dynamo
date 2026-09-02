@@ -2775,6 +2775,7 @@ dependencies = [
  "dynamo-truthy",
  "libc",
  "libloading 0.8.9",
+ "memmap2",
  "nix 0.30.1",
  "nixl-sys",
  "offset-allocator",

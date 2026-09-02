@@ -238,6 +238,9 @@ impl ConnectorTransferBatcher {
 pub struct BlockTransferHandler {
     device: Option<LocalBlockDataList<DeviceStorage>>,
     host: Option<LocalBlockDataList<PinnedStorage>>,
+    // Declared after `host` so the mapping and its NIXL/CUDA registrations are
+    // released before the owner receives detach on final handler drop.
+    host_attachment: Option<Arc<super::shared_memory::ActiveAttachmentSession>>,
     disk: Option<LocalBlockDataList<DiskStorage>>,
     context: Arc<TransferContext>,
     scheduler_client: Option<TransferSchedulerClient>,
@@ -258,6 +261,26 @@ impl BlockTransferHandler {
         scheduler_client: Option<TransferSchedulerClient>,
         nccl_config: NcclConfig,
     ) -> Result<Self> {
+        Self::new_with_host_attachment(
+            device_blocks,
+            host_blocks,
+            None,
+            disk_blocks,
+            context,
+            scheduler_client,
+            nccl_config,
+        )
+    }
+
+    pub(super) fn new_with_host_attachment(
+        device_blocks: Option<Vec<LocalBlock<DeviceStorage, BasicMetadata>>>,
+        host_blocks: Option<Vec<LocalBlock<PinnedStorage, BasicMetadata>>>,
+        host_attachment: Option<Arc<super::shared_memory::ActiveAttachmentSession>>,
+        disk_blocks: Option<Vec<LocalBlock<DiskStorage, BasicMetadata>>>,
+        context: Arc<TransferContext>,
+        scheduler_client: Option<TransferSchedulerClient>,
+        nccl_config: NcclConfig,
+    ) -> Result<Self> {
         let transfer_mode = if nccl_config.is_enabled() {
             TransferMode::Replicated
         } else {
@@ -267,6 +290,7 @@ impl BlockTransferHandler {
         Ok(Self {
             device: Self::get_local_data(device_blocks),
             host: Self::get_local_data(host_blocks),
+            host_attachment,
             disk: Self::get_local_data(disk_blocks),
             context,
             scheduler_client,
@@ -349,11 +373,29 @@ impl BlockTransferHandler {
 
     /// Execute transfer with batching to prevent resource exhaustion
     pub async fn execute_transfer(&self, request: BlockTransferRequest) -> Result<()> {
+        let uses_host = request.from_pool() == &Host || request.to_pool() == &Host;
+        if uses_host
+            && self
+                .host_attachment
+                .as_ref()
+                .is_some_and(|attachment| !attachment.is_healthy())
+        {
+            return Err(anyhow::anyhow!("rcommu G2 attachment is no longer healthy"));
+        }
         self.batcher.execute_batched_transfer(self, request).await
     }
 
     /// Execute transfer directly without batching (used by the batcher)
     pub async fn execute_transfer_direct(&self, request: BlockTransferRequest) -> Result<()> {
+        let uses_host = request.from_pool() == &Host || request.to_pool() == &Host;
+        if uses_host
+            && self
+                .host_attachment
+                .as_ref()
+                .is_some_and(|attachment| !attachment.is_healthy())
+        {
+            return Err(anyhow::anyhow!("rcommu G2 attachment is no longer healthy"));
+        }
         match self.transfer_mode {
             TransferMode::Sharded => self.execute_transfer_spmd_sharded(request).await,
             #[cfg(feature = "nccl")]

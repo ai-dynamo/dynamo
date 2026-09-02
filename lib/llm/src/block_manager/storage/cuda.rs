@@ -158,11 +158,20 @@ impl Cuda {
     }
 }
 
-/// Pinned host memory storage using CUDA page-locked memory.
-/// Wraps [`dynamo_memory::PinnedStorage`] and adds registration handle support.
+#[derive(Debug)]
+enum PinnedBacking {
+    CudaAllocated(dynamo_memory::PinnedStorage),
+    External(dynamo_memory::ExternalPinnedStorage),
+}
+
+/// Pinned host memory storage with either CUDA-allocated or externally mapped backing.
+///
+/// Both variants use the same KVBM storage and NIXL registration interface. Their
+/// destruction remains distinct: CUDA allocations call `cuMemFreeHost`, while
+/// external mappings call `cuMemHostUnregister` and then unmap the owner-provided file.
 #[derive(Debug)]
 pub struct PinnedStorage {
-    inner: dynamo_memory::PinnedStorage,
+    inner: PinnedBacking,
     handles: RegistrationHandles,
 }
 
@@ -182,7 +191,7 @@ impl PinnedStorage {
         let inner =
             dynamo_memory::PinnedStorage::new_for_device(size, Some(ctx.cu_device() as u32))?;
         Ok(Self {
-            inner,
+            inner: PinnedBacking::CudaAllocated(inner),
             handles: RegistrationHandles::new(),
         })
     }
@@ -206,9 +215,17 @@ impl PinnedStorage {
         }
         let inner = dynamo_memory::PinnedStorage::new_for_device(size, device_id)?;
         Ok(Self {
-            inner,
+            inner: PinnedBacking::CudaAllocated(inner),
             handles: RegistrationHandles::new(),
         })
+    }
+
+    /// Wrap an owner-provided mapping that has already been registered with CUDA.
+    pub fn from_external(inner: dynamo_memory::ExternalPinnedStorage) -> Self {
+        Self {
+            inner: PinnedBacking::External(inner),
+            handles: RegistrationHandles::new(),
+        }
     }
 }
 
@@ -225,25 +242,40 @@ impl Storage for PinnedStorage {
     }
 
     fn addr(&self) -> u64 {
-        self.inner.addr() as u64
+        match &self.inner {
+            PinnedBacking::CudaAllocated(inner) => inner.addr() as u64,
+            PinnedBacking::External(inner) => inner.addr() as u64,
+        }
     }
 
     fn size(&self) -> usize {
-        self.inner.size()
+        match &self.inner {
+            PinnedBacking::CudaAllocated(inner) => inner.size(),
+            PinnedBacking::External(inner) => inner.size(),
+        }
     }
 
     unsafe fn as_ptr(&self) -> *const u8 {
-        unsafe { self.inner.as_ptr() }
+        match &self.inner {
+            PinnedBacking::CudaAllocated(inner) => unsafe { inner.as_ptr() },
+            PinnedBacking::External(inner) => inner.as_ptr(),
+        }
     }
 
     unsafe fn as_mut_ptr(&mut self) -> *mut u8 {
-        unsafe { self.inner.as_mut_ptr() }
+        match &mut self.inner {
+            PinnedBacking::CudaAllocated(inner) => unsafe { inner.as_mut_ptr() },
+            PinnedBacking::External(inner) => unsafe { inner.as_mut_ptr() },
+        }
     }
 }
 
 impl CudaContextProivder for PinnedStorage {
     fn cuda_context(&self) -> &Arc<CudaContext> {
-        self.inner.ctx()
+        match &self.inner {
+            PinnedBacking::CudaAllocated(inner) => inner.ctx(),
+            PinnedBacking::External(inner) => inner.ctx(),
+        }
     }
 }
 
@@ -267,13 +299,16 @@ impl RegisterableStorage for PinnedStorage {
 
 impl StorageMemset for PinnedStorage {
     fn memset(&mut self, value: u8, offset: usize, size: usize) -> Result<(), StorageError> {
-        if offset + size > self.inner.size() {
+        let end = offset.checked_add(size).ok_or_else(|| {
+            StorageError::OperationFailed("memset: offset + size overflow".into())
+        })?;
+        if end > self.size() {
             return Err(StorageError::OperationFailed(
                 "memset: offset + size > storage size".into(),
             ));
         }
         unsafe {
-            let ptr = self.inner.as_mut_ptr().add(offset);
+            let ptr = self.as_mut_ptr().add(offset);
             std::ptr::write_bytes(ptr, value, size);
         }
         Ok(())
