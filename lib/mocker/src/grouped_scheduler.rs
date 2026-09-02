@@ -49,6 +49,30 @@ use crate::scheduler::{
     handoff_channel_capacity,
 };
 
+const ABSOLUTE_PASS_MAX_CATCH_UP_ENV: &str = "DYN_MOCKER_ABSOLUTE_PASS_MAX_CATCH_UP_MS";
+
+fn parse_absolute_pass_max_catch_up(value: &str) -> Result<std::time::Duration> {
+    let milliseconds = value.parse::<f64>().with_context(|| {
+        format!("{ABSOLUTE_PASS_MAX_CATCH_UP_ENV} must be a number of milliseconds")
+    })?;
+    ensure!(
+        milliseconds.is_finite() && milliseconds > 0.0,
+        "{ABSOLUTE_PASS_MAX_CATCH_UP_ENV} must be finite and positive, got {value}"
+    );
+    std::time::Duration::try_from_secs_f64(milliseconds / 1_000.0)
+        .with_context(|| format!("{ABSOLUTE_PASS_MAX_CATCH_UP_ENV} is out of range: {value}"))
+}
+
+fn absolute_pass_max_catch_up_from_env() -> Result<Option<std::time::Duration>> {
+    match std::env::var(ABSOLUTE_PASS_MAX_CATCH_UP_ENV) {
+        Ok(value) => parse_absolute_pass_max_catch_up(&value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("{ABSOLUTE_PASS_MAX_CATCH_UP_ENV} must be valid UTF-8")
+        }
+    }
+}
+
 /// Per-rank Dynamo sinks consumed by [`create_grouped_scheduler`].
 #[derive(Clone, Default)]
 pub struct GroupedSchedulerRankSinks {
@@ -277,6 +301,7 @@ fn create_grouped_scheduler_from_components(
         .checked_mul(dp_size.get() as usize)
         .context("grouped scheduler control capacity overflow")?;
     let event_capacity = control_capacity.max(dp_size.get() as usize * 4).max(64);
+    let absolute_pass_max_catch_up = absolute_pass_max_catch_up_from_env()?;
     let factory = engine_factory(components.rank, components.timing)?;
     // Existing live schedulers seed every process-local worker from DP rank.
     // A logical worker therefore retains worker_id=0 at this compatibility
@@ -299,6 +324,7 @@ fn create_grouped_scheduler_from_components(
         GroupedLiveDriverConfig {
             control_capacity,
             event_capacity,
+            absolute_pass_max_catch_up,
         },
         Some(cancel_token.clone()),
     )?;
@@ -788,6 +814,25 @@ fn fail_pending_command(
         let _ = reply.send(Err(error));
     } else {
         tracing::warn!(command_id, error = ?error, "grouped live request failed");
+    }
+}
+
+#[cfg(test)]
+mod absolute_pass_config_tests {
+    use super::*;
+
+    #[test]
+    fn absolute_pass_catch_up_requires_a_finite_positive_value() {
+        assert_eq!(
+            parse_absolute_pass_max_catch_up("5").unwrap(),
+            std::time::Duration::from_millis(5)
+        );
+        for invalid in ["0", "-1", "NaN", "inf", "not-a-number"] {
+            assert!(
+                parse_absolute_pass_max_catch_up(invalid).is_err(),
+                "{invalid}"
+            );
+        }
     }
 }
 

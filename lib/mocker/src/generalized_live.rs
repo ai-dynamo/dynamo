@@ -45,6 +45,10 @@ pub struct GroupedLiveDriverConfig {
     pub control_capacity: usize,
     /// Capacity of the ordered neutral-effect lane.
     pub event_capacity: usize,
+    /// When set, carry each modeled pass end forward as the next pass start
+    /// deadline, but never start more than this duration behind wall time.
+    /// `None` preserves the historical wall-clock-per-pass behavior.
+    pub absolute_pass_max_catch_up: Option<Duration>,
 }
 
 impl Default for GroupedLiveDriverConfig {
@@ -52,6 +56,7 @@ impl Default for GroupedLiveDriverConfig {
         Self {
             control_capacity: 64,
             event_capacity: 64,
+            absolute_pass_max_catch_up: None,
         }
     }
 }
@@ -63,6 +68,9 @@ impl GroupedLiveDriverConfig {
         }
         if self.event_capacity == 0 {
             bail!("grouped live event capacity must be positive");
+        }
+        if self.absolute_pass_max_catch_up == Some(Duration::ZERO) {
+            bail!("grouped live absolute-pass catch-up must be positive");
         }
         Ok(self)
     }
@@ -389,6 +397,9 @@ pub fn spawn_grouped_live_engine(
             deferred_commands: VecDeque::new(),
             timing_diagnostics: LiveTimingDiagnostics::default(),
             last_pass_finished_ms: None,
+            absolute_pass_max_catch_up: config.absolute_pass_max_catch_up,
+            engine_time_ms: 0.0,
+            next_pass_deadline_ms: None,
         }
         .run()
         .await
@@ -417,6 +428,67 @@ struct GroupedLiveActor {
     deferred_commands: VecDeque<ControlEnvelope>,
     timing_diagnostics: LiveTimingDiagnostics,
     last_pass_finished_ms: Option<f64>,
+    absolute_pass_max_catch_up: Option<Duration>,
+    engine_time_ms: f64,
+    next_pass_deadline_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PassStartDecision {
+    started_at_ms: f64,
+    absolute_deadline: bool,
+    carried_deadline: bool,
+    deadline_lag_ms: f64,
+    catch_up_applied_ms: f64,
+    catch_up_clamped_ms: f64,
+    monotonic_floor_ms: f64,
+}
+
+fn select_pass_start(
+    wall_ms: f64,
+    engine_time_ms: f64,
+    next_deadline_ms: Option<f64>,
+    max_catch_up: Option<Duration>,
+) -> PassStartDecision {
+    let Some(max_catch_up) = max_catch_up else {
+        return PassStartDecision {
+            started_at_ms: wall_ms.max(engine_time_ms),
+            absolute_deadline: false,
+            carried_deadline: false,
+            deadline_lag_ms: 0.0,
+            catch_up_applied_ms: 0.0,
+            catch_up_clamped_ms: 0.0,
+            monotonic_floor_ms: 0.0,
+        };
+    };
+    let Some(deadline_ms) = next_deadline_ms else {
+        return PassStartDecision {
+            started_at_ms: wall_ms.max(engine_time_ms),
+            absolute_deadline: true,
+            carried_deadline: false,
+            deadline_lag_ms: 0.0,
+            catch_up_applied_ms: 0.0,
+            catch_up_clamped_ms: 0.0,
+            monotonic_floor_ms: 0.0,
+        };
+    };
+
+    let deadline_lag_ms = (wall_ms - deadline_ms).max(0.0);
+    let catch_up_floor_ms = (wall_ms - duration_ms(max_catch_up)).max(0.0);
+    // The prior pass normally ensures that its end is not in the future. If a
+    // clock edge violates that expectation, keep the deadline instead of
+    // backdating the new pass.
+    let bounded_deadline_ms = deadline_ms.max(catch_up_floor_ms);
+    let started_at_ms = bounded_deadline_ms.max(engine_time_ms);
+    PassStartDecision {
+        started_at_ms,
+        absolute_deadline: true,
+        carried_deadline: true,
+        deadline_lag_ms,
+        catch_up_applied_ms: (wall_ms - started_at_ms).max(0.0),
+        catch_up_clamped_ms: (bounded_deadline_ms - deadline_ms).max(0.0),
+        monotonic_floor_ms: (started_at_ms - bounded_deadline_ms).max(0.0),
+    }
 }
 
 const LIVE_TIMING_LOG_INTERVAL_PASSES: u64 = 512;
@@ -429,6 +501,15 @@ fn duration_ms(duration: Duration) -> f64 {
 struct LiveTimingDiagnostics {
     total_passes: u64,
     interval_passes: u64,
+    absolute_deadline_passes: u64,
+    carried_deadline_passes: u64,
+    catch_up_clamped_passes: u64,
+    monotonic_floor_passes: u64,
+    overdue_catch_up_passes: u64,
+    deadline_lag_ms: f64,
+    catch_up_applied_ms: f64,
+    catch_up_clamped_ms: f64,
+    monotonic_floor_ms: f64,
     pre_pass_work_ms: f64,
     modeled_ms: f64,
     execute_pass_ms: f64,
@@ -444,10 +525,14 @@ struct LiveTimingDiagnostics {
     max_wake_overshoot_ms: f64,
     max_completion_boundary_ms: f64,
     max_cycle_overhead_ms: f64,
+    max_deadline_lag_ms: f64,
+    max_catch_up_applied_ms: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct LivePassTiming {
+    schedule: PassStartDecision,
+    overdue_catch_up: bool,
     pre_pass_work_ms: f64,
     modeled_ms: f64,
     execute_pass_ms: f64,
@@ -466,6 +551,15 @@ impl LiveTimingDiagnostics {
     fn record(&mut self, timing: LivePassTiming) {
         self.total_passes += 1;
         self.interval_passes += 1;
+        self.absolute_deadline_passes += u64::from(timing.schedule.absolute_deadline);
+        self.carried_deadline_passes += u64::from(timing.schedule.carried_deadline);
+        self.catch_up_clamped_passes += u64::from(timing.schedule.catch_up_clamped_ms > 0.0);
+        self.monotonic_floor_passes += u64::from(timing.schedule.monotonic_floor_ms > 0.0);
+        self.overdue_catch_up_passes += u64::from(timing.overdue_catch_up);
+        self.deadline_lag_ms += timing.schedule.deadline_lag_ms;
+        self.catch_up_applied_ms += timing.schedule.catch_up_applied_ms;
+        self.catch_up_clamped_ms += timing.schedule.catch_up_clamped_ms;
+        self.monotonic_floor_ms += timing.schedule.monotonic_floor_ms;
         self.pre_pass_work_ms += timing.pre_pass_work_ms;
         self.modeled_ms += timing.modeled_ms;
         self.execute_pass_ms += timing.execute_pass_ms;
@@ -483,17 +577,35 @@ impl LiveTimingDiagnostics {
             .max_completion_boundary_ms
             .max(timing.completion_boundary_ms);
         self.max_cycle_overhead_ms = self.max_cycle_overhead_ms.max(timing.cycle_overhead_ms);
+        self.max_deadline_lag_ms = self
+            .max_deadline_lag_ms
+            .max(timing.schedule.deadline_lag_ms);
+        self.max_catch_up_applied_ms = self
+            .max_catch_up_applied_ms
+            .max(timing.schedule.catch_up_applied_ms);
 
         if self.interval_passes < LIVE_TIMING_LOG_INTERVAL_PASSES {
             return;
         }
 
         let count = self.interval_passes as f64;
+        let carried_count = self.carried_deadline_passes.max(1) as f64;
         tracing::info!(
             target: "dynamo_mocker::live_timing",
             event = "mocker_live_timing",
             total_passes = self.total_passes,
             interval_passes = self.interval_passes,
+            absolute_deadline_passes = self.absolute_deadline_passes,
+            carried_deadline_passes = self.carried_deadline_passes,
+            catch_up_clamped_passes = self.catch_up_clamped_passes,
+            monotonic_floor_passes = self.monotonic_floor_passes,
+            overdue_catch_up_passes = self.overdue_catch_up_passes,
+            deadline_lag_mean_ms = self.deadline_lag_ms / carried_count,
+            deadline_lag_max_ms = self.max_deadline_lag_ms,
+            catch_up_applied_mean_ms = self.catch_up_applied_ms / carried_count,
+            catch_up_applied_max_ms = self.max_catch_up_applied_ms,
+            catch_up_clamped_mean_ms = self.catch_up_clamped_ms / carried_count,
+            monotonic_floor_mean_ms = self.monotonic_floor_ms / carried_count,
             pre_pass_work_mean_ms = self.pre_pass_work_ms / count,
             modeled_mean_ms = self.modeled_ms / count,
             execute_pass_mean_ms = self.execute_pass_ms / count,
@@ -547,6 +659,7 @@ impl GroupedLiveActor {
 
             self.process_due_internal_work().await?;
             if !self.engine.is_ready() {
+                self.next_pass_deadline_ms = None;
                 if !self.wait_for_idle_work().await? {
                     return Ok(());
                 }
@@ -557,28 +670,46 @@ impl GroupedLiveActor {
             // so a continuously refilled control lane cannot starve a pass.
             self.apply_idle_control_snapshot().await?;
             if !self.engine.is_ready() {
+                self.next_pass_deadline_ms = None;
                 continue;
             }
 
-            let started_at_ms = self.elapsed_ms();
-            let pre_pass_work_ms = self
-                .last_pass_finished_ms
-                .map_or(0.0, |finished_ms| (started_at_ms - finished_ms).max(0.0));
+            let wall_started_at_ms = self.elapsed_ms();
+            let schedule = select_pass_start(
+                wall_started_at_ms,
+                self.engine_time_ms,
+                self.next_pass_deadline_ms,
+                self.absolute_pass_max_catch_up,
+            );
+            let started_at_ms = schedule.started_at_ms;
+            self.engine_time_ms = started_at_ms;
+            let pre_pass_work_ms = self.last_pass_finished_ms.map_or(0.0, |finished_ms| {
+                (wall_started_at_ms - finished_ms).max(0.0)
+            });
             let Some(started) = self.engine.execute_pass(started_at_ms)? else {
+                self.next_pass_deadline_ms = None;
                 continue;
             };
             let execute_pass_finished_ms = self.elapsed_ms();
             let pass_id = started.pass_id;
             let end_ms = started.end_ms;
+            self.next_pass_deadline_ms = Some(end_ms);
             let zero_duration = end_ms <= started_at_ms;
             self.publish(GroupedLiveEvent::PassStarted(started)).await?;
             let pass_started_published_ms = self.elapsed_ms();
+            let overdue_catch_up =
+                schedule.carried_deadline && !zero_duration && end_ms <= pass_started_published_ms;
 
             if !self.wait_for_pass_boundary(end_ms).await? {
                 return Ok(());
             }
             let woke_at_ms = self.elapsed_ms();
-            let completed_at_ms = woke_at_ms.max(end_ms);
+            let completion_candidate_ms = if self.absolute_pass_max_catch_up.is_some() {
+                end_ms
+            } else {
+                woke_at_ms.max(end_ms)
+            };
+            let completed_at_ms = self.advance_engine_time(completion_candidate_ms);
             let completed = self.engine.complete_pass(pass_id, completed_at_ms)?;
             let complete_pass_finished_ms = self.elapsed_ms();
             let completion_started_at = Instant::now();
@@ -603,9 +734,11 @@ impl GroupedLiveActor {
 
             let cycle_overhead_ms = (post_pass_controls_finished_ms - end_ms).max(0.0);
             self.timing_diagnostics.record(LivePassTiming {
+                schedule,
+                overdue_catch_up,
                 pre_pass_work_ms,
                 modeled_ms: (end_ms - started_at_ms).max(0.0),
-                execute_pass_ms: (execute_pass_finished_ms - started_at_ms).max(0.0),
+                execute_pass_ms: (execute_pass_finished_ms - wall_started_at_ms).max(0.0),
                 pass_started_publish_ms: (pass_started_published_ms - execute_pass_finished_ms)
                     .max(0.0),
                 wake_overshoot_ms: (woke_at_ms - end_ms).max(0.0),
@@ -636,6 +769,11 @@ impl GroupedLiveActor {
 
     fn elapsed_ms(&self) -> f64 {
         self.clock_origin.elapsed().as_secs_f64() * 1_000.0
+    }
+
+    fn advance_engine_time(&mut self, candidate_ms: f64) -> f64 {
+        self.engine_time_ms = self.engine_time_ms.max(candidate_ms);
+        self.engine_time_ms
     }
 
     async fn publish(&self, event: GroupedLiveEvent) -> Result<()> {
@@ -718,9 +856,9 @@ impl GroupedLiveActor {
             };
             match request {
                 BoundaryRequest::Apply { command, reply } => {
-                    let result = self
-                        .engine
-                        .apply_command_effects(command, self.elapsed_ms());
+                    let wall_ms = self.elapsed_ms();
+                    let now_ms = self.advance_engine_time(wall_ms);
+                    let result = self.engine.apply_command_effects(command, now_ms);
                     let _ = reply.send(result);
                 }
                 BoundaryRequest::Finish {
@@ -760,7 +898,8 @@ impl GroupedLiveActor {
         let command_id = envelope.command_id;
         let is_request_cancellation =
             matches!(&envelope.command.command, Command::CancelRequest { .. });
-        let now_ms = self.elapsed_ms();
+        let wall_ms = self.elapsed_ms();
+        let now_ms = self.advance_engine_time(wall_ms);
         let result = self.engine.apply_command_effects(envelope.command, now_ms);
         match result {
             Ok(effects) => {
@@ -870,7 +1009,8 @@ impl GroupedLiveActor {
         let command_id = envelope.command_id;
         let is_request_cancellation =
             matches!(&envelope.command.command, Command::CancelRequest { .. });
-        let now_ms = self.elapsed_ms();
+        let wall_ms = self.elapsed_ms();
+        let now_ms = self.advance_engine_time(wall_ms);
         let result = self.engine.apply_command_effects(envelope.command, now_ms);
         match result {
             Ok(effects) => {
@@ -915,7 +1055,8 @@ impl GroupedLiveActor {
     }
 
     async fn process_due_internal_work(&mut self) -> Result<()> {
-        let now_ms = self.elapsed_ms();
+        let wall_ms = self.elapsed_ms();
+        let now_ms = self.engine_time_ms.max(wall_ms);
         if !self
             .engine
             .next_internal_deadline_ms()
@@ -923,6 +1064,7 @@ impl GroupedLiveActor {
         {
             return Ok(());
         }
+        let now_ms = self.advance_engine_time(now_ms);
         self.engine.process_internal_work(now_ms)?;
         Ok(())
     }
@@ -1017,11 +1159,19 @@ mod tests {
     }
 
     fn runtime_with_config(dp_size: u32, config: EngineConfig) -> GroupedLiveRuntime {
+        runtime_with_driver_config(dp_size, config, GroupedLiveDriverConfig::default())
+    }
+
+    fn runtime_with_driver_config(
+        dp_size: u32,
+        config: EngineConfig,
+        driver_config: GroupedLiveDriverConfig,
+    ) -> GroupedLiveRuntime {
         let engine = EngineFactory::new(config)
             .unwrap()
             .build(EngineIdentity::new(7), NonZeroU32::new(dp_size).unwrap())
             .unwrap();
-        spawn_grouped_live_engine(engine, GroupedLiveDriverConfig::default(), None).unwrap()
+        spawn_grouped_live_engine(engine, driver_config, None).unwrap()
     }
 
     struct PromptLengthTiming;
@@ -1066,6 +1216,149 @@ mod tests {
         events.recv().await.expect("live actor must remain active")
     }
 
+    fn ten_ms_runtime(max_catch_up: Option<Duration>) -> GroupedLiveRuntime {
+        runtime_with_driver_config(
+            1,
+            EngineConfig {
+                num_gpu_blocks: 128,
+                block_size: 4,
+                max_num_seqs: 8,
+                max_num_batched_tokens: 256,
+                timing_model: TimingModelConfig::Fixed {
+                    prefill_ms: 10.0,
+                    decode_ms: 10.0,
+                },
+                ..EngineConfig::default()
+            },
+            GroupedLiveDriverConfig {
+                absolute_pass_max_catch_up: max_catch_up,
+                ..GroupedLiveDriverConfig::default()
+            },
+        )
+    }
+
+    async fn first_completion_after_ten_ms(
+        runtime: &mut GroupedLiveRuntime,
+        request_id: u128,
+    ) -> (f64, GroupedPassBoundary) {
+        runtime
+            .handle
+            .apply_command(SchedulerCommand::new(
+                0,
+                Command::Submit(request(request_id, 4, 3)),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            next_event(&mut runtime.events).await,
+            GroupedLiveEvent::CommandApplied { .. }
+        ));
+        let GroupedLiveEvent::PassStarted(first) = next_event(&mut runtime.events).await else {
+            panic!("expected first pass start");
+        };
+        tokio::time::advance(Duration::from_millis(10)).await;
+        let GroupedLiveEvent::PassCompleted { boundary, .. } =
+            next_event(&mut runtime.events).await
+        else {
+            panic!("expected first pass completion");
+        };
+        (first.end_ms, boundary)
+    }
+
+    #[test]
+    fn absolute_pass_start_is_bounded_and_monotonic() {
+        let cap = Some(Duration::from_millis(5));
+
+        let ordinary = select_pass_start(12.0, 0.0, Some(10.0), cap);
+        assert_eq!(ordinary.started_at_ms, 10.0);
+        assert_eq!(ordinary.deadline_lag_ms, 2.0);
+        assert_eq!(ordinary.catch_up_applied_ms, 2.0);
+        assert_eq!(ordinary.catch_up_clamped_ms, 0.0);
+
+        let bounded = select_pass_start(30.0, 0.0, Some(10.0), cap);
+        assert_eq!(bounded.started_at_ms, 25.0);
+        assert_eq!(bounded.deadline_lag_ms, 20.0);
+        assert_eq!(bounded.catch_up_applied_ms, 5.0);
+        assert_eq!(bounded.catch_up_clamped_ms, 15.0);
+
+        let monotonic = select_pass_start(30.0, 28.0, Some(10.0), cap);
+        assert_eq!(monotonic.started_at_ms, 28.0);
+        assert_eq!(monotonic.monotonic_floor_ms, 3.0);
+
+        let after_idle = select_pass_start(100.0, 28.0, None, cap);
+        assert_eq!(after_idle.started_at_ms, 100.0);
+        assert!(!after_idle.carried_deadline);
+
+        let future = select_pass_start(9.0, 0.0, Some(10.0), cap);
+        assert_eq!(future.started_at_ms, 10.0);
+        assert_eq!(future.catch_up_applied_ms, 0.0);
+
+        let legacy = select_pass_start(30.0, 0.0, Some(10.0), None);
+        assert_eq!(legacy.started_at_ms, 30.0);
+        assert!(!legacy.absolute_deadline);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn absolute_deadline_removes_finish_delay_without_skipping_finish() {
+        let mut runtime = ten_ms_runtime(Some(Duration::from_millis(5)));
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 201).await;
+
+        tokio::time::advance(Duration::from_millis(2)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            runtime.events.try_recv().is_err(),
+            "the actor must not start another pass before Finish"
+        );
+        boundary.finish().await.unwrap();
+        let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
+            panic!("expected second pass start");
+        };
+        assert_eq!(second.started_at_ms, first_end_ms);
+        assert_eq!(second.end_ms, first_end_ms + 10.0);
+
+        runtime.handle.shutdown();
+        runtime.actor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn boundary_command_time_floors_a_carried_deadline() {
+        let mut runtime = ten_ms_runtime(Some(Duration::from_millis(5)));
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 202).await;
+
+        tokio::time::advance(Duration::from_millis(2)).await;
+        boundary
+            .apply_command(SchedulerCommand::new(
+                0,
+                Command::Submit(request(203, 4, 1)),
+            ))
+            .await
+            .unwrap();
+        boundary.finish().await.unwrap();
+        let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
+            panic!("expected second pass start");
+        };
+        assert_eq!(second.started_at_ms, first_end_ms + 2.0);
+
+        runtime.handle.shutdown();
+        runtime.actor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn default_schedule_keeps_finish_delay_in_the_next_pass_start() {
+        let mut runtime = ten_ms_runtime(None);
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 204).await;
+
+        tokio::time::advance(Duration::from_millis(2)).await;
+        boundary.finish().await.unwrap();
+        let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
+            panic!("expected second pass start");
+        };
+        assert_eq!(second.started_at_ms, first_end_ms + 2.0);
+
+        runtime.handle.shutdown();
+        runtime.actor.await.unwrap().unwrap();
+    }
+
     fn ready_actor(
         event_tx: mpsc::Sender<GroupedLiveEvent>,
         cancel_token: CancellationToken,
@@ -1102,6 +1395,9 @@ mod tests {
             deferred_commands: VecDeque::new(),
             timing_diagnostics: LiveTimingDiagnostics::default(),
             last_pass_finished_ms: None,
+            absolute_pass_max_catch_up: None,
+            engine_time_ms: 0.0,
+            next_pass_deadline_ms: None,
         }
     }
 
@@ -1418,6 +1714,9 @@ mod tests {
             deferred_commands: VecDeque::new(),
             timing_diagnostics: LiveTimingDiagnostics::default(),
             last_pass_finished_ms: None,
+            absolute_pass_max_catch_up: None,
+            engine_time_ms: 0.0,
+            next_pass_deadline_ms: None,
         };
         assert!(actor.wait_for_pass_boundary(started.end_ms).await.unwrap());
         response
