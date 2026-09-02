@@ -129,11 +129,22 @@ where
                             break false;
                         }
                         ResponseItemOutcome::DrainableTerminal => {
-                            drainable_terminal = true;
-                            drain_deadline.as_mut().reset(tokio::time::Instant::now() + DRAIN_TIMEOUT);
+                            // Armed once: re-arming per frame would let a flood of terminals
+                            // postpone the deadline forever.
+                            if !drainable_terminal {
+                                drainable_terminal = true;
+                                drain_deadline.as_mut().reset(tokio::time::Instant::now() + DRAIN_TIMEOUT);
+                            }
                             // Only the newest terminal frame can be the last one.
                             if let Some(previous) = pending_terminal.replace(item) {
                                 yield previous;
+                            }
+                            // `biased` polls this arm first, so an always-ready stream would
+                            // otherwise starve the deadline below. Compare the clock rather than
+                            // `is_elapsed()`: a `Sleep` that is never polled never reports elapsed.
+                            if tokio::time::Instant::now() >= drain_deadline.deadline() {
+                                guard.record_migration_failure(None);
+                                break false;
                             }
                         }
                         ResponseItemOutcome::Healthy => {

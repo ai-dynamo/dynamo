@@ -873,6 +873,52 @@ async fn drain_without_trailing_error_gives_up_at_the_deadline() {
     runtime.shutdown();
 }
 
+/// `biased` polls the stream arm before the drain deadline, so a worker that stays
+/// continuously ready with terminal frames must not be able to postpone the deadline
+/// forever. The drain is armed once and checked against the clock on every frame.
+#[tokio::test]
+#[serial_test::serial]
+async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
+    let (router, runtime) = router(None).await;
+    tokio::time::pause();
+    let context = Context::new(()).context();
+    let source = ResponseStream::new(
+        Box::pin(async_stream::stream! {
+            loop {
+                yield cancelled_frame();
+            }
+        }),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        Arc::clone(&router.request_metrics),
+        "starvation-guard".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        &request(),
+        false,
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+
+    // Paused time does not auto-advance while the source is always ready, so the consumer
+    // moves the clock past the deadline itself.
+    let mut frames = 0u32;
+    while monitored.next().await.is_some() {
+        frames += 1;
+        if frames == 8 {
+            tokio::time::advance(DRAIN_TIMEOUT + Duration::from_millis(1)).await;
+        }
+        assert!(
+            frames < 1_000,
+            "the drain deadline was starved by an always-ready terminal stream"
+        );
+    }
+
+    drop(router);
+    runtime.shutdown();
+}
+
 /// Transport EOF ends the drain and releases the booking.
 #[tokio::test]
 #[serial_test::serial]
