@@ -621,7 +621,7 @@ jobs:
       amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
       cuda_version: '["13.2"]'
-      platform: '["amd64"]'
+      platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
       run_sanity_check: false # skip for absence of torch
       run_cpu_only_tests: true
       cpu_only_test_markers: '(pre_merge or post_merge) and triton and gpu_0'

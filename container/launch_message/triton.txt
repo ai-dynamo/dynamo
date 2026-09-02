@@ -43,10 +43,8 @@ etcd/nats required):
 > python -m dynamo.triton --discovery-backend=file &
 
 Send a request (tensor models use KServe gRPC, not the OpenAI HTTP API):
-> python grpc_client.py
+> python client.py
 
 The worker exposes the full tritonserver.Options surface as flags
 (python -m dynamo.triton --help). See
 $DYNAMO_HOME/components/src/dynamo/triton/README.md for details.
-
-

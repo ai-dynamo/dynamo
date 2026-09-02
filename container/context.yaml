@@ -172,6 +172,7 @@ triton:
     # 13.2 at build time. The wheels load CUDA dynamically, so they run on the
     # 13.2 runtime image regardless.
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
+    # This value will be updated monthly by the Triton Team after each release.
     runtime_image_tag: 26.07-py3
   enable_media_ffmpeg: "false"
   enable_gpu_memory_service: "true"
