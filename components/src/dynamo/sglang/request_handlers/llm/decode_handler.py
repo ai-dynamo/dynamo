@@ -526,7 +526,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             lora_path=self._resolve_lora(request),
         )
         if self.serving_mode == DisaggregationMode.DECODE:
-            validate_disaggregated_n(native_request.sampling_params.get("n"))
+            validate_disaggregated_n((native_request.sampling_params or {}).get("n"))
         return native_generate_stream(self.engine, native_request)
 
     async def generate(

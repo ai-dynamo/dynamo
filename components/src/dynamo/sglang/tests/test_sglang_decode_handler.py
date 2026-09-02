@@ -449,6 +449,31 @@ def test_native_generate_rejects_parallel_disaggregated_decode():
     assert error.value.code == 400
 
 
+def test_native_generate_allows_omitted_sampling_params_in_disaggregated_decode():
+    handler = _new_decode_handler(serving_mode=DisaggregationMode.DECODE)
+    handler.enable_trace = False
+    handler.engine = SimpleNamespace()
+    handler._priority_kwargs = lambda _priority: {}
+    handler._resolve_lora = lambda _request: None
+    context = SimpleNamespace(trace_id="trace-id", id=lambda: "request-id")
+
+    stream = handler._native_generate_stream(
+        request={
+            "bootstrap_info": {
+                "bootstrap_host": "prefill",
+                "bootstrap_port": 1234,
+                "bootstrap_room": 5678,
+            }
+        },
+        native_payload={},
+        input_param={"input_ids": [1, 2, 3]},
+        context=context,
+        priority=None,
+    )
+
+    assert stream is not None
+
+
 def test_engine_generate_rejects_top_logprobs_by_default(monkeypatch):
     monkeypatch.delenv("DYN_SGL_ALLOW_TOP_LOGPROBS", raising=False)
 
@@ -765,6 +790,22 @@ def test_build_sampling_params_rejects_parallel_disaggregated_decode():
         )
 
     assert error.value.code == 400
+
+
+@pytest.mark.parametrize("sampling_options", [{}, {"n": 1}])
+def test_build_sampling_params_allows_single_disaggregated_decode(sampling_options):
+    handler = _new_decode_handler(
+        serving_mode=DisaggregationMode.DECODE,
+    )
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": sampling_options,
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params.get("n") == sampling_options.get("n")
 
 
 @pytest.mark.asyncio
