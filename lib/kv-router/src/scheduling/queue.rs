@@ -716,6 +716,14 @@ impl<
     }
 
     /// Enqueue a new request through the router-owned policy queue.
+    ///
+    /// Every request enters the policy queue and the actor drains the ready
+    /// backlog in the same turn, so an uncontended request is admitted before
+    /// the enqueue acknowledgement returns. Two direct-admission carve-outs
+    /// bypass the queue: classes with any zero per-worker limit (which can
+    /// never hold a queued entry) and windows with zero discovered workers
+    /// (so selection reports `NoEndpoints` instead of a scaled-to-zero
+    /// queue-limit rejection).
     pub async fn enqueue(&self, request: SchedulingRequest) {
         self.enqueue_with_block_hashes(request, None).await;
     }
@@ -831,6 +839,11 @@ impl<
             class_index,
             snapshot,
             due_at: None,
+            // "Arrival" is the moment the caller hands the request to the
+            // scheduler handle, stamped before the admission channel. Two
+            // racing callers can therefore enqueue in the opposite order of
+            // their offsets; `enqueue_seq` stays the authoritative FCFS
+            // tiebreak for same-score entries.
             arrival_offset_secs: self.start_time.elapsed().as_secs_f64(),
         }
     }
@@ -1142,7 +1155,7 @@ impl<
             .due_at
             .is_some_and(|due_at| due_at <= decay_now)
         {
-            request.respond(Err(KvSchedulerError::DueTimeExpired));
+            request.respond(Err(KvSchedulerError::DeadlineExceeded));
             return false;
         }
         let class_index = queue_metadata.class_index;
@@ -1174,7 +1187,7 @@ impl<
                 return self.admit_one(request, attempt_tx, lifecycle_transfer, decay_now);
             }
         }
-        tracing::debug!(policy_class = class.name, "ordering request");
+        tracing::trace!(policy_class = class.name, "ordering request");
         let priority_jump = request.priority_jump;
         let strict_priority = request.strict_priority;
         let placement = request
@@ -1216,7 +1229,7 @@ impl<
             let class_index = entry.class_index();
             self.subtract_pending_counters(class_index, entry.snapshot());
             let mut request = entry.into_payload().request;
-            request.respond(Err(KvSchedulerError::DueTimeExpired));
+            request.respond(Err(KvSchedulerError::DeadlineExceeded));
         }
     }
 
@@ -1432,12 +1445,12 @@ impl<
                 decay_now,
             )
             .await;
-            if queued
-                .due_at
-                .is_some_and(|due_at| due_at <= Instant::now())
-            {
-                    let mut request = popped.into_payload().request;
-                request.respond(Err(KvSchedulerError::DueTimeExpired));
+            if queued.due_at.is_some_and(|due_at| due_at <= Instant::now()) {
+                // The pop already charged this entry's scheduling cost against
+                // the class deficit; the credit is intentionally not refunded,
+                // matching every other post-pop terminal outcome.
+                let mut request = popped.into_payload().request;
+                request.respond(Err(KvSchedulerError::DeadlineExceeded));
                 continue;
             }
             let wait_ms = queued.enqueue_at.elapsed().as_millis() as u64;
@@ -1458,7 +1471,7 @@ impl<
             let class_index = popped.class_index();
             let class = self.profile.class(class_index);
             let queued = popped.into_payload();
-            tracing::debug!(
+            tracing::trace!(
                 policy_class = class.name,
                 "scheduling request from pending queue"
             );
@@ -2415,7 +2428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_due_time_is_rejected_at_enqueue() {
+    async fn expired_deadline_is_rejected_at_enqueue() {
         let (queue, _slots) = make_queue(1, 16, 64, Some(0.0));
         let (request, response_rx) = make_request("expired-on-arrival", 64);
         queue
@@ -2423,7 +2436,7 @@ mod tests {
             .await;
         assert!(matches!(
             response_rx.await.unwrap(),
-            Err(KvSchedulerError::DueTimeExpired)
+            Err(KvSchedulerError::DeadlineExceeded)
         ));
         assert_eq!(queue.pending_count(), 0);
     }
@@ -2445,7 +2458,7 @@ mod tests {
 
         assert!(matches!(
             parked_rx.await.unwrap(),
-            Err(KvSchedulerError::DueTimeExpired)
+            Err(KvSchedulerError::DeadlineExceeded)
         ));
         assert_eq!(queue.pending_count(), 0);
     }

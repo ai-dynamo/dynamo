@@ -459,7 +459,7 @@ fn map_scheduler_error(error: scheduling::KvSchedulerError) -> anyhow::Error {
         scheduling::KvSchedulerError::AllEligibleWorkersOverloaded => {
             (ErrorType::ResourceExhausted, true)
         }
-        scheduling::KvSchedulerError::DueTimeExpired => (ErrorType::DeadlineExceeded, false),
+        scheduling::KvSchedulerError::DeadlineExceeded => (ErrorType::DeadlineExceeded, false),
         scheduling::KvSchedulerError::AllEligibleWorkersFiltered => (ErrorType::Unavailable, false),
         _ => return error.into(),
     };

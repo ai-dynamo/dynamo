@@ -565,7 +565,7 @@ impl ErrorMessage {
             return (
                 code,
                 Json(ErrorMessage {
-                    message: "request deadline exceeded".to_string(),
+                    message: super::metrics::REQUEST_DEADLINE_EXCEEDED_MESSAGE.to_string(),
                     error_type: map_error_code_to_error_type(code),
                     code: code.as_u16(),
                     details: None,
