@@ -13,11 +13,6 @@ name: Auto Dependency Upgrade - Trigger
 on:
   schedule:
     - cron: '0 10 * * *'
-  # TEMP: exercise the pipeline on push to the development branch. Remove with
-  # the rc24 pin before merge -- this branch name does not exist after merge.
-  push:
-    branches:
-      - anants/auto-dep-upgrade-baseline-refresh
   workflow_dispatch:
     inputs:
       framework:
@@ -130,25 +125,6 @@ jobs:
     outputs:
       stem: ${{ steps.capture.outputs.stem }}
     steps:
-      # TEMP diagnostics: records what this runner provides so the choice stops
-      # being guesswork -- syft has to materialize ~30 GB unpacked, which is a
-      # different resource profile from the rust compiles this pool is sized for.
-      # Never fails the job; the capture below is the real gate.
-      - name: Probe runner capabilities
-        continue-on-error: true
-        run: |
-          echo "--- identity ---";  id; cat /etc/os-release | head -2 || true
-          echo "--- cpu/mem ---";   nproc; free -g || true
-          echo "--- disk ---";      df -h / /tmp "${RUNNER_TEMP:-/tmp}" 2>&1 | sort -u
-          echo "--- registry tooling ---"
-          for t in docker crane skopeo syft; do
-            printf '%-8s %s\n' "$t" "$(command -v $t || echo MISSING)"
-          done
-          echo "--- docker reachable? ---"
-          docker buildx version 2>&1 | head -3 || echo "no buildx"
-          docker info 2>&1 | head -3 || echo "no daemon"
-          echo "--- DOCKER_HOST=${DOCKER_HOST:-unset}  socket: $(test -S /var/run/docker.sock && echo present || echo absent) ---"
-
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
