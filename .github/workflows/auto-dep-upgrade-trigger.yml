@@ -49,10 +49,13 @@ jobs:
       branch:         ${{ steps.branch.outputs.name }}
       proceed:        ${{ steps.branch.outputs.proceed }}
     steps:
-      - name: Checkout main
+      # No explicit ref: checkout defaults to the ref that triggered the run.
+      # A scheduled run is always the default branch, so cron behaviour is
+      # unchanged, while a workflow_dispatch runs the pipeline code from the ref
+      # you dispatched -- which is what makes a change to it testable pre-merge.
+      - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: main
           fetch-depth: 0
           token: ${{ secrets.OPS_BOT_PAT }}
 
@@ -108,10 +111,9 @@ jobs:
     outputs:
       stem: ${{ steps.capture.outputs.stem }}
     steps:
-      - name: Checkout main
+      - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: main
           persist-credentials: false
 
       - name: Install tooling
@@ -195,10 +197,9 @@ jobs:
     if: needs.detect.outputs.proceed == 'true' && inputs.dry_run != true
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout main
+      - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: main
           fetch-depth: 0
           token: ${{ secrets.OPS_BOT_PAT }}
 
