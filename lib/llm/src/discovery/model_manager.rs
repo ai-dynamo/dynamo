@@ -3786,4 +3786,105 @@ mod tests {
             "incomplete-but-engine-present model must be ModelUnavailable (503), not 404"
         );
     }
+
+    /// Stand-in engine for registration-only tests; never invoked. One blanket
+    /// implementation covers every single-in/many-out engine alias, so occupying one more
+    /// model type below costs a registration call rather than another engine impl.
+    struct UncalledEngine;
+
+    #[async_trait::async_trait]
+    impl<Req, Resp>
+        dynamo_runtime::engine::AsyncEngine<
+            dynamo_runtime::pipeline::SingleIn<Req>,
+            dynamo_runtime::pipeline::ManyOut<Resp>,
+            dynamo_runtime::pipeline::Error,
+        > for UncalledEngine
+    where
+        Req: Send + Sync + 'static,
+        Resp: dynamo_runtime::engine::Data,
+    {
+        async fn generate(
+            &self,
+            _request: dynamo_runtime::pipeline::SingleIn<Req>,
+        ) -> Result<dynamo_runtime::pipeline::ManyOut<Resp>, dynamo_runtime::pipeline::Error>
+        {
+            anyhow::bail!("engine is never invoked by this test")
+        }
+    }
+
+    /// Registers one model that occupies `model_type`. Returns false when this test has no
+    /// way to occupy that unit, which is the signal the caller turns into a failure.
+    fn register_model_occupying(manager: &ModelManager, model_type: ModelType) -> bool {
+        let name = "occupancy-probe";
+        let outcome = if model_type == ModelType::Chat {
+            manager.add_chat_completions_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Completions {
+            manager.add_completions_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Embedding {
+            manager.add_embeddings_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Images {
+            manager.add_images_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Audios {
+            manager.add_audios_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Videos {
+            manager.add_videos_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::TensorBased {
+            manager.add_tensor_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Realtime {
+            manager.add_realtime_model(
+                name,
+                "ck",
+                Arc::new(crate::engines::EchoBidirectionalEngine),
+            )
+        } else if model_type == ModelType::Classify {
+            manager.add_classify_model(name, "ck", Arc::new(UncalledEngine))
+        } else if model_type == ModelType::Pooling {
+            manager.add_pooling_model(name, "ck", Arc::new(UncalledEngine))
+        } else {
+            return false;
+        };
+        outcome.expect("registering the occupancy probe model failed");
+        true
+    }
+
+    /// `has_models_of_type` is a hand-maintained chain over the per-type model lists, and
+    /// `ModelType` is a `bitflags!` type rather than an enum, so a unit left out of that
+    /// chain draws no exhaustiveness error. It is instead reported as never occupied, and
+    /// the HTTP frontend then retracts that unit's endpoint on the first removal carrying
+    /// the bit even though models are still registered — the same 404 class of bug the
+    /// catalog-derived retraction was added to fix.
+    ///
+    /// This walks every `ModelType` unit that maps onto at least one `EndpointType`,
+    /// registers a model that occupies it, and requires `has_models_of_type` to say so. A
+    /// future endpoint-backed unit fails here either because there is no way to register a
+    /// model of it or because the chain does not answer it. `register_model_occupying` is
+    /// itself a hand-maintained list, but an omission there is loud where an omission in
+    /// the production chain is silent.
+    #[test]
+    fn has_models_of_type_answers_every_endpoint_backed_model_type() {
+        for unit in ModelType::all().units() {
+            // Units that serve no HTTP endpoint carry no such obligation: ModelType::Prefill
+            // is a cross-version marker, and ModelType::TensorBased has no endpoint mapping.
+            if unit.as_endpoint_types_with_anthropic(true).is_empty() {
+                continue;
+            }
+
+            let manager = ModelManager::new();
+            assert!(
+                !manager.has_models_of_type(unit),
+                "{unit:?} must not be reported as occupied in an empty manager"
+            );
+            assert!(
+                register_model_occupying(&manager, unit),
+                "{unit:?} maps onto an HTTP endpoint but this test cannot register a model \
+                 that occupies it; add a branch to register_model_occupying, and a term to \
+                 ModelManager::has_models_of_type if it lacks one"
+            );
+            assert!(
+                manager.has_models_of_type(unit),
+                "ModelManager::has_models_of_type does not answer {unit:?}, so the frontend \
+                 would retract that endpoint while a model of that type is still registered"
+            );
+        }
+    }
 }
