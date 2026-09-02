@@ -630,3 +630,57 @@ func TestElasticEPRayPoCGateIsUpgradeSafe(t *testing.T) {
 		t.Errorf("the gate changed the leader's spec, which would roll a serving deployment (-off +on):\n%s", diff)
 	}
 }
+
+// TestSynthesizeElasticEPFollowerDCD_AffinityUsesPodStampedNamespace pins the source of
+// the dynamo-namespace value in the follower's placement terms.
+//
+// Two accessors disagree. GetDCDDynamoNamespace prefers the shared spec's dynamoNamespace
+// and only falls back to the DCD's label; the renderer stamps pods with the former. A
+// graph that sets the deprecated v1alpha1 dynamoNamespace therefore gets pods labelled
+// "ep-gate" while its DCD label reads "<k8s-namespace>-ep-gate".
+//
+// Selecting on the label produced a term matching no pod. That is worse than it sounds:
+// the affinity is not merely wrong, it is unsatisfiable, so the capability check reads it
+// as "the leader is not in an NVLink partition" and drops it. The follower then schedules
+// anywhere, silently losing the NVLink guarantee the term exists to provide. Caught on
+// dynamo-aws-gb300; fixtures where both values agree cannot see it.
+func TestSynthesizeElasticEPFollowerDCD_AffinityUsesPodStampedNamespace(t *testing.T) {
+	const (
+		podStamped = "ep-gate"
+		dcdLabel   = "tzulingk-ft-tests-ep-gate"
+	)
+
+	leader := leaderDCD(elasticEPComponent())
+	leader.Labels[commonconsts.KubeLabelDynamoNamespace] = dcdLabel
+	// GetDCDDynamoNamespace resolves through the v1alpha1 sparse-save annotation, which is
+	// where a graph using the deprecated dynamoNamespace field keeps it, and which is what
+	// the renderer stamps on the pods. Setting it apart from the label reproduces the
+	// divergence seen on the cluster.
+	if leader.Annotations == nil {
+		leader.Annotations = map[string]string{}
+	}
+	leader.Annotations["nvidia.com/dcd-spec"] = `{"dynamoNamespace":"` + podStamped + `"}`
+
+	if got := GetDCDDynamoNamespace(leader); got != podStamped {
+		t.Fatalf("fixture does not diverge: GetDCDDynamoNamespace = %q, want %q", got, podStamped)
+	}
+
+	t.Log("Synthesize the follower from a leader whose two namespace values disagree")
+	follower := synthesizeElasticEPFollowerDCD(leader, leaderComponent, true)
+	if follower == nil {
+		t.Fatal("no follower derived")
+	}
+
+	terms := follower.Spec.PodTemplate.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if len(terms) == 0 {
+		t.Fatal("no required pod-affinity term was injected")
+	}
+
+	t.Log("The term selects the namespace the pods carry, not the DCD's label")
+	got := terms[0].LabelSelector.MatchLabels[commonconsts.KubeLabelDynamoNamespace]
+	if got != podStamped {
+		t.Errorf("affinity selects dynamo-namespace %q, want %q (the value stamped on pods); "+
+			"selecting %q matches no pod, so the term is unsatisfiable and gets dropped",
+			got, podStamped, dcdLabel)
+	}
+}

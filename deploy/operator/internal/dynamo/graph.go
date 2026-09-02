@@ -522,7 +522,16 @@ func synthesizeElasticEPFollowerDCD(leaderDCD *v1beta1.DynamoComponentDeployment
 		injectElasticEPFollowerAffinity(
 			&follower.Spec.PodTemplate.Spec,
 			leaderComponentName,
-			leaderDCD.Labels[commonconsts.KubeLabelDynamoNamespace],
+			// GetDCDDynamoNamespace, not the DCD's own label: the two can disagree, and
+			// the pods are stamped with this one. GetDCDDynamoNamespace prefers the
+			// shared spec's dynamoNamespace and only falls back to the label, so a graph
+			// that sets it (the deprecated v1alpha1 field) gets "ep-gate" on its pods
+			// while the DCD label reads "<k8s-ns>-ep-gate". Selecting on the label built
+			// a term that matched no pod: the follower's NVLink affinity was silently
+			// dropped as unsatisfiable, and would never have pinned it to the leader's
+			// partition. Caught on dynamo-aws-gb300, invisible to fixtures where the two
+			// values agree.
+			GetDCDDynamoNamespace(leaderDCD),
 			leaderDCD.Name,
 		)
 	}
