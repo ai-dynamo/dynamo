@@ -34,7 +34,6 @@ class NcclBootstrap:
             A new NcclBootstrap instance
         """
         ...
-
     def serialize(self) -> bytes:
         """
         Serialize the bootstrap data for distribution to other ranks.
@@ -45,7 +44,6 @@ class NcclBootstrap:
             The serialized bootstrap data (136 bytes)
         """
         ...
-
     @staticmethod
     def deserialize(data: bytes) -> "NcclBootstrap":
         """
@@ -62,7 +60,6 @@ class NcclBootstrap:
             A new NcclBootstrap instance
         """
         ...
-
     def init_communicator(self, rank: int) -> "NcclCommRef":
         """
         Initialize the NCCL communicator.
@@ -85,7 +82,6 @@ class NcclBootstrap:
             Owning reference; pass to KvbmWorker/PyTrtllmKvConnectorWorker
         """
         ...
-
     def world_size(self) -> int:
         """
         Get the world size for this bootstrap.
@@ -96,7 +92,6 @@ class NcclBootstrap:
             The world size
         """
         ...
-
 
 class NcclCommRef:
     """
@@ -111,7 +106,6 @@ class NcclCommRef:
         Raw ncclComm_t pointer as an integer (borrowed; do not destroy).
         """
         ...
-
 
 class KvbmWorker:
     """
@@ -175,12 +169,17 @@ class Layer:
 
     ...
 
-    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
+    def __dlpack__(
+        self,
+        stream: Optional[Any] = None,
+        max_version: Optional[Any] = None,
+        dl_device: Optional[Any] = None,
+        copy: Optional[bool] = None,
+    ) -> Any:
         """
         Get a dlpack capsule of the layer
         """
         ...
-
     def __dlpack_device__(self) -> Any:
         """
         Get the dlpack device of the layer
@@ -199,38 +198,38 @@ class Block:
         Get the number of layers in the list
         """
         ...
-
     def __getitem__(self, index: int) -> Layer:
         """
         Get a layer by index
         """
         ...
-
-    def __iter__(self) -> 'Block':
+    def __iter__(self) -> "Block":
         """
         Get an iterator over the layers
         """
         ...
-
     def __next__(self) -> Block:
         """
         Get the next layer in the iterator
         """
         ...
-
     def to_list(self) -> List[Layer]:
         """
         Get a list of layers
         """
         ...
-
-    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
+    def __dlpack__(
+        self,
+        stream: Optional[Any] = None,
+        max_version: Optional[Any] = None,
+        dl_device: Optional[Any] = None,
+        copy: Optional[bool] = None,
+    ) -> Any:
         """
         Get a dlpack capsule of the block
         Exception raised if the block is not contiguous
         """
         ...
-
     def __dlpack_device__(self) -> Any:
         """
         Get the dlpack device of the block
@@ -249,25 +248,21 @@ class BlockList:
         Get the number of blocks in the list
         """
         ...
-
     def __getitem__(self, index: int) -> Block:
         """
         Get a block by index
         """
         ...
-
-    def __iter__(self) -> 'BlockList':
+    def __iter__(self) -> "BlockList":
         """
         Get an iterator over the blocks
         """
         ...
-
     def __next__(self) -> Block:
         """
         Get the next block in the iterator
         """
         ...
-
     def to_list(self) -> List[Block]:
         """
         Get a list of blocks
@@ -288,7 +283,7 @@ class BlockManager:
         dtype: Optional[str] = None,
         host_num_blocks: Optional[int] = None,
         device_num_blocks: Optional[int] = None,
-        device_id: int = 0
+        device_id: int = 0,
     ) -> None:
         """
         Create a `BlockManager` object
@@ -313,7 +308,6 @@ class BlockManager:
             CUDA device ID, defaults to 0
         """
         ...
-
     def allocate_host_blocks_blocking(self, count: int) -> BlockList:
         """
         Allocate a list of host blocks (blocking call)
@@ -329,7 +323,6 @@ class BlockManager:
             List of allocated blocks
         """
         ...
-
     async def allocate_host_blocks(self, count: int) -> BlockList:
         """
         Allocate a list of host blocks
@@ -345,7 +338,6 @@ class BlockManager:
             List of allocated blocks
         """
         ...
-
     def allocate_device_blocks_blocking(self, count: int) -> BlockList:
         """
         Allocate a list of device blocks (blocking call)
@@ -361,7 +353,6 @@ class BlockManager:
             List of allocated blocks
         """
         ...
-
     async def allocate_device_blocks(self, count: int) -> BlockList:
         """
         Allocate a list of device blocks
@@ -383,9 +374,7 @@ class KvbmRequest:
     A request for KV cache
     """
 
-    def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None:
-        ...
-
+    def __init__(self, request_id: int, tokens: List[int], block_size: int) -> None: ...
 
 class SchedulerOutput:
     """
@@ -396,9 +385,7 @@ class SchedulerOutput:
     cached_requests: List[Any]
     num_scheduled_tokens: dict
 
-    def __init__(self) -> None:
-        ...
-
+    def __init__(self) -> None: ...
 
 class PyTrtllmKvConnectorWorker:
     """
@@ -436,7 +423,6 @@ class PyTrtllmKvConnectorWorker:
             Required for MLA support optimization.
         """
         ...
-
     def register_kv_caches(
         self,
         num_device_blocks: int,
@@ -465,7 +451,6 @@ class PyTrtllmKvConnectorWorker:
             List of raw CUDA event handles
         """
         ...
-
     def bind_connector_meta(self, metadata: bytes) -> None:
         """
         Bind connector metadata from the leader.
@@ -476,13 +461,11 @@ class PyTrtllmKvConnectorWorker:
             Serialized connector metadata
         """
         ...
-
     def execute_offload_operations(self) -> None:
         """
         Execute pending offload operations.
         """
         ...
-
     def save_kv_layer(self, layer_idx: int) -> None:
         """
         Save a KV cache layer.
@@ -493,13 +476,11 @@ class PyTrtllmKvConnectorWorker:
             Index of the layer to save
         """
         ...
-
     def start_load_kv(self) -> None:
         """
         Start loading KV cache data.
         """
         ...
-
     def get_finished(
         self,
         finished_gen_req_ids: List[int],
@@ -521,7 +502,6 @@ class PyTrtllmKvConnectorWorker:
             A tuple of (finished_offloading, finished_onboarding) request ID lists
         """
         ...
-
     def submit_offload_on_event(self, event: int) -> None:
         """
         Submit offload operations to be executed when the given event completes.
@@ -532,7 +512,6 @@ class PyTrtllmKvConnectorWorker:
             Raw CUDA event handle
         """
         ...
-
 
 class PyTrtllmKvConnectorLeader:
     """
@@ -570,7 +549,6 @@ class PyTrtllmKvConnectorLeader:
             Output consolidator endpoint
         """
         ...
-
     def get_num_new_matched_tokens(
         self,
         request_id: str,
@@ -595,7 +573,6 @@ class PyTrtllmKvConnectorLeader:
             A tuple of (num_matched_tokens, is_complete)
         """
         ...
-
     def update_state_after_alloc(
         self,
         request_id: str,
@@ -615,7 +592,6 @@ class PyTrtllmKvConnectorLeader:
             Current context position
         """
         ...
-
     def build_connector_metadata(self, scheduler_output: SchedulerOutput) -> bytes:
         """
         Build connector metadata from scheduler output.
@@ -631,7 +607,6 @@ class PyTrtllmKvConnectorLeader:
             Serialized connector metadata
         """
         ...
-
     def request_finished(self, request_id: str, block_ids: List[int]) -> bool:
         """
         Mark a request as finished.
@@ -649,7 +624,6 @@ class PyTrtllmKvConnectorLeader:
             True if the request was successfully marked as finished
         """
         ...
-
     def has_slot(self, request_id: str) -> bool:
         """
         Check if a slot exists for the given request.
@@ -665,7 +639,6 @@ class PyTrtllmKvConnectorLeader:
             True if a slot exists
         """
         ...
-
     def create_slot(self, request: KvbmRequest, tokens: List[int]) -> None:
         """
         Create a slot for a request.
@@ -678,3 +651,73 @@ class PyTrtllmKvConnectorLeader:
             List of tokens for the request
         """
         ...
+
+class DynamoPlhKeyCodec:
+    def __init__(self, manager_namespace: bytes) -> None: ...
+    @property
+    def codec_id(self) -> str: ...
+    def extend_pages(
+        self,
+        parent_key: Optional[bytes],
+        page_tokens: List[int],
+        page_size: int,
+        cache_salt: Optional[str] = None,
+        extra_key: Optional[str] = None,
+    ) -> List[bytes]: ...
+
+class SglangLookupTicket:
+    @property
+    def ticket_id(self) -> int: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def hit_pages(self) -> int: ...
+
+class SglangOperation:
+    @property
+    def operation_id(self) -> int: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def kind(self) -> str: ...
+
+class SglangCompletion:
+    @property
+    def operation_id(self) -> int: ...
+    @property
+    def generation(self) -> int: ...
+    @property
+    def kind(self) -> str: ...
+    @property
+    def success(self) -> bool: ...
+    @property
+    def error(self) -> Optional[str]: ...
+
+class SglangLocalKvStore:
+    def __init__(
+        self,
+        page_size: int,
+        num_device_blocks: int,
+        tensors: List[Any],
+        host_ptr: int,
+        host_nbytes: int,
+        manager_namespace: bytes,
+        host_region_guard: Any,
+        device_id: int = 0,
+    ) -> None: ...
+    def lookup_prefix(self, encoded_keys: List[bytes]) -> SglangLookupTicket: ...
+    def cancel_lookup(self, ticket: SglangLookupTicket) -> None: ...
+    def enqueue_store(
+        self, encoded_keys: List[bytes], source_g1_blocks: List[int]
+    ) -> SglangOperation: ...
+    def enqueue_load(
+        self,
+        ticket: SglangLookupTicket,
+        encoded_keys: List[bytes],
+        target_g1_blocks: List[int],
+    ) -> SglangOperation: ...
+    def poll_completions(self) -> List[SglangCompletion]: ...
+    def drain(self, timeout_ms: int = 30_000) -> None: ...
+    def reset(self, timeout_ms: int = 30_000) -> None: ...
+    def close(self, timeout_ms: int = 30_000) -> None: ...
+    def pending_counts(self) -> tuple[int, int, int]: ...

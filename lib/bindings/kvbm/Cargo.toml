@@ -21,12 +21,24 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["block-manager"]
-block-manager = ["dynamo-llm/block-manager", "dep:dlpark", "dep:cudarc"]
+block-manager = [
+  "dynamo-llm/block-manager",
+  "dep:cudarc",
+  "dep:dlpark",
+  "dep:dynamo-memory",
+  "dep:dynamo-tokens",
+  "dep:kvbm-logical",
+  "dep:kvbm-physical",
+]
 nccl = ["block-manager", "dynamo-llm/nccl", "cudarc/nccl"]  # Enable NCCL collective operations for replicated mode
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }
 dynamo-runtime = { path = "../../runtime" }
+dynamo-memory = { path = "../../memory", optional = true }
+dynamo-tokens = { path = "../../tokens", optional = true }
+kvbm-logical = { path = "../../kvbm-logical", optional = true }
+kvbm-physical = { path = "../../kvbm-physical", optional = true }
 
 anyhow = { version = "1" }
 derive-getters = "0.5"

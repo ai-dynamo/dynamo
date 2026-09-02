@@ -16,6 +16,8 @@ use dynamo_runtime::{
 use dynamo_llm::{self as llm_rs};
 
 mod block_manager;
+#[cfg(feature = "block-manager")]
+mod sglang;
 
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
@@ -37,6 +39,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     #[cfg(feature = "block-manager")]
     block_manager::add_to_module(m)?;
+    #[cfg(feature = "block-manager")]
+    sglang::add_to_module(m)?;
 
     Ok(())
 }

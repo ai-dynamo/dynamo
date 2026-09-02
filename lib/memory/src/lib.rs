@@ -29,6 +29,7 @@ pub mod prelude;
 mod device;
 mod disk;
 mod external;
+mod external_pinned;
 mod pinned;
 mod system;
 mod tensor;
@@ -40,6 +41,7 @@ pub use arena::{ArenaAllocator, ArenaBuffer, ArenaError};
 pub use device::DeviceStorage;
 pub use disk::DiskStorage;
 pub use external::ExternalDeviceMemory;
+pub use external_pinned::ExternalPinnedStorage;
 #[cfg(target_os = "linux")]
 pub use numa::{NumaNode, is_numa_disabled, is_numa_enabled};
 pub use offset::OffsetBuffer;

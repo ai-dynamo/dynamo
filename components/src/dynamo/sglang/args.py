@@ -14,7 +14,15 @@ from pathlib import Path
 from typing import Any, Dict, Generator, Optional
 
 import yaml
+
+# Import the selected cache backend before any SGLang module resolves its registry.
+from dynamo.sglang.cache_plugin import load_sglang_cache_plugin
+
+# isort: split
+
 from sglang.srt.server_args import ServerArgs
+
+# isort: split
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
@@ -355,6 +363,9 @@ async def parse_args(args: list[str]) -> Config:
     Raises:
         SystemExit: If arguments are invalid or incompatible.
     """
+    # Programmatic callers can pass argv unrelated to process-wide sys.argv.
+    load_sglang_cache_plugin(args)
+
     runtime_argspec = DynamoRuntimeArgGroup()
     dynamo_sglang_argspec = DynamoSGLangArgGroup()
 
@@ -416,6 +427,9 @@ async def parse_args(args: list[str]) -> Config:
         if "--config" in unknown:
             config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
             unknown = config_merger.merge_config_with_args(unknown)
+
+        # A config file can select the backend even when the raw argv did not.
+        load_sglang_cache_plugin(unknown)
 
         unknown = _normalize_multimodal_disaggregation_args(unknown, dynamo_config)
         dynamo_config.validate_multimodal_topology()

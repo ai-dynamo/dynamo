@@ -602,6 +602,19 @@ impl PositionalLineageHash {
         Self::new(block_hash, None, 0)
     }
 
+    /// Decode the canonical 16-byte big-endian wire representation.
+    ///
+    /// This is the inverse of [`Self::to_be_bytes`] and is intended for typed
+    /// protocol boundaries which must resume a lineage hash chain.
+    pub fn from_be_bytes(bytes: [u8; 16]) -> Self {
+        Self(u128::from_be_bytes(bytes))
+    }
+
+    /// Encode this hash in its canonical 16-byte big-endian wire form.
+    pub fn to_be_bytes(self) -> [u8; 16] {
+        self.0.to_be_bytes()
+    }
+
     /// Extends this lineage by one block, producing the child PLH.
     ///
     /// The chain recurrence is [`compute_next_sequence_hash`]. Salt does not seed the
@@ -3323,6 +3336,7 @@ mod tests {
             rmp_serde::from_slice(&bytes).expect("plh deserialize");
         assert_eq!(plh, decoded);
         assert_eq!(plh.as_u128(), decoded.as_u128());
+        assert_eq!(PositionalLineageHash::from_be_bytes(plh.to_be_bytes()), plh);
 
         // Vec roundtrip — exercises the codec inside a container.
         let vec = vec![psh, PositionalSequenceHash::default(), psh];
