@@ -4,6 +4,7 @@
 """process_openai_request must let client-error types from image loading
 propagate (so the frontend returns a 4xx) instead of swallowing them to None."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -359,3 +360,185 @@ async def test_video_missing_decoder_error_is_actionable(monkeypatch) -> None:
     assert "install_media_decoders trtllm" in msg
     # The vendor loader's own text survives as the cause.
     assert "OpenCV (cv2) is required for video decoding" in msg
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_extra, expected",
+    [
+        ({"mm_processor_kwargs": {"num_crops": 4}}, {"num_crops": 4}),
+        ({"extra_args": {"mm_processor_kwargs": {"num_crops": 4}}}, {"num_crops": 4}),
+        ({}, {}),
+        # Explicit top-level {} wins over extra_args.
+        (
+            {
+                "mm_processor_kwargs": {},
+                "extra_args": {"mm_processor_kwargs": {"num_crops": 9}},
+            },
+            {},
+        ),
+    ],
+)
+async def test_mm_processor_kwargs_forwarded(request_extra, expected) -> None:
+    """Overrides reach the engine inputs from either location; absent yields {},
+    which TRT-LLM's processor requires instead of None."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+
+    processed = await processor.process_openai_request(
+        {"token_ids": [1, 2, 3], **request_extra},
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    assert processed["mm_processor_kwargs"] == expected
+
+
+@pytest.mark.asyncio
+async def test_mm_processor_kwargs_non_object_is_rejected() -> None:
+    """A non-object value is a client error, not a silently ignored field."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await processor.process_openai_request(
+            {"token_ids": [1, 2, 3], "mm_processor_kwargs": "invalid"},
+            embeddings=None,
+            ep_disaggregated_params=None,
+        )
+
+    assert excinfo.value.status == 400
+
+
+@pytest.mark.asyncio
+async def test_expanded_prompt_len_skipped_when_kwargs_override() -> None:
+    """Overridden requests get no sizing hint: the calculator is neither
+    override-aware nor guaranteed non-mutating."""
+    processor = MultimodalRequestProcessor(
+        model_type="multimodal",
+        model_dir="unused",
+        max_file_size_mb=10,
+        tokenizer=MagicMock(),
+    )
+    ip = MagicMock()
+    ip.get_mm_token_ids.return_value = None
+    ip.get_num_tokens_per_image.return_value = 4
+    processor.input_processor = ip
+
+    processed = await processor.process_openai_request(
+        {"token_ids": [1, 2, 3], "mm_processor_kwargs": {"max_pixels": 1024}},
+        embeddings=None,
+        ep_disaggregated_params=None,
+    )
+
+    assert "expanded_prompt_len" not in processed
+    ip.get_num_tokens_per_image.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_epd_non_object_kwargs_raises_client_error() -> None:
+    """The disaggregated path must raise the same 400 as the aggregated one.
+
+    Yielding an error payload instead reads as a normal encoder response, so the
+    caller surfaces a client mistake as an internal failure.
+    """
+    from dynamo.trtllm.encode_helper import EncodeHelper
+
+    # URLs come from the processor, not the request; the engine must report an
+    # available encoder, or the flow short-circuits before the kwargs check.
+    processor = MagicMock()
+    processor.extract_prompt_and_media.return_value = (
+        "describe",
+        ["http://example.invalid/a.png"],
+        [],
+    )
+    engine = MagicMock()
+    engine.encoder_available = True
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        async for _ in EncodeHelper.process_encode_request(
+            request={
+                "token_ids": [1, 2, 3],
+                "messages": [{"role": "user", "content": "describe"}],
+                "mm_processor_kwargs": "invalid",
+            },
+            multimodal_processor=processor,
+            connector=None,
+            tokenizer=MagicMock(),
+            model_dir="unused",
+            model_type="multimodal",
+            engine=engine,
+        ):
+            pass
+
+    assert excinfo.value.status == 400
+
+
+async def _cache_keys_for(request, url):
+    """Run the real cache path and return the key it looked up."""
+    from dynamo.trtllm.multimodal import embedding_fetcher as ef
+
+    seen = []
+    cache = MagicMock()
+    cache.get.side_effect = lambda h: seen.append(h) or None
+    cache.set = MagicMock()
+
+    async def _encode(_req):
+        raise AssertionError("encode should not run in this test")
+
+    with pytest.raises(Exception):
+        await ef._fetch_embeddings_with_cache([url], request, cache, _encode)
+    return seen[0]
+
+
+@pytest.mark.asyncio
+async def test_embedding_cache_key_does_not_collide_with_plain_url() -> None:
+    """`url + salt` collided when a URL ended with another request's overrides."""
+    overrides = {"max_soft_tokens": 70}
+    salt = json.dumps(overrides, sort_keys=True, default=str)
+    url = "http://example.invalid/a.png"
+
+    salted = await _cache_keys_for({"mm_processor_kwargs": overrides}, url)
+    lookalike = await _cache_keys_for({}, url + salt)
+
+    assert salted != lookalike
+
+
+@pytest.mark.asyncio
+async def test_embedding_cache_key_unchanged_without_overrides() -> None:
+    """No overrides must hash exactly the URL, so existing entries stay valid."""
+    from dynamo.trtllm.multimodal.hasher import MultimodalHasher
+
+    url = "http://example.invalid/a.png"
+    key = await _cache_keys_for({}, url)
+    assert key == MultimodalHasher.hash_bytes(url.encode())
+
+
+@pytest.mark.asyncio
+async def test_cached_path_rejects_non_object_kwargs_on_hit() -> None:
+    """A cache hit must not mask a malformed value with a 200."""
+    from dynamo.trtllm.multimodal import embedding_fetcher as ef
+
+    url = "http://example.invalid/a.png"
+    cache = MagicMock()
+    # Pre-seeded so a plain-URL hash would hit and return early.
+    cache.get.return_value = MagicMock(tensor=torch.zeros(1))
+
+    async def _encode(_req):
+        raise AssertionError("encode must not run")
+
+    with pytest.raises(HttpStatusError) as excinfo:
+        await ef._fetch_embeddings_with_cache(
+            [url], {"mm_processor_kwargs": "invalid"}, cache, _encode
+        )
+
+    assert excinfo.value.status == 400
+    cache.get.assert_not_called()
