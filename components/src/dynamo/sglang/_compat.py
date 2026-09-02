@@ -20,10 +20,13 @@ Runtime data-contract notes (not code-level shims):
   >= 0.5.11. Pass through; do not re-encode.
 """
 
+import importlib
 import inspect
 import logging
+import uuid
 from collections.abc import Mapping
 from functools import lru_cache, wraps
+from types import ModuleType
 from typing import Any
 
 try:
@@ -67,7 +70,8 @@ def publish_server_args(server_args: Any, *, role: str) -> None:
 try:
     from sglang.srt.arg_groups.overrides import declare_late_resolution
 except ImportError:
-    # SGLang 0.5.17 and the XPU 0.5.11 pin predate declarations.
+    # The separately pinned XPU SGLang 0.5.11 predates declarations. Remove
+    # when the XPU SGLang pin is upgraded to 0.5.18+.
     declare_late_resolution = None
 
 try:
@@ -86,6 +90,76 @@ except ImportError:
         sglang_resolved_view = None
 
 logger = logging.getLogger(__name__)
+
+
+def get_mm_encoder_class() -> type[Any]:
+    """Load MMEncoder from the supported SGLang package layout.
+
+    Keep this import deferred because the encoder module imports compiled CUDA
+    operators and this compatibility module is also collected on CPU-only CI
+    hosts.
+    """
+    try:
+        from sglang.srt.disaggregation.encoder.server import MMEncoder
+    except ImportError:
+        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
+        # 0.5.19+.
+        from sglang.srt.disaggregation.encode_server import MMEncoder
+
+    return MMEncoder
+
+
+def get_encoder_preprocessor_modules() -> tuple[ModuleType, ...]:
+    """Return importable encoder modules that bind video preprocessing APIs."""
+    modules: list[ModuleType] = []
+    for module_path in (
+        "sglang.srt.disaggregation.encoder.preprocessor",
+        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
+        # 0.5.19+.
+        "sglang.srt.disaggregation.encode_server",
+    ):
+        try:
+            modules.append(importlib.import_module(module_path))
+        except (ImportError, OSError):
+            continue
+    return tuple(modules)
+
+
+async def mm_encode(
+    encoder: Any, media_inputs: list[Any], modality: Any
+) -> tuple[Any, Any, dict[str, Any]]:
+    """Encode media across the supported SGLang MMEncoder APIs."""
+    legacy_encode = getattr(encoder, "_encode", None)
+    if callable(legacy_encode):
+        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
+        # 0.5.19+.
+        return await legacy_encode(media_inputs, modality)
+
+    prepare = getattr(encoder, "_prepare_encode_context", None)
+    compute = getattr(encoder, "_compute_embedding", None)
+    if not callable(prepare) or not callable(compute):
+        raise RuntimeError("SGLang MMEncoder does not expose an encode API")
+
+    request = {
+        "req_id": f"dynamo-direct-{uuid.uuid4()}",
+        "num_parts": 1,
+        "part_idx": 0,
+        "mm_items": media_inputs,
+        "hashes": None,
+    }
+    encode_context = await prepare(
+        [request],
+        modality,
+        use_global_cache=False,
+    )
+    embeddings = await compute(encode_context, keep_on_gpu=False)
+    if embeddings is None:
+        raise RuntimeError("SGLang MMEncoder returned no embeddings")
+    return (
+        encode_context.preprocess_result.grid_thw,
+        embeddings,
+        encode_context.aux_data,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -246,6 +320,9 @@ __all__ = [
     "ConfigArgumentMerger",
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
+    "get_encoder_preprocessor_modules",
+    "get_mm_encoder_class",
+    "mm_encode",
     "model_config_of",
     "override_server_args",
     "publish_server_args",

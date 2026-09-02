@@ -5,7 +5,6 @@ import asyncio
 import importlib
 import json
 import logging
-import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Optional
 from urllib.parse import urlparse
@@ -14,17 +13,11 @@ import numpy as np
 import torch
 from blake3 import blake3
 
-# MMEncoder chain imports compiled CUDA ops; may fail in CPU-only environments.
+# Modality is safe to import during collection; MMEncoder itself is loaded
+# lazily by get_mm_encoder_class because it imports compiled CUDA operators.
 try:
-    try:
-        from sglang.srt.disaggregation.encoder.server import MMEncoder
-    except ImportError:
-        # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is
-        # 0.5.19+.
-        from sglang.srt.disaggregation.encode_server import MMEncoder
     from sglang.srt.managers.schedule_batch import Modality
 except (ImportError, OSError):
-    MMEncoder = None  # type: ignore[assignment]
     Modality = None  # type: ignore[assignment]
 from sglang.srt.parser.conversation import chat_templates
 from transformers import AutoTokenizer
@@ -58,6 +51,11 @@ from dynamo.common.multimodal.video_loader import VideoLoader
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.env import env_bool
 from dynamo.llm import MultimodalEmbeddingCachePublisher
+from dynamo.sglang._compat import (
+    get_encoder_preprocessor_modules,
+    get_mm_encoder_class,
+    mm_encode,
+)
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import (
     MultiModalGroup,
@@ -155,10 +153,9 @@ def _install_load_video_passthrough() -> None:
     why an earlier revision still raised ``ValueError: Unsupported video input
     type`` end to end while every unit test passed.
 
-    SGLang 0.5.19 moved this binding from ``encode_server`` into
-    ``disaggregation.encoder.preprocessor``. Patch both locations so N and N-1
-    remain supported, plus the shared processor and utils bindings. Idempotent;
-    a no-op when SGLang is unavailable.
+    The compatibility shim supplies the encoder module for N and N-1. Patch it
+    plus the shared processor and utils bindings. Idempotent; a no-op when
+    SGLang is unavailable.
     """
     if not SGLANG_VIDEO_DECODER_AVAILABLE:
         return
@@ -176,18 +173,20 @@ def _install_load_video_passthrough() -> None:
         _load_video_passthrough._dynamo_nvdec_passthrough = True  # type: ignore[attr-defined]
         module.load_video = _load_video_passthrough
 
-    patched: list[str] = []
+    encoder_modules = get_encoder_preprocessor_modules()
+    modules = list(encoder_modules)
     for module_path in (
-        # Encoder call sites for SGLang 0.5.19 and 0.5.18, respectively.
-        "sglang.srt.disaggregation.encoder.preprocessor",
-        "sglang.srt.disaggregation.encode_server",
         "sglang.srt.multimodal.processors.base_processor",
         "sglang.srt.utils",
     ):
         try:
-            module = importlib.import_module(module_path)
+            modules.append(importlib.import_module(module_path))
         except (ImportError, OSError):
             continue
+
+    patched: list[str] = []
+    for module in modules:
+        module_path = module.__name__
         orig = getattr(module, "load_video", None)
         if orig is None:
             continue
@@ -197,11 +196,8 @@ def _install_load_video_passthrough() -> None:
         _wrap(module, orig)
         patched.append(module_path)
 
-    encoder_modules = {
-        "sglang.srt.disaggregation.encoder.preprocessor",
-        "sglang.srt.disaggregation.encode_server",
-    }
-    if not encoder_modules.intersection(patched):
+    encoder_module_names = {module.__name__ for module in encoder_modules}
+    if not encoder_module_names.intersection(patched):
         # Without this one the decoder reaches load_video unpatched and the
         # request fails with "Unsupported video input type" rather than falling
         # back, so make the gap visible instead of waiting for a 400.
@@ -238,15 +234,7 @@ def _install_nvdec_video_metadata_shim() -> None:
     so the synthesized values below never apply to it. The shim remains only for
     genuine pre-decoded arrays.
     """
-    for module_path in (
-        "sglang.srt.disaggregation.encoder.preprocessor",
-        "sglang.srt.disaggregation.encode_server",
-    ):
-        try:
-            module = importlib.import_module(module_path)
-        except (ImportError, OSError):
-            continue
-
+    for module in get_encoder_preprocessor_modules():
         orig = getattr(module, "preprocess_video", None)
         if orig is None or getattr(orig, "_dynamo_nvdec_shim", False):
             continue
@@ -266,7 +254,7 @@ def _install_nvdec_video_metadata_shim() -> None:
             return video, metadata
 
         _preprocess_video_with_metadata._dynamo_nvdec_shim = True  # type: ignore[attr-defined]
-        module.preprocess_video = _preprocess_video_with_metadata
+        module.preprocess_video = _preprocess_video_with_metadata  # type: ignore[attr-defined]
 
 
 class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
@@ -307,15 +295,17 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
         self.num_video_frames = max(1, VideoLoader.NUM_FRAMES_DEFAULT)
         self._url_policy = UrlValidationPolicy.from_env()
 
-        if MMEncoder is None:
+        try:
+            mm_encoder_class = get_mm_encoder_class()
+        except (ImportError, OSError) as exc:
             raise RuntimeError(
                 "MMEncoder is not available. "
                 "Multimodal encode worker requires a CUDA environment."
-            )
+            ) from exc
 
         # torch.distributed requires a dist_init_method even for tp=1;
         # port 0 lets the OS assign a free port.
-        self.encoder = MMEncoder(
+        self.encoder = mm_encoder_class(
             server_args=config.server_args,
             dist_init_method="tcp://127.0.0.1:0",
             rank=0,
@@ -878,36 +868,8 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, s
     async def _encode_media(
         self, media_inputs: list[Any], modality: Any
     ) -> tuple[Any, torch.Tensor, dict[str, Any]]:
-        """Encode media across the SGLang 0.5.18 and 0.5.19 APIs."""
-        legacy_encode = getattr(self.encoder, "_encode", None)
-        if callable(legacy_encode):
-            return await legacy_encode(media_inputs, modality)
-
-        prepare = getattr(self.encoder, "_prepare_encode_context", None)
-        compute = getattr(self.encoder, "_compute_embedding", None)
-        if not callable(prepare) or not callable(compute):
-            raise AttributeError("SGLang MMEncoder does not expose an encode API")
-
-        request = {
-            "req_id": f"dynamo-direct-{uuid.uuid4()}",
-            "num_parts": 1,
-            "part_idx": 0,
-            "mm_items": media_inputs,
-            "hashes": None,
-        }
-        encode_context = await prepare(
-            [request],
-            modality,
-            use_global_cache=False,
-        )
-        embeddings = await compute(encode_context, keep_on_gpu=False)
-        if embeddings is None:
-            raise RuntimeError("SGLang MMEncoder returned no embeddings")
-        return (
-            encode_context.preprocess_result.grid_thw,
-            embeddings,
-            encode_context.aux_data,
-        )
+        """Encode media through Dynamo's SGLang compatibility boundary."""
+        return await mm_encode(self.encoder, media_inputs, modality)
 
     def _extract_media_inputs(
         self, request: Dict[str, Any]
