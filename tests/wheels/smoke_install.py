@@ -15,8 +15,8 @@ from email.parser import Parser
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-GLIBC_FLOOR = (2, 28)
-MANYLINUX_POLICY = "manylinux_2_28"
+SUPPORTED_MANYLINUX_FLOORS = {(2, 28), (2, 39)}
+MANYLINUX_POLICY_RE = re.compile(r"manylinux_(\d+)_(\d+)_")
 RUNTIME_PY_TAGS = {"cp310", "cp311", "cp312"}
 # First-party optional wheel that must ship with the core wheels.
 REQUIRED_OPTIONAL_DIST = "kvbm"
@@ -67,6 +67,13 @@ def wheel_tags(wheel: Path) -> tuple[str, str, str]:
             f"wheel filename does not include PEP 427 tags: {wheel.name}"
         )
     return parts[-3], parts[-2], parts[-1]
+
+
+def manylinux_glibc_floor(platform_tag: str) -> tuple[int, int] | None:
+    match = MANYLINUX_POLICY_RE.search(platform_tag)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def wheel_metadata(wheel: Path) -> dict[str, list[str] | str]:
@@ -120,12 +127,10 @@ def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> Non
     runtime_py_tag, runtime_abi_tag, runtime_platform_tag = wheel_tags(runtime)
     if runtime_abi_tag != "abi3":
         raise AssertionError(f"{runtime.name} should use abi3, got {runtime_abi_tag}")
-    if (
-        MANYLINUX_POLICY not in runtime_platform_tag
-        and runtime_platform_tag != "linux_x86_64"
-    ):
+    runtime_glibc_floor = manylinux_glibc_floor(runtime_platform_tag)
+    if runtime_glibc_floor not in SUPPORTED_MANYLINUX_FLOORS:
         raise AssertionError(
-            f"{runtime.name} should target {MANYLINUX_POLICY} or linux_x86_64, "
+            f"{runtime.name} should target one of {sorted(SUPPORTED_MANYLINUX_FLOORS)}, "
             f"got {runtime_platform_tag}"
         )
     if runtime_py_tag not in RUNTIME_PY_TAGS:
@@ -195,7 +200,8 @@ def binary_wheels(wheelhouse: Path) -> list[Path]:
 def assert_auditwheel_show(wheelhouse: Path) -> None:
     for wheel in binary_wheels(wheelhouse):
         _, _, platform_tag = wheel_tags(wheel)
-        if MANYLINUX_POLICY not in platform_tag:
+        glibc_floor = manylinux_glibc_floor(platform_tag)
+        if glibc_floor not in SUPPORTED_MANYLINUX_FLOORS:
             continue
         proc = run(
             [sys.executable, "-m", "auditwheel", "show", str(wheel)],
@@ -203,10 +209,14 @@ def assert_auditwheel_show(wheelhouse: Path) -> None:
             stderr=subprocess.STDOUT,
         )
         print(proc.stdout)
-        if MANYLINUX_POLICY not in proc.stdout:
+        reported_floors = {
+            (int(major), int(minor))
+            for major, minor in MANYLINUX_POLICY_RE.findall(proc.stdout)
+        }
+        if reported_floors and min(reported_floors) > glibc_floor:
             raise AssertionError(
-                f"{wheel.name}: auditwheel did not report a {MANYLINUX_POLICY} "
-                f"policy:\n{proc.stdout}"
+                f"{wheel.name}: auditwheel reported an ABI floor above the tagged "
+                f"GLIBC_{glibc_floor[0]}.{glibc_floor[1]}:\n{proc.stdout}"
             )
 
 
@@ -245,7 +255,8 @@ def assert_glibc_floor(wheelhouse: Path) -> None:
         offenders: list[str] = []
         for wheel in binary_wheels(wheelhouse):
             _, _, platform_tag = wheel_tags(wheel)
-            if MANYLINUX_POLICY not in platform_tag:
+            glibc_floor = manylinux_glibc_floor(platform_tag)
+            if glibc_floor not in SUPPORTED_MANYLINUX_FLOORS:
                 continue
             wheel_tmp = tmp_path / wheel.name.removesuffix(".whl")
             shared_libraries = extracted_shared_libraries(wheel, wheel_tmp)
@@ -257,19 +268,19 @@ def assert_glibc_floor(wheelhouse: Path) -> None:
             for shared_library in shared_libraries:
                 versions = glibc_version_needs(shared_library)
                 too_new = sorted(
-                    version for version in versions if version > GLIBC_FLOOR
+                    version for version in versions if version > glibc_floor
                 )
                 if too_new:
                     offenders.append(
                         f"{wheel.name}:{shared_library.relative_to(wheel_tmp)} "
-                        f"requires GLIBC_{too_new[-1][0]}.{too_new[-1][1]}"
+                        f"requires GLIBC_{too_new[-1][0]}.{too_new[-1][1]} "
+                        f"above tag floor GLIBC_{glibc_floor[0]}.{glibc_floor[1]}"
                     )
 
         if offenders:
             details = "\n".join(f"  {offender}" for offender in offenders)
             raise AssertionError(
-                f"binary wheels exceed GLIBC_{GLIBC_FLOOR[0]}.{GLIBC_FLOOR[1]}:\n"
-                f"{details}"
+                f"binary wheels exceed their tagged GLIBC floor:\n{details}"
             )
 
 

@@ -595,18 +595,20 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     cd /opt/dynamo/lib/bindings/python && \
 {% if framework == "sglang" %}    maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist && \
 {% else %}    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
-{% if device == "xpu" %}        # The XPU builder is Ubuntu 24.04, whose libc is newer than manylinux_2_28.
-    # Keep the native linux tag instead of falsely relabeling this wheel as manylinux.
-    maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --auditwheel skip --out /opt/dynamo/dist; \
-{% else %}        # Skip maturin's built-in repair: it would graft the in-tree libav* into the
+    # Skip maturin's built-in repair: it would graft the in-tree libav* into the
         # wheel, which the codec gate rejects. Repair with those sonames excluded so
         # they stay external and resolve to the image's /usr/local/lib copies. This
         # media-enabled wheel is intentionally image-only and non-self-contained.
+{% if device == "xpu" %}        ARCH_ALT=x86_64 && \
+    MANYLINUX_POLICY=manylinux_2_39_x86_64 && \
+{% else %}
         case "${TARGETARCH}" in \
             amd64) ARCH_ALT=x86_64 ;; \
             arm64) ARCH_ALT=aarch64 ;; \
             *) echo "ERROR: unexpected TARGETARCH='${TARGETARCH}'; cannot pick a manylinux platform tag" >&2; exit 1 ;; \
         esac && \
+    MANYLINUX_POLICY=manylinux_2_28_${ARCH_ALT} && \
+{% endif %}
         maturin build --release --features "media-ffmpeg,kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --auditwheel skip --out target/wheels && \
         auditwheel repair \
             --exclude 'libavcodec.so.*' \
@@ -616,10 +618,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             --exclude 'libavutil.so.*' \
             --exclude 'libswresample.so.*' \
             --exclude 'libswscale.so.*' \
-            --plat manylinux_2_28_${ARCH_ALT} \
+            --plat ${MANYLINUX_POLICY} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/ai_dynamo_runtime-*.whl; \
-{% endif %}    \
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist; \
     fi && \
