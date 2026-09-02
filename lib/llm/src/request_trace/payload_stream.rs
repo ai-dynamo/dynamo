@@ -103,16 +103,15 @@ where
                 // on the first `Err` it receives and drops this stream, so end-of-stream
                 // is never reached on the streaming path and the buffered prefix would
                 // otherwise be lost behind a `client_cancelled` reason.
-                if chunk.is_error() {
-                    if let Some(tx) = self.done_tx.take() {
-                        let chunks = std::mem::take(&mut self.chunks);
-                        let parsing_options = ParsingOptions::default();
-                        tokio::spawn(async move {
-                            let _ = tx.send(
-                                aggregate_with_partial_recovery(chunks, parsing_options).await,
-                            );
-                        });
-                    }
+                if chunk.is_error()
+                    && let Some(tx) = self.done_tx.take()
+                {
+                    let chunks = std::mem::take(&mut self.chunks);
+                    let parsing_options = ParsingOptions::default();
+                    tokio::spawn(async move {
+                        let _ =
+                            tx.send(aggregate_with_partial_recovery(chunks, parsing_options).await);
+                    });
                 }
                 // Forward the chunk unchanged downstream
                 Poll::Ready(Some(chunk))
