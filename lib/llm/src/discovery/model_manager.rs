@@ -1221,13 +1221,9 @@ impl ModelManager {
     /// with no backing model list is never occupied; [`ModelType::Prefill`] is such a
     /// unit, being a cross-version marker rather than a served surface.
     ///
-    /// This is the only place that maps a [`ModelType`] onto the list of models behind
-    /// it. Two callers depend on agreeing exactly: the discovery watcher decides here
-    /// whether a removal should emit a retraction card at all, and the HTTP frontend
-    /// decides here whether a retraction it received should disable the endpoint. A new
-    /// `ModelType` variant that one of them treated as occupied and the other as empty
-    /// would either strand an endpoint enabled with nothing behind it or 404 a surface
-    /// that still has models.
+    /// This is the only place that maps a [`ModelType`] onto the models behind it, and it
+    /// must stay aligned with endpoint retraction: a unit answered wrongly here either
+    /// disables an endpoint that still has models or leaves one enabled with none.
     pub fn has_models_of_type(&self, model_type: ModelType) -> bool {
         (model_type.contains(ModelType::Chat) && !self.list_chat_completions_models().is_empty())
             || (model_type.contains(ModelType::Completions)
