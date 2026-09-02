@@ -33,12 +33,16 @@ pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
 pub use dynamo_llm::model_type::ModelInput;
 pub use engine::{
-    AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,
-    FinishReason, FirstTokenNotifier, GenerateContext, GuidedDecodingOptions, HEALTH_CHECK_KEY,
-    KvEventPublisher, KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt,
-    LlmRegistration, LogProbs, Metrics, MetricsBindings, MetricsCtx, MultimodalData,
-    OnPublisherReady, OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest,
-    RawEngine, SamplingOptions, StopConditions, StopReason, TopLogprob, TopLogprobs, chunk, usage,
+    AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, DraftCleanupOutcomeV1,
+    DraftTransportDescriptorV1, EXTERNAL_SPECULATION_LIFECYCLE_ENGINE_DATA_KEY, Endpoint,
+    EndpointId, EngineConfig, ExternalDraftBinding, ExternalSpeculationLifecycleV1, FinishReason,
+    FirstTokenNotifier, GenerateContext, GuidedDecodingOptions, HEALTH_CHECK_KEY, KvEventPublisher,
+    KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, LogProbs,
+    Metrics, MetricsBindings, MetricsCtx, ModelRegistration, MultimodalData, OnPublisherReady,
+    OnSnapshotPublisherReady, OutputOptions, PrefillResult, PreprocessedRequest, RawEngine,
+    RouterHintEnvelope, SamplingOptions, SpeculativeDecodingRouterHintV1, StopConditions,
+    StopReason, TopLogprob, TopLogprobs, WorkerRole, WorkerWithDpRank, chunk,
+    new_external_speculation_incarnation, usage, validate_endpoint_id,
 };
 pub use error::{BackendError, DynamoError, ErrorType};
 pub use metrics::{ComponentGauges, EngineMetrics, LifecycleGauges};

@@ -3,7 +3,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     str::FromStr,
 };
 
@@ -19,6 +19,7 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
+use crate::protocols::external_speculation::DraftTransportDescriptorV1;
 use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
 
@@ -284,6 +285,10 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
 
+    /// Exact backend-owned transport descriptor for each selectable speculative-draft DP rank.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub external_draft_transports: BTreeMap<u32, DraftTransportDescriptorV1>,
+
     /// Bootstrap endpoint for disaggregated serving (prefill workers publish this)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_endpoint: Option<DisaggregatedEndpoint>,
@@ -383,6 +388,7 @@ impl Default for ModelRuntimeConfig {
             kv_event_source_mode: None,
             kv_state_endpoint: None,
             runtime_data: HashMap::new(),
+            external_draft_transports: BTreeMap::new(),
             disaggregated_endpoint: None,
             enable_eagle: false,
             taints: HashSet::new(),
@@ -555,6 +561,44 @@ fn validate_kv_transfer_domain(domain: &str) -> Result<(), ValidationError> {
 }
 
 fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), ValidationError> {
+    let has_external_speculation = !config.external_draft_transports.is_empty();
+    if has_external_speculation {
+        if config.data_parallel_size == 0 {
+            return Err(validation_error(
+                "invalid_external_speculation_dp_range",
+                "external-speculation descriptors require data_parallel_size greater than zero",
+            ));
+        }
+        let Some(dp_rank_end) = config
+            .data_parallel_start_rank
+            .checked_add(config.data_parallel_size)
+        else {
+            return Err(validation_error(
+                "invalid_external_speculation_dp_range",
+                "external-speculation DP range overflows u32",
+            ));
+        };
+        for dp_rank in config.external_draft_transports.keys() {
+            if !(*dp_rank >= config.data_parallel_start_rank && *dp_rank < dp_rank_end) {
+                return Err(validation_error(
+                    "external_speculation_rank_out_of_range",
+                    format!(
+                        "external-speculation descriptor rank {dp_rank} is outside [{}, {dp_rank_end})",
+                        config.data_parallel_start_rank
+                    ),
+                ));
+            }
+        }
+        for (dp_rank, descriptor) in &config.external_draft_transports {
+            if let Err(error) = descriptor.validate() {
+                return Err(validation_error(
+                    "invalid_external_draft_transport",
+                    format!("invalid draft transport for DP rank {dp_rank}: {error}"),
+                ));
+            }
+        }
+    }
+
     if let Some(parser) = config
         .tool_call_parser
         .as_deref()
@@ -1268,6 +1312,35 @@ mod tests {
         ] {
             assert!(config.validate_config().is_err());
         }
+    }
+
+    #[test]
+    fn external_draft_transports_are_omitted_by_default() {
+        let value = serde_json::to_value(ModelRuntimeConfig::default()).unwrap();
+        assert!(value.get("external_draft_transports").is_none());
+    }
+
+    #[test]
+    fn external_draft_transports_validate_rank_and_identity_domains() {
+        let mut config = ModelRuntimeConfig {
+            data_parallel_start_rank: 2,
+            data_parallel_size: 2,
+            ..Default::default()
+        };
+        config.external_draft_transports.insert(
+            2,
+            DraftTransportDescriptorV1 {
+                protocol: "mock-specdec-zmq-v1".into(),
+                address: "tcp://draft:50051".into(),
+                draft_incarnation_id: 7,
+                orphan_cleanup_timeout_ms: 1_000,
+            },
+        );
+        config.validate_config().unwrap();
+
+        let descriptor = config.external_draft_transports.remove(&2).unwrap();
+        config.external_draft_transports.insert(4, descriptor);
+        assert!(config.validate_config().is_err());
     }
 
     #[test]

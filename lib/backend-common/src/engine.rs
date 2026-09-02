@@ -22,6 +22,7 @@ use tokio::sync::watch;
 use crate::error::DynamoError;
 
 pub use dynamo_llm::first_token::FirstTokenNotifier;
+pub use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 pub use dynamo_llm::kv_router::publisher::KvEventPublisher;
 pub use dynamo_llm::protocols::common::llm_backend::{
     LLMEngineOutput, LogProbs, TopLogprob, TopLogprobs,
@@ -33,8 +34,17 @@ pub use dynamo_llm::protocols::common::preprocessor::{
 pub use dynamo_llm::protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
 };
+pub use dynamo_llm::protocols::external_speculation::{
+    DraftCleanupOutcomeV1, DraftTransportDescriptorV1,
+    EXTERNAL_SPECULATION_LIFECYCLE_ENGINE_DATA_KEY, ExternalSpeculationLifecycleV1,
+    RouterHintEnvelope, SpeculativeDecodingRouterHintV1, new_external_speculation_incarnation,
+    validate_endpoint_id,
+};
+pub use dynamo_llm::worker_role::{ExternalDraftBinding, WorkerRole};
 pub use dynamo_protocols::types::{CompletionUsage, StopReason};
+pub use dynamo_runtime::component::Endpoint;
 pub use dynamo_runtime::engine::AsyncEngineContext;
+pub use dynamo_runtime::protocols::EndpointId;
 
 /// Per-request handle wrapping the runtime context. `Deref`s to
 /// `dyn AsyncEngineContext` so engine code uses it transparently.
@@ -176,6 +186,18 @@ pub struct EngineConfig {
     /// Token-pipeline registration metadata (KV cache, DP, bootstrap).
     /// `Some` for [`LLMEngine`]s; `None` for [`RawEngine`]s.
     pub llm: Option<LlmRegistration>,
+}
+
+/// Endpoint-bound model registration metadata supplied by an LLM engine.
+///
+/// The standard default preserves the model-card wire shape for every existing
+/// backend. External-speculation workers override this after the serving
+/// endpoint exists so targets can bind to the draft registration and drafts
+/// can advertise their per-rank transport descriptors.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModelRegistration {
+    pub worker_role: WorkerRole,
+    pub external_draft_transports: BTreeMap<u32, DraftTransportDescriptorV1>,
 }
 
 /// Inference engine trait.
@@ -415,6 +437,18 @@ pub trait LLMEngine: Send + Sync + 'static {
         _endpoint: dynamo_runtime::component::Endpoint,
     ) -> Result<(), DynamoError> {
         Ok(())
+    }
+
+    /// Return endpoint-bound role and descriptor metadata for discovery.
+    ///
+    /// Called exactly once after [`LLMEngine::on_endpoint_ready`] and before
+    /// the model card is validated or attached. The default is the legacy
+    /// standard-worker registration with no external-speculation descriptors.
+    async fn model_registration(
+        &self,
+        _endpoint: &dynamo_runtime::component::Endpoint,
+    ) -> Result<ModelRegistration, DynamoError> {
+        Ok(ModelRegistration::default())
     }
 }
 

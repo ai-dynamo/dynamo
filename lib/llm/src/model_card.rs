@@ -21,6 +21,7 @@ use crate::entrypoint::RouterConfig;
 use crate::local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend};
 use crate::model_type::{ModelInput, ModelType};
 use crate::protocols::tensor::TensorModelConfig;
+use crate::worker_role::WorkerRole;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_kv_router::identity::{ExplicitIdentityMap, IndexerIdentitySpec};
@@ -915,6 +916,12 @@ pub struct ModelDeploymentCard {
     #[serde(default)]
     pub worker_type: Option<crate::worker_type::WorkerType>,
 
+    /// Serving behavior layered on the worker's processing stage.
+    /// Standard is omitted to preserve the legacy deployment-card wire shape.
+    #[serde(default, skip_serializing_if = "WorkerRole::is_standard")]
+    #[builder(default)]
+    pub worker_role: WorkerRole,
+
     /// Peer worker types this worker requires to serve traffic, in DNF form.
     /// The outer `Vec` is OR; each inner `Vec` is an AND-set of required
     /// worker types. Empty outer `Vec` means "no peers required."
@@ -1005,6 +1012,88 @@ impl ModelDeploymentCard {
     /// worker was a full-request worker.
     pub fn effective_worker_type(&self) -> crate::worker_type::WorkerType {
         Self::resolve_worker_type(self.worker_type, self.model_type)
+    }
+
+    /// Validate static role semantics and role-specific per-rank runtime descriptors.
+    pub fn validate_worker_role(
+        &self,
+        own_endpoint: Option<&dynamo_runtime::protocols::EndpointId>,
+    ) -> anyhow::Result<()> {
+        if !self.worker_role.is_standard()
+            || !self.runtime_config.external_draft_transports.is_empty()
+        {
+            self.runtime_config
+                .validate_config()
+                .map_err(anyhow::Error::msg)?;
+        }
+        let worker_type = self.effective_worker_type();
+        let public_surface = self.model_type - ModelType::Prefill;
+        self.worker_role
+            .validate(worker_type, !public_surface.is_empty(), own_endpoint)?;
+
+        let runtime = &self.runtime_config;
+        if !self.worker_role.is_standard() {
+            anyhow::ensure!(
+                runtime.data_parallel_size > 0,
+                "external-speculation workers require at least one selectable DP rank"
+            );
+        }
+        let expected_ranks = runtime
+            .data_parallel_start_rank
+            .checked_add(runtime.data_parallel_size)
+            .map(|end| runtime.data_parallel_start_rank..end)
+            .ok_or_else(|| anyhow::anyhow!("data-parallel rank range overflows u32"))?;
+        let expected_rank_keys = expected_ranks.collect::<std::collections::BTreeSet<_>>();
+        let transport_rank_keys = runtime
+            .external_draft_transports
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        match &self.worker_role {
+            WorkerRole::Standard => {
+                anyhow::ensure!(
+                    runtime.external_draft_transports.is_empty(),
+                    "standard workers must not advertise speculative-draft transports"
+                );
+            }
+            WorkerRole::SpeculativeTarget(_) => {
+                anyhow::ensure!(
+                    self.model_input == ModelInput::Tokens,
+                    "speculative targets require token input for KV-aware routing"
+                );
+                anyhow::ensure!(
+                    self.model_type.supports_chat() || self.model_type.supports_completions(),
+                    "speculative targets must expose a generative LLM surface"
+                );
+                anyhow::ensure!(
+                    self.needs.is_empty(),
+                    "speculative targets must not use worker-type dependencies"
+                );
+                anyhow::ensure!(
+                    self.migration_limit == 0,
+                    "speculative targets do not support migration"
+                );
+                anyhow::ensure!(
+                    runtime.external_draft_transports.is_empty(),
+                    "speculative targets must not advertise draft transports"
+                );
+            }
+            WorkerRole::SpeculativeDraft => {
+                anyhow::ensure!(
+                    self.model_type.is_empty(),
+                    "speculative drafts must use an empty model_type"
+                );
+                anyhow::ensure!(
+                    self.needs.is_empty(),
+                    "speculative drafts must not use worker-type dependencies"
+                );
+                anyhow::ensure!(
+                    transport_rank_keys == expected_rank_keys,
+                    "speculative drafts must advertise exactly one transport descriptor per selectable DP rank"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Resolve an explicit or legacy worker role without constructing a model card.
@@ -1177,6 +1266,16 @@ impl ModelDeploymentCard {
                         };
                         bytes_to_hash.push(v);
                     }
+                }
+
+                // Preserve legacy checksums for the default role. Non-standard roles are
+                // deployment identity and must split WorkerSets during a rolling change.
+                if !self.worker_role.is_standard() {
+                    bytes_to_hash.extend_from_slice(b"dynamo/model-card/worker-role/v1");
+                    let role = serde_json::to_vec(&self.worker_role)
+                        .expect("WorkerRole serialization is infallible");
+                    bytes_to_hash.extend((role.len() as u32).to_be_bytes());
+                    bytes_to_hash.extend(role);
                 }
 
                 if let Some(router_config) = self.router_config.as_ref()
@@ -1862,7 +1961,8 @@ impl ModelDeploymentCard {
             model_type: Default::default(),  // set later
             model_input: Default::default(), // set later
             worker_type: Default::default(), // set later
-            needs: Default::default(),       // set later
+            worker_role: Default::default(),
+            needs: Default::default(), // set later
             lora: None,
             aliases: Vec::new(),
             user_data: None,
@@ -3381,5 +3481,117 @@ mod worker_type_tests {
         );
         let restored: ModelDeploymentCard = serde_json::from_value(serialized).unwrap();
         assert!(restored.indexer_identity.is_none());
+    }
+}
+
+#[cfg(test)]
+mod worker_role_tests {
+    use super::*;
+    use crate::{
+        protocols::external_speculation::DraftTransportDescriptorV1,
+        worker_role::{ExternalDraftBinding, WorkerRole},
+        worker_type::WorkerType,
+    };
+    use dynamo_runtime::protocols::EndpointId;
+
+    fn target_card() -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only("target");
+        card.model_type = ModelType::Chat | ModelType::Completions;
+        card.model_input = ModelInput::Tokens;
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.worker_role = WorkerRole::SpeculativeTarget(ExternalDraftBinding {
+            endpoint: EndpointId::from("specdec/draft/generate"),
+            protocol: "mock-specdec-zmq-v1".into(),
+            router_hint_schema_version: 1,
+        });
+        card
+    }
+
+    fn draft_card() -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only("draft");
+        card.model_type = ModelType::empty();
+        card.worker_type = Some(WorkerType::Aggregated);
+        card.worker_role = WorkerRole::SpeculativeDraft;
+        card.runtime_config.external_draft_transports.insert(
+            0,
+            DraftTransportDescriptorV1 {
+                protocol: "mock-specdec-zmq-v1".into(),
+                address: "tcp://draft:50051".into(),
+                draft_incarnation_id: 7,
+                orphan_cleanup_timeout_ms: 1_000,
+            },
+        );
+        card
+    }
+
+    #[test]
+    fn standard_role_preserves_legacy_wire_shape_and_checksum() {
+        let card = ModelDeploymentCard::with_name_only("model");
+        let value = serde_json::to_value(&card).unwrap();
+        assert!(value.get("worker_role").is_none());
+
+        let restored: ModelDeploymentCard = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.worker_role, WorkerRole::Standard);
+        assert_eq!(restored.mdcsum(), card.mdcsum());
+    }
+
+    #[test]
+    fn nonstandard_role_is_wire_visible_and_changes_deployment_identity() {
+        let standard = ModelDeploymentCard::with_name_only("target");
+        let target = target_card();
+        let value = serde_json::to_value(&target).unwrap();
+        assert_eq!(value["worker_role"]["role"], "speculative_target");
+        assert_ne!(target.mdcsum(), standard.mdcsum());
+    }
+
+    #[test]
+    fn target_and_draft_cards_require_complete_registration() {
+        let target = target_card();
+        target
+            .validate_worker_role(Some(&EndpointId::from("specdec/target/generate")))
+            .unwrap();
+        let draft = draft_card();
+        draft
+            .validate_worker_role(Some(&EndpointId::from("specdec/draft/generate")))
+            .unwrap();
+
+        let mut missing_transport = draft.clone();
+        missing_transport
+            .runtime_config
+            .external_draft_transports
+            .clear();
+        assert!(missing_transport.validate_worker_role(None).is_err());
+    }
+
+    #[test]
+    fn target_rejects_migration_nonaggregated_stage_and_self_binding() {
+        let mut target = target_card();
+        target.migration_limit = 1;
+        assert!(target.validate_worker_role(None).is_err());
+
+        target.migration_limit = 0;
+        target.worker_type = Some(WorkerType::Decode);
+        assert!(target.validate_worker_role(None).is_err());
+
+        target.worker_type = Some(WorkerType::Aggregated);
+        assert!(
+            target
+                .validate_worker_role(Some(&EndpointId::from("specdec/draft/generate")))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn runtime_reachability_does_not_change_deployment_checksum() {
+        let first = draft_card();
+        let mut second = draft_card();
+        let descriptor = second
+            .runtime_config
+            .external_draft_transports
+            .get_mut(&0)
+            .unwrap();
+        descriptor.address = "tcp://replacement:50051".into();
+        descriptor.draft_incarnation_id = 99;
+        assert_eq!(first.mdcsum(), second.mdcsum());
     }
 }

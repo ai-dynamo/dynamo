@@ -8,7 +8,7 @@ use derive_builder::Builder;
 use dynamo_kv_router::{
     config::RouterConfigOverride,
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId},
-    router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint},
+    router_hint::{ROUTER_HINT_EXTRA_ARGS_KEY, RouterHint, RouterHintEnvelope},
 };
 use dynamo_runtime::error::{DynamoError, ErrorType, match_error_chain};
 use serde::{Deserialize, Serialize};
@@ -464,7 +464,13 @@ impl PreprocessedRequest {
     }
 
     pub fn attach_router_hint(&mut self, hint: &RouterHint) -> serde_json::Result<()> {
-        let hint_value = serde_json::to_value(hint)?;
+        self.replace_router_hint(&RouterHintEnvelope::kv(hint.clone()))
+    }
+
+    /// Replace any caller-provided or stale hint with a validated router-owned envelope.
+    pub fn replace_router_hint(&mut self, envelope: &RouterHintEnvelope) -> serde_json::Result<()> {
+        // Serialize first so validation failures leave the request untouched.
+        let hint_value = serde_json::to_value(envelope)?;
         let mut map = extra_args_object(self.extra_args.take());
         let mut kv_transfer_params = match map.remove(KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY) {
             Some(serde_json::Value::Object(params)) => params,
@@ -655,6 +661,77 @@ mod tests {
                 serde_json::json!([33])
             );
         }
+    }
+
+    #[test]
+    fn replace_router_hint_strips_caller_hint_and_preserves_unrelated_fields() {
+        use dynamo_kv_router::router_hint::{
+            DraftTransport, RouterHintEnvelope, SpeculativeDecodingRouterHintV1,
+        };
+        use dynamo_runtime::protocols::EndpointId;
+
+        let mut req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .extra_args(Some(serde_json::json!({
+                "caller": "kept",
+                "kv_transfer_params": {
+                    "transfer_id": "kept",
+                    "router_hint": {"speculative_decoding": {"caller": "ignored"}}
+                }
+            })))
+            .build()
+            .unwrap();
+        let envelope = RouterHintEnvelope::speculative(SpeculativeDecodingRouterHintV1 {
+            schema_version: 1,
+            draft_endpoint: EndpointId::from("specdec/draft/generate"),
+            draft: dynamo_kv_router::protocols::WorkerWithDpRank::new(42, 1),
+            draft_incarnation_id: 7,
+            transport: DraftTransport {
+                protocol: "specdec-zmq-v1".into(),
+                address: "tcp://draft:50051".into(),
+                orphan_cleanup_timeout_ms: 1_000,
+            },
+        });
+
+        req.replace_router_hint(&envelope).unwrap();
+
+        let extra_args = req.extra_args.unwrap();
+        assert_eq!(extra_args["caller"], "kept");
+        assert_eq!(
+            extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY]["transfer_id"],
+            "kept"
+        );
+        let hint = &extra_args[KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY][ROUTER_HINT_EXTRA_ARGS_KEY];
+        assert_eq!(hint["speculative_decoding"]["draft"]["worker_id"], 42);
+        assert!(hint["speculative_decoding"].get("caller").is_none());
+    }
+
+    #[test]
+    fn replace_router_hint_is_fail_closed_and_transactional() {
+        use dynamo_kv_router::router_hint::RouterHintEnvelope;
+
+        let original = serde_json::json!({
+            "kv_transfer_params": {"router_hint": {"caller": "stale"}}
+        });
+        let mut req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .extra_args(Some(original.clone()))
+            .build()
+            .unwrap();
+
+        assert!(
+            req.replace_router_hint(&RouterHintEnvelope::default())
+                .is_err()
+        );
+        assert_eq!(req.extra_args, Some(original));
     }
 
     #[test]

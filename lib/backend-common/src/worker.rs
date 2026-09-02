@@ -32,7 +32,8 @@ use tokio_util::sync::CancellationToken;
 use crate::adapter::{EngineAdapter, RawEngineAdapter};
 use crate::disagg::DisaggregationMode;
 use crate::engine::{
-    EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, RawEngine,
+    EngineConfig, KvEventSource, LLMEngine, MetricsBindings, MetricsCtx, ModelRegistration,
+    RawEngine,
 };
 use crate::error::{BackendError, DynamoError, ErrorType};
 use crate::publisher::{PublisherHandles, setup_publishers};
@@ -391,6 +392,16 @@ impl EngineKind {
             EngineKind::Llm(e) => e.on_endpoint_ready(endpoint).await,
             // Raw media engines publish no discovery records of their own.
             EngineKind::Raw(_) => Ok(()),
+        }
+    }
+
+    async fn model_registration(
+        &self,
+        endpoint: &dynamo_runtime::component::Endpoint,
+    ) -> Result<ModelRegistration, DynamoError> {
+        match self {
+            EngineKind::Llm(e) => e.model_registration(endpoint).await,
+            EngineKind::Raw(_) => Ok(ModelRegistration::default()),
         }
     }
 
@@ -935,7 +946,6 @@ impl Worker {
         endpoint: dynamo_runtime::component::Endpoint,
         shutdown: CancellationToken,
     ) -> Result<(), DynamoError> {
-        let model_type = resolve_model_type(&self.config)?;
         let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
         let rl_config = if self.config.enable_rl {
             Some(
@@ -951,10 +961,6 @@ impl Worker {
         } else {
             None
         };
-        let mut local_model =
-            build_local_model(&self.config, engine_config, self.engine.is_raw()).await?;
-        tracing::debug!("local model built");
-
         // Hand the engine its serving endpoint before registering the model
         // with discovery. on_endpoint_ready is a fatal handoff: doing it first
         // means a failure leaves nothing published, so there is no stale
@@ -963,6 +969,17 @@ impl Worker {
         // still runs before `register_engine_controls`, so `/engine/*` cannot
         // fire before the engine has the endpoint.
         self.engine.on_endpoint_ready(endpoint.clone()).await?;
+
+        let registration = self.engine.model_registration(&endpoint).await?;
+        let model_type = resolve_model_type(&self.config, &registration)?;
+        let mut local_model = build_local_model(
+            &self.config,
+            engine_config,
+            self.engine.is_raw(),
+            &registration,
+        )
+        .await?;
+        tracing::debug!("local model built");
 
         local_model
             .attach(
@@ -1848,7 +1865,16 @@ fn resolve_served_name(config: &WorkerConfig, engine_config: &EngineConfig) -> O
 /// carried by `WorkerType::Encode`.
 ///
 /// Everything else falls back to the parsed `endpoint_types`.
-fn resolve_model_type(config: &WorkerConfig) -> Result<ModelType, DynamoError> {
+fn resolve_model_type(
+    config: &WorkerConfig,
+    registration: &ModelRegistration,
+) -> Result<ModelType, DynamoError> {
+    if matches!(
+        registration.worker_role,
+        dynamo_llm::worker_role::WorkerRole::SpeculativeDraft
+    ) {
+        return Ok(ModelType::empty());
+    }
     if config.disaggregation_mode.is_prefill() {
         return Ok(ModelType::Prefill);
     }
@@ -1998,6 +2024,7 @@ async fn build_local_model(
     config: &WorkerConfig,
     engine_config: &EngineConfig,
     name_only: bool,
+    registration: &ModelRegistration,
 ) -> Result<LocalModel, DynamoError> {
     let served_name = resolve_served_name(config, engine_config)
         .or_else(|| Some(engine_config.model.clone()))
@@ -2056,6 +2083,7 @@ async fn build_local_model(
         enable_local_indexer,
         kv_state_endpoint: config.kv_state_endpoint.clone(),
         disaggregated_endpoint,
+        external_draft_transports: registration.external_draft_transports.clone(),
         runtime_data,
         ..ModelRuntimeConfig::default()
     };
@@ -2095,12 +2123,14 @@ async fn build_local_model(
         builder.source_path(PathBuf::from(source));
     }
 
-    builder.build().await.map_err(|e| {
+    let mut local_model = builder.build().await.map_err(|e| {
         err(
             ErrorType::Backend(BackendError::Unknown),
             format!("build local model: {e}"),
         )
-    })
+    })?;
+    local_model.set_worker_role(registration.worker_role.clone());
+    Ok(local_model)
 }
 
 #[cfg(test)]
@@ -2405,9 +2435,14 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
-            .await
-            .unwrap();
+        let local_model = build_local_model(
+            &config,
+            &engine_config,
+            false,
+            &ModelRegistration::default(),
+        )
+        .await
+        .unwrap();
         let runtime_config = local_model.runtime_config();
 
         assert_eq!(runtime_config.context_length, Some(32_768));
@@ -2455,7 +2490,7 @@ mod tests {
             ..EngineConfig::default()
         };
         // name_only=true must succeed offline; name_only=false would fetch.
-        build_local_model(&config, &engine_config, true)
+        build_local_model(&config, &engine_config, true, &ModelRegistration::default())
             .await
             .expect("name-only build must not fetch");
     }
@@ -2473,9 +2508,10 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, true)
-            .await
-            .expect("name-only model with media config must build");
+        let local_model =
+            build_local_model(&config, &engine_config, true, &ModelRegistration::default())
+                .await
+                .expect("name-only model with media config must build");
 
         assert!(local_model.card().media_decoder.is_some());
         assert!(local_model.card().media_fetcher.is_some());
@@ -2490,7 +2526,7 @@ mod tests {
             ..WorkerConfig::default()
         };
         assert_eq!(
-            resolve_model_type(&config).unwrap(),
+            resolve_model_type(&config, &ModelRegistration::default()).unwrap(),
             ModelType::Chat | ModelType::Completions,
         );
     }
@@ -2505,7 +2541,10 @@ mod tests {
             disaggregation_mode: DisaggregationMode::Decode,
             ..WorkerConfig::default()
         };
-        assert_eq!(resolve_model_type(&config).unwrap(), ModelType::Chat);
+        assert_eq!(
+            resolve_model_type(&config, &ModelRegistration::default()).unwrap(),
+            ModelType::Chat
+        );
     }
 
     #[test]
@@ -2521,7 +2560,7 @@ mod tests {
             disaggregation_mode: DisaggregationMode::Prefill,
             ..WorkerConfig::default()
         };
-        let mt = resolve_model_type(&config).unwrap();
+        let mt = resolve_model_type(&config, &ModelRegistration::default()).unwrap();
         assert_eq!(mt, ModelType::Prefill);
         assert!(mt.supports_prefill());
         assert!(!mt.supports_chat());
@@ -2542,11 +2581,30 @@ mod tests {
             disaggregation_mode: DisaggregationMode::Encode,
             ..WorkerConfig::default()
         };
-        let mt = resolve_model_type(&config).unwrap();
+        let mt = resolve_model_type(&config, &ModelRegistration::default()).unwrap();
         assert_eq!(mt, ModelType::empty());
         assert!(mt.is_empty());
         assert!(!mt.supports_chat());
         assert!(!mt.supports_completions());
+    }
+
+    #[test]
+    fn resolve_model_type_speculative_draft_is_surface_less_and_aggregated() {
+        let config = WorkerConfig::default();
+        let registration = ModelRegistration {
+            worker_role: dynamo_llm::worker_role::WorkerRole::SpeculativeDraft,
+            ..ModelRegistration::default()
+        };
+
+        assert!(
+            resolve_model_type(&config, &registration)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            resolve_worker_type_and_needs(&config),
+            (WorkerType::Aggregated, Vec::new())
+        );
     }
 
     // -------------------------------------------------------------------
@@ -2730,9 +2788,14 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
-            .await
-            .unwrap();
+        let local_model = build_local_model(
+            &config,
+            &engine_config,
+            false,
+            &ModelRegistration::default(),
+        )
+        .await
+        .unwrap();
         // Decode workers cannot host the local indexer endpoint, so the
         // worker forces it off even when the operator-supplied flag is true.
         assert!(!local_model.runtime_config().enable_local_indexer);
@@ -2750,10 +2813,144 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
+        let local_model = build_local_model(
+            &config,
+            &engine_config,
+            false,
+            &ModelRegistration::default(),
+        )
+        .await
+        .unwrap();
+        assert!(local_model.runtime_config().enable_local_indexer);
+    }
+
+    async fn registration_endpoint(component: &str) -> dynamo_runtime::component::Endpoint {
+        let runtime = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(
+            runtime,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        drt.namespace("registration-test")
+            .unwrap()
+            .component(component)
+            .unwrap()
+            .endpoint("generate")
+    }
+
+    #[tokio::test]
+    async fn standard_registration_preserves_serialized_model_card_shape() {
+        let config = WorkerConfig::default();
+        let engine_config = EngineConfig {
+            model: "test/model".to_string(),
+            ..EngineConfig::default()
+        };
+        let local_model = build_local_model(
+            &config,
+            &engine_config,
+            false,
+            &ModelRegistration::default(),
+        )
+        .await
+        .unwrap();
+        let wire = serde_json::to_value(local_model.card()).unwrap();
+
+        assert!(wire.get("worker_role").is_none());
+        assert!(
+            wire["runtime_config"]
+                .get("external_draft_transports")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_builds_valid_final_target_and_draft_cards() {
+        use dynamo_llm::protocols::external_speculation::DraftTransportDescriptorV1;
+        use dynamo_llm::worker_role::{ExternalDraftBinding, WorkerRole};
+
+        let config = WorkerConfig::default();
+        let engine_config = EngineConfig {
+            model: "test/model".to_string(),
+            ..EngineConfig::default()
+        };
+        let target_registration = ModelRegistration {
+            worker_role: WorkerRole::SpeculativeTarget(ExternalDraftBinding {
+                endpoint: EndpointId::from("specdec/draft/generate"),
+                protocol: "mock-specdec-zmq-v1".to_string(),
+                router_hint_schema_version: ExternalDraftBinding::ROUTER_HINT_SCHEMA_VERSION,
+            }),
+            external_draft_transports: Default::default(),
+        };
+        let mut target = build_local_model(&config, &engine_config, false, &target_registration)
             .await
             .unwrap();
-        assert!(local_model.runtime_config().enable_local_indexer);
+        target
+            .attach(
+                &registration_endpoint("target").await,
+                resolve_model_type(&config, &target_registration).unwrap(),
+                ModelInput::Tokens,
+                None,
+                Some(WorkerType::Aggregated),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(target.card().worker_role, target_registration.worker_role);
+
+        let draft_registration = ModelRegistration {
+            worker_role: WorkerRole::SpeculativeDraft,
+            external_draft_transports: [(
+                0,
+                DraftTransportDescriptorV1 {
+                    protocol: "mock-specdec-zmq-v1".to_string(),
+                    address: "tcp://127.0.0.1:5555".to_string(),
+                    draft_incarnation_id: 31,
+                    orphan_cleanup_timeout_ms: 1_000,
+                },
+            )]
+            .into(),
+        };
+        let mut draft = build_local_model(&config, &engine_config, false, &draft_registration)
+            .await
+            .unwrap();
+        draft
+            .attach(
+                &registration_endpoint("draft").await,
+                resolve_model_type(&config, &draft_registration).unwrap(),
+                ModelInput::Tokens,
+                None,
+                Some(WorkerType::Aggregated),
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(draft.card().worker_role, WorkerRole::SpeculativeDraft);
+        assert_eq!(
+            draft.runtime_config().external_draft_transports,
+            draft_registration.external_draft_transports
+        );
+
+        let invalid_registration = ModelRegistration {
+            external_draft_transports: draft_registration.external_draft_transports,
+            ..target_registration
+        };
+        let mut invalid = build_local_model(&config, &engine_config, false, &invalid_registration)
+            .await
+            .unwrap();
+        assert!(
+            invalid
+                .attach(
+                    &registration_endpoint("invalid-target").await,
+                    resolve_model_type(&config, &invalid_registration).unwrap(),
+                    ModelInput::Tokens,
+                    None,
+                    Some(WorkerType::Aggregated),
+                    Vec::new(),
+                )
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -2776,9 +2973,14 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
-            .await
-            .unwrap();
+        let local_model = build_local_model(
+            &config,
+            &engine_config,
+            false,
+            &ModelRegistration::default(),
+        )
+        .await
+        .unwrap();
         let endpoint = local_model
             .runtime_config()
             .disaggregated_endpoint
@@ -2800,9 +3002,14 @@ mod tests {
             ..EngineConfig::default()
         };
 
-        let local_model = build_local_model(&config, &engine_config, false)
-            .await
-            .unwrap();
+        let local_model = build_local_model(
+            &config,
+            &engine_config,
+            false,
+            &ModelRegistration::default(),
+        )
+        .await
+        .unwrap();
         assert!(
             local_model
                 .runtime_config()
@@ -3528,6 +3735,14 @@ mod handoff_and_lifecycle_tests {
                 Ok(())
             }
         }
+
+        async fn model_registration(
+            &self,
+            _endpoint: &dynamo_runtime::component::Endpoint,
+        ) -> Result<ModelRegistration, DynamoError> {
+            self.log.lock().unwrap().push("model_registration");
+            Ok(ModelRegistration::default())
+        }
     }
 
     /// Engine that overrides only the required methods, so it inherits the
@@ -3569,17 +3784,16 @@ mod handoff_and_lifecycle_tests {
             .expect("default on_endpoint_ready must succeed");
     }
 
-    /// `serve_with_orchestrator` runs `on_endpoint_ready` before
-    /// `register_engine_controls` and `register_engine_updates`. Drive the same
-    /// three production calls in that order and assert: (1) the handoff is
+    /// `serve_with_orchestrator` runs endpoint handoff and model registration
+    /// before registering administrative routes. Drive those production calls
+    /// in the same order and assert: (1) the endpoint-bound registration is
     /// observed before the engine is asked for its controls/updates, and (2) the
     /// advertised control lands under `control/<name>` and the advertised update
     /// under `update/<name>` in the DRT's engine-route registry, so
     /// `/engine/control/<name>` and `/engine/update/<name>` become routable.
-    #[cfg(feature = "integration")]
     #[tokio::test]
     async fn handoff_precedes_registration_and_populates_namespaced_registry() {
-        let endpoint = test_endpoint().await;
+        let endpoint = test_local_endpoint().await;
         let (engine, log) = HandoffMockEngine::new(
             false,
             vec!["start_profile".to_string()],
@@ -3593,6 +3807,11 @@ mod handoff_and_lifecycle_tests {
             .on_endpoint_ready(endpoint.clone())
             .await
             .expect("handoff should succeed");
+        worker
+            .engine
+            .model_registration(&endpoint)
+            .await
+            .expect("model registration should succeed");
         worker
             .register_engine_controls(&endpoint)
             .await
@@ -3608,6 +3827,7 @@ mod handoff_and_lifecycle_tests {
             recorded,
             vec![
                 "on_endpoint_ready",
+                "model_registration",
                 "supported_controls",
                 "supported_updates"
             ],

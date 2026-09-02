@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use super::*;
 use dynamo_kv_router::protocols::{
@@ -14,6 +14,10 @@ use llm_rs::local_model::runtime_config::StructuralTagMode as RsStructuralTagMod
 use llm_rs::local_model::runtime_config::StructuralTagSchemaMode as RsStructuralTagSchemaMode;
 use llm_rs::local_model::runtime_config::StructuralTagScope as RsStructuralTagScope;
 use llm_rs::local_model::runtime_config::TokenizerBackend as RsTokenizerBackend;
+use llm_rs::protocols::external_speculation::{
+    DraftTransportDescriptorV1 as RsDraftTransportDescriptorV1,
+    new_external_speculation_incarnation,
+};
 use llm_rs::protocols::tensor::TensorModelConfig;
 use pyo3::exceptions::PyValueError;
 
@@ -73,6 +77,52 @@ impl ModelRuntimeConfig {
     pub(crate) fn validate_config(&self) -> PyResult<()> {
         validate_model_runtime_config(&self.inner)
     }
+
+    fn require_selectable_dp_rank(&self, dp_rank: u32) -> PyResult<()> {
+        let end = self
+            .inner
+            .data_parallel_start_rank
+            .checked_add(self.inner.data_parallel_size)
+            .ok_or_else(|| PyValueError::new_err("data-parallel rank range overflows u32"))?;
+        if dp_rank < self.inner.data_parallel_start_rank || dp_rank >= end {
+            return Err(PyValueError::new_err(format!(
+                "DP rank {dp_rank} is outside [{}, {end})",
+                self.inner.data_parallel_start_rank
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn insert_immutable_descriptor<T: PartialEq>(
+    descriptors: &mut BTreeMap<u32, T>,
+    dp_rank: u32,
+    descriptor: T,
+    name: &str,
+) -> PyResult<()> {
+    validate_immutable_descriptor(descriptors, dp_rank, &descriptor, name)?;
+    if descriptors.contains_key(&dp_rank) {
+        return Ok(());
+    }
+    descriptors.insert(dp_rank, descriptor);
+    Ok(())
+}
+
+fn validate_immutable_descriptor<T: PartialEq>(
+    descriptors: &BTreeMap<u32, T>,
+    dp_rank: u32,
+    descriptor: &T,
+    name: &str,
+) -> PyResult<()> {
+    if descriptors
+        .get(&dp_rank)
+        .is_some_and(|existing| existing != descriptor)
+    {
+        return Err(PyValueError::new_err(format!(
+            "{name} for DP rank {dp_rank} is immutable for this runtime configuration"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn parse_tensor_model_config(
@@ -145,6 +195,40 @@ impl ModelRuntimeConfig {
     #[setter]
     fn set_data_parallel_start_rank(&mut self, data_parallel_start_rank: u32) {
         self.inner.data_parallel_start_rank = data_parallel_start_rank;
+    }
+
+    /// Advertise one immutable external draft transport for a global DP rank.
+    #[pyo3(signature = (dp_rank, protocol, address, orphan_cleanup_timeout_ms, draft_incarnation_id=None))]
+    fn add_external_draft_transport(
+        &mut self,
+        dp_rank: u32,
+        protocol: String,
+        address: String,
+        orphan_cleanup_timeout_ms: u32,
+        draft_incarnation_id: Option<u64>,
+    ) -> PyResult<u64> {
+        self.require_selectable_dp_rank(dp_rank)?;
+        let draft_incarnation_id = match draft_incarnation_id {
+            Some(value) => value,
+            None => new_external_speculation_incarnation()
+                .map_err(|error| PyValueError::new_err(error.to_string()))?,
+        };
+        let descriptor = RsDraftTransportDescriptorV1 {
+            protocol,
+            address,
+            draft_incarnation_id,
+            orphan_cleanup_timeout_ms,
+        };
+        descriptor
+            .validate()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        insert_immutable_descriptor(
+            &mut self.inner.external_draft_transports,
+            dp_rank,
+            descriptor,
+            "external draft transport",
+        )?;
+        Ok(draft_incarnation_id)
     }
 
     #[setter]

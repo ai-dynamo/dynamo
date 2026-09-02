@@ -44,6 +44,7 @@ pub use dynamo_tokenizers::{file_json_field, log_json_err};
 pub mod tokens;
 pub mod types;
 pub mod utils;
+pub mod worker_role;
 pub mod worker_type;
 
 #[cfg(feature = "block-manager")]
