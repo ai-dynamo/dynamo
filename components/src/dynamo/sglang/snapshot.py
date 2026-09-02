@@ -73,9 +73,9 @@ async def warmup_engine(engine: sgl.Engine, server_args: Any) -> None:
         warmup_args["input_ids"] = np.load(
             server_args.debug_tensor_dump_input_file
         ).tolist()
-        warmup_args["sampling_params"][
-            "max_new_tokens"
-        ] = DUMMY_DEBUG_TENSOR_MAX_NEW_TOKENS
+        warmup_args["sampling_params"]["max_new_tokens"] = (
+            DUMMY_DEBUG_TENSOR_MAX_NEW_TOKENS
+        )
 
     is_disaggregated = server_args.disaggregation_mode != "null"
     if is_disaggregated:
@@ -145,6 +145,11 @@ def snapshot_server_arg_overrides() -> dict[str, bool]:
     return overrides
 
 
+def should_premap_gms_weights(load_format: str) -> bool:
+    """Return whether restored shadow engines should pre-map GMS weights."""
+    return load_format == "gms" or os.environ.get("DYN_GMS_USE_V1") == "true"
+
+
 async def prepare_snapshot_engine(
     server_args,
 ) -> EngineSnapshotController[sgl.Engine] | None:
@@ -183,7 +188,10 @@ async def prepare_snapshot_engine(
 
     snapshot_controller = EngineSnapshotController(
         engine=engine,
-        pause_controller=SGLangEnginePauseController(engine),
+        pause_controller=SGLangEnginePauseController(
+            engine,
+            premap_weights=should_premap_gms_weights(server_args.load_format),
+        ),
         snapshot_config=snapshot_config,
     )
     if not await snapshot_controller.wait_for_restore():

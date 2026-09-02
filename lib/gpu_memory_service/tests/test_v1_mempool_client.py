@@ -23,6 +23,8 @@ def test_weight_and_kv_lifecycle(monkeypatch):
     client = object.__new__(TorchMempoolMemoryClient)
     client._device = 0
     client._state, client._weights_state = "RUNNING", "OPEN"
+    client._weights_mapped = True
+    client._kv_cache_mapped = True
     client._weights_pool, client._kv_cache_pool = object(), object()
     client._active_domain = Mock()
     client._weights = Mock(mappings=("mapping",))
@@ -70,3 +72,29 @@ def test_weight_and_kv_lifecycle(monkeypatch):
     client._weights.commit.assert_called_once_with()
     assert client._state == "RUNNING"
     assert client._weights_state == "PUBLISHED"
+
+
+def test_resume_domains_independently():
+    client = object.__new__(TorchMempoolMemoryClient)
+    client._device = 0
+    client._state, client._weights_state = "SUSPENDED", "PUBLISHED"
+    client._weights_mapped = False
+    client._kv_cache_mapped = False
+    client._weights = Mock()
+    client._kv_cache = Mock()
+
+    client.resume(("weights",))
+
+    client._weights.connect.assert_called_once_with(mempool_module.RequestedLockType.RO)
+    client._weights.remap_all_vas.assert_called_once_with()
+    client._kv_cache.connect.assert_not_called()
+    assert client._state == "PARTIALLY_RESUMED"
+
+    client.resume(("kv_cache",))
+
+    client._kv_cache.connect.assert_called_once_with(
+        mempool_module.RequestedLockType.RW
+    )
+    client._kv_cache.reallocate_all_handles.assert_called_once_with()
+    client._kv_cache.remap_all_vas.assert_called_once_with()
+    assert client._state == "RUNNING"

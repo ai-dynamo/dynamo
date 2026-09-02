@@ -157,6 +157,31 @@ def test_pause_resume_routes_only_managed_tags(build_impl):
     ]
 
 
+def test_premapped_weights_stay_mapped_during_full_resume(build_impl):
+    impl, weights, kv_cache, _ = build_impl(
+        weights_lock=GrantedLockType.RO,
+        kv_cache_lock=GrantedLockType.RW,
+    )
+
+    impl.pause()
+    impl.resume("weights")
+    impl.resume()
+
+    assert weights.calls == [
+        "unmap_all_vas",
+        "abort",
+        ("connect", RequestedLockType.RO, None),
+        "remap_all_vas",
+    ]
+    assert kv_cache.calls == [
+        "unmap_all_vas",
+        "abort",
+        ("connect", RequestedLockType.RW, None),
+        ("reallocate_all_handles", "kv_cache"),
+        "remap_all_vas",
+    ]
+
+
 @pytest.mark.parametrize("tag", ["weights", "kv_cache"])
 def test_region_requires_rw_allocator(build_impl, tag):
     impl, _, _, _ = build_impl()
