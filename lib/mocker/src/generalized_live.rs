@@ -418,6 +418,7 @@ impl GroupedLiveActor {
             }
             let completed_at_ms = self.advance_engine_time(end_ms);
             let completed = self.engine.complete_pass(pass_id, completed_at_ms)?;
+            self.clear_pass_deadline_if_not_ready();
             let (boundary_tx, boundary_rx) = mpsc::channel(1);
             self.publish(GroupedLiveEvent::PassCompleted {
                 completed,
@@ -458,6 +459,12 @@ impl GroupedLiveActor {
         self.advance_engine_time(candidate_ms)
     }
 
+    fn clear_pass_deadline_if_not_ready(&mut self) {
+        if !self.engine.is_ready() {
+            self.next_pass_deadline_ms = None;
+        }
+    }
+
     async fn publish(&self, event: GroupedLiveEvent) -> Result<()> {
         tokio::select! {
             biased;
@@ -491,6 +498,7 @@ impl GroupedLiveActor {
                 BoundaryRequest::Apply { command, reply } => {
                     let now_ms = self.command_time_ms();
                     let result = self.engine.apply_command_effects(command, now_ms);
+                    self.clear_pass_deadline_if_not_ready();
                     let _ = reply.send(result);
                 }
                 BoundaryRequest::Finish { reply } => {
@@ -507,6 +515,7 @@ impl GroupedLiveActor {
             matches!(&envelope.command.command, Command::CancelRequest { .. });
         let now_ms = self.command_time_ms();
         let result = self.engine.apply_command_effects(envelope.command, now_ms);
+        self.clear_pass_deadline_if_not_ready();
         match result {
             Ok(effects) => {
                 let event = GroupedLiveEvent::CommandApplied {
@@ -927,6 +936,35 @@ mod tests {
             panic!("expected second pass start");
         };
         assert_eq!(second.started_at_ms, first_end_ms);
+
+        runtime.handle.shutdown();
+        runtime.actor.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_control_after_a_drained_boundary_starts_from_wall_time() {
+        let mut runtime = ten_ms_runtime();
+        let (first_end_ms, boundary) = first_completion_after_ten_ms(&mut runtime, 210, 1).await;
+
+        tokio::time::advance(Duration::from_millis(20)).await;
+        let queued = runtime
+            .handle
+            .enqueue_command(SchedulerCommand::new(
+                0,
+                Command::Submit(request(211, 4, 1)),
+            ))
+            .await
+            .unwrap();
+        boundary.finish().await.unwrap();
+        assert!(matches!(
+            next_event(&mut runtime.events).await,
+            GroupedLiveEvent::CommandApplied { .. }
+        ));
+        queued.response.await.unwrap().unwrap();
+        let GroupedLiveEvent::PassStarted(second) = next_event(&mut runtime.events).await else {
+            panic!("expected second pass start");
+        };
+        assert_eq!(second.started_at_ms, first_end_ms + 20.0);
 
         runtime.handle.shutdown();
         runtime.actor.await.unwrap().unwrap();
