@@ -15,6 +15,7 @@ use crate::{
     },
     kv_router::WorkerSelectorFactory,
     local_model::runtime_config::{ModelRuntimeConfig, TokenizerBackend},
+    model_type::ModelType,
     namespace::NamespaceFilter,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -398,10 +399,22 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> 
             }
         }
         ModelUpdate::Removed(card) => {
-            // Handle all supported endpoint types, not just the first one
-            for endpoint_type in card
+            // Endpoint availability is process-wide, so a removal may only retract an
+            // endpoint once nothing is left behind it. Emitters do not all pre-filter:
+            // a LoRA adapter card carries its base model's `model_type`, so unloading
+            // one adapter arrives here as a chat-shaped removal while the base model
+            // and its sibling adapters are still registered and serving. Deriving the
+            // retraction from the live catalog instead of from the event makes that
+            // harmless, and makes duplicate or repeated removals idempotent.
+            let manager = service.model_manager();
+            let vacated = card
                 .model_type
-                .as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
+                .units()
+                .into_iter()
+                .filter(|unit| !manager.has_models_of_type(*unit))
+                .fold(ModelType::empty(), |vacated, unit| vacated | unit);
+            for endpoint_type in
+                vacated.as_endpoint_types_with_anthropic(service.anthropic_api_enabled())
             {
                 service.enable_model_endpoint(endpoint_type, false)?;
             }
@@ -427,5 +440,77 @@ fn update_model_metrics(
             // Note: Metrics are typically not removed to preserve historical data
             // This matches the behavior in the polling task
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engines::make_echo_engine;
+    use crate::model_card::{LoraInfo, ModelDeploymentCard};
+    use crate::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+
+    fn chat_engine() -> OpenAIChatCompletionsStreamingEngine {
+        Arc::new(StreamingEngineAdapter::new(make_echo_engine()))
+    }
+
+    fn chat_card(name: &str) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only(name);
+        card.model_type = ModelType::Chat;
+        card
+    }
+
+    /// A LoRA adapter card is a clone of its base model's card, so it carries
+    /// `ModelType::Chat` for a chat model. Because endpoint flags are process-wide,
+    /// treating that removal as "disable chat" answers `404` on
+    /// `/v1/chat/completions` for the base model and every sibling adapter that is
+    /// still registered. The retraction must instead follow the live catalog.
+    #[test]
+    fn unloading_one_adapter_keeps_chat_enabled_for_the_base_model() {
+        let service = Arc::new(HttpService::builder().build().unwrap());
+        let manager = service.model_manager();
+        manager
+            .add_chat_completions_model("base-model", "ck-base", chat_engine())
+            .unwrap();
+        manager
+            .add_chat_completions_model("base-model-adapter", "ck-adapter", chat_engine())
+            .unwrap();
+
+        let base_card = chat_card("base-model");
+        let mut adapter_card = chat_card("base-model-adapter");
+        adapter_card.lora = Some(LoraInfo {
+            name: "base-model-adapter".to_string(),
+            max_gpu_lora_count: None,
+        });
+
+        update_http_endpoints(service.clone(), ModelUpdate::Added(base_card.clone())).unwrap();
+        update_http_endpoints(service.clone(), ModelUpdate::Added(adapter_card.clone())).unwrap();
+        assert!(service.model_endpoint_enabled(EndpointType::Chat));
+        assert!(service.model_endpoint_enabled(EndpointType::Responses));
+
+        // The watcher drops the model from the manager before it emits the removal,
+        // so the frontend observes the post-removal catalog.
+        manager.remove_model("base-model-adapter");
+        update_http_endpoints(service.clone(), ModelUpdate::Removed(adapter_card)).unwrap();
+        assert!(
+            service.model_endpoint_enabled(EndpointType::Chat),
+            "unloading one adapter must leave /v1/chat/completions serving the base model"
+        );
+        assert!(
+            service.model_endpoint_enabled(EndpointType::Responses),
+            "unloading one adapter must leave /v1/responses serving the base model"
+        );
+
+        // The last chat-shaped model going away must still retract the endpoints.
+        manager.remove_model("base-model");
+        update_http_endpoints(service.clone(), ModelUpdate::Removed(base_card)).unwrap();
+        assert!(
+            !service.model_endpoint_enabled(EndpointType::Chat),
+            "removing the last chat model must disable /v1/chat/completions"
+        );
+        assert!(
+            !service.model_endpoint_enabled(EndpointType::Responses),
+            "removing the last chat model must disable /v1/responses"
+        );
     }
 }

@@ -45,6 +45,7 @@ use crate::{
     lora::state_tracker::LoraWorkerProjection,
     lora::{LoraFilter, LoraRoutingTable, LoraStateTracker, load_estimator::LoadEstimator},
     model_card::{LoraInfo, ModelDeploymentCard},
+    model_type::ModelType,
     types::{
         RealtimeBidirectionalEngine,
         generic::tensor::TensorStreamingEngine,
@@ -1212,6 +1213,35 @@ impl ModelManager {
             .filter(|(_, model)| model.has_prefill())
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    /// True when at least one registered model still serves `model_type`.
+    ///
+    /// A combined [`ModelType`] is occupied when any of its units is occupied. A unit
+    /// with no backing model list is never occupied; [`ModelType::Prefill`] is such a
+    /// unit, being a cross-version marker rather than a served surface.
+    ///
+    /// This is the only place that maps a [`ModelType`] onto the list of models behind
+    /// it. Two callers depend on agreeing exactly: the discovery watcher decides here
+    /// whether a removal should emit a retraction card at all, and the HTTP frontend
+    /// decides here whether a retraction it received should disable the endpoint. A new
+    /// `ModelType` variant that one of them treated as occupied and the other as empty
+    /// would either strand an endpoint enabled with nothing behind it or 404 a surface
+    /// that still has models.
+    pub fn has_models_of_type(&self, model_type: ModelType) -> bool {
+        (model_type.contains(ModelType::Chat) && !self.list_chat_completions_models().is_empty())
+            || (model_type.contains(ModelType::Completions)
+                && !self.list_completions_models().is_empty())
+            || (model_type.contains(ModelType::Embedding)
+                && !self.list_embeddings_models().is_empty())
+            || (model_type.contains(ModelType::Images) && !self.list_images_models().is_empty())
+            || (model_type.contains(ModelType::Audios) && !self.list_audios_models().is_empty())
+            || (model_type.contains(ModelType::Videos) && !self.list_videos_models().is_empty())
+            || (model_type.contains(ModelType::TensorBased)
+                && !self.list_tensor_models().is_empty())
+            || (model_type.contains(ModelType::Realtime) && !self.list_realtime_models().is_empty())
+            || (model_type.contains(ModelType::Classify) && !self.list_classify_models().is_empty())
+            || (model_type.contains(ModelType::Pooling) && !self.list_pooling_models().is_empty())
     }
 
     pub fn get_embeddings_engine(
