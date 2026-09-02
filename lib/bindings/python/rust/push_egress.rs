@@ -31,7 +31,7 @@ use anyhow::Error;
 use bytes::{BufMut, Bytes, BytesMut};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyDict, PyModule};
 use tokio_stream::{Stream, StreamExt};
 
 use tokio::sync::mpsc;
@@ -209,11 +209,16 @@ impl std::fmt::Debug for PushFrame {
 impl PushFrame {
     /// Encode one Python response object, with the GIL held by the caller.
     ///
-    /// Both steps are shared with the pull path — `parse_python_response`
-    /// interprets the object, `write_annotated_response` produces the bytes — so
-    /// the two cannot drift. The only change from the pull path is where those
-    /// bytes land: a buffer reused across this request's frames, rather than a
-    /// fresh `Vec` each time.
+    /// Two encoders, one wire format. A steady-state token frame takes the fast
+    /// path (`try_write_token_frame`), which writes msgpack directly; everything
+    /// else falls back to the encoder shared with the pull path —
+    /// `parse_python_response` interprets the object, `write_annotated_response`
+    /// produces the bytes — so the fallback cannot drift. The fast path is held
+    /// to the same bytes by `token_frame_matches_generic_encoding`, which matters
+    /// because the two are chosen per frame *within one response stream*.
+    ///
+    /// Either way the bytes land in a buffer reused across this request's frames,
+    /// rather than a fresh `Vec` each time.
     ///
     /// ## Why `try_lock` rather than `lock`
     ///
@@ -273,6 +278,16 @@ impl PushFrame {
         codec: RequestPlanePayloadCodec,
         out: &mut BytesMut,
     ) -> PyResult<bool> {
+        if codec == RequestPlanePayloadCodec::Msgpack
+            && let Ok(dict) = obj.downcast::<PyDict>()
+            && python_payload::try_write_token_frame(dict, out)
+        {
+            // Never an error frame: a token frame has no error field, and
+            // `try_write_token_frame` only accepts dicts whose exact key set
+            // rules out an `_dynamo_annotated` envelope.
+            return Ok(false);
+        }
+
         let annotated =
             python_payload::parse_python_response(obj.clone().unbind(), py).map_err(|error| {
                 PyValueError::new_err(format!(

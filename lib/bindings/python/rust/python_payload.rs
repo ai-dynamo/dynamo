@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use bytes::Bytes;
+use bytes::{BufMut, Bytes, BytesMut};
 use dynamo_runtime::pipeline::PipelineError;
 use dynamo_runtime::pipeline::network::{
     EncodedResponseFrame, IngressRequestDecoder, IngressResponseEncoder, NetworkStreamWrapper,
@@ -10,7 +10,7 @@ use dynamo_runtime::pipeline::network::{
 use dynamo_runtime::protocols::annotated::Annotated;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::{PyDict, PyInt, PyList, PyString};
 use pythonize::{Depythonizer, Pythonizer, depythonize};
 use serde::de::Error as _;
 use serde::ser::Error as _;
@@ -235,6 +235,152 @@ pub(crate) fn write_annotated_response<T: Serialize, W: std::io::Write>(
     Ok(is_error)
 }
 
+// ── Steady-state token-frame fast path ───────────────────────────────────────
+//
+// Writes standard TRT-LLM token frames directly to bypass costly generic
+// serialization.
+//
+// Streaming decode predominantly produces a two-key dict (`token_ids`, `index`).
+// Using the generic `pythonize` encoder creates massive overhead due to
+// sequential type-checking and integer downcasting for every single token ID.
+//
+// This fast path skips that ladder. Byte-equivalence with the generic encoder is
+// verified by the `token_frame_matches_generic_encoding` test.
+
+/// Justifies the hardcoded map lengths below based on envelope serialization:
+///
+/// * **`Annotated` (1 key):** Serializes only the `data` key (the token payload).
+///   Other fields (`id`, `event`, etc.) are `None` on token frames and skipped by `serde`.
+/// * **`NetworkStreamWrapper` (2 keys):** Serializes the `data` key (holding the
+///   `Annotated` object) plus the always-written `complete_final` boolean.
+const KEY_DATA: &str = "data";
+const KEY_COMPLETE_FINAL: &str = "complete_final";
+const KEY_TOKEN_IDS: &str = "token_ids";
+const KEY_INDEX: &str = "index";
+
+/// Try to encode a token frame straight to msgpack, skipping serde entirely.
+///
+/// Returns `true` if `dict` matched and the frame was written. Returns `false`,
+/// having written nothing, if it did not — the caller must then use the generic
+/// path. To match, `dict` must be exactly `token_ids` then `index`, holding a
+/// list of non-negative ints and a non-negative int. Msgpack only; JSON always
+/// takes the generic path.
+pub(crate) fn try_write_token_frame(dict: &Bound<'_, PyDict>, out: &mut BytesMut) -> bool {
+    // We can only tell a frame is ineligible partway through writing it — a bad
+    // token id in the middle of the list, say — so remember where the caller
+    // left off and rewind on failure. Half a frame followed by a whole one is
+    // undecodable garbage on the wire.
+    let rewind = out.len();
+    if parse_and_write_token_frame(dict, out).is_none() {
+        out.truncate(rewind);
+        return false;
+    }
+    true
+}
+
+fn parse_and_write_token_frame(dict: &Bound<'_, PyDict>, out: &mut BytesMut) -> Option<()> {
+    // Match on iteration ORDER, not by key lookup.
+    //
+    // A msgpack map stores its entries in the order the serializer visits them,
+    // which for a Python dict is insertion order. So a dict holding these same
+    // two keys the other way round has to encode the other way round too — if
+    // we matched it here, the fast and generic paths would disagree on bytes.
+    //
+    // Matching on order also makes this a *complete* check of the shape: a third
+    // key fails the `next()` below, and a `_dynamo_annotated` envelope can never
+    // match. That is what makes it safe to skip `parse_python_response`.
+    let mut entries = dict.iter();
+    let (token_ids_key, token_ids) = entries.next()?;
+    let (index_key, index) = entries.next()?;
+    if entries.next().is_some()
+        || !key_is(&token_ids_key, KEY_TOKEN_IDS)
+        || !key_is(&index_key, KEY_INDEX)
+    {
+        return None;
+    }
+
+    let token_ids = token_ids.downcast::<PyList>().ok()?;
+    let index = exact_uint(&index)?;
+
+    write_token_frame_bytes(
+        token_ids.iter().map(|token_id| exact_uint(&token_id)),
+        u32::try_from(token_ids.len()).ok()?,
+        index,
+        &mut (&mut *out).writer(),
+    )
+}
+
+/// Write the msgpack bytes for one token frame.
+///
+/// Kept separate from the Python-facing code above so the wire layout — the part
+/// that must match the generic encoder exactly — can be unit-tested. This crate
+/// builds as a PyO3 extension module and so does not link libpython, meaning
+/// `cargo test` cannot touch Python objects. See the module tests below.
+///
+/// `token_count` must equal the number of items `token_ids` yields. msgpack
+/// writes an array's length *before* its elements, so a mismatch produces a
+/// frame that cannot be decoded. A `None` item aborts the frame mid-write, which
+/// is why the caller has to be able to rewind.
+fn write_token_frame_bytes<W, I>(
+    token_ids: I,
+    token_count: u32,
+    index: u64,
+    writer: &mut W,
+) -> Option<()>
+where
+    W: std::io::Write,
+    I: Iterator<Item = Option<u64>>,
+{
+    // Three nested maps, matching what serde would emit:
+    //   NetworkStreamWrapper { data, complete_final }
+    //     -> Annotated { data }   (id/event/comment/error are None, so skipped)
+    //          -> { token_ids, index }
+    rmp::encode::write_map_len(writer, 2).ok()?;
+    rmp::encode::write_str(writer, KEY_DATA).ok()?;
+    rmp::encode::write_map_len(writer, 1).ok()?;
+    rmp::encode::write_str(writer, KEY_DATA).ok()?;
+    rmp::encode::write_map_len(writer, 2).ok()?;
+    rmp::encode::write_str(writer, KEY_TOKEN_IDS).ok()?;
+    rmp::encode::write_array_len(writer, token_count).ok()?;
+    let mut written = 0u32;
+    for token_id in token_ids {
+        rmp::encode::write_uint(writer, token_id?).ok()?;
+        written += 1;
+    }
+    if written != token_count {
+        return None;
+    }
+    rmp::encode::write_str(writer, KEY_INDEX).ok()?;
+    rmp::encode::write_uint(writer, index).ok()?;
+    rmp::encode::write_str(writer, KEY_COMPLETE_FINAL).ok()?;
+    rmp::encode::write_bool(writer, false).ok()?;
+    Some(())
+}
+
+/// Whether `key` is exactly the `str` `name`.
+fn key_is(key: &Bound<'_, PyAny>, name: &str) -> bool {
+    key.downcast_exact::<PyString>()
+        .ok()
+        .and_then(|key| key.to_str().ok())
+        .is_some_and(|key| key == name)
+}
+
+/// `value` as a `u64` — but only if the generic path would also encode it as a
+/// plain unsigned integer.
+///
+/// `downcast_exact` is load-bearing. In Python `bool` is a subclass of `int`,
+/// and pythonize checks `PyBool` *before* `PyInt`, so generically a `True` in a
+/// token list becomes a msgpack bool. It must not silently become the integer 1
+/// here. Requiring the exact type keeps bools (and any other `int` subclass) on
+/// the generic path.
+///
+/// `extract` then rejects negatives and anything larger than `u64`, which the
+/// generic path also encodes differently — as a signed int, and as msgpack
+/// *bytes* respectively.
+fn exact_uint(value: &Bound<'_, PyAny>) -> Option<u64> {
+    value.downcast_exact::<PyInt>().ok()?.extract().ok()
+}
+
 fn encode_python_response(
     payload_codec: RequestPlanePayloadCodec,
     response: PythonResponseItem,
@@ -361,7 +507,182 @@ mod tests {
 
     use super::{
         Annotated, NetworkStreamWrapper, RequestPlanePayloadCodec, encode_annotated_response,
+        write_token_frame_bytes,
     };
+    use serde::Serialize;
+
+    // ── token-frame fast path: wire equivalence ──────────────────────────────
+    //
+    // The fast path skips serde. That is only safe if it produces the SAME bytes
+    // the generic path would, so these tests encode one logical response both
+    // ways and compare.
+    //
+    // Byte equality, not just "both decode": the two paths are picked per frame
+    // *within a single response stream*, so any difference in map ordering or
+    // integer width would be a wire mismatch between consecutive frames of one
+    // response.
+    //
+    // The Python half — the shape and type checks in `parse_and_write_token_frame`
+    // — cannot be tested here, since these tests do not link libpython. It is
+    // covered by pytest against the built extension instead.
+
+    /// Stands in for the dict `handler_base.py` builds per token, with the fields
+    /// in the same order Python inserts them. msgpack writes a Rust struct as a
+    /// map, so this serializes exactly as that Python dict does.
+    ///
+    /// `u64`, not `u32`, to match what the fast path actually accepts: `exact_uint`
+    /// takes any value up to `u64::MAX`, so the comparison has to reach that far
+    /// too or the widest markers would go unchecked.
+    #[derive(Serialize)]
+    struct TokenFramePayload {
+        token_ids: Vec<u64>,
+        index: u64,
+    }
+
+    /// What the generic path puts on the wire for this frame.
+    fn generic_encoding(token_ids: &[u64], index: u64) -> Vec<u8> {
+        let (bytes, is_error) = encode_annotated_response(
+            RequestPlanePayloadCodec::Msgpack,
+            Annotated::from_data(TokenFramePayload {
+                token_ids: token_ids.to_vec(),
+                index,
+            }),
+        )
+        .expect("generic encode must succeed");
+        assert!(!is_error, "a token frame is never an error frame");
+        bytes
+    }
+
+    /// What the fast path puts on the wire for this frame.
+    fn fast_encoding(token_ids: &[u64], index: u64) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_token_frame_bytes(
+            token_ids.iter().copied().map(Some),
+            u32::try_from(token_ids.len()).expect("length fits u32"),
+            index,
+            &mut bytes,
+        )
+        .expect("fast encode must succeed");
+        bytes
+    }
+
+    /// Values on both sides of every msgpack uint marker boundary. msgpack picks
+    /// a different marker byte per magnitude, so these are where a hand-written
+    /// encoder would drift from `write_uint`. Runs to `u64::MAX` because that is
+    /// the largest value the fast path will accept.
+    const MAGNITUDES: [u64; 12] = [
+        0,
+        1,
+        127,           // largest positive fixint
+        128,           // first needing uint8
+        255,           // largest uint8
+        256,           // first needing uint16
+        65_535,        // largest uint16
+        65_536,        // first needing uint32
+        4_294_967_295, // largest uint32
+        4_294_967_296, // first needing uint64
+        u64::MAX - 1,
+        u64::MAX,
+    ];
+
+    fn assert_encodings_agree(token_ids: &[u64], index: u64) {
+        assert_eq!(
+            fast_encoding(token_ids, index),
+            generic_encoding(token_ids, index),
+            "fast and generic encodings diverged for token_ids={token_ids:?} index={index}"
+        );
+    }
+
+    /// Covers token id widths, plus list lengths on both sides of the fixarray
+    /// boundary where `write_array_len` switches marker.
+    #[test]
+    fn token_frame_matches_generic_encoding() {
+        let mut cases: Vec<Vec<u64>> = vec![
+            vec![],              // engine returned no new tokens
+            vec![5],             // the steady-state case
+            MAGNITUDES.to_vec(), // mixed widths in one list
+            (0..15).collect(),   // fixarray, at the limit
+            (0..16).collect(),   // first length needing array16
+            (0..40).collect(),   // comfortably past it
+        ];
+        cases.extend(MAGNITUDES.map(|magnitude| vec![magnitude]));
+
+        for token_ids in &cases {
+            assert_encodings_agree(token_ids, 0);
+        }
+    }
+
+    /// `index` is encoded independently of the token list, so it only needs its
+    /// own uint boundaries — no cross product with the cases above.
+    #[test]
+    fn token_frame_index_matches_generic_encoding() {
+        for index in MAGNITUDES {
+            assert_encodings_agree(&[5], index);
+        }
+    }
+
+    /// The frame must decode to the envelope the rest of the request plane
+    /// expects: `data` present, no error, not the end-of-stream marker.
+    ///
+    /// The byte-equality tests above compare the two paths to each other, so they
+    /// would pass if both were wrong in the same way. This one checks the result
+    /// independently.
+    #[test]
+    fn token_frame_decodes_as_a_non_terminal_data_frame() {
+        let bytes = fast_encoding(&[7, 8], 3);
+        let wrapper: NetworkStreamWrapper<Annotated<rmpv::Value>> =
+            RequestPlanePayloadCodec::Msgpack
+                .decode(&bytes)
+                .expect("fast-path frame must decode");
+
+        assert!(!wrapper.complete_final, "not the end-of-stream marker");
+        let annotated = wrapper.data.expect("frame carries data");
+        assert!(annotated.error.is_none(), "a token frame carries no error");
+        assert!(annotated.id.is_none() && annotated.event.is_none());
+
+        let data = annotated.data.expect("annotated data");
+        let fields = data.as_map().expect("payload is a map");
+        let field = |name: &str| {
+            fields
+                .iter()
+                .find(|(key, _)| key.as_str() == Some(name))
+                .map(|(_, value)| value)
+                .unwrap_or_else(|| panic!("payload must carry {name}"))
+        };
+        assert_eq!(
+            field("token_ids")
+                .as_array()
+                .expect("token_ids is an array")
+                .iter()
+                .map(|id| id.as_u64().expect("token id is a uint"))
+                .collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+        assert_eq!(field("index").as_u64(), Some(3));
+    }
+
+    /// A token the Python side could not convert must abort the whole frame,
+    /// never report a partial one as written. The caller rewinds on `None`.
+    #[test]
+    fn token_frame_aborts_on_an_unconvertible_token() {
+        let mut bytes = Vec::new();
+        assert!(
+            write_token_frame_bytes([Some(1), None, Some(3)].into_iter(), 3, 0, &mut bytes)
+                .is_none(),
+            "an unconvertible token must abort the frame"
+        );
+    }
+
+    /// If the declared count and the tokens actually yielded disagree, the array
+    /// header would lie about its length and the frame would not decode.
+    #[test]
+    fn token_frame_rejects_a_token_count_mismatch() {
+        let mut bytes = Vec::new();
+        assert!(
+            write_token_frame_bytes([Some(1), Some(2)].into_iter(), 3, 0, &mut bytes).is_none(),
+            "too few tokens for the declared count must abort the frame"
+        );
+    }
 
     // ── encode_annotated_response contract ───────────────────────────────────
     //
