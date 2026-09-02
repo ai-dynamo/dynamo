@@ -126,20 +126,16 @@ RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')
 
 {% if device == "cuda" %}
 # A.X-K2 support is not present in the upstream vLLM 0.26.0 runtime. Apply the
-# minimal forward-port from SKT's axk2-v0.23.0 branch directly to the installed
-# Python package. vLLM 0.26.0 already includes the newer upstream DSpark runtime,
-# but needs the later upstream sparse-MLA-plus-SWA-draft KV allocation fix.
-# Validate config conversion, registry wiring, and that cache grouping fallback
-# rather than overlaying SKT's older DSpark implementation on top of it.
+# four Python-only forward-port patches directly to the installed package in the
+# standard Dynamo vLLM runtime image. vLLM 0.26.0 already includes the newer
+# upstream DSpark runtime, but needs the later upstream sparse-MLA-plus-SWA-draft
+# KV allocation fix. Validate config conversion, registry wiring, and that cache
+# grouping fallback rather than overlaying SKT's older DSpark implementation.
 COPY --chmod=644 container/patches/vllm/axk2/*.patch /tmp/axk2-vllm-patches/
 COPY --chmod=755 container/deps/vllm/validate_axk2_port.py /tmp/validate_axk2_port.py
 RUN set -eux; \
     cd "${SITE_PACKAGES}"; \
     for patch_file in /tmp/axk2-vllm-patches/*.patch; do \
-        if [ "$(basename "${patch_file}")" = \
-            "0005-fix-kv-cache-round-fp8-ds-mla-tile-scales-for-ue8m0.patch" ]; then \
-            continue; \
-        fi; \
         patch --batch --forward -p1 < "${patch_file}"; \
     done; \
     python3 -m compileall -q \
