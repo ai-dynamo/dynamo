@@ -31,7 +31,9 @@ identity. The baseline comes from the baseline-source ladder, and the user's exp
 invariant at every rung:
 
 1. The user provides a DGD (`origin: user`).
-2. No user DGD, but the catalog has an exact or close recipe for the model, hardware, and backend: propose it —
+2. No user DGD, but the catalog has an exact or close recipe for the model, hardware, and backend (perform the
+   scan with the `find-serving-recipe` skill, which defines the catalog as an ordered set of sources with
+   provenance gates and produces the dossier this rung's evidence record cites): propose it —
    for a close match, with an explicit adaptation diff naming every changed field and its reason — and capture the
    user-confirmed manifest (`origin: recipe-confirmed`). Adaptation covers INFRASTRUCTURE PREREQUISITES, not just
    hardware fields: check the variant's requirements (gateway/service-mesh routing, referenced secrets, CRDs,
