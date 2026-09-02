@@ -221,6 +221,7 @@ pub struct CacheHistoryStats {
 /// been fed back through the model, so it has no corresponding KV entry.
 pub struct CacheHistoryRequest {
     prompt_tokens: Vec<u32>,
+    prompt_hashes: Vec<u64>,
     block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     lora_name: Option<String>,
     cache_namespace: Option<String>,
@@ -240,8 +241,20 @@ impl CacheHistoryRequest {
         block_size: u32,
         is_eagle: bool,
     ) -> Self {
+        let mut tokens_with_hashes =
+            TokensWithHashes::new(prompt_tokens.clone(), block_size).with_is_eagle(is_eagle);
+        if let Some(infos) = &block_mm_infos {
+            tokens_with_hashes = tokens_with_hashes.with_mm_infos(infos.clone());
+        }
+        if let Some(lora_name) = &lora_name {
+            tokens_with_hashes = tokens_with_hashes.with_lora_name(lora_name.clone());
+        }
+        if let Some(cache_namespace) = &cache_namespace {
+            tokens_with_hashes = tokens_with_hashes.with_cache_namespace(cache_namespace.clone());
+        }
         Self {
             prompt_tokens,
+            prompt_hashes: tokens_with_hashes.get_or_compute_seq_hashes().to_vec(),
             block_mm_infos,
             lora_name,
             cache_namespace,
@@ -251,10 +264,6 @@ impl CacheHistoryRequest {
             prompt_recorded: false,
             finalized: false,
         }
-    }
-
-    pub fn previously_computed_tokens(&self, history: &CacheHistory) -> u64 {
-        history.previously_computed_tokens(&self.sequence_hashes(&self.prompt_tokens))
     }
 
     pub fn observe_output(&mut self, output_index: u32, token_ids: &[u32]) {
@@ -267,7 +276,7 @@ impl CacheHistoryRequest {
     }
 
     pub fn prompt_hashes(&self) -> Vec<u64> {
-        self.sequence_hashes(&self.prompt_tokens)
+        self.prompt_hashes.clone()
     }
 
     pub fn output_hashes(&self) -> Vec<Vec<u64>> {
@@ -281,6 +290,9 @@ impl CacheHistoryRequest {
                     sequence.extend_from_slice(&self.prompt_tokens);
                     sequence.extend_from_slice(computed_output);
                     self.sequence_hashes(&sequence)
+                        .into_iter()
+                        .skip(self.prompt_hashes.len())
+                        .collect()
                 })
             })
             .collect()
@@ -404,15 +416,14 @@ mod tests {
     fn generated_history_excludes_the_newest_sampled_token() {
         let mut request =
             super::CacheHistoryRequest::new(vec![1, 2, 3, 4], None, None, None, 2, false);
-        request.observe_output(0, &[5, 6, 7]);
+        request.observe_output(0, &[5, 6, 7, 8]);
         let mut history = CacheHistory::new(32, 2);
         let prompt_hashes = request.prompt_hashes();
         let output_hashes = request.output_hashes();
         request.finalize(&mut history, prompt_hashes, output_hashes);
 
-        // Prompt has two complete blocks; prompt plus the first two generated
-        // tokens has three. The final sampled token is deliberately absent.
-        assert_eq!(history.stats().retained_records, 5);
+        // The newest sampled token has no corresponding KV entry.
+        assert_eq!(history.stats().retained_records, 3);
     }
 
     #[test]

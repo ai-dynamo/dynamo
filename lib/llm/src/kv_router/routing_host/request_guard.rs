@@ -80,9 +80,13 @@ struct MaterializedOutputBlocks {
 #[derive(serde::Deserialize)]
 struct CacheLossWorkerOutcome {
     complete: bool,
+    #[serde(default)]
     prompt_tokens: u64,
+    #[serde(default)]
     gpu_hit_tokens: u64,
+    #[serde(default)]
     cpu_hit_tokens: u64,
+    #[serde(default)]
     cpu_lookup_tokens: u64,
 }
 
@@ -618,6 +622,7 @@ where
     cache_history: Option<Arc<Mutex<CacheHistory>>>,
     cache_history_request: Option<CacheHistoryRequest>,
     cache_history_verified: bool,
+    cache_history_finalized: bool,
     _lora_load: Option<LoraLoadGuard>,
 }
 
@@ -695,6 +700,7 @@ where
             cache_history,
             cache_history_request,
             cache_history_verified: false,
+            cache_history_finalized: false,
             _lora_load: None,
         }
     }
@@ -729,6 +735,7 @@ where
             cache_history: None,
             cache_history_request: None,
             cache_history_verified: false,
+            cache_history_finalized: false,
             _lora_load: lora_load,
         }
     }
@@ -963,9 +970,10 @@ where
     }
 
     fn finalize_cache_history(&mut self) {
-        if !self.cache_history_verified {
+        if !self.cache_history_verified || self.cache_history_finalized {
             return;
         }
+        self.cache_history_finalized = true;
         let Some(history_request) = self.cache_history_request.as_mut() else {
             return;
         };
