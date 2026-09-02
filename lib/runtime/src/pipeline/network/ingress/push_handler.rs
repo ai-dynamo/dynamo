@@ -3,6 +3,7 @@
 
 use super::*;
 
+use crate::admission_gate;
 use crate::engine::AsyncEngineContext;
 use crate::metrics::prometheus_names::work_handler;
 use crate::metrics::work_handler_perf::{
@@ -107,6 +108,10 @@ impl WorkHandlerMetrics {
             "Total number of requests cancelled by work handler",
             metrics_labels,
         )?;
+
+        // The gate admits on this endpoint's behalf, so expose its family here
+        // too. Idempotent: the gate is process-global and every endpoint asks.
+        admission_gate::register_metrics(endpoint.get_metrics_registry());
 
         Ok(Self::new(
             request_counter,
@@ -638,11 +643,19 @@ where
         })?;
 
         tracing::trace!("calling generate");
-        let stream = self
-            .segment
-            .get()
-            .expect("segment not set")
-            .generate(request)
+        // The one backend admission point: `generate` is not polled unless a
+        // slot was taken, and the slot rides in the returned stream so every
+        // exit releases it. A refusal surfaces as an ordinary `generate`
+        // failure, leaving the error path below unchanged.
+        let context = request.context();
+        let stream = admission_gate::global()
+            .admit(
+                Some(context.as_ref()),
+                self.segment
+                    .get()
+                    .expect("segment not set")
+                    .generate(request),
+            )
             .await
             .map_err(|e| {
                 if let Some(m) = self.metrics() {
@@ -683,6 +696,8 @@ where
             }
         };
 
+        // Pumping this stream to the end, or dropping it, returns the admitted
+        // slot to the oldest queued request.
         self.pump_response_stream(stream, &publisher, payload_codec)
             .await;
 
