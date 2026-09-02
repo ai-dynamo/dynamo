@@ -26,10 +26,12 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model
+from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
 )
+from dynamo.common.utils.env import env_bool
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     EMBEDDING_CACHE_METRIC_PREFIX,
@@ -207,6 +209,7 @@ async def worker(argv: list[str] | None = None) -> None:
             config,
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
+        config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -221,6 +224,11 @@ async def worker(argv: list[str] | None = None) -> None:
         request_plane=config.request_plane,
         event_plane=config.event_plane,
     )
+
+    if snapshot_controller is not None:
+        # The flock lives on the open fd, not on any Python reference; the
+        # kernel releases it when the process exits.
+        await elect_and_wake(snapshot_controller.pause_controller, runtime)
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there

@@ -270,6 +270,9 @@ async def test_merges_encoder_images_with_local_video_and_decoded_fallback():
 @pytest.mark.asyncio
 async def test_extracts_uuid_only_media_as_aligned_none_slots():
     processor = _processor()
+    processor.embedding_loader = SimpleNamespace(
+        load_multimodal_embeddings=AsyncMock(return_value={})
+    )
     image = Image.new("RGB", (1, 1))
     image_items = [
         {"Url": "https://example.com/image.png"},
@@ -287,6 +290,7 @@ async def test_extracts_uuid_only_media_as_aligned_none_slots():
     processor.image_loader.load_image_batch.assert_awaited_once_with(
         image_items, preserve_uuid_slots=True
     )
+    processor.embedding_loader.load_multimodal_embeddings.assert_not_awaited()
 
 
 @pytest.mark.asyncio
