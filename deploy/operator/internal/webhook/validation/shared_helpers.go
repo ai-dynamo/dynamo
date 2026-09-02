@@ -28,6 +28,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	runtimefeatures "github.com/ai-dynamo/dynamo/deploy/operator/internal/features/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -52,7 +53,6 @@ type runtimeVersionValidationSource uint8
 const (
 	runtimeVersionSourceV1Beta1 runtimeVersionValidationSource = iota
 	runtimeVersionSourceV1Alpha1
-	runtimeVersionSourceDisabled
 )
 
 // runtimeVersionValidationSourceForRequest uses RequestKind because it preserves
@@ -79,6 +79,10 @@ func runtimeVersionValidationSourceForGVK(gvk schema.GroupVersionKind) runtimeVe
 }
 
 func (v *sharedValidation) validatesRuntimeVersionFor(source runtimeVersionValidationSource) bool {
+	return !v.ratchetRuntimeVersion && v.runtimeVersionSource == source
+}
+
+func (v *sharedValidation) hasRuntimeVersionSource(source runtimeVersionValidationSource) bool {
 	return v.runtimeVersionSource == source
 }
 
@@ -113,6 +117,21 @@ func runtimeVersionImageAndPathV1Alpha1(
 	return "", imagePath
 }
 
+// toleratesMissingRuntimeVersionOverride reports whether componentType may omit
+// runtimeVersionOverride when its image tag carries no resolvable version.
+//
+// EPP is never exempt. Whether eppConfig is required (legacy Go EPP) or
+// forbidden (native Rust EPP, 1.5.0+) is decided entirely by the resolved
+// runtime version, so an unresolvable version enforces neither half of the
+// rule: eppRuntimeCompatibilityError returns nil and the component is admitted
+// with no contract checked at all. Standalone DynamoComponentDeployments set
+// allowMissingRuntimeVersionOverride, so without this carve-out an EPP DCD on a
+// non-semver tag (a CI sha tag, :latest, a digest ref) would silently skip the
+// check that the DynamoGraphDeployment path still performs.
+func (v *sharedValidation) toleratesMissingRuntimeVersionOverride(componentType string) bool {
+	return v.allowMissingRuntimeVersionOverride && componentType != consts.ComponentTypeEPP
+}
+
 // runtimeVersionOverrideRequired reports whether image cannot provide a version and override is absent.
 func runtimeVersionOverrideRequired(image, override string) bool {
 	if override != "" {
@@ -120,6 +139,87 @@ func runtimeVersionOverrideRequired(image, override string) bool {
 	}
 	_, err := runtimeversion.ParseImageVersion(image)
 	return err != nil
+}
+
+type eppRuntimeContract struct {
+	componentType          string
+	image                  string
+	runtimeVersionOverride string
+	hasEPPConfig           bool
+}
+
+// eppRuntimeContractV1Beta1 returns the complete runtime-contract inputs represented by spec.
+// spec must not be nil. image is the source-version main container image.
+func eppRuntimeContractV1Beta1(spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, image string) eppRuntimeContract {
+	return eppRuntimeContract{
+		componentType:          string(spec.ComponentType),
+		image:                  image,
+		runtimeVersionOverride: spec.RuntimeVersionOverride,
+		hasEPPConfig:           spec.EPPConfig != nil,
+	}
+}
+
+// eppRuntimeContractV1Alpha1 returns the complete runtime-contract inputs represented by spec.
+// spec must not be nil. image is the source-version main container image.
+func eppRuntimeContractV1Alpha1(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, image string) eppRuntimeContract {
+	return eppRuntimeContract{
+		componentType:          spec.ComponentType,
+		image:                  image,
+		runtimeVersionOverride: spec.RuntimeVersionOverride,
+		hasEPPConfig:           spec.EPPConfig != nil,
+	}
+}
+
+// eppRuntimeCompatibilityError returns the cross-field error for an EPP runtime-contract mismatch.
+// Invalid or unavailable runtime versions are reported by the runtime-version
+// validator instead, which for an EPP component always demands a resolvable
+// version (see toleratesMissingRuntimeVersionOverride) -- so returning nil here
+// defers the report rather than admitting an unchecked contract.
+func eppRuntimeCompatibilityError(contract eppRuntimeContract, eppConfigPath *field.Path) *field.Error {
+	if contract.componentType != consts.ComponentTypeEPP {
+		return nil
+	}
+
+	version, err := runtimeversion.Resolve(contract.image, contract.runtimeVersionOverride)
+	if err != nil {
+		return nil
+	}
+
+	if runtimefeatures.NativeRustEPP.Enabled(&version) {
+		if contract.hasEPPConfig {
+			return field.Forbidden(
+				eppConfigPath,
+				"must be omitted for native Rust EPP images with runtime version 1.5.0 or later",
+			)
+		}
+		return nil
+	}
+
+	if !contract.hasEPPConfig {
+		return field.Required(
+			eppConfigPath,
+			"is required for legacy Go EPP images with runtime version earlier than 1.5.0",
+		)
+	}
+	return nil
+}
+
+// eppRuntimeCompatibilityUpdateError ratchets only an identical pre-existing contract violation.
+// eppConfigPath must not be nil. sameEPPConfig reports full source-version value equality.
+func eppRuntimeCompatibilityUpdateError(
+	newContract eppRuntimeContract,
+	oldContract eppRuntimeContract,
+	sameEPPConfig bool,
+	eppConfigPath *field.Path,
+) *field.Error {
+	newErr := eppRuntimeCompatibilityError(newContract, eppConfigPath)
+	if newErr == nil {
+		return nil
+	}
+	if newContract == oldContract && sameEPPConfig {
+		return nil
+	}
+	return newErr
 }
 
 func hasContainerNamed(containers []corev1.Container, name string) bool {

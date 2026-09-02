@@ -15,6 +15,7 @@
 
 import asyncio
 import dataclasses
+import inspect
 import logging
 import os
 import re
@@ -1240,16 +1241,66 @@ class HandlerBase(BaseGenerativeHandler):
             conv_kwargs = (
                 {"conversation_params": conversation_params} if conv_affinity else {}
             )
-            generation_result = self.engine.llm.generate_async(
-                inputs=processed_input,  # Use the correctly extracted inputs
-                sampling_params=sampling_params,
-                disaggregated_params=disaggregated_params,
-                streaming=streaming,
-                trace_headers=trace_headers,
-                scheduling_params=scheduling_params,
+            generate_kwargs = {
+                "inputs": processed_input,  # Use the correctly extracted inputs
+                "sampling_params": sampling_params,
+                "disaggregated_params": disaggregated_params,
+                "streaming": streaming,
+                "trace_headers": trace_headers,
+                "scheduling_params": scheduling_params,
                 **conv_kwargs,
-                priority=priority,
-                cache_salt=cache_salt,
+                "priority": priority,
+                "cache_salt": cache_salt,
+            }
+            generate_async = self.engine.llm.generate_async
+            try:
+                generation_result = generate_async(**generate_kwargs)
+            except (ValueError, TypeError, NotImplementedError) as e:
+                # TRT-LLM performs request validation and preprocessing synchronously in
+                # `generate_async()`, before executor submission. A TypeError can also mean
+                # Dynamo called an incompatible TRT-LLM API, so only treat it as request-local
+                # when the call itself matches a meaningful runtime signature. The same
+                # exception types during result iteration can indicate an executor bug and should
+                # continue through the fatal path below.
+                if isinstance(e, TypeError) and not _call_signature_accepts_kwargs(
+                    generate_async, generate_kwargs
+                ):
+                    raise
+                error_msg = str(e)
+                logging.warning(
+                    "Request %s rejected during request validation (%s): %s",
+                    request_id,
+                    type(e).__name__,
+                    error_msg,
+                )
+                yield {
+                    "finish_reason": {"error": error_msg},
+                    "token_ids": [],
+                }
+                return
+
+            # Log the Dynamo-to-engine request-ID mapping exactly once per
+            # request, immediately after submission. This is the only place the
+            # Dynamo request UUID, the TRT-LLM executor client ID, and (in
+            # disaggregated mode) the cross-phase disagg_request_id coexist, and
+            # none of them is persisted together anywhere else. The line makes
+            # every engine-side per-request record (e.g. a perf-metrics JSONL
+            # keyed by the executor client ID, or requestStats keyed by the
+            # disagg ID) joinable to Dynamo traces, spans, and logs offline.
+            # Notes for consumers: the client ID is a per-worker-process
+            # counter, so join it only within this worker's own log; logging
+            # before the response iteration starts means cancelled requests
+            # still leave their mapping behind.
+            # context.id() is the canonical request UUID (the payload's id field
+            # is not guaranteed on every path), and this handler already treats
+            # it as authoritative elsewhere.
+            logging.info(
+                "Engine ID map: request_id=%s trtllm_client_id=%s disagg_request_id=%s",
+                context.id(),
+                getattr(generation_result, "request_id", None),
+                disaggregated_params.disagg_request_id
+                if disaggregated_params
+                else None,
             )
 
             # In disagg decode mode with remote prefill, wrap abort() to defer
@@ -1573,3 +1624,24 @@ class HandlerBase(BaseGenerativeHandler):
         # 1. it catches unsupported fields / attributes.
         # 2. it executes the class's `__post_init__`, which may contain helpful validation logic.
         return dataclasses.replace(sampling_params, **overrides)
+
+
+def _call_signature_accepts_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> bool:
+    """Return whether a meaningfully inspectable callable accepts `kwargs`."""
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return False
+
+    if all(
+        parameter.kind
+        in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        for parameter in signature.parameters.values()
+    ):
+        return False
+
+    try:
+        signature.bind(**kwargs)
+    except TypeError:
+        return False
+    return True
