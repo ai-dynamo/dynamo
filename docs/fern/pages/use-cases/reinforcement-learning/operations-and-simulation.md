@@ -134,7 +134,7 @@ engine:
   backend: vllm
   workers:
     aggregated:
-      parallelism: {replicas: 4}
+      parallelism: {replicas: 4, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
 router:
   policy: kv_router
 ```

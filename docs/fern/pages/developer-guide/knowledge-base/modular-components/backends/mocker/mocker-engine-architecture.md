@@ -91,8 +91,8 @@ The unified AISimulate configuration exposes three timing modes under
 - **`polynomial`** uses hardcoded polynomial formulas. Prefill time scales quadratically with token
   count, while decode time depends on the total active KV cache size.
 
-The removed public Mocker CLI flags, including `--aic-perf-model`, are not inputs to
-`aisimulate predict` or `aisimulate recommend`.
+The live Mocker CLI flags, including `--aic-perf-model`, are separate from the inputs to
+`aisimulate predict` and `aisimulate recommend`.
 
 ## Bootstrap Rendezvous (Disaggregated Serving)
 

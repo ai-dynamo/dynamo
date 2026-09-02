@@ -175,3 +175,25 @@ def test_materialize_dgd_rejects_non_object_dgd() -> None:
             [{"kind": "ConfigMap"}, "not-an-object"],
             purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
         )
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        (["python3", "-m", "dynamo.mocker"], []),
+        (["sh", "-c"], ["python3 -m dynamo.mocker --model-path test/model"]),
+    ],
+)
+def test_mocker_detection_matches_discrete_command_tokens(command, args) -> None:
+    assert dgd_materialization._invokes_mocker(command, args)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-m", "dynamo.worker", "--model", "org/dynamo.mocker-model"],
+        ["-m", "dynamo.worker", "--endpoint", "dyn://dynamo.mocker.generate"],
+    ],
+)
+def test_mocker_detection_rejects_substring_matches(args) -> None:
+    assert not dgd_materialization._invokes_mocker(["python3"], args)

@@ -10,7 +10,7 @@ import logging
 from enum import Enum
 from typing import Any
 
-from dynamo.profiler.utils.config import get_main_container_dict
+from dynamo.profiler.utils.config import break_arguments, get_main_container_dict
 from dynamo.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from dynamo.profiler.utils.dgd_override import apply_dgd_overrides
 from dynamo.profiler.utils.model_info import (
@@ -143,6 +143,13 @@ _TRUST_REMOTE_CODE_FLAG = "--trust-remote-code"
 _WORKER_COMPONENT_TYPES = frozenset({"worker", "prefill", "decode"})
 
 
+def _invokes_mocker(
+    command: list[str] | str | None, args: list[str] | str | None
+) -> bool:
+    """Return whether a container command invokes the public Mocker module."""
+    return "dynamo.mocker" in break_arguments(command) + break_arguments(args)
+
+
 def _all_workers_already_have_trust_flag(config: dict) -> bool:
     """Return True when every worker component carries --trust-remote-code.
 
@@ -167,8 +174,7 @@ def _all_workers_already_have_trust_flag(config: dict) -> bool:
         cmd = main_container.get("command") or []
 
         # Skip mocker workers — they never carry the flag.
-        all_tokens = " ".join(str(t) for t in (list(cmd) + list(args)))
-        if "dynamo.mocker" in all_tokens:
+        if _invokes_mocker(cmd, args):
             continue
 
         is_shell_c = (
@@ -217,8 +223,7 @@ def _inject_trust_remote_code_flag(config: dict) -> None:
         cmd = main_container.get("command") or []
 
         # Skip mocker workers — their argparse does not accept the flag.
-        all_tokens = " ".join(str(t) for t in (list(cmd) + list(args)))
-        if "dynamo.mocker" in all_tokens:
+        if _invokes_mocker(cmd, args):
             continue
 
         # Detect shell form: command=["sh","-c"] with a single-string args.

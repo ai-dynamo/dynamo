@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import subprocess
+import sys
 
 import pytest
 
@@ -15,4 +17,16 @@ pytestmark = [
 
 def test_public_mocker_module_cli_is_available() -> None:
     assert importlib.util.find_spec("dynamo.mocker.__main__") is not None
-    assert importlib.util.find_spec("dynamo.mocker._worker") is None
+
+
+@pytest.mark.parametrize("option", ["--help", "--version"])
+def test_public_mocker_module_cli_executes(option: str) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "dynamo.mocker", option],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout

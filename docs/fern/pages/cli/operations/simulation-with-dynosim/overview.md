@@ -21,7 +21,7 @@ Use DynoSim when you want to answer questions such as:
 | DynoSim prediction | `aisimulate predict --stack dynamo` | Runs one workload against one simulated Dynamo configuration and emits metrics plus a report |
 | DynoSim recommendation | `aisimulate recommend --stack dynamo` | Searches simulation trials across parallelism, worker split, router knobs, service-level objective (SLO) constraints, and GPU budget |
 | Live Mocker workers | `python3 -m dynamo.mocker` | Registers simulated workers with the live Dynamo runtime; does not generate replay traffic |
-| Replay online mode | Unavailable | Will return through the unified AISimulate CLI in a future release |
+| Public Replay online CLI | Unavailable | Will return through the unified AISimulate CLI in a future release; the Python replay SDK retains online mode |
 | Mocker core | `lib/mocker` | Models engine scheduling, KV allocation, prefix caching, preemption, and timing |
 | AISimulate performance model | `timing.type: default` in the AISimulate YAML | Supplies calibrated timing and candidate-shape data for supported model/backend/GPU tuples |
 | Planner simulation | `planner` in the AISimulate YAML | Runs Planner decisions in the simulation loop to study scaling behavior and SLO compliance |

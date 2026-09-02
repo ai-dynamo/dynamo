@@ -1,7 +1,7 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-# Live Mocker worker launcher. Offline virtual-clock replay lives in AISimulate.
+# Offline virtual-clock replay lives in AISimulate.
 
 import argparse
 import asyncio

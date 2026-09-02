@@ -10,7 +10,8 @@ engine-specific scheduler and KV-cache state. Offline prediction and live Mocker
 same core through virtual-time and wall-clock execution, respectively.
 
 Run `python3 -m dynamo.mocker` to launch live workers. This worker launcher is separate from the
-former Replay online mode, which remains unavailable in the unified AISimulate CLI.
+former public Replay online CLI, which remains unavailable in the unified AISimulate CLI. The
+Python replay SDK retains online mode for programmatic callers.
 
 ## Engine Behavior
 
@@ -41,9 +42,9 @@ events. The SGLang core uses its own token-pool and radix-cache implementation.
 Scheduler state determines the batch and cache-hit inputs to the timing source. Choose one timing
 source for each worker role with `engine.workers.<role>.timing.type`.
 
-The removed public Mocker CLI options for profile-derived interpolation and direct `--aic-*`
-configuration are not part of the unified CLI. Use only the timing types accepted by the
-AISimulate YAML schema.
+The live Mocker CLI options for profile-derived interpolation and direct `--aic-*` configuration
+are separate from the unified CLI. In AISimulate configurations, use only the timing types accepted
+by the AISimulate YAML schema.
 
 ### AISimulate Performance Model
 
@@ -127,5 +128,5 @@ Interpret simulation results within these boundaries:
 - Mocker simulates text-token processing; it does not model multimodal encoder or cross-attention
   compute.
 
-Use offline prediction for broad algorithm and configuration exploration. Validate the distributed
-path with focused GPU benchmarks until online simulation returns.
+Use offline prediction for broad algorithm and configuration exploration. Use live Mocker workers
+to exercise the distributed path, and validate performance conclusions with focused GPU benchmarks.

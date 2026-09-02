@@ -50,9 +50,11 @@ Benefits:
 
 Quick Start:
 
-Online Mocker simulation is temporarily unavailable. Use
-aisimulate predict --stack dynamo for offline simulation. Online simulation will return through
-the unified AISimulate CLI in a future release.
+Start a live Mocker worker with:
+> python3 -m dynamo.mocker --model-path Qwen/Qwen3-0.6B
+
+Use aisimulate predict --stack dynamo for offline virtual-clock simulation. The former public
+Replay online CLI is temporarily unavailable; the live Mocker worker CLI remains available.
 
 Start frontend server:
 > python -m dynamo.frontend --http-port 8000

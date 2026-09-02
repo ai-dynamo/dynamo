@@ -432,8 +432,8 @@ The Mocker engine models backend behavior without running inference. Use
 workload/configuration trial and
 [DynoSim Sweeps](../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx) to search candidate
 configurations. Use [Mocker Live Simulation](../../cli/operations/simulation-with-dynosim/mocker-live-simulation.mdx)
-to launch live simulated workers through the Dynamo runtime. The former Replay online mode remains
-unavailable.
+to launch live simulated workers through the Dynamo runtime. The former public Replay online CLI
+remains unavailable, although the Python replay SDK retains online mode.
 
 ---
 
