@@ -55,9 +55,6 @@ fn capture_http_headers_with_list(
     (!out.is_empty()).then_some(out)
 }
 
-/// Fallback reason for a record that has no response and no stated reason. A
-/// consumer should never see this; it means a call site dropped the response
-/// without saying why.
 const DROP_UNSPECIFIED: &str = "unspecified";
 
 pub struct RequestPayloadHandle {
