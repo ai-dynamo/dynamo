@@ -50,7 +50,6 @@ impl PayloadOutcome {
     }
 }
 
-/// The response stream ended without ever yielding a chunk.
 const DROP_EMPTY_RESPONSE_STREAM: &str = "empty_response_stream";
 
 /// The aggregation never reported an outcome at all: the SSE consumer dropped the
@@ -205,6 +204,24 @@ where
     )
 }
 
+/// A well-formed response carrying no choices, sent to the client when aggregation
+/// failed so the HTTP response shape stays valid.
+fn empty_fallback_response() -> NvCreateChatCompletionResponse {
+    NvCreateChatCompletionResponse {
+        inner: dynamo_protocols::types::CreateChatCompletionResponse {
+            id: String::new(),
+            created: 0,
+            usage: None,
+            model: String::new(),
+            object: "chat.completion".to_string(),
+            system_fingerprint: None,
+            choices: vec![],
+            service_tier: None,
+        },
+        nvext: None,
+    }
+}
+
 /// Collect all chunks, aggregate them, then emit a single final chunk (for non-streaming)
 pub fn fold_aggregate_with_future<S>(stream: S) -> (PayloadStream, PayloadFuture)
 where
@@ -214,35 +231,18 @@ where
 
     let single_chunk_stream = async move {
         let chunks: Vec<_> = stream.collect().await;
-        let chunks_stream = futures::stream::iter(chunks);
         let parsing_options = ParsingOptions::default();
+        let outcome = aggregate_with_partial_recovery(chunks, parsing_options).await;
 
-        match DeltaAggregator::apply(chunks_stream, parsing_options).await {
-            Ok(final_resp) => {
-                let _ = tx.send(PayloadOutcome::complete(final_resp.clone()));
-                final_response_to_one_chunk_stream(final_resp)
-            }
-            Err(e) => {
-                tracing::warn!("fold aggregation failed: {e}");
-                // The client still receives a (best-effort) empty fallback chunk so the
-                // HTTP response shape stays valid; the record carries this reason instead.
-                let _ = tx.send(PayloadOutcome::dropped(None, aggregation_failed_reason(&e)));
-                let fallback = NvCreateChatCompletionResponse {
-                    inner: dynamo_protocols::types::CreateChatCompletionResponse {
-                        id: String::new(),
-                        created: 0,
-                        usage: None,
-                        model: String::new(),
-                        object: "chat.completion".to_string(),
-                        system_fingerprint: None,
-                        choices: vec![],
-                        service_tier: None,
-                    },
-                    nvext: None,
-                };
-                final_response_to_one_chunk_stream(fallback)
-            }
-        }
+        // A dropped outcome may still carry the pre-error prefix for the record, but the
+        // client gets the empty fallback either way: a truncated aggregation presented as
+        // the whole answer is worse than an empty one the caller can recognize as such.
+        let client_response = match (&outcome.drop_reason, &outcome.response) {
+            (None, Some(complete)) => complete.clone(),
+            _ => empty_fallback_response(),
+        };
+        let _ = tx.send(outcome);
+        final_response_to_one_chunk_stream(client_response)
     };
 
     let future = Box::pin(async move {
@@ -837,6 +837,10 @@ mod tests {
             .as_deref()
             .expect("an errored stream must carry a drop reason");
         assert!(
+            reason.starts_with("aggregation_failed:"),
+            "reason should use the colon-delimited grammar, got {reason}"
+        );
+        assert!(
             reason.contains("invalid sampling parameter"),
             "the record must name the backend error rather than report a client cancel, got {reason}"
         );
@@ -847,50 +851,6 @@ mod tests {
         assert_eq!(
             partial.inner.choices[0].message.content.as_ref().unwrap(),
             &ChatCompletionMessageContent::Text("Hello ".to_string()),
-        );
-    }
-
-    #[tokio::test]
-    async fn error_chunk_mid_stream_keeps_partial_content_and_names_the_error() {
-        let chunks = vec![
-            create_mock_chunk("Hello ".to_string(), 0),
-            Annotated::<NvCreateChatCompletionStreamResponse>::from_error(
-                "invalid sampling parameter",
-            ),
-            create_mock_chunk("never delivered".to_string(), 0),
-        ];
-
-        let input_stream = stream::iter(chunks.clone());
-        let (passthrough, future) = scan_aggregate_with_future(input_stream);
-        let results: Vec<_> = passthrough.collect().await;
-        let outcome = future.await;
-
-        assert_eq!(
-            results.len(),
-            chunks.len(),
-            "the error chunk must still reach the client unchanged"
-        );
-
-        let reason = outcome
-            .drop_reason
-            .as_deref()
-            .expect("an errored stream must carry a drop reason");
-        assert!(
-            reason.starts_with("aggregation_failed:"),
-            "reason should use the colon-delimited grammar, got {reason}"
-        );
-        assert!(
-            reason.contains("invalid sampling parameter"),
-            "reason should name the underlying error, got {reason}"
-        );
-
-        let partial = outcome
-            .response
-            .expect("content delivered before the error must be preserved");
-        assert_eq!(
-            partial.inner.choices[0].message.content.as_ref().unwrap(),
-            &ChatCompletionMessageContent::Text("Hello ".to_string()),
-            "only the pre-error prefix should be aggregated"
         );
     }
 
@@ -920,6 +880,54 @@ mod tests {
         assert!(
             reason.contains("backend unavailable"),
             "reason should name the underlying error, got {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fold_error_after_content_records_the_prefix_and_sends_the_fallback() {
+        let chunks = vec![
+            create_mock_chunk("Hello ".to_string(), 0),
+            Annotated::<NvCreateChatCompletionStreamResponse>::from_error(
+                "invalid sampling parameter",
+            ),
+        ];
+
+        let (folded, future) = fold_aggregate_with_future(stream::iter(chunks));
+        let delivered: Vec<_> = folded.collect().await;
+        let outcome = future.await;
+
+        assert_eq!(delivered.len(), 1, "the fold path emits a single chunk");
+        assert!(
+            delivered[0]
+                .data
+                .as_ref()
+                .expect("the fallback chunk carries a body")
+                .inner
+                .choices
+                .is_empty(),
+            "the client gets the empty fallback, not the truncated aggregation"
+        );
+
+        let reason = outcome
+            .drop_reason
+            .as_deref()
+            .expect("an errored fold must carry a drop reason");
+        assert!(
+            reason.starts_with("aggregation_failed:"),
+            "reason should use the colon-delimited grammar, got {reason}"
+        );
+        assert!(
+            reason.contains("invalid sampling parameter"),
+            "reason should name the underlying error, got {reason}"
+        );
+
+        let partial = outcome
+            .response
+            .expect("content collected before the error must reach the record");
+        assert_eq!(
+            partial.inner.choices[0].message.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Hello ".to_string()),
+            "only the pre-error prefix should be aggregated"
         );
     }
 }
