@@ -182,6 +182,7 @@ def test_materialize_dgd_rejects_non_object_dgd() -> None:
     [
         (["python3", "-m", "dynamo.mocker"], []),
         (["sh", "-c"], ["python3 -m dynamo.mocker --model-path test/model"]),
+        (["python3", "-m", "dynamo.mocker._worker"], []),
     ],
 )
 def test_mocker_detection_matches_discrete_command_tokens(command, args) -> None:

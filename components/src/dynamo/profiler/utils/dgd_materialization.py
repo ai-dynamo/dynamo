@@ -141,12 +141,15 @@ def _materialize_dgd_document(
 _TRUST_REMOTE_CODE_BACKENDS = frozenset({"vllm", "sglang"})
 _TRUST_REMOTE_CODE_FLAG = "--trust-remote-code"
 _WORKER_COMPONENT_TYPES = frozenset({"worker", "prefill", "decode"})
+_MOCKER_MODULES = frozenset({"dynamo.mocker", "dynamo.mocker._worker"})
 
 
 def _invokes_mocker(
     command: list[str] | str | None, args: list[str] | str | None
 ) -> bool:
-    return "dynamo.mocker" in break_arguments(command) + break_arguments(args)
+    return not _MOCKER_MODULES.isdisjoint(
+        break_arguments(command) + break_arguments(args)
+    )
 
 
 def _all_workers_already_have_trust_flag(config: dict) -> bool:
