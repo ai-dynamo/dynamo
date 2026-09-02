@@ -56,3 +56,34 @@ The default dataset is the converted GSM8K test split at
 `../../../../../../datasets/gsm8k/batch-gateway/gsm8k-main-test.jsonl`.
 The source file remains read-only; each run writes its exact normalized slice
 into that run's raw artifact directory.
+
+## Current Status
+
+The end-to-end native POC is complete. Canonical run
+`20260828T213549Z-planner-native-1e3ff8` began with worker DGDSA spec/status
+`0/0`, no worker pod, and a Grove/KAI-gated frontend. A new durable Gateway job
+caused Planner to publish floor 1/cap 0, scale the owned DGDSA `0 -> 1`, wait for
+readiness, open cap 5, drain 100/100 with zero failures, and return floor/cap to
+zero. Async dispatched and successful counters both increased by exactly 100;
+terminal backlog, in-flight, and queue depth were zero. The machine verifier
+passed all 15 assertions and the compiler reported zero data-quality issues.
+
+The earlier stock, standalone-controlled, and warm native runs remain useful
+comparators. The standalone runner's replica recommendation remains advisory;
+only the native Planner path owns Kubernetes scaling.
+
+## Key Evidence
+
+- [Baseline input research](research/20260828-baseline-inputs.md)
+- [Local preflight report](reports/20260828-local-preflight.md)
+- [Control-loop runner report](reports/20260828-control-loop-runner.md)
+- [Stock live baseline report](reports/20260828-stock-live-baseline.md)
+- [Planner-controlled live report](reports/20260828-controlled-live.md)
+- [Native autonomous E2E report](reports/20260828-native-planner-e2e.md)
+
+## Next Action
+
+Add a fixed concurrent online workload to compare online latency under stock,
+standalone-controlled, and native Planner-controlled batch drain. If automatic
+post-batch worker scale-down is desired, add it to the normal load-planner
+policy; the batch replica floor intentionally remains a lower bound.

@@ -21,6 +21,18 @@ flowchart LR
     frontend --> worker["Dynamo worker"]
 ```
 
+## Validation Evidence
+
+Canonical run `20260828T213549Z-planner-native-1e3ff8` began with the
+worker DGDSA at zero and the existing frontend pod held SchedulingGated by
+Grove/KAI. A new Gateway job caused Planner to keep admission at zero, scale
+only the owned worker DGDSA `0 -> 1`, wait for readiness, open a 5-RPS cap,
+drain 100/100 requests with zero failures, and return the batch floor and cap to
+zero. The worker remained at one because the floor is a lower bound rather than
+a scale-down instruction. See the
+[native E2E report](experiment/reports/20260828-native-planner-e2e.md) and the
+[experiment index](experiment/index.md) for the full evidence corpus.
+
 The POC focuses on plumbing, fail-closed control, autonomous worker recovery,
 and batch-only execution. Due-date optimization, concurrent online SLA
 protection, fairness among jobs/tenants, and post-batch scale-down remain future
