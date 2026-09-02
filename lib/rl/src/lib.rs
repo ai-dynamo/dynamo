@@ -42,6 +42,48 @@ const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_MAX_CONCURRENT_PROBES: usize = 32;
 const RL_WORKERS_PROTOCOL_VERSION: u32 = 1;
 
+/// Validated base URL for worker-specific RL HTTP administration routes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RlAdminBaseUrl(String);
+
+impl RlAdminBaseUrl {
+    pub fn parse(raw: &str) -> anyhow::Result<Self> {
+        let value = raw.trim();
+        if value.is_empty() {
+            anyhow::bail!("RL admin base URL must not be blank");
+        }
+        let parsed = url::Url::parse(value)
+            .map_err(|error| anyhow::anyhow!("invalid RL admin base URL: {error}"))?;
+        let has_valid_authority = value
+            .split_once("://")
+            .is_some_and(|(_, authority)| !authority.is_empty() && !authority.starts_with('/'));
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host_str().is_none()
+            || !has_valid_authority
+        {
+            anyhow::bail!("RL admin base URL must use HTTP or HTTPS and include a host");
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            anyhow::bail!("RL admin base URL must not include user information");
+        }
+        if parsed.query().is_some() {
+            anyhow::bail!("RL admin base URL must not include a query string");
+        }
+        if parsed.fragment().is_some() {
+            anyhow::bail!("RL admin base URL must not include a fragment");
+        }
+        Ok(Self(value.to_string()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
 type ModelKey = (String, String, u64);
 
 #[derive(Clone)]
@@ -456,14 +498,14 @@ fn parse_worker_routes(value: serde_json::Value) -> anyhow::Result<WorkerRoutes>
     let admin_base_url = value
         .get("admin_base_url")
         .map(|value| {
-            let url = value.as_str().ok_or_else(|| {
+            let raw = value.as_str().ok_or_else(|| {
                 anyhow::anyhow!("worker routes response has invalid 'admin_base_url'")
             })?;
-            let url = url.trim();
-            if url.is_empty() {
-                anyhow::bail!("worker routes response has invalid 'admin_base_url'");
-            }
-            Ok(url.to_string())
+            RlAdminBaseUrl::parse(raw)
+                .map(RlAdminBaseUrl::into_string)
+                .map_err(|error| {
+                    anyhow::anyhow!("worker routes response has invalid 'admin_base_url': {error}")
+                })
         })
         .transpose()?;
 
@@ -665,7 +707,13 @@ mod tests {
 
     #[test]
     fn parse_worker_routes_rejects_invalid_admin_base_url() {
-        for value in [json!("   "), json!(42)] {
+        for value in [
+            json!("   "),
+            json!(42),
+            json!("https://user:token@worker.example.com/admin"),
+            json!("https://worker.example.com/admin?token=secret"),
+            json!("https://worker.example.com/admin#fragment"),
+        ] {
             let err = parse_worker_routes(json!({
                 "routes": [],
                 "admin_base_url": value,

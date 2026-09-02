@@ -33,7 +33,14 @@ where
                 phase,
                 is_query_only,
                 SelectionOptions {
-                    affinity_target,
+                    pinned_target: match self.session_affinity_mode {
+                        SessionAffinityMode::Hard => affinity_target,
+                        SessionAffinityMode::Soft => None,
+                    },
+                    affinity_target: match self.session_affinity_mode {
+                        SessionAffinityMode::Hard => None,
+                        SessionAffinityMode::Soft => affinity_target,
+                    },
                     planned_worker,
                     policy_class,
                     session_context,
@@ -176,7 +183,7 @@ where
                 Arc::clone(self.kv_router()),
                 request.context().id().to_string(),
                 selection.worker,
-                true,
+                selection.attempt,
             ),
             selection,
             affinity,
@@ -194,26 +201,30 @@ where
             mut affinity,
             ..
         } = plan;
+        let selected_target = route_target(selection.worker);
         let guard = match self
             .track_planned_selection(&request, &mut selection, cleanup)
             .await
         {
             Ok(guard) => guard,
-            Err(error) => {
-                invalidate_on_non_cancellation(&mut affinity, &error);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
-        let selected_target = route_target(selection.worker);
         let stream = match self.dispatch_selection(request, selection, guard).await {
             Ok(stream) => stream,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut affinity, &error);
+                if self.session_affinity_mode == SessionAffinityMode::Hard
+                    && !self.affinity_target_is_valid(selected_target)
+                    && let Some(operation) = affinity.take()
+                {
+                    operation.invalidate();
+                }
                 return Err(error);
             }
         };
         match affinity {
-            Some(affinity) => affinity.into_stream(selected_target, stream),
+            Some(affinity) => {
+                affinity.into_stream(selected_target, stream, self.session_affinity_mode)
+            }
             None => Ok(stream),
         }
     }
@@ -290,8 +301,8 @@ where
                 self.request_metrics.clone(),
                 context_id.clone(),
                 selected_worker,
+                selection.attempt,
                 request,
-                !is_query_only,
             ),
         };
 
@@ -385,6 +396,7 @@ where
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let context_id = request.context().id().to_string();
         let request_context = request.context().clone();
+        let route_trace_context = get_route_trace_context(&request);
         let phase = request
             .tracker
             .as_ref()
@@ -419,22 +431,41 @@ where
         let dispatch = self
             .inner
             .dispatch_kv_admitted(updated_request, selection.worker.worker_id);
+        let route_span = tracing::info_span!(
+            target: "request_span",
+            "kv_router.route_request",
+            otel.kind = "client",
+            request_id = %context_id,
+            worker_id = tracing::field::Empty,
+            dp_rank = selection.worker.dp_rank,
+            overlap_blocks = selection.overlap_amount,
+            phase = ?phase,
+            "request.attempt" = tracing::field::Empty,
+            "request.outcome" = tracing::field::Empty,
+            "migration.is_retry" = tracing::field::Empty,
+            "migration.reason" = tracing::field::Empty,
+            "migration.from_worker_id" = tracing::field::Empty,
+            "migration.tokens_completed" = tracing::field::Empty,
+            "cancellation.signal" = tracing::field::Empty,
+            "error.type" = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+            otel.status_description = tracing::field::Empty,
+        );
+        record_route_span_start(
+            &route_span,
+            route_trace_context.as_deref(),
+            selection.worker.worker_id,
+        );
         let dispatch_result = cancel_on_stop(
             request_context.as_ref(),
-            dispatch.instrument(tracing::info_span!(
-                "kv_router.route_request",
-                request_id = %context_id,
-                worker_id = selection.worker.worker_id,
-                dp_rank = selection.worker.dp_rank,
-                overlap_blocks = selection.overlap_amount,
-                phase = ?phase,
-            )),
+            dispatch.instrument(route_span.clone()),
         )
         .await
         .and_then(|result| result);
         let response_stream = match dispatch_result {
             Ok(stream) => stream,
             Err(error) => {
+                record_route_error(&route_span, error.as_ref());
                 let typed_error = error
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
@@ -445,7 +476,10 @@ where
         };
 
         guard.mark_dispatched();
-        Ok(into_monitored_response(response_stream, guard))
+        Ok(wrap_route_span(
+            into_monitored_response(response_stream, guard),
+            route_span,
+        ))
     }
 
     fn warn_if_output_replay_annotation_ignored(
@@ -500,17 +534,13 @@ where
             .await
         {
             Ok(guard) => guard,
-            Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         let selected_target = route_target(selection.worker);
         let metadata = match prepare(&mut request, selected_target) {
             Ok(metadata) => metadata,
             Err(error) => {
                 guard.abort().await;
-                invalidate_on_non_cancellation(&mut operation, &error);
                 return Err(error);
             }
         };
@@ -518,13 +548,21 @@ where
         let stream = match self.dispatch_selection(request, selection, guard).await {
             Ok(stream) => stream,
             Err(error) => {
-                invalidate_on_non_cancellation(&mut operation, &error);
+                if self.session_affinity_mode == SessionAffinityMode::Hard
+                    && !self.affinity_target_is_valid(selected_target)
+                    && let Some(operation) = operation.take()
+                {
+                    operation.invalidate();
+                }
                 return Err(error);
             }
         };
         let Some(operation) = operation else {
             return Ok((metadata, stream));
         };
-        Ok((metadata, operation.into_stream(selected_target, stream)?))
+        Ok((
+            metadata,
+            operation.into_stream(selected_target, stream, self.session_affinity_mode)?,
+        ))
     }
 }

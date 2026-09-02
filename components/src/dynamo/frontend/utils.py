@@ -183,6 +183,18 @@ def make_internal_error(request_id: str, detail: str | None = None) -> dict[str,
     }
 
 
+def as_error_envelope(error_payload: dict[str, Any]) -> dict[str, Any]:
+    """Tag an error dict so the binding reads it as an error frame.
+
+    Without ``_dynamo_annotated`` the binding reads the dict as a completion
+    chunk and fails with ``missing field `id```. The client then gets a 500 and
+    never sees the message. The HTTP layer reads the text back off ``comment``.
+    See ``depythonize_annotated`` in ``lib/bindings/python/rust/engine.rs``.
+    """
+    message = (error_payload.get("error") or {}).get("message") or "unknown error"
+    return {"_dynamo_annotated": True, "event": "error", "comment": [message]}
+
+
 _SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX = "BackendInvalidArgument: "
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import subprocess
 import sys
@@ -72,11 +73,6 @@ def main(argv: list[str] | None = None) -> None:
         allow_abbrev=False,
     )
     parser.add_argument(
-        "--use-v1",
-        action="store_true",
-        help="Use the CUDA-only V1 profile for servers, loaders, or the restore-ready probe.",
-    )
-    parser.add_argument(
         "--device-type",
         type=str,
         default=VMMDeviceType.CUDA.value,
@@ -106,8 +102,9 @@ def main(argv: list[str] | None = None) -> None:
             "--probe-restore-ready is one-shot and cannot start servers or loaders"
         )
     args = parser.parse_args(argv)
-    if args.use_v1 and args.device_type != VMMDeviceType.CUDA.value:
-        parser.error("--use-v1 only supports --device-type=cuda")
+    use_v1 = os.environ.get("DYN_GMS_USE_V1") == "true"
+    if use_v1 and args.device_type != VMMDeviceType.CUDA.value:
+        parser.error("DYN_GMS_USE_V1=true only supports --device-type=cuda")
 
     init_vmm(VMMDeviceType.from_str(args.device_type))
     vmm = get_vmm()
@@ -115,7 +112,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.probe_restore_ready:
         timeout_ms = int(_PROBE_TIMEOUT_SECONDS * 1000)
         for device in devices:
-            if args.use_v1:
+            if use_v1:
                 session = v1_session(
                     v1_get_socket_path(device, "weights"),
                     RequestedLockType.RO,
@@ -145,15 +142,13 @@ def main(argv: list[str] | None = None) -> None:
     try:
         for device in devices:
             command = [sys.executable, "-m", "gpu_memory_service"]
-            if args.use_v1:
-                command.append("--use-v1")
             command.extend(["--device", str(device)])
-            if not args.use_v1:
+            if not use_v1:
                 command.extend(["--device-type", args.device_type])
             process = subprocess.Popen(command)
             logger.info(
                 "Started GMS%s device=%d pid=%d",
-                " V1" if args.use_v1 else "",
+                " V1" if use_v1 else "",
                 device,
                 process.pid,
             )
@@ -161,8 +156,6 @@ def main(argv: list[str] | None = None) -> None:
 
         if args.enable_loader is not None:
             loader_argv = list(args.enable_loader)
-            if args.use_v1:
-                loader_argv.insert(0, "--use-v1")
             loaders.extend(
                 start_per_device(
                     "gpu_memory_service.cli.snapshot.loader",

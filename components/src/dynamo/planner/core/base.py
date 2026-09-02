@@ -44,7 +44,7 @@ from dynamo.planner.core.types import (
 )
 from dynamo.planner.environment.interface import PlannerEnvironment
 from dynamo.planner.environment.state import DeploymentState
-from dynamo.planner.errors import DeploymentValidationError
+from dynamo.planner.errors import DeploymentValidationError, GPUShapeUnavailableError
 from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
@@ -57,17 +57,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
+_GPU_SHAPE_RETRY_MIN_SECONDS = 0.1
+_GPU_SHAPE_RETRY_MAX_SECONDS = 5.0
 
 
 def _engine_caps(
     worker_info,
     num_gpu: Optional[int],
+    gpu_cost_per_replica: Optional[int],
     power_watts_per_replica: Optional[int] = None,
 ) -> Optional[EngineCapabilities]:
-    if worker_info is None and num_gpu is None and power_watts_per_replica is None:
+    if (
+        worker_info is None
+        and num_gpu is None
+        and gpu_cost_per_replica is None
+        and power_watts_per_replica is None
+    ):
         return None
     return EngineCapabilities(
         num_gpu=num_gpu,
+        gpu_cost_per_replica=gpu_cost_per_replica,
         max_num_batched_tokens=(
             worker_info.max_num_batched_tokens if worker_info else None
         ),
@@ -85,11 +94,13 @@ def build_worker_capabilities(state: DeploymentState) -> WorkerCapabilities:
         prefill=_engine_caps(
             state.prefill.info,
             state.prefill.num_gpus,
+            state.prefill.gpus_per_replica,
             state.prefill.power_watts_per_replica,
         ),
         decode=_engine_caps(
             state.decode.info,
             state.decode.num_gpus,
+            state.decode.gpus_per_replica,
             state.decode.power_watts_per_replica,
         ),
     )
@@ -234,11 +245,11 @@ class NativePlannerBase:
 
         required_gpus = 0
         if prefill_min_endpoint is not None and capabilities.prefill is not None:
-            p_gpu = capabilities.prefill.num_gpu
+            p_gpu = capabilities.prefill.resolved_gpu_cost_per_replica
             if p_gpu is not None:
                 required_gpus += prefill_min_endpoint * p_gpu
         if decode_min_endpoint is not None and capabilities.decode is not None:
-            d_gpu = capabilities.decode.num_gpu
+            d_gpu = capabilities.decode.resolved_gpu_cost_per_replica
             if d_gpu is not None:
                 required_gpus += decode_min_endpoint * d_gpu
         if (
@@ -727,8 +738,8 @@ class NativePlannerBase:
 
         now = tick_input.now_s
         state = self.environment.deployment_state()
-        prefill_gpus = state.prefill.num_gpus or 0
-        decode_gpus = state.decode.num_gpus or 0
+        prefill_gpus = state.prefill.gpus_per_replica or state.prefill.num_gpus or 0
+        decode_gpus = state.decode.gpus_per_replica or state.decode.num_gpus or 0
         if self._last_gpu_hours_update_ts is not None:
             dt_s = max(0.0, now - self._last_gpu_hours_update_ts)
             self._cumulative_gpu_hours += (
@@ -848,6 +859,10 @@ class NativePlannerBase:
         engine = self._ensure_engine()
         next_tick = engine.initial_tick(time.time())
         poll_interval = self.config.load_adjustment_interval_seconds / 10
+        gpu_shape_retry_interval = min(
+            max(poll_interval, _GPU_SHAPE_RETRY_MIN_SECONDS),
+            _GPU_SHAPE_RETRY_MAX_SECONDS,
+        )
 
         try:
             while True:
@@ -856,6 +871,14 @@ class NativePlannerBase:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
                     continue
 
-                next_tick = await self._run_one_tick(engine, next_tick)
+                try:
+                    next_tick = await self._run_one_tick(engine, next_tick)
+                except GPUShapeUnavailableError as exc:
+                    logger.warning(
+                        "Skipping planner tick until the operator publishes a current GPU shape: %s; retrying in %.1fs",
+                        exc,
+                        gpu_shape_retry_interval,
+                    )
+                    await asyncio.sleep(gpu_shape_retry_interval)
         finally:
             await self._shutdown_runtime()
