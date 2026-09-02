@@ -25,7 +25,8 @@ use super::metrics::{register_lora_allocation_metrics, register_worker_timing_me
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
 use crate::kv_router::metrics::{
-    RoutingOverheadMetrics, register_router_queue_metrics, register_worker_load_metrics,
+    RoutingOverheadMetrics, register_prefill_continue_metrics, register_router_queue_metrics,
+    register_worker_load_metrics,
 };
 use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
@@ -1197,6 +1198,13 @@ impl HttpServiceConfigBuilder {
         // These are updated by KvScheduler on enqueue/update/free
         if let Err(e) = register_router_queue_metrics(&registry) {
             tracing::warn!("Failed to register router queue metrics: {}", e);
+        }
+
+        // Registered unconditionally, like the queue metrics above: the feature
+        // is default-off, and a zero series is what tells an operator it never
+        // fired rather than that nothing is reporting.
+        if let Err(e) = register_prefill_continue_metrics(&registry) {
+            tracing::warn!("Failed to register prefill-continue metrics: {}", e);
         }
 
         if let Some(ref discovery) = config.drt_discovery {

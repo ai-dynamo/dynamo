@@ -409,7 +409,9 @@ fn pinned_worker_hint(
 ) -> Option<(u64, Option<u32>)> {
     let routing = routing?;
     match phase {
-        RequestPhase::Prefill => {
+        // A continuation runs on the worker its prefill was routed to, so it
+        // resolves like a prefill, not like an aggregated request.
+        RequestPhase::Prefill | RequestPhase::Continuation => {
             let worker_id = routing.prefill_worker_id.or(routing.backend_instance_id)?;
             let dp_rank = routing.prefill_dp_rank.or(routing.dp_rank);
             Some((worker_id, dp_rank))

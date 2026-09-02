@@ -754,7 +754,8 @@ pub fn explicit_target(
         return Ok(None);
     };
     let (worker_id, dp_rank) = match phase {
-        RequestPhase::Prefill => (
+        // A continuation runs on the worker its prefill was routed to.
+        RequestPhase::Prefill | RequestPhase::Continuation => (
             routing.prefill_worker_id.or(routing.backend_instance_id),
             routing.prefill_dp_rank.or(routing.dp_rank),
         ),

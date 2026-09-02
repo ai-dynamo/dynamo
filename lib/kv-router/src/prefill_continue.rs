@@ -45,6 +45,47 @@ pub enum PrefillContinueSkip {
     ConcurrencyUnknown,
 }
 
+impl PrefillContinueSkip {
+    /// Every reason, so a caller can create the metric series up front.
+    ///
+    /// A counter with no observations exposes no sample at all, so an operator
+    /// asking "why did it never fire?" would get an empty query rather than a
+    /// zero. The enum is `#[non_exhaustive]`, which stops a caller building
+    /// this list itself, so it lives here where a new variant is added.
+    pub const ALL: &'static [Self] = &[
+        Self::Disabled,
+        Self::NoTrigger,
+        Self::DecodeHasRoom,
+        Self::DecodeLoadUnknown,
+        Self::PrefillBusy,
+        Self::PrefillLoadUnknown,
+        Self::BudgetAboveCap,
+        Self::BudgetUnbounded,
+        Self::ConcurrencyCapReached,
+        Self::ConcurrencyUnknown,
+    ];
+
+    /// A stable, low-cardinality label for metrics.
+    ///
+    /// Deliberately not `Debug`: these become a Prometheus label value, so
+    /// renaming a variant must not silently rename a series an operator has a
+    /// dashboard on.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::NoTrigger => "no_trigger",
+            Self::DecodeHasRoom => "decode_has_room",
+            Self::DecodeLoadUnknown => "decode_load_unknown",
+            Self::PrefillBusy => "prefill_busy",
+            Self::PrefillLoadUnknown => "prefill_load_unknown",
+            Self::BudgetAboveCap => "budget_above_cap",
+            Self::BudgetUnbounded => "budget_unbounded",
+            Self::ConcurrencyCapReached => "concurrency_cap_reached",
+            Self::ConcurrencyUnknown => "concurrency_unknown",
+        }
+    }
+}
+
 /// The decision itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefillContinueDecision {
@@ -713,6 +754,71 @@ mod tests {
         // Off: there is no decision to interlock.
         assert!(!probes(false, Some(0.4), None));
     }
+    #[test]
+    fn skip_labels_are_stable_and_distinct() {
+        // These are Prometheus label values. A rename breaks an operator's
+        // dashboard silently, and a duplicate merges two series just as
+        // silently, so pin the exact strings and not only their shape.
+        let expected = [
+            (PrefillContinueSkip::Disabled, "disabled"),
+            (PrefillContinueSkip::NoTrigger, "no_trigger"),
+            (PrefillContinueSkip::DecodeHasRoom, "decode_has_room"),
+            (
+                PrefillContinueSkip::DecodeLoadUnknown,
+                "decode_load_unknown",
+            ),
+            (PrefillContinueSkip::PrefillBusy, "prefill_busy"),
+            (
+                PrefillContinueSkip::PrefillLoadUnknown,
+                "prefill_load_unknown",
+            ),
+            (PrefillContinueSkip::BudgetAboveCap, "budget_above_cap"),
+            (PrefillContinueSkip::BudgetUnbounded, "budget_unbounded"),
+            (
+                PrefillContinueSkip::ConcurrencyCapReached,
+                "concurrency_cap_reached",
+            ),
+            (
+                PrefillContinueSkip::ConcurrencyUnknown,
+                "concurrency_unknown",
+            ),
+        ];
+        for (reason, label) in expected {
+            assert_eq!(reason.as_str(), label);
+        }
+
+        let distinct: std::collections::HashSet<_> =
+            expected.iter().map(|(_, label)| *label).collect();
+        assert_eq!(distinct.len(), expected.len(), "labels must be distinct");
+        assert_eq!(
+            expected.len(),
+            PrefillContinueSkip::ALL.len(),
+            "every reason must be pinned here"
+        );
+    }
+
+    #[test]
+    fn all_lists_every_skip_reason() {
+        // `ALL` drives which metric series exist, so a variant missing from it
+        // is a series that never appears — the exact failure it exists to stop.
+        // Adding a variant makes this match non-exhaustive and fails the build.
+        for reason in PrefillContinueSkip::ALL {
+            match reason {
+                PrefillContinueSkip::Disabled
+                | PrefillContinueSkip::NoTrigger
+                | PrefillContinueSkip::DecodeHasRoom
+                | PrefillContinueSkip::DecodeLoadUnknown
+                | PrefillContinueSkip::PrefillBusy
+                | PrefillContinueSkip::PrefillLoadUnknown
+                | PrefillContinueSkip::BudgetAboveCap
+                | PrefillContinueSkip::BudgetUnbounded
+                | PrefillContinueSkip::ConcurrencyCapReached
+                | PrefillContinueSkip::ConcurrencyUnknown => {}
+            }
+        }
+        assert_eq!(PrefillContinueSkip::ALL.len(), 10);
+    }
+
     #[test]
     fn preflight_and_decide_agree_on_the_cheap_gates() {
         // The router runs `preflight` first to avoid paying for a load probe a

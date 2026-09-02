@@ -24,14 +24,31 @@ use dynamo_runtime::protocols::annotated::Annotated;
 use futures::stream::Stream;
 use parking_lot::Mutex;
 
+use prometheus::IntGauge;
+
+use crate::kv_router::metrics::PREFILL_CONTINUE_METRICS;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 
 type LlmResponse = Annotated<LLMEngineOutput>;
 
 /// Continuations in flight, per prefill worker.
-#[derive(Default)]
 pub(super) struct ContinuationCensus {
     in_flight: Mutex<HashMap<WorkerId, usize>>,
+    /// The published gauge, held rather than reached for.
+    ///
+    /// A census is per router but the global gauge is per process, so a test
+    /// touching the global would race every other test that admits. Owning the
+    /// handle lets a test hold its own and keeps the production path identical.
+    active: IntGauge,
+}
+
+impl Default for ContinuationCensus {
+    fn default() -> Self {
+        Self {
+            in_flight: Mutex::default(),
+            active: PREFILL_CONTINUE_METRICS.active.clone(),
+        }
+    }
 }
 
 impl ContinuationCensus {
@@ -57,6 +74,9 @@ impl ContinuationCensus {
             return None;
         }
         in_flight.insert(worker_id, running + 1);
+        // Paired with the permit this returns, not with the map, so it is
+        // symmetric with the decrement in `release`.
+        self.active.inc();
         Some(ContinuationPermit {
             census: Arc::clone(self),
             worker_id,
@@ -83,8 +103,14 @@ impl ContinuationCensus {
     }
 
     fn release(&self, worker_id: WorkerId) {
+        // Unconditional, and before the map: the gauge counts permits, and this
+        // runs exactly once per permit. Pairing it with the map instead would
+        // let the early return below skip a decrement and ratchet the gauge up
+        // for the life of the process.
+        self.active.dec();
         let mut in_flight = self.in_flight.lock();
         let Some(running) = in_flight.get_mut(&worker_id) else {
+            debug_assert!(false, "a continuation permit outlived its census row");
             return;
         };
         *running -= 1;
@@ -153,8 +179,13 @@ impl Stream for CountedContinuation {
 mod tests {
     use super::*;
 
+    /// A census with a gauge of its own, so no test touches the process-global
+    /// series and none of them need serializing against each other.
     fn census() -> Arc<ContinuationCensus> {
-        Arc::new(ContinuationCensus::default())
+        Arc::new(ContinuationCensus {
+            in_flight: Mutex::default(),
+            active: IntGauge::new("test_prefill_continue_active", "test").unwrap(),
+        })
     }
 
     #[test]
@@ -163,9 +194,11 @@ mod tests {
 
         let permit = census.try_admit(7, 2).expect("first place is free");
         assert_eq!(census.in_flight(7), 1);
+        assert_eq!(census.active.get(), 1, "the gauge must follow the count");
 
         drop(permit);
         assert_eq!(census.in_flight(7), 0);
+        assert_eq!(census.active.get(), 0, "and give the place back with it");
         assert!(
             census.in_flight.lock().is_empty(),
             "a worker at zero must not keep a row, or the map grows with fleet churn"

@@ -1225,6 +1225,14 @@ fn validate_kv_router_config(config: &KvRouterConfig) -> Result<(), String> {
                 .to_string(),
         );
     }
+    if config.prefill_continue_enabled && !config.router_track_output_blocks {
+        tracing::warn!(
+            "prefill_continue_enabled without router_track_output_blocks: a continuing worker's \
+             occupancy freezes at prompt size, so the load this feature reads back is wrong for \
+             exactly the workers it is loading. Enable output-block tracking before trusting a \
+             benchmark of it."
+        );
+    }
     if config.prefill_continue_max_concurrent == Some(0) {
         tracing::warn!(
             "prefill_continue_max_concurrent is 0: the feature is enabled but every request will \

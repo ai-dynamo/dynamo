@@ -65,6 +65,7 @@ use prometheus::{
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::indexer::ApproximateLruStats;
+use dynamo_kv_router::prefill_continue::PrefillContinueSkip;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
@@ -644,6 +645,146 @@ pub fn register_router_queue_metrics(
     registry.register(Box::new(m.pending_isl_tokens.clone()))?;
     registry.register(Box::new(m.pending_cached_tokens.clone()))?;
     registry.register(Box::new(m.backpressure_total.clone()))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Prefill-continues-decode metrics
+// ---------------------------------------------------------------------------
+
+/// Why the router did or did not keep a request generating on its prefill
+/// worker.
+///
+/// The feature's failure mode is silence: it is default-off, every gate fails
+/// closed, and a misconfigured deployment looks exactly like an idle one. These
+/// answer "why did it never fire?" without turning on debug logging.
+pub struct PrefillContinueMetrics {
+    /// Each pre-routing decision the router actually made, labelled `continue`
+    /// or the refusal reason.
+    ///
+    /// A request arriving while the feature is off is not counted: the router
+    /// returns before deciding, and counting one per request would duplicate an
+    /// existing request counter to say nothing. `disabled` therefore stays at
+    /// zero, and every series at zero is itself the signal that the feature is
+    /// off.
+    ///
+    /// `continue` counts requests the router *asked* to continue, not ones that
+    /// did. Dispatch can still withdraw the ask once it knows the worker, so
+    /// continuations actually served is `continue` minus `demotions_total`.
+    pub decisions_total: IntCounterVec,
+    /// Continuations the router asked for and then withdrew at dispatch, once
+    /// the chosen worker was known.
+    pub demotions_total: IntCounterVec,
+    /// Continuations generating right now, summed over the prefill pool.
+    pub active: IntGauge,
+}
+
+pub static PREFILL_CONTINUE_METRICS: LazyLock<PrefillContinueMetrics> =
+    LazyLock::new(|| PrefillContinueMetrics {
+        decisions_total: IntCounterVec::new(
+            Opts::new(
+                format!("{}_prefill_continue_decisions_total", name_prefix::FRONTEND),
+                "Prefill-continuation decisions the router made, by outcome. All series \
+                 zero means the feature is off; it is registered either way so the absence \
+                 of a decision is readable",
+            ),
+            &["decision"],
+        )
+        .expect("Failed to create prefill_continue_decisions_total counter"),
+        demotions_total: IntCounterVec::new(
+            Opts::new(
+                format!("{}_prefill_continue_demotions_total", name_prefix::FRONTEND),
+                "Continuations withdrawn at dispatch once the worker was known, by reason",
+            ),
+            &["reason"],
+        )
+        .expect("Failed to create prefill_continue_demotions_total counter"),
+        active: IntGauge::new(
+            format!("{}_prefill_continue_active", name_prefix::FRONTEND),
+            "Continuations currently generating on prefill workers, across every prefill pool \
+             in this process",
+        )
+        .expect("Failed to create prefill_continue_active gauge"),
+    });
+
+/// `decision` label values the router settles before it asks the policy.
+///
+/// The policy's own refusals come from [`PrefillContinueSkip::as_str`].
+pub mod prefill_continue_decision {
+    /// The router asked the worker to continue.
+    pub const CONTINUE: &str = "continue";
+    /// The pool declared no support, so no worker could be asked.
+    pub const POOL_UNDECLARED: &str = "pool_undeclared";
+    /// Nothing was routable, so there was no pool to ask.
+    pub const NO_ROUTABLE_WORKERS: &str = "no_routable_workers";
+}
+
+/// `reason` label values for continuations withdrawn at dispatch.
+pub mod prefill_continue_demotion {
+    /// The chosen worker had not declared support for the marker.
+    pub const WORKER_UNDECLARED: &str = "worker_undeclared";
+    /// No cap was configured, so the bound could not be applied.
+    pub const NO_CAP_CONFIGURED: &str = "no_cap_configured";
+    /// The chosen worker was already at its cap.
+    pub const WORKER_AT_CAP: &str = "worker_at_cap";
+}
+
+impl PrefillContinueMetrics {
+    /// Record one pre-routing decision, by outcome.
+    pub fn record_decision(&self, outcome: &str) {
+        self.decisions_total.with_label_values(&[outcome]).inc();
+    }
+
+    /// Record one continuation withdrawn at dispatch, by reason.
+    pub fn record_demotion(&self, reason: &str) {
+        self.demotions_total.with_label_values(&[reason]).inc();
+    }
+}
+
+/// Every reason a continuation can be withdrawn once the worker is known.
+const PREFILL_CONTINUE_DEMOTION_REASONS: &[&str] = &[
+    prefill_continue_demotion::WORKER_UNDECLARED,
+    prefill_continue_demotion::NO_CAP_CONFIGURED,
+    prefill_continue_demotion::WORKER_AT_CAP,
+];
+
+/// Create every series up front, so "it never fired" reads as a zero rather
+/// than as an empty query.
+///
+/// A counter vector with no observations exposes no samples at all, so a
+/// default-off deployment would publish nothing and an operator could not tell
+/// the feature apart from a broken exporter. The label set is finite and small,
+/// so materializing all of it costs nothing and removes the ambiguity.
+///
+/// `disabled` is materialized but never incremented: the router returns before
+/// deciding when the feature is off, rather than counting a decision per
+/// request that it did not make. Every series sitting at zero *is* the signal
+/// that the feature is off.
+fn materialize_prefill_continue_series(m: &PrefillContinueMetrics) {
+    for label in [
+        prefill_continue_decision::CONTINUE,
+        prefill_continue_decision::POOL_UNDECLARED,
+        prefill_continue_decision::NO_ROUTABLE_WORKERS,
+    ] {
+        m.decisions_total.with_label_values(&[label]);
+    }
+    for reason in PrefillContinueSkip::ALL {
+        m.decisions_total.with_label_values(&[reason.as_str()]);
+    }
+    for reason in PREFILL_CONTINUE_DEMOTION_REASONS {
+        m.demotions_total.with_label_values(&[reason]);
+    }
+}
+
+/// Register the prefill-continuation metrics with the given registry.
+pub fn register_prefill_continue_metrics(
+    registry: &prometheus::Registry,
+) -> Result<(), prometheus::Error> {
+    let m = &*PREFILL_CONTINUE_METRICS;
+    materialize_prefill_continue_series(m);
+    registry.register(Box::new(m.decisions_total.clone()))?;
+    registry.register(Box::new(m.demotions_total.clone()))?;
+    registry.register(Box::new(m.active.clone()))?;
     Ok(())
 }
 
@@ -1673,5 +1814,63 @@ mod kv_publisher_registration_tests {
                 .contains("conflicts with auto-injected const label"),
             "unexpected error: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod prefill_continue_metric_tests {
+    use super::*;
+
+    /// The whole point of these counters is answering "why did it never fire?".
+    /// A default-off deployment must therefore publish zeros, not nothing: an
+    /// empty query is indistinguishable from a broken exporter.
+    #[test]
+    fn a_registry_publishes_every_decision_series_before_anything_happens() {
+        let registry = prometheus::Registry::new();
+        register_prefill_continue_metrics(&registry).expect("registration");
+
+        let names: std::collections::HashSet<String> = registry
+            .gather()
+            .iter()
+            .flat_map(|family| {
+                let metric_name = family.name().to_string();
+                family.get_metric().iter().map(move |metric| {
+                    let label = metric
+                        .get_label()
+                        .iter()
+                        .map(|l| format!("{}={}", l.name(), l.value()))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("{metric_name}{{{label}}}")
+                })
+            })
+            .collect();
+
+        for reason in PrefillContinueSkip::ALL {
+            let series = format!(
+                "{}_prefill_continue_decisions_total{{decision={}}}",
+                name_prefix::FRONTEND,
+                reason.as_str()
+            );
+            assert!(names.contains(&series), "missing {series} in {names:?}");
+        }
+        for label in [
+            prefill_continue_decision::CONTINUE,
+            prefill_continue_decision::POOL_UNDECLARED,
+            prefill_continue_decision::NO_ROUTABLE_WORKERS,
+        ] {
+            let series = format!(
+                "{}_prefill_continue_decisions_total{{decision={label}}}",
+                name_prefix::FRONTEND
+            );
+            assert!(names.contains(&series), "missing {series}");
+        }
+        for reason in PREFILL_CONTINUE_DEMOTION_REASONS {
+            let series = format!(
+                "{}_prefill_continue_demotions_total{{reason={reason}}}",
+                name_prefix::FRONTEND
+            );
+            assert!(names.contains(&series), "missing {series}");
+        }
     }
 }

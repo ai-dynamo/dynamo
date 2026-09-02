@@ -34,13 +34,16 @@ use census::{ContinuationCensus, ContinuationPermit};
 
 use crate::{
     discovery::{ModelManager, RuntimeConfigWatch},
+    kv_router::metrics::{
+        PREFILL_CONTINUE_METRICS, prefill_continue_decision, prefill_continue_demotion,
+    },
     kv_router::{RoutingHost, WorkerSelectorFactory},
     local_model::runtime_config::{ModelRuntimeConfig, PREFILL_CONTINUE_CAPABILITY},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
-        timing::{RequestPhase, RequestTracker},
+        timing::{RequestPhase, RequestTracker, WORKER_TYPE_PREFILL},
     },
     session_affinity::AffinityTarget,
 };
@@ -131,6 +134,9 @@ fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
 
 struct PreparedPrefill {
     worker_id: u64,
+    /// Resolved at dispatch, so the continuation phase can attribute its
+    /// per-worker metrics to the same rank the request actually ran on.
+    dp_rank: Option<u32>,
     bootstrap_info: Option<BootstrapInfo>,
     topology_constraints: Option<RoutingConstraints>,
     /// Present only when the request is going out as a continuation. Its
@@ -356,6 +362,8 @@ where
     match capability {
         PrefillPoolCapability::Supported => true,
         PrefillPoolCapability::NoRoutableWorkers => {
+            PREFILL_CONTINUE_METRICS
+                .record_decision(prefill_continue_decision::NO_ROUTABLE_WORKERS);
             tracing::debug!(
                 request_id,
                 "Prefill continuation declined: no routable prefill workers"
@@ -363,6 +371,7 @@ where
             false
         }
         PrefillPoolCapability::Undeclared(undeclared) => {
+            PREFILL_CONTINUE_METRICS.record_decision(prefill_continue_decision::POOL_UNDECLARED);
             tracing::debug!(
                 request_id,
                 ?undeclared,
@@ -427,6 +436,7 @@ where
             None => self.continuations.min_in_flight(&routable),
         };
         if let Some(reason) = self.prefill_continue_policy.preflight(budget, active) {
+            PREFILL_CONTINUE_METRICS.record_decision(reason.as_str());
             tracing::debug!(
                 request_id,
                 ?reason,
@@ -448,12 +458,16 @@ where
             .with_active_continuations(active);
 
         let decision = self.prefill_continue_policy.decide(input);
-        if let Some(reason) = decision.skip_reason() {
-            tracing::debug!(
-                request_id,
-                ?reason,
-                "Prefill continuation declined before routing"
-            );
+        match decision.skip_reason() {
+            Some(reason) => {
+                PREFILL_CONTINUE_METRICS.record_decision(reason.as_str());
+                tracing::debug!(
+                    request_id,
+                    ?reason,
+                    "Prefill continuation declined before routing"
+                );
+            }
+            None => PREFILL_CONTINUE_METRICS.record_decision(prefill_continue_decision::CONTINUE),
         }
         decision.should_continue()
     }
@@ -764,6 +778,35 @@ where
                 // the phase permit as the ordinary path does, so a migration retry
                 // can set Prefill again.
                 drop(prefill_phase_barrier);
+                // Move the request out of its prefill phase even though the
+                // worker does not change.
+                //
+                // The frontend latches worker attribution from the tracker on
+                // the first response chunk and resolves the inter-token latency
+                // gauge from the decode worker it finds there. A continuation
+                // never dispatches one, so that latch saw nothing and the gauge
+                // was never written: inter-token latency was emitted for every
+                // arm except the ones running this feature. Recording it here,
+                // before the stream can be polled, is what fixes it.
+                //
+                // `Continuation` records the same worker as both legs and stays
+                // distinct from `Aggregated`, so the arm is still tellable apart
+                // in an A/B. Note the decode worker type is recorded as
+                // `prefill`; see the field's doc for why, and query it that way.
+                //
+                // The barrier above must be dropped first: the phase semaphore
+                // holds a single permit, so setting a phase while holding it
+                // would deadlock. The permit taken here is bound, not dropped,
+                // so it covers the recording below.
+                if let Some(tracker) = tracker.as_ref() {
+                    let _continuation_phase_permit =
+                        tracker.set_phase(RequestPhase::Continuation).await;
+                    tracker.record_worker(
+                        prepared.worker_id,
+                        prepared.dp_rank,
+                        WORKER_TYPE_PREFILL,
+                    );
+                }
                 // The prefill context has its own controller, so a cancel would
                 // not reach the worker on a stream we hand back to the client.
                 // Link it, as Migration does for its retry children.
@@ -1002,6 +1045,7 @@ where
 
         Ok(PreparedPrefill {
             worker_id,
+            dp_rank,
             bootstrap_info,
             topology_constraints,
             continuation_permit,
@@ -1034,6 +1078,7 @@ where
             .get(&worker_id)
             .is_some_and(|config| config.supports_runtime_capability(PREFILL_CONTINUE_CAPABILITY));
         if !declared {
+            PREFILL_CONTINUE_METRICS.record_demotion(prefill_continue_demotion::WORKER_UNDECLARED);
             tracing::debug!(
                 worker_id,
                 "Prefill continuation demoted to a handoff: the selected worker never declared \
@@ -1047,6 +1092,7 @@ where
         // validation asks for one, but it does not run on every path a router
         // can be built from, so a config can still arrive here without one.
         let Some(cap) = self.prefill_continue_policy.max_concurrent() else {
+            PREFILL_CONTINUE_METRICS.record_demotion(prefill_continue_demotion::NO_CAP_CONFIGURED);
             tracing::debug!(
                 worker_id,
                 "Prefill continuation demoted to a handoff: no continuation cap is configured, \
@@ -1059,6 +1105,7 @@ where
             return Some(permit);
         }
 
+        PREFILL_CONTINUE_METRICS.record_demotion(prefill_continue_demotion::WORKER_AT_CAP);
         tracing::debug!(
             worker_id,
             in_flight = self.continuations.in_flight(worker_id),

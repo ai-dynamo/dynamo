@@ -4047,9 +4047,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     ),
                 }
 
-                # A continuation is the whole response, so report why it ended. The
-                # one-token prefill deliberately reports nothing: the router reads a
-                # finish reason as "this request is already complete".
+                # A continuation is the whole response, so report why it ended:
+                # the client needs it to know the stream is over. The one-token
+                # prefill still reports nothing, because there the router does
+                # read a finish reason as "already complete" — on a continuation
+                # it never inspects the stream at all.
                 finish_reason = res.outputs[0].finish_reason if res.outputs else None
                 if prefill_continues and finish_reason:
                     output["finish_reason"] = normalize_finish_reason(finish_reason)

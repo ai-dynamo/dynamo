@@ -120,7 +120,10 @@ mod tests {
         kv_router::{RouterLoadSource, RoutingHost, RoutingLoadContext},
         local_model::runtime_config::PREFILL_CONTINUE_CAPABILITY,
         protocols::common::{
-            FinishReason, llm_backend::LLMEngineOutput, preprocessor::PreprocessedRequest,
+            FinishReason,
+            llm_backend::LLMEngineOutput,
+            preprocessor::PreprocessedRequest,
+            timing::{RequestPhase, RequestTracker},
         },
     };
     use dynamo_runtime::pipeline::Operator;
@@ -582,6 +585,8 @@ mod tests {
 
         let mut request = request();
         request.stop_conditions.max_tokens = Some(256);
+        let tracker = Arc::new(RequestTracker::new());
+        request.tracker = Some(tracker.clone());
 
         let mut response = Operator::generate(prefill_router.as_ref(), Context::new(request), next)
             .await
@@ -610,6 +615,22 @@ mod tests {
             prefill_router.continuations.in_flight(worker_id),
             0,
             "and gives its place back at the end of the stream"
+        );
+
+        // Finish-time gauges key on a recorded decode worker, and a request
+        // that stays in the prefill phase never records one — so without this
+        // transition inter-token latency is missing from exactly the arms
+        // running the feature.
+        assert_eq!(tracker.phase(), RequestPhase::Continuation);
+        assert_eq!(
+            tracker.decode_worker_id(),
+            Some(worker_id),
+            "the generating worker must be recorded as the decode worker"
+        );
+        assert_eq!(
+            tracker.prefill_worker_id(),
+            Some(worker_id),
+            "and as the prefill worker, because it did both"
         );
 
         drop(worker_runtimes);
