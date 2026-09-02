@@ -15,7 +15,7 @@ independent TP4 workers behind the Dynamo KV-aware router.
 | --- | --- |
 | GPU | 8x B200 total; 4x B200 per worker |
 | Topology | Aggregated, two worker replicas |
-| Parallelism | TP4, DP1, expert parallel enabled (effective EP4) |
+| Parallelism | TP4, DP1, expert parallel disabled |
 | Weight precision | NVFP4 |
 | KV-cache precision | `auto` (BF16 for this checkpoint/backend) |
 | Attention | `FLASHINFER_MLA_SPARSE` |
@@ -26,7 +26,8 @@ independent TP4 workers behind the Dynamo KV-aware router.
 
 Two workers are intentional: one TP4 worker can prove that KV events are
 published, but the router needs at least two candidates to exercise KV-aware
-placement.
+placement. Expert parallelism is deliberately disabled because the selected
+four-GPU profile is TP4/DP1 without EP.
 
 The deployment uses the revision-pinned A.X-K2 development image built from
 Dynamo 1.4.1 and vLLM 0.26.0. The image contains the A.X-K2 model port, DSpark
