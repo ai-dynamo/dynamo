@@ -1268,7 +1268,7 @@ class HandlerBase(BaseGenerativeHandler):
                     raise
                 error_msg = str(e)
                 logging.warning(
-                    "Request %s rejected during TensorRT-LLM preprocessing (%s): %s",
+                    "Request %s rejected during request validation (%s): %s",
                     request_id,
                     type(e).__name__,
                     error_msg,
