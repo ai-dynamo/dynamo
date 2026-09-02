@@ -101,6 +101,10 @@ spec:
                         operator: In
                         values:
                           - NVIDIA-B200
+                      - key: kubernetes.io/hostname
+                        operator: NotIn
+                        values:
+                          - cluster-0967a26d-pool-14bee067-prctr-7tjtm
           containers:
             - name: main
               image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-axk2-patches1-4@sha256:d4700ed2346c4766ba9e1c27db215909b58af0151c880828fdc795bd1f629db9
