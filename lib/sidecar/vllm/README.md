@@ -31,7 +31,7 @@ It is a standalone Rust executable and is also compiled into
 - Capability-gated RL pause/resume, sleep/wake, weight-transfer, and weight-version controls through native gRPC
 - Image, video, and audio URL and data-URI inputs; cache UUIDs remain image-only
 
-Audio and video inputs currently require the `connorcarpenter15/vllm:feat/grpc-audio-video-combined` review branch at commit [`236caaec7221842c307e87e05ea3356539be6b20`](https://github.com/connorcarpenter15/vllm/commit/236caaec7221842c307e87e05ea3356539be6b20), tracked by [connorcarpenter15/vllm#32](https://github.com/connorcarpenter15/vllm/pull/32). The fork's current `main` and stock vLLM releases do not contain this support while that PR remains open.
+Audio and video gRPC inputs are not available in vLLM `0.28.0`. They require a later vLLM release.
 
 The protocol does not support LoRA, encode workers, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, audio/video cache UUIDs, or EPD. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
 
