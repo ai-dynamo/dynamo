@@ -672,6 +672,13 @@ impl<T> PolicyQueue<T> {
         self.take_if_entry_in_class(class_index, |entry| predicate(entry.payload()))
     }
 
+    /// Removes and returns every entry whose deadline is at or before `now`.
+    ///
+    /// Cost: one full scan of all queued entries plus a heap rebuild of each
+    /// class that lost an entry, per timer fire. Acceptable while deadlines are
+    /// rare; once every request carries a due time (the classifier PR), this
+    /// needs a seq-to-lane index or expiry-on-pop to avoid O(N) per fire under
+    /// a standing backlog.
     pub(crate) fn take_expired(&mut self, now: Instant) -> Vec<PolicyQueueEntry<T>> {
         if self.due_entries.is_empty() {
             return Vec::new();
