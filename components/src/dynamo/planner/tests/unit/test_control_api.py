@@ -451,6 +451,25 @@ async def test_shutdown_finalizes_diagnostics_once():
 
 
 @pytest.mark.asyncio
+async def test_shutdown_retrieves_completed_effect_submission_error(caplog):
+    planner = _planner("agg")
+
+    async def fail_submission():
+        raise RuntimeError("late submission failure")
+
+    submission_task = asyncio.create_task(fail_submission())
+    await asyncio.sleep(0)
+    assert submission_task.done()
+    planner._effect_submission_task = submission_task
+
+    await planner._shutdown_runtime()
+
+    assert planner._effect_submission_task is None
+    assert "Failed pending planner effect submission" in caplog.text
+    assert "late submission failure" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_control_api_port_zero_disables_server_startup():
     planner = _planner("agg", control_api_port=0)
     planner._bootstrap_regression = AsyncMock()

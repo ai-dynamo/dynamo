@@ -238,8 +238,9 @@ class NativePlannerBase:
 
         effect_submission_task = self._effect_submission_task
         self._effect_submission_task = None
-        if effect_submission_task is not None and not effect_submission_task.done():
-            effect_submission_task.cancel()
+        if effect_submission_task is not None:
+            if not effect_submission_task.done():
+                effect_submission_task.cancel()
             try:
                 await effect_submission_task
             except asyncio.CancelledError:
