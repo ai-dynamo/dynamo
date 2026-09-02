@@ -114,7 +114,13 @@ jobs:
     name: ${{ needs.detect.outputs.framework }} / baseline capture
     needs: detect
     if: needs.detect.outputs.proceed == 'true'
-    runs-on: prod-tester-amd-v2
+    # Fastchecker rather than prod-tester-amd-v2: that pool forbids containerless
+    # jobs and its admission rejects a push on a personal branch, so the pipeline
+    # could never be exercised before merge. Fastchecker runs the rust-tests /
+    # rust-clippy jobs containerless and admits this event, which keeps a change
+    # to this workflow testable.
+    runs-on:
+      group: Fastchecker
     timeout-minutes: 90
     outputs:
       stem: ${{ steps.capture.outputs.stem }}
