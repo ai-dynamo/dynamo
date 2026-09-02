@@ -26,10 +26,12 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model
+from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
 )
+from dynamo.common.utils.env import env_bool
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     EMBEDDING_CACHE_METRIC_PREFIX,
@@ -61,6 +63,12 @@ from .capacity import (
     publish_vllm_token_budget,
 )
 from .dp_topology import get_dp_range_for_worker
+from .embedding_worker_processes import (
+    EmbeddingEngineCleanupResource,
+    create_shared_embedding_engine_client,
+    is_embedding_process_child,
+    start_embedding_parent_watchdog,
+)
 from .engine_generate import publish_engine_generate_capability
 from .handlers import apply_data_parallel_runtime_config
 from .headless import run_dynamo_headless
@@ -151,7 +159,20 @@ async def worker(argv: list[str] | None = None) -> None:
         argv = sys.argv[1:]
     config = parse_args(argv)
 
-    dump_config(config.dump_config_to, config)
+    embedding_process_child = is_embedding_process_child()
+    if config.embedding_worker_processes > 1 and os.environ.get(
+        "DYN_SNAPSHOT_CONTROL_DIR"
+    ):
+        raise ValueError(
+            "--embedding-worker-processes greater than 1 is incompatible with "
+            "checkpoint mode (DYN_SNAPSHOT_CONTROL_DIR is set)."
+        )
+    if embedding_process_child:
+        start_embedding_parent_watchdog()
+    else:
+        # Internal endpoint children have identical configuration. Only the
+        # owning process writes the requested dump path.
+        dump_config(config.dump_config_to, config)
 
     # Name the model. Use either the full path (vllm and sglang do the same),
     # or the HF name (e.g. "Qwen/Qwen3-0.6B"), depending on cmd line params.
@@ -171,7 +192,7 @@ async def worker(argv: list[str] | None = None) -> None:
     # vllm will attempt to download the model again, but find it in the HF cache.
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
-    if should_prefetch_model(config):
+    if not embedding_process_child and should_prefetch_model(config):
         await fetch_model(config.model)
 
     # Snapshot mode: load engine before runtime creation so there are no
@@ -188,6 +209,7 @@ async def worker(argv: list[str] | None = None) -> None:
             config,
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
+        config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -202,6 +224,11 @@ async def worker(argv: list[str] | None = None) -> None:
         request_plane=config.request_plane,
         event_plane=config.event_plane,
     )
+
+    if snapshot_controller is not None:
+        # The flock lives on the open fd, not on any Python reference; the
+        # kernel releases it when the process exits.
+        await elect_and_wake(snapshot_controller.pause_controller, runtime)
 
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there
@@ -675,13 +702,28 @@ def setup_vllm_engine(
 
     # Time engine initialization
     start_time = time.time()
-    engine_client = AsyncLLM.from_vllm_config(
-        vllm_config=vllm_config,
-        usage_context=usage_context,
-        stat_loggers=factory,
-        enable_log_requests=engine_args.enable_log_requests,
-        disable_log_stats=engine_args.disable_log_stats,
-    )
+    embedding_process_group = None
+    if config.embedding_worker and config.embedding_worker_processes > 1:
+        (
+            engine_client,
+            vllm_config,
+            embedding_process_group,
+        ) = create_shared_embedding_engine_client(
+            vllm_config=vllm_config,
+            process_count=config.embedding_worker_processes,
+            usage_context=usage_context,
+            stat_loggers=factory,
+            enable_log_requests=engine_args.enable_log_requests,
+            disable_log_stats=engine_args.disable_log_stats,
+        )
+    else:
+        engine_client = AsyncLLM.from_vllm_config(
+            vllm_config=vllm_config,
+            usage_context=usage_context,
+            stat_loggers=factory,
+            enable_log_requests=engine_args.enable_log_requests,
+            disable_log_stats=engine_args.disable_log_stats,
+        )
     load_time = time.time() - start_time
 
     # Record model load time. ``component_gauges`` is None on the
@@ -693,15 +735,44 @@ def setup_vllm_engine(
 
     logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 
-    # update block_size in vllm_config based on final engine cache info for later use
-    runtime_values = get_engine_cache_info(engine_client)
+    embedding_cleanup_resource: EmbeddingEngineCleanupResource | None = None
+    if embedding_process_group is not None:
+        embedding_cleanup_resource = EmbeddingEngineCleanupResource(
+            embedding_process_group,
+            prometheus_temp_dir,
+        )
+    engine_cleanup_resource = (
+        embedding_cleanup_resource
+        if embedding_cleanup_resource is not None
+        else prometheus_temp_dir
+    )
+
+    # The shared embedding EngineCore is already running at this point, so make
+    # startup failure transactional and do not leave child endpoints behind.
+    try:
+        runtime_values = get_engine_cache_info(engine_client)
+    except BaseException:
+        if embedding_cleanup_resource is not None:
+            try:
+                engine_client.shutdown()
+            except Exception:
+                logger.exception(
+                    "Failed to shut down parent embedding client after startup error"
+                )
+            try:
+                embedding_cleanup_resource.cleanup()
+            except Exception:
+                logger.exception(
+                    "Failed to clean up shared embedding EngineCore after startup error"
+                )
+        raise
     vllm_config.cache_config.block_size = runtime_values["block_size"]
 
     return (
         engine_client,
         vllm_config,
         default_sampling_params,
-        prometheus_temp_dir,
+        engine_cleanup_resource,
         component_gauges,
     )
 

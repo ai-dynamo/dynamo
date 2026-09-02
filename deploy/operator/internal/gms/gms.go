@@ -29,6 +29,9 @@ const (
 	// EnvSocketDir is the environment variable name for the GMS UDS socket directory.
 	EnvSocketDir = "GMS_SOCKET_DIR"
 
+	// EnvUseV1 selects the GMS V1 protocol in engine and GMS processes.
+	EnvUseV1 = "DYN_GMS_USE_V1"
+
 	// ServerModule is the Python module for the GMS server entry point.
 	ServerModule = "gpu_memory_service.cli.server"
 )
@@ -39,7 +42,11 @@ const (
 // socket-bind via connect-retry. Native sidecar status is kept so kubelet
 // terminates the server when the Job's regular containers exit; a regular
 // container here would keep the Pod in Running forever. Idempotent.
-func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container) {
+//
+// Snapshot-coupled GMS uses the V1 protocol: sidecar, extra GMS clients,
+// and the engine container all receive DYN_GMS_USE_V1=true. Intra-pod
+// GMS without snapshot keeps the V0 sidecar and does not set that env.
+func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Container, useV1 bool) {
 	if podSpec == nil || mainContainer == nil {
 		return
 	}
@@ -47,6 +54,10 @@ func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Containe
 	EnsureClient(podSpec, mainContainer)
 
 	sidecar := Container(ServerContainerName, ServerModule, mainContainer.Image)
+	if useV1 {
+		EnableV1(&sidecar)
+		EnableV1(mainContainer)
+	}
 	sidecar.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
 	for i := range podSpec.InitContainers {
 		if podSpec.InitContainers[i].Name == sidecar.Name {
@@ -54,6 +65,23 @@ func EnsureServerSidecar(podSpec *corev1.PodSpec, mainContainer *corev1.Containe
 		}
 	}
 	podSpec.InitContainers = append(podSpec.InitContainers, sidecar)
+}
+
+// EnableV1 sets DYN_GMS_USE_V1=true on a GMS process container. Idempotent.
+func EnableV1(container *corev1.Container) {
+	if container == nil {
+		return
+	}
+	for i := range container.Env {
+		if container.Env[i].Name == EnvUseV1 {
+			container.Env[i] = corev1.EnvVar{Name: EnvUseV1, Value: "true"}
+			return
+		}
+	}
+	container.Env = append(container.Env, corev1.EnvVar{
+		Name:  EnvUseV1,
+		Value: "true",
+	})
 }
 
 // EnsureClient adds the GMS UDS socket volume, mount, GMS_SOCKET_DIR env var,
