@@ -1017,7 +1017,6 @@ fn dispatch_output_batch(
         if cancel.is_cancelled() {
             return None;
         }
-        let scheduler_signal = signal.clone();
         let scheduler_id = signal.uuid;
         let terminal = signal.completed;
         let Some(route) = routes
@@ -1033,27 +1032,37 @@ fn dispatch_output_batch(
             event: signal,
             observed_at,
         });
-        if delivery != OutputDelivery::Delivered {
-            let newly_abandoned = route.abandon_stream();
-            if newly_abandoned && delivery == OutputDelivery::Full {
-                tracing::debug!(
-                    client_id = %route.client_id,
-                    scheduler_id = %route.scheduler_id,
-                    "cancelling live Mocker request with a full output stream"
-                );
+        let mut failed_signal = match delivery {
+            OutputDelivery::Delivered => {
+                if terminal && route.observe_terminal() {
+                    remove_route(routes, &route);
+                }
+                continue;
             }
-            // The scheduler-side sender converts this acknowledgement into
-            // `OutputClosed`; the grouped completion dispatcher cancels the
-            // native request before releasing the pass boundary. Retire the
-            // Dynamo route now so a replacement cannot receive stale output.
-            route.shutdown();
-            remove_route(routes, &route);
-            failed.push(scheduler_signal);
-            continue;
-        }
-        if terminal && route.observe_terminal() {
-            remove_route(routes, &route);
-        }
+            OutputDelivery::Full(signal) => {
+                let newly_abandoned = route.abandon_stream();
+                if newly_abandoned {
+                    tracing::debug!(
+                        client_id = %route.client_id,
+                        scheduler_id = %route.scheduler_id,
+                        "cancelling live Mocker request with a full output stream"
+                    );
+                }
+                signal
+            }
+            OutputDelivery::Closed(signal) => {
+                route.abandon_stream();
+                signal
+            }
+        };
+        // The scheduler-side sender converts this acknowledgement into
+        // `OutputClosed`; the grouped completion dispatcher cancels the
+        // native request before releasing the pass boundary. Retire the
+        // Dynamo route now so a replacement cannot receive stale output.
+        route.shutdown();
+        remove_route(routes, &route);
+        failed_signal.uuid = scheduler_id;
+        failed.push(failed_signal);
     }
     Some(failed)
 }

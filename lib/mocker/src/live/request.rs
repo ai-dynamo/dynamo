@@ -154,12 +154,12 @@ impl RequestRoute {
     pub(super) fn send_output(&self, output: ObservedOutput) -> OutputDelivery {
         let output_tx = self.output_tx.lock().unwrap();
         let Some(output_tx) = output_tx.as_ref() else {
-            return OutputDelivery::Closed;
+            return OutputDelivery::Closed(output.event);
         };
         match output_tx.try_send(output) {
             Ok(()) => OutputDelivery::Delivered,
-            Err(mpsc::error::TrySendError::Full(_)) => OutputDelivery::Full,
-            Err(mpsc::error::TrySendError::Closed(_)) => OutputDelivery::Closed,
+            Err(mpsc::error::TrySendError::Full(output)) => OutputDelivery::Full(output.event),
+            Err(mpsc::error::TrySendError::Closed(output)) => OutputDelivery::Closed(output.event),
         }
     }
 
@@ -196,11 +196,10 @@ impl RequestRoute {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OutputDelivery {
     Delivered,
-    Full,
-    Closed,
+    Full(OutputSignal),
+    Closed(OutputSignal),
 }
 
 pub(super) fn remove_route(routes: &RequestRoutes, route: &Arc<RequestRoute>) -> bool {
@@ -238,4 +237,55 @@ pub(super) fn shutdown_routes(routes: &RequestRoutes) {
     }
     routes.by_client.clear();
     routes.by_scheduler.clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn signal(uuid: Uuid, token_id: u32) -> OutputSignal {
+        OutputSignal {
+            uuid,
+            token_id: Some(token_id),
+            completed: false,
+            rejected: false,
+            handoff_delay_ms: None,
+            cached_tokens: None,
+        }
+    }
+
+    fn observed(event: OutputSignal) -> ObservedOutput {
+        ObservedOutput {
+            event,
+            observed_at: tokio::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn failed_output_delivery_returns_the_original_signal() {
+        let client_id = Uuid::from_u128(1);
+        let scheduler_id = Uuid::from_u128(2);
+        let (output_tx, mut output_rx) = mpsc::channel(1);
+        let route = RequestRoute::new(client_id, scheduler_id, output_tx);
+
+        assert!(matches!(
+            route.send_output(observed(signal(client_id, 10))),
+            OutputDelivery::Delivered
+        ));
+        let full = match route.send_output(observed(signal(client_id, 20))) {
+            OutputDelivery::Full(signal) => signal,
+            _ => panic!("expected full output delivery"),
+        };
+        assert_eq!(full.uuid, client_id);
+        assert_eq!(full.token_id, Some(20));
+
+        assert_eq!(output_rx.try_recv().unwrap().event.token_id, Some(10));
+        drop(output_rx);
+        let closed = match route.send_output(observed(signal(client_id, 30))) {
+            OutputDelivery::Closed(signal) => signal,
+            _ => panic!("expected closed output delivery"),
+        };
+        assert_eq!(closed.uuid, client_id);
+        assert_eq!(closed.token_id, Some(30));
+    }
 }
