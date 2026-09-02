@@ -874,17 +874,13 @@ fn admitted_ids(members: &[DesiredInstance]) -> Vec<u64> {
 
 /// Pick the one cohort of a group whose workers are allowed to serve the model.
 ///
-/// Workers that disagree about a model's deployment card land in different
-/// cohorts, and serving them together could route one model's traffic to a
+/// A cohort holds the workers that agree about a model's deployment card, and
+/// only one may serve: mixing cohorts could route a model's traffic to a
 /// different materialization. A cohort the group has already committed keeps
-/// the model, so a worker that joins later with an incompatible card cannot
-/// displace workers that are already serving. Everything short of a commit is
-/// contestable: the largest cohort wins, ties broken by the lexicographically
-/// smallest fingerprint. That makes the winner a function of the cohort set
-/// alone, so frontend replicas that observe the same workers in different
-/// orders still admit the same cohort — up to the point where one of them
-/// commits, after which keeping healthy serving state takes priority over
-/// agreeing with a replica that has committed nothing.
+/// the model. Everything short of a commit is contestable, and the winner
+/// there is a function of the cohort set alone — largest cohort, ties broken
+/// by the lexicographically smallest fingerprint — so frontend replicas that
+/// observe the same workers in different orders still admit the same cohort.
 fn elect_cohort<'a>(
     cohorts: &'a HashMap<String, BTreeSet<String>>,
     committed: Option<&str>,
@@ -951,15 +947,10 @@ fn report_refused_cohorts(key: &GroupKey, group: &mut DesiredGroup, elected: &st
 ///
 /// A commit is the only thing that wins an election outright, so this covers
 /// exactly the statuses `status_has_commit` reports. Every other status has
-/// published nothing, and protecting one would decide the election by the order
-/// this frontend happened to observe two simultaneously registering workers:
-/// `ModelDiscoveryController::run` starts queued builds at the top of every
-/// iteration and applies one discovery event per iteration, so the first
-/// observed cohort is always `Building` by the time the second is applied.
-/// `Retrying` and `Blocked` are excluded for a second reason — `release_due_retries`
-/// recycles them onto the same fingerprint and the next `start_queued_builds`
-/// promotes them straight back to `Building`, so a cohort that can never build
-/// would hold the model unregistered for as long as it keeps failing.
+/// published nothing, and protecting one would break the election twice over:
+/// it would settle the winner by the order this frontend happened to observe
+/// two simultaneously registering workers, and it would let a cohort that can
+/// never build hold the model unregistered for as long as it keeps failing.
 fn committed_fingerprint(status: &GroupStatus) -> Option<&str> {
     match status {
         GroupStatus::Ready { fingerprint, .. } | GroupStatus::BlockedReady { fingerprint, .. } => {
