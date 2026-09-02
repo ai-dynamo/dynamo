@@ -1432,7 +1432,6 @@ where
         match self
             .find_best_match_details_with_policy_class_inner(
                 context_id,
-                Instant::now(),
                 tokens,
                 block_mm_infos,
                 router_config_override,
@@ -1485,7 +1484,6 @@ where
         match self
             .find_best_match_details_with_policy_class_inner(
                 context_id,
-                Instant::now(),
                 tokens,
                 block_mm_infos,
                 router_config_override,
@@ -1517,7 +1515,6 @@ where
     async fn find_best_match_details_with_policy_class_inner(
         &self,
         context_id: Option<&str>,
-        ingress_at: Instant,
         tokens: &[u32],
         block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
         router_config_override: Option<&RouterConfigOverride>,
@@ -1679,7 +1676,7 @@ where
         let (response, attempt, selected_worker_load) = match admission {
             FindBestMatchAdmission::WithAdmission { .. } => match self
                 .scheduler
-                .schedule_request_admitted_with_context(schedule_request, ingress_at)
+                .schedule_request_admitted(schedule_request)
                 .instrument(tracing::info_span!("kv_router.schedule"))
                 .await
             {

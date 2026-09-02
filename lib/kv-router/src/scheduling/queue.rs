@@ -773,14 +773,8 @@ impl<
         block_hashes: Option<Vec<LocalBlockHash>>,
         lease: Option<Box<RequestLifecycleLease>>,
     ) -> Option<Box<RequestLifecycleLease>> {
-        self.enqueue_admitted_with_block_hashes_and_lease(
-            request,
-            block_hashes,
-            lease,
-            None,
-            StdInstant::now(),
-        )
-        .await
+        self.enqueue_admitted_with_block_hashes_and_lease(request, block_hashes, lease, None)
+            .await
     }
 
     pub(crate) async fn enqueue_admitted_with_block_hashes_and_lease(
@@ -789,7 +783,6 @@ impl<
         block_hashes: Option<Vec<LocalBlockHash>>,
         lease: Option<Box<RequestLifecycleLease>>,
         attempt_tx: Option<oneshot::Sender<AttemptId>>,
-        _ingress_at: StdInstant,
     ) -> Option<Box<RequestLifecycleLease>> {
         self.record_received();
         if self.queueing_enabled && lease.is_none() && request.mode.lifecycle_request_id().is_some()
