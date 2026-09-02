@@ -21,6 +21,13 @@ DEFAULT_MANIFEST = Path("container/compliance/base_sboms/manifest.json")
 
 
 def stem_for(manifest: dict, image: str, tag: str, arches: list[str]) -> str:
+    """Return the shared baseline_sbom stem for image:tag across `arches`.
+
+    Raises SystemExit if any arch is missing, matches more than one row, has an
+    unexpected filename, or if the arches disagree on the stem.
+    """
+    if not arches:
+        raise SystemExit("no architectures given; --arches must name at least one")
     entries = manifest.get("entries", [])
     stems: dict[str, str] = {}
     for arch in arches:

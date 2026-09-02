@@ -45,6 +45,8 @@ jobs:
   detect:
     name: ${{ matrix.framework }} / detect
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -61,11 +63,17 @@ jobs:
       # A scheduled run is always the default branch, so cron behaviour is
       # unchanged, while a workflow_dispatch runs the pipeline code from the ref
       # you dispatched -- which is what makes a change to it testable pre-merge.
+      #
+      # Because that ref is caller-chosen, this job must hold no write-capable
+      # credential: it runs repository Python, so persisting the bot PAT here
+      # would let anyone able to dispatch escalate to whatever that PAT can
+      # reach. Nothing here needs it -- the release lookup uses GITHUB_TOKEN and
+      # ls-remote only reads.
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 0
-          token: ${{ secrets.OPS_BOT_PAT }}
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
@@ -122,6 +130,8 @@ jobs:
     runs-on:
       group: Fastchecker
     timeout-minutes: 90
+    permissions:
+      contents: read
     outputs:
       stem: ${{ steps.capture.outputs.stem }}
     steps:

@@ -27,11 +27,11 @@ FRAMEWORK_SOURCES: dict[str, dict[str, object]] = {
         # Anchored inside the trtllm: block so we don't pick up
         # vllm/sglang runtime_image_tag lines earlier in the file.
         "current_regex": re.compile(
-            r"(?m)^trtllm:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image_tag:\s*(\S+)\s*$",
+            r"(?m)^trtllm:\s*?\n(?:[ \t][^\n]*\n)*?[ \t]+runtime_image_tag:\s*(\S+)\s*$",
         ),
         # Same anchoring for the sibling runtime_image the tag hangs off.
         "runtime_image_regex": re.compile(
-            r"(?m)^trtllm:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image:\s*(\S+)\s*$",
+            r"(?m)^trtllm:\s*?\n(?:[ \t][^\n]*\n)*?[ \t]+runtime_image:\s*(\S+)\s*$",
         ),
     },
 }
@@ -83,6 +83,11 @@ def latest_release(repo: str, include_prereleases: bool) -> str:
 
 
 def _context_field(framework: str, key: str, repo_root: Path) -> str:
+    """Return the single capture of FRAMEWORK_SOURCES[framework][key] in context.yaml.
+
+    Raises SystemExit if the pattern does not match, so a drifted pin format
+    fails loudly rather than silently reporting a stale value.
+    """
     src = FRAMEWORK_SOURCES[framework]
     text = (repo_root / "container" / "context.yaml").read_text()
     m = src[key].search(text)  # type: ignore[union-attr]
@@ -92,10 +97,16 @@ def _context_field(framework: str, key: str, repo_root: Path) -> str:
 
 
 def current_pin(framework: str, repo_root: Path) -> str:
+    """Return the framework's currently pinned version, e.g. 1.3.0rc25."""
     return _context_field(framework, "current_regex", repo_root)
 
 
 def runtime_image(framework: str, repo_root: Path) -> str:
+    """Return the registry repo the pin belongs to, without a tag.
+
+    e.g. nvcr.io/nvidia/tensorrt-llm/release. Callers join this with the
+    detected version to form the ref to capture a baseline against.
+    """
     return _context_field(framework, "runtime_image_regex", repo_root)
 
 

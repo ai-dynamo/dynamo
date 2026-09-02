@@ -19,6 +19,7 @@ import importlib.util
 import shutil
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
@@ -42,8 +43,19 @@ def load(name: str, path: Path):
 
 
 def fail(msg: str) -> None:
+    """Report a failed assertion and exit non-zero (exit 0 == safe to bump)."""
     print(f"FAIL: {msg}")
     sys.exit(1)
+
+
+def fail_exc(what: str, exc: BaseException) -> None:
+    """Same, for an unexpected crash: keep the traceback for debugging.
+
+    The traceback is printed rather than propagated so the script keeps its
+    single contract -- exit 0 means safe to bump, anything else means stop.
+    """
+    traceback.print_exc()
+    fail(f"{what} raised {type(exc).__name__}: {exc}")
 
 
 def main() -> int:
@@ -69,7 +81,7 @@ def main() -> int:
         except SystemExit as exc:
             fail(f"bump apply() raised SystemExit: {exc}")
         except Exception as exc:  # noqa: BLE001 - any crash is a red result
-            fail(f"bump apply() raised {type(exc).__name__}: {exc}")
+            fail_exc("bump apply()", exc)
 
         after = data_path.read_text()
         if after == before:
@@ -134,7 +146,7 @@ def main() -> int:
         except SystemExit as exc:
             fail(f"set_baseline_stem raised SystemExit: {exc}")
         except Exception as exc:  # noqa: BLE001 - any crash is a red result
-            fail(f"set_baseline_stem raised {type(exc).__name__}: {exc}")
+            fail_exc("set_baseline_stem", exc)
 
         ctx_after = ctx_path.read_text()
         cb, ca = ctx_before.splitlines(), ctx_after.splitlines()
