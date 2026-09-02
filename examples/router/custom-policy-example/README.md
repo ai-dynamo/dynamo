@@ -267,6 +267,11 @@ The [custom routing API reference](../../../docs/fern/pages/developer-guide/adva
 
 ## Try the Policies End to End With Mocker
 
+> [!WARNING]
+> Online simulation with Mocker is temporarily unavailable. The `python -m dynamo.mocker` commands
+> in this section do not run in this release. This workflow will return through the unified
+> AISimulate surface in a future release.
+
 Use the embedded Python frontend for this local test. The standalone EPP uses Kubernetes `InferencePool` discovery. Complete [Run With the Python Frontend](#run-with-the-python-frontend) first so that the extension links this example catalog.
 
 Create `/tmp/worker-selection.yaml` with the policy instances from [Configure a Policy Instance](#5-configure-a-policy-instance).

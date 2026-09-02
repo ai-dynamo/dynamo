@@ -28,6 +28,7 @@ use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
+use dynamo_kv_router::scheduling::AdmissionAttempt;
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
@@ -59,6 +60,7 @@ type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter<WorkerSelectionPolic
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use llm_rs::session_affinity::SessionAffinityMode as RsSessionAffinityMode;
 
 use super::aic_callback::create_aic_prefill_load_estimator;
 use super::entrypoint::AicPerfConfig;
@@ -2200,7 +2202,8 @@ impl KvRouter {
     ///
     /// Worker role and Prometheus metric labels come from the endpoint's model card.
     #[new]
-    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None))]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (endpoint, block_size, kv_router_config, aic_perf_config=None, session_affinity_ttl_secs=None, *, load_threshold_config=None, session_affinity_mode="hard"))]
     fn new(
         py: Python<'_>,
         endpoint: &Endpoint,
@@ -2209,12 +2212,16 @@ impl KvRouter {
         aic_perf_config: Option<&AicPerfConfig>,
         session_affinity_ttl_secs: Option<u64>,
         load_threshold_config: Option<&LoadThresholdConfig>,
+        session_affinity_mode: &str,
     ) -> PyResult<Self> {
         if session_affinity_ttl_secs.is_some_and(|ttl| !(1..=31_536_000).contains(&ttl)) {
             return Err(PyValueError::new_err(
                 "session_affinity_ttl_secs must be between 1 and 31536000",
             ));
         }
+        let session_affinity_mode = session_affinity_mode
+            .parse::<RsSessionAffinityMode>()
+            .map_err(PyValueError::new_err)?;
         let kv_router_config = kv_router_config.inner();
         let load_threshold_config = load_threshold_config
             .map(LoadThresholdConfig::as_rust)
@@ -2284,6 +2291,7 @@ impl KvRouter {
                     managed_router.router().clone(),
                     managed_router.load_context().clone(),
                     session_affinity_ttl_secs.map(Duration::from_secs),
+                    session_affinity_mode,
                 )
                 .map_err(to_pyerr)?;
 
@@ -2476,8 +2484,8 @@ impl KvRouter {
         let update_states = request_id.is_some();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let outcome = chooser
-                .find_best_match_details_with_policy_class(
+            let admitted = chooser
+                .find_best_match_details_with_policy_class_admitted(
                     request_id.as_deref(),
                     &token_ids,
                     block_mm_infos.as_deref(),
@@ -2497,6 +2505,7 @@ impl KvRouter {
                 )
                 .await
                 .map_err(to_pyerr)?;
+            let (outcome, attempt) = admitted.into_parts();
             let (best_worker, overlap_blocks) = match outcome {
                 llm_rs::kv_router::FindBestMatchOutcome::Routed {
                     worker,
@@ -2508,7 +2517,7 @@ impl KvRouter {
                 }
             };
 
-            if update_indexer {
+            let routing_decision = if update_indexer {
                 let cfg = chooser.kv_router_config();
                 if !cfg.use_kv_events || cfg.predict_on_route_enabled() {
                     let mut tokens_with_hashes =
@@ -2524,11 +2533,34 @@ impl KvRouter {
                         tokens_with_hashes =
                             tokens_with_hashes.with_cache_namespace(cache_namespace.clone());
                     }
-                    chooser
-                        .record_routing_decision(tokens_with_hashes, best_worker)
-                        .await
-                        .map_err(to_pyerr)?;
+                    Some(tokens_with_hashes)
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+
+            if let Some(request_id) = request_id {
+                let AdmissionAttempt::Tracked(attempt_id) = attempt else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "tracked admission returned no attempt identity",
+                    ));
+                };
+                chooser
+                    .enroll_public_request_attempt(
+                        request_id,
+                        best_worker,
+                        attempt_id,
+                        routing_decision,
+                    )
+                    .await
+                    .map_err(to_pyerr)?;
+            } else if let Some(tokens_with_hashes) = routing_decision {
+                chooser
+                    .record_query_only_routing_decision(tokens_with_hashes, best_worker)
+                    .await
+                    .map_err(to_pyerr)?;
             }
 
             Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
