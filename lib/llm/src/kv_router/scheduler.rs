@@ -38,7 +38,7 @@ use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 pub struct KvScheduler<Sel = DefaultWorkerSelector, RF = NoopOverlapScoresRefresh>
@@ -281,11 +281,15 @@ where
         response
     }
 
-    pub(crate) async fn schedule_request_admitted(
+    pub(crate) async fn schedule_request_admitted_with_context(
         &self,
         request: ScheduleRequest,
+        ingress_at: Instant,
     ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
-        let response = self.inner.schedule_request_admitted(request).await;
+        let response = self
+            .inner
+            .schedule_request_admitted_with_context(request, ingress_at)
+            .await;
         self.observe_schedule_result(&response);
         response
     }
