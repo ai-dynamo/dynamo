@@ -799,9 +799,7 @@ impl<
         }
     }
 
-    /// Test-only producer for `due_at`: nothing in this crate sets a due time
-    /// yet, but the actor-side expiry paths must stay covered until the
-    /// classifier PR lands the production producer.
+    /// Enqueue a request with `due_at` for actor-expiry tests.
     #[cfg(test)]
     pub(crate) async fn enqueue_with_due_at_for_test(
         &self,
