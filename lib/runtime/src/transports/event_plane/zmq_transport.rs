@@ -1085,20 +1085,60 @@ mod tests {
 
         subscriber.remove_endpoint(&endpoint_a).unwrap();
         assert_eq!(subscriber.endpoint_count(), 1);
-        let message = timeout(Duration::from_secs(2), async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let envelope_a_after_removal = EventEnvelope {
+            sequence: 2,
+            ..envelope_a
+        };
+        let envelope_b_after_removal = EventEnvelope {
+            sequence: 2,
+            ..envelope_b
+        };
+        let encoded_a_after_removal = codec.encode_envelope(&envelope_a_after_removal).unwrap();
+        let encoded_b_after_removal = codec.encode_envelope(&envelope_b_after_removal).unwrap();
+        timeout(Duration::from_secs(2), async {
             loop {
-                publisher_b.publish(topic, encoded_b.clone()).await.unwrap();
+                publisher_a
+                    .publish(topic, encoded_a_after_removal.clone())
+                    .await
+                    .unwrap();
+                publisher_b
+                    .publish(topic, encoded_b_after_removal.clone())
+                    .await
+                    .unwrap();
                 if let Ok(Some(Ok(message))) =
                     timeout(Duration::from_millis(25), subscriber.next()).await
-                    && message.publisher_id == 202
+                    && message.sequence == 2
                 {
-                    break message;
+                    assert_ne!(
+                        message.publisher_id, 101,
+                        "removed publisher must not deliver new messages"
+                    );
+                    if message.publisher_id == 202 {
+                        break;
+                    }
                 }
             }
         })
         .await
         .expect("remaining publisher should continue after endpoint removal");
-        assert_eq!(message.publisher_id, 202);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+        while tokio::time::Instant::now() < deadline {
+            publisher_a
+                .publish(topic, encoded_a_after_removal.clone())
+                .await
+                .unwrap();
+            if let Ok(Some(Ok(message))) =
+                timeout(Duration::from_millis(10), subscriber.next()).await
+                && message.sequence == 2
+            {
+                assert_ne!(
+                    message.publisher_id, 101,
+                    "removed publisher must remain disconnected"
+                );
+            }
+        }
     }
 
     #[tokio::test]

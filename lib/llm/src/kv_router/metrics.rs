@@ -211,25 +211,8 @@ pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
 
 pub(crate) struct KvZmqIngressMetrics {
     sources: IntGaugeVec,
-    socket_groups: IntGaugeVec,
-    connected_endpoints: IntGaugeVec,
-    batches_total: IntCounterVec,
+    batches_total: IntCounter,
     lifecycle_total: IntCounterVec,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KvZmqIngressStream {
-    Events,
-    Metrics,
-}
-
-impl KvZmqIngressStream {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Events => "events",
-            Self::Metrics => "metrics",
-        }
-    }
 }
 
 static KV_ZMQ_INGRESS_METRICS: OnceLock<Arc<KvZmqIngressMetrics>> = OnceLock::new();
@@ -248,28 +231,12 @@ impl KvZmqIngressMetrics {
                     )
                     .expect("failed to create router_kv_zmq_ingress_sources gauge");
                 let batches_total = metrics
-                    .create_intcountervec(
+                    .create_intcounter(
                         "router_kv_zmq_ingress_batches_total",
                         "Total ZMQ KV ingress batches handed to WorkerQueryClient",
                         &[],
                     )
                     .expect("failed to create router_kv_zmq_ingress_batches_total counter");
-                let socket_groups = metrics
-                    .create_intgaugevec(
-                        "router_kv_zmq_ingress_socket_groups",
-                        "Number of direct-ZMQ KV ingress SUB socket groups by stream",
-                        &["stream"],
-                        &[],
-                    )
-                    .expect("failed to create router_kv_zmq_ingress_socket_groups gauge");
-                let connected_endpoints = metrics
-                    .create_intgaugevec(
-                        "router_kv_zmq_ingress_connected_endpoints",
-                        "Number of publisher endpoints connected to direct-ZMQ KV ingress SUB sockets by stream",
-                        &["stream"],
-                        &[],
-                    )
-                    .expect("failed to create router_kv_zmq_ingress_connected_endpoints gauge");
                 let lifecycle_total = metrics
                     .create_intcountervec(
                         "router_kv_zmq_ingress_lifecycle_total",
@@ -280,8 +247,6 @@ impl KvZmqIngressMetrics {
                     .expect("failed to create router_kv_zmq_ingress_lifecycle_total counter");
                 Arc::new(Self {
                     sources,
-                    socket_groups,
-                    connected_endpoints,
                     batches_total,
                     lifecycle_total,
                 })
@@ -297,46 +262,12 @@ impl KvZmqIngressMetrics {
         self.sources.with_label_values(&[state]).dec();
     }
 
-    pub(crate) fn increment_batch(&self, stream: KvZmqIngressStream) {
-        self.batches_total
-            .with_label_values(&[stream.label()])
-            .inc();
+    pub(crate) fn increment_batch(&self) {
+        self.batches_total.inc();
     }
 
     pub(crate) fn increment_lifecycle(&self, action: &'static str) {
-        self.increment_stream_lifecycle(KvZmqIngressStream::Events, action);
-    }
-
-    pub(crate) fn increment_stream_lifecycle(
-        &self,
-        stream: KvZmqIngressStream,
-        action: &'static str,
-    ) {
-        self.lifecycle_total
-            .with_label_values(&[stream.label(), action])
-            .inc();
-    }
-
-    pub(crate) fn observe_pool(
-        &self,
-        stream: KvZmqIngressStream,
-        event: crate::direct_zmq_sub_pool::DirectZmqSubPoolEvent,
-    ) {
-        use crate::direct_zmq_sub_pool::DirectZmqSubPoolEvent;
-
-        match event {
-            DirectZmqSubPoolEvent::SocketGroups(delta) => self
-                .socket_groups
-                .with_label_values(&[stream.label()])
-                .add(delta),
-            DirectZmqSubPoolEvent::ConnectedEndpoints(delta) => self
-                .connected_endpoints
-                .with_label_values(&[stream.label()])
-                .add(delta),
-            DirectZmqSubPoolEvent::Lifecycle(action) => {
-                self.increment_stream_lifecycle(stream, action)
-            }
-        }
+        self.lifecycle_total.with_label_values(&[action]).inc();
     }
 
     pub(crate) fn increment_lifecycle_by(&self, action: &'static str, value: u64) {

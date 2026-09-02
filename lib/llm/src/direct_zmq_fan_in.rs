@@ -5,11 +5,12 @@ use std::{collections::HashMap, time::Duration};
 
 use anyhow::Result;
 use dynamo_runtime::{
-    component::Endpoint,
+    component::{Component, Endpoint},
     discovery::{
         DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
         EventChannelInstanceId, EventChannelQuery, EventScope, EventTransport,
     },
+    protocols::EndpointId,
     traits::DistributedRuntimeProvider,
     transports::event_plane::ValidatedEnvelope,
 };
@@ -17,9 +18,7 @@ use futures::StreamExt;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use crate::direct_zmq_sub_pool::{
-    DirectZmqSubPool, DirectZmqSubPoolEvent, endpoints_per_sub_from_env,
-};
+use crate::direct_zmq_sub_pool::{DirectZmqSubItem, DirectZmqSubPool, endpoints_per_sub_from_env};
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
@@ -123,34 +122,57 @@ where
     H: Fn(ValidatedEnvelope) -> Result<()> + Clone + Send + Sync + 'static,
     O: Fn(FanInObservation) + Clone + Send + Sync + 'static,
 {
+    start_direct_zmq_fan_in_for_endpoint_id(
+        endpoint.component().clone(),
+        endpoint.id(),
+        topic,
+        rcvhwm,
+        excluded_publisher_id,
+        continuity_mode,
+        cancellation_token,
+        handler,
+        observer,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_direct_zmq_fan_in_for_endpoint_id<H, O>(
+    component: Component,
+    endpoint_id: EndpointId,
+    topic: &'static str,
+    rcvhwm: i32,
+    excluded_publisher_id: Option<u64>,
+    continuity_mode: ContinuityMode,
+    cancellation_token: CancellationToken,
+    handler: H,
+    observer: O,
+) -> Result<JoinHandle<()>>
+where
+    H: Fn(ValidatedEnvelope) -> Result<()> + Clone + Send + Sync + 'static,
+    O: Fn(FanInObservation) + Clone + Send + Sync + 'static,
+{
     let endpoints_per_sub = endpoints_per_sub_from_env()?;
-    let query =
-        DiscoveryQuery::EventChannels(EventChannelQuery::endpoint_topic(endpoint.id(), topic));
+    let query = DiscoveryQuery::EventChannels(EventChannelQuery::endpoint_topic(
+        endpoint_id.clone(),
+        topic,
+    ));
     let watch_cancel = cancellation_token.child_token();
-    let initial_watch = endpoint
+    let initial_watch = component
         .drt()
         .discovery()
         .list_and_watch(query.clone(), Some(watch_cancel.clone()))
         .await?;
-    let pool_observer = observer.clone();
-    let group_pool = DirectZmqSubPool::new_with_rcvhwm(
+    let group_pool = DirectZmqSubPool::new(
         topic,
         endpoints_per_sub,
         rcvhwm,
-        std::sync::Arc::new(move |event| match event {
-            DirectZmqSubPoolEvent::Lifecycle("envelope_decode_error") => {
-                observe(&pool_observer, 0, 0, FanInEvent::EnvelopeDecodeError)
-            }
-            DirectZmqSubPoolEvent::Lifecycle("identity_mismatch") => {
-                observe(&pool_observer, 0, 0, FanInEvent::IdentityMismatch)
-            }
-            _ => {}
-        }),
         cancellation_token.child_token(),
     )?;
 
     Ok(tokio::spawn(run_supervisor(
-        endpoint,
+        component,
+        endpoint_id,
         topic,
         query,
         group_pool,
@@ -165,7 +187,8 @@ where
 
 #[allow(clippy::too_many_arguments)]
 async fn run_supervisor<H, O>(
-    endpoint: Endpoint,
+    component: Component,
+    endpoint_id: EndpointId,
     topic: &'static str,
     query: DiscoveryQuery,
     group_pool: DirectZmqSubPool,
@@ -183,9 +206,9 @@ async fn run_supervisor<H, O>(
     O: Fn(FanInObservation) + Clone + Send + Sync + 'static,
 {
     let expected_scope = EventScope::Endpoint {
-        endpoint: endpoint.id(),
+        endpoint: endpoint_id,
     };
-    let discovery = endpoint.drt().discovery();
+    let discovery = component.drt().discovery();
     let mut resume_cursors = HashMap::<u64, u64>::new();
     let mut next_generation = 1_u64;
     let mut retry_delay = INITIAL_BACKOFF;
@@ -442,7 +465,7 @@ where
 async fn consume_connection<H, O>(
     publisher_id: u64,
     generation: u64,
-    receiver: &mut mpsc::Receiver<ValidatedEnvelope>,
+    receiver: &mut mpsc::Receiver<DirectZmqSubItem>,
     disconnected: &CancellationToken,
     cursor: &mut SequenceCursor,
     handler: &H,
@@ -454,14 +477,36 @@ where
     O: Fn(FanInObservation) + Send + Sync,
 {
     loop {
-        let envelope = tokio::select! {
+        let item = tokio::select! {
             biased;
             _ = cancel.cancelled() => return false,
             _ = disconnected.cancelled() => return true,
-            envelope = receiver.recv() => envelope,
+            item = receiver.recv() => item,
         };
-        let Some(envelope) = envelope else {
+        let Some(item) = item else {
             return true;
+        };
+
+        let envelope = match item {
+            DirectZmqSubItem::Envelope(envelope) => envelope,
+            DirectZmqSubItem::EnvelopeDecodeError => {
+                observe(
+                    observer,
+                    publisher_id,
+                    generation,
+                    FanInEvent::EnvelopeDecodeError,
+                );
+                continue;
+            }
+            DirectZmqSubItem::IdentityMismatch => {
+                observe(
+                    observer,
+                    publisher_id,
+                    generation,
+                    FanInEvent::IdentityMismatch,
+                );
+                continue;
+            }
         };
 
         match cursor.observe(envelope.sequence) {

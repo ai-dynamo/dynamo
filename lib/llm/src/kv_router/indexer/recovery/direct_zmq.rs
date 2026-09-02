@@ -17,7 +17,7 @@ use dynamo_runtime::{
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::{Codec, EventScope, ValidatedEnvelope},
+    transports::event_plane::{Codec, EventScope},
 };
 use futures::StreamExt;
 use tokio::{
@@ -36,10 +36,11 @@ use super::{
 };
 use crate::{
     direct_zmq_sub_pool::{
-        DirectZmqSubPool, DirectZmqSubPoolEvent, ENDPOINTS_PER_SUB_ENV, endpoints_per_sub_from_env,
+        DirectZmqSubItem, DirectZmqSubPool, ENDPOINTS_PER_SUB_ENV, KV_ZMQ_RCVHWM,
+        endpoints_per_sub_from_env,
     },
     discovery::{KvSourceId, KvSourceMembershipView, KvSourceMembershipWatch},
-    kv_router::metrics::{KvZmqIngressMetrics, KvZmqIngressStream, RouterWorkerStatusMetrics},
+    kv_router::metrics::{KvZmqIngressMetrics, RouterWorkerStatusMetrics},
 };
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
@@ -263,14 +264,10 @@ async fn consume_scope(
         endpoint: kv_state_endpoint.clone(),
     };
     let (signal_tx, mut signal_rx) = mpsc::channel(SIGNAL_CAPACITY);
-    let pool_metrics = ingress_metrics.clone();
-    let pool_observer = Arc::new(move |event: DirectZmqSubPoolEvent| {
-        pool_metrics.observe_pool(KvZmqIngressStream::Events, event);
-    });
     let group_pool = DirectZmqSubPool::new(
         KV_EVENT_SUBJECT,
         endpoints_per_sub,
-        pool_observer,
+        KV_ZMQ_RCVHWM,
         cancellation_token.child_token(),
     )
     .expect("validated direct-ZMQ KV ingress configuration");
@@ -813,12 +810,23 @@ async fn run_source(
 
 async fn consume_connection(
     publisher_id: u64,
-    receiver: &mut mpsc::Receiver<ValidatedEnvelope>,
+    receiver: &mut mpsc::Receiver<DirectZmqSubItem>,
     client: &Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
     metrics: &KvZmqIngressMetrics,
 ) {
     let codec = Codec::default();
-    while let Some(envelope) = receiver.recv().await {
+    while let Some(item) = receiver.recv().await {
+        let envelope = match item {
+            DirectZmqSubItem::Envelope(envelope) => envelope,
+            DirectZmqSubItem::EnvelopeDecodeError => {
+                metrics.increment_lifecycle("envelope_decode_error");
+                continue;
+            }
+            DirectZmqSubItem::IdentityMismatch => {
+                metrics.increment_lifecycle("identity_mismatch");
+                continue;
+            }
+        };
         let events = match codec.decode_payload::<Vec<RouterEvent>>(&envelope.payload) {
             Ok(events) => events,
             Err(error) => {
@@ -828,7 +836,7 @@ async fn consume_connection(
             }
         };
         client.handle_live_batch(publisher_id, events).await;
-        metrics.increment_batch(KvZmqIngressStream::Events);
+        metrics.increment_batch();
     }
 }
 
