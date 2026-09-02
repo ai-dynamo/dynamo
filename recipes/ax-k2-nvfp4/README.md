@@ -39,9 +39,14 @@ scale-writer patch and does not rebuild vLLM. This recipe keeps
 path and does not require that native FP8 KV-cache change.
 
 The EAGLE3 draft is revision-pinned and loaded through vLLM's real speculative
-decoder with `num_speculative_tokens=3`. This is not the synthetic-acceptance
-benchmark mode. The draft is trained for A.X-K2's 262,144-token context and
-must not be paired with a different target architecture or RoPE configuration.
+decoder with `num_speculative_tokens=3`. Production selects the
+`speculative-config` ConfigMap key. For throughput-only benchmarking, the same
+ConfigMap also provides `speculative-config-synthetic`, which keeps the draft
+cost but forces a synthetic acceptance length of 2.12 using
+`rejection_sample_method: synthetic`. Synthetic mode does not measure output
+quality and must not be used as the production default. The draft is trained
+for A.X-K2's 262,144-token context and must not be paired with a different
+target architecture or RoPE configuration.
 
 ## Prerequisites
 
@@ -119,6 +124,11 @@ trace at concurrency 32 with AIPerf 0.12.0. See
 - EAGLE3 uses the production acceptance path with three proposed tokens per
   step. The draft revision is pinned to
   `24958e91737d760908f73a8af4b6e06080fc5c1d`.
+- For synthetic throughput experiments only, change the worker's ConfigMap key
+  from `speculative-config` to `speculative-config-synthetic`. That variant
+  adds `rejection_sample_method: synthetic` and
+  `synthetic_acceptance_length: 2.12`; acceptance length includes the target
+  bonus token.
 - Each TP4 worker requests 400 GiB of host memory, matching the proven A.X-K2
   TP4 cluster deployment while allowing both replicas to schedule.
 - This branch-specific image is experimental and hosted under `nvstaging`.
