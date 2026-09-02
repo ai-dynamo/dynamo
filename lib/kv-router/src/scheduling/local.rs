@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant as StdInstant};
 
 use rustc_hash::FxHashMap;
 use tokio::sync::watch;
@@ -328,6 +328,17 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
+        self.schedule_request_admitted_with_context(request, StdInstant::now())
+            .await
+    }
+
+    /// Schedule with the router's original ingress timing.
+    #[doc(hidden)]
+    pub async fn schedule_request_admitted_with_context(
+        &self,
+        request: ScheduleRequest,
+        ingress_at: StdInstant,
+    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
         let tracked = request.mode.is_tracked();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
@@ -343,6 +354,7 @@ where
                 block_hashes,
                 lifecycle_lease,
                 tracked.then_some(attempt_tx),
+                ingress_at,
             )
             .await;
 

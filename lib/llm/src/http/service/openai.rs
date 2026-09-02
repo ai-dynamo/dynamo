@@ -560,6 +560,20 @@ impl ErrorMessage {
             );
         }
 
+        if super::metrics::request_deadline_exceeded(err.as_ref()) {
+            let code = StatusCode::TOO_MANY_REQUESTS;
+            return (
+                code,
+                Json(ErrorMessage {
+                    message: "request deadline exceeded".to_string(),
+                    error_type: map_error_code_to_error_type(code),
+                    code: code.as_u16(),
+                    details: None,
+                    metric_error_type: Some(ErrorType::Cancelled),
+                }),
+            );
+        }
+
         // Check for ResourceExhausted anywhere in the error chain → HTTP 529
         if super::metrics::request_was_rejected(err.as_ref()) {
             return ErrorMessage::sanitized_with_details(
@@ -6004,6 +6018,23 @@ mod tests {
         assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
         assert_eq!(response.1.message, "Service temporarily unavailable");
+    }
+
+    #[test]
+    fn caller_deadline_maps_to_http_429_without_overload_accounting() {
+        use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
+
+        let error: anyhow::Error = DynamoError::builder()
+            .error_type(DynamoErrorType::DeadlineExceeded)
+            .message("internal deadline detail")
+            .build()
+            .into();
+        assert!(!super::super::metrics::request_was_rejected(error.as_ref()));
+
+        let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
+        assert_eq!(response.0, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.1.message, "request deadline exceeded");
+        assert_eq!(response.1.metric_error_type, Some(ErrorType::Cancelled));
     }
 
     #[test]
