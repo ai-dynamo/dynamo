@@ -19,7 +19,10 @@ use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::HashSet,
+    sync::{Arc, OnceLock},
+};
 use thiserror::Error;
 use tmq::{
     AsZmqSocket, Context, Message, Multipart, SocketBuilder,
@@ -284,6 +287,80 @@ pub struct ZmqWireMessage {
 
 pub type ZmqWireStream =
     std::pin::Pin<Box<dyn futures::Stream<Item = Result<ZmqWireMessage>> + Send>>;
+
+/// One dynamically managed ZMQ SUB socket connected to several publishers.
+///
+/// The caller must keep this value in one task. ZMQ SUB sockets are not thread-safe.
+pub struct DynamicZmqSubSocket {
+    socket: Subscribe,
+    expected_topic: Vec<u8>,
+    endpoints: HashSet<String>,
+}
+
+impl DynamicZmqSubSocket {
+    /// Connect a new SUB socket to its first publisher endpoint.
+    pub fn connect(endpoint: &str, topic: &str) -> Result<Self> {
+        Self::connect_with_rcvhwm(endpoint, topic, ZMQ_RCVHWM)
+    }
+
+    /// Connect a new SUB socket with an explicit receive high-water mark.
+    pub fn connect_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Self> {
+        let socket = ZmqSubTransport::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
+        tracing::info!(endpoint, topic, rcvhwm, "Dynamic ZMQ SUB socket connected");
+        Ok(Self {
+            socket,
+            expected_topic: topic.as_bytes().to_vec(),
+            endpoints: HashSet::from([endpoint.to_string()]),
+        })
+    }
+
+    /// Connect this SUB socket to one more publisher endpoint.
+    pub fn add_endpoint(&mut self, endpoint: &str) -> Result<()> {
+        if self.endpoints.contains(endpoint) {
+            return Ok(());
+        }
+        self.socket.get_socket().connect(endpoint)?;
+        self.endpoints.insert(endpoint.to_string());
+        Ok(())
+    }
+
+    /// Stop receiving from one publisher endpoint.
+    pub fn remove_endpoint(&mut self, endpoint: &str) -> Result<()> {
+        if !self.endpoints.contains(endpoint) {
+            return Ok(());
+        }
+        self.socket.get_socket().disconnect(endpoint)?;
+        self.endpoints.remove(endpoint);
+        Ok(())
+    }
+
+    /// Receive and decode the next multipart message.
+    pub async fn next(&mut self) -> Option<Result<ZmqWireMessage>> {
+        loop {
+            let frames = match self.socket.next().await? {
+                Ok(frames) => frames,
+                Err(error) => return Some(Err(error.into())),
+            };
+            match decode_multipart(frames, &self.expected_topic) {
+                Ok(message) => {
+                    return Some(Ok(ZmqWireMessage {
+                        publisher_id: message.publisher_id,
+                        sequence: message.sequence,
+                        payload: message.payload,
+                    }));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Dropping malformed dynamic ZMQ message");
+                }
+            }
+        }
+    }
+
+    /// Number of publisher endpoints connected to this SUB socket.
+    pub fn endpoint_count(&self) -> usize {
+        self.endpoints.len()
+    }
+}
 
 /// One event envelope whose ZMQ frames and envelope attribution agree.
 #[derive(Debug)]
@@ -957,6 +1034,71 @@ mod tests {
             codec.decode_envelope(&wire.payload).unwrap().payload,
             sentinel.payload
         );
+    }
+
+    #[tokio::test]
+    async fn dynamic_sub_socket_adds_and_removes_publishers() {
+        let process = std::process::id();
+        let endpoint_a = format!("inproc://dynamo-zmq-dynamic-a-{process}");
+        let endpoint_b = format!("inproc://dynamo-zmq-dynamic-b-{process}");
+        let topic = "dynamic-subscriber";
+        let (publisher_a, _) = ZmqPubTransport::bind(&endpoint_a, topic).await.unwrap();
+        let (publisher_b, _) = ZmqPubTransport::bind(&endpoint_b, topic).await.unwrap();
+        let mut subscriber = DynamicZmqSubSocket::connect(&endpoint_a, topic).unwrap();
+        subscriber.add_endpoint(&endpoint_b).unwrap();
+        assert_eq!(subscriber.endpoint_count(), 2);
+
+        let codec = MsgpackCodec;
+        let envelope_a = EventEnvelope {
+            publisher_id: 101,
+            sequence: 1,
+            published_at: 1,
+            topic: topic.to_string(),
+            payload: Bytes::from_static(b"a"),
+        };
+        let envelope_b = EventEnvelope {
+            publisher_id: 202,
+            sequence: 1,
+            published_at: 1,
+            topic: topic.to_string(),
+            payload: Bytes::from_static(b"b"),
+        };
+        let encoded_a = codec.encode_envelope(&envelope_a).unwrap();
+        let encoded_b = codec.encode_envelope(&envelope_b).unwrap();
+
+        let seen = timeout(Duration::from_secs(2), async {
+            let mut seen = HashSet::new();
+            while seen.len() < 2 {
+                publisher_a.publish(topic, encoded_a.clone()).await.unwrap();
+                publisher_b.publish(topic, encoded_b.clone()).await.unwrap();
+                if let Ok(Some(Ok(message))) =
+                    timeout(Duration::from_millis(25), subscriber.next()).await
+                {
+                    seen.insert(message.publisher_id);
+                }
+            }
+            seen
+        })
+        .await
+        .expect("dynamic SUB socket should receive from both publishers");
+        assert_eq!(seen, HashSet::from([101, 202]));
+
+        subscriber.remove_endpoint(&endpoint_a).unwrap();
+        assert_eq!(subscriber.endpoint_count(), 1);
+        let message = timeout(Duration::from_secs(2), async {
+            loop {
+                publisher_b.publish(topic, encoded_b.clone()).await.unwrap();
+                if let Ok(Some(Ok(message))) =
+                    timeout(Duration::from_millis(25), subscriber.next()).await
+                    && message.publisher_id == 202
+                {
+                    break message;
+                }
+            }
+        })
+        .await
+        .expect("remaining publisher should continue after endpoint removal");
+        assert_eq!(message.publisher_id, 202);
     }
 
     #[tokio::test]

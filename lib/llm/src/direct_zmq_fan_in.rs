@@ -11,11 +11,15 @@ use dynamo_runtime::{
         EventChannelInstanceId, EventChannelQuery, EventScope, EventTransport,
     },
     traits::DistributedRuntimeProvider,
-    transports::event_plane::{ValidatedEnvelope, ValidatedZmqSource, ValidatedZmqSourceError},
+    transports::event_plane::ValidatedEnvelope,
 };
 use futures::StreamExt;
-use tokio::task::JoinHandle;
+use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+
+use crate::direct_zmq_sub_pool::{
+    DirectZmqSubPool, DirectZmqSubPoolEvent, endpoints_per_sub_from_env,
+};
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
@@ -119,6 +123,7 @@ where
     H: Fn(ValidatedEnvelope) -> Result<()> + Clone + Send + Sync + 'static,
     O: Fn(FanInObservation) + Clone + Send + Sync + 'static,
 {
+    let endpoints_per_sub = endpoints_per_sub_from_env()?;
     let query =
         DiscoveryQuery::EventChannels(EventChannelQuery::endpoint_topic(endpoint.id(), topic));
     let watch_cancel = cancellation_token.child_token();
@@ -127,12 +132,28 @@ where
         .discovery()
         .list_and_watch(query.clone(), Some(watch_cancel.clone()))
         .await?;
+    let pool_observer = observer.clone();
+    let group_pool = DirectZmqSubPool::new_with_rcvhwm(
+        topic,
+        endpoints_per_sub,
+        rcvhwm,
+        std::sync::Arc::new(move |event| match event {
+            DirectZmqSubPoolEvent::Lifecycle("envelope_decode_error") => {
+                observe(&pool_observer, 0, 0, FanInEvent::EnvelopeDecodeError)
+            }
+            DirectZmqSubPoolEvent::Lifecycle("identity_mismatch") => {
+                observe(&pool_observer, 0, 0, FanInEvent::IdentityMismatch)
+            }
+            _ => {}
+        }),
+        cancellation_token.child_token(),
+    )?;
 
     Ok(tokio::spawn(run_supervisor(
         endpoint,
         topic,
         query,
-        rcvhwm,
+        group_pool,
         excluded_publisher_id,
         continuity_mode,
         cancellation_token,
@@ -147,7 +168,7 @@ async fn run_supervisor<H, O>(
     endpoint: Endpoint,
     topic: &'static str,
     query: DiscoveryQuery,
-    rcvhwm: i32,
+    group_pool: DirectZmqSubPool,
     excluded_publisher_id: Option<u64>,
     continuity_mode: ContinuityMode,
     cancellation_token: CancellationToken,
@@ -253,8 +274,7 @@ async fn run_supervisor<H, O>(
                             endpoint,
                             generation,
                             high_watermark,
-                            topic,
-                            rcvhwm,
+                            group_pool.clone(),
                             continuity_mode,
                             handler.clone(),
                             observer.clone(),
@@ -296,6 +316,7 @@ async fn run_supervisor<H, O>(
         }
         retry_delay = (retry_delay * 2).min(MAX_BACKOFF);
     }
+    group_pool.shutdown().await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -304,8 +325,7 @@ fn spawn_source<H, O>(
     endpoint: String,
     generation: u64,
     high_watermark: Option<u64>,
-    topic: &'static str,
-    rcvhwm: i32,
+    group_pool: DirectZmqSubPool,
     continuity_mode: ContinuityMode,
     handler: H,
     observer: O,
@@ -329,8 +349,7 @@ where
             task_endpoint,
             generation,
             high_watermark,
-            topic,
-            rcvhwm,
+            group_pool,
             continuity_mode,
             handler,
             observer,
@@ -353,8 +372,7 @@ async fn run_source<H, O>(
     endpoint: String,
     generation: u64,
     high_watermark: Option<u64>,
-    topic: &'static str,
-    rcvhwm: i32,
+    group_pool: DirectZmqSubPool,
     continuity_mode: ContinuityMode,
     handler: H,
     observer: O,
@@ -369,14 +387,14 @@ where
     let mut connected_once = false;
 
     loop {
-        let source = tokio::select! {
+        let registration = tokio::select! {
             _ = cancel.cancelled() => break,
-            source = ValidatedZmqSource::connect(&endpoint, topic, publisher_id, rcvhwm) => source,
+            registration = group_pool.register(publisher_id, &endpoint, generation) => registration,
         };
-        let mut source = match source {
-            Ok(source) => source,
+        let mut registration = match registration {
+            Ok(registration) => registration,
             Err(error) => {
-                tracing::warn!(%error, publisher_id, generation, %endpoint, topic, "failed to connect direct-ZMQ source");
+                tracing::warn!(%error, publisher_id, generation, %endpoint, "failed to register direct-ZMQ source");
                 observe(&observer, publisher_id, generation, FanInEvent::Reconnect);
                 if !sleep_or_cancel(retry_delay, &cancel).await {
                     break;
@@ -394,7 +412,8 @@ where
         if !consume_connection(
             publisher_id,
             generation,
-            &mut source,
+            &mut registration.receiver,
+            &registration.disconnected,
             &mut cursor,
             &handler,
             &observer,
@@ -402,8 +421,14 @@ where
         )
         .await
         {
+            group_pool
+                .unregister(registration.group_id, publisher_id, generation)
+                .await;
             break;
         }
+        group_pool
+            .unregister(registration.group_id, publisher_id, generation)
+            .await;
         if !sleep_or_cancel(retry_delay, &cancel).await {
             break;
         }
@@ -413,10 +438,12 @@ where
     cursor.high_watermark
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn consume_connection<H, O>(
     publisher_id: u64,
     generation: u64,
-    source: &mut ValidatedZmqSource,
+    receiver: &mut mpsc::Receiver<ValidatedEnvelope>,
+    disconnected: &CancellationToken,
     cursor: &mut SequenceCursor,
     handler: &H,
     observer: &O,
@@ -430,37 +457,11 @@ where
         let envelope = tokio::select! {
             biased;
             _ = cancel.cancelled() => return false,
-            envelope = source.next() => envelope,
+            _ = disconnected.cancelled() => return true,
+            envelope = receiver.recv() => envelope,
         };
         let Some(envelope) = envelope else {
             return true;
-        };
-        let envelope = match envelope {
-            Ok(envelope) => envelope,
-            Err(ValidatedZmqSourceError::Receive(error)) => {
-                tracing::warn!(%error, publisher_id, generation, "direct-ZMQ source receive failed");
-                return true;
-            }
-            Err(ValidatedZmqSourceError::EnvelopeDecode(error)) => {
-                tracing::warn!(%error, publisher_id, generation, "dropping malformed direct-ZMQ envelope");
-                observe(
-                    observer,
-                    publisher_id,
-                    generation,
-                    FanInEvent::EnvelopeDecodeError,
-                );
-                continue;
-            }
-            Err(error @ ValidatedZmqSourceError::IdentityMismatch { .. }) => {
-                tracing::warn!(%error, publisher_id, generation, "dropping misattributed direct-ZMQ envelope");
-                observe(
-                    observer,
-                    publisher_id,
-                    generation,
-                    FanInEvent::IdentityMismatch,
-                );
-                continue;
-            }
         };
 
         match cursor.observe(envelope.sequence) {

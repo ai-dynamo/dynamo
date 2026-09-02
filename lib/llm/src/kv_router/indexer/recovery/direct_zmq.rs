@@ -17,7 +17,7 @@ use dynamo_runtime::{
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::{Codec, EventScope, ValidatedZmqSource, ValidatedZmqSourceError},
+    transports::event_plane::{Codec, EventScope, ValidatedEnvelope},
 };
 use futures::StreamExt;
 use tokio::{
@@ -35,8 +35,11 @@ use super::{
     worker_query::WorkerQueryClient,
 };
 use crate::{
+    direct_zmq_sub_pool::{
+        DirectZmqSubPool, DirectZmqSubPoolEvent, ENDPOINTS_PER_SUB_ENV, endpoints_per_sub_from_env,
+    },
     discovery::{KvSourceId, KvSourceMembershipView, KvSourceMembershipWatch},
-    kv_router::metrics::{KvZmqIngressMetrics, RouterWorkerStatusMetrics},
+    kv_router::metrics::{KvZmqIngressMetrics, KvZmqIngressStream, RouterWorkerStatusMetrics},
 };
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
@@ -104,6 +107,21 @@ pub(super) async fn run_direct_zmq_supervisor(
 ) {
     let status_metrics = RouterWorkerStatusMetrics::from_component(&component);
     let ingress_metrics = KvZmqIngressMetrics::from_component(&component);
+    let endpoints_per_sub = match endpoints_per_sub_from_env() {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(%error, "Invalid direct-ZMQ KV ingress configuration");
+            if let Some(ready) = startup_ready.take() {
+                let _ = ready.send(Err(error.to_string()));
+            }
+            return;
+        }
+    };
+    tracing::info!(
+        endpoints_per_sub,
+        env = ENDPOINTS_PER_SUB_ENV,
+        "Configured direct-ZMQ KV ingress SUB fan-in"
+    );
     let mut retry_delay = INITIAL_BACKOFF;
 
     loop {
@@ -190,6 +208,7 @@ pub(super) async fn run_direct_zmq_supervisor(
             &serving_endpoint,
             metric_scope,
             &cancellation_token,
+            endpoints_per_sub,
         )
         .await;
         scope_cancel.cancel();
@@ -238,11 +257,23 @@ async fn consume_scope(
     serving_endpoint: &EndpointId,
     metric_scope: MismatchMetricScope,
     cancellation_token: &CancellationToken,
+    endpoints_per_sub: usize,
 ) -> ScopeExit {
     let expected_scope = EventScope::Endpoint {
         endpoint: kv_state_endpoint.clone(),
     };
     let (signal_tx, mut signal_rx) = mpsc::channel(SIGNAL_CAPACITY);
+    let pool_metrics = ingress_metrics.clone();
+    let pool_observer = Arc::new(move |event: DirectZmqSubPoolEvent| {
+        pool_metrics.observe_pool(KvZmqIngressStream::Events, event);
+    });
+    let group_pool = DirectZmqSubPool::new(
+        KV_EVENT_SUBJECT,
+        endpoints_per_sub,
+        pool_observer,
+        cancellation_token.child_token(),
+    )
+    .expect("validated direct-ZMQ KV ingress configuration");
     let mut sources = HashMap::<u64, SourceTask>::new();
     let mut invalid_publishers = HashSet::new();
     let mut next_task_generation = 1_u64;
@@ -270,6 +301,7 @@ async fn consume_scope(
                     client,
                     view.clone(),
                     &mut sources,
+                    &group_pool,
                     ingress_metrics,
                     &signal_tx,
                     cancellation_token,
@@ -307,6 +339,7 @@ async fn consume_scope(
                             client,
                             view,
                             &mut sources,
+                            &group_pool,
                             ingress_metrics,
                             &signal_tx,
                             cancellation_token,
@@ -328,6 +361,7 @@ async fn consume_scope(
                             client,
                             view,
                             &mut sources,
+                            &group_pool,
                             ingress_metrics,
                             &signal_tx,
                             cancellation_token,
@@ -374,6 +408,7 @@ async fn consume_scope(
                                 client,
                                 view,
                                 &mut sources,
+                                &group_pool,
                                 ingress_metrics,
                                 &signal_tx,
                                 cancellation_token,
@@ -389,6 +424,7 @@ async fn consume_scope(
                             endpoint,
                             task_generation,
                             signal_tx.clone(),
+                            group_pool.clone(),
                             client.clone(),
                             ingress_metrics.clone(),
                             cancellation_token.child_token(),
@@ -409,6 +445,7 @@ async fn consume_scope(
                                 client,
                                 view,
                                 &mut sources,
+                                &group_pool,
                                 ingress_metrics,
                                 &signal_tx,
                                 cancellation_token,
@@ -432,6 +469,7 @@ async fn consume_scope(
     for (_, source) in &stopped_sources {
         source.cancel.cancel();
     }
+    group_pool.shutdown().await;
     let publisher_ids = stopped_sources
         .iter()
         .map(|(publisher_id, _)| *publisher_id)
@@ -451,10 +489,12 @@ async fn consume_scope(
     exit
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_sources(
     client: &Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
     preliminary_view: KvSourceMembershipView,
     sources: &mut HashMap<u64, SourceTask>,
+    group_pool: &DirectZmqSubPool,
     metrics: &Arc<KvZmqIngressMetrics>,
     signal_tx: &mpsc::Sender<SourceSignal>,
     cancellation_token: &CancellationToken,
@@ -475,6 +515,7 @@ async fn reconcile_sources(
             publisher_id,
             client,
             sources,
+            group_pool,
             metrics,
             signal_tx,
             cancellation_token,
@@ -502,6 +543,7 @@ async fn reconcile_sources(
             publisher_id,
             client,
             sources,
+            group_pool,
             metrics,
             signal_tx,
             cancellation_token,
@@ -547,6 +589,7 @@ async fn restart_source(
     publisher_id: u64,
     client: &Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
     sources: &mut HashMap<u64, SourceTask>,
+    group_pool: &DirectZmqSubPool,
     metrics: &Arc<KvZmqIngressMetrics>,
     signal_tx: &mpsc::Sender<SourceSignal>,
     cancellation_token: &CancellationToken,
@@ -568,6 +611,7 @@ async fn restart_source(
             endpoint,
             task_generation,
             signal_tx.clone(),
+            group_pool.clone(),
             client.clone(),
             metrics.clone(),
             cancellation_token.child_token(),
@@ -601,11 +645,13 @@ fn bindings_for_publisher(ready: &HashSet<KvSourceId>, publisher_id: u64) -> Has
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_source(
     publisher_id: u64,
     endpoint: String,
     task_generation: u64,
     signal_tx: mpsc::Sender<SourceSignal>,
+    group_pool: DirectZmqSubPool,
     client: Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
     metrics: Arc<KvZmqIngressMetrics>,
     cancel: CancellationToken,
@@ -618,6 +664,7 @@ fn spawn_source(
             task_endpoint,
             task_generation,
             signal_tx,
+            group_pool,
             client,
             metrics,
             task_cancel,
@@ -639,24 +686,23 @@ async fn run_source(
     endpoint: String,
     task_generation: u64,
     signal_tx: mpsc::Sender<SourceSignal>,
+    group_pool: DirectZmqSubPool,
     client: Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
     metrics: Arc<KvZmqIngressMetrics>,
     cancel: CancellationToken,
 ) {
     let mut retry_delay = INITIAL_BACKOFF;
     loop {
-        let stream = tokio::select! {
-            _ = cancel.cancelled() => return,
-            stream = ValidatedZmqSource::connect_default(
-                &endpoint,
-                KV_EVENT_SUBJECT,
-                publisher_id,
-            ) => stream,
-        };
-        let mut stream = match stream {
-            Ok(stream) => stream,
+        if cancel.is_cancelled() {
+            return;
+        }
+        let registration = group_pool
+            .register(publisher_id, &endpoint, task_generation)
+            .await;
+        let mut registration = match registration {
+            Ok(registration) => registration,
             Err(error) => {
-                tracing::warn!(%error, publisher_id, %endpoint, "Failed to connect direct-ZMQ KV source");
+                tracing::warn!(%error, publisher_id, %endpoint, "Failed to register direct-ZMQ KV source with a socket group");
                 if signal_tx
                     .send(SourceSignal::Disconnected {
                         publisher_id,
@@ -674,6 +720,12 @@ async fn run_source(
                 continue;
             }
         };
+        if cancel.is_cancelled() {
+            group_pool
+                .unregister(registration.group_id, publisher_id, task_generation)
+                .await;
+            return;
+        }
         retry_delay = INITIAL_BACKOFF;
 
         let (activate, activation) = oneshot::channel();
@@ -689,18 +741,58 @@ async fn run_source(
             return;
         }
 
-        let activated = tokio::select! {
-            _ = cancel.cancelled() => return,
-            activated = activation => activated.is_ok(),
-        };
-        if !activated {
-            return;
+        enum ActivationOutcome {
+            Activated,
+            Cancelled,
+            Disconnected,
         }
 
-        tokio::select! {
+        let activation_outcome = tokio::select! {
+            _ = cancel.cancelled() => ActivationOutcome::Cancelled,
+            activated = activation => {
+                if activated.is_ok() {
+                    ActivationOutcome::Activated
+                } else {
+                    ActivationOutcome::Cancelled
+                }
+            },
+            _ = registration.disconnected.cancelled() => ActivationOutcome::Disconnected,
+        };
+        if !matches!(activation_outcome, ActivationOutcome::Activated) {
+            group_pool
+                .unregister(registration.group_id, publisher_id, task_generation)
+                .await;
+            if matches!(activation_outcome, ActivationOutcome::Cancelled) {
+                return;
+            }
+            if signal_tx
+                .send(SourceSignal::Disconnected {
+                    publisher_id,
+                    task_generation,
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+            if !sleep_or_cancel(retry_delay, &cancel).await {
+                return;
+            }
+            retry_delay = (retry_delay * 2).min(MAX_BACKOFF);
+            continue;
+        }
+
+        let cancelled = tokio::select! {
             biased;
-            _ = cancel.cancelled() => return,
-            _ = consume_connection(publisher_id, &mut stream, &client, &metrics) => {}
+            _ = cancel.cancelled() => true,
+            _ = registration.disconnected.cancelled() => false,
+            _ = consume_connection(publisher_id, &mut registration.receiver, &client, &metrics) => false,
+        };
+        group_pool
+            .unregister(registration.group_id, publisher_id, task_generation)
+            .await;
+        if cancelled {
+            return;
         }
         if signal_tx
             .send(SourceSignal::Disconnected {
@@ -721,33 +813,12 @@ async fn run_source(
 
 async fn consume_connection(
     publisher_id: u64,
-    stream: &mut ValidatedZmqSource,
+    receiver: &mut mpsc::Receiver<ValidatedEnvelope>,
     client: &Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
     metrics: &KvZmqIngressMetrics,
 ) {
     let codec = Codec::default();
-    loop {
-        let result = stream.next().await;
-        let Some(result) = result else {
-            return;
-        };
-        let envelope = match result {
-            Ok(envelope) => envelope,
-            Err(ValidatedZmqSourceError::Receive(error)) => {
-                tracing::warn!(%error, publisher_id, "Direct-ZMQ KV source stream failed");
-                return;
-            }
-            Err(ValidatedZmqSourceError::EnvelopeDecode(error)) => {
-                tracing::warn!(%error, publisher_id, "Failed to decode direct-ZMQ KV envelope");
-                metrics.increment_lifecycle("envelope_decode_error");
-                continue;
-            }
-            Err(error @ ValidatedZmqSourceError::IdentityMismatch { .. }) => {
-                tracing::warn!(%error, publisher_id, "Dropping direct-ZMQ KV envelope with inconsistent attribution");
-                metrics.increment_lifecycle("identity_mismatch");
-                continue;
-            }
-        };
+    while let Some(envelope) = receiver.recv().await {
         let events = match codec.decode_payload::<Vec<RouterEvent>>(&envelope.payload) {
             Ok(events) => events,
             Err(error) => {
@@ -757,7 +828,7 @@ async fn consume_connection(
             }
         };
         client.handle_live_batch(publisher_id, events).await;
-        metrics.increment_batch();
+        metrics.increment_batch(KvZmqIngressStream::Events);
     }
 }
 
