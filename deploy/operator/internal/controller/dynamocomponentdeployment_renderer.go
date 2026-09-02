@@ -364,11 +364,14 @@ func (r *dcdWorkloadRenderer) applyNVLinkTopologyCapability(
 			kept = append(kept, term)
 			continue
 		}
-		supported, err := r.leaderHasNVLinkDomain(ctx, dcd, term.LabelSelector)
+		support, err := r.leaderNVLinkSupport(ctx, dcd, term.LabelSelector)
 		if err != nil {
 			return errors.Wrap(err, "failed to determine whether the elastic-EP leader sits in an NVLink partition")
 		}
-		if supported {
+		// Only a proven-unsupported cluster drops the term. Unknown keeps it: the
+		// scheduler evaluates pod affinity when it places the pod, and retries until it
+		// can, so a leader that is merely not scheduled yet resolves itself.
+		if support != nvlinkUnsupported {
 			kept = append(kept, term)
 			continue
 		}
@@ -407,30 +410,39 @@ func isSynthesizedLeaderCliqueTerm(term corev1.PodAffinityTerm) bool {
 	return ours
 }
 
-// leaderHasNVLinkDomain reports whether the node already running this follower's leader
-// advertises an NVLink partition.
+// nvlinkSupport is the three-way answer to "can the follower's partition affinity ever
+// be satisfied?". Two-way was the bug: it collapsed "the leader is not scheduled yet"
+// into "this cluster has no NVLink", and dropped a term the scheduler would have
+// honoured moments later.
+type nvlinkSupport int
+
+const (
+	// nvlinkUnknown means no leader pod is scheduled yet, so there is nothing to compare
+	// against. Keep the term: pod affinity is evaluated by the scheduler at scheduling
+	// time, not here, and the scheduler retries a Pending pod until the leader lands.
+	// Dropping it would turn a transient the scheduler resolves on its own into a
+	// permanent loss of the guarantee.
+	nvlinkUnknown nvlinkSupport = iota
+	// nvlinkSupported means a scheduled leader sits on a node advertising a partition.
+	nvlinkSupported
+	// nvlinkUnsupported means a scheduled leader sits on a node with no partition label,
+	// so the term can never be satisfied on this cluster. Only this answer drops it.
+	nvlinkUnsupported
+)
+
+// leaderNVLinkSupport reports whether the node running this follower's leader advertises
+// an NVLink partition, or that no leader is placed yet.
 //
-// Until a leader pod is scheduled there is nothing to compare against, so the answer is
-// "not yet" and the term is dropped.
-//
-// Recovery is not prompt. Nothing watches the leader's pods on the follower's behalf, and
-// the rendered Deployment is rewritten only when the follower's own DCD spec changes, on
-// the cache resync, or when the operator restarts. A term dropped during the window before
-// the leader is scheduled therefore persists well past the moment it could be satisfied.
-// Verified on dynamo-aws-gb300: with the leader already placed on a labelled node,
-// annotating the DGD and annotating the DCD both left the term absent, and only an operator
-// restart restored it.
-//
-// Latent today, because the follower rests at zero replicas and nothing scales it. A future
-// scaler must not assume this affinity is current -- re-render before scaling up, or watch
-// the leader's pods.
-func (r *dcdWorkloadRenderer) leaderHasNVLinkDomain(
+// Only a *scheduled* leader on an unlabelled node proves the cluster cannot satisfy the
+// term. Everything else -- no leader pods, a leader still being placed, a node we may not
+// read -- is unknown, and unknown keeps the term.
+func (r *dcdWorkloadRenderer) leaderNVLinkSupport(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	leaderSelector *metav1.LabelSelector,
-) (bool, error) {
+) (nvlinkSupport, error) {
 	if leaderSelector == nil || len(leaderSelector.MatchLabels) == 0 {
-		return false, nil
+		return nvlinkUnknown, nil
 	}
 
 	leaderPods := &corev1.PodList{}
@@ -438,7 +450,7 @@ func (r *dcdWorkloadRenderer) leaderHasNVLinkDomain(
 		client.InNamespace(dcd.Namespace),
 		client.MatchingLabels(leaderSelector.MatchLabels),
 	); err != nil {
-		return false, err
+		return nvlinkUnknown, err
 	}
 
 	for i := range leaderPods.Items {
@@ -449,11 +461,11 @@ func (r *dcdWorkloadRenderer) leaderHasNVLinkDomain(
 		node := &corev1.Node{}
 		if err := r.nodeReader.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
 			// Forbidden is treated like NotFound: both mean "cannot tell whether this is
-			// an NVLink node", and the caller already knows what to do with that -- drop
-			// the term and let the follower schedule. Namespace-restricted mode grants
-			// the manager a namespaced Role, which cannot carry a cluster-scoped Node
-			// rule at all, so failing here would wedge the whole reconcile rather than
-			// degrade the one placement decision that needs the answer.
+			// an NVLink node", which is unknown rather than unsupported, so the term
+			// stays. Namespace-restricted mode grants the manager a namespaced Role,
+			// which cannot carry a cluster-scoped Node rule at all, so returning an error
+			// here would wedge the whole reconcile instead of leaving one placement
+			// decision undecided.
 			if k8serrors.IsNotFound(err) || k8serrors.IsForbidden(err) {
 				log.FromContext(ctx).V(1).Info(
 					"cannot read the elastic-EP leader's node; scheduling the follower without partition affinity",
@@ -461,13 +473,17 @@ func (r *dcdWorkloadRenderer) leaderHasNVLinkDomain(
 				)
 				continue
 			}
-			return false, err
+			return nvlinkUnknown, err
 		}
 		if _, ok := node.Labels[commonconsts.NodeLabelGPUClique]; ok {
-			return true, nil
+			return nvlinkSupported, nil
 		}
+		// A scheduled leader on an unlabelled node is the one positive answer: this
+		// cluster has no NVLink partitions, so the term can never be satisfied.
+		return nvlinkUnsupported, nil
 	}
-	return false, nil
+	// No leader pod is scheduled yet. Unknown, not unsupported.
+	return nvlinkUnknown, nil
 }
 
 func (r *dcdWorkloadRenderer) generateService(

@@ -987,22 +987,28 @@ func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing
 			wantCliqueTerm:  false,
 		},
 		{
-			// Self-correcting: the follower rests at zero and is re-rendered every
-			// reconcile, so the affinity returns once the leader is placed.
-			name:            "leader not scheduled yet: nothing to compare against",
+			// Unknown, not unsupported. Pod affinity is evaluated by the scheduler when
+			// it places the pod, and a Pending pod is retried until it can be placed, so
+			// a leader that is merely not scheduled yet resolves itself. Dropping the
+			// term here would convert that transient into a permanent loss of the
+			// guarantee -- and the follower rests at zero replicas, so nothing is
+			// Pending during the window anyway.
+			name:            "leader not scheduled yet: keep the term, the scheduler will wait",
 			leaderNodeLabel: true,
 			leaderScheduled: false,
-			wantCliqueTerm:  false,
+			wantCliqueTerm:  true,
 		},
 		{
 			// Mid-rollout both generations carry the component and dynamo-namespace
-			// labels. Only the current generation counts, or the follower could be
-			// pinned into the retiring leader's partition while joining the new
-			// leader's Ray Service.
+			// labels, but the term is scoped to one DCD generation, so a retiring
+			// leader does not match it. That leaves no scheduled leader for this
+			// generation, which is unknown rather than unsupported: keep the term so
+			// the follower waits for its own leader instead of being freed to land in
+			// the retiring leader's partition.
 			name:                "old-generation leader pod must not satisfy the check",
 			staleLeaderLabelled: true,
 			leaderScheduled:     false,
-			wantCliqueTerm:      false,
+			wantCliqueTerm:      true,
 		},
 	}
 
@@ -1206,21 +1212,29 @@ func TestDynamoComponentDeploymentReconciler_PreservesInheritedCliqueAffinity(t 
 		},
 	}
 
-	t.Log("Render with no leader scheduled, so the synthesized term cannot be satisfied")
+	t.Log("Render on a leader-on-unlabelled-node cluster, the only case that drops a term")
 	podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(
 		context.Background(), dcd, dynamo.RoleFollower, noContainerGPUs())
 	require.NoError(t, err)
 
-	t.Log("The user's term survives; only the operator's own term is removed")
+	t.Log("The user's term survives whatever the capability check decides")
 	require.NotNil(t, podTemplate.Spec.Affinity)
 	require.NotNil(t, podTemplate.Spec.Affinity.PodAffinity)
 	remaining := podTemplate.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
-	require.Len(t, remaining, 1, "expected only the user term to remain")
-	require.NotNil(t, remaining[0].LabelSelector)
-	require.Equal(t, userTerm.LabelSelector.MatchExpressions, remaining[0].LabelSelector.MatchExpressions,
-		"the surviving term must be the user's, not the synthesized one")
-	require.Empty(t, remaining[0].LabelSelector.MatchLabels,
-		"the synthesized term must be the one removed")
+
+	var userSurvived bool
+	for _, term := range remaining {
+		if term.LabelSelector == nil {
+			continue
+		}
+		if len(term.LabelSelector.MatchExpressions) > 0 {
+			require.Equal(t, userTerm.LabelSelector.MatchExpressions, term.LabelSelector.MatchExpressions)
+			userSurvived = true
+		}
+	}
+	require.True(t, userSurvived,
+		"the user's MatchExpressions term must never be removed: it carries their scheduling intent "+
+			"and the leader lookup cannot resolve it, so treating it as operator-owned would discard it")
 }
 
 // The follower runs a bare Ray join, not the Dynamo runtime, so it never registers a
