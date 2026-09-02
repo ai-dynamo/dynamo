@@ -13,6 +13,11 @@ name: Auto Dependency Upgrade - Trigger
 on:
   schedule:
     - cron: '0 10 * * *'
+  # TEMP: exercise the pipeline on push to the development branch. Remove with
+  # the rc24 pin before merge -- this branch name does not exist after merge.
+  push:
+    branches:
+      - anants/auto-dep-upgrade-baseline-refresh
   workflow_dispatch:
     inputs:
       framework:
