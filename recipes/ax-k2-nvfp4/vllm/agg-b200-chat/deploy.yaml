@@ -54,8 +54,6 @@ spec:
                     --router-mode kv \
                     --router-kv-events \
                     --kv-cache-block-size 64 \
-                    --router-track-prefill-tokens \
-                    --router-kv-overlap-score-credit-decay 0.1 \
                     --http-host 0.0.0.0 \
                     --http-port 8000
               env:
@@ -125,8 +123,6 @@ spec:
                     --attention-backend FLASHINFER_MLA_SPARSE \
                     --kv-cache-dtype auto \
                     --max-model-len 262144 \
-                    --max-num-seqs 32 \
-                    --max-num-batched-tokens 16384 \
                     --gpu-memory-utilization 0.92 \
                     --block-size 64 \
                     --enable-prefix-caching \
