@@ -25,6 +25,7 @@ use dynamo_llm::worker_type::WorkerType;
 use dynamo_runtime::engine_routes::EngineRouteCallback;
 use dynamo_runtime::pipeline::network::Ingress;
 use dynamo_runtime::protocols::EndpointId;
+use dynamo_runtime::telemetry::LifecycleOperationRole;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 use tokio_util::sync::CancellationToken;
@@ -1017,12 +1018,21 @@ impl Worker {
                     engine_adapter = engine_adapter.with_first_token_source(source);
                 }
                 let engine_adapter = Arc::new(engine_adapter);
-                let ingress = Ingress::for_engine(engine_adapter.clone()).map_err(|e| {
-                    err(
-                        ErrorType::Backend(BackendError::Unknown),
-                        format!("ingress: {e}"),
-                    )
-                })?;
+                let lifecycle_role = match self.config.disaggregation_mode {
+                    DisaggregationMode::Prefill => LifecycleOperationRole::Prefill,
+                    DisaggregationMode::Decode => LifecycleOperationRole::Decode,
+                    DisaggregationMode::Aggregated | DisaggregationMode::Encode => {
+                        LifecycleOperationRole::Worker
+                    }
+                };
+                let ingress =
+                    Ingress::for_engine_with_lifecycle_role(engine_adapter.clone(), lifecycle_role)
+                        .map_err(|e| {
+                            err(
+                                ErrorType::Backend(BackendError::Unknown),
+                                format!("ingress: {e}"),
+                            )
+                        })?;
                 let probe = Arc::new(crate::adapter::JsonProbeAdapter::new(engine_adapter));
                 (ingress, probe)
             }
