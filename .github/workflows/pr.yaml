@@ -569,7 +569,7 @@ jobs:
     with:
       framework: triton
       target: runtime
-      cuda_version: '["13.2"]'
+      cuda_version: '[""]'
       platform: 'linux/amd64' # @whoisj to enable ARM64 support in a future patch.
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_timeout_minutes: 60
@@ -908,7 +908,7 @@ jobs:
       test_type: CPU Test
       amd_runner: prod-tester-amd-v2
       target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
-      cuda_version: '["13.2"]'
+      cuda_version: '[""]'
       platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
       run_sanity_check: false # requires torch which is not present.
       run_cpu_only_tests: true
@@ -928,7 +928,7 @@ jobs:
   #     test_type: QA Test
   #     amd_runner: prod-tester-amd-gpu-v2
   #     target_tag_plain: ${{ needs.triton-build.outputs.target_tag_plain }}
-  #     cuda_version: '["13.2"]'
+  #     cuda_version: '[""]'
   #     platform: '["amd64"]' # @whoisj to enable ARM64 support in a future patch.
   #     enable_coverage: true
   #     run_sanity_check: false # requires torch which is not present.

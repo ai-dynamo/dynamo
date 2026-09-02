@@ -168,9 +168,8 @@ triton:
   cuda13.2:
     base_image: nvcr.io/nvidia/cuda-dl-base
     runtime_image: nvcr.io/nvidia/tritonserver
-    # Build toolchain only, pinned to CUDA 13.1: the Rust cudarc crate rejects
-    # 13.2 at build time. The wheels load CUDA dynamically, so they run on the
-    # 13.2 runtime image regardless.
+    # Build toolchain only, pinned to CUDA 13.1: the Rust cudarc crate rejects 13.2 at build time.
+    # The wheels load CUDA dynamically, so they run on the 13.2 runtime image regardless.
     base_image_tag: 26.02-cuda13.1-devel-ubuntu24.04
     # This value will be updated monthly by the Triton Team after each release.
     runtime_image_tag: 26.07-py3

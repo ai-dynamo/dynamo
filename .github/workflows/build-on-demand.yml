@@ -103,7 +103,7 @@ jobs:
     with:
       framework: triton
       target: runtime
-      cuda_version: '["13.2"]'
+      cuda_version: '[""]'
       platform: 'linux/amd64'
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_timeout_minutes: 60
