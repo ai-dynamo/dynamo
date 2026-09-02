@@ -353,7 +353,6 @@ impl KvRouterConfig {
             prefill_continue_max_budget_tokens,
             prefill_continue_max_concurrent,
             prefill_continue_force,
-            ..Default::default()
         };
         validate_kv_router_config(&inner)?;
         Ok(KvRouterConfig { inner })
