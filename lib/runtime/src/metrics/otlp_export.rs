@@ -100,9 +100,18 @@ fn to_metric(family: &MetricFamily, start: u64, now: u64) -> Option<Metric> {
                 .map(|m| summary_point(m, start, now))
                 .collect(),
         }),
-        // UNTYPED is normalised to a gauge upstream; anything else is a
-        // Prometheus type we do not emit.
-        _ => return None,
+        // Native families reach here straight from `Registry::gather()`,
+        // without passing through the typed builder that normalises engine
+        // metrics, so an UNTYPED family arrives as-is. Exposition format treats
+        // untyped as a gauge; do the same rather than return None, which would
+        // drop the family from OTLP without a trace.
+        MetricType::UNTYPED => metric::Data::Gauge(Gauge {
+            data_points: family
+                .get_metric()
+                .iter()
+                .map(|m| number_point(m, m.untyped.value(), start, now))
+                .collect(),
+        }),
     };
 
     Some(Metric {
@@ -557,6 +566,93 @@ mod tests {
             .map(|m| m.name.as_str())
             .collect();
         assert!(empty.is_empty(), "families with no datapoints: {empty:?}");
+    }
+
+    /// Dynamo's own metrics reach OTLP by a different route than engine
+    /// metrics: `Registry::gather()` straight into the mapper, never through
+    /// the typed builder. Every other test here feeds engine-side data, so
+    /// this is the only cover for that half of the exporter's input.
+    #[test]
+    fn native_dynamo_families_survive_the_mapping() {
+        let registry = MetricsRegistry::new();
+
+        let counter =
+            prometheus::IntCounter::new("dynamo_requests_total", "Requests").expect("counter");
+        counter.inc_by(7);
+        registry
+            .get_prometheus_registry()
+            .register(Box::new(counter))
+            .expect("register counter");
+
+        let histogram = prometheus::Histogram::with_opts(
+            prometheus::HistogramOpts::new("dynamo_latency_seconds", "Latency")
+                .buckets(vec![0.1, 1.0]),
+        )
+        .expect("histogram");
+        histogram.observe(0.5);
+        registry
+            .get_prometheus_registry()
+            .register(Box::new(histogram))
+            .expect("register histogram");
+
+        let families = registry.metric_families_combined().expect("combined");
+        let metrics = to_resource_metrics(&families, &[], UNIX_EPOCH)
+            .scope_metrics
+            .into_iter()
+            .next()
+            .expect("scope")
+            .metrics;
+
+        let by_name = |n: &str| metrics.iter().find(|m| m.name == n).cloned();
+
+        let Some(metric::Data::Sum(sum)) = by_name("dynamo_requests_total").expect("counter").data
+        else {
+            panic!("counter should map to a Sum");
+        };
+        assert!(sum.is_monotonic);
+        assert_eq!(
+            sum.data_points[0].value,
+            Some(number_data_point::Value::AsDouble(7.0))
+        );
+
+        let Some(metric::Data::Histogram(h)) =
+            by_name("dynamo_latency_seconds").expect("histogram").data
+        else {
+            panic!("histogram should map to a Histogram");
+        };
+        assert_eq!(h.data_points[0].count, 1);
+        assert_eq!(h.data_points[0].sum, Some(0.5));
+    }
+
+    /// An UNTYPED family has not been through the typed builder's
+    /// normalisation, so the mapper must decide for itself. Dropping it would
+    /// remove the family from OTLP silently.
+    #[test]
+    fn untyped_family_maps_to_a_gauge() {
+        let mut family = MetricFamily::new();
+        family.set_name("legacy_metric".to_string());
+        family.set_field_type(MetricType::UNTYPED);
+        let mut metric = prometheus::proto::Metric::new();
+        let mut untyped = prometheus::proto::Untyped::new();
+        untyped.set_value(3.5);
+        metric.untyped = Some(untyped).into();
+        family.mut_metric().push(metric);
+
+        let metrics = to_resource_metrics(&[family], &[], UNIX_EPOCH)
+            .scope_metrics
+            .into_iter()
+            .next()
+            .expect("scope")
+            .metrics;
+
+        assert_eq!(metrics.len(), 1, "UNTYPED family was dropped");
+        let Some(metric::Data::Gauge(g)) = &metrics[0].data else {
+            panic!("expected gauge, got {:?}", metrics[0].data);
+        };
+        assert_eq!(
+            g.data_points[0].value,
+            Some(number_data_point::Value::AsDouble(3.5))
+        );
     }
 
     /// The exporter must not depend on the system status server, which is
