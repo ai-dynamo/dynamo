@@ -4,8 +4,11 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.core.types import (
+    BatchDrainLimitDecision,
+    BatchSchedulingObservation,
+)
 from dynamo.planner.environment.base import PlannerEnvironmentImpl
 from dynamo.planner.errors import DeploymentValidationError
 from dynamo.planner.monitoring.worker_info import (
@@ -56,6 +59,15 @@ def _fpm_provider() -> MagicMock:
     return provider
 
 
+def _batch_provider() -> MagicMock:
+    provider = MagicMock()
+    provider.initialize = AsyncMock()
+    provider.collect = AsyncMock(return_value=BatchSchedulingObservation())
+    provider.apply_drain_limits = AsyncMock()
+    provider.shutdown = AsyncMock()
+    return provider
+
+
 @pytest.mark.asyncio
 async def test_initialize_uses_backend_names_and_resolves_namespace_before_state():
     order = []
@@ -96,6 +108,41 @@ async def test_initialize_uses_backend_names_and_resolves_namespace_before_state
     assert order.index("ready") < order.index("namespace") < order.index("gpu")
     assert order.index("gpu") < order.index("fpm:base-ns-workerhash")
     fpm_provider.async_init.assert_awaited_once_with("base-ns-workerhash")
+
+
+@pytest.mark.asyncio
+async def test_batch_provider_lifecycle_collection_and_actuation_are_delegated():
+    controller = _controller()
+    fpm_provider = _fpm_provider()
+    batch_provider = _batch_provider()
+    environment = PlannerEnvironmentImpl(
+        config=_config(),
+        controller=controller,
+        require_prefill=True,
+        require_decode=True,
+        fpm_provider=fpm_provider,
+        batch_provider=batch_provider,
+    )
+
+    await environment.initialize()
+    observation = await environment.collect_batch_scheduling()
+    decisions = [
+        BatchDrainLimitDecision(
+            pool_id="pool",
+            max_admission_rps=0.0,
+            valid_until_s=100.0,
+            decision_id="decision",
+        )
+    ]
+    await environment.apply_batch_drain_limits(decisions)
+    await environment.shutdown()
+
+    assert observation == BatchSchedulingObservation()
+    batch_provider.initialize.assert_awaited_once_with()
+    batch_provider.collect.assert_awaited_once_with()
+    batch_provider.apply_drain_limits.assert_awaited_once_with(decisions)
+    batch_provider.shutdown.assert_awaited_once_with()
+    fpm_provider.shutdown.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

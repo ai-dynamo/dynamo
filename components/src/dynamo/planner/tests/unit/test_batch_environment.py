@@ -11,15 +11,18 @@ from typing import Any, Optional
 import pytest
 from dynamo.planner.core.types import (
     BatchDispatcherFeedback,
+    BatchDrainLimitDecision,
     BatchJobDemand,
     PoolTrafficDemand,
 )
+from dynamo.planner.environment import batch as batch_environment
 from dynamo.planner.environment.batch import (
     BatchGatewayJobSource,
     BatchSchedulingCollector,
     LlmdAsyncOpenMetricsSource,
     LlmdAsyncPrometheusSource,
     OpenMetricsOnlineTrafficSource,
+    RedisLeasedDrainLimitActuator,
 )
 
 
@@ -1192,3 +1195,157 @@ async def test_llmd_async_prometheus_source_fails_on_missing_or_fractional_count
     )
     with pytest.raises(ValueError, match="queued_requests.*integer"):
         await fractional_source.collect_dispatcher_feedback(observed_at_s=1.0)
+
+
+class _FakeRedisPipeline:
+    def __init__(self, execute_results: Optional[list[object]] = None) -> None:
+        self.commands: list[tuple[object, ...]] = []
+        self.execute_results = execute_results or [5, True]
+        self.execute_count = 0
+
+    async def __aenter__(self) -> _FakeRedisPipeline:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc: Optional[BaseException],
+        traceback: Optional[object],
+    ) -> None:
+        return None
+
+    def hset(self, key: str, *, mapping: Mapping[str, str]) -> _FakeRedisPipeline:
+        self.commands.append(("hset", key, dict(mapping)))
+        return self
+
+    def pexpireat(self, key: str, when: int) -> _FakeRedisPipeline:
+        self.commands.append(("pexpireat", key, when))
+        return self
+
+    async def execute(self) -> list[object]:
+        self.execute_count += 1
+        return self.execute_results
+
+
+class _FakeRedis:
+    def __init__(self, pipeline: Optional[_FakeRedisPipeline] = None) -> None:
+        self.fake_pipeline = pipeline or _FakeRedisPipeline()
+        self.transaction_values: list[bool] = []
+        self.closed = False
+
+    def pipeline(self, *, transaction: bool = True) -> _FakeRedisPipeline:
+        self.transaction_values.append(transaction)
+        return self.fake_pipeline
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_redis_actuator_atomically_sets_hash_and_absolute_expiry() -> None:
+    redis = _FakeRedis()
+    actuator = RedisLeasedDrainLimitActuator(
+        client=redis,
+        control_key_resolver=lambda pool_id: f"planner:drain:{pool_id}",
+        clock=lambda: 1_000.0,
+    )
+    decision = BatchDrainLimitDecision(
+        pool_id="pool-a",
+        max_admission_rps=0.0,
+        valid_until_s=1_030.1259,
+        decision_id="decision-7",
+    )
+
+    await actuator.apply_drain_limit(decision)
+
+    assert redis.transaction_values == [True]
+    assert redis.fake_pipeline.execute_count == 1
+    assert redis.fake_pipeline.commands == [
+        (
+            "hset",
+            "planner:drain:pool-a",
+            {
+                "api_version": "llm-d.ai/v1alpha1",
+                "pool_id": "pool-a",
+                "max_admission_rps": "0",
+                "valid_until_unix_ms": "1030125",
+                "decision_id": "decision-7",
+            },
+        ),
+        ("pexpireat", "planner:drain:pool-a", 1_030_125),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field_name, invalid_value, error",
+    [
+        ("pool_id", "", "pool_id"),
+        ("max_admission_rps", math.nan, "max_admission_rps"),
+        ("valid_until_s", 999.0, "expired"),
+        ("decision_id", "", "decision_id"),
+    ],
+)
+async def test_redis_actuator_rejects_invalid_decisions_before_writing(
+    field_name: str, invalid_value: object, error: str
+) -> None:
+    decision = BatchDrainLimitDecision("pool-a", 1.0, 2_000.0, "decision")
+    setattr(decision, field_name, invalid_value)
+    redis = _FakeRedis()
+    actuator = RedisLeasedDrainLimitActuator(
+        client=redis,
+        control_key_resolver=lambda pool_id: pool_id,
+        clock=lambda: 1_000.0,
+    )
+
+    with pytest.raises(ValueError, match=error):
+        await actuator.apply_drain_limit(decision)
+
+    assert redis.transaction_values == []
+
+
+@pytest.mark.asyncio
+async def test_redis_actuator_fails_if_expiry_was_not_applied() -> None:
+    redis = _FakeRedis(_FakeRedisPipeline([5, False]))
+    actuator = RedisLeasedDrainLimitActuator(
+        client=redis,
+        control_key_resolver=lambda pool_id: pool_id,
+        clock=lambda: 1_000.0,
+    )
+
+    with pytest.raises(RuntimeError, match="did not apply"):
+        await actuator.apply_drain_limit(
+            BatchDrainLimitDecision("pool-a", 1.0, 2_000.0, "decision")
+        )
+
+
+@pytest.mark.asyncio
+async def test_redis_from_url_is_lazy_and_owns_created_client(monkeypatch) -> None:
+    redis = _FakeRedis()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class _FakeRedisModule:
+        @staticmethod
+        def from_url(redis_url: str, **options: object) -> _FakeRedis:
+            calls.append((redis_url, options))
+            return redis
+
+    monkeypatch.setattr(
+        batch_environment.importlib,
+        "import_module",
+        lambda module_name: (
+            _FakeRedisModule
+            if module_name == "redis.asyncio"
+            else pytest.fail(f"unexpected import: {module_name}")
+        ),
+    )
+    actuator = RedisLeasedDrainLimitActuator.from_url(
+        "redis://redis.example/0",
+        control_key_resolver=lambda pool_id: pool_id,
+        decode_responses=True,
+    )
+
+    await actuator.aclose()
+
+    assert calls == [("redis://redis.example/0", {"decode_responses": True})]
+    assert redis.closed is True
