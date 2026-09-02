@@ -323,8 +323,8 @@ mod tests {
 
         RequestPayloadHandle::for_test("payload-test-req-ok", "test-model", true)
             .emit(Some(Arc::new(create_test_response("hello"))), None);
-        RequestPayloadHandle::for_test("payload-test-req-cancel", "test-model", true)
-            .emit(None, Some("client_cancelled".to_string()));
+        RequestPayloadHandle::for_test("payload-test-req-dropped", "test-model", true)
+            .emit(None, Some("response_stream_dropped".to_string()));
 
         let mut records = HashMap::new();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -339,7 +339,7 @@ mod tests {
                 };
                 if matches!(
                     payload.request_id.as_str(),
-                    "payload-test-req-ok" | "payload-test-req-cancel"
+                    "payload-test-req-ok" | "payload-test-req-dropped"
                 ) {
                     records.insert(payload.request_id.clone(), record);
                 }
@@ -352,8 +352,8 @@ mod tests {
             .remove("payload-test-req-ok")
             .expect("payload-test-req-ok record");
         let second = records
-            .remove("payload-test-req-cancel")
-            .expect("payload-test-req-cancel record");
+            .remove("payload-test-req-dropped")
+            .expect("payload-test-req-dropped record");
 
         assert_eq!(
             first.event_type,
@@ -371,7 +371,7 @@ mod tests {
             crate::request_trace::RequestTraceEventType::RequestPayload
         );
         let second_payload = second.payload.as_ref().expect("second payload");
-        assert_eq!(second_payload.request_id, "payload-test-req-cancel");
+        assert_eq!(second_payload.request_id, "payload-test-req-dropped");
         assert!(second_payload.request.is_some());
         assert!(second_payload.response.is_none());
         assert!(
@@ -380,7 +380,7 @@ mod tests {
         );
         assert_eq!(
             second_payload.payload_drop_reason.as_deref(),
-            Some("client_cancelled")
+            Some("response_stream_dropped")
         );
     }
 

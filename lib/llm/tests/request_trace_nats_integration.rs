@@ -232,12 +232,12 @@ mod tests {
                 let request_true = create_test_request("nemotron", true);
                 payload::create_handle(&request_true, "store-true", None)
                     .expect("store=true handle")
-                    .emit(None, Some("client_cancelled".to_string()));
+                    .emit(None, Some("response_stream_dropped".to_string()));
 
                 let request_false = create_test_request("nemotron", false);
                 payload::create_handle(&request_false, "store-false", None)
                     .expect("store=false handle")
-                    .emit(None, Some("client_cancelled".to_string()));
+                    .emit(None, Some("response_stream_dropped".to_string()));
 
                 time::sleep(Duration::from_millis(200)).await;
 

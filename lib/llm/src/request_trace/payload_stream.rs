@@ -52,9 +52,12 @@ impl PayloadOutcome {
 
 const DROP_EMPTY_RESPONSE_STREAM: &str = "empty_response_stream";
 
-/// The aggregation never reported an outcome at all: the SSE consumer dropped the
-/// pass-through stream before end-of-stream, or the aggregation task was cancelled.
-const DROP_CLIENT_CANCELLED: &str = "client_cancelled";
+/// The aggregation never reported an outcome at all: something dropped the
+/// pass-through stream before end-of-stream. A client disconnect does that, but so
+/// does `http::service::disconnect` killing the engine context on a backend
+/// inactivity timeout, and the two are indistinguishable from here. The reason names
+/// what we observed rather than guessing at a cause.
+const DROP_RESPONSE_STREAM_DROPPED: &str = "response_stream_dropped";
 
 /// Build the `aggregation_failed` drop reason. The colon-delimited
 /// `identifier:detail` shape matches the marker reasons `otel_sink.rs` already
@@ -63,10 +66,6 @@ fn aggregation_failed_reason(error: impl std::fmt::Display) -> String {
     format!("aggregation_failed:{error}")
 }
 
-/// Resolves to the aggregation outcome. On success it carries the final response and
-/// no drop reason; otherwise it carries a drop reason naming why the record is
-/// incomplete, plus whatever partial response was recovered. The caller emits the
-/// single combined request payload record once, either way.
 type PayloadFuture = Pin<Box<dyn std::future::Future<Output = PayloadOutcome> + Send>>;
 
 /// Forwards transformed chunks unchanged; collects them for aggregation.
@@ -101,7 +100,7 @@ where
                 // The SSE monitor in `http::service::disconnect` breaks out of its loop
                 // on the first `Err` it receives and drops this stream, so end-of-stream
                 // is never reached on the streaming path and the buffered prefix would
-                // otherwise be lost behind a `client_cancelled` reason.
+                // otherwise be lost behind a `response_stream_dropped` reason.
                 if chunk.is_error()
                     && let Some(tx) = self.done_tx.take()
                 {
@@ -192,12 +191,13 @@ where
             match rx.await {
                 Ok(outcome) => outcome,
                 Err(_) => {
-                    // tx dropped without sending: the SSE consumer dropped the passthrough
-                    // stream before end-of-stream (client cancel), or the task was cancelled.
+                    // tx dropped without sending: the passthrough stream went away before
+                    // end-of-stream, either because the client disconnected or because the
+                    // engine context was killed under it.
                     tracing::debug!(
-                        "request payload: response aggregation produced no outcome (client cancel)"
+                        "request payload: response aggregation produced no outcome (stream dropped)"
                     );
-                    PayloadOutcome::dropped(None, DROP_CLIENT_CANCELLED)
+                    PayloadOutcome::dropped(None, DROP_RESPONSE_STREAM_DROPPED)
                 }
             }
         }),
@@ -250,9 +250,9 @@ where
             Ok(outcome) => outcome,
             Err(_) => {
                 tracing::debug!(
-                    "request payload: fold response aggregation produced no outcome (client cancel)"
+                    "request payload: fold response aggregation produced no outcome (stream dropped)"
                 );
-                PayloadOutcome::dropped(None, DROP_CLIENT_CANCELLED)
+                PayloadOutcome::dropped(None, DROP_RESPONSE_STREAM_DROPPED)
             }
         }
     });
@@ -700,7 +700,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_stream_handling() {
         // Empty stream: the aggregator has nothing to apply, so the outcome carries no
-        // response, and names itself rather than looking like a client cancel.
+        // response, and names itself rather than looking like a dropped stream.
         let chunks: Vec<Annotated<NvCreateChatCompletionStreamResponse>> = vec![];
 
         let input_stream = stream::iter(chunks);
@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(
             outcome.drop_reason.as_deref(),
             Some("empty_response_stream"),
-            "an empty stream must be distinguishable from a client cancel"
+            "an empty stream must be distinguishable from a dropped one"
         );
     }
 
@@ -797,8 +797,8 @@ mod tests {
     async fn test_concurrent_futures() {
         // Test that multiple concurrent payload streams don't interfere. The
         // passthrough streams are dropped immediately (the `_` destructure), which
-        // models a client cancel before the first poll — each future should
-        // independently resolve to a cancelled outcome without crosstalk.
+        // models the stream going away before the first poll — each future should
+        // independently resolve to a dropped outcome without crosstalk.
         let chunks1 = vec![create_mock_chunk("Stream 1".to_string(), 0)];
         let chunks2 = vec![create_mock_chunk("Stream 2".to_string(), 0)];
 
@@ -809,8 +809,14 @@ mod tests {
 
         assert!(outcome1.response.is_none());
         assert!(outcome2.response.is_none());
-        assert_eq!(outcome1.drop_reason.as_deref(), Some("client_cancelled"));
-        assert_eq!(outcome2.drop_reason.as_deref(), Some("client_cancelled"));
+        assert_eq!(
+            outcome1.drop_reason.as_deref(),
+            Some("response_stream_dropped")
+        );
+        assert_eq!(
+            outcome2.drop_reason.as_deref(),
+            Some("response_stream_dropped")
+        );
     }
 
     #[tokio::test]
@@ -842,7 +848,7 @@ mod tests {
         );
         assert!(
             reason.contains("invalid sampling parameter"),
-            "the record must name the backend error rather than report a client cancel, got {reason}"
+            "the record must name the backend error rather than report a dropped stream, got {reason}"
         );
 
         let partial = outcome
