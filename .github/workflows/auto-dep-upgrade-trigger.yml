@@ -121,9 +121,40 @@ jobs:
     if: needs.detect.outputs.proceed == 'true'
     runs-on: prod-tester-amd-v2
     timeout-minutes: 90
+    # TEMP: this pool rejects containerless jobs ("Jobs without a job container
+    # are forbidden on this runner"). Pinned to a stock base while we establish
+    # what the pod actually provides; see the probe step below.
+    container:
+      image: ubuntu:24.04
     outputs:
       stem: ${{ steps.capture.outputs.stem }}
     steps:
+      # Before checkout: actions/checkout needs git, and a stock base has none.
+      - name: Install base tooling
+        run: |
+          set -eux
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            git curl ca-certificates python3 python3-yaml
+
+      # TEMP diagnostics: records what this pod provides so the runner choice
+      # stops being guesswork. Never fails the job -- the capture below is the
+      # real gate.
+      - name: Probe runner capabilities
+        continue-on-error: true
+        run: |
+          echo "--- identity ---";  id; cat /etc/os-release | head -2
+          echo "--- cpu/mem ---";   nproc; free -g || true
+          echo "--- disk ---";      df -h / /tmp "${RUNNER_TEMP:-/tmp}" 2>&1 | sort -u
+          echo "--- registry tooling ---"
+          for t in docker crane skopeo syft; do
+            printf '%-8s %s\n' "$t" "$(command -v $t || echo MISSING)"
+          done
+          echo "--- docker reachable? ---"
+          docker buildx version 2>&1 | head -3 || echo "no buildx"
+          docker info 2>&1 | head -3 || echo "no daemon"
+          echo "--- DOCKER_HOST=${DOCKER_HOST:-unset}  socket: $(test -S /var/run/docker.sock && echo present || echo absent) ---"
+
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
