@@ -84,6 +84,22 @@ def verify_github_issue(repo: str, number: str, token: str) -> tuple[bool, bool]
     return False, False
 
 
+def repo_visible(repo: str, token: str) -> tuple[bool, bool]:
+    """Return (visible, api_ok)."""
+    status, _ = http_json(
+        f"https://api.github.com/repos/{repo}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    if status == 200:
+        return True, True
+    if status in (403, 404, 410):
+        return False, True
+    return False, False
+
+
 def verify_linear_issue(identifier: str, api_key: str) -> tuple[bool, bool]:
     """Return (exists, api_ok)."""
     if not api_key:
@@ -149,6 +165,8 @@ def main() -> int:
 
     verified: list[str] = []
     unverified: list[str] = []
+    invisible_repo_refs: list[str] = []
+    repo_visibility: dict[str, tuple[bool, bool]] = {}
 
     ordered_refs = sorted(github_refs, key=lambda r: (r[0], int(r[1])))[:MAX_CANDIDATES]
     for ref_repo, number in ordered_refs:
@@ -159,12 +177,19 @@ def main() -> int:
         elif not api_ok:
             unverified.append(f"GitHub reference {label} (API unavailable)")
         elif ref_repo != repo:
-            # A 404 on a cross-repo reference can mean the workflow token
-            # cannot see that repository (internal visibility) rather than
-            # that the issue does not exist. Fail open.
-            unverified.append(
-                f"GitHub reference {label} (not visible to the workflow token)"
-            )
+            # A 404 on a cross-repo issue can mean the workflow token cannot
+            # see that repository (internal visibility) rather than that the
+            # issue does not exist. Disambiguate against the repository
+            # itself: a visible repository makes the 404 a definitive
+            # missing issue, while an invisible repository is reported but
+            # does not by itself pass the check.
+            if ref_repo not in repo_visibility:
+                repo_visibility[ref_repo] = repo_visible(ref_repo, gh_token)
+            visible, repo_api_ok = repo_visibility[ref_repo]
+            if not repo_api_ok:
+                unverified.append(f"GitHub reference {label} (API unavailable)")
+            elif not visible:
+                invisible_repo_refs.append(label)
         if verified:
             # One verified issue satisfies the check; stop spending lookups.
             break
@@ -232,6 +257,16 @@ def main() -> int:
                 "issue instead.",
             ]
             if fork_linear_ids
+            else []
+        )
+        + (
+            [
+                "",
+                f"References found ({', '.join(invisible_repo_refs)}) point at a",
+                "repository the workflow token cannot see; reference an issue the",
+                "workflow can verify instead.",
+            ]
+            if invisible_repo_refs
             else []
         )
     )
