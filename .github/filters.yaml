@@ -89,6 +89,7 @@ examples:
   - 'deploy/pre-deployment/**'
   - 'scripts/generate_kustomize_openapi.py'
   - 'scripts/kustomize-matrix.py'
+  - 'scripts/validate-recipe-kustomization.py'
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
   - 'docs/tests/**'
