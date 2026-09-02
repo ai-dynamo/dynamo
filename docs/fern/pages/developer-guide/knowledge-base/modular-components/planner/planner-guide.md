@@ -191,6 +191,9 @@ curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
 
 The update is atomic. Use `-1` to disable either GPU budget. The Planner rejects malformed values, fields that are inactive for the current mode, a `min_gpu_budget` greater than `max_gpu_budget` when both are enabled, and minimum footprints that exceed `max_gpu_budget` or the configured power budget. The same checks run at startup, so an infeasible minimum configuration fails before the Planner enters its tick loop. Scale-up has no per-component maximum endpoint setting; the existing GPU, power, Global Planner, and cluster-capacity limits remain the upper bounds.
 
+> [!WARNING]
+> If a scaling submission loses its acknowledgement after the Planner stops waiting for it, a later submission error leaves the outcome unknown. The Planner then stops automatic effect submission to avoid duplicating an action that the remote service might have applied. Runtime `GET` and `PATCH` remain available. Verify the deployment's desired and Ready replica counts, then restart the Planner to resume automatic submission.
+
 The same diagnostic signals surfaced in these reports are also exported as Prometheus metrics under the `dynamo_planner_*` prefix—for example estimated TTFT/ITL (`dynamo_planner_estimated_ttft_ms`, `dynamo_planner_estimated_itl_ms`), recommended replica counts (`dynamo_planner_predicted_num_prefill_replicas`, `dynamo_planner_predicted_num_decode_replicas`), per-engine capacity and FPM queue depths, and load/throughput scaling decision enums.
 
 The Replica Counts plot overlays actual prefill/decode replicas with discrete recommendation markers for the Planner's recommended prefill/decode replicas. When `advisory: true`, these recommended counts are suggestions only; the Planner records what it would do without applying the change.

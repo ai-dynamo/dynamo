@@ -156,6 +156,8 @@ class NativePlannerBase:
         self._config_lock = asyncio.Lock()
         self._config_generation = 0
         self._effect_submission_task: Optional[asyncio.Task[None]] = None
+        self._effect_submission_outcome_unknown: Optional[str] = None
+        self._effect_submission_hold_logged = False
         self._diagnostics_finalized = False
         self._environment_initialized = False
         self._engine: Optional[EngineProtocol] = None
@@ -686,29 +688,72 @@ class NativePlannerBase:
         await self._apply_effects(effects)
 
     def _effect_submission_done(self, task: asyncio.Task[None]) -> None:
-        if self._effect_submission_task is task:
-            self._effect_submission_task = None
+        if self._effect_submission_task is not task:
+            return
         if task.cancelled():
+            self._mark_effect_submission_unknown("submission task was cancelled")
             return
         exception = task.exception()
-        if exception is not None:
-            logger.error(
-                "Planner effect submission failed",
-                exc_info=(type(exception), exception, exception.__traceback__),
-            )
+        if exception is None:
+            self._effect_submission_task = None
+            return
+        self._mark_effect_submission_unknown(
+            f"submission failed: {exception}", exception
+        )
+
+    def _mark_effect_submission_unknown(
+        self, reason: str, exception: Optional[BaseException] = None
+    ) -> None:
+        if self._effect_submission_outcome_unknown is not None:
+            return
+        self._effect_submission_outcome_unknown = reason
+        logger.error(
+            "Planner effect submission outcome is unknown (%s). Automatic "
+            "effect submission is disabled until the Planner is restarted; "
+            "verify the deployment state before restarting to avoid duplicating "
+            "an action that the remote service may already have applied.",
+            reason,
+            exc_info=(
+                (type(exception), exception, exception.__traceback__)
+                if exception is not None
+                else None
+            ),
+        )
 
     async def _submit_effects(
         self, effects: PlannerEffects, config_generation: int
     ) -> None:
         """Submit at most one effect without cancelling an unacknowledged request."""
 
-        pending = self._effect_submission_task
-        if pending is not None and not pending.done():
-            logger.warning(
-                "Skipping planner effect submission while the previous request "
-                "is still awaiting acknowledgement"
-            )
+        if self._effect_submission_outcome_unknown is not None:
+            if not self._effect_submission_hold_logged:
+                logger.error(
+                    "Holding planner effects because a previous submission outcome "
+                    "is unknown; runtime configuration remains available, but "
+                    "automatic submission requires a Planner restart after the "
+                    "deployment state is verified"
+                )
+                self._effect_submission_hold_logged = True
             return
+
+        pending = self._effect_submission_task
+        if pending is not None:
+            if not pending.done():
+                logger.warning(
+                    "Skipping planner effect submission while the previous request "
+                    "is still awaiting acknowledgement"
+                )
+                return
+            if pending.cancelled():
+                self._mark_effect_submission_unknown("submission task was cancelled")
+                return
+            exception = pending.exception()
+            if exception is not None:
+                self._mark_effect_submission_unknown(
+                    f"submission failed: {exception}", exception
+                )
+                return
+            self._effect_submission_task = None
 
         task = asyncio.create_task(
             self._apply_effects_if_current(effects, config_generation)
@@ -726,6 +771,9 @@ class NativePlannerBase:
                 "second effect will be submitted until it completes",
                 _EFFECT_SUBMISSION_WAIT_SECONDS,
             )
+        else:
+            if self._effect_submission_task is task:
+                self._effect_submission_task = None
 
     def _current_worker_counts(self) -> tuple[int, int]:
         """Best-known current (prefill, decode) ready worker counts.

@@ -182,6 +182,9 @@ curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
 
 更新是原子的。将任一 GPU budget 设为 `-1` 可禁用该限制。Planner 会拒绝格式错误的值、当前模式未启用的字段、两个 budget 都启用时大于 `max_gpu_budget` 的 `min_gpu_budget`，以及超过 `max_gpu_budget` 或已配置 power budget 的最小资源组合。相同的检查也会在启动时运行，因此不可行的最小配置会在 Planner 进入 tick loop 之前失败。扩容没有组件级最大端点配置；现有的 GPU、power、Global Planner 和集群容量限制继续作为上限。
 
+> [!WARNING]
+> 如果 Planner 停止等待扩缩容提交后仍未收到确认，而该提交随后返回错误，Planner 将无法确定远端是否已执行操作。为避免重复执行远端可能已经应用的操作，Planner 会停止自动提交 effect。运行时 `GET` 和 `PATCH` 仍然可用。请先确认 deployment 的 desired 和 Ready 副本数，再重启 Planner 以恢复自动提交。
+
 这些报告中展示的同一组诊断信号也会以 `dynamo_planner_*` 前缀导出为 Prometheus 指标，例如估算的 TTFT/ITL（`dynamo_planner_estimated_ttft_ms`、`dynamo_planner_estimated_itl_ms`）、建议副本数（`dynamo_planner_predicted_num_prefill_replicas`、`dynamo_planner_predicted_num_decode_replicas`）、每个引擎的容量和 FPM 队列深度，以及负载/吞吐量扩缩容决策枚举。
 
 Replica Counts 图会将实际 prefill/decode 副本与 Planner 建议的 prefill/decode 副本的离散建议标记叠加显示。当 `advisory: true` 时，这些建议数量仅作为建议；Planner 会记录它本会执行的操作，但不会应用该变更。
