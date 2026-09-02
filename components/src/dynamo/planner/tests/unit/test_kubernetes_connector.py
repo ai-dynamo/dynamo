@@ -1324,12 +1324,9 @@ def test_typed_worker_with_explicit_zero_shape_is_rejected(
     ("command", "args"),
     [
         (None, ["-m", "dynamo.mocker", "--model-name", "test-model"]),
-        (
-            ["python3", "-m", "dynamo.mocker._worker"],
-            ["--model-name", "test-model"],
-        ),
+        (["python3", "-m", "dynamo.mocker"], ["--model-name", "test-model"]),
     ],
-    ids=["public-module", "worker-module"],
+    ids=["module-in-args", "module-in-command"],
 )
 def test_typed_mocker_worker_with_zero_physical_shape_uses_configured_fallback(
     kubernetes_connector, mock_kube_api, command, args
