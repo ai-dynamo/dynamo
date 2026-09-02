@@ -182,18 +182,21 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_PUBLISH_KV_EVENTS",
             default=False,
             help=(
-                "If set, publish KV cache events to the KV router. This does "
-                "not enable TensorRT-LLM performance metrics; configure "
-                "`return_perf_metrics` and `enable_iter_perf_stats` through "
-                "TensorRT-LLM engine arguments when needed. The deprecated "
-                "`--publish-events-and-metrics` alias retains its original "
-                "combined behavior for one release."
+                "Publish KV cache events to the KV router. This does not enable "
+                "TensorRT-LLM metric reporting; use --publish-metrics for that."
             ),
-            dest="publish_events_and_metrics",
-            # `obsolete_flag` accepts the old `--publish-events-and-metrics`
-            # / `--no-publish-events-and-metrics` aliases automatically.
-            # DeprecationWarning fires in args.py:parse_args.
-            obsolete_flag="--publish-events-and-metrics",
+            dest="publish_kv_events",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--publish-metrics",
+            env_var="DYN_TRTLLM_PUBLISH_METRICS",
+            default=False,
+            help=(
+                "Publish TensorRT-LLM iteration and Prometheus metrics. This does "
+                "not publish KV cache events; use --publish-kv-events for that."
+            ),
+            dest="publish_metrics",
         )
         add_argument(
             g,
@@ -502,8 +505,8 @@ class DynamoTrtllmConfig(ConfigBase):
     free_gpu_memory_fraction: float
     extra_engine_args: str
     override_engine_args: str
-    publish_events_and_metrics: bool
-    legacy_publish_events_and_metrics: bool = False
+    publish_kv_events: bool
+    publish_metrics: bool
     load_format: str
     model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None

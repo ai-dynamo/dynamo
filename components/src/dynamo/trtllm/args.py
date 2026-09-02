@@ -54,8 +54,7 @@ class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         DynamoTrtllmConfig.validate(self)
-        # Derive use_kv_events from publish_events_and_metrics
-        self.use_kv_events = self.publish_events_and_metrics
+        self.use_kv_events = self.publish_kv_events
 
         # fix the connector as trtllm accepts only one connector and it should be in VALID_TRTLLM_CONNECTORS
         # while the runtime args accepts a list of connectors
@@ -99,41 +98,36 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
     """
     cli_args = list(argv) if argv is not None else sys.argv[1:]
 
-    # Track which spelling supplied the final CLI value so the deprecated
-    # combined flag can retain its legacy metrics behavior for one release.
-    legacy_cli_metrics: Optional[bool] = None
+    # The deprecated combined spelling maps to both independent controls.
+    expanded_cli_args = []
     legacy_cli_seen = False
     for arg in cli_args:
         flag = arg.split("=", 1)[0]
         if flag == "--publish-events-and-metrics":
-            legacy_cli_metrics = True
             legacy_cli_seen = True
+            expanded_cli_args.extend(["--publish-kv-events", "--publish-metrics"])
         elif flag == "--no-publish-events-and-metrics":
-            legacy_cli_metrics = False
             legacy_cli_seen = True
-        elif flag in ("--publish-kv-events", "--no-publish-kv-events"):
-            legacy_cli_metrics = False
+            expanded_cli_args.extend(["--no-publish-kv-events", "--no-publish-metrics"])
+        else:
+            expanded_cli_args.append(arg)
+    cli_args = expanded_cli_args
 
     if legacy_cli_seen:
         _warn_deprecated(
-            "--publish-events-and-metrics is deprecated; use --publish-kv-events. "
-            "The old flag retains its combined KV-event and performance-metrics "
-            "behavior for one release."
+            "--publish-events-and-metrics is deprecated; use both "
+            "--publish-kv-events and --publish-metrics. The old flag remains "
+            "an alias for both controls for one release."
         )
-    legacy_env_used = (
-        "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS" in os.environ
-        and "DYN_TRTLLM_PUBLISH_KV_EVENTS" not in os.environ
-    )
-    if legacy_env_used:
+    if "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS" in os.environ:
         _warn_deprecated(
             "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated; use "
-            "DYN_TRTLLM_PUBLISH_KV_EVENTS. The old env var stays as an "
-            "alias with combined KV-event and performance-metrics behavior "
-            "for one release."
+            "DYN_TRTLLM_PUBLISH_KV_EVENTS and DYN_TRTLLM_PUBLISH_METRICS. "
+            "The old env var remains an alias for both controls for one release."
         )
-        os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] = os.environ[
-            "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS"
-        ]
+        legacy_value = os.environ["DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS"]
+        os.environ.setdefault("DYN_TRTLLM_PUBLISH_KV_EVENTS", legacy_value)
+        os.environ.setdefault("DYN_TRTLLM_PUBLISH_METRICS", legacy_value)
 
     parser = argparse.ArgumentParser(
         description="Dynamo TensorRT-LLM worker configuration\n\n"
@@ -156,12 +150,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
 
     parsed_args, remaining = parser.parse_known_args(cli_args)
     config = Config.from_cli_args(parsed_args)
-    legacy_metrics_source = (
-        legacy_cli_metrics if legacy_cli_metrics is not None else legacy_env_used
-    )
-    config.legacy_publish_events_and_metrics = bool(
-        config.publish_events_and_metrics and legacy_metrics_source
-    )
 
     # Consume the router flags before the dynamic --trtllm.* scan sees them.
     config.router_advertisement, remaining = parse_worker_router_config(remaining)
