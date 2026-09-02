@@ -787,6 +787,12 @@ pub mod event_plane {
     /// Event plane codec selection: "json" or "msgpack".
     pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
 
+    /// Maximum number of sockets in the process-wide ZMQ context.
+    ///
+    /// The default is 8,192. The value must not exceed the platform limit
+    /// reported by libzmq.
+    pub const DYN_ZMQ_MAX_SOCKETS: &str = "DYN_ZMQ_MAX_SOCKETS";
+
     /// Bounded capacity of the direct ZMQ event-subscriber's merged event channel.
     ///
     /// Many peer publishers (e.g. every other frontend under replica-sync) feed
@@ -1042,6 +1048,7 @@ mod tests {
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
+            event_plane::DYN_ZMQ_MAX_SOCKETS,
             event_plane::DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY,
             // ZMQ Broker
             zmq_broker::DYN_ZMQ_BROKER_URL,

@@ -19,23 +19,151 @@ use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use std::sync::{Arc, OnceLock};
+use std::{
+    ffi::{OsStr, c_void},
+    ptr::NonNull,
+    sync::{Arc, OnceLock},
+};
 use thiserror::Error;
 use tmq::{
-    AsZmqSocket, Context, Message, Multipart, SocketBuilder,
-    publish::{Publish, publish},
-    subscribe::{Subscribe, subscribe},
+    AsZmqSocket, FromZmqSocket, Message, Multipart,
+    publish::Publish,
+    subscribe::{Subscribe, SubscribeWithoutTopic},
 };
 use tokio::sync::{Mutex, broadcast};
 use tokio_util::task::AbortOnDropHandle;
 
-/// Returns the process-wide shared ZMQ context.
+use crate::config::environment_names::event_plane::DYN_ZMQ_MAX_SOCKETS;
+
+const ZMQ_MAX_SOCKETS_DEFAULT: i32 = 8_192;
+
+/// Owns one libzmq context configured before its first socket is created.
 ///
-/// libzmq spawns background I/O threads per `Context`, so all PUB/SUB sockets
-/// share one. `zmq::Context` is reference-counted; clones drive the same context.
-fn shared_zmq_context() -> Context {
-    static CONTEXT: OnceLock<Context> = OnceLock::new();
-    CONTEXT.get_or_init(Context::new).clone()
+/// The production instance is stored in a process-wide static so it always
+/// outlives the `zmq::Socket` wrappers created from its raw sockets. Local test
+/// instances must be dropped only after all of their sockets are dropped.
+struct RawZmqContext {
+    raw: NonNull<c_void>,
+}
+
+// SAFETY: libzmq contexts are thread-safe. Socket thread affinity is enforced
+// by the existing `zmq::Socket` and `tmq` wrappers, not by this context handle.
+unsafe impl Send for RawZmqContext {}
+// SAFETY: see the `Send` implementation above.
+unsafe impl Sync for RawZmqContext {}
+
+impl RawZmqContext {
+    fn from_env() -> Result<Self> {
+        let raw = NonNull::new(unsafe { zmq_sys::zmq_ctx_new() })
+            .ok_or_else(|| anyhow!(last_zmq_error()))?;
+        let context = Self { raw };
+        let socket_limit = context.get_option(zmq_sys::ZMQ_SOCKET_LIMIT)?;
+        anyhow::ensure!(
+            socket_limit > 0,
+            "libzmq reported an invalid ZMQ_SOCKET_LIMIT of {socket_limit}"
+        );
+
+        let max_sockets = parse_max_sockets(
+            std::env::var_os(DYN_ZMQ_MAX_SOCKETS).as_deref(),
+            socket_limit,
+        )?;
+        context.set_option(zmq_sys::ZMQ_MAX_SOCKETS, max_sockets)?;
+
+        tracing::info!(
+            max_sockets,
+            socket_limit,
+            env = DYN_ZMQ_MAX_SOCKETS,
+            "Configured process-wide ZMQ context"
+        );
+        Ok(context)
+    }
+
+    #[cfg(test)]
+    fn with_max_sockets(max_sockets: i32) -> Result<Self> {
+        let raw = NonNull::new(unsafe { zmq_sys::zmq_ctx_new() })
+            .ok_or_else(|| anyhow!(last_zmq_error()))?;
+        let context = Self { raw };
+        let socket_limit = context.get_option(zmq_sys::ZMQ_SOCKET_LIMIT)?;
+        let max_sockets =
+            parse_max_sockets(Some(OsStr::new(&max_sockets.to_string())), socket_limit)?;
+        context.set_option(zmq_sys::ZMQ_MAX_SOCKETS, max_sockets)?;
+        Ok(context)
+    }
+
+    fn socket(&self, socket_type: u32) -> std::result::Result<zmq::Socket, zmq::Error> {
+        let raw = unsafe { zmq_sys::zmq_socket(self.raw.as_ptr(), socket_type as i32) };
+        if raw.is_null() {
+            return Err(last_zmq_error());
+        }
+
+        // SAFETY: `raw` is a live socket returned by the same linked libzmq
+        // library used by `zmq`. Ownership is transferred exactly once to the
+        // wrapper, which closes it on drop. The process-wide context outlives
+        // every production socket created here.
+        Ok(unsafe { zmq::Socket::from_raw(raw) })
+    }
+
+    fn get_option(&self, option: u32) -> Result<i32> {
+        let value = unsafe { zmq_sys::zmq_ctx_get(self.raw.as_ptr(), option as i32) };
+        if value == -1 {
+            Err(last_zmq_error().into())
+        } else {
+            Ok(value)
+        }
+    }
+
+    fn set_option(&self, option: u32, value: i32) -> Result<()> {
+        let result = unsafe { zmq_sys::zmq_ctx_set(self.raw.as_ptr(), option as i32, value) };
+        if result == -1 {
+            Err(last_zmq_error().into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for RawZmqContext {
+    fn drop(&mut self) {
+        loop {
+            if unsafe { zmq_sys::zmq_ctx_term(self.raw.as_ptr()) } == 0 {
+                return;
+            }
+            if last_zmq_error() != zmq::Error::EINTR {
+                return;
+            }
+        }
+    }
+}
+
+fn last_zmq_error() -> zmq::Error {
+    zmq::Error::from_raw(unsafe { zmq_sys::zmq_errno() })
+}
+
+fn parse_max_sockets(value: Option<&OsStr>, socket_limit: i32) -> Result<i32> {
+    let value = match value {
+        Some(value) => value
+            .to_str()
+            .ok_or_else(|| anyhow!("{DYN_ZMQ_MAX_SOCKETS} must be valid UTF-8"))?
+            .parse::<i32>()
+            .map_err(|_| anyhow!("{DYN_ZMQ_MAX_SOCKETS} must be a positive integer"))?,
+        None => ZMQ_MAX_SOCKETS_DEFAULT,
+    };
+
+    anyhow::ensure!(value > 0, "{DYN_ZMQ_MAX_SOCKETS} must be positive");
+    anyhow::ensure!(
+        value <= socket_limit,
+        "{DYN_ZMQ_MAX_SOCKETS}={value} exceeds libzmq ZMQ_SOCKET_LIMIT={socket_limit}"
+    );
+    Ok(value)
+}
+
+/// Returns the process-wide shared ZMQ context.
+fn shared_zmq_context() -> Result<&'static RawZmqContext> {
+    static CONTEXT: OnceLock<std::result::Result<RawZmqContext, String>> = OnceLock::new();
+    match CONTEXT.get_or_init(|| RawZmqContext::from_env().map_err(|error| format!("{error:#}"))) {
+        Ok(context) => Ok(context),
+        Err(error) => Err(anyhow!(error.clone())),
+    }
 }
 
 /// High Water Mark (HWM) for ZMQ sockets.
@@ -51,30 +179,23 @@ use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
 use crate::discovery::EventTransportKind;
 
-fn configure_publish_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
-where
-    T: tmq::FromZmqSocket<T>,
-{
-    builder
-        .set_sndhwm(ZMQ_SNDHWM)
-        .set_sndtimeo(ZMQ_SNDTIMEOUT_MS)
+fn publish_socket() -> Result<zmq::Socket> {
+    let socket = shared_zmq_context()?.socket(zmq_sys::ZMQ_PUB)?;
+    socket.set_sndhwm(ZMQ_SNDHWM)?;
+    socket.set_sndtimeo(ZMQ_SNDTIMEOUT_MS)?;
+    Ok(socket)
 }
 
-fn configure_subscribe_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
-where
-    T: tmq::FromZmqSocket<T>,
-{
-    configure_subscribe_builder_with_hwm(builder, ZMQ_RCVHWM)
+fn subscribe_socket() -> Result<zmq::Socket> {
+    subscribe_socket_with_hwm(ZMQ_RCVHWM)
 }
 
-fn configure_subscribe_builder_with_hwm<T>(
-    builder: SocketBuilder<T>,
-    rcvhwm: i32,
-) -> SocketBuilder<T>
-where
-    T: tmq::FromZmqSocket<T>,
-{
-    builder.set_rcvhwm(rcvhwm).set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)
+fn subscribe_socket_with_hwm(rcvhwm: i32) -> Result<zmq::Socket> {
+    anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
+    let socket = shared_zmq_context()?.socket(zmq_sys::ZMQ_SUB)?;
+    socket.set_rcvhwm(rcvhwm)?;
+    socket.set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)?;
+    Ok(socket)
 }
 
 /// Keeps a received ZMQ message alive for as long as any derived `Bytes` exists.
@@ -114,8 +235,9 @@ impl ZmqPubTransport {
             endpoint.to_string()
         };
 
-        let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).bind(&actual_endpoint)?;
+        let socket = publish_socket()?;
+        socket.bind(&actual_endpoint)?;
+        let socket = Publish::from_zmq_socket(socket)?;
 
         tracing::info!(
             endpoint = %actual_endpoint,
@@ -139,8 +261,9 @@ impl ZmqPubTransport {
 
     /// Connect to single broker XSUB endpoint (broker mode)
     pub async fn connect(xsub_endpoint: &str, topic: &str) -> Result<Self> {
-        let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).connect(xsub_endpoint)?;
+        let socket = publish_socket()?;
+        socket.connect(xsub_endpoint)?;
+        let socket = Publish::from_zmq_socket(socket)?;
 
         tracing::info!(
             endpoint = %xsub_endpoint,
@@ -162,8 +285,9 @@ impl ZmqPubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).connect(first_endpoint)?;
+        let socket = publish_socket()?;
+        socket.connect(first_endpoint)?;
+        let socket = Publish::from_zmq_socket(socket)?;
 
         for endpoint in endpoints {
             socket.get_socket().connect(endpoint)?;
@@ -337,13 +461,9 @@ impl ZmqSubTransport {
     }
 
     fn connect_socket_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Subscribe> {
-        anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
-        let ctx = shared_zmq_context();
-        Ok(
-            configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm)
-                .connect(endpoint)?
-                .subscribe(topic.as_bytes())?,
-        )
+        let socket = subscribe_socket_with_hwm(rcvhwm)?;
+        socket.connect(endpoint)?;
+        Ok(SubscribeWithoutTopic::from_zmq_socket(socket)?.subscribe(topic.as_bytes())?)
     }
 
     /// Create a new ZMQ subscriber by connecting to a single endpoint.
@@ -434,10 +554,9 @@ impl ZmqSubTransport {
             anyhow::bail!("Cannot connect to zero endpoints");
         };
 
-        let ctx = shared_zmq_context();
-        let socket = configure_subscribe_builder(subscribe(&ctx))
-            .connect(first_endpoint)?
-            .subscribe(topic.as_bytes())?;
+        let socket = subscribe_socket()?;
+        socket.connect(first_endpoint)?;
+        let socket = SubscribeWithoutTopic::from_zmq_socket(socket)?.subscribe(topic.as_bytes())?;
 
         for endpoint in endpoints_iter {
             socket.get_socket().connect(endpoint)?;
@@ -583,6 +702,46 @@ mod tests {
     use super::*;
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
     use tokio::time::{Duration, timeout};
+
+    #[test]
+    fn max_socket_configuration_is_strict_and_bounded() {
+        assert_eq!(parse_max_sockets(None, 16_384).unwrap(), 8_192);
+        let error = parse_max_sockets(None, 4_096).unwrap_err();
+        assert!(error.to_string().contains("ZMQ_SOCKET_LIMIT=4096"));
+        assert_eq!(
+            parse_max_sockets(Some(OsStr::new("2048")), 16_384).unwrap(),
+            2_048
+        );
+
+        assert!(parse_max_sockets(Some(OsStr::new("0")), 16_384).is_err());
+        assert!(parse_max_sockets(Some(OsStr::new("invalid")), 16_384).is_err());
+        let error = parse_max_sockets(Some(OsStr::new("16385")), 16_384).unwrap_err();
+        assert!(error.to_string().contains("ZMQ_SOCKET_LIMIT=16384"));
+    }
+
+    #[test]
+    fn raw_context_applies_socket_capacity_and_closes_after_sockets() {
+        let context = RawZmqContext::with_max_sockets(2).unwrap();
+        assert_eq!(context.get_option(zmq_sys::ZMQ_MAX_SOCKETS).unwrap(), 2);
+
+        let first = context.socket(zmq_sys::ZMQ_PAIR).unwrap();
+        let second = context.socket(zmq_sys::ZMQ_PAIR).unwrap();
+        assert!(matches!(
+            context.socket(zmq_sys::ZMQ_PAIR),
+            Err(zmq::Error::EMFILE)
+        ));
+
+        drop(first);
+        drop(second);
+        drop(context);
+
+        let larger_context = RawZmqContext::with_max_sockets(3).unwrap();
+        let sockets = (0..3)
+            .map(|_| larger_context.socket(zmq_sys::ZMQ_PAIR).unwrap())
+            .collect::<Vec<_>>();
+        drop(sockets);
+        drop(larger_context);
+    }
 
     async fn send_raw(publisher: &ZmqPubTransport, frames: Vec<Vec<u8>>) {
         publisher
