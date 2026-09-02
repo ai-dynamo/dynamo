@@ -760,8 +760,8 @@ async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
         Arc::clone(&router.request_metrics),
         "shutdown-drain".to_string(),
         WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
-        false,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -806,8 +806,8 @@ async fn client_cancellation_still_ends_stream_without_draining() {
         Arc::clone(&router.request_metrics),
         "client-cancelled-drain".to_string(),
         WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
-        false,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -844,8 +844,8 @@ async fn drain_without_trailing_error_gives_up_at_the_deadline() {
         Arc::clone(&router.request_metrics),
         "shutdown-drain-deadline".to_string(),
         WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
-        false,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
@@ -867,6 +867,56 @@ async fn drain_without_trailing_error_gives_up_at_the_deadline() {
             .await
             .expect("the stream must end after the drain gives up")
             .is_none()
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// The drain window must actually be armed for DRAIN_TIMEOUT, not merely exist. A worker
+/// that sends its typed error a scheduler tick after the `Cancelled` frame -- well inside
+/// the window -- must still have that error reach migration, and the withheld frame must
+/// not be published ahead of it. Removing the `drain_deadline` reset leaves the deadline at
+/// its already-elapsed initial value, which ends the stream on the `Cancelled` frame and
+/// fails this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn trailing_error_within_the_drain_window_still_reaches_migration() {
+    let (router, runtime) = router(None).await;
+    tokio::time::pause();
+    let context = Context::new(()).context();
+    let source = ResponseStream::new(
+        Box::pin(async_stream::stream! {
+            yield cancelled_frame();
+            // Comfortably inside the window: the drain must still be open here.
+            tokio::time::sleep(DRAIN_TIMEOUT / 2).await;
+            yield engine_shutdown_frame();
+        }),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        Arc::clone(&router.request_metrics),
+        "drain-window-armed".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        &request(),
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+
+    let first = monitored
+        .next()
+        .await
+        .expect("the trailing engine-shutdown error must survive the drain window");
+    assert!(
+        is_engine_shutdown(&first),
+        "migration keys off the typed error, and the withheld cancel frame must not \
+         precede it; got {first:?}"
+    );
+    assert!(
+        monitored.next().await.is_none(),
+        "the shutdown error is the whole response"
     );
 
     drop(router);
@@ -895,8 +945,8 @@ async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
         Arc::clone(&router.request_metrics),
         "starvation-guard".to_string(),
         WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
         &request(),
-        false,
     );
     let monitored = monitor_response_stream(source, context, guard);
     tokio::pin!(monitored);
