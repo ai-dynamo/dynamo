@@ -223,6 +223,7 @@ sglang:
 
 trtllm:
   - 'container/deps/requirements.trtllm.txt'
+  - 'container/patches/trtllm/**'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/templates/trtllm_*'

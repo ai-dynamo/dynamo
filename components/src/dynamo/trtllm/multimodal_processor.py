@@ -89,6 +89,17 @@ class TokenizerProtocol(Protocol):
         ...
 
 
+def resolve_mm_processor_kwargs(request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Per-request processor overrides, canonical field first.
+
+    Presence-based: an explicit top-level {} must not fall through to extra_args.
+    """
+    mm_kwargs = request.get("mm_processor_kwargs")
+    if mm_kwargs is None:
+        mm_kwargs = (request.get("extra_args") or {}).get("mm_processor_kwargs")
+    return mm_kwargs
+
+
 class MultimodalRequestProcessor:
     """Simple processor for OpenAI format multimodal requests."""
 
@@ -136,8 +147,34 @@ class MultimodalRequestProcessor:
         except Exception as e:
             logging.warning("Input processor unavailable for max_tokens sizing: %s", e)
 
+    def _known_processor_kwargs(
+        self, mm_kwargs: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """The subset of mm_kwargs the HF image processor declares valid.
+
+        Unknown keys are dropped: sizing reaches the HF processor's
+        _get_num_multimodal_tokens(), which on some models (Gemma-4) merges
+        kwargs into class-level defaults in place, breaking later requests.
+        """
+        if not mm_kwargs:
+            return {}
+        try:
+            image_processor = getattr(
+                getattr(self.input_processor, "processor", None),
+                "image_processor",
+                None,
+            )
+            valid = getattr(image_processor, "valid_kwargs", None)
+            names = set(getattr(valid, "__annotations__", None) or {})
+        except Exception:
+            names = set()
+        return {k: v for k, v in mm_kwargs.items() if k in names}
+
     def _expanded_prompt_len(
-        self, token_ids: List[int], images: Optional[List[Any]]
+        self,
+        token_ids: List[int],
+        images: Optional[List[Any]],
+        mm_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
         """Post-expansion prompt length: text tokens plus per-image tokens, with
         image placeholders in token_ids replaced by their expanded token counts.
@@ -151,8 +188,13 @@ class MultimodalRequestProcessor:
             mm_ids = self.input_processor.get_mm_token_ids()
             mm_id_set = set(mm_ids.tolist()) if mm_ids is not None else set()
             num_placeholders = sum(1 for t in token_ids if t in mm_id_set)
+            sizing_kwargs = self._known_processor_kwargs(mm_kwargs)
             image_tokens = sum(
-                int(self.input_processor.get_num_tokens_per_image(image=img))
+                int(
+                    self.input_processor.get_num_tokens_per_image(
+                        image=img, **sizing_kwargs
+                    )
+                )
                 for img in images
             )
             return len(token_ids) - num_placeholders + image_tokens
@@ -340,12 +382,21 @@ class MultimodalRequestProcessor:
 
         # Initialize result in TokensPrompt format
         # mm_processor_kwargs must be a dict (not None) for TRT-LLM's processor
-        processed_inputs: Dict[str, Any] = {"mm_processor_kwargs": {}}
+        extra_args = request.get("extra_args") or {}
+        mm_kwargs = resolve_mm_processor_kwargs(request)
+        if mm_kwargs is not None and not isinstance(mm_kwargs, dict):
+            raise HttpStatusError(
+                400,
+                "Malformed mm_processor_kwargs field: expected an object",
+                str(mm_kwargs),
+            )
+        processed_inputs: Dict[str, Any] = {
+            "mm_processor_kwargs": mm_kwargs if mm_kwargs is not None else {}
+        }
 
         # TODO(TRTLLM-11294): Remove the fallback to text_prompt for EPD-NIXL and embeddings cases.
         # This is a temporary workaround to bypass TRT-LLM's bug where token IDs & embeddings
         # are not processed correctly.
-        extra_args = request.get("extra_args") or {}
         formatted_prompt_from_frontend = extra_args.get("formatted_prompt")
 
         # EPD Flow Case 2: Embeddings received via NIXL from encode worker
@@ -609,7 +660,9 @@ class MultimodalRequestProcessor:
         # against the real context usage rather than the unexpanded placeholders.
         mm_data = processed_inputs.get("multi_modal_data")
         expanded_len = self._expanded_prompt_len(
-            token_ids, mm_data.get("image") if mm_data else None
+            token_ids,
+            mm_data.get("image") if mm_data else None,
+            processed_inputs.get("mm_processor_kwargs"),
         )
         if expanded_len is not None:
             processed_inputs["expanded_prompt_len"] = expanded_len

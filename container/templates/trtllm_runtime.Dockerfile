@@ -54,6 +54,26 @@ ENV DYNAMO_HOME=/workspace \
 
 WORKDIR /workspace
 
+# Recipe-branch TRT-LLM fix not yet in the pinned 1.3.0rc25 release.
+#
+#   18274 -> https://github.com/NVIDIA/TensorRT-LLM/pull/18274 (open)
+#
+# The checked-in .patch file is the upstream PR diff with the mail header and
+# the tests/ hunks stripped -- the release image installs only the
+# tensorrt_llm package, not the test tree. dist-packages is not a git repo,
+# but `git apply` operates on a plain working tree, so -p1 off dist-packages
+# lands a/tensorrt_llm/... on the installed package. --check first so a base
+# image bump that already carries the fix fails the build loudly instead
+# of silently shipping an unpatched image.
+RUN --mount=type=bind,source=./container/patches/trtllm,target=/tmp/trtllm-patches \
+    cd /usr/local/lib/python3.12/dist-packages && \
+    for p in /tmp/trtllm-patches/*.patch; do \
+        echo "applying $p" && \
+        git apply --check "$p" && \
+        git apply "$p"; \
+    done && \
+    /usr/bin/python3 -c "import ast; [ast.parse(open(f).read()) for f in ('tensorrt_llm/_torch/models/modeling_multimodal_mixin.py', 'tensorrt_llm/_torch/models/modeling_gemma4mm.py', 'tensorrt_llm/_torch/models/modeling_gemma4.py', 'tensorrt_llm/_torch/attention_backend/flashinfer.py')]"
+
 # Install packages missing from upstream, sanity-check libnixl, register
 # TRT-LLM lib paths with ldconfig (upstream's /etc/shinit_v2 only sets them
 # for shells, not K8s python3 launches), swap upstream's standalone etcd
@@ -486,9 +506,20 @@ COPY --from=runtime_full / /
 #
 # Every match is checked, not just the first: the whole point is catching the
 # case where more than one exists.
+#
+# PyNvVideoCodec is checked by the same guard. The TRT-LLM release image ships
+# pynvvideocodec 2.1.0 in system site-packages with a vendored ffmpeg (rc22
+# carried no such package). codec_policy.yaml waives those libraries because
+# the vendored libavcodec registers vp9 only, with h264/hevc/aac absent -- but
+# that waiver matches on path, so without this probe a future base image could
+# reintroduce the excluded decoders silently. enumerate_bundled_decoders.py
+# exits 1 when any of them is registered, so `set -eu` fails the build.
 RUN --mount=type=bind,source=./container/compliance/enumerate_bundled_decoders.py,target=/tmp/enumerate_bundled_decoders.py \
     set -eu; \
     for lib in $(find /usr/local/lib/python3.12/dist-packages/nvidia/dali/.libs -name 'libavcodec*.so*' 2>/dev/null); do \
+        /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
+    done; \
+    for lib in $(find /usr/local/lib/python3.12/dist-packages/PyNvVideoCodec -name 'libavcodec*.so*' 2>/dev/null); do \
         /usr/bin/python3 /tmp/enumerate_bundled_decoders.py "$lib"; \
     done
 

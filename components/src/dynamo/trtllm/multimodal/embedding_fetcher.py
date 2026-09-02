@@ -8,6 +8,7 @@ Provides utility functions for fetching image embeddings from remote encoder
 with per-URL caching support.
 """
 
+import json
 import logging
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -152,8 +153,19 @@ async def _fetch_embeddings_with_cache(
     uncached_indices = []
     uncached_hashes = []
 
+    # Overrides change the embeddings for a URL, so they are part of cache
+    # identity; without them the hash is unchanged, so existing entries stay valid.
+    mm_kwargs = (
+        request.get("mm_processor_kwargs") if isinstance(request, dict) else None
+    )
+    if not isinstance(mm_kwargs, dict):
+        mm_kwargs = None
+    kwargs_salt = (
+        json.dumps(mm_kwargs, sort_keys=True, default=str) if mm_kwargs else ""
+    )
+
     for i, url in enumerate(image_urls):
-        url_hash = MultimodalHasher.hash_bytes(url.encode())
+        url_hash = MultimodalHasher.hash_bytes((url + kwargs_salt).encode())
         cached = cache.get(url_hash)
         if cached is not None:
             embeddings_with_index.append((i, cached.tensor))

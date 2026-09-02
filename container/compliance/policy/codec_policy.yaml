@@ -124,21 +124,65 @@ exceptions:
 
       Re-measure when the vendored version moves.
     owner: DALI
-  # PyNvVideoCodec (added for NVDEC hardware video decode) vendors libavutil and
-  # libavformat under its package dir to demux input containers before handing the
-  # elementary stream to NVDEC. It ships NO libavcodec (the scan would flag it) and
-  # no libx264/265/fdk-aac: no software video/audio codec implementation is present;
-  # the decode runs on NVDEC via libnvcuvid. Scoped to the two non-codec libs only,
-  # so a libavcodec bundled by a future version would still fail the build.
+  # PyNvVideoCodec (NVDEC hardware video decode) vendors an ffmpeg stack under its
+  # package dir to demux input containers before handing the elementary stream to
+  # NVDEC. Decode itself runs on NVDEC via libnvcuvid.
+  #
+  # An earlier revision waived only libavutil + libavformat and said a bundled
+  # libavcodec "would still fail the build". That tripwire fired: the TRT-LLM
+  # release image now ships pynvvideocodec 2.1.0 in system site-packages (rc22
+  # carried no such package at all), and it vendors the full stack -- libavcodec,
+  # libavdevice, libavfilter, libswresample, libswscale.
+  #
+  # Resolved by measurement, not by assumption. container/compliance/
+  # enumerate_bundled_decoders.py against the shipped libavcodec.so.61 reports
+  # 1 decoder registered -- vp9 -- with h264, hevc, aac, aac_fixed and aac_latm
+  # all ABSENT. NVIDIA already restricted this ffmpeg build, the same fix DALI
+  # took in 2.1.1. So the deny globs match on presence while the content carries
+  # no software h264/hevc/aac, exactly the DALI situation above.
+  #
+  # Enforcement moves to build time rather than being dropped: a guard in
+  # trtllm_runtime.Dockerfile runs enumerate_bundled_decoders.py over every
+  # bundled libavcodec and fails the build (exit 1) if any excluded decoder
+  # reappears. The globs below stay enumerated per-library rather than covering
+  # the whole directory, so a genuinely new artifact kind (libx264, libfdk-aac)
+  # still fails the scan.
+  #
+  # Re-measure when the vendored version moves.
   - glob: "**/PyNvVideoCodec/libavutil.so*"
     reason: >-
       PyNvVideoCodec bundles libavutil (utility routines, no codec) to support its
-      NVDEC container demux path; the package ships no libavcodec, so no software
-      codec implementation is present. Decode runs on NVDEC (libnvcuvid).
+      NVDEC container demux path. Decode runs on NVDEC (libnvcuvid).
     owner: PyNvVideoCodec
   - glob: "**/PyNvVideoCodec/libavformat.so*"
     reason: >-
       PyNvVideoCodec bundles libavformat (container demuxers/muxers only, no codec)
-      to parse the input container before NVDEC decode; the package ships no
-      libavcodec. Companion waiver to the PyNvVideoCodec libavutil entry above.
+      to parse the input container before NVDEC decode.
+    owner: PyNvVideoCodec
+  - glob: "**/PyNvVideoCodec/libavcodec.so*"
+    reason: >-
+      Vendored by pynvvideocodec 2.1.0 in the TRT-LLM release image. Measured with
+      enumerate_bundled_decoders.py: registers vp9 only; h264, hevc, aac, aac_fixed
+      and aac_latm are absent. A build-time guard in trtllm_runtime.Dockerfile
+      re-checks this and fails the build if any of them reappear.
+    owner: PyNvVideoCodec
+  - glob: "**/PyNvVideoCodec/libavdevice.so*"
+    reason: >-
+      Device I/O muxers/demuxers only, no codec implementation. Companion to the
+      PyNvVideoCodec libavcodec entry above.
+    owner: PyNvVideoCodec
+  - glob: "**/PyNvVideoCodec/libavfilter.so*"
+    reason: >-
+      Filter graph library, no codec implementation. DT_NEEDED by the vendored
+      stack, so it cannot be removed independently.
+    owner: PyNvVideoCodec
+  - glob: "**/PyNvVideoCodec/libswresample.so*"
+    reason: >-
+      Audio resampling helper, no codec implementation. Companion to the
+      PyNvVideoCodec libavcodec entry above.
+    owner: PyNvVideoCodec
+  - glob: "**/PyNvVideoCodec/libswscale.so*"
+    reason: >-
+      Colourspace/scaling helper, no codec implementation. Companion to the
+      PyNvVideoCodec libavcodec entry above.
     owner: PyNvVideoCodec
