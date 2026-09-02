@@ -37,7 +37,6 @@ use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
 use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::common::{SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
@@ -567,8 +566,13 @@ fn preprocessed_from_generate_with_tracker(
     } = routing_metadata;
     let sampling = &request.sampling_params;
     let max_tokens = sampling.max_tokens();
-    let min_tokens = sampling.min_tokens();
-    let ignore_eos = sampling.ignore_eos();
+    let stop_conditions = sampling.project_stop_conditions();
+    let sampling_options = sampling
+        .project_sampling_options()
+        .map_err(anyhow::Error::msg)?;
+    let output_options = sampling
+        .project_output_options()
+        .map_err(anyhow::Error::msg)?;
     let routing_priority = dynamo_routing_priority(request.priority);
     // With vLLM's default `enable_tower_connector_lora=false`, MM identifiers
     // are adapter-invariant and `lora_name` separately salts LM KV hashes. When
@@ -612,17 +616,9 @@ fn preprocessed_from_generate_with_tracker(
     PreprocessedRequest::builder()
         .model(model.to_string())
         .token_ids(token_ids)
-        .stop_conditions(StopConditions {
-            max_tokens,
-            min_tokens,
-            ignore_eos: Some(ignore_eos),
-            ..Default::default()
-        })
-        .sampling_options(SamplingOptions {
-            n: Some(1),
-            ..Default::default()
-        })
-        .output_options(Default::default())
+        .stop_conditions(stop_conditions)
+        .sampling_options(sampling_options)
+        .output_options(output_options)
         .mm_routing_info(mm_routing_info)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
@@ -2197,7 +2193,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_projects_prime_text_controls() {
+    fn generate_projects_training_text_controls() {
         let request: GenerateRequest = serde_json::from_value(serde_json::json!({
             "token_ids": [1, 2],
             "sampling_params": {

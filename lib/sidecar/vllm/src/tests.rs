@@ -484,7 +484,7 @@ fn rl_worker_metadata_identifies_zero_parallelism_dimensions() {
             _ => unreachable!(),
         }
         let model = DiscoveredModel::from_proto(model_info(), server).expect("valid discovery");
-        let error = model.rl_worker_metadata(None).unwrap_err();
+        let error = model.rl_worker_metadata(None, None).unwrap_err();
         assert!(error.to_string().contains(expected));
     }
 }
@@ -701,7 +701,7 @@ impl FakeWorldSizeServer {
                 .expect("write response");
         });
         Self {
-            endpoint: format!("http://{address}"),
+            endpoint: format!("http://{address}/"),
             request,
             task,
         }
@@ -1015,7 +1015,7 @@ struct V028ResponseOptions {
 }
 
 #[test]
-fn token_native_compatibility_envelope_forwards_prime_controls() {
+fn token_native_compatibility_envelope_forwards_text_controls() {
     let mut request = request();
     request.output_options.skip_special_tokens = Some(false);
     request.routing.as_mut().expect("routing").priority = Some(-7);
@@ -1056,7 +1056,7 @@ fn token_native_compatibility_envelope_forwards_prime_controls() {
         "request-1".to_string(),
         DisaggregationMode::Aggregated,
     )
-    .expect("Prime token controls should map to vLLM 0.28");
+    .expect("token-native controls should map to vLLM 0.28");
 
     assert_eq!(wire.priority, 7);
     assert_eq!(

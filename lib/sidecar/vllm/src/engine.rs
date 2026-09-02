@@ -8,8 +8,8 @@ use dynamo_backend_common::{
     DisaggregationMode, DynamoError, GenerateContext, KvEventSource, LLMEngine, LLMEngineOutput,
     LLMEngineOutputExt, RlAdminBaseUrl, WorkerConfig, usage,
 };
-use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
-use futures::stream::BoxStream;
+use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, HttpEndpoint, SidecarStartupError};
+use futures::{TryStreamExt, stream::BoxStream};
 use serde_json::{Map, Value, json};
 use tokio::sync::OnceCell;
 use tokio::time::Instant;
@@ -95,8 +95,9 @@ impl VllmSidecarEngine {
 
         let endpoint = args.sidecar.grpc_endpoint;
         let enable_rl = args.sidecar.common.enable_rl;
-        let vllm_http_url = args
-            .vllm_http_endpoint
+        let vllm_http_endpoint = args.vllm_http_endpoint;
+        let vllm_http_url = vllm_http_endpoint
+            .as_ref()
             .map(|endpoint| {
                 RlAdminBaseUrl::parse(endpoint.as_str()).map_err(|error| {
                     client::invalid_argument(format!(
@@ -111,10 +112,16 @@ impl VllmSidecarEngine {
             "Discovering vLLM model metadata from {endpoint}; startup deadline: {:?}",
             transport.startup_deadline
         );
-        let model = bootstrap_discover(&endpoint, transport, bootstrap_deadline)?;
+        let (model, fallback_world_size) = bootstrap_discover(
+            &endpoint,
+            transport,
+            bootstrap_deadline,
+            enable_rl,
+            vllm_http_endpoint.as_ref(),
+        )?;
         let mode = args.sidecar.common.disaggregation_mode;
         let rl_metadata = enable_rl
-            .then(|| model.rl_worker_metadata(vllm_http_url))
+            .then(|| model.rl_worker_metadata(vllm_http_url, fallback_world_size))
             .transpose()?;
         let engine = Self::new(endpoint, model.clone(), mode, transport);
         let config = WorkerConfig {
@@ -742,7 +749,10 @@ fn bootstrap_discover(
     endpoint: &GrpcEndpoint,
     transport: GrpcTransportConfig,
     startup_deadline: Instant,
-) -> Result<DiscoveredModel, DynamoError> {
+    enable_rl: bool,
+    vllm_http_endpoint: Option<&HttpEndpoint>,
+) -> Result<(DiscoveredModel, Option<u32>), DynamoError> {
+    let vllm_http_endpoint = vllm_http_endpoint.cloned();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -761,6 +771,94 @@ fn bootstrap_discover(
             )
             .await?;
         let (model, server) = client.discover(startup_deadline).await?;
-        DiscoveredModel::from_proto(model, server)
+        let model = DiscoveredModel::from_proto(model, server)?;
+        let fallback_world_size = if enable_rl && model.requires_world_size_fallback() {
+            // Compatibility with stock vLLM 0.28, whose Control proto does not
+            // include ParallelismInfo.world_size. Remove when vLLM 0.28 leaves
+            // Dynamo's supported mixed-version window.
+            let endpoint = vllm_http_endpoint.as_ref().ok_or_else(|| {
+                client::invalid_argument(
+                    "--vllm-http-endpoint is required for RL discovery with vLLM 0.28",
+                )
+            })?;
+            Some(fetch_vllm_world_size(endpoint, startup_deadline).await?)
+        } else {
+            None
+        };
+        Ok((model, fallback_world_size))
     })
+}
+
+async fn fetch_vllm_world_size(
+    endpoint: &HttpEndpoint,
+    startup_deadline: Instant,
+) -> Result<u32, DynamoError> {
+    const MAX_RESPONSE_BYTES: usize = 1024;
+
+    let mut url = endpoint.with_path("/get_world_size");
+    url.query_pairs_mut().append_pair("include_dp", "true");
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| {
+            client::invalid_argument(format!("could not configure vLLM HTTP client: {error}"))
+        })?;
+    let request = async {
+        let response = http.get(url.clone()).send().await.map_err(|error| {
+            if error.is_connect() {
+                dynamo_sidecar_common::cannot_connect(format!(
+                    "could not connect to vLLM world-size endpoint {url}: {error}"
+                ))
+            } else {
+                client::protocol_error(format!("vLLM world-size request to {url} failed: {error}"))
+            }
+        })?;
+        if !response.status().is_success() {
+            return Err(client::protocol_error(format!(
+                "vLLM world-size endpoint returned HTTP {}",
+                response.status()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
+            return Err(client::protocol_error(
+                "vLLM world-size response exceeds 1024 bytes",
+            ));
+        }
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.try_next().await.map_err(|error| {
+            client::protocol_error(format!("could not read vLLM world-size response: {error}"))
+        })? {
+            if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                return Err(client::protocol_error(
+                    "vLLM world-size response exceeds 1024 bytes",
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let payload: Value = serde_json::from_slice(&body).map_err(|error| {
+            client::protocol_error(format!("invalid vLLM world-size response: {error}"))
+        })?;
+        payload
+            .get("world_size")
+            .and_then(Value::as_u64)
+            .and_then(|world_size| u32::try_from(world_size).ok())
+            .filter(|world_size| *world_size > 0)
+            .ok_or_else(|| {
+                client::protocol_error(
+                    "vLLM world-size response must contain a positive u32 'world_size'",
+                )
+            })
+    };
+    tokio::time::timeout_at(startup_deadline, request)
+        .await
+        .map_err(|_| {
+            dynamo_sidecar_common::connection_timeout(format!(
+                "vLLM world-size request to {url} exceeded the total startup deadline"
+            ))
+        })?
 }
