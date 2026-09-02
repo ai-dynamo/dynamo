@@ -53,7 +53,7 @@ spec:
                   exec python3 -m dynamo.frontend \
                     --router-mode kv \
                     --router-kv-events \
-                    --kv-cache-block-size 32 \
+                    --kv-cache-block-size 64 \
                     --http-host 0.0.0.0 \
                     --http-port 8000
               env:
