@@ -3,7 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Detect latest upstream version for a Dynamo framework dependency.
 
-Stdout: one-line JSON: {"framework", "current", "latest", "upgrade_needed"}.
+Stdout: one-line JSON:
+{"framework", "current", "latest", "upgrade_needed", "runtime_image"}.
+runtime_image is the registry repo the tag belongs to, so callers can build the
+full ref (<runtime_image>:<latest>) without re-parsing context.yaml.
 Exit 0 on success regardless of upgrade_needed; non-zero only on real errors.
 """
 from __future__ import annotations
@@ -25,6 +28,10 @@ FRAMEWORK_SOURCES: dict[str, dict[str, object]] = {
         # vllm/sglang runtime_image_tag lines earlier in the file.
         "current_regex": re.compile(
             r"(?m)^trtllm:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image_tag:\s*(\S+)\s*$",
+        ),
+        # Same anchoring for the sibling runtime_image the tag hangs off.
+        "runtime_image_regex": re.compile(
+            r"(?m)^trtllm:\s*?\n(?:[ \t]+[^\n]*\n)*?[ \t]+runtime_image:\s*(\S+)\s*$",
         ),
     },
 }
@@ -75,13 +82,21 @@ def latest_release(repo: str, include_prereleases: bool) -> str:
     return max(candidates, key=parse_version)
 
 
-def current_pin(framework: str, repo_root: Path) -> str:
+def _context_field(framework: str, key: str, repo_root: Path) -> str:
     src = FRAMEWORK_SOURCES[framework]
     text = (repo_root / "container" / "context.yaml").read_text()
-    m = src["current_regex"].search(text)  # type: ignore[union-attr]
+    m = src[key].search(text)  # type: ignore[union-attr]
     if not m:
-        raise SystemExit(f"no current pin found for {framework}")
+        raise SystemExit(f"no {key} match for {framework} in container/context.yaml")
     return m.group(1)
+
+
+def current_pin(framework: str, repo_root: Path) -> str:
+    return _context_field(framework, "current_regex", repo_root)
+
+
+def runtime_image(framework: str, repo_root: Path) -> str:
+    return _context_field(framework, "runtime_image_regex", repo_root)
 
 
 def main() -> int:
@@ -105,6 +120,7 @@ def main() -> int:
                 "current": cur,
                 "latest": latest,
                 "upgrade_needed": parse_version(latest) > parse_version(cur),
+                "runtime_image": runtime_image(args.framework, args.repo_root),
             }
         )
     )
