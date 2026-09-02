@@ -18,10 +18,32 @@ surface and not the other.
 import uvloop
 from prometheus_client import CollectorRegistry, Counter, Histogram
 
-from dynamo.common.utils.prometheus import register_engine_metrics_callback
+from dynamo.common.utils.prometheus import (
+    register_embedding_cache_metrics,
+    register_engine_metrics_callback,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 ENGINE_PREFIX = "parity:"
+
+
+class _StubCache:
+    """The stats surface `register_embedding_cache_metrics` reads.
+
+    Registered here because that helper is a second, independent registration
+    site: it has its own callbacks, so it can drift from the engine path on its
+    own. It did -- it registered only the exposition callback, leaving embedding
+    cache metrics on /metrics and absent from OTLP.
+    """
+
+    stats = {
+        "hits": 5,
+        "misses": 2,
+        "evictions": 1,
+        "utilization": 0.5,
+        "current_bytes": 1024,
+        "entries": 3,
+    }
 
 
 @dynamo_worker()
@@ -48,6 +70,13 @@ async def parity_worker(runtime: DistributedRuntime):
         namespace_name="parity",
         component_name="echo",
         endpoint_name="generate",
+    )
+
+    register_embedding_cache_metrics(
+        endpoint,
+        _StubCache(),
+        model_name="parity-model",
+        component_name="echo",
     )
 
     await endpoint.serve_endpoint(generate)

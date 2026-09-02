@@ -608,37 +608,55 @@ def register_embedding_cache_metrics(
     lock = threading.Lock()
     prev_state = {"hits": 0, "misses": 0, "evictions": 0}
 
+    def _refresh_locked() -> None:
+        """Fold the cache's monotonic stats into the registry. Caller holds `lock`.
+
+        Safe to call from either callback: increments are deltas against
+        ``prev_state``, which advances on every call, so whichever surface
+        collects next sees only what has accumulated since.
+        """
+        stats = cache.stats
+
+        # Delta-based counter increments from monotonic source values
+        delta_hits = stats["hits"] - prev_state["hits"]
+        delta_misses = stats["misses"] - prev_state["misses"]
+        delta_evictions = stats["evictions"] - prev_state["evictions"]
+
+        if delta_hits > 0:
+            hits_counter.labels(**label_values).inc(delta_hits)
+        if delta_misses > 0:
+            misses_counter.labels(**label_values).inc(delta_misses)
+        if delta_evictions > 0:
+            evictions_counter.labels(**label_values).inc(delta_evictions)
+
+        prev_state["hits"] = stats["hits"]
+        prev_state["misses"] = stats["misses"]
+        prev_state["evictions"] = stats["evictions"]
+
+        # Set gauge snapshots
+        utilization_gauge.labels(**label_values).set(stats["utilization"])
+        current_bytes_gauge.labels(**label_values).set(stats["current_bytes"])
+        entries_gauge.labels(**label_values).set(stats["entries"])
+
     def _collect_embedding_cache_metrics() -> str:
         """Callback invoked on each /metrics scrape."""
         with lock:
-            stats = cache.stats
-
-            # Delta-based counter increments from monotonic source values
-            delta_hits = stats["hits"] - prev_state["hits"]
-            delta_misses = stats["misses"] - prev_state["misses"]
-            delta_evictions = stats["evictions"] - prev_state["evictions"]
-
-            if delta_hits > 0:
-                hits_counter.labels(**label_values).inc(delta_hits)
-            if delta_misses > 0:
-                misses_counter.labels(**label_values).inc(delta_misses)
-            if delta_evictions > 0:
-                evictions_counter.labels(**label_values).inc(delta_evictions)
-
-            prev_state["hits"] = stats["hits"]
-            prev_state["misses"] = stats["misses"]
-            prev_state["evictions"] = stats["evictions"]
-
-            # Set gauge snapshots
-            utilization_gauge.labels(**label_values).set(stats["utilization"])
-            current_bytes_gauge.labels(**label_values).set(stats["current_bytes"])
-            entries_gauge.labels(**label_values).set(stats["entries"])
-
+            _refresh_locked()
             return generate_latest(registry).decode("utf-8")
 
+    def _collect_embedding_cache_typed() -> list:
+        """Same metrics, handed over typed for the OTLP export."""
+        with lock:
+            _refresh_locked()
+            return get_prometheus_typed(registry)
+
+    # Registered on both surfaces: /metrics renders the exposition text, OTLP
+    # exports the same registry typed. Registering only one would leave these
+    # metrics visible on a Prometheus dashboard and absent from the collector.
     endpoint.metrics.register_prometheus_expfmt_callback(
         _collect_embedding_cache_metrics
     )
+    endpoint.metrics.register_prometheus_typed_callback(_collect_embedding_cache_typed)
     logging.info(
         "Registered embedding cache metrics (model=%s, component=%s)",
         model_name,
