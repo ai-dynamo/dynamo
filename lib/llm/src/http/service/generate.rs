@@ -2197,6 +2197,58 @@ mod tests {
     }
 
     #[test]
+    fn generate_projects_prime_text_controls() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "temperature": 0.25,
+                "top_p": 0.9,
+                "top_k": 17,
+                "min_p": 0.05,
+                "seed": 23,
+                "max_tokens": 8,
+                "min_tokens": 2,
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
+                "repetition_penalty": 1.1,
+                "stop_token_ids": [7, 8],
+                "ignore_eos": true,
+                "logprobs": 1,
+                "skip_special_tokens": false
+            },
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+
+        assert_eq!(preprocessed.sampling_options.temperature, Some(0.25));
+        assert_eq!(preprocessed.sampling_options.top_p, Some(0.9));
+        assert_eq!(preprocessed.sampling_options.top_k, Some(17));
+        assert_eq!(preprocessed.sampling_options.min_p, Some(0.05));
+        assert_eq!(preprocessed.sampling_options.seed, Some(23));
+        assert_eq!(preprocessed.sampling_options.presence_penalty, Some(0.1));
+        assert_eq!(preprocessed.sampling_options.frequency_penalty, Some(0.2));
+        assert_eq!(preprocessed.sampling_options.repetition_penalty, Some(1.1));
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
+        assert_eq!(preprocessed.stop_conditions.min_tokens, Some(2));
+        assert_eq!(
+            preprocessed.stop_conditions.stop_token_ids.as_deref(),
+            Some(&[7, 8][..])
+        );
+        assert_eq!(preprocessed.stop_conditions.ignore_eos, Some(true));
+        assert_eq!(preprocessed.output_options.logprobs, Some(1));
+        assert_eq!(preprocessed.output_options.skip_special_tokens, Some(false));
+    }
+
+    #[test]
     fn generate_request_context_matches_vllm_header_precedence() {
         let mut headers = HeaderMap::new();
         headers.insert(X_REQUEST_ID_HEADER, "header-request".parse().unwrap());

@@ -766,6 +766,13 @@ mod tests {
             (
                 json!({
                     "token_ids": [1],
+                    "sampling_params": {"logprobs": -2}
+                }),
+                "logprobs",
+            ),
+            (
+                json!({
+                    "token_ids": [1],
                     "sampling_params": {"prompt_logprobs": -2}
                 }),
                 "prompt_logprobs",

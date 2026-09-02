@@ -16,7 +16,9 @@ use dynamo_backend_common::{
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
+use prost::Message;
 use serde_json::json;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, oneshot};
 use tokio_stream::wrappers::TcpListenerStream;
@@ -36,6 +38,7 @@ struct FakeVllm {
     data_parallel_rank_metadata: Arc<Mutex<Vec<Option<String>>>>,
     peers: Arc<Mutex<Vec<SocketAddr>>>,
     model_info_override: Arc<Mutex<Option<pb::ModelInfo>>>,
+    server_info_override: Arc<Mutex<Option<pb::ServerInfo>>>,
     reject: Arc<AtomicBool>,
     hang: Arc<AtomicBool>,
     hang_before_headers: Arc<AtomicBool>,
@@ -226,7 +229,13 @@ impl pb::control_server::Control for FakeVllm {
         &self,
         _request: Request<pb::GetServerInfoRequest>,
     ) -> Result<Response<pb::ServerInfo>, Status> {
-        Ok(Response::new(server_info()))
+        Ok(Response::new(
+            self.server_info_override
+                .lock()
+                .await
+                .clone()
+                .unwrap_or_else(server_info),
+        ))
     }
 
     async fn get_model_info(
@@ -663,6 +672,48 @@ struct FakeServer {
     shutdown: Option<oneshot::Sender<()>>,
 }
 
+struct FakeWorldSizeServer {
+    endpoint: String,
+    request: Arc<Mutex<Option<String>>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl FakeWorldSizeServer {
+    async fn start(world_size: u32) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let request = Arc::new(Mutex::new(None));
+        let recorded_request = request.clone();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept world-size request");
+            let mut buffer = vec![0; 4096];
+            let size = stream.read(&mut buffer).await.expect("read request");
+            let raw = String::from_utf8_lossy(&buffer[..size]).into_owned();
+            *recorded_request.lock().await = Some(raw);
+            let body = format!(r#"{{"world_size":{world_size}}}"#);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        });
+        Self {
+            endpoint: format!("http://{address}"),
+            request,
+            task,
+        }
+    }
+}
+
+impl Drop for FakeWorldSizeServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 impl FakeServer {
     async fn start(service: FakeVllm) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -804,12 +855,22 @@ fn engine_with_server_info(
 async fn engine_from_args(
     endpoint: &str,
 ) -> (VllmSidecarEngine, dynamo_backend_common::WorkerConfig) {
-    let argv = vec![
+    try_engine_from_args(endpoint, Some("http://worker:8120"))
+        .await
+        .expect("bootstrap discovery")
+}
+
+async fn try_engine_from_args(
+    endpoint: &str,
+    http_endpoint: Option<&str>,
+) -> Result<
+    (VllmSidecarEngine, dynamo_backend_common::WorkerConfig),
+    dynamo_backend_common::DynamoError,
+> {
+    let mut argv = vec![
         "dynamo-vllm-sidecar".to_string(),
         "--grpc-endpoint".to_string(),
         endpoint.to_string(),
-        "--vllm-http-endpoint".to_string(),
-        "http://worker:8120".to_string(),
         "--enable-rl".to_string(),
         "--grpc-connections".to_string(),
         "2".to_string(),
@@ -818,10 +879,15 @@ async fn engine_from_args(
         "--grpc-connect-attempt-timeout-secs".to_string(),
         "1".to_string(),
     ];
+    if let Some(http_endpoint) = http_endpoint {
+        argv.extend([
+            "--vllm-http-endpoint".to_string(),
+            http_endpoint.to_string(),
+        ]);
+    }
     tokio::task::spawn_blocking(move || VllmSidecarEngine::from_args(Some(argv)))
         .await
         .expect("bootstrap task")
-        .expect("bootstrap discovery")
 }
 
 async fn collect(
@@ -875,6 +941,132 @@ async fn startup_rejects_model_identity_change_after_bootstrap() {
     *server.service.model_info_override.lock().await = Some(changed);
 
     assert!(engine.start(0).await.is_err());
+}
+
+#[tokio::test]
+async fn stock_vllm_world_size_uses_private_http_fallback() {
+    let service = FakeVllm::default();
+    let mut legacy_server = server_info();
+    legacy_server
+        .parallelism
+        .as_mut()
+        .expect("parallelism")
+        .world_size = 0;
+    *service.server_info_override.lock().await = Some(legacy_server);
+    let grpc = FakeServer::start(service).await;
+    let http = FakeWorldSizeServer::start(8).await;
+
+    let (_, worker) = try_engine_from_args(&grpc.endpoint, Some(&http.endpoint))
+        .await
+        .expect("stock vLLM 0.28 fallback");
+
+    assert_eq!(
+        worker.rl_metadata,
+        Some(
+            RlWorkerMetadata::new(
+                8,
+                Some(RlAdminBaseUrl::parse(&http.endpoint).expect("valid admin URL")),
+            )
+            .expect("valid metadata")
+        )
+    );
+    assert!(http.request.lock().await.as_deref().is_some_and(|request| {
+        request.starts_with("GET /get_world_size?include_dp=true HTTP/1.1")
+    }));
+}
+
+#[tokio::test]
+async fn stock_vllm_world_size_fallback_rejects_zero() {
+    let service = FakeVllm::default();
+    let mut legacy_server = server_info();
+    legacy_server
+        .parallelism
+        .as_mut()
+        .expect("parallelism")
+        .world_size = 0;
+    *service.server_info_override.lock().await = Some(legacy_server);
+    let grpc = FakeServer::start(service).await;
+    let http = FakeWorldSizeServer::start(0).await;
+
+    let error = match try_engine_from_args(&grpc.endpoint, Some(&http.endpoint)).await {
+        Ok(_) => panic!("zero fallback must fail"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("positive"));
+}
+
+#[test]
+fn discovered_model_advertises_token_native_generate() {
+    let model = DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery");
+    assert_eq!(
+        model
+            .engine_config()
+            .runtime_data
+            .get("vllm_inference_v1_generate"),
+        Some(&serde_json::Value::Bool(true))
+    );
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct V028ResponseOptions {
+    #[prost(bool, optional, tag = "8")]
+    skip_special_tokens: Option<bool>,
+}
+
+#[test]
+fn token_native_compatibility_envelope_forwards_prime_controls() {
+    let mut request = request();
+    request.output_options.skip_special_tokens = Some(false);
+    request.routing.as_mut().expect("routing").priority = Some(-7);
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {
+                "temperature": 0.2,
+                "top_p": 0.9,
+                "top_k": 4,
+                "min_p": 0.1,
+                "seed": 123,
+                "max_tokens": 1,
+                "min_tokens": 1,
+                "presence_penalty": 0.3,
+                "frequency_penalty": 0.4,
+                "repetition_penalty": 1.1,
+                "stop_token_ids": [2],
+                "ignore_eos": true,
+                "logprobs": 1,
+                "prompt_logprobs": 1,
+                "cache_salt": "cache-salt",
+                "skip_special_tokens": false,
+                "return_token_ids": true
+            },
+            "model": "served-model",
+            "stream": false,
+            "cache_salt": "cache-salt",
+            "priority": 7,
+            "kv_transfer_params": {
+                "connector_data": {"values": [1, true, null]}
+            }
+        }
+    }));
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("Prime token controls should map to vLLM 0.28");
+
+    assert_eq!(wire.priority, 7);
+    assert_eq!(
+        wire.stopping.as_ref().expect("stopping").stop_token_ids,
+        [2]
+    );
+    assert!(wire.response.as_ref().expect("response").output_logprobs);
+    let encoded = wire.response.expect("response").encode_to_vec();
+    let response = V028ResponseOptions::decode(encoded.as_slice()).expect("decode v0.28 response");
+    assert_eq!(response.skip_special_tokens, Some(false));
 }
 
 #[tokio::test]
