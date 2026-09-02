@@ -304,7 +304,13 @@ mod tests {
             .await
             .unwrap();
         let shared = Arc::new(
-            RoutingHost::new_builtin_with_coordinator(push_router, load_context, None).unwrap(),
+            RoutingHost::new_builtin_with_coordinator(
+                push_router,
+                load_context,
+                None,
+                crate::session_affinity::SessionAffinityMode::Hard,
+            )
+            .unwrap(),
         );
         let prefill = PrefillRouter::disabled(Arc::new(ModelManager::new()), mode, None);
         prefill.binding.store(Some(Arc::new(

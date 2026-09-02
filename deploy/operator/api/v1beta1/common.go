@@ -188,7 +188,12 @@ type RestartStrategy struct {
 // Omit the field to opt out.
 type ScalingAdapter struct{}
 
-// EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
+// EPPConfig contains configuration for the legacy Go EPP (Endpoint Picker Plugin).
+//
+// Deprecated: Go EPP is deprecated. New EPP components should omit `eppConfig`
+// and use the native Rust EPP (env-var configuration only). Existing DGDs that
+// still set `eppConfig` keep the Go EPP Pod contract until they migrate
+// explicitly by clearing `eppConfig` (and updating the image).
 // +kubebuilder:validation:XValidation:rule="has(self.configMapRef) != has(self.config)",message="exactly one of configMapRef or config must be specified"
 type EPPConfig struct {
 	// configMapRef references a user-provided ConfigMap containing EPP
@@ -774,6 +779,24 @@ type ComponentReplicaStatus struct {
 	// active revision namespace until cutover completes.
 	// +optional
 	RuntimeNamespace string `json:"runtimeNamespace,omitempty"`
+
+	// gpusPerEngine is the number of GPUs assigned to one inference engine in a
+	// component replica, across all of its nodes. Independent auxiliary GPU
+	// allocations are excluded. A present zero means the engine itself has no
+	// GPUs; consult gpusPerReplica for auxiliary allocations.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	GPUsPerEngine *int64 `json:"gpusPerEngine,omitempty"`
+
+	// gpusPerReplica is the unique GPU allocation added when this component
+	// scales by one replica, across all nodes, application and initialization
+	// phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective
+	// Pod scheduling footprint; shared DRA claims are counted once. A present
+	// zero records a successful non-GPU resolution; omission means no current
+	// shape is available.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	GPUsPerReplica *int64 `json:"gpusPerReplica,omitempty"`
 
 	// replicas is the total number of non-terminated replicas.
 	// +kubebuilder:validation:Minimum=0

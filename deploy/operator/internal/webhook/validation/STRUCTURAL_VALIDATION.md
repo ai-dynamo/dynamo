@@ -131,6 +131,39 @@ Keep this table current whenever a resource validator is migrated.
   separate. Conversion is a boundary with explicit conversion and fidelity
   tests; do not build a parallel cross-version validator.
 
+## API-version and update ownership
+
+- Run admission in production order: validate the submitted source-version
+  schema and CEL, convert only accepted requests through the production path,
+  then invoke the public create or update webhook handler.
+- Validate shared semantics once in the storage-version recursion when typed
+  conversion preserves every required input and the reported field path has
+  the same meaning in both versions. Do not repeat that rule in the
+  compatibility-version recursion.
+- Keep compatibility-version validation only for rules that cannot be
+  faithfully enforced after conversion, such as source-only fields,
+  source-schema gaps, source-specific field paths, or source-specific warnings.
+- Determine version ownership from the typed conversion contract, not from
+  private preservation annotations. Validation code must never inspect, decode,
+  branch on, or expose conversion payload annotations or payload shapes.
+- Treat represented live values as authoritative, including nil, empty, false,
+  and zero. Compatibility validation must not restore, supplement, or resurrect
+  a represented field from stale preservation data.
+- Run stateless new-state validation for both creates and updates. Update
+  validators add only rules that genuinely depend on old state, such as
+  immutability, ratcheting, ownership transitions, or removal bypasses; do not
+  duplicate a static rule behind field-change or tuple-change detection.
+- When a newly introduced static rule intentionally ratchets pre-existing
+  violations, keep its decision in one shared function. The update adapter may
+  suppress the new-state error only when the complete normalized rule inputs
+  and the invalid field value are identical in the old and new objects. Do not
+  approximate equality with a list of fields that happen to trigger the rule;
+  cover an unrelated edit, every contract-input transition, repair, and
+  rollback through the production admission chain.
+- Before adding version-specific or update-specific validation, trace the
+  public admission call graph and existing typed conversion. Add the rule at
+  the lowest single structural owner that all applicable paths already reach.
+
 ## API types shared by multiple resources
 
 - Give each shared API type one structural validator that every resource
