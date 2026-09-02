@@ -35,7 +35,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=shared \
     --mount=type=cache,target=/build/target,sharing=locked \
     mkdir -p /out \
     && cargo build -p dynamo-mocker-backend --release \
-    && cp /build/target/release/dynamo-mocker-backend /out/
+        --bin dynamo-mocker-backend \
+        --bin mock-target-specdec-worker \
+        --bin mock-draft-spec-dec-worker \
+    && cp /build/target/release/dynamo-mocker-backend /out/ \
+    && cp /build/target/release/mock-target-specdec-worker /out/ \
+    && cp /build/target/release/mock-draft-spec-dec-worker /out/
 
 FROM debian:bookworm-slim
 
@@ -44,5 +49,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/dynamo-mocker-backend /usr/local/bin/
+COPY --from=builder /out/mock-target-specdec-worker /usr/local/bin/
+COPY --from=builder /out/mock-draft-spec-dec-worker /usr/local/bin/
+COPY --from=builder /build/lib/llm/tests/data/sample-models/mock-llama-3.1-8b-instruct /opt/dynamo/tokenizer
 
 ENTRYPOINT ["dynamo-mocker-backend"]

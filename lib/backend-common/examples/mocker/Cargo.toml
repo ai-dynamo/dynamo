@@ -11,22 +11,38 @@ homepage.workspace = true
 repository.workspace = true
 description = "Dynamo Rust backend example wrapping the dynamo-mocker scheduler — a full-fidelity mocked LLM engine exposed through the LLMEngine trait."
 
+[features]
+default = []
+specdec-kind = []
+
 [[bin]]
 name = "dynamo-mocker-backend"
 path = "src/main.rs"
 
+[[bin]]
+name = "mock-target-specdec-worker"
+path = "src/bin/mock-target-specdec-worker.rs"
+
+[[bin]]
+name = "mock-draft-spec-dec-worker"
+path = "src/bin/mock-draft-spec-dec-worker.rs"
+
 [dependencies]
 dynamo-backend-common = { workspace = true }
+dynamo-llm = { workspace = true }
 dynamo-mocker = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 dashmap = { workspace = true }
 futures = { workspace = true }
 rand = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+tmq = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -35,3 +51,7 @@ uuid = { workspace = true }
 [dev-dependencies]
 dynamo-backend-common = { workspace = true, features = ["testing"] }
 dynamo-runtime = { workspace = true }
+libc = { workspace = true }
+reqwest = { workspace = true }
+serial_test = "3"
+tempfile = { workspace = true }

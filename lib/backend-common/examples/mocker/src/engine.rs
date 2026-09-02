@@ -82,7 +82,7 @@ fn stamp_synthetic_logprobs(output: &mut LLMEngineOutput, token_id: u32, top_k: 
 
 #[derive(clap::Parser, Debug)]
 #[command(
-    name = env!("CARGO_BIN_NAME"),
+    name = "dynamo-mocker-backend",
     about = "Dynamo mocker backend — serves the dynamo-mocker scheduler through the backend-common LLMEngine trait."
 )]
 struct Args {
