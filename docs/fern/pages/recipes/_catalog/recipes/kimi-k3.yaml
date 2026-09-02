@@ -20,24 +20,58 @@ artifacts:
     release_tag: v1.4.0-kimi-k3-dev.1
     release_state: prerelease
 targets:
-- id: vllm-agg-h200
+- id: vllm-agg-gb300
   recommended: false
   hardware:
-    gpu: H200
-    count: 32
+    gpu: GB300
+    count: 16
   runtime:
     framework: vllm
   topology: aggregated
   techniques:
   - kv-aware-routing
   - mxfp4
+  - fp8-kv-cache
+  - dspark-speculative-decoding
   workload:
-    type: agentic
-    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 24
+    sla: 50 user output tok/s, TTFT P50 <= 5 s
   deploy:
-    asset: recipes/kimi-k3/vllm/agg-h200-agentic/deploy.yaml
+    asset: recipes/kimi-k3/vllm/agg-gb300-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k3/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 62.2 output tok/s/GPU, 57.8 user tok/s P50, TTFT P50 879 ms at concurrency 24 (1 worker, 15% agentic trace subset)
+- id: vllm-disagg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 16
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - mxfp4
+  - fp8-kv-cache
+  - dspark-speculative-decoding
+  - pd-kv-transfer
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 16
+    sla: 50 user output tok/s, TTFT P50 <= 5 s
+  deploy:
+    asset: recipes/kimi-k3/vllm/disagg-gb300-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k3/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 50.3 output tok/s/GPU, 90.0 user tok/s P50, TTFT P50 6357 ms at concurrency 16 (1P1D, 15% agentic trace subset)
 - id: vllm-agg-gb200
   recommended: false
   hardware:
@@ -51,71 +85,40 @@ targets:
   - mxfp4
   - fp8-kv-cache
   workload:
-    type: agentic
-    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 7
+    sla: 50 user output tok/s, TTFT P50 <= 5 s
   deploy:
     asset: recipes/kimi-k3/vllm/agg-gb200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k3/perf/perf.yaml
   expected_performance:
-    available: false
-- id: vllm-disagg-gb200
+    available: true
+    summary: 20.1 output tok/s/GPU, 56.1 user tok/s P50, TTFT P50 638 ms at concurrency 7 (1 worker, 15% agentic trace subset)
+- id: vllm-agg-h200
   recommended: false
   hardware:
-    gpu: GB200
+    gpu: H200
     count: 32
-  runtime:
-    framework: vllm
-  topology: disaggregated
-  techniques:
-  - disaggregated-prefill-decode
-  - kv-aware-routing
-  - mxfp4
-  - fp8-kv-cache
-  workload:
-    type: agentic
-    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
-  deploy:
-    asset: recipes/kimi-k3/vllm/disagg-gb200-agentic/deploy.yaml
-  expected_performance:
-    available: false
-- id: vllm-agg-gb300
-  recommended: false
-  hardware:
-    gpu: GB300
-    count: 16
   runtime:
     framework: vllm
   topology: aggregated
   techniques:
   - kv-aware-routing
   - mxfp4
-  - fp8-kv-cache
   workload:
-    type: agentic
-    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 4
+    sla: 50 user output tok/s, TTFT P50 <= 5 s
   deploy:
-    asset: recipes/kimi-k3/vllm/agg-gb300-agentic/deploy.yaml
+    asset: recipes/kimi-k3/vllm/agg-h200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k3/perf/perf.yaml
   expected_performance:
-    available: false
-- id: vllm-disagg-gb300
-  recommended: false
-  hardware:
-    gpu: GB300
-    count: 24
-  runtime:
-    framework: vllm
-  topology: disaggregated
-  techniques:
-  - disaggregated-prefill-decode
-  - kv-aware-routing
-  - mxfp4
-  - fp8-kv-cache
-  workload:
-    type: agentic
-    traffic: ~57.6K-token shared system prompt, 6.4K ISL / 200 OSL, 90% KV cache hit
-  deploy:
-    asset: recipes/kimi-k3/vllm/disagg-gb300-agentic/deploy.yaml
-  expected_performance:
-    available: false
+    available: true
+    summary: 3.54 output tok/s/GPU, 39.95 user tok/s P50, TTFT P50 3660 ms at concurrency 4 (1 worker, 15% agentic trace subset)
 - id: sglang-agg-gb300
   recommended: false
   hardware:
@@ -125,14 +128,95 @@ targets:
     framework: sglang
   topology: aggregated
   techniques:
+  - load-aware-routing
   - mxfp4
   - fp8-kv-cache
   - dspark-speculative-decoding
   workload:
-    type: agentic
-    traffic: 64K input / 400 output / 90% KV-reuse Mooncake trace replay, 15% subset at concurrency 64
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 54
+    sla: 50 user output tok/s, TTFT P50 <= 5 s
   deploy:
     asset: recipes/kimi-k3/sglang/agg-gb300-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k3/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 84.4 output tok/s/GPU, 51.3 user tok/s P50, TTFT P50 573 ms at concurrency 54 over 3 workers (15% agentic trace subset)
+- id: sglang-disagg-gb300
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 16
+  runtime:
+    framework: sglang
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - load-aware-routing
+  - mxfp4
+  - fp8-kv-cache
+  - dspark-speculative-decoding
+  - pd-kv-transfer
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 18
+    sla: 50 user output tok/s, TTFT P50 <= 5 s
+  deploy:
+    asset: recipes/kimi-k3/sglang/disagg-gb300-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k3/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 61.0 output tok/s/GPU, 75.9 user tok/s P50, TTFT P50 4809 ms at concurrency 18 (1P1D, 15% agentic trace subset)
+- id: sglang-agg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 32
+  runtime:
+    framework: sglang
+  topology: aggregated
+  techniques:
+  - load-aware-routing
+  - mxfp4
+  - fp8-kv-cache
+  - dspark-speculative-decoding
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 28
+    sla: 50 user output tok/s, TTFT P50 <= 5 s
+  deploy:
+    asset: recipes/kimi-k3/sglang/agg-gb200-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/kimi-k3/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 32.9 output tok/s/GPU, 56.1 user tok/s P50, TTFT P50 828 ms at concurrency 28 over 2 workers (15% agentic trace subset)
+- id: sglang-disagg-gb200
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 32
+  runtime:
+    framework: sglang
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - load-aware-routing
+  - mxfp4
+  - fp8-kv-cache
+  - dspark-speculative-decoding
+  - pd-kv-transfer
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit
+    sla: 50 user output tok/s, TTFT P50 <= 5 s
+  deploy:
+    asset: recipes/kimi-k3/sglang/disagg-gb200-agentic/deploy.yaml
   benchmark:
     tool: aiperf
     asset: recipes/kimi-k3/perf/perf.yaml
@@ -141,5 +225,4 @@ targets:
 related_benchmarks: []
 maintainer: null
 gaps:
-- GB200 manifests mount weights via node-local hostPath (GKE pattern); all four vLLM targets pin the public NGC image (1.4.0-kimi-k3-dev.1)
-- The SGLang perf asset has no validated expected-performance numbers; the vLLM targets have no perf assets
+- SGLang GB200 disaggregated does not yet have validated expected-performance numbers

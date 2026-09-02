@@ -83,15 +83,6 @@ kubectl wait --for=condition=Complete job/kimi-k3-sglang-gb300-agg-bench \
   -n "${NAMESPACE}" --timeout=10800s
 ```
 
-The Job uses the public
-`nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0` image and runs:
-
-```bash
-aiperf profile --config /etc/aiperf/perf.yaml
-```
-
-The request count is set to the number of rows in `TRACE_FILE`.
-
 ### 4. Fetch artifacts
 
 With the default `ARTIFACT_DIR`:
@@ -130,9 +121,6 @@ kubectl apply -f perf.yaml -n "${NAMESPACE}"
 kubectl wait --for=condition=Complete job/kimi-k3-sglang-gb300-agg-bench \
   -n "${NAMESPACE}" --timeout=10800s
 ```
-
-Do not compare partial runs. A completed run must account for successful,
-errored, and unfinished requests before reporting aggregate throughput.
 
 ## Tunable environment variables
 
