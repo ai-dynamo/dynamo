@@ -242,7 +242,7 @@ from dynamo.mocker.main import compute_stagger_delay
 compute_stagger_delay(num_workers: int, stagger_delay: float) -> float
 ```
 
-[`components/src/dynamo/mocker/main.py#L105`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L105)
+[`components/src/dynamo/mocker/main.py#L104`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L104)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-main-graceful-shutdown" title="graceful_shutdown (function)">
@@ -256,7 +256,7 @@ from dynamo.mocker.main import graceful_shutdown
 graceful_shutdown(runtimes: list)
 ```
 
-[`components/src/dynamo/mocker/main.py#L35`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L35)
+[`components/src/dynamo/mocker/main.py#L34`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L34)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-main-launch-workers" title="launch_workers (function)">
@@ -276,7 +276,7 @@ Each worker gets its own DistributedRuntime, which means:
 - Independent service registration and stats scraping
 - But still sharing the same tokio runtime (efficient)
 
-[`components/src/dynamo/mocker/main.py#L127`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L127)
+[`components/src/dynamo/mocker/main.py#L126`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L126)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-config-load-mocker-engine-args" title="load_mocker_engine_args (function)">
@@ -304,7 +304,7 @@ from dynamo.mocker.main import main
 main()
 ```
 
-[`components/src/dynamo/mocker/main.py#L266`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L266)
+[`components/src/dynamo/mocker/main.py#L265`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L265)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-args-parse-args" title="parse_args (function)">
@@ -364,7 +364,7 @@ from dynamo.mocker.main import prefetch_model
 prefetch_model(model_path: str) -> None
 ```
 
-[`components/src/dynamo/mocker/main.py#L46`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L46)
+[`components/src/dynamo/mocker/main.py#L45`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L45)
 </Accordion>
 
 <Accordion id="api-dynamo-mocker-args-resolve-planner-profile-data" title="resolve_planner_profile_data (function)">
@@ -441,5 +441,5 @@ worker()
 Each mocker gets its own DistributedRuntime instance for true isolation,
 while still sharing the same event loop and tokio runtime.
 
-[`components/src/dynamo/mocker/main.py#L64`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L64)
+[`components/src/dynamo/mocker/main.py#L63`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker/main.py#L63)
 </Accordion>
