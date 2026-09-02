@@ -9,6 +9,15 @@ metadata:
     app.kubernetes.io/name: axk2-agg-b200-chat
     app.kubernetes.io/part-of: ax-k2-nvfp4
 data:
+  speculative-config-synthetic: |-
+    {
+      "method": "eagle3",
+      "model": "skt/A.X-K2-EAGLE3",
+      "revision": "24958e91737d760908f73a8af4b6e06080fc5c1d",
+      "num_speculative_tokens": 3,
+      "rejection_sample_method": "synthetic",
+      "synthetic_acceptance_length": 2.12
+    }
   speculative-config: |-
     {
       "method": "eagle3",
@@ -147,7 +156,7 @@ spec:
                   valueFrom:
                     configMapKeyRef:
                       name: axk2-agg-b200-chat-specdec-config
-                      key: speculative-config
+                      key: speculative-config # speculative-config-synthetic for benchmark-only AL=2.12
               resources:
                 requests:
                   nvidia.com/gpu: "4"
