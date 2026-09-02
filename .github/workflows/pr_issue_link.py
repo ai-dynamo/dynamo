@@ -43,6 +43,7 @@ LINEAR_BRANCH_RE = re.compile(r"(?:^|[/_-])([a-z][a-z0-9]{1,9}-\d{1,6})(?:$|[/_-
 GITHUB_REF_RE = re.compile(r"(?:^|[^\w&])#(\d{1,7})\b")
 CROSS_REPO_RE = re.compile(r"\b([\w.-]+/[\w.-]+)#(\d{1,7})\b")
 ISSUE_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/issues/(\d{1,7})\b")
+HTML_COMMENT_RE = re.compile(r"<!--.*?(?:-->|$)", re.DOTALL)
 BOT_AUTHORS = {"dependabot[bot]", "github-actions[bot]", "copy-pr-bot[bot]"}
 # PR text is untrusted input; bound the number of authenticated lookups it
 # can trigger.
@@ -151,7 +152,9 @@ def main() -> int:
         print(f"Author {author} is a bot; skipping the issue-link check.")
         return 0
 
-    text = f"{title}\n{body}"
+    # The PR template carries example references inside HTML comments;
+    # commented-out text must not satisfy the check.
+    text = HTML_COMMENT_RE.sub(" ", f"{title}\n{body}")
     linear_ids = set(LINEAR_TEXT_RE.findall(text))
     linear_ids.update(m.upper() for m in LINEAR_BRANCH_RE.findall(branch))
     github_refs = {(repo, n) for n in GITHUB_REF_RE.findall(text)}
@@ -168,7 +171,8 @@ def main() -> int:
     invisible_repo_refs: list[str] = []
     repo_visibility: dict[str, tuple[bool, bool]] = {}
 
-    ordered_refs = sorted(github_refs, key=lambda r: (r[0], int(r[1])))[:MAX_CANDIDATES]
+    all_refs = sorted(github_refs, key=lambda r: (r[0], int(r[1])))
+    ordered_refs = all_refs[:MAX_CANDIDATES]
     for ref_repo, number in ordered_refs:
         exists, api_ok = verify_github_issue(ref_repo, number, gh_token)
         label = f"#{number}" if ref_repo == repo else f"{ref_repo}#{number}"
@@ -194,8 +198,17 @@ def main() -> int:
             # One verified issue satisfies the check; stop spending lookups.
             break
 
+    if not verified and len(all_refs) > MAX_CANDIDATES:
+        # Aggregation and release PRs can carry more references than the
+        # lookup budget; never hard-fail on candidates that were not checked.
+        unverified.append(
+            f"{len(all_refs) - MAX_CANDIDATES} further GitHub references "
+            f"beyond the {MAX_CANDIDATES}-lookup bound (not verified)"
+        )
+
+    all_linear_ids = sorted(linear_ids)
     fork_linear_ids: list[str] = []
-    for identifier in sorted(linear_ids)[:MAX_CANDIDATES]:
+    for identifier in all_linear_ids[:MAX_CANDIDATES]:
         if verified:
             break
         if is_untrusted_fork:
@@ -210,6 +223,12 @@ def main() -> int:
             verified.append(f"Linear issue {identifier}")
         elif not api_ok:
             unverified.append(f"Linear reference {identifier} (not verified)")
+
+    if not verified and len(all_linear_ids) > MAX_CANDIDATES:
+        unverified.append(
+            f"{len(all_linear_ids) - MAX_CANDIDATES} further Linear references "
+            f"beyond the {MAX_CANDIDATES}-lookup bound (not verified)"
+        )
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
 
