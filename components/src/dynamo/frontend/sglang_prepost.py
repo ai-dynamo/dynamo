@@ -837,22 +837,20 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
-    # TODO: response_format wins here even when tool_choice is "required" or names
-    # a function, so a request that demanded a tool call can come back with none
-    # -- the tool constraint is dropped and only logged. The other two paths do
-    # the opposite: preprocessor/tool_choice.rs clears the response_format JSON
-    # and keeps the tool constraint, and prepost.py does the same after narrowing
-    # its conflict check. response_format is scoped by the OpenAI spec to the
-    # message the model returns to the user, not to tool calls, so the tool
-    # constraint is the one that must survive.
-    #
+    forced_tool_choice = tool_choice == "required" or _is_named_tool_choice(tool_choice)
     if (
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None
     ):
-        logger.warning(
-            "Tool-call guided decoding will be ignored because of response_format already exists."
-        )
+        if forced_tool_choice:
+            logger.warning(
+                "response_format guided decoding will be ignored because tool_choice is forced."
+            )
+        else:
+            logger.warning(
+                "Tool-call guided decoding will be ignored because response_format already exists."
+            )
+
     # A forced tool choice and a legacy guided_* constrain the same token stream,
     # so honoring the guided_* would drop the tool constraint while the forced-tool
     # parser stays selected. Reject that rather than drop one silently, matching
@@ -863,24 +861,23 @@ def preprocess_chat_request(
     # guided_regex; nothing is displaced, and named_zero_arg_tool below still
     # recognizes it. Rejecting an identical constraint would refuse a request the
     # two paths agree on.
-    tool_choice = request.get("tool_choice", "auto")
     if (
         legacy_guidance
         and tool_call_guided_decoding is not None
         and legacy_guidance != tool_call_guided_decoding
-        and (tool_choice == "required" or _is_named_tool_choice(tool_choice))
+        and forced_tool_choice
     ):
         raise InvalidArgument(
             "tool_choice forces a tool call and cannot be combined with an "
             "explicit guided_* constraint."
         )
 
-    # Explicit legacy constraints outrank automatic guidance, matching the vLLM
-    # processor. response_format is NOT covered by the check above -- see the TODO
-    # further up: it still wins over a forced tool choice here, unlike the other
-    # two paths.
     guided_decoding = (
-        legacy_guidance or response_format_guided_decoding or tool_call_guided_decoding
+        tool_call_guided_decoding
+        if forced_tool_choice
+        else legacy_guidance
+        or response_format_guided_decoding
+        or tool_call_guided_decoding
     )
 
     return SglangPreprocessResult(
