@@ -57,6 +57,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
+# A tick waits briefly for the common fast submission path, then leaves the
+# task running. It is deliberately not cancelled: a remote request may have
+# been accepted even when its response has not arrived, so retrying could
+# duplicate an unacknowledged action.
+_EFFECT_SUBMISSION_WAIT_SECONDS = 5.0
 _GPU_SHAPE_RETRY_MIN_SECONDS = 0.1
 _GPU_SHAPE_RETRY_MAX_SECONDS = 5.0
 
@@ -149,6 +154,8 @@ class NativePlannerBase:
         self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
         self._control_api_runner: Optional[aiohttp.web.AppRunner] = None
         self._config_lock = asyncio.Lock()
+        self._config_generation = 0
+        self._effect_submission_task: Optional[asyncio.Task[None]] = None
         self._diagnostics_finalized = False
         self._environment_initialized = False
         self._engine: Optional[EngineProtocol] = None
@@ -226,6 +233,17 @@ class NativePlannerBase:
                 await engine.shutdown()
             except Exception:
                 logger.exception("Failed to stop planner engine")
+
+        effect_submission_task = self._effect_submission_task
+        self._effect_submission_task = None
+        if effect_submission_task is not None and not effect_submission_task.done():
+            effect_submission_task.cancel()
+            try:
+                await effect_submission_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Failed pending planner effect submission")
 
         if self._environment_initialized:
             self._environment_initialized = False
@@ -417,6 +435,7 @@ class NativePlannerBase:
             before = self._min_endpoint_response()
             for field, value in updates.items():
                 setattr(self.config, field, value)
+            self._config_generation += 1
             after = self._min_endpoint_response()
             logger.info(
                 "Updated planner runtime configuration: %s -> %s", before, after
@@ -650,6 +669,64 @@ class NativePlannerBase:
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         pass
 
+    async def _apply_effects_if_current(
+        self, effects: PlannerEffects, config_generation: int
+    ) -> None:
+        """Submit effects only if their runtime configuration is still current."""
+
+        async with self._config_lock:
+            if config_generation != self._config_generation:
+                logger.info(
+                    "Discarding planner effects computed at runtime config generation "
+                    "%d; current generation is %d",
+                    config_generation,
+                    self._config_generation,
+                )
+                return
+        await self._apply_effects(effects)
+
+    def _effect_submission_done(self, task: asyncio.Task[None]) -> None:
+        if self._effect_submission_task is task:
+            self._effect_submission_task = None
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is not None:
+            logger.error(
+                "Planner effect submission failed",
+                exc_info=(type(exception), exception, exception.__traceback__),
+            )
+
+    async def _submit_effects(
+        self, effects: PlannerEffects, config_generation: int
+    ) -> None:
+        """Submit at most one effect without cancelling an unacknowledged request."""
+
+        pending = self._effect_submission_task
+        if pending is not None and not pending.done():
+            logger.warning(
+                "Skipping planner effect submission while the previous request "
+                "is still awaiting acknowledgement"
+            )
+            return
+
+        task = asyncio.create_task(
+            self._apply_effects_if_current(effects, config_generation)
+        )
+        self._effect_submission_task = task
+        task.add_done_callback(self._effect_submission_done)
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task), timeout=_EFFECT_SUBMISSION_WAIT_SECONDS
+            )
+        except TimeoutError:
+            logger.warning(
+                "Planner effect submission is still awaiting acknowledgement "
+                "after %.1fs; runtime configuration remains available and no "
+                "second effect will be submitted until it completes",
+                _EFFECT_SUBMISSION_WAIT_SECONDS,
+            )
+
     def _current_worker_counts(self) -> tuple[int, int]:
         """Best-known current (prefill, decode) ready worker counts.
 
@@ -865,11 +942,13 @@ class NativePlannerBase:
         if tick_input.worker_counts is not None:
             self._last_worker_counts = tick_input.worker_counts
 
-        # Keep runtime configuration stable through decision submission. Scaling
-        # calls are non-blocking, so the lock is released before the rollout.
+        # Snapshot the runtime configuration generation with the decision. The
+        # external submission does not hold this lock: it may await a remote
+        # response indefinitely, while GET/PATCH must remain available.
         async with self._config_lock:
+            config_generation = self._config_generation
             effects = await engine.tick(tick, tick_input)
-            await self._apply_effects(effects)
+        await self._submit_effects(effects, config_generation)
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         if emit_diagnostics:
             self._report_diagnostics(tick, effects.diagnostics)
