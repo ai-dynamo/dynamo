@@ -37,7 +37,7 @@ curl -N http://localhost:8000/generate \
 
 Set `DYN_SGLANG_ENABLE_GENERATE=1` on the frontend. The worker must accept token input; do not start it with `--use-sglang-tokenizer`, which selects text input and prevents the worker from advertising `/generate`.
 
-Use an OpenAI-compatible route when the adapter needs one envelope across backends or named NVIDIA request extensions. This example bypasses frontend tokenization and asks Dynamo to return the generated token IDs and prompt log probabilities:
+Use an OpenAI-compatible route when the adapter needs one envelope across backends or named NVIDIA request extensions. This example bypasses frontend tokenization and asks Dynamo to return the effective prompt token sequence, generated token IDs, and prompt log probabilities:
 
 ```bash
 curl http://localhost:8000/v1/completions \
@@ -51,10 +51,12 @@ curl http://localhost:8000/v1/completions \
     "prompt_logprobs": 5,
     "nvext": {
       "token_data": [151644, 8948, 198],
-      "extra_fields": ["completion_token_ids", "prompt_logprobs"]
+      "extra_fields": ["prompt_token_ids", "completion_token_ids", "prompt_logprobs"]
     }
   }'
 ```
+
+`nvext.token_data` supplies pre-tokenized request input. `nvext.extra_fields` selects response metadata; `prompt_token_ids` returns the effective single-prompt token sequence used after preprocessing, including pre-tokenized input.
 
 Treat the engine's token sequence as authoritative. Do not reconstruct training tokens from generated text. Before accepting a sample, check token and log-probability alignment, the terminal state, the selected model and tokenizer, and the framework's mask and retry rules. See [RL Integration Reference](integration-reference.md#know-what-returns-to-the-trainer) for the data Dynamo can return and what remains framework-owned.
 
