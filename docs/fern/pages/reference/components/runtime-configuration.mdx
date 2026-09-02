@@ -132,12 +132,6 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_EVENT_PLANE`
 </ParamField>
 
-<ParamField path="--connector" type="string" default="null">
-  KV-cache transfer connector. Accepts zero or more values. Deprecated for vLLM — use `--kv-transfer-config` instead. For TRT-LLM, valid options are `nixl`, `lmcache`, `kvbm`, `null`, and `none`.
-
-  Environment variable: `DYN_CONNECTOR`
-</ParamField>
-
 ## Parsing
 
 <ParamField path="--dyn-tool-call-parser" type="string" default="null">

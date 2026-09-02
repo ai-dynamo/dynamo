@@ -107,6 +107,15 @@ class DynamoTrtllmArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--connector",
+            env_var="DYN_CONNECTOR",
+            default=[],
+            help="KV cache connector for the TensorRT-LLM engine. Accepts at most "
+            "one value: 'kvbm' enables the KVBM integration, 'none' disables it.",
+            nargs="*",
+        )
+        add_argument(
+            g,
             flag_name="--kv-block-size",
             env_var="DYN_TRTLLM_KV_BLOCK_SIZE",
             default=32,
@@ -490,6 +499,7 @@ class DynamoTrtllmConfig(ConfigBase):
     enable_attention_dp: bool
     conversation_affinity: bool
     conversation_affinity_dp_rank_source: str
+    connector: list[str]
     kv_block_size: int
     gpus_per_node: Optional[int] = None
     max_batch_size: int

@@ -55,7 +55,6 @@ def _make_omni_config(**overrides) -> OmniConfig:
         "discovery_backend": "etcd",
         "request_plane": "tcp",
         "event_plane": "nats",
-        "connector": [],
         "enable_local_indexer": True,
         "dyn_tool_call_parser": None,
         "dyn_reasoning_parser": None,
