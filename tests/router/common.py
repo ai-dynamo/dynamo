@@ -2732,6 +2732,7 @@ def _test_router_decisions(
     router_predicted_ttl_secs: Optional[float] = None,
     router_approximate_cache_policy: str = "ttl",
     initial_wait: float = 0.25,
+    router_init_timeout: int = 120,
 ):
     """Validate cross-worker routing decisions based on longest prefix match.
 
@@ -2797,6 +2798,7 @@ def _test_router_decisions(
             ),
             num_workers=expected_num_instances,
             engine_workers=engine_workers,
+            timeout=router_init_timeout,
         )
 
         # Wait for workers to be ready and get their instance IDs

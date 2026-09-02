@@ -331,6 +331,7 @@ def test_router_decisions_sglang_multiple_workers(
         num_workers=2,
         single_gpu=True,
         test_dp_rank=False,
+        test_kwargs={"router_init_timeout": 180},
     )
 
 
