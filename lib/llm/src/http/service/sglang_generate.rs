@@ -534,7 +534,6 @@ mod tests {
     fn streaming_deadline_wins_over_overload_classification() {
         use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
 
-        // A chain carrying both markers must keep the deadline outcome.
         let error = DynamoError::builder()
             .error_type(DynamoErrorType::WorkerOverloaded)
             .message("worker overloaded")
