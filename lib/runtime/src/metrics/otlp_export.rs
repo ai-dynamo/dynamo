@@ -349,11 +349,16 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
         // Typed callbacks cross into Python and take the GIL, which can block
         // for as long as the engine holds it. That must not park an async
         // worker thread.
+        //
+        // Awaited rather than raced against `cancel`: a blocking task cannot be
+        // cancelled, so racing it would only drop the handle while the closure
+        // ran on -- reaching for the GIL on a detached thread while the process
+        // tears down, and delaying shutdown anyway, since the runtime waits for
+        // blocking tasks it has already started. Exit latency is one
+        // collection; the loop checks `cancel` before the next.
         let collector = registry.clone();
-        let collected = tokio::select! {
-            _ = cancel.cancelled() => break,
-            result = tokio::task::spawn_blocking(move || collector.metric_families_combined()) => result,
-        };
+        let collected =
+            tokio::task::spawn_blocking(move || collector.metric_families_combined()).await;
         let families = match collected {
             Ok(Ok(families)) => families,
             Ok(Err(error)) => {
@@ -552,6 +557,48 @@ mod tests {
             .map(|m| m.name.as_str())
             .collect();
         assert!(empty.is_empty(), "families with no datapoints: {empty:?}");
+    }
+
+    /// The exporter must not depend on the system status server, which is
+    /// disabled by default (`DYN_SYSTEM_PORT=-1`). Gating export on it made
+    /// the documented `OTEL_METRICS_EXPORTER=otlp` opt-in a silent no-op in
+    /// the default configuration.
+    ///
+    /// Asserts a connection actually arrives, rather than that some code ran:
+    /// a spawn that never dials proves nothing.
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    async fn export_starts_without_the_system_status_server() {
+        use crate::distributed::distributed_test_utils::create_test_drt_async;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+
+        // DYN_SYSTEM_PORT is left unset, so the status server takes its
+        // default of -1 (disabled) -- the configuration the bug hid in.
+        let connected = temp_env::async_with_vars(
+            [
+                (env_otlp::OTEL_METRICS_EXPORTER, Some("otlp")),
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
+                    Some(format!("http://127.0.0.1:{port}").as_str()),
+                ),
+                (env_otlp::OTEL_METRIC_EXPORT_INTERVAL, Some("100")),
+            ],
+            async {
+                let _drt = create_test_drt_async().await;
+                tokio::time::timeout(Duration::from_secs(10), listener.accept())
+                    .await
+                    .is_ok()
+            },
+        )
+        .await;
+
+        assert!(
+            connected,
+            "exporter never dialled the collector with the system status server disabled"
+        );
     }
 
     /// `prometheus_client` reports an Info family under its bare name but
