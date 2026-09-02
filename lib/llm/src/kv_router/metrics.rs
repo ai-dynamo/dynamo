@@ -275,6 +275,11 @@ impl KvZmqIngressMetrics {
             .with_label_values(&[action])
             .inc_by(value);
     }
+
+    #[cfg(test)]
+    pub(crate) fn lifecycle_count(&self, action: &'static str) -> u64 {
+        self.lifecycle_total.with_label_values(&[action]).get()
+    }
 }
 
 // ---------------------------------------------------------------------------

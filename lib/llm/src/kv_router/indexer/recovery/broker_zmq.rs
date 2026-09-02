@@ -773,8 +773,13 @@ mod tests {
             .await
             .unwrap();
 
+        let mut lane = lanes.lanes.remove(&7).unwrap();
         cancel.cancel();
-        assert!(lanes.lanes.get(&7).unwrap().cancel.is_cancelled());
+        assert!(lane.cancel.is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), &mut lane.handle)
+            .await
+            .expect("publisher lane should stop after supervisor cancellation")
+            .expect("publisher lane should exit cleanly");
         lanes.shutdown().await;
     }
 
@@ -782,11 +787,14 @@ mod tests {
     async fn first_sequence_seeds_watermark_without_counting_a_gap() {
         let metrics = test_metrics().await;
         let mut high_watermark = None;
+        let gaps_before = metrics.lifecycle_count("sequence_gap");
+        let out_of_order_before = metrics.lifecycle_count("out_of_order");
 
         assert_eq!(
             observe_sequence(1_000_000, &mut high_watermark, &metrics),
             (0, false)
         );
+        assert_eq!(metrics.lifecycle_count("sequence_gap"), gaps_before);
         assert_eq!(
             observe_sequence(1_000_003, &mut high_watermark, &metrics),
             (2, false)
@@ -796,5 +804,10 @@ mod tests {
             (0, true)
         );
         assert_eq!(high_watermark, Some(1_000_003));
+        assert_eq!(metrics.lifecycle_count("sequence_gap"), gaps_before + 2);
+        assert_eq!(
+            metrics.lifecycle_count("out_of_order"),
+            out_of_order_before + 1
+        );
     }
 }
