@@ -32,7 +32,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 
 use tokio::sync::mpsc;
 
@@ -594,9 +594,7 @@ pub(crate) fn response_channel(
 
     // The consumer side is pure Rust: no Python work, no GIL, no encoding, just
     // the wait for whatever the handler pushes next.
-    let stream = futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|item| (item, rx))
-    });
+    let stream = ReceiverStream::new(rx);
 
     (sender, stream)
 }
