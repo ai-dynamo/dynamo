@@ -53,22 +53,24 @@ async def server_process(example_dir):
 
 async def run_client(example_dir):
     """Run the client for a specified duration and capture its output"""
-    client_proc = subprocess.Popen(
+    with subprocess.Popen(
         ["python3", "-u", "client.py"],
         cwd=example_dir,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-    )
+    ) as client_proc:
+        # Let it run for 5 seconds
+        await asyncio.sleep(5)
 
-    # Let it run for 5 seconds
-    await asyncio.sleep(5)
-
-    # Terminate the client
-    client_proc.terminate()
-    stdout, stderr = client_proc.communicate(timeout=1)
-
-    return stdout, stderr
+        # Terminate the client
+        client_proc.terminate()
+        try:
+            return client_proc.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            client_proc.kill()
+            client_proc.communicate()
+            raise
 
 
 @pytest.mark.asyncio
