@@ -3981,7 +3981,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 												Name:  "wait-for-leader",
 												Image: "worker-image",
 												Command: []string{"sh", "-c",
-													`export LEADER_HOST="${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}" LEADER_PORT="6379" && exec python3 /scripts/wait-for-leader.py`},
+													`export LEADER_HOST="${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}" LEADER_PORT="6379" && bash /scripts/wait-for-ray-leader.sh`},
 												VolumeMounts: []corev1.VolumeMount{
 													{
 														Name:      "wait-leader-script",

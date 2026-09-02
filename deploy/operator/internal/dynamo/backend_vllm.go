@@ -144,6 +144,7 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 const (
 	waitLeaderConfigMapSuffix = "wait-leader-script"
 	waitLeaderScriptKey       = "wait-for-leader.py"
+	waitRayLeaderScriptKey    = "wait-for-ray-leader.sh"
 	waitLeaderVolumeName      = "wait-leader-script"
 	waitLeaderMountPath       = "/scripts"
 )
@@ -222,6 +223,19 @@ while True:
     time.sleep(5)
 `
 
+// WaitRayLeaderScript is the Bash script that verifies Ray leader is started
+// It reads LEADER_HOST and LEADER_PORT from environment variables so the script content is generic.
+const WaitRayLeaderScript = `
+echo "Waiting for Ray leader to become available..."
+
+# Loop until a health check passes or a network connection succeeds
+until ray health-check --address "${LEADER_HOST}:${LEADER_PORT}" &>/dev/null; do
+	echo "Ray leader not healthy yet, retrying in 5 seconds"
+    sleep 5
+done
+echo "Ray leader is up"
+`
+
 // k8sVarPattern matches Kubernetes $(VAR) env-var expansion syntax.
 var k8sVarPattern = regexp.MustCompile(`\$\((\w+)\)`)
 
@@ -249,7 +263,8 @@ func GenerateWaitLeaderConfigMap(dgdName, namespace string) *corev1.ConfigMap {
 			},
 		},
 		Data: map[string]string{
-			waitLeaderScriptKey: WaitLeaderScript,
+			waitLeaderScriptKey:    WaitLeaderScript,
+			waitRayLeaderScriptKey: WaitRayLeaderScript,
 		},
 	}
 }
@@ -260,15 +275,25 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 		return
 	}
 	initName := "wait-for-leader-mp"
-	leaderPort := commonconsts.VLLMMpMasterPort
-	// If the podSpec is detected as multi-node Ray, set different leader port and init container name
+	// Use sh -c so the shell expands variable references at runtime.
+	// Grove/LWS env vars are appended to init containers AFTER our env
+	// vars, so Kubernetes $(VAR) expansion (which is order-dependent)
+	// cannot resolve them. The shell sees all env vars regardless of
+	// definition order.
+	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
+	shellHostname := k8sToShellVarSyntax(leaderHostname)
+	command := []string{"sh", "-c", fmt.Sprintf(
+		`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 %s/%s`,
+		shellHostname, commonconsts.VLLMMpMasterPort, waitLeaderMountPath, waitLeaderScriptKey)}
+	// If the podSpec is detected as multi-node Ray, set different init container name and init command
 	if b.shouldInjectVLLMRayWaitLeaderInit(podSpec, numberOfNodes, role) {
-		leaderPort = VLLMPort
 		initName = "wait-for-leader"
+		command = []string{"sh", "-c", fmt.Sprintf(
+			`export LEADER_HOST="%s" LEADER_PORT="%s" && bash %s/%s`,
+			shellHostname, VLLMPort, waitLeaderMountPath, waitRayLeaderScriptKey)}
 	}
 
 	mainContainer := &podSpec.Containers[0]
-	leaderHostname := multinodeDeployer.GetLeaderHostname(serviceName)
 	mainImage := mainContainer.Image
 	cmName := GetWaitLeaderConfigMapName(b.ParentGraphDeploymentName)
 
@@ -283,18 +308,10 @@ func (b *VLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32
 		},
 	})
 
-	// Use sh -c so the shell expands variable references at runtime.
-	// Grove/LWS env vars are appended to init containers AFTER our env
-	// vars, so Kubernetes $(VAR) expansion (which is order-dependent)
-	// cannot resolve them. The shell sees all env vars regardless of
-	// definition order.
-	shellHostname := k8sToShellVarSyntax(leaderHostname)
 	initContainer := corev1.Container{
-		Name:  initName,
-		Image: mainImage,
-		Command: []string{"sh", "-c", fmt.Sprintf(
-			`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 %s/%s`,
-			shellHostname, leaderPort, waitLeaderMountPath, waitLeaderScriptKey)},
+		Name:    initName,
+		Image:   mainImage,
+		Command: command,
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      waitLeaderVolumeName,

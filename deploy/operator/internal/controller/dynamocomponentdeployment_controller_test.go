@@ -1482,7 +1482,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Name:  "wait-for-leader",
 										Image: "test-image:1.5.0",
 										Command: []string{"sh", "-c",
-											`export LEADER_HOST="${LWS_LEADER_ADDRESS}" LEADER_PORT="6379" && exec python3 /scripts/wait-for-leader.py`},
+											`export LEADER_HOST="${LWS_LEADER_ADDRESS}" LEADER_PORT="6379" && bash /scripts/wait-for-ray-leader.sh`},
 										VolumeMounts: []corev1.VolumeMount{
 											{
 												Name:      "wait-leader-script",
