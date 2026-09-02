@@ -466,9 +466,10 @@ class ThunderAgentScheduler:
         }
         buffer = self._cfg.buffer_per_program
         for program in self._table.programs.values():
-            if program.lifecycle != ProgramLifecycle.ACTIVE:
+            replica = program.assigned_replica
+            if replica is None or program.lifecycle != ProgramLifecycle.ACTIVE:
                 continue
-            entry = usage.get(program.assigned_replica)
+            entry = usage.get(replica)
             if entry is None:
                 continue
             entry.programs.append(program)

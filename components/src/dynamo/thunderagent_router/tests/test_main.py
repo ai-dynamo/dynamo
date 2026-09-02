@@ -156,7 +156,9 @@ async def test_a_placed_program_pins_both_backend_id_and_dp_rank():
 
     await drive(handler)
 
-    assert handler._kv_router.sent["routing"] == {  # type: ignore[union-attr]
+    sent = handler._kv_router.sent
+    assert sent is not None
+    assert sent["routing"] == {
         "backend_instance_id": 7,
         "dp_rank": 3,
     }
@@ -173,7 +175,9 @@ async def test_an_unplaced_program_sends_no_pin_and_is_counted():
 
     await drive(handler)
 
-    assert handler._kv_router.sent["routing"] is None  # type: ignore[union-attr]
+    sent = handler._kv_router.sent
+    assert sent is not None
+    assert sent["routing"] is None
     assert handler._stat_unpinned_turns == 1
 
 
