@@ -645,8 +645,7 @@ impl EntrypointArgs {
                 "tls_cert_path and tls_key_path must be provided together",
             ));
         }
-        if tls_client_ca_cert_path.is_some()
-            && (tls_cert_path.is_none() || tls_key_path.is_none())
+        if tls_client_ca_cert_path.is_some() && (tls_cert_path.is_none() || tls_key_path.is_none())
         {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "tls_client_ca_cert_path requires tls_cert_path and tls_key_path",

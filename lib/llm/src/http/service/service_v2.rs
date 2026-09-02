@@ -823,6 +823,10 @@ impl HttpService {
         cancel_token: CancellationToken,
         listener: Option<tokio::net::TcpListener>,
     ) -> Result<()> {
+        if self.tls_client_ca_cert_path.is_some() && !self.enable_tls {
+            anyhow::bail!("TLS must be enabled when a client CA certificate is configured");
+        }
+
         let address = format!("{}:{}", self.host, self.port);
         let protocol = if self.enable_tls { "HTTPS" } else { "HTTP" };
         tracing::info!(protocol, address, "Starting HTTP(S) service");
@@ -1624,8 +1628,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_http_mtls_requires_client_certificate() {
+    async fn test_http_mtls_rejects_missing_and_untrusted_client_certificates() {
         let certificates = make_mtls_test_certificates();
+        let untrusted_certificates = make_mtls_test_certificates();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
@@ -1649,8 +1654,15 @@ mod tests {
             .build()
             .unwrap();
         let authenticated_client = reqwest::Client::builder()
-            .add_root_certificate(root)
+            .add_root_certificate(root.clone())
             .identity(reqwest::Identity::from_pem(&certificates.client_identity_pem).unwrap())
+            .build()
+            .unwrap();
+        let untrusted_client = reqwest::Client::builder()
+            .add_root_certificate(root)
+            .identity(
+                reqwest::Identity::from_pem(&untrusted_certificates.client_identity_pem).unwrap(),
+            )
             .build()
             .unwrap();
         let url = format!("https://127.0.0.1:{port}/live");
@@ -1668,6 +1680,7 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
 
         assert!(unauthenticated_client.get(&url).send().await.is_err());
+        assert!(untrusted_client.get(&url).send().await.is_err());
 
         cancel.cancel();
         tokio::time::timeout(Duration::from_secs(2), handle)
@@ -1675,6 +1688,23 @@ mod tests {
             .expect("mTLS service did not stop")
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_http_mtls_requires_tls() {
+        let service = HttpService::builder()
+            .tls_client_ca_cert_path(Some(PathBuf::from("client-ca.crt")))
+            .build()
+            .unwrap();
+
+        let error = service
+            .run(CancellationToken::new())
+            .await
+            .expect_err("client CA without TLS must be rejected");
+        assert_eq!(
+            error.to_string(),
+            "TLS must be enabled when a client CA certificate is configured"
+        );
     }
 
     #[test]

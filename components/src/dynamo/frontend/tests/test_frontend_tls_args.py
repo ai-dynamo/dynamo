@@ -51,10 +51,6 @@ def test_http_mtls_environment_configuration(monkeypatch: pytest.MonkeyPatch) ->
 def test_http_mtls_requires_server_identity() -> None:
     with pytest.raises(
         ValueError,
-        match=(
-            "--tls-client-ca-cert-path requires --tls-cert-path and --tls-key-path"
-        ),
+        match=("--tls-client-ca-cert-path requires --tls-cert-path and --tls-key-path"),
     ):
-        parse_frontend_config(
-            ["--tls-client-ca-cert-path", "client-ca.crt"]
-        )
+        parse_frontend_config(["--tls-client-ca-cert-path", "client-ca.crt"])
