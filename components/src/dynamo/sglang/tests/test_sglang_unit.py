@@ -24,6 +24,7 @@ from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
     filter_supported_async_generate_kwargs,
     override_server_args,
+    publish_server_args,
     require_reasoning_kwargs,
     resolved_server_args,
 )
@@ -119,28 +120,6 @@ def test_override_server_args_uses_declarative_resolution(monkeypatch):
     assert not hasattr(server_args, "enable_memory_saver")
 
 
-def test_override_server_args_supports_sglang_0_5_17(monkeypatch):
-    calls = []
-
-    class ServerArgs:
-        def override(self, source, **fields):
-            calls.append((source, fields))
-            for name, value in fields.items():
-                object.__setattr__(self, name, value)
-
-    monkeypatch.setattr(sglang_compat, "declare_late_resolution", None)
-    server_args = ServerArgs()
-
-    override_server_args(
-        server_args,
-        "dynamo.test",
-        enable_memory_saver=True,
-    )
-
-    assert calls == [("dynamo.test", {"enable_memory_saver": True})]
-    assert server_args.enable_memory_saver is True
-
-
 def test_override_server_args_supports_legacy_xpu_pin(monkeypatch):
     monkeypatch.setattr(sglang_compat, "declare_late_resolution", None)
     server_args = SimpleNamespace(enable_memory_saver=False)
@@ -154,6 +133,20 @@ def test_override_server_args_supports_legacy_xpu_pin(monkeypatch):
 
     assert server_args.enable_memory_saver is True
     assert server_args.load_format == "legacy-loader"
+
+
+def test_publish_server_args_uses_runtime_context(monkeypatch):
+    calls = []
+    server_args = SimpleNamespace()
+    monkeypatch.setattr(
+        sglang_compat,
+        "_sglang_publish",
+        lambda value, *, role: calls.append((value, role)),
+    )
+
+    publish_server_args(server_args, role="encoder")
+
+    assert calls == [(server_args, "encoder")]
 
 
 def test_resolved_server_args_uses_declarative_view(monkeypatch):
@@ -170,12 +163,15 @@ def test_resolved_server_args_uses_declarative_view(monkeypatch):
     assert raw_server_args.page_size is None
 
 
-def test_config_uses_resolved_server_args_after_runtime_init():
+def test_config_uses_resolved_server_args_after_runtime_init(monkeypatch):
     raw_server_args = SimpleNamespace(page_size=None, disaggregation_mode="null")
     resolved_server_args = SimpleNamespace(page_size=64, disaggregation_mode="null")
-    raw_server_args._resolved = lambda: resolved_server_args
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_resolved_view",
+        lambda server_args: resolved_server_args,
+    )
     config = sglang_args.Config(raw_server_args, SimpleNamespace())
-
     runtime_server_args = config.use_resolved_server_args(raw_server_args)
 
     assert raw_server_args.page_size is None

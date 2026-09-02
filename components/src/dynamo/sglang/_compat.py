@@ -27,16 +27,63 @@ from functools import lru_cache, wraps
 from typing import Any
 
 try:
+    from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
+except ImportError:
+    # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is 0.5.19+.
+    from sglang.srt.server_args_config_parser import ConfigArgumentMerger
+
+try:
+    from sglang.srt.arg_groups.model_override_base import (
+        model_config_of as _sglang_model_config_of,
+    )
+except ImportError:
+    # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is 0.5.19+.
+    _sglang_model_config_of = None
+
+try:
+    from sglang.srt.runtime_context import publish as _sglang_publish
+except ImportError:
+    # Fallback for SGLang 0.5.18 and the XPU 0.5.11 pin. Remove the 0.5.18
+    # portion when minimum supported SGLang is 0.5.19+.
+    _sglang_publish = None
+
+
+def model_config_of(server_args: Any) -> Any:
+    """Return the cached SGLang model config across 0.5.18 and 0.5.19."""
+    legacy_get_model_config = getattr(server_args, "get_model_config", None)
+    if callable(legacy_get_model_config):
+        return legacy_get_model_config()
+    if _sglang_model_config_of is None:
+        raise AttributeError("SGLang does not expose a model-config accessor")
+    return _sglang_model_config_of(server_args)
+
+
+def publish_server_args(server_args: Any, *, role: str) -> None:
+    """Publish process-wide SGLang configuration when the API is available."""
+    if _sglang_publish is not None:
+        _sglang_publish(server_args, role=role)
+
+
+try:
     from sglang.srt.arg_groups.overrides import declare_late_resolution
 except ImportError:
     # SGLang 0.5.17 and the XPU 0.5.11 pin predate declarations.
     declare_late_resolution = None
 
 try:
-    from sglang.srt.arg_groups.overrides import resolved_view as sglang_resolved_view
+    from sglang.srt.arg_groups.model_override_base import (
+        resolved_view as sglang_resolved_view,
+    )
 except ImportError:
-    # SGLang #36255 exposes ServerArgs._resolved() instead.
-    sglang_resolved_view = None
+    # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is 0.5.19+.
+    try:
+        from sglang.srt.arg_groups.overrides import (
+            resolved_view as sglang_resolved_view,
+        )
+    except ImportError:
+        # The separately pinned XPU SGLang 0.5.11 stores effective values on
+        # ServerArgs directly. Remove when that pin is upgraded.
+        sglang_resolved_view = None
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +100,10 @@ def _warn_require_reasoning_unsupported() -> None:
 def ensure_sglang_tensor_image_size() -> None:
     """Allow SGLang's image-token resolver to handle decoded image tensors.
 
-    SGLang 0.5.13 through 0.5.18 assume every decoded image exposes the PIL
-    ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
-    CHW tensor, causing multimodal requests to fall back to retokenization.
+    SGLang 0.5.13 through the 0.5.19 release branch assume every decoded image
+    exposes the PIL ``height``/``width`` attributes. Its CUDA JPEG decoder
+    instead returns a CHW tensor, causing multimodal requests to fall back to
+    retokenization.
 
     Remove this compatibility override once the minimum supported SGLang
     release handles tensor image dimensions itself.
@@ -98,24 +146,12 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
 
     SGLang 0.5.18+ resolves its effective configuration separately from raw
     ``ServerArgs`` input. Declare pre-engine changes through its resolution API
-    so the engine's resolved projection observes them. SGLang 0.5.17 exposes
-    ``ServerArgs.override`` instead. The separately pinned XPU image still uses
-    SGLang 0.5.11, which predates both APIs; preserve its legacy assignment
-    behavior until its engine pin is upgraded.
+    so the engine's resolved projection observes them. The separately pinned
+    XPU image still uses SGLang 0.5.11, which predates that API; preserve its
+    legacy assignment behavior until its engine pin is upgraded.
     """
     if declare_late_resolution is not None:
         declare_late_resolution(server_args, source, **fields)
-        return
-
-    late_resolution = getattr(server_args, "_late_resolution", None)
-    if callable(late_resolution):
-        late_resolution(source, **fields)
-        return
-
-    # Fallback for SGLang 0.5.17. Remove when minimum supported SGLang is 0.5.18+.
-    override = getattr(server_args, "override", None)
-    if callable(override):
-        override(source, **fields)
         return
 
     # XPU compatibility for SGLang 0.5.11. Remove when the XPU SGLang pin is
@@ -127,14 +163,11 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
 def resolved_server_args(server_args: Any) -> Any:
     """Return SGLang's effective configuration for one initialized engine.
 
-    SGLang #36255 exposes ``ServerArgs._resolved()``. Current SGLang keeps
-    ``ServerArgs`` raw and exposes the same projection through
-    ``resolved_view()``. Older supported releases and Dynamo's non-LLM argument
-    stubs retain effective values on the object itself.
+    SGLang 0.5.18 and 0.5.19 keep ``ServerArgs`` raw and expose the effective
+    projection through ``resolved_view()``. The separately pinned XPU release
+    and Dynamo's non-LLM argument stubs retain effective values on the object
+    itself.
     """
-    resolve = getattr(server_args, "_resolved", None)
-    if callable(resolve):
-        return resolve()
     if sglang_resolved_view is not None:
         return sglang_resolved_view(server_args)
     return server_args
@@ -210,8 +243,11 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
 
 
 __all__ = [
+    "ConfigArgumentMerger",
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
+    "model_config_of",
     "override_server_args",
+    "publish_server_args",
     "require_reasoning_kwargs",
 ]
