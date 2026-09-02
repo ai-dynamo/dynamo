@@ -135,6 +135,10 @@ class TestStandaloneRouterRefusesDisaggFlags:
     These drive `parse_args` rather than mutating a parsed config, so they
     cover the wiring too: a flag that was never registered, or registered to
     the wrong `dest`, would otherwise pass a validator-only test.
+
+    `ThunderAgentRouterConfig` subclasses this config and calls `super()`, so
+    it inherits both guards. The messages therefore describe the router rather
+    than naming a binary the operator may not have run.
     """
 
     def _parse(self, *flags: str):

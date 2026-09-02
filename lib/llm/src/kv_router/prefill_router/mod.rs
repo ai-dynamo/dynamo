@@ -1596,6 +1596,18 @@ mod tests {
     }
 
     #[test]
+    fn the_wire_constants_are_pinned() {
+        // The vLLM worker declares these separately, in Python. Every other
+        // test here refers to the symbol, so a rename on either side would
+        // disable the feature with both suites green, and the router would
+        // report a plain handoff — indistinguishable from the policy choosing
+        // one. The matching asserts are in
+        // components/src/dynamo/vllm/tests/test_vllm_worker_handler.py.
+        assert_eq!(PREFILL_CONTINUE_ANNOTATION, "x-prefill-continue");
+        assert_eq!(PREFILL_CONTINUE_CAPABILITY, "prefill_continue");
+    }
+
+    #[test]
     fn a_unanimous_pool_supports_continuation() {
         let configs = pool(&[true, true, true]);
 

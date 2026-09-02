@@ -775,6 +775,20 @@ class TestPrefillContinueAnnotation:
                     pass
         make_protocol.assert_not_called()
 
+    async def test_the_wire_constants_are_pinned(self):
+        """These two strings are the contract with the Rust router.
+
+        Both sides declare them separately, and every other test here refers to
+        the symbol, so a rename or typo on either side would disable the whole
+        feature with the suite still green — and the router would report a
+        plain handoff, which is indistinguishable from the policy choosing one.
+        Pin the literals so the halves cannot drift apart silently.
+        """
+        # lib/llm/src/kv_router/prefill_router/mod.rs
+        assert mod.PREFILL_CONTINUE_ANNOTATION == "x-prefill-continue"
+        # lib/llm/src/local_model/runtime_config.rs
+        assert mod.PREFILL_CONTINUE_CAPABILITY == "prefill_continue"
+
     async def test_the_two_markers_are_distinct(self):
         assert mod.PREFILL_CONTINUE_ANNOTATION != mod.BYPASS_REMOTE_PREFILL_ANNOTATION
 

@@ -86,8 +86,8 @@ class DynamoRouterConfig(KvRouterConfigBase, AicPerfConfigBase):
         if self.prefill_continue_enabled or self.prefill_continue_config is not None:
             raise ValueError(
                 "--router-prefill-continue is only supported by dynamo.frontend "
-                "disaggregated serving; standalone dynamo.router has no prefill "
-                "router to continue from"
+                "disaggregated serving; this router builds only a KvRouter and "
+                "has no prefill router to continue from"
             )
 
 
