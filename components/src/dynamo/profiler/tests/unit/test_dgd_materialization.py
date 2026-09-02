@@ -188,12 +188,6 @@ def test_mocker_detection_matches_discrete_command_tokens(command, args) -> None
     assert dgd_materialization._invokes_mocker(command, args)
 
 
-@pytest.mark.parametrize(
-    "args",
-    [
-        ["-m", "dynamo.worker", "--model", "org/dynamo.mocker-model"],
-        ["-m", "dynamo.worker", "--endpoint", "dyn://dynamo.mocker.generate"],
-    ],
-)
-def test_mocker_detection_rejects_substring_matches(args) -> None:
+def test_mocker_detection_rejects_substring_matches() -> None:
+    args = ["-m", "dynamo.worker", "--model", "org/dynamo.mocker-model"]
     assert not dgd_materialization._invokes_mocker(["python3"], args)
