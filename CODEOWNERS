@@ -28,6 +28,7 @@
 #   router           @ai-dynamo/dynamo-router-codeowners
 #   runtime          @ai-dynamo/dynamo-runtime-codeowners
 #   tokenspeed       @ai-dynamo/dynamo-tokenspeed-codeowners
+#   tpu              @ai-dynamo/dynamo-tpu-codeowners
 #   xpu              @ai-dynamo/dynamo-xpu-codeowners
 #   *                @ai-dynamo/dynamo-runtime-codeowners  (catch-all)
 #
@@ -54,6 +55,7 @@
 #   @ai-dynamo/dynamo-router-codeowners
 #   @ai-dynamo/dynamo-runtime-codeowners
 #   @ai-dynamo/dynamo-tokenspeed-codeowners
+#   @ai-dynamo/dynamo-tpu-codeowners
 #   @ai-dynamo/dynamo-xpu-codeowners
 
 *                                                                                                       @ai-dynamo/dynamo-runtime-codeowners
@@ -495,6 +497,7 @@
 /lib/llm/src/block_manager.md                                                                           @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager.rs                                                                           @ai-dynamo/dynamo-kv-memory-codeowners
 /tests/benchmarks/multimodal/                                                                           @ai-dynamo/dynamo-multimodal-codeowners
+/tests/serve/test_vllm_tpu.py                                                                           @ai-dynamo/dynamo-tpu-codeowners @aojea
 /tests/serve/test_vllm_xpu.py                                                                           @ai-dynamo/dynamo-xpu-codeowners
 /.github/codeowners/areas.yaml                                                                          @ai-dynamo/dynamo-process-codeowners
 /.github/workflows/pr-xpu.yaml                                                                          @ai-dynamo/dynamo-xpu-codeowners
@@ -527,6 +530,8 @@
 /lib/llm/src/block_manager/pool.rs                                                                      @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/preprocessor/media.rs                                                                      @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/common/http/                                                                     @ai-dynamo/dynamo-frontend-codeowners
+/examples/backends/vllm/deploy/tpu/                                                                     @ai-dynamo/dynamo-tpu-codeowners @aojea
+/examples/backends/vllm/launch/tpu/                                                                     @ai-dynamo/dynamo-tpu-codeowners @aojea
 /lib/llm/src/block_manager/block.rs                                                                     @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/offload/                                                                     @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/state.rs                                                                     @ai-dynamo/dynamo-kv-memory-codeowners
@@ -573,7 +578,7 @@
 /.codex/                                                                                                @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /agents/                                                                                                @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.agents/                                                                                               @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
-/CODEOWNERS                                                                                             @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-rl-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners @ai-dynamo/dynamo-xpu-codeowners
+/CODEOWNERS                                                                                             @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners @ai-dynamo/dynamo-backend-sglang-codeowners @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-backend-vllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners @ai-dynamo/dynamo-docs-codeowners @ai-dynamo/dynamo-epp-codeowners @ai-dynamo/dynamo-fault-tolerance-codeowners @ai-dynamo/dynamo-frontend-codeowners @ai-dynamo/dynamo-gms-codeowners @ai-dynamo/dynamo-kv-memory-codeowners @ai-dynamo/dynamo-multimodal-codeowners @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-planner-codeowners @ai-dynamo/dynamo-rl-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-tokenspeed-codeowners @ai-dynamo/dynamo-tpu-codeowners @ai-dynamo/dynamo-xpu-codeowners @aojea
 /agent-docs/                                                                                            @ai-dynamo/dynamo-process-codeowners @ai-dynamo/dynamo-agents-codeowners
 /.lycheeignore                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-docs-codeowners
 /tests/deploy/                                                                                          @ai-dynamo/dynamo-ops-codeowners @ai-dynamo/dynamo-operator-codeowners
