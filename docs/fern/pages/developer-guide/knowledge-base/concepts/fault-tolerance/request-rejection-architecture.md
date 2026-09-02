@@ -101,36 +101,152 @@ threshold that is simply too high.
 
 ## Worker-Side Request Admission
 
-A worker can impose a hard cap independently of Frontend busy detection. Setting
-`--engine-request-limit N` creates `N` engine slots. Requests that arrive while those slots are full
-enter a small Dynamo overflow queue of size `Q`. When the engine and queue are both full, the worker
-returns `Server overloaded: worker at capacity`; the Frontend maps the resulting
-rejection to the worker-scoped `WorkerOverloaded` error. When request migration is enabled, it can
-retry the request without changing its allowlist or routing constraints.
+A worker process admits through one process-global admission gate. There is a single admission point
+in the runtime, on the shared ingress path both request planes already funnel through, so requests
+arriving over TCP and over NATS compete for the same `N` engine slots and the same FIFO queue of size
+`Q`, whether the backend is implemented in Rust or Python:
 
-The worker rejection does not add a failed-worker exclusion to the routing request or change the
-standalone router protocol. An in-process router can exclude the failed worker with request-local
-state while retrying. In a split or standalone deployment, selection uses the router's current global
-overload and fault state, so a retry can select the same worker again. Worker-local overload
-migration is therefore best-effort in that topology. Pool-scoped `ResourceExhausted` remains
-non-migratable because no eligible worker has known capacity. If either overload error reaches the
-client, the Frontend returns the configured overload status, HTTP 529 by default.
+```text
+TCP request plane  ─┐
+                    ├─> shared ingress handler ─> gate ─> Rust or Python backend worker
+NATS request plane ─┘
+```
 
-The effective maximum is `N + Q` requests. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` defaults to `16`, is an
-advanced override, must be at least `2`, and is read only when the engine limit is enabled.
+The gate is a property of the process, not of an individual endpoint: every endpoint served over the
+shared ingress path shares one limit and one queue. Generation traffic dominates that budget in a
+worker process, but the same process's control, status, indexer, LoRA-management and KV-management
+endpoints draw on it too, so size `N` with a little headroom above the concurrency you expect the
+engine to sustain. The in-process health-check canary is issued through the local endpoint registry
+and never passes through the gate.
 
-### Overflow Channel Sizing
+A request takes a free engine slot when one is available, otherwise it joins the FIFO queue, and
+otherwise the worker refuses it with `Server overloaded: worker at capacity`. A slot is released when
+the admitted request finishes, errors, or is cancelled, and passes to a queued request. Selection is
+FIFO — the oldest queued request, so a new arrival does not bypass an older waiter — with one
+exception: the single admission that follows a Controlled Delay rejection may take the newest queued
+request instead, as [Adaptive LIFO](#adaptive-lifo) describes. A request cancelled while queued frees
+its queue slot immediately.
 
-The channel capacity is `Q - 1` because one dispatcher task can hold a request between the queue and
-an engine slot. This produces an exact `N + Q` cap for `Q >= 2`. A value of `1` would still require a
-channel capacity of one and could permit two queued requests, which is why the supported minimum is
-`2`.
+The refusal happens before the backend is asked to do any work, so the request never reaches the
+engine. It is reported through the same pre-stream error path a failed `generate` uses, which today
+carries an opaque message rather than a category; the Frontend therefore treats it as it treats any
+pre-stream worker failure. Preserving the worker-scoped classification across that boundary is
+separate transport work.
 
-Worker admission exports:
+`N` resolves in this order:
 
-- `dynamo_rejection_request_total`
-- `dynamo_engine_request`
-- `dynamo_request_queue`
+1. `DYN_ENGINE_REQUEST_LIMIT` (`--engine-request-limit`), when set to a positive integer.
+2. `ceil(3/2 x max_num_seqs x data_parallel_size)` in integer arithmetic, from a capacity reported by
+   model-card registration.
+3. Exactly `10000`, when neither is available. This is the final limit; the `3/2` factor is never
+   applied to it.
+
+`Q` defaults to `40000` and is overridden independently by `DYN_DYNAMO_REQUEST_QUEUE_LIMIT`. The
+queue holds exactly `Q` requests: no dispatcher holds a hidden `Q + 1`th.
+
+The worker refusal does not add a failed-worker exclusion to the routing request or change the
+standalone router protocol.
+
+The effective maximum is `N + Q` requests. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` is an advanced override
+read independently of the engine limit, and defaults to `40000`.
+
+### Controlled Delay
+
+Queueing is bounded in time as well as in length. Every request that joins the FIFO is stamped, at
+enqueue, with a deadline of `enqueue time + queue delay`. The delay is one process-wide budget: it
+defaults to `5000` milliseconds and is overridden by a positive `DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS`,
+in whole milliseconds, down to `1`. That override is environment-only; there is no command-line flag.
+An unset, unparseable or non-positive value leaves the default in place.
+
+The deadline bounds queue residence only. It does not limit how long an admitted request may run,
+it is not a per-request SLO, and a request that takes a free engine slot immediately never carries
+one at all. When a queued request passes its deadline it is removed from the queue at once, so it
+stops consuming queue capacity, and the worker refuses it with
+`Server overloaded: request rejected after exceeding the backend admission queue delay` — the same
+refusal path as a full queue, distinguished only by the message.
+
+Because every entry gets the same delay budget at enqueue, FIFO order is also nondecreasing deadline
+order, so expiry only ever removes a prefix of the queue and never inspects the requests behind it.
+The gate owns exactly one timer for the oldest live deadline, re-armed whenever the head changes,
+rather than a periodic sweep or a timer per queued request. Every path that hands a freed slot to a
+queued request also re-checks the head deadline first, so a slot released before that timer fires is
+still never given to a request the delay budget has already given up on. This is
+transport-independent: the same gate, timer and expiry result apply over TCP and NATS.
+
+`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` turns that expiry rejection off. It accepts
+`1`/`true`/`on`/`yes` and `0`/`false`/`off`/`no`, case-insensitively, and is environment-only with no
+command-line flag. Unset, empty and unrecognized values leave it enabled, and an unrecognized one is
+logged. Disabled, the bounded FIFO stands alone: nothing leaves the queue for age, a request may wait
+longer than the delay and still be admitted in its FIFO turn, and the gate arms no timer at all. Such
+a request is not an expired one — expiry is simply not in force — so it is never counted as a
+rejection, and the queue length bound becomes the only backpressure.
+
+### Adaptive LIFO
+
+Which queued request the freed capacity goes to is a separate policy. Rejection is
+always from the front of the queue; selection is not. An admission that rejected nothing takes the
+oldest queued request, exactly as before; one that rejected at least one request takes the newest
+instead, that being the request with the most of its delay budget left. That applies to one
+admission only: the next starts at the front again, however many requests the rejection removed, so
+there is no lasting LIFO order and no backlog of owed back admissions. A rejection by the gate's
+timer and one while handing over freed capacity count the same way, and a refusal that reached no
+request — its caller had already gone — counts for nothing. Selecting from the back needs no second
+deadline check, because the due prefix is removed immediately before every admission and one
+process-wide delay budget makes deadlines nondecreasing along the queue.
+
+`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO` turns the back selection off, with the same boolean
+vocabulary, the same enabled default and the same environment-only scope. Turning it off changes
+selection alone: the queue delay, the deadlines and which requests are rejected are all unaffected.
+Adaptive LIFO also does nothing until Controlled Delay has actually rejected a live waiter, so with
+Controlled Delay disabled it never takes effect — but neither switch changes the other's behavior.
+
+### Where The Capacity Hint Comes From
+
+The implemented rule is exactly this: **the first usable capacity report from any non-LoRA base model
+card registered in the process wins.** A report is usable when `max_num_seqs` and
+`data_parallel_size` are both present and non-zero and their scaled product is in range. A later
+conflicting report from any other base card in the same process is logged and ignored, and the
+environment override always wins over any report. LoRA cards report no capacity.
+
+The gate does not test which kind of component published the card, and nothing in the runtime records
+that distinction. `register_model` is reached by routers as well as engines — `global_router`,
+`vllm.omni.stage_router` and `thunderagent_router` all call it — so a router card carrying a usable
+`max_num_seqs` would size the gate for its own process. In tree those router cards leave
+`max_num_seqs` unset today, so they report nothing usable and the limit falls through to rule 3. That
+is a property of the current router configurations, not a guarantee the runtime enforces: if you add
+a `max_num_seqs` to a router's `ModelRuntimeConfig`, that value becomes that router process's
+admission limit.
+
+Registration can complete after the gate is already admitting requests, so the limit stays adjustable
+rather than being frozen at startup and a component whose metadata resolves late is still sized
+correctly. Raising the limit releases queued work immediately; lowering it never revokes a slot that
+is already held.
+
+### Relationship To The TCP Request Plane
+
+The TCP request plane keeps its own worker pool, sized by `DYN_TCP_WORKER_POOL_SIZE` and
+`DYN_TCP_WORK_QUEUE_SIZE`. That pool bounds TCP-side task execution only; it is independent of the
+gate and no longer changes with the engine-admission settings. The two use the same numeric defaults
+by coincidence, not by sharing constants.
+
+The two controls report separately. The `dynamo_work_handler_*` family reports TCP worker-pool
+occupancy, queue activity and capacity, permit wait, and enqueue rejection. The gate has its own
+independent family:
+
+- `dynamo_backend_admission_engine_request_count` and
+  `dynamo_backend_admission_request_queue_count` — current occupancy of the limit and the FIFO queue.
+- `dynamo_backend_admission_engine_request_limit` and
+  `dynamo_backend_admission_request_queue_limit` — the sizing actually in force, including a limit
+  resized by a late capacity hint. Each live count pairs with the bound that governs it.
+- `dynamo_backend_admission_request_total` — every request the gate receives, labelled `path` and
+  classified exactly once as `direct`, `queue` or `cancelled`. A request shed for a full queue is
+  counted under `queue`, that being how its queue path ended.
+- `dynamo_backend_admission_dequeue_total` — queued requests that took a slot, labelled `source` as
+  `fifo` or `adaptive_lifo`. Candidates removed while searching are not counted.
+- `dynamo_backend_admission_rejection_total` — refusals, labelled `reason` as `queue_full` or
+  `request_expired`. A request cancelled while queued is not a rejection and is counted under neither.
+- `dynamo_backend_admission_cancellation_total` — requests cancelled before admission, on either
+  path. A cancelled request keeps whichever `path` it was classified under.
 
 See [Cancellation and Rejection](../../../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection)
 for metric types and labels.
