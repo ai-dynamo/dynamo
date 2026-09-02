@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Overlay for the Planner-controlled batch-drain POC. Apply this after
+# llm-d-async-values.yaml. The deployment command must provide ap.image.repository
+# and ap.image.tag for an image containing the companion Redis leased-rate gate.
+ap:
+  imagePullPolicy: Always
+
+  # The controller queries a Prometheus server, not this pod's raw /metrics
+  # endpoint. The target cluster selects PodMonitors across namespaces.
+  podMonitor:
+    enabled: true
+    interval: 5s
+
+  # A named pool gives the observation and effect contracts one stable key.
+  workerPools:
+    - id: dynamo-batch
+      workers: 8
+      # Admission control belongs at the worker-pool boundary. Queue gates do
+      # not wait on ActionWait, so placing this under queuesConfig would not
+      # enforce the leased drain rate.
+      gate_type: wait-on-refuse
+      gate_params:
+        gate:
+          gate_type: redis-leased-rate
+          gate_params:
+            address: batch-gateway-valkey:6379
+            control_key: llm-d-async:drain-limit:dynamo-batch
+            # Keep the permitted burst small while allowing sub-1 RPS limits.
+            burst_seconds: "0.25"
+
+  redis:
+    # queuesConfig replaces the single-queue fields from the base values. The
+    # empty global gate is required because the chart rejects both forms at once.
+    gateType: ""
+    gateParams: {}
+    queuesConfig:
+      - id: dynamo-batch
+        queue_name: llm-d-async:requests:dynamo-batch
+        # Do not set result_queue_name here. Batch Gateway supplies the
+        # destination in each request's routing metadata.
+        worker_pool_id: dynamo-batch
+        request_path_url: /v1/chat/completions
+        igw_base_url: http://qwen3-0-6b-batch-frontend:8000
