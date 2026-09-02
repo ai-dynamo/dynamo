@@ -464,17 +464,15 @@ def _mock_get_llm_engine(engine_args, *args, **kwargs):
 
 
 @pytest.mark.parametrize(
-    ("publish_flag", "expected_perf_metrics"),
+    "publish_flag",
     [
-        ("--publish-kv-events", False),
-        ("--publish-events-and-metrics", True),
+        "--publish-kv-events",
+        "--publish-events-and-metrics",
     ],
 )
 @pytest.mark.asyncio
-async def test_init_llm_worker_engine_args_without_overrides(
-    monkeypatch, publish_flag, expected_perf_metrics
-):
-    """The new KV-event flag is decoupled while the legacy flag stays combined."""
+async def test_init_llm_worker_engine_args_without_overrides(monkeypatch, publish_flag):
+    """KV-event flags, including the deprecated alias, do not enable engine metrics."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_EXTRA_ENGINE_ARGS", raising=False)
@@ -510,12 +508,8 @@ async def test_init_llm_worker_engine_args_without_overrides(
         engine_args = exc_info.value.engine_args
         assert engine_args["max_num_tokens"] == config.max_num_tokens
         assert engine_args["max_batch_size"] == config.max_batch_size
-        if expected_perf_metrics:
-            assert engine_args["return_perf_metrics"] is True
-            assert engine_args["enable_iter_perf_stats"] is True
-        else:
-            assert engine_args["return_perf_metrics"] is False
-            assert engine_args["enable_iter_perf_stats"] is False
+        assert engine_args["return_perf_metrics"] is False
+        assert engine_args["enable_iter_perf_stats"] is False
 
 
 @pytest.mark.asyncio

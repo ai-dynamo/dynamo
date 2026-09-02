@@ -16,11 +16,8 @@ export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"Qwen/Qwen3-0.6B"}
 export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3/agg.yaml"}
 export MODALITY=${MODALITY:-"text"}
 
-# TensorRT-LLM performance statistics are independent of KV-event publication.
-# Merge them with any GPU memory override because the CLI accepts a single
-# --override-engine-args value.
-METRICS_JSON='{"return_perf_metrics": true, "enable_iter_perf_stats": true}'
-OVERRIDE_JSON=$(build_trtllm_override_args_with_mem --merge-with-json "$METRICS_JSON")
+# Build GPU memory JSON (returns bare JSON, no flag)
+OVERRIDE_JSON=$(build_trtllm_override_args_with_mem)
 
 # Add --override-engine-args if we have JSON
 TRTLLM_OVERRIDE_ARGS=()
@@ -42,6 +39,7 @@ python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --modality "$MODALITY" \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
+  --publish-kv-events \
   "${TRTLLM_OVERRIDE_ARGS[@]}" &
 
 # Exit on first worker failure; kill 0 in the EXIT trap tears down the rest

@@ -370,13 +370,6 @@ async def init_llm_worker(
         "kv_connector_config": kv_connector_config,
     }
 
-    # Preserve the deprecated combined flag's original behavior. These are
-    # defaults rather than forced overrides so explicit YAML/JSON engine
-    # settings below retain their existing precedence.
-    if config.legacy_publish_events_and_metrics:
-        arg_map["return_perf_metrics"] = True
-        arg_map["enable_iter_perf_stats"] = True
-
     arg_map["load_format"] = engine_load_format
 
     # Enable sleep_config when GMS manages weights — required for GMS
@@ -533,14 +526,18 @@ async def init_llm_worker(
         )
     default_sampling_params = SamplingParams()
 
-    # Request-level perf metrics share the engine flag's name, but are a separate
-    # setting. Follow the final engine args so explicit YAML/JSON instrumentation
-    # works independently of KV-event publication. `cached_tokens` is unaffected:
-    # it comes from `res.cached_tokens`, not from `request_perf_metrics`.
+    # Request-level perf metrics are a *separate* switch that merely shares the
+    # engine flag's name. Tie it to KV-event publishing, not to the engine flag
+    # (which now defaults to False above): its one consumer is the KV-transfer
+    # histogram in HandlerBase, whose AdditionalMetricsCollector is built only under
+    # `if config.publish_events_and_metrics`. So with publishing off nothing reads
+    # `request_perf_metrics` and filling it is pure waste. `cached_tokens` is
+    # unaffected either way -- it comes from `res.cached_tokens`, not from
+    # `request_perf_metrics`. An explicit engine-level override still forces these
+    # back on: TRT-LLM resolves the effective value as `sampling or engine` in
+    # `LLM._prepare_sampling_params`.
     if hasattr(default_sampling_params, "return_perf_metrics"):
-        default_sampling_params.return_perf_metrics = bool(
-            arg_map.get("return_perf_metrics", False)
-        )
+        default_sampling_params.return_perf_metrics = config.publish_events_and_metrics
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode. Prefill and encode workers
