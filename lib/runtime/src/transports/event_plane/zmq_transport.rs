@@ -381,14 +381,45 @@ impl ZmqSubTransport {
         topic: &str,
         rcvhwm: i32,
     ) -> Result<ZmqWireStream> {
-        let mut socket = Self::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
+        let socket = Self::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
+        Self::single_consumer_stream(socket, topic, rcvhwm, 1)
+    }
+
+    /// Connect one consumer directly to multiple ZMQ endpoints.
+    ///
+    /// The returned stream owns one SUB socket connected to every endpoint. It
+    /// avoids the lossy local broadcast hop used by [`Self::connect_multiple`].
+    pub async fn connect_single_consumer_multiple(
+        endpoints: &[String],
+        topic: &str,
+    ) -> Result<ZmqWireStream> {
+        let mut endpoints = endpoints.iter();
+        let Some(first_endpoint) = endpoints.next() else {
+            anyhow::bail!("Cannot connect to zero endpoints");
+        };
+
+        let endpoint_count = endpoints.len() + 1;
+        let socket = Self::connect_socket(first_endpoint, topic)?;
+        for endpoint in endpoints {
+            socket.get_socket().connect(endpoint)?;
+        }
+
+        Self::single_consumer_stream(socket, topic, ZMQ_RCVHWM, endpoint_count)
+    }
+
+    fn single_consumer_stream(
+        mut socket: Subscribe,
+        topic: &str,
+        rcvhwm: i32,
+        endpoint_count: usize,
+    ) -> Result<ZmqWireStream> {
         let expected_topic = topic.as_bytes().to_vec();
 
         tracing::info!(
-            endpoint,
+            endpoint_count,
             topic,
             rcvhwm,
-            "Direct ZMQ single-consumer stream connected"
+            "ZMQ single-consumer stream connected"
         );
 
         let stream = stream! {
@@ -408,7 +439,7 @@ impl ZmqSubTransport {
                         payload: message.payload,
                     }),
                     Err(error) => {
-                        tracing::warn!(%error, "Dropping malformed direct-ZMQ message");
+                        tracing::warn!(%error, "Dropping malformed ZMQ message");
                     }
                 }
             }
