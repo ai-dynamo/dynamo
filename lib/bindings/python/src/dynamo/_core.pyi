@@ -2966,6 +2966,7 @@ class KvRouter:
         self,
         request: JsonLike,
         response_buffer_size: int = 100,
+        context: Context | None = None,
     ) -> AsyncIterator[JsonLike]:
         """
         Generate from a preprocessed request dict (PreprocessedRequest format).
@@ -2973,6 +2974,8 @@ class KvRouter:
         Accepts a full request dict with token_ids, model, stop_conditions, etc.
         Set response_buffer_size to 0 for demand-driven direct Python consumption;
         negative values are rejected.
+        Pass context to preserve request metadata, cancellation, and distributed
+        tracing across the Python/Rust boundary.
         Returns an async iterator yielding generation responses.
         """
         ...

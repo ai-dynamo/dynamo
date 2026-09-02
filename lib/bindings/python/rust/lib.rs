@@ -146,10 +146,10 @@ fn get_span_for_direct_context(
 }
 
 // Helper to create request context with proper linking and cancellation handling
-fn create_request_context(
-    request: rmpv::Value,
+fn create_request_context<T: rs::pipeline::Data>(
+    request: T,
     parent_ctx: &Option<context::Context>,
-) -> RsContext<rmpv::Value> {
+) -> RsContext<T> {
     match parent_ctx {
         // If there is a parent context, link the request as a child context of it
         Some(parent_ctx) => {
