@@ -945,6 +945,7 @@ where
                 stats.estimated_retained_bytes,
                 stats.capacity_bytes,
                 stats.capacity_blocks,
+                stats.oldest_chunk_age_seconds,
             );
             self.cache_history_verified = true;
         }
@@ -983,6 +984,7 @@ where
             stats.estimated_retained_bytes,
             stats.capacity_bytes,
             stats.capacity_blocks,
+            stats.oldest_chunk_age_seconds,
         );
     }
 }

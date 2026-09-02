@@ -863,6 +863,7 @@ pub struct RouterRequestMetrics {
     pub cache_loss_history_estimated_bytes: IntGauge,
     pub cache_loss_history_capacity_bytes: IntGauge,
     pub cache_loss_history_capacity_blocks: IntGauge,
+    pub cache_loss_history_oldest_chunk_age_seconds: IntGauge,
 }
 
 static ROUTER_REQUEST_METRICS: OnceLock<Arc<RouterRequestMetrics>> = OnceLock::new();
@@ -1069,6 +1070,13 @@ impl RouterRequestMetrics {
                         extra_labels,
                     )
                     .expect("failed to create router_cache_loss_history_capacity_blocks");
+                let cache_loss_history_oldest_chunk_age_seconds = metrics
+                    .create_intgauge(
+                        &router_metric("cache_loss_history_oldest_chunk_age_seconds"),
+                        "Approximate retention horizon: age of the oldest retained cache-loss history chunk",
+                        extra_labels,
+                    )
+                    .expect("failed to create router_cache_loss_history_oldest_chunk_age_seconds");
                 Arc::new(Self {
                     requests_total,
                     time_to_first_token_seconds,
@@ -1090,6 +1098,7 @@ impl RouterRequestMetrics {
                     cache_loss_history_estimated_bytes,
                     cache_loss_history_capacity_bytes,
                     cache_loss_history_capacity_blocks,
+                    cache_loss_history_oldest_chunk_age_seconds,
                 })
             })
             .clone()
@@ -1136,6 +1145,7 @@ impl RouterRequestMetrics {
         estimated_retained_bytes: usize,
         capacity_bytes: usize,
         capacity_blocks: usize,
+        oldest_chunk_age_seconds: u64,
     ) {
         self.cache_loss_history_block_records
             .set(retained_records.min(i64::MAX as usize) as i64);
@@ -1149,6 +1159,8 @@ impl RouterRequestMetrics {
             .set(capacity_bytes.min(i64::MAX as usize) as i64);
         self.cache_loss_history_capacity_blocks
             .set(capacity_blocks.min(i64::MAX as usize) as i64);
+        self.cache_loss_history_oldest_chunk_age_seconds
+            .set(oldest_chunk_age_seconds.min(i64::MAX as u64) as i64);
     }
 }
 

@@ -11,24 +11,21 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
+    time::Instant,
 };
 
 use parking_lot::Mutex;
 
 use dynamo_kv_router::protocols::{BlockExtraInfo, TokensWithHashes};
 
-/// Default number of complete sequence-hash records retained by a frontend.
-///
-/// Each record represents one full KV block. The ledger is FIFO: once full,
-/// the oldest observed record is removed before the newest is inserted.
-pub const DEFAULT_HISTORY_BLOCK_CAPACITY: usize = 5_000_000;
-pub const HISTORY_BLOCK_CAPACITY_ENV: &str = "DYN_CACHE_LOSS_HISTORY_BLOCKS";
 pub const HISTORY_BYTES_ENV: &str = "DYN_CACHE_LOSS_HISTORY_BYTES";
 pub const CACHE_LOSS_FUNNEL_ENABLED_ENV: &str = "DYN_CACHE_LOSS_FUNNEL_ENABLED";
 pub const DEFAULT_HISTORY_BYTES: usize = 256 * 1024 * 1024;
+pub const HISTORY_CHUNK_RECORDS: usize = 4_096;
 
 /// Conservative planning estimate: an 8-byte FIFO sequence hash plus the
-/// amortized hash-map key, refcount, bucket slack, and allocator overhead.
+/// amortized hash-map key, refcount, bucket slack, and allocator overhead. The
+/// amortized chunk timestamp is negligible at the fixed chunk size.
 /// This is deliberately larger than `size_of::<u64>()`; it is a capacity model,
 /// not a promise about a particular Rust allocator build.
 pub const ESTIMATED_BYTES_PER_HISTORY_RECORD: usize = 32;
@@ -54,27 +51,27 @@ pub struct CacheHistory {
     capacity_blocks: usize,
     capacity_bytes: usize,
     block_tokens: u64,
-    records: VecDeque<u64>,
+    chunk_records: usize,
+    retained_records: usize,
+    chunks: VecDeque<HistoryChunk>,
     retained: HashMap<u64, u32>,
+}
+
+#[derive(Debug)]
+struct HistoryChunk {
+    inserted_at: Instant,
+    hashes: Vec<u64>,
 }
 
 impl CacheHistory {
     pub fn from_env(block_tokens: u32) -> Arc<Mutex<Self>> {
-        let requested_blocks = std::env::var(HISTORY_BLOCK_CAPACITY_ENV)
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .filter(|&value| value > 0)
-            .unwrap_or(DEFAULT_HISTORY_BLOCK_CAPACITY);
         let requested_bytes = std::env::var(HISTORY_BYTES_ENV)
             .ok()
             .and_then(|value| value.parse().ok())
             .filter(|&value| value > 0)
             .unwrap_or(DEFAULT_HISTORY_BYTES);
         let capacity_bytes = requested_bytes.max(ESTIMATED_BYTES_PER_HISTORY_RECORD);
-        let byte_limited_blocks = capacity_bytes / ESTIMATED_BYTES_PER_HISTORY_RECORD;
-        let capacity_blocks = requested_blocks.min(byte_limited_blocks.max(1));
         Arc::new(Mutex::new(Self::new_with_budget(
-            capacity_blocks,
             block_tokens,
             capacity_bytes,
         )))
@@ -83,13 +80,37 @@ impl CacheHistory {
     #[cfg(test)]
     pub fn new(capacity_blocks: usize, block_tokens: u32) -> Self {
         Self::new_with_budget(
-            capacity_blocks,
             block_tokens,
             capacity_blocks.saturating_mul(ESTIMATED_BYTES_PER_HISTORY_RECORD),
         )
     }
 
-    fn new_with_budget(capacity_blocks: usize, block_tokens: u32, capacity_bytes: usize) -> Self {
+    #[cfg(test)]
+    fn new_with_chunk(capacity_blocks: usize, block_tokens: u32, chunk_records: usize) -> Self {
+        Self::new_with_chunk_budget(
+            block_tokens,
+            capacity_blocks.saturating_mul(ESTIMATED_BYTES_PER_HISTORY_RECORD),
+            chunk_records,
+        )
+    }
+
+    fn new_with_budget(block_tokens: u32, capacity_bytes: usize) -> Self {
+        let record_budget = capacity_bytes / ESTIMATED_BYTES_PER_HISTORY_RECORD;
+        Self::new_with_chunk_budget(
+            block_tokens,
+            capacity_bytes,
+            record_budget.min(HISTORY_CHUNK_RECORDS),
+        )
+    }
+
+    fn new_with_chunk_budget(
+        block_tokens: u32,
+        capacity_bytes: usize,
+        chunk_records: usize,
+    ) -> Self {
+        let record_budget = capacity_bytes / ESTIMATED_BYTES_PER_HISTORY_RECORD;
+        let chunk_records = chunk_records.max(1).min(record_budget.max(1));
+        let capacity_blocks = (record_budget / chunk_records).max(1) * chunk_records;
         assert!(
             capacity_blocks > 0,
             "cache history capacity must be positive"
@@ -102,7 +123,9 @@ impl CacheHistory {
             capacity_blocks,
             capacity_bytes,
             block_tokens: u64::from(block_tokens),
-            records: VecDeque::with_capacity(capacity_blocks.min(65_536)),
+            chunk_records,
+            retained_records: 0,
+            chunks: VecDeque::new(),
             retained: HashMap::new(),
         }
     }
@@ -122,19 +145,41 @@ impl CacheHistory {
     /// window without losing an older retained occurrence prematurely.
     pub fn record_completed(&mut self, sequence_hashes: impl IntoIterator<Item = u64>) {
         for hash in sequence_hashes {
-            if self.records.len() == self.capacity_blocks {
-                let evicted = self.records.pop_front().expect("history was non-empty");
-                let count = self
-                    .retained
-                    .get_mut(&evicted)
-                    .expect("history refcount missing");
-                *count -= 1;
-                if *count == 0 {
-                    self.retained.remove(&evicted);
-                }
+            if self.retained_records == self.capacity_blocks {
+                self.evict_oldest_chunk();
             }
-            self.records.push_back(hash);
+            if self
+                .chunks
+                .back()
+                .is_none_or(|chunk| chunk.hashes.len() == self.chunk_records)
+            {
+                self.chunks.push_back(HistoryChunk {
+                    inserted_at: Instant::now(),
+                    hashes: Vec::with_capacity(self.chunk_records),
+                });
+            }
+            self.chunks
+                .back_mut()
+                .expect("history chunk was just created")
+                .hashes
+                .push(hash);
+            self.retained_records += 1;
             *self.retained.entry(hash).or_default() += 1;
+        }
+    }
+
+    fn evict_oldest_chunk(&mut self) {
+        let chunk = self.chunks.pop_front().expect("history was non-empty");
+        self.retained_records -= chunk.hashes.len();
+        for evicted in chunk.hashes {
+            let count = self
+                .retained
+                .get_mut(&evicted)
+                .expect("history refcount missing");
+            *count -= 1;
+            if *count == 0 {
+                self.retained.remove(&evicted);
+            }
         }
     }
 
@@ -142,13 +187,17 @@ impl CacheHistory {
         CacheHistoryStats {
             capacity_blocks: self.capacity_blocks,
             capacity_bytes: self.capacity_bytes,
-            retained_records: self.records.len(),
+            retained_records: self.retained_records,
             retained_unique_hashes: self.retained.len(),
-            represented_tokens: (self.records.len() as u64).saturating_mul(self.block_tokens),
+            represented_tokens: (self.retained_records as u64).saturating_mul(self.block_tokens),
             estimated_retained_bytes: self
-                .records
-                .len()
+                .retained_records
                 .saturating_mul(ESTIMATED_BYTES_PER_HISTORY_RECORD),
+            oldest_chunk_age_seconds: self
+                .chunks
+                .front()
+                .map(|chunk| chunk.inserted_at.elapsed().as_secs())
+                .unwrap_or(0),
         }
     }
 }
@@ -161,6 +210,7 @@ pub struct CacheHistoryStats {
     pub retained_unique_hashes: usize,
     pub represented_tokens: u64,
     pub estimated_retained_bytes: usize,
+    pub oldest_chunk_age_seconds: u64,
 }
 
 /// Request-local state used to record canonical prompt and generated histories
@@ -317,8 +367,8 @@ mod tests {
     }
 
     #[test]
-    fn retains_recent_records_and_expires_the_oldest() {
-        let mut history = CacheHistory::new(2, 16);
+    fn retains_recent_records_and_expires_the_oldest_chunk() {
+        let mut history = CacheHistory::new_with_chunk(2, 16, 1);
         history.record_completed([10, 20]);
         assert_eq!(history.previously_computed_tokens(&[10, 20]), 32);
 
@@ -329,8 +379,19 @@ mod tests {
     }
 
     #[test]
+    fn evicts_a_complete_oldest_chunk() {
+        let mut history = CacheHistory::new_with_chunk(8, 16, 4);
+        history.record_completed([1, 2, 3, 4]);
+        history.record_completed([5, 6, 7, 8]);
+        history.record_completed([9]);
+        assert_eq!(history.stats().retained_records, 5);
+        assert_eq!(history.previously_computed_tokens(&[1]), 0);
+        assert_eq!(history.previously_computed_tokens(&[5, 6, 7, 8, 9]), 80);
+    }
+
+    #[test]
     fn duplicate_records_keep_a_hash_retained_until_all_expire() {
-        let mut history = CacheHistory::new(2, 8);
+        let mut history = CacheHistory::new_with_chunk(2, 8, 1);
         history.record_completed([7, 7]);
         history.record_completed([9]);
 
@@ -355,9 +416,12 @@ mod tests {
     }
 
     #[test]
-    fn default_budget_can_hold_the_requested_five_million_records() {
-        let capacity_from_default_budget =
-            super::DEFAULT_HISTORY_BYTES / super::ESTIMATED_BYTES_PER_HISTORY_RECORD;
-        assert!(capacity_from_default_budget >= super::DEFAULT_HISTORY_BLOCK_CAPACITY);
+    fn default_budget_derives_capacity_without_a_block_limit() {
+        let history = CacheHistory::from_env(16);
+        let history = history.lock();
+        assert_eq!(
+            history.stats().capacity_blocks,
+            super::DEFAULT_HISTORY_BYTES / super::ESTIMATED_BYTES_PER_HISTORY_RECORD
+        );
     }
 }
