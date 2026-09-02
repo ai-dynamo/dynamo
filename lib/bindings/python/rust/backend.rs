@@ -34,6 +34,7 @@ use dynamo_llm::local_model::runtime_config::{
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
+use dynamo_sidecar_common::SidecarStartupError;
 use futures::stream::{BoxStream, StreamExt};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
@@ -47,11 +48,25 @@ use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
 
+fn sidecar_startup_to_pyerr(error: SidecarStartupError) -> PyErr {
+    match error {
+        SidecarStartupError::Cli(error) => {
+            let _ = error.print();
+            pyo3::exceptions::PySystemExit::new_err(error.exit_code())
+        }
+        SidecarStartupError::Dynamo(error) => {
+            pyo3::exceptions::PyValueError::new_err(error.to_string())
+        }
+    }
+}
+
 /// Register `dynamo._core.backend` and its classes on the parent `_core` module.
 pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let m = PyModule::new(py, "backend")?;
     m.add_function(wrap_pyfunction!(_run_sglang_sidecar, &m)?)?;
+    m.add_function(wrap_pyfunction!(_run_trtllm_sidecar, &m)?)?;
+    m.add_function(wrap_pyfunction!(_run_vllm_sidecar, &m)?)?;
     m.add_class::<DisaggregationMode>()?;
     m.add_class::<EngineConfig>()?;
     m.add_class::<LlmRegistration>()?;
@@ -87,10 +102,60 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
     let (engine, config) = py
-        .allow_threads(move || {
-            dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(cli_argv))
-        })
-        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+        .allow_threads(move || dynamo_sglang_sidecar::SglangSidecarEngine::try_from_args(cli_argv))
+        .map_err(sidecar_startup_to_pyerr)?;
+
+    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+}
+
+const VLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-vllm-sidecar";
+
+fn vllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
+    let mut cli_argv = Vec::with_capacity(argv.len() + 1);
+    cli_argv.push(VLLM_SIDECAR_PROGRAM_NAME.to_string());
+    cli_argv.extend(argv);
+    cli_argv
+}
+
+/// Run the native vLLM sidecar in the current process.
+///
+/// Python's module launcher passes only option arguments, while clap's
+/// `try_parse_from` expects the program name at index zero. Add that stable
+/// name here so Python callers use ordinary `sys.argv[1:]` semantics.
+#[pyfunction]
+#[pyo3(signature = (argv=None))]
+fn _run_vllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let cli_argv = vllm_sidecar_argv(argv.unwrap_or_default());
+    let (engine, config) = py
+        .allow_threads(move || dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args(cli_argv))
+        .map_err(sidecar_startup_to_pyerr)?;
+
+    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+}
+
+const TRTLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-trtllm-sidecar";
+
+fn trtllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
+    let mut cli_argv = Vec::with_capacity(argv.len() + 1);
+    cli_argv.push(TRTLLM_SIDECAR_PROGRAM_NAME.to_string());
+    cli_argv.extend(argv);
+    cli_argv
+}
+
+/// Run the native TensorRT-LLM sidecar in the current process.
+///
+/// Python's module launcher passes only option arguments, while clap's
+/// `try_parse_from` expects the program name at index zero. Add that stable
+/// name here so Python callers use ordinary `sys.argv[1:]` semantics.
+#[pyfunction]
+#[pyo3(signature = (argv=None))]
+fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let cli_argv = trtllm_sidecar_argv(argv.unwrap_or_default());
+    let (engine, config) = py
+        .allow_threads(move || dynamo_trtllm_sidecar::TrtllmSidecarEngine::try_from_args(cli_argv))
+        .map_err(sidecar_startup_to_pyerr)?;
 
     py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
         .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
@@ -469,6 +534,7 @@ impl WorkerConfig {
                 // Python vLLM owns and serves its existing `.rl` endpoint.
                 // The shared Rust endpoint is opt-in for Rust sidecars only.
                 enable_rl: false,
+                rl_metadata: None,
                 media_decoder: media_decoder.map(|decoder| decoder.inner),
                 media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
             },
@@ -580,12 +646,10 @@ impl Worker {
         let raw = self.raw;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let runtime = rs::Worker::runtime_from_existing()
-                .or_else(|_| {
-                    let worker = rs::Worker::from_settings()?;
-                    Ok::<_, anyhow::Error>(worker.runtime().clone())
-                })
-                .map_err(to_pyerr)?;
+            // No fallback: `runtime_from_existing` creates the process runtime when there isn't
+            // one, so it only fails when the settings themselves are bad. Retrying through
+            // `Worker::from_settings` would read those same settings and fail the same way.
+            let runtime = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
 
             // Initialize logging now that tokio context is available. Mirrors
             // the DistributedRuntime init path — required so workers using
@@ -734,7 +798,7 @@ impl PyEngineCore {
             request_metadata: self.request_metadata.clone(),
         };
 
-        let first_token = ctx.first_token_sender().cloned();
+        let first_token = ctx.first_token_notifier().cloned();
         let inner_ctx = ctx.inner_arc();
         // **Invariant**: `tracing::Span::current()` here MUST be the
         // `engine.generate` span opened by the adapter. The capture must

@@ -11,51 +11,18 @@ use tracing::Instrument;
 use dynamo_kv_router::selector::WorkerSelector;
 
 use dynamo_runtime::{
-    pipeline::{ManyOut, SingleIn},
+    pipeline::ManyOut,
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
 use super::{PrefillCompletion, PrefillError, PrefillRouter};
 use crate::{
-    kv_router::KvPushRouter,
     local_model::runtime_config::ModelRuntimeConfig,
     protocols::common::{
-        llm_backend::{FinishReason, LLMEngineOutput, PreprocessedRequest},
+        llm_backend::{FinishReason, LLMEngineOutput},
         timing::RequestTracker,
     },
-    session_affinity::{AffinityTarget, SessionAffinityPushRouter},
 };
-
-pub(super) enum InnerPrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    KvRouter(Arc<KvPushRouter<Sel>>),
-    SimpleRouter(Arc<SessionAffinityPushRouter>),
-}
-
-impl<Sel> InnerPrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    pub(super) async fn select_and_dispatch_prefill<M, F>(
-        &self,
-        request: SingleIn<PreprocessedRequest>,
-        prepare: F,
-    ) -> Result<(M, ManyOut<Annotated<LLMEngineOutput>>)>
-    where
-        F: FnOnce(&mut PreprocessedRequest, AffinityTarget) -> Result<M>,
-    {
-        match self {
-            InnerPrefillRouter::KvRouter(router) => {
-                router.select_and_dispatch_prefill(request, prepare).await
-            }
-            InnerPrefillRouter::SimpleRouter(router) => {
-                router.select_and_dispatch_prefill(request, prepare).await
-            }
-        }
-    }
-}
 
 impl<Sel> PrefillRouter<Sel>
 where
@@ -74,10 +41,10 @@ where
         };
 
         if let Some(error) = first_output.err() {
-            return Err(PrefillError::PrefillError(
-                "Prefill router returned error in output".to_string(),
-                Some(Box::new(error)),
-            ));
+            // Include the worker's text. `to_pyerr` keeps only `Display`, so a
+            // `#[source]` is lost. See `PrefillError::PrefillError`.
+            let detail = format!("Prefill router returned error in output: {error}");
+            return Err(PrefillError::PrefillError(detail, Some(Box::new(error))));
         }
 
         if let Some(ref tracker) = tracker {
@@ -105,10 +72,8 @@ where
         if !is_bootstrap {
             while let Some(next) = prefill_response.next().await {
                 if let Some(error) = next.err() {
-                    return Err(PrefillError::PrefillError(
-                        "Prefill router returned error in output stream".to_string(),
-                        Some(Box::new(error)),
-                    ));
+                    let detail = format!("Prefill router returned error in output stream: {error}");
+                    return Err(PrefillError::PrefillError(detail, Some(Box::new(error))));
                 }
                 if let Some(output) = next.data.as_ref()
                     && prompt_tokens_details.is_none()
@@ -280,7 +245,11 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        // The text must survive: `to_pyerr` only keeps `Display`.
+        let Err(err) = result else {
+            panic!("expected a first output error");
+        };
+        assert!(err.to_string().contains("prefill failed"), "{err}");
         assert!(tracker.record_prefill_complete());
     }
 
@@ -297,7 +266,10 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err());
+        let Err(err) = result else {
+            panic!("expected a later output error");
+        };
+        assert!(err.to_string().contains("prefill stream failed"), "{err}");
         assert!(!tracker.record_prefill_complete());
     }
 

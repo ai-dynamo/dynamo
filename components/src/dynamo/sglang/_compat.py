@@ -26,7 +26,27 @@ from collections.abc import Mapping
 from functools import lru_cache, wraps
 from typing import Any
 
+try:
+    from sglang.srt.arg_groups.overrides import declare_late_resolution
+except ImportError:
+    # SGLang 0.5.17 and the XPU 0.5.11 pin predate declarations.
+    declare_late_resolution = None
+
+try:
+    from sglang.srt.arg_groups.overrides import resolved_view as sglang_resolved_view
+except ImportError:
+    # SGLang #36255 exposes ServerArgs._resolved() instead.
+    sglang_resolved_view = None
+
 logger = logging.getLogger(__name__)
+
+try:
+    from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang.srt.utils.server_args_config_parser":
+        raise
+    # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
+    from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 
 @lru_cache(maxsize=1)
@@ -41,7 +61,7 @@ def _warn_require_reasoning_unsupported() -> None:
 def ensure_sglang_tensor_image_size() -> None:
     """Allow SGLang's image-token resolver to handle decoded image tensors.
 
-    SGLang 0.5.13 through 0.5.17 assume every decoded image exposes the PIL
+    SGLang 0.5.13 through 0.5.18 assume every decoded image exposes the PIL
     ``height``/``width`` attributes. Its CUDA JPEG decoder instead returns a
     CHW tensor, causing multimodal requests to fall back to retokenization.
 
@@ -82,15 +102,25 @@ def ensure_sglang_tensor_image_size() -> None:
 
 
 def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
-    """Apply a post-resolution SGLang configuration update.
+    """Declare launcher-stage SGLang configuration fields.
 
-    SGLang 0.5.17 makes ``ServerArgs`` unconditionally read-only after
-    resolution. Both supported CUDA releases expose ``ServerArgs.override`` as
-    the audited mutation API, so Dynamo must use it instead of assigning fields.
-    The separately pinned XPU image still uses SGLang 0.5.11, which predates
-    that API; preserve its legacy assignment behavior until its engine pin is
-    upgraded.
+    SGLang 0.5.18+ resolves its effective configuration separately from raw
+    ``ServerArgs`` input. Declare pre-engine changes through its resolution API
+    so the engine's resolved projection observes them. SGLang 0.5.17 exposes
+    ``ServerArgs.override`` instead. The separately pinned XPU image still uses
+    SGLang 0.5.11, which predates both APIs; preserve its legacy assignment
+    behavior until its engine pin is upgraded.
     """
+    if declare_late_resolution is not None:
+        declare_late_resolution(server_args, source, **fields)
+        return
+
+    late_resolution = getattr(server_args, "_late_resolution", None)
+    if callable(late_resolution):
+        late_resolution(source, **fields)
+        return
+
+    # Fallback for SGLang 0.5.17. Remove when minimum supported SGLang is 0.5.18+.
     override = getattr(server_args, "override", None)
     if callable(override):
         override(source, **fields)
@@ -100,6 +130,22 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
     # upgraded to 0.5.16+.
     for name, value in fields.items():
         setattr(server_args, name, value)
+
+
+def resolved_server_args(server_args: Any) -> Any:
+    """Return SGLang's effective configuration for one initialized engine.
+
+    SGLang #36255 exposes ``ServerArgs._resolved()``. Current SGLang keeps
+    ``ServerArgs`` raw and exposes the same projection through
+    ``resolved_view()``. Older supported releases and Dynamo's non-LLM argument
+    stubs retain effective values on the object itself.
+    """
+    resolve = getattr(server_args, "_resolved", None)
+    if callable(resolve):
+        return resolve()
+    if sglang_resolved_view is not None:
+        return sglang_resolved_view(server_args)
+    return server_args
 
 
 @lru_cache(maxsize=32)
@@ -172,8 +218,10 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
 
 
 __all__ = [
+    "ConfigArgumentMerger",
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
     "override_server_args",
     "require_reasoning_kwargs",
+    "resolved_server_args",
 ]

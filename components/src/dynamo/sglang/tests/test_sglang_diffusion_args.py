@@ -42,6 +42,7 @@ class FakeEngineArgs:
     attention_backend: Optional[str] = None
     performance_mode: str = "auto"
     num_gpus: int = 1
+    master_port: int = 30005
 
     @staticmethod
     def add_cli_args(parser):
@@ -49,6 +50,7 @@ class FakeEngineArgs:
         parser.add_argument("--tp-size", type=int, default=None)
         parser.add_argument("--dp-size", type=int, default=1)
         parser.add_argument("--num-gpus", type=int, default=1)
+        parser.add_argument("--master-port", type=int, default=30005)
         parser.add_argument("--log-level", type=str, default="info")
         parser.add_argument("--enable-trace", action="store_true")
         parser.add_argument("--attention-backend", type=str, default=None)
@@ -177,11 +179,14 @@ class TestParseDiffusionArgs:
                 "fast",
                 "--tp-size",
                 "2",
+                "--master-port",
+                "23456",
             ]
         )
         assert adapter.engine_args.attention_backend == "flash"
         assert adapter.engine_args.performance_mode == "fast"
         assert adapter.engine_args.tp_size == 2
+        assert adapter.engine_args.master_port == 23456
 
     def test_dynamo_side_flags_split_out(self, monkeypatch):
         """--served-model-name / --enable-metrics must not leak into the
