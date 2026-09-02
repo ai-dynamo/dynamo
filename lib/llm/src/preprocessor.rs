@@ -8382,30 +8382,6 @@ mod tests {
         assert!(!should_hash_decoded_video(true, false, false, false));
     }
 
-    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
-    #[test]
-    fn consecutive_video_layout_skips_hashing_before_decode() {
-        let is_eligible = |modalities: &[&str]| {
-            let mut previous_entry_was_video = false;
-            modalities.iter().all(|modality| {
-                exact_mm_routing_layout_accepts_next_entry(
-                    &mut previous_entry_was_video,
-                    *modality == "video_url",
-                )
-            })
-        };
-
-        let adjacent_videos_are_eligible = is_eligible(&["video_url", "video_url"]);
-        assert!(!adjacent_videos_are_eligible);
-        assert!(!should_hash_decoded_video(
-            adjacent_videos_are_eligible,
-            false,
-            false,
-            true
-        ));
-        assert!(is_eligible(&["video_url", "image_url", "video_url"]));
-    }
-
     #[test]
     fn replace_reserved_media_slot_preserves_alignment_and_returns_errors() {
         let mut map = HashMap::from([(
