@@ -130,6 +130,18 @@ impl RequestPlanePayloadCodec {
     }
 }
 
+/// Starting capacity for a buffer that one response frame is encoded into.
+///
+/// Where that buffer starts decides how many times it regrows before the frame
+/// fits, and a streaming response encodes a frame per generated token. The two
+/// codecs disagree on the default: `serde_json::to_vec` starts at 128 bytes,
+/// while `rmp_serde::to_vec_named` starts at zero — so msgpack, the default
+/// codec, pays that regrowth on every frame unless the caller sizes the buffer
+/// itself. Matching the JSON figure keeps both codecs starting from the same
+/// place. A frame larger than this still encodes correctly; it just grows as it
+/// would have anyway.
+pub const RESPONSE_ENCODE_CAPACITY_HINT: usize = 128;
+
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
 impl<T: PipelineIO + Serialize + for<'de> Deserialize<'de>> Codable for T {}
 
@@ -486,11 +498,13 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SEND_BUFFER_COUNT, NetworkStreamWrapper, RequestControlMessage,
-        RequestPlanePayloadCodec, RequestType, ResponseType, StreamOptions,
+        DEFAULT_SEND_BUFFER_COUNT, IngressResponseEncoder, NetworkStreamWrapper,
+        RequestControlMessage, RequestPlanePayloadCodec, RequestType, ResponseType,
+        SerdeIngressPayloadAdapter, StreamOptions,
     };
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
+    use crate::protocols::annotated::Annotated;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -659,6 +673,58 @@ mod tests {
             assert_eq!(decoded, wrapper);
         }
     }
+
+    /// The ingress response encoder builds its frame with `encode_into` against a
+    /// pre-sized buffer rather than `encode`. Nothing local reads that frame back
+    /// — it is decoded by the peer — so a byte-level divergence would surface as
+    /// a decode failure at the caller, far from the change that caused it. Pin
+    /// the equivalence here instead, across both codecs and all three frame
+    /// shapes the encoder produces.
+    #[tokio::test]
+    async fn serde_ingress_encoder_matches_encode_byte_for_byte() {
+        let data = Annotated::from_data(serde_json::json!({
+            "token_ids": [128, 9001],
+            "index": 3,
+        }));
+        let error = Annotated::<serde_json::Value>::from_error("engine failed");
+
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            for (case, response, complete_final, expect_error) in [
+                ("data frame", Some(data.clone()), false, false),
+                ("error frame", Some(error.clone()), false, true),
+                ("complete final", None, true, false),
+            ] {
+                let expected = codec
+                    .encode(&NetworkStreamWrapper {
+                        data: response.clone(),
+                        complete_final,
+                    })
+                    .expect("reference encode");
+
+                let frame = SerdeIngressPayloadAdapter
+                    .encode_response(codec, response, complete_final)
+                    .await
+                    .expect("adapter encode");
+
+                assert_eq!(
+                    frame.bytes.as_ref(),
+                    expected.as_slice(),
+                    "codec={} case={case}",
+                    codec.name()
+                );
+                assert_eq!(
+                    frame.is_error,
+                    expect_error,
+                    "codec={} case={case}",
+                    codec.name()
+                );
+                assert!(!frame.stop_stream, "codec={} case={case}", codec.name());
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -768,13 +834,17 @@ where
             data: response,
             complete_final,
         };
-        let encoded = payload_codec.encode(&wrapper).map_err(|err| {
-            PipelineError::SerializationError(format!(
-                "Failed serializing {} request-plane response: {}",
-                payload_codec.name(),
-                err
-            ))
-        });
+        let mut bytes = Vec::with_capacity(RESPONSE_ENCODE_CAPACITY_HINT);
+        let encoded = payload_codec
+            .encode_into(&wrapper, &mut bytes)
+            .map(|()| bytes)
+            .map_err(|err| {
+                PipelineError::SerializationError(format!(
+                    "Failed serializing {} request-plane response: {}",
+                    payload_codec.name(),
+                    err
+                ))
+            });
         std::future::ready(encoded.map(|bytes| EncodedResponseFrame {
             bytes: bytes.into(),
             is_error,
