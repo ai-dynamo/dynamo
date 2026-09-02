@@ -7,7 +7,7 @@ subtitle: Install, deploy, and operate Dynamo on Kubernetes
 ---
 
 <Note>
-This page covers the **Kubernetes** path. To run Dynamo directly on a workstation or virtual machine without Kubernetes, see the [Local CLI User Guide](../../cli/getting-started/introduction.mdx).
+This page covers the **Kubernetes** path. To run Dynamo directly on a workstation or virtual machine without Kubernetes, see the [Local Guide](../../cli/getting-started/introduction.mdx).
 </Note>
 
 ## Jump Right In
@@ -70,9 +70,6 @@ This page covers the **Kubernetes** path. To run Dynamo directly on a workstatio
     **Model storage**
 
     <CardGroup cols={2}>
-      <Card title="Model Storage Overview" icon="regular hard-drive" href="../installation/model-storage/overview.md">
-        Choose a storage approach for model weights.
-      </Card>
       <Card title="AKS Storage" icon="regular database" href="../installation/model-storage/aks-storage.md">
         Compare storage options for Azure Kubernetes Service.
       </Card>
@@ -127,11 +124,11 @@ This page covers the **Kubernetes** path. To run Dynamo directly on a workstatio
       <Card title="Sizing with AIConfigurator" icon="regular ruler-combined" href="../disaggregated-serving/sizing-with-aiconfigurator.mdx">
         Select parallelism and replica settings for a workload.
       </Card>
-      <Card title="Multinode Deployments" icon="regular network-wired" href="../model-deployment/multinode-deployments.md">
-        Deploy a model across multiple Kubernetes nodes.
+      <Card title="Multinode Orchestration" icon="regular network-wired" href="../installation/multinode-orchestration.md">
+        Install a gang scheduler for workloads that span Kubernetes nodes.
       </Card>
-      <Card title="Model Caching" icon="regular database" href="../model-deployment/model-loading/model-caching.mdx">
-        Reduce model-loading time across pods.
+      <Card title="Model Storage" icon="regular database" href="../installation/model-storage/overview.md">
+        Choose storage for model weights and shared caches.
       </Card>
       <Card title="KV Cache Offloading" icon="regular layer-group" href="../kv-cache-offloading/overview.mdx">
         Extend KV cache capacity beyond GPU memory.
@@ -168,11 +165,11 @@ This page covers the **Kubernetes** path. To run Dynamo directly on a workstatio
     **Inference simulation with DynoSim**
 
     <CardGroup cols={2}>
-      <Card title="DynoSim Overview" icon="regular circle-info" href="../operations/simulation-with-dynosim/overview.md">
+      <Card title="DynoSim Overview" icon="regular circle-info" href="../../cli/operations/simulation-with-dynosim/overview.md">
         Learn the simulation workflow and components.
       </Card>
       <Card title="Simulate a Kubernetes Deployment" icon="regular server" href="../operations/simulation-with-dynosim/mocker-live-simulation.mdx">
-        Exercise the Kubernetes frontend and router with simulated workers.
+        Check the status of temporarily unavailable online simulation.
       </Card>
     </CardGroup>
   </Accordion>

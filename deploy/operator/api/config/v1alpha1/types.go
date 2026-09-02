@@ -236,6 +236,28 @@ type InfrastructureConfiguration struct {
 	ModelExpressURL string `json:"modelExpressURL"`
 	// PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics
 	PrometheusEndpoint string `json:"prometheusEndpoint"`
+	// NATSTLSCAPath is the CA certificate path for verifying the NATS server
+	NATSTLSCAPath string `json:"natsTLSCAPath,omitempty"`
+	// NATSTLSClientCertPath is the client certificate path for NATS mTLS
+	NATSTLSClientCertPath string `json:"natsTLSClientCertPath,omitempty"`
+	// NATSTLSClientKeyPath is the client private key path for NATS mTLS
+	NATSTLSClientKeyPath string `json:"natsTLSClientKeyPath,omitempty"`
+	// TCPTLSCertPath is the server certificate path for TCP TLS
+	TCPTLSCertPath string `json:"tcpTLSCertPath,omitempty"`
+	// TCPTLSKeyPath is the server private key path for TCP TLS
+	TCPTLSKeyPath string `json:"tcpTLSKeyPath,omitempty"`
+	// TCPTLSCAPath is the CA certificate path for verifying TCP peers
+	TCPTLSCAPath string `json:"tcpTLSCAPath,omitempty"`
+	// TCPTLSClientCertPath is the client certificate path for TCP mTLS
+	TCPTLSClientCertPath string `json:"tcpTLSClientCertPath,omitempty"`
+	// TCPTLSClientKeyPath is the client private key path for TCP mTLS
+	TCPTLSClientKeyPath string `json:"tcpTLSClientKeyPath,omitempty"`
+	// TCPTLSClientCAPath is the CA certificate path for verifying TCP client certificates (mTLS)
+	TCPTLSClientCAPath string `json:"tcpTLSClientCAPath,omitempty"`
+	// TCPTLSServerName overrides the TLS SNI hostname used by TCP clients when
+	// verifying the server certificate. Useful when dialing by IP (pod address)
+	// to a server whose certificate has a DNS SAN.
+	TCPTLSServerName string `json:"tcpTLSServerName,omitempty"`
 }
 
 // IngressConfiguration holds ingress settings.

@@ -8,6 +8,12 @@ use super::types::ExtraKeyItem;
 // Must match _DYNAMO_CACHE_SALT_PREFIX in components/src/dynamo/vllm/handlers.py.
 const DYNAMO_CACHE_SALT_PREFIX: &str = "dynamo-cache-salt:";
 
+/// Encode a frontend-approved routing hash in the marker form carried through
+/// vLLM `extra_keys`.
+pub fn mark_mm_hash_for_extra_key(mm_hash: u64) -> String {
+    format!("{mm_hash:016x}{}", "0".repeat(48))
+}
+
 /// Parse a frontend-issued Dynamo MM hash from a vLLM extra key.
 ///
 /// The worker canonicalizes a frontend-approved routing hash to its first 16
@@ -152,6 +158,10 @@ mod tests {
 
     #[test]
     fn only_frontend_padded_mm_hashes_are_parsed() {
+        assert_eq!(
+            parse_mm_hash_from_extra_key(&mark_mm_hash_for_extra_key(0x0123_4567_89ab_cdef)),
+            Some(0x0123_4567_89ab_cdef)
+        );
         assert_eq!(
             parse_mm_hash_from_extra_key(
                 "0123456789abcdef000000000000000000000000000000000000000000000000"

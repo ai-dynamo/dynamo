@@ -50,6 +50,15 @@ func basePodSpec() corev1.PodSpec {
 	}
 }
 
+func gpuTestContainer(name, count string) corev1.Container {
+	return corev1.Container{
+		Name: name,
+		Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+			corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse(count),
+		}},
+	}
+}
+
 func TestApplyClaim_EmptyContainers(t *testing.T) {
 	ps := corev1.PodSpec{}
 	err := ApplyClaim(&ps, "myapp-worker-gpu")
@@ -131,7 +140,7 @@ func TestApplyClaim_AlwaysTargetsFirstContainer(t *testing.T) {
 	assert.Empty(t, ps.Containers[1].Resources.Claims)
 }
 
-func TestExtractGPUCountFromResourceRequirements_DeterministicResourceSelection(t *testing.T) {
+func TestExtractGPUCountFromResourceRequirements_RejectsMultipleGPUKeys(t *testing.T) {
 	resources := corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
 			corev1.ResourceName("nvidia.com/mig-3g.20gb"):           resource.MustParse("1"),
@@ -139,9 +148,39 @@ func TestExtractGPUCountFromResourceRequirements_DeterministicResourceSelection(
 		},
 	}
 
-	gpuCount, err := ExtractGPUCountFromResourceRequirements(resources)
+	_, err := ExtractGPUCountFromResourceRequirements(resources)
+	require.ErrorContains(t, err, "multiple scalar GPU resource keys")
+	assert.ErrorContains(t, err, commonconsts.KubeResourceGPUNvidia)
+	assert.ErrorContains(t, err, "nvidia.com/mig-3g.20gb")
+}
+
+func TestExtractGPUCountFromResourceRequirements_RejectsDifferentRequestAndLimitKeys(t *testing.T) {
+	resources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("4"),
+		},
+		Requests: corev1.ResourceList{
+			corev1.ResourceName("nvidia.com/mig-3g.20gb"): resource.MustParse("1"),
+		},
+	}
+
+	_, err := ExtractGPUCountFromResourceRequirements(resources)
+	require.ErrorContains(t, err, "multiple scalar GPU resource keys")
+}
+
+func TestExtractGPUCountFromResourceRequirements_AllowsSameRequestAndLimitKey(t *testing.T) {
+	resources := corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("4"),
+		},
+		Requests: corev1.ResourceList{
+			corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("4"),
+		},
+	}
+
+	count, err := ExtractGPUCountFromResourceRequirements(resources)
 	require.NoError(t, err)
-	assert.Equal(t, 4, gpuCount)
+	assert.Equal(t, 4, count)
 }
 
 func TestExtractGPUCountFromResourceRequirements_MIGResource(t *testing.T) {
@@ -497,6 +536,298 @@ func TestResolveGPUCountPrefersScalarResources(t *testing.T) {
 	got, err := ResolveGPUCount(context.Background(), nil, "default", nil, resources)
 	require.NoError(t, err)
 	assert.Equal(t, 8, got)
+}
+
+func TestResolvePodGPUCountSidecarCost(t *testing.T) {
+	tests := []struct {
+		name       string
+		sidecarGPU string
+		want       int
+	}{
+		{name: "sidecar without GPU preserves main cost", want: 4},
+		{name: "zero-GPU sidecar preserves main cost", sidecarGPU: "0", want: 4},
+		{name: "independent GPU sidecar increases replica cost", sidecarGPU: "1", want: 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Build a Pod with a four-GPU engine and optional sidecar GPU limit")
+			podSpec := &corev1.PodSpec{Containers: []corev1.Container{
+				{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+						corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("4"),
+					}},
+				},
+				{Name: "sidecar"},
+			}}
+			if tt.sidecarGPU != "" {
+				podSpec.Containers[1].Resources.Limits = corev1.ResourceList{
+					corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse(tt.sidecarGPU),
+				}
+			}
+
+			t.Log("Count the unique GPU allocation across regular containers")
+			got, err := ResolvePodGPUCount(t.Context(), nil, "default", podSpec)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestResolvePodGPUCountNativeSidecarCost(t *testing.T) {
+	nativeSidecarRestart := corev1.ContainerRestartPolicyAlways
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name: "main",
+			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+				corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("4"),
+			}},
+		}},
+		InitContainers: []corev1.Container{
+			{
+				Name:          "native-sidecar",
+				RestartPolicy: &nativeSidecarRestart,
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+				}},
+			},
+			{
+				Name: "one-shot-init",
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("8"),
+				}},
+			},
+		},
+	}
+
+	got, err := ResolvePodGPUCount(t.Context(), nil, "default", podSpec)
+	require.NoError(t, err)
+	assert.Equal(t, 9, got)
+}
+
+func TestResolvePodGPUCountOneShotBeforeNativeSidecar(t *testing.T) {
+	nativeSidecarRestart := corev1.ContainerRestartPolicyAlways
+	nativeSidecar := gpuTestContainer("native-sidecar", "1")
+	nativeSidecar.RestartPolicy = &nativeSidecarRestart
+	podSpec := &corev1.PodSpec{
+		Containers: []corev1.Container{gpuTestContainer("main", "4")},
+		InitContainers: []corev1.Container{
+			gpuTestContainer("one-shot-init", "8"),
+			nativeSidecar,
+		},
+	}
+
+	got, err := ResolvePodGPUCount(t.Context(), nil, "default", podSpec)
+	require.NoError(t, err)
+	assert.Equal(t, 8, got)
+}
+
+func TestResolvePodGPUCountIncludesAllInitDRAClaims(t *testing.T) {
+	nativeSidecarRestart := corev1.ContainerRestartPolicyAlways
+	podSpec := &corev1.PodSpec{
+		ResourceClaims: []corev1.PodResourceClaim{
+			{Name: "sidecar-gpu", ResourceClaimTemplateName: ptr.To("gpu-template")},
+			{Name: "init-gpu", ResourceClaimTemplateName: ptr.To("gpu-template")},
+		},
+		Containers: []corev1.Container{{Name: "main"}},
+		InitContainers: []corev1.Container{
+			{
+				Name:          "native-sidecar",
+				RestartPolicy: &nativeSidecarRestart,
+				Resources: corev1.ResourceRequirements{
+					Claims: []corev1.ResourceClaim{{Name: "sidecar-gpu"}},
+				},
+			},
+			{
+				Name: "one-shot-init",
+				Resources: corev1.ResourceRequirements{
+					Claims: []corev1.ResourceClaim{{Name: "init-gpu"}},
+				},
+			},
+		},
+	}
+
+	got, err := ResolvePodGPUCount(
+		t.Context(),
+		testGPUClaimReader(t, testGPUClaimTemplate("gpu-template")),
+		"default",
+		podSpec,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 4, got)
+}
+
+func TestResolvePodGPUCountDeduplicatesSharedDRAClaim(t *testing.T) {
+	t.Log("Build two containers that share one two-GPU DRA claim")
+	podSpec := &corev1.PodSpec{
+		ResourceClaims: []corev1.PodResourceClaim{{
+			Name:                      "gpu",
+			ResourceClaimTemplateName: ptr.To("gpu-template"),
+		}},
+		Containers: []corev1.Container{
+			{Name: "main", Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu"}}}},
+			{Name: "sidecar", Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu"}}}},
+		},
+	}
+	template := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "gpu-template", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+				Name: "gpu",
+				Exactly: &resourcev1.ExactDeviceRequest{
+					DeviceClassName: "gpu.nvidia.com",
+					AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+					Count:           2,
+				},
+			}}},
+		}},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, resourcev1.AddToScheme(scheme))
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		template,
+		&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"}},
+	).Build()
+
+	t.Log("Count the shared claim once")
+	got, err := ResolvePodGPUCount(t.Context(), reader, "default", podSpec)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got)
+}
+
+func TestResolvePodGPUCountDeduplicatesAllAndNamedDRARequests(t *testing.T) {
+	t.Log("Build one claim where an all-requests reference overlaps a named reference")
+	podSpec := &corev1.PodSpec{
+		ResourceClaims: []corev1.PodResourceClaim{{
+			Name:                      "gpu",
+			ResourceClaimTemplateName: ptr.To("gpu-template"),
+		}},
+		Containers: []corev1.Container{
+			{Name: "main", Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu", Request: "rank-0"}}}},
+			{Name: "sidecar", Resources: corev1.ResourceRequirements{Claims: []corev1.ResourceClaim{{Name: "gpu"}}}},
+		},
+	}
+	template := &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "gpu-template", Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{
+				{
+					Name: "rank-0",
+					Exactly: &resourcev1.ExactDeviceRequest{
+						DeviceClassName: "gpu.nvidia.com",
+						AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+						Count:           2,
+					},
+				},
+				{
+					Name: "rank-1",
+					Exactly: &resourcev1.ExactDeviceRequest{
+						DeviceClassName: "gpu.nvidia.com",
+						AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+						Count:           2,
+					},
+				},
+			}},
+		}},
+	}
+	scheme := runtime.NewScheme()
+	require.NoError(t, resourcev1.AddToScheme(scheme))
+	reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		template,
+		&resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"}},
+	).Build()
+
+	got, err := ResolvePodGPUCount(t.Context(), reader, "default", podSpec)
+	require.NoError(t, err)
+	assert.Equal(t, 4, got)
+}
+
+func TestResolvePodGPUCountAddsScalarAndDRAAllocations(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		ResourceClaims: []corev1.PodResourceClaim{{
+			Name:                      "gpu",
+			ResourceClaimTemplateName: ptr.To("gpu-template"),
+		}},
+		Containers: []corev1.Container{{
+			Name: "main",
+			Resources: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceName(commonconsts.KubeResourceGPUNvidia): resource.MustParse("1"),
+				},
+				Claims: []corev1.ResourceClaim{{Name: "gpu"}},
+			},
+		}},
+	}
+	template := testGPUClaimTemplate("gpu-template")
+	reader := testGPUClaimReader(t, template)
+
+	got, err := ResolvePodGPUCount(t.Context(), reader, "default", podSpec)
+	require.NoError(t, err)
+	assert.Equal(t, 3, got)
+}
+
+func TestResolvePodSetGPUCountDeduplicatesOnlyConcreteClaimsAcrossPods(t *testing.T) {
+	concreteClaim := &resourcev1.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "shared-gpu", Namespace: "default"},
+		Spec:       testGPUClaimTemplate("unused").Spec.Spec,
+	}
+	reader := testGPUClaimReader(t, concreteClaim, testGPUClaimTemplate("gpu-template"))
+	podForClaim := func(alias string, concrete bool) *corev1.PodSpec {
+		podClaim := corev1.PodResourceClaim{Name: alias}
+		if concrete {
+			podClaim.ResourceClaimName = ptr.To("shared-gpu")
+		} else {
+			podClaim.ResourceClaimTemplateName = ptr.To("gpu-template")
+		}
+		return &corev1.PodSpec{
+			ResourceClaims: []corev1.PodResourceClaim{podClaim},
+			Containers: []corev1.Container{{
+				Name: alias,
+				Resources: corev1.ResourceRequirements{
+					Claims: []corev1.ResourceClaim{{Name: alias}},
+				},
+			}},
+		}
+	}
+
+	concrete, err := ResolvePodSetGPUCount(t.Context(), reader, "default", []PodSpecMultiplicity{
+		{PodSpec: podForClaim("leader-gpu", true), Count: 1},
+		{PodSpec: podForClaim("worker-gpu", true), Count: 2},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, concrete, "one concrete claim is one physical allocation")
+
+	templates, err := ResolvePodSetGPUCount(t.Context(), reader, "default", []PodSpecMultiplicity{
+		{PodSpec: podForClaim("leader-gpu", false), Count: 1},
+		{PodSpec: podForClaim("worker-gpu", false), Count: 2},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 6, templates, "claim templates allocate once per rendered Pod")
+}
+
+func testGPUClaimTemplate(name string) *resourcev1.ResourceClaimTemplate {
+	return &resourcev1.ResourceClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+		Spec: resourcev1.ResourceClaimTemplateSpec{Spec: resourcev1.ResourceClaimSpec{
+			Devices: resourcev1.DeviceClaim{Requests: []resourcev1.DeviceRequest{{
+				Name: "gpu",
+				Exactly: &resourcev1.ExactDeviceRequest{
+					DeviceClassName: "gpu.nvidia.com",
+					AllocationMode:  resourcev1.DeviceAllocationModeExactCount,
+					Count:           2,
+				},
+			}}},
+		}},
+	}
+}
+
+func testGPUClaimReader(t *testing.T, objects ...client.Object) client.Client {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, resourcev1.AddToScheme(scheme))
+	objects = append(objects, &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: "gpu.nvidia.com"}})
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 }
 
 func TestGenerateResourceClaimTemplate_Enabled(t *testing.T) {

@@ -20,6 +20,7 @@ import base64
 from io import BytesIO
 from unittest.mock import AsyncMock, patch
 
+import numpy as np
 import pytest
 from PIL import Image
 
@@ -204,13 +205,13 @@ async def test_http_timeout_raises_valueerror(loader: ImageLoader) -> None:
 
 async def test_http_status_error_propagated(loader: ImageLoader) -> None:
     """HTTP 4xx/5xx should propagate as HttpStatusError."""
-    mock_fetch = _mock_fetch_bytes(
-        side_effect=HttpStatusError(404, "Not Found", "https://example.com/img.png")
-    )
+    error = HttpStatusError(404, "Not Found", "https://example.com/img.png")
+    mock_fetch = _mock_fetch_bytes(side_effect=error)
     with patch(_FETCH_BYTES_PATH, mock_fetch):
         with pytest.raises(HttpStatusError) as exc_info:
             await loader.load_image("https://example.com/img.png")
         assert exc_info.value.status == 404
+        assert exc_info.value is error
 
 
 # --- Cache behavior ---
@@ -297,6 +298,23 @@ async def test_batch_propagates_cancellation(loader: ImageLoader) -> None:
         )
 
 
+async def test_frontend_decoded_grayscale_image_is_converted_to_rgb(
+    loader: ImageLoader,
+) -> None:
+    loader._nixl_connector = object()
+    grayscale = np.full((2, 3, 1), 127, dtype=np.uint8)
+
+    with patch(
+        "dynamo.common.multimodal.image_loader.read_decoded_media_via_nixl",
+        new=AsyncMock(return_value=grayscale),
+    ):
+        image = await loader._read_and_convert_nixl_image({})
+
+    assert image.mode == "RGB"
+    assert image.size == (3, 2)
+    assert image.getpixel((0, 0)) == (127, 127, 127)
+
+
 async def test_unsupported_format_batch_data_url_raises_415(
     loader: ImageLoader,
 ) -> None:
@@ -332,14 +350,41 @@ async def test_url_validation_error_from_fetch_preserved(
 ) -> None:
     """A UrlValidationError raised mid-fetch (redirect revalidation) must survive
     _fetch_and_process's except branch, not be flattened to a plain ValueError."""
-    mock_fetch = _mock_fetch_bytes(
-        side_effect=UrlValidationError("Too many redirects (max=3)")
-    )
+    error = UrlValidationError("Too many redirects (max=3)")
+    mock_fetch = _mock_fetch_bytes(side_effect=error)
     with patch(_FETCH_BYTES_PATH, mock_fetch):
-        with pytest.raises(UrlValidationError, match="Too many redirects"):
+        with pytest.raises(UrlValidationError, match="Too many redirects") as exc_info:
             await loader.load_image_batch(
                 [{URL_VARIANT_KEY: "https://example.com/img.png"}]
             )
+
+    assert exc_info.value is error
+
+
+@pytest.mark.parametrize(
+    "client_error",
+    [
+        UrlValidationError("blocked host"),
+        HttpStatusError(415, "Unsupported Media Type", "https://example.com/x.svg"),
+    ],
+)
+async def test_image_batch_prioritizes_typed_client_error(
+    loader: ImageLoader, client_error: Exception
+) -> None:
+    """A concurrent decode failure cannot erase a terminal client verdict."""
+    loader.load_image = AsyncMock(
+        side_effect=[RuntimeError("decode failed"), client_error]
+    )
+
+    with pytest.raises(type(client_error)) as exc_info:
+        await loader.load_image_batch(
+            [
+                {URL_VARIANT_KEY: "https://example.com/bad.png"},
+                {URL_VARIANT_KEY: "https://example.com/rejected.png"},
+            ]
+        )
+
+    assert exc_info.value is client_error
 
 
 async def test_cache_is_lru_not_fifo(loader: ImageLoader) -> None:

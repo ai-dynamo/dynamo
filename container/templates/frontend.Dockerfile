@@ -8,13 +8,12 @@
 ##############################################
 FROM ${EPP_IMAGE} AS epp
 
-# NOTE: EPP's Go compliance SBOM (/sbom-go.cdx.json) + harvested license texts are
-# NO LONGER pulled from the EPP image here. compliance.Dockerfile's licenses stage
-# reads them from the build context (.epp-sbom/), populated by the CI EPP-build
-# step's `make sbom-export` while the build cache is warm. This replaced a fragile
-# COPY --from that re-pulled the pushed EPP image (whose runtime layer could miss
-# the files after a BuildKit cache refresh). Only the /epp binary is taken from
-# the EPP image (below).
+# The EPP image is built from deploy/inference-gateway/ext-proc (Rust). This
+# image contributes three things to the frontend: the /epp binary (copied
+# below), and — consumed by compliance.Dockerfile's licenses and sources_collect
+# stages — the CycloneDX SBOM describing /epp's crate closure plus the harvested
+# LICENSE texts for those crates. /epp ships in no wheel, so that SBOM is the
+# only thing that puts its crates into the frontend's NOTICES and OSRB bundle.
 
 # Build `crick` as a wheel in an isolated stage so the C toolchain never
 # reaches the final frontend image. aiperf 0.10.0 depends on crick==0.0.8,
@@ -56,6 +55,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         # required for EPP
         ca-certificates \
         libstdc++6 \
+        # required by EPP's embedded ZMQ KV-event/replica-sync subscriber
+        # (dynamo-kv-router's standalone-selection feature); matches the
+        # runtime dep installed in deploy/inference-gateway/ext-proc/Dockerfile
+        libzmq5 \
         # required for verification of GPG keys
         gnupg2 \
         # required for installing dependencies from git repositories
@@ -142,9 +145,11 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
 # Test and dev dependencies are NOT installed here — they go in the test and dev images.
 RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tmp/requirements.common.txt \
     --mount=type=bind,source=./container/deps/requirements.frontend.txt,target=/tmp/requirements.frontend.txt \
+    --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp/overrides.frontend.txt \
     --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv pip install \
+        --overrides /tmp/overrides.frontend.txt \
         --requirement /tmp/requirements.common.txt \
         --requirement /tmp/requirements.frontend.txt
 
@@ -153,10 +158,12 @@ ARG NIXL_REF
 # In an ideal world, we'd use a mirror of PyPI for much more reliable downloads.
 # UV_FIND_LINKS points at the crick wheel pre-built in the crick_builder stage;
 # uv prefers it over the sdist on arm64 where no manylinux aarch64 wheel exists.
-RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
+RUN --mount=type=bind,source=./container/deps/overrides.frontend.txt,target=/tmp/overrides.frontend.txt \
+    --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775,sharing=shared \
     echo "${NIXL_REF}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "NIXL_REF must be a vX.Y.Z release tag; got '${NIXL_REF}'" >&2; exit 1; } && \
     export UV_CACHE_DIR=/home/dynamo/.cache/uv UV_FIND_LINKS=/opt/dynamo/wheelhouse/extra && \
     uv pip install \
+    --overrides /tmp/overrides.frontend.txt \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl && \
     # The meta package requires both backends unconditionally (its cu12/cu13
@@ -175,7 +182,7 @@ RUN --mount=type=cache,id=uv-dynamo-{{ context.dynamo.uv_version }},target=/home
     fi && \
     cd /workspace/benchmarks && \
     export UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
-    uv pip install .
+    uv pip install --overrides /tmp/overrides.frontend.txt .
 
 # Setup environment for all users
 USER root

@@ -658,7 +658,8 @@ class DeploymentSpec:
         Returns:
             dict with 'jsonl_enabled' and 'log_level' keys
         """
-        envs = self._deployment_spec.get("spec", {}).get("envs", [])
+        env_key = "env" if self._schema == SCHEMA_V1BETA1 else "envs"
+        envs = self._deployment_spec.get("spec", {}).get(env_key, [])
 
         jsonl_enabled = False
         log_level = None
