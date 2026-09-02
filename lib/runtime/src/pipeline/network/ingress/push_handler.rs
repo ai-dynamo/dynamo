@@ -593,8 +593,15 @@ where
 
         let lifecycle = request_id
             .as_ref()
-            .map(|id| LifecycleTrace::from_request_id(id.clone()))
-            .unwrap_or_else(LifecycleTrace::from_environment);
+            .map(|id| {
+                LifecycleTrace::from_request_id_with_role(
+                    id.clone(),
+                    self.lifecycle_operation_role(),
+                )
+            })
+            .unwrap_or_else(|| {
+                LifecycleTrace::from_environment_with_role(self.lifecycle_operation_role())
+            });
 
         // Increment inflight and ensure it's decremented on all exits via RAII guard
         let _inflight_guard = self.metrics().map(|m| {

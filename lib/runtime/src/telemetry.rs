@@ -14,8 +14,7 @@ use std::sync::{
 use tracing::Span;
 
 use crate::config::environment_names::lifecycle_tracing::{
-    DYN_DISAGGREGATION_MODE, DYN_LIFECYCLE_TRACE_ENABLED, DYN_LIFECYCLE_TRACE_MODE,
-    DYN_LIFECYCLE_TRACE_PROFILE,
+    DYN_LIFECYCLE_TRACE_ENABLED, DYN_LIFECYCLE_TRACE_MODE,
 };
 
 /// Static tracing target used exclusively by lifecycle spans.
@@ -101,7 +100,7 @@ impl LifecycleIdentity {
             request_id,
             operation_id: uuid::Uuid::new_v4().to_string(),
             role,
-            profile: lifecycle_profile(),
+            profile: DEFAULT_PROFILE.to_string(),
             mode: lifecycle_mode(),
             identity_state,
         }
@@ -225,7 +224,16 @@ pub struct LifecycleTrace {
 impl LifecycleTrace {
     /// Capture the lifecycle feature gate for a newly-created request.
     pub fn from_environment() -> Self {
-        Self::new(lifecycle_tracing_enabled())
+        Self::from_environment_with_role(LifecycleOperationRole::Worker)
+    }
+
+    /// Capture worker state using the role configured once at worker startup.
+    pub fn from_environment_with_role(role: LifecycleOperationRole) -> Self {
+        if lifecycle_tracing_enabled() {
+            Self::enabled(LifecycleIdentity::new(None, role), None)
+        } else {
+            Self::disabled()
+        }
     }
 
     /// Construct capture state explicitly, primarily for integrations and tests.
@@ -242,17 +250,18 @@ impl LifecycleTrace {
 
     /// Construct worker capture state using the request ID propagated at ingress.
     pub fn from_request_id(request_id: impl Into<String>) -> Self {
+        Self::from_request_id_with_role(request_id, LifecycleOperationRole::Worker)
+    }
+
+    /// Construct worker capture state with its statically configured role.
+    pub fn from_request_id_with_role(
+        request_id: impl Into<String>,
+        role: LifecycleOperationRole,
+    ) -> Self {
         if !lifecycle_tracing_enabled() {
             return Self::disabled();
         }
-        let mode = worker_disaggregation_mode();
-        Self::enabled(
-            LifecycleIdentity::new(
-                Some(request_id.into()),
-                worker_operation_role(mode.as_deref()),
-            ),
-            None,
-        )
+        Self::enabled(LifecycleIdentity::new(Some(request_id.into()), role), None)
     }
 
     pub fn router_request(request_id: impl Into<String>) -> Self {
@@ -344,8 +353,8 @@ impl LifecycleTrace {
         if !self.enabled {
             return Span::none();
         }
-        let mode = worker_disaggregation_mode();
-        self.start(worker_response_streaming_stage(mode.as_deref()))
+        let role = self.identity.as_ref().map(|identity| identity.role);
+        self.start(worker_response_streaming_stage(role))
     }
 
     /// Start the worker operation boundary for a disaggregated role.
@@ -357,8 +366,8 @@ impl LifecycleTrace {
         if !self.enabled {
             return Span::none();
         }
-        let mode = worker_disaggregation_mode();
-        self.start(worker_operation_stage(mode.as_deref()))
+        let role = self.identity.as_ref().map(|identity| identity.role);
+        self.start(worker_operation_stage(role))
     }
 }
 
@@ -426,13 +435,6 @@ impl Drop for TerminalState {
     }
 }
 
-fn lifecycle_profile() -> String {
-    std::env::var(DYN_LIFECYCLE_TRACE_PROFILE)
-        .ok()
-        .filter(|profile| !profile.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_PROFILE.to_string())
-}
-
 fn lifecycle_mode() -> String {
     match std::env::var(DYN_LIFECYCLE_TRACE_MODE) {
         Ok(mode) if mode.trim().eq_ignore_ascii_case("investigation") => {
@@ -459,32 +461,18 @@ fn instance_id() -> &'static str {
         .as_str()
 }
 
-fn worker_disaggregation_mode() -> Option<String> {
-    std::env::var(DYN_DISAGGREGATION_MODE)
-        .ok()
-        .map(|mode| mode.trim().to_ascii_lowercase())
-}
-
-fn worker_operation_role(mode: Option<&str>) -> LifecycleOperationRole {
-    match mode {
-        Some("prefill") => LifecycleOperationRole::Prefill,
-        Some("decode") => LifecycleOperationRole::Decode,
-        _ => LifecycleOperationRole::Worker,
-    }
-}
-
-fn worker_operation_stage(mode: Option<&str>) -> LifecycleStage {
-    match mode {
-        Some("prefill") => LifecycleStage::WorkerOperationPrefill,
-        Some("decode") => LifecycleStage::WorkerOperationDecode,
+fn worker_operation_stage(role: Option<LifecycleOperationRole>) -> LifecycleStage {
+    match role {
+        Some(LifecycleOperationRole::Prefill) => LifecycleStage::WorkerOperationPrefill,
+        Some(LifecycleOperationRole::Decode) => LifecycleStage::WorkerOperationDecode,
         _ => LifecycleStage::WorkerOperation,
     }
 }
 
-fn worker_response_streaming_stage(mode: Option<&str>) -> LifecycleStage {
-    match mode {
-        Some("prefill") => LifecycleStage::ResponseStreamingPrefill,
-        Some("decode") => LifecycleStage::ResponseStreamingDecode,
+fn worker_response_streaming_stage(role: Option<LifecycleOperationRole>) -> LifecycleStage {
+    match role {
+        Some(LifecycleOperationRole::Prefill) => LifecycleStage::ResponseStreamingPrefill,
+        Some(LifecycleOperationRole::Decode) => LifecycleStage::ResponseStreamingDecode,
         _ => LifecycleStage::ResponseStreamingWorker,
     }
 }
@@ -558,11 +546,17 @@ mod tests {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(captured.clone()));
         let _guard = tracing::subscriber::set_default(subscriber);
-        let trace = LifecycleTrace::new(true);
-
-        for mode in [None, Some("prefill"), Some("decode")] {
-            let _operation = trace.start(worker_operation_stage(mode));
-            let _streaming = trace.start(worker_response_streaming_stage(mode));
+        for role in [
+            LifecycleOperationRole::Worker,
+            LifecycleOperationRole::Prefill,
+            LifecycleOperationRole::Decode,
+        ] {
+            let trace = LifecycleTrace::enabled(
+                LifecycleIdentity::new(Some("request-id".to_string()), role),
+                None,
+            );
+            let _operation = trace.start_worker_operation();
+            let _streaming = trace.start_worker_response_streaming();
         }
 
         let captured = captured.lock().unwrap();
