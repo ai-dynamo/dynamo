@@ -31,7 +31,17 @@ on:
 env:
   # The release currently in development on main. Update at each cycle open,
   # when the prior release branch is cut and main rolls to the next line.
-  MAIN_RELEASE_VERSION: "1.6.0"
+  # The v prefix is part of the version: every Dynamo release in the Linear
+  # pipeline is v-prefixed, and the action matches an existing release by this
+  # exact string. A bare "1.6.0" creates a second, empty release next to the
+  # real one.
+  MAIN_RELEASE_VERSION: "v1.6.0"
+
+  # First-run scan base. With no base the action scans from the pipeline's
+  # latest release, which would sweep in every issue merged since August. This
+  # is the commit where the 1.5 branch was cut, so the first run sees exactly
+  # the commits that belong to this cycle. Update it at each cycle open.
+  RELEASE_SCAN_BASE: "330ce842416d0065e33dbb67109585fbba6f4930"
 
 concurrency:
   group: linear-release-sync-${{ github.ref }}
@@ -54,12 +64,12 @@ jobs:
           access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
           command: sync
           version: ${{ env.MAIN_RELEASE_VERSION }}
-          name: Dynamo v${{ env.MAIN_RELEASE_VERSION }}
+          name: Dynamo ${{ env.MAIN_RELEASE_VERSION }}
+          base_ref: ${{ env.RELEASE_SCAN_BASE }}
           # Deliberate rollout gate: the workflow does not sync until this is
           # flipped. Dry run scans and logs what it would attach without
           # creating or modifying anything in Linear. Flip to false in a
-          # follow-up PR once one observed run confirms it targets the
-          # existing "Dynamo v1.6.0" release rather than creating a
-          # duplicate, and LINEAR_ACCESS_KEY is confirmed to be a pipeline
-          # access key.
+          # follow-up PR once one observed run logs that it would update the
+          # existing "Dynamo v1.6.0" release rather than create one, and
+          # LINEAR_ACCESS_KEY is confirmed to be a pipeline access key.
           dry_run: true

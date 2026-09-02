@@ -47,6 +47,9 @@ the change exists; an agent pointed at the issue first inherits all of it.
   back into DGH, so either side works.
 - Bug found mid-task that needs its own fix: create an issue for it rather
   than folding untracked work into the current PR.
+- **Release features**: each feature in a release has a tracking ticket in
+  Linear with its work issues linked as Related, so that ticket is where to
+  look up which feature a work issue belongs to.
 
 ### Name the Branch
 
