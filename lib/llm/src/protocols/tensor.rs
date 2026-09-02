@@ -10,42 +10,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use validator::Validate;
 
-/// Serde adapter: (de)serialize `Vec<f16>` as a JSON array of f32 values so
-/// consumers see actual float numbers, not the underlying u16 bit pattern the
-/// `half` crate's default serde emits. f16 → f32 → f16 roundtrips are lossless.
-mod f16_vec_as_f32 {
-    use half::f16;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(v: &[f16], s: S) -> Result<S::Ok, S::Error> {
-        let floats: Vec<f32> = v.iter().map(|x| x.to_f32()).collect();
-        floats.serialize(s)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<f16>, D::Error> {
-        let floats = Vec::<f32>::deserialize(d)?;
-        Ok(floats.into_iter().map(f16::from_f32).collect())
-    }
-}
-
-/// Serde adapter: (de)serialize `Vec<bf16>` as a JSON array of f32 values.
-/// bf16 → f32 is exact; f32 → bf16 truncates the mantissa, so values that
-/// originated as bf16 roundtrip exactly.
-mod bf16_vec_as_f32 {
-    use half::bf16;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S: Serializer>(v: &[bf16], s: S) -> Result<S::Ok, S::Error> {
-        let floats: Vec<f32> = v.iter().map(|x| x.to_f32()).collect();
-        floats.serialize(s)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<bf16>, D::Error> {
-        let floats = Vec::<f32>::deserialize(d)?;
-        Ok(floats.into_iter().map(bf16::from_f32).collect())
-    }
-}
-
 // [gluo TODO] whether it makes sense to have aggregator for tensor..
 // we could if considering aggregation to be stacking the tensors by adding
 // one more dimension. i.e. stream of [2, 2] tensors to be aggregated to
@@ -109,8 +73,8 @@ pub enum FlattenTensor {
     Int16(Vec<i16>),
     Int32(Vec<i32>),
     Int64(Vec<i64>),
-    Float16(#[serde(with = "f16_vec_as_f32")] Vec<f16>),
-    BFloat16(#[serde(with = "bf16_vec_as_f32")] Vec<bf16>),
+    Float16(Vec<f16>),
+    BFloat16(Vec<bf16>),
     Float32(Vec<f32>),
     Float64(Vec<f64>),
     // Typically use to store string data, but really it can store
@@ -344,51 +308,39 @@ pub type Parameters = HashMap<String, ParameterValue>;
 mod tests {
     use super::*;
 
-    // half::f16 default serde emits u16 bit patterns; the vec adapter must
-    // translate to floats or Python reads the bits as integers.
+    // `half::f16` is `#[repr(transparent)] struct f16(u16)` with `#[derive(Serialize)]`,
+    // so it serializes as its underlying u16 bit pattern and the custom `Deserialize` is
+    // symmetric. Production request-plane codec is msgpack; JSON round-trip here is the
+    // cheapest local exercise of the derive without pulling in an extra dev-dep.
     #[test]
-    fn fp16_serde_emits_json_floats_and_roundtrips() {
+    fn fp16_flatten_tensor_json_roundtrip_bit_exact() {
         let original = FlattenTensor::Float16(vec![
             f16::from_f32(1.5),
             f16::from_f32(-2.25),
             f16::from_f32(3.125),
+            f16::from_f32(-4.0),
+            f16::from_f32(0.5),
+            f16::from_f32(100.0),
         ]);
 
-        let json = serde_json::to_value(&original).unwrap();
-        assert_eq!(json["data_type"], "Float16");
-        let values = json["values"].as_array().unwrap();
-        for v in values {
-            assert!(v.is_f64(), "expected JSON float, got {:?}", v);
-        }
-        assert_eq!(values[0].as_f64().unwrap(), 1.5);
-        assert_eq!(values[1].as_f64().unwrap(), -2.25);
-        assert_eq!(values[2].as_f64().unwrap(), 3.125);
-
-        let roundtrip: FlattenTensor =
-            serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+        let json = serde_json::to_string(&original).unwrap();
+        let roundtrip: FlattenTensor = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtrip, original);
     }
 
     #[test]
-    fn bf16_serde_emits_json_floats_and_roundtrips() {
+    fn bf16_flatten_tensor_json_roundtrip_bit_exact() {
         let original = FlattenTensor::BFloat16(vec![
             bf16::from_f32(1.5),
             bf16::from_f32(-2.25),
             bf16::from_f32(3.125),
+            bf16::from_f32(-4.0),
+            bf16::from_f32(0.5),
+            bf16::from_f32(100.0),
         ]);
 
-        let json = serde_json::to_value(&original).unwrap();
-        assert_eq!(json["data_type"], "BFloat16");
-        let values = json["values"].as_array().unwrap();
-        for v in values {
-            assert!(v.is_f64(), "expected JSON float, got {:?}", v);
-        }
-        assert_eq!(values[0].as_f64().unwrap(), 1.5);
-        assert_eq!(values[1].as_f64().unwrap(), -2.25);
-        assert_eq!(values[2].as_f64().unwrap(), 3.125);
-
-        let roundtrip: FlattenTensor =
-            serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+        let json = serde_json::to_string(&original).unwrap();
+        let roundtrip: FlattenTensor = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtrip, original);
     }
 }
