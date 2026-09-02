@@ -43,10 +43,13 @@ CANCELLATION_MAX_TOKENS = 2048
 PREFILL_CANCELLATION_MAX_TOKENS = 128
 XPU_CANCELLATION_MAX_TOKENS = 2096
 
-# Each worker already gets a 300s startup budget from ManagedProcess and reports
-# its own health-check timeout. This only has to stay above their sum; the old
-# 150s bound did not, so it fired first and hid them (DYN-4129).
-DECODE_CANCEL_TEST_TIMEOUT_S = 720
+# Each process already gets its own ManagedProcess startup budget and reports
+# its own health-check timeout. This only has to stay above their sum, so it
+# never fires first and hides them (DYN-4129). The three start serially:
+# 60s frontend + 300s prefill + 300s decode, plus ~210s of bounded waits,
+# metrics polling and teardown after that.
+DECODE_CANCEL_FRONTEND_STARTUP_TIMEOUT_S = 60
+DECODE_CANCEL_TEST_TIMEOUT_S = 900
 
 # The streaming read had no bound. STREAM_READ is the per-read socket timeout
 # between chunks; BEHAVIORAL is the wall-clock deadline across all of them.
@@ -376,14 +379,19 @@ def test_request_cancellation_vllm_aggregated(
 @pytest.mark.timeout(DECODE_CANCEL_TEST_TIMEOUT_S)
 @pytest.mark.nightly
 @pytest.mark.gpu_2
-@pytest.mark.profiled_vram_gib(6.9)
-@pytest.mark.requested_vllm_kv_cache_bytes(331_711_000)
+# Qwen3-0.6B BF16 costs 114,688 KV bytes/token, so the disaggregated workers
+# need 16384 * 114688 = 1.88 GB to hold one --max-model-len request. vLLM
+# refuses to start below that. 2 GiB leaves ~14% headroom.
+@pytest.mark.profiled_vram_gib(8.6)
+@pytest.mark.requested_vllm_kv_cache_bytes(2_147_483_648)
 def test_request_cancellation_vllm_decode_cancel(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """Verify that decode-side work stops after a disaggregated request is cancelled."""
 
-    with DynamoFrontendProcess(request) as frontend:
+    with DynamoFrontendProcess(
+        request, timeout_s=DECODE_CANCEL_FRONTEND_STARTUP_TIMEOUT_S
+    ) as frontend:
         logger.info("Frontend started successfully")
 
         with DynamoWorkerProcess(
