@@ -1157,8 +1157,7 @@ pub fn chat_completion_to_response(
         output_limit_reached =
             choice.finish_reason == Some(dynamo_protocols::types::FinishReason::Length);
 
-        // Raw model reasoning is reasoning text, not a generated summary. Keep
-        // it before any tool calls so output order matches the decoded turn.
+        // Reasoning precedes tool calls so output order matches the decoded turn.
         if let Some(reasoning_text) = choice.message.reasoning_content
             && !reasoning_text.is_empty()
             && params.reasoning_summary_requested()

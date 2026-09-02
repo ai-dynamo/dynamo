@@ -53,8 +53,8 @@ pub struct ResponseStreamConverter {
     message_output_index: u32,
     message_output_status: Option<OutputStatus>,
     accumulated_text: String,
-    // Ordered reasoning spans. A new item is opened if reasoning resumes after
-    // text or a tool call, preserving interleaved model output.
+    // Ordered reasoning spans; a new item opens when reasoning resumes after
+    // a tool call.
     reasoning_items: Vec<ReasoningState>,
     active_reasoning_index: Option<usize>,
     // Function call tracking
@@ -153,48 +153,56 @@ impl ResponseStreamConverter {
         reasoning: &str,
         events: &mut Vec<Result<Event, anyhow::Error>>,
     ) {
-        if self.active_reasoning_index.is_none() {
-            let output_index = self.next_output_index;
-            self.next_output_index += 1;
-            let item_id = format!("rs_{}", Uuid::new_v4().simple());
-            self.reasoning_items.push(ReasoningState {
-                item_id: item_id.clone(),
-                accumulated_text: String::new(),
-                output_index,
-                output_status: None,
-            });
-            self.active_reasoning_index = Some(self.reasoning_items.len() - 1);
+        let state_index = match self.active_reasoning_index {
+            Some(state_index) => state_index,
+            None => {
+                // Close pending tool calls first: live event order must match
+                // the final output order.
+                let output_status = self.output_status();
+                self.append_pending_function_call_done_events(events, output_status);
 
-            let item_added =
-                ResponseStreamEvent::ResponseOutputItemAdded(ResponseOutputItemAddedEvent {
-                    sequence_number: self.next_seq(),
+                let output_index = self.next_output_index;
+                self.next_output_index += 1;
+                let item_id = format!("rs_{}", Uuid::new_v4().simple());
+                self.reasoning_items.push(ReasoningState {
+                    item_id: item_id.clone(),
+                    accumulated_text: String::new(),
                     output_index,
-                    item: OutputItem::Reasoning(ReasoningItem {
-                        id: Some(item_id.clone()),
-                        summary: vec![],
-                        content: Some(vec![]),
-                        encrypted_content: None,
-                        status: Some(OutputStatus::InProgress),
-                    }),
+                    output_status: None,
                 });
-            events.push(self.make_sse_event(&item_added));
+                let state_index = self.reasoning_items.len() - 1;
+                self.active_reasoning_index = Some(state_index);
 
-            let part_added =
-                ResponseStreamEvent::ResponseContentPartAdded(ResponseContentPartAddedEvent {
-                    sequence_number: self.next_seq(),
-                    item_id,
-                    output_index,
-                    content_index: 0,
-                    part: OutputContent::ReasoningText(ReasoningTextContent {
-                        text: String::new(),
-                    }),
-                });
-            events.push(self.make_sse_event(&part_added));
-        }
+                let item_added =
+                    ResponseStreamEvent::ResponseOutputItemAdded(ResponseOutputItemAddedEvent {
+                        sequence_number: self.next_seq(),
+                        output_index,
+                        item: OutputItem::Reasoning(ReasoningItem {
+                            id: Some(item_id.clone()),
+                            summary: vec![],
+                            content: Some(vec![]),
+                            encrypted_content: None,
+                            status: Some(OutputStatus::InProgress),
+                        }),
+                    });
+                events.push(self.make_sse_event(&item_added));
 
-        let state_index = self
-            .active_reasoning_index
-            .expect("reasoning state must be active after opening it");
+                let part_added =
+                    ResponseStreamEvent::ResponseContentPartAdded(ResponseContentPartAddedEvent {
+                        sequence_number: self.next_seq(),
+                        item_id,
+                        output_index,
+                        content_index: 0,
+                        part: OutputContent::ReasoningText(ReasoningTextContent {
+                            text: String::new(),
+                        }),
+                    });
+                events.push(self.make_sse_event(&part_added));
+
+                state_index
+            }
+        };
+
         let (item_id, output_index) = {
             let state = &mut self.reasoning_items[state_index];
             state.accumulated_text.push_str(reasoning);
@@ -2309,6 +2317,8 @@ mod tests {
         assert_eq!(
             resumed_types,
             vec![
+                "response.function_call_arguments.done".to_string(),
+                "response.output_item.done".to_string(),
                 "response.output_item.added".to_string(),
                 "response.content_part.added".to_string(),
                 "response.reasoning_text.delta".to_string(),
@@ -2329,6 +2339,53 @@ mod tests {
             })
             .collect();
         assert_eq!(reasoning_texts, vec!["first thought", "second thought"]);
+    }
+
+    /// Resumed reasoning closes the pending tool call before opening the next item.
+    #[test]
+    fn test_resumed_reasoning_completes_pending_tool_call_first() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), reasoning_params());
+
+        let _ = conv.process_chunk(&reasoning_chunk("first thought"));
+        let _ = conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("lookup"),
+            Some("{}"),
+        ));
+
+        let resumed_types = event_types(&conv.process_chunk(&reasoning_chunk("second thought")));
+        assert_eq!(
+            resumed_types,
+            vec![
+                "response.function_call_arguments.done".to_string(),
+                "response.output_item.done".to_string(),
+                "response.output_item.added".to_string(),
+                "response.content_part.added".to_string(),
+                "response.reasoning_text.delta".to_string(),
+            ]
+        );
+
+        // No tool-call done events repeat at stream end.
+        let end_types = event_types(&conv.emit_end_events());
+        assert_eq!(
+            end_types,
+            vec![
+                "response.reasoning_text.done".to_string(),
+                "response.content_part.done".to_string(),
+                "response.output_item.done".to_string(),
+                "response.completed".to_string(),
+            ]
+        );
+
+        let output = conv.completed_output();
+        assert_eq!(output.len(), 3);
+        assert!(matches!(output[0], OutputItem::Reasoning(_)));
+        let OutputItem::FunctionCall(call) = &output[1] else {
+            panic!("expected function call output");
+        };
+        assert_eq!(call.status, Some(OutputStatus::Completed));
+        assert!(matches!(output[2], OutputItem::Reasoning(_)));
     }
 
     #[test]
