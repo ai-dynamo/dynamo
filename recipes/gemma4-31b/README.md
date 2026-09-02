@@ -3,6 +3,6 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Gemma 4 31B Recipe
+# Gemma-4-31B Recipe
 
-See the [Gemma 4 31B recipe documentation](https://docs.nvidia.com/dynamo/dev/recipes/gemma4-31b) for deployment, smoke-test, benchmarking, performance, and configuration guidance.
+See the [Gemma-4-31B recipe documentation](https://docs.nvidia.com/dynamo/dev/recipes/gemma-4-31b) for deployment, smoke-test, benchmarking, performance, and configuration guidance.

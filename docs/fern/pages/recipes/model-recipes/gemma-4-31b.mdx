@@ -1,15 +1,15 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Gemma 4 31B"
-subtitle: "Serve Gemma 4 31B with Dynamo and TensorRT-LLM on B200, GB200, or H200 for long-context agentic workloads."
+title: "Gemma-4-31B"
+subtitle: "Serve Gemma-4-31B with Dynamo and TensorRT-LLM on B200, GB200, or H200 for long-context agentic workloads."
 ---
 
 import { RecipeStyles } from "@/components/RecipeStyles";
 
 <RecipeStyles />
 
-Each target below is a Dynamo + TensorRT-LLM deployment of Gemma 4 31B for multimodal, reasoning, and tool-calling workloads.
+Each target below is a Dynamo + TensorRT-LLM deployment of Gemma-4-31B for multimodal, reasoning, and tool-calling workloads.
 
 B200 and GB200 serve the NVFP4 checkpoint with FP8 KV cache and MTP speculative decoding, while H200 serves the BF16 checkpoint. All targets use KV-aware routing and CPU KV-cache offload.
 
@@ -271,13 +271,13 @@ The B200 and GB200 targets serve the model on TensorRT-LLM with KV-aware routing
 - Some video codecs, including AV1, are not included in the runtime image. Extend the image when those codecs are required.
 - `media_io_kwargs` applies only when frontend decoding is enabled. When frontend decoding is disabled, the frameworks do not receive it correctly.
 - Multimodal items support public URLs only.
-- `reasoning_effort` only enables or disables reasoning because the Gemma 4 chat template does not support finer levels.
+- `reasoning_effort` only enables or disables reasoning because the Gemma-4-31B chat template does not support finer levels.
 - On the MTP-enabled B200 and GB200 variants, one-model speculative decoding does not support `min_p` or `min_tokens`; it rejects `frequency_penalty`, `presence_penalty`, and `repetition_penalty`. Greedy decoding (`temperature=0`) also rejects `n > 1` and `best_of > 1`.
 - This recipe supports only chat-type endpoints: `/v1/chat/completions` and `/v1/responses`.
 
 ## Source
 
-- Source READMEs: [Gemma 4 31B recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/gemma4-31b/) and [benchmark workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/perf/README.md)
+- Source READMEs: [Gemma-4-31B recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/gemma4-31b/) and [benchmark workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/perf/README.md)
 - Deploy manifests: [B200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/trtllm/agg-b200-agentic/deploy.yaml), [GB200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/trtllm/agg-gb200-agentic/deploy.yaml), and [H200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/trtllm/agg-h200-agentic/deploy.yaml)
 - Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/perf/perf.yaml)
 - Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/model-cache/model-download.yaml)

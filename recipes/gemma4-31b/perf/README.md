@@ -3,10 +3,10 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Gemma 4 31B Benchmark Recipe
+# Gemma-4-31B Benchmark Recipe
 
 A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job,
-[`perf.yaml`](perf.yaml), covers all three Gemma 4 31B DGDs. Set `ENDPOINT`,
+[`perf.yaml`](perf.yaml), covers all three Gemma-4-31B DGDs. Set `ENDPOINT`,
 `TARGET_MODEL`, `TRACE_FILE`, and `CONCURRENCY` for the target variant.
 
 The Job waits for the target model on the Dynamo frontend, runs a short warmup,
@@ -59,9 +59,9 @@ The 15% subset contains 3,541 requests. Its SHA-256 is
 export NAMESPACE=your-namespace
 ```
 
-### 1. Deploy Gemma 4
+### 1. Deploy Gemma-4-31B
 
-Follow the deployment instructions in the [Gemma 4 31B documentation](../../../docs/fern/pages/recipes/model-recipes/gemma4-31b.mdx)
+Follow the deployment instructions in the [Gemma-4-31B documentation](../../../docs/fern/pages/recipes/model-recipes/gemma-4-31b.mdx)
 and wait for the selected DGD to become ready. Use the DGD affinity value from
 the target table when configuring `perf.yaml`.
 

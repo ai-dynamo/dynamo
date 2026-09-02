@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# AIPerf trace-replay benchmark for the Gemma 4 31B aggregate DGDs.
+# AIPerf trace-replay benchmark for the Gemma-4-31B aggregate DGDs.
 #
 # Restart the DGD pods between independent concurrency points so TensorRT-LLM
 # KV-cache state and Dynamo routing state are reset.

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Best-effort aggregated TensorRT-LLM deployment for Gemma 4 31B NVFP4 on
+# Best-effort aggregated TensorRT-LLM deployment for Gemma-4-31B NVFP4 on
 # 1x GB200 per worker. Mirrors ../agg-b200-agentic/deploy.yaml.
 apiVersion: v1
 kind: ConfigMap

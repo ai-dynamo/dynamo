@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Best-effort aggregated TensorRT-LLM deployment for Gemma 4 31B on H200
+# Best-effort aggregated TensorRT-LLM deployment for Gemma-4-31B on H200
 # (Hopper, SM90), 4x GPU per worker.
 #
 # This is NOT a port of ../agg-gb200-agentic/deploy.yaml. Hopper cannot use the
@@ -9,7 +9,7 @@
 #
 #   * bf16 weights, not NVFP4 -- NVFP4 requires Blackwell. Weights are ~58 GiB
 #     rather than ~17 GiB.
-#   * 16-bit KV cache, not fp8 -- Gemma 4 31B is hybrid-attention, and its
+#   * 16-bit KV cache, not fp8 -- Gemma-4-31B is hybrid-attention, and its
 #     full_attention layers use global_head_dim=512. FlashInfer permits
 #     head_dim > 256 on SM80+ only for 16-bit KV; one-byte (fp8) KV stays
 #     SM100+. Setting `dtype: fp8` here aborts at init with
