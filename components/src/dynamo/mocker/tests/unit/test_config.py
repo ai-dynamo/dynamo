@@ -87,7 +87,7 @@ def _load_replay_main():
         pytest.skip(
             "Dynamo replay CLI tests require the optional AISimulate distribution"
         )
-    return importlib.import_module("dynamo.replay.main")
+    return importlib.import_module("dynamo.replay.config")
 
 
 def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
@@ -404,7 +404,7 @@ def test_build_mocker_engine_args_preserves_explicit_max_model_len():
 def test_replay_engine_args_keeps_max_model_len_explicit_only():
     replay_main = _load_replay_main()
 
-    engine_args = replay_main._load_engine_args(
+    engine_args = replay_main.load_engine_args(
         json.dumps(
             {
                 "num_gpu_blocks": 4096,
@@ -420,7 +420,7 @@ def test_replay_engine_args_keeps_max_model_len_explicit_only():
 def test_replay_engine_args_preserves_explicit_max_model_len():
     replay_main = _load_replay_main()
 
-    engine_args = replay_main._load_engine_args(
+    engine_args = replay_main.load_engine_args(
         json.dumps(
             {
                 "num_gpu_blocks": 4096,
@@ -437,7 +437,7 @@ def test_replay_engine_args_preserves_explicit_max_model_len():
 def test_replay_attention_dp_sets_rank_topology_with_explicit_kv_capacity():
     replay_main = _load_replay_main()
 
-    engine_args = replay_main._load_engine_args(
+    engine_args = replay_main.load_engine_args(
         json.dumps(
             {
                 "num_gpu_blocks": 4096,
@@ -455,7 +455,7 @@ def test_replay_rejects_mismatched_dp_topology():
     replay_main = _load_replay_main()
 
     with pytest.raises(ValueError, match="dp_size must match"):
-        replay_main._load_engine_args(
+        replay_main.load_engine_args(
             json.dumps(
                 {
                     "num_gpu_blocks": 4096,
@@ -471,7 +471,7 @@ def test_replay_rejects_dp_topology_without_aic_attention_dp():
     replay_main = _load_replay_main()
 
     with pytest.raises(ValueError, match="dp_size must match"):
-        replay_main._load_engine_args(
+        replay_main.load_engine_args(
             json.dumps(
                 {
                     "num_gpu_blocks": 4096,
