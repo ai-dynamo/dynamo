@@ -1320,15 +1320,28 @@ def test_typed_worker_with_explicit_zero_shape_is_rejected(
         kubernetes_connector.get_gpu_shapes(require_prefill=False, require_decode=True)
 
 
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        (None, ["-m", "dynamo.mocker", "--model-name", "test-model"]),
+        (
+            ["python3", "-m", "dynamo.mocker._worker"],
+            ["--model-name", "test-model"],
+        ),
+    ],
+    ids=["public-module", "worker-module"],
+)
 def test_typed_mocker_worker_with_zero_physical_shape_uses_configured_fallback(
-    kubernetes_connector, mock_kube_api
+    kubernetes_connector, mock_kube_api, command, args
 ):
     component = _component(
         "decode-worker",
         "decode",
         replicas=1,
-        args=["-m", "dynamo.mocker", "--model-name", "test-model"],
+        args=args,
     )
+    if command is not None:
+        component["podTemplate"]["spec"]["containers"][0]["command"] = command
     deployment = _deployment(component)
     deployment["metadata"]["generation"] = 2
     deployment["status"] = {

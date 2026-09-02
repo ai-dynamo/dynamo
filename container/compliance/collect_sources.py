@@ -25,8 +25,8 @@ Per-ecosystem strategy (matches the plan in
            subset and tars it.
 
   go       go mod vendor per Go module. For the dynamo runtime
-           templates this is empty (no Go binaries); operator / EPP
-           have it.
+           templates this is empty (no Go binaries); the operator
+           has it. EPP is Rust and is covered under `rust` above.
 
   native   preserve source tarballs for from-source components
            (criu, ucx, libfabric, ffmpeg, gdrcopy, NIXL, etc.).
@@ -275,7 +275,9 @@ def collect_dpkg_sources(
 _FIRST_PARTY_RUST_PREFIXES = ("aisimulate-", "dynamo-", "kvbm-", "nixl-")
 
 
-def _shipped_rust_crates(site_packages_dirs: list[Path]) -> set[tuple[str, str]]:
+def _shipped_rust_crates(
+    site_packages_dirs: list[Path], extra_sboms: list[Path] | None = None
+) -> set[tuple[str, str]]:
     """Walk every installed wheel's embedded CycloneDX SBOM and return the
     set of (name, version) tuples for Rust crates that ship in this image.
 
@@ -284,11 +286,21 @@ def _shipped_rust_crates(site_packages_dirs: list[Path]) -> set[tuple[str, str]]
     `pip install --break-system-packages` (sglang) ship packages under
     `/usr/lib/python3/dist-packages` instead of the `lib/python*/site-packages`
     layout a venv produces.
+
+    `extra_sboms` covers Rust binaries that ship outside any wheel — the
+    frontend's `/epp` — which that glob cannot reach. Their crates are vendored
+    already (wheel_builder runs `cargo vendor` over the whole root workspace,
+    and ext-proc is a member of it); without the SBOM they are simply never
+    selected out of the vendor tree.
     """
     crates: set[tuple[str, str]] = set()
     sbom_paths: list[Path] = []
     for site in site_packages_dirs:
         sbom_paths.extend(site.glob("*.dist-info/sboms/*.cyclonedx.json"))
+    for extra in extra_sboms or []:
+        if not extra.is_file():
+            raise FileNotFoundError(f"--rust-sbom path does not exist: {extra}")
+        sbom_paths.append(extra)
     for sbom in sbom_paths:
         try:
             doc = json.loads(sbom.read_text(encoding="utf-8"))
@@ -313,7 +325,10 @@ def _shipped_rust_crates(site_packages_dirs: list[Path]) -> set[tuple[str, str]]
 
 
 def collect_rust_sources(
-    site_packages_dirs: list[Path], vendor_full: Path, output_dir: Path
+    site_packages_dirs: list[Path],
+    vendor_full: Path,
+    output_dir: Path,
+    extra_sboms: list[Path] | None = None,
 ) -> int:
     """Copy third-party Rust crate sources into output_dir.
 
@@ -339,7 +354,7 @@ def collect_rust_sources(
         )
         return 0
 
-    crates = _shipped_rust_crates(site_packages_dirs)
+    crates = _shipped_rust_crates(site_packages_dirs, extra_sboms)
     copied = 0
     skipped_first_party = 0
     missing_in_vendor: list[str] = []
@@ -506,8 +521,8 @@ runtime this archive belongs to).
 | Directory | What's here |
 |---|---|
 | `dpkg/`    | `.dsc` + tarballs for Debian/Ubuntu packages we install on top of the baseline image. Scoped to the delta against the baseline SBOM. NVIDIA-proprietary packages (CUDA repos) have no public source repo and are not included; see "skipped packages" in the build log. |
-| `rust/`    | `cargo vendor` tree filtered to the third-party crates that appear in the installed wheels' embedded SBOMs. Excludes first-party crates (`aisimulate-*`, `dynamo-*`, `kvbm-*`, `nixl-*`) owned by NVIDIA in this repository or separate ai-dynamo releases. Includes the workspace `Cargo.toml` + `Cargo.lock` for context. |
-| `go/`      | `go mod vendor` tree for the operator / snapshot / EPP binaries. Excludes first-party modules (`github.com/ai-dynamo/...`). |
+| `rust/`    | `cargo vendor` tree filtered to the third-party crates that appear in the installed wheels' embedded SBOMs, plus any SBOM passed via `--rust-sbom` for a binary that ships outside a wheel (the frontend's `/epp`). Excludes first-party crates (`aisimulate-*`, `dynamo-*`, `kvbm-*`, `nixl-*`) owned by NVIDIA in this repository or separate ai-dynamo releases. Includes the workspace `Cargo.toml` + `Cargo.lock` for context. |
+| `go/`      | `go mod vendor` tree for the operator / snapshot binaries. Excludes first-party modules (`github.com/ai-dynamo/...`). |
 | `native/`  | Upstream source tarballs (or git clones) for from-source builds — CRIU, cuda-checkpoint, ucx, libfabric, gdrcopy, ffmpeg, NIXL where applicable. Excludes first-party native helpers (`cuda-checkpoint-helper`). |
 
 ## Python sources are not in this archive
@@ -646,6 +661,18 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--rust-sbom",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "CycloneDX SBOM for a Rust binary that ships outside any wheel, so "
+            "the site-packages scan cannot discover its crates. Repeatable. "
+            "Mirrors the generators' --rust-sbom; the frontend passes the "
+            "ext-proc SBOM describing /epp."
+        ),
+    )
+    parser.add_argument(
         "--rust-vendor-full",
         type=Path,
         default=Path("/opt/dynamo-vendor-full"),
@@ -711,7 +738,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             site_dirs = list(args.rust_venv.glob("lib/python*/site-packages"))
         counts["rust"] = collect_rust_sources(
-            site_dirs, args.rust_vendor_full, args.sources_root / "rust"
+            site_dirs,
+            args.rust_vendor_full,
+            args.sources_root / "rust",
+            extra_sboms=args.rust_sbom,
         )
     if "go" in ecosystems:
         counts["go"] = collect_go_sources(args.go_vendor_dir, args.sources_root / "go")
