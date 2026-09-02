@@ -76,6 +76,22 @@ spec:
     spec:
       restartPolicy: Never
 
+      # Co-locate the benchmark pod with the target DGD frontend.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                      - frontend
+                  - key: nvidia.com/dynamo-graph-deployment-name
+                    operator: In
+                    values:
+                      - kimi-k3-sglang-gb300-agg-agentic
+              topologyKey: kubernetes.io/hostname
+
       containers:
         - name: aiperf
           image: nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0
@@ -85,6 +101,16 @@ spec:
           args:
             - |
               set -euo pipefail
+              MODELS_URL="${INFERENCE_URL%/v1/chat/completions}/v1/models"
+              MODEL_READY_DEADLINE=$((SECONDS + 3600))
+              echo "Waiting for $TARGET_MODEL at $MODELS_URL"
+              until wget -qO- -T 5 "$MODELS_URL" | grep -Fq "$TARGET_MODEL"; do
+                if ((SECONDS >= MODEL_READY_DEADLINE)); then
+                  echo "Timed out waiting for $TARGET_MODEL at $MODELS_URL" >&2
+                  exit 1
+                fi
+                sleep 5
+              done
               export REQUESTS="$(wc -l < "$TRACE_FILE" | tr -d '[:space:]')"
               exec aiperf profile --config /etc/aiperf/perf.yaml
 

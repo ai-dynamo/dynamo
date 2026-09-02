@@ -1,89 +1,97 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Kimi-K3 on SGLang via Dynamo, disaggregated 1P1D on 16x GB300.
-# Each worker spans two 4-GPU nodes with TP8 over MNNVL. Prefill-to-decode
-# KV, KDA state, and DSPARK draft-KV transfer uses Mooncake over MNNVL.
+# Kimi-K3 on SGLang via Dynamo, disaggregated 1P1D on 32x GB200.
+# Each worker spans four 4-GPU nodes with TP16 over MNNVL. Prefill-to-decode
+# KV, KDA state, and DSPARK draft-KV transfer uses Mooncake. Both roles share
+# one ComputeDomain so all eight workers use the same IMEX channel.
 
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: kimi-k3-sglang-gb300-disagg-agentic-sglang-config
+  name: kimi-k3-sglang-gb200-disagg-agentic-sglang-config
 data:
   prefill.yaml: |-
     model-path: moonshotai/Kimi-K3
     served-model-name: moonshotai/Kimi-K3
     trust-remote-code: true
     context-length: 1048576
-    max-running-requests: 32
-    mem-fraction-static: 0.92
+    max-running-requests: 64
+    mem-fraction-static: 0.88
+    chunked-prefill-size: 8192
+    max-prefill-tokens: 8192
+    page-size: 64
+    schedule-policy: fcfs
     weight-loader-prefetch-checkpoints: true
     enable-multimodal: true
+    mm-attention-backend: triton_attn
     speculative-algorithm: DSPARK
     speculative-draft-model-path: RadixArk/Kimi-K3-DSpark
     speculative-dspark-block-size: 7
-    disable-overlap-schedule: true
-    disaggregation-mode: prefill
-    disaggregation-transfer-backend: mooncake
-    disaggregation-bootstrap-port: 30001
-    enable-metrics: true
-    enable-nccl-nvls: true
-    tp-size: 8
-    dp-size: 1
-    ep-size: 8
-    pp-size: 1
-    dcp-size: 1
     moe-runner-backend: deep_gemm
     moe-a2a-backend: megamoe
-    cuda-graph-backend-decode: disabled
-    mamba-full-memory-ratio: 0.7
-    page-size: 64
+    mamba-full-memory-ratio: 0.9
     enable-hierarchical-cache: true
     hicache-size: 100
     kv-cache-dtype: fp8_e4m3
+    enable-nccl-nvls: true
+    enable-metrics: true
+    tp-size: 16
+    dp-size: 1
+    ep-size: 16
+    pp-size: 1
+    dcp-size: 1
+    disaggregation-mode: prefill
+    disaggregation-transfer-backend: mooncake
+    disaggregation-bootstrap-port: 30001
 
   decode.yaml: |-
     model-path: moonshotai/Kimi-K3
     served-model-name: moonshotai/Kimi-K3
     trust-remote-code: true
     context-length: 1048576
-    max-running-requests: 64
-    mem-fraction-static: 0.92
-    mamba-full-memory-ratio: 0.9
-    kv-cache-dtype: fp8_e4m3
+    max-running-requests: 96
+    mem-fraction-static: 0.88
+    chunked-prefill-size: 8192
+    max-prefill-tokens: 8192
+    page-size: 64
+    schedule-policy: fcfs
     weight-loader-prefetch-checkpoints: true
     enable-multimodal: true
+    mm-attention-backend: triton_attn
     speculative-algorithm: DSPARK
     speculative-draft-model-path: RadixArk/Kimi-K3-DSpark
     speculative-dspark-block-size: 7
+    moe-runner-backend: deep_gemm
+    moe-a2a-backend: megamoe
+    mamba-full-memory-ratio: 0.9
+    kv-cache-dtype: fp8_e4m3
+    enable-nccl-nvls: true
+    enable-metrics: true
+    tp-size: 16
+    dp-size: 1
+    ep-size: 16
+    pp-size: 1
+    dcp-size: 16
     disaggregation-mode: decode
     disaggregation-transfer-backend: mooncake
     disaggregation-bootstrap-port: 30001
-    enable-metrics: true
-    enable-nccl-nvls: true
-    tp-size: 8
-    dcp-size: 8
-    ep-size: 8
-    decode-attention-backend: cutedsl_mla
-    moe-runner-backend: deep_gemm
-    moe-a2a-backend: megamoe
-    page-size: 64
 ---
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:
-  name: kimi-k3-sglang-gb300-disagg-agentic-compute-domain
+  name: kimi-k3-sglang-gb200-disagg-agentic-compute-domain
 spec:
   numNodes: 0
   channel:
     allocationMode: Single
     resourceClaimTemplate:
-      name: kimi-k3-sglang-gb300-disagg-agentic-compute-domain-channel
+      name: kimi-k3-sglang-gb200-disagg-agentic-compute-domain-channel
 ---
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
-  name: kimi-k3-sglang-gb300-disagg-agentic
+  name: kimi-k3-sglang-gb200-disagg-agentic
 spec:
   backendFramework: sglang
   components:
@@ -124,15 +132,15 @@ spec:
 
     - name: PrefillWorker
       type: prefill
-      replicas: 1
+      replicas: 2
       multinode:
-        nodeCount: 2
+        nodeCount: 4
       sharedMemorySize: 64Gi
       podTemplate:
         spec:
           resourceClaims:
             - name: compute-domain-channel
-              resourceClaimTemplateName: kimi-k3-sglang-gb300-disagg-agentic-compute-domain-channel
+              resourceClaimTemplateName: kimi-k3-sglang-gb200-disagg-agentic-compute-domain-channel
           terminationGracePeriodSeconds: 60
           containers:
             - name: main
@@ -160,22 +168,12 @@ spec:
                   value: "1"
                 - name: NCCL_CUMEM_ENABLE
                   value: "1"
-                - name: SGLANG_OPT_USE_CUSTOM_ALL_REDUCE_V2
-                  value: "1"
-                - name: SGLANG_ENABLE_CUSTOM_ALL_REDUCE_V2_MULTINODE
-                  value: "1"
-                - name: SGLANG_OPT_MAMBA_SKIP_DECODE_LOCK
-                  value: "1"
                 - name: SGLANG_MOONCAKE_CUSTOM_MEM_POOL
                   value: NVLINK
                 - name: MC_FORCE_MNNVL
                   value: "true"
-                - name: SGLANG_RAGGED_VERIFY_MODE
-                  value: static
-                - name: SGLANG_K3_SP_COLLECTIVE
-                  value: "1"
                 - name: SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK
-                  value: "2048"
+                  value: "1024"
                 # For perf benchmarking only
                 # - name: SGLANG_SIMULATE_ACC_LEN
                 #   value: "4.05"
@@ -212,7 +210,7 @@ spec:
           volumes:
             - name: sglang-config
               configMap:
-                name: kimi-k3-sglang-gb300-disagg-agentic-sglang-config
+                name: kimi-k3-sglang-gb200-disagg-agentic-sglang-config
             - name: shared-model-cache
               persistentVolumeClaim:
                 claimName: shared-model-cache
@@ -221,13 +219,13 @@ spec:
       type: decode
       replicas: 1
       multinode:
-        nodeCount: 2
+        nodeCount: 4
       sharedMemorySize: 64Gi
       podTemplate:
         spec:
           resourceClaims:
             - name: compute-domain-channel
-              resourceClaimTemplateName: kimi-k3-sglang-gb300-disagg-agentic-compute-domain-channel
+              resourceClaimTemplateName: kimi-k3-sglang-gb200-disagg-agentic-compute-domain-channel
           terminationGracePeriodSeconds: 60
           containers:
             - name: main
@@ -258,23 +256,17 @@ spec:
                   value: "1"
                 - name: NCCL_CUMEM_ENABLE
                   value: "1"
-                - name: SGLANG_OPT_USE_CUSTOM_ALL_REDUCE_V2
-                  value: "1"
-                - name: SGLANG_ENABLE_CUSTOM_ALL_REDUCE_V2_MULTINODE
-                  value: "1"
                 - name: SGLANG_MOONCAKE_CUSTOM_MEM_POOL
                   value: NVLINK
                 - name: MC_FORCE_MNNVL
                   value: "true"
-                - name: SGLANG_RAGGED_VERIFY_MODE
-                  value: static
+                - name: SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK
+                  value: "1024"
                 # For perf benchmarking only
                 # - name: SGLANG_SIMULATE_ACC_LEN
                 #   value: "4.05"
                 # - name: SGLANG_SIMULATE_ACC_METHOD
                 #   value: match-expected
-                - name: SGLANG_K3_SP_COLLECTIVE
-                  value: "1"
               ports:
                 - name: system
                   containerPort: 9090
@@ -306,7 +298,7 @@ spec:
           volumes:
             - name: sglang-config
               configMap:
-                name: kimi-k3-sglang-gb300-disagg-agentic-sglang-config
+                name: kimi-k3-sglang-gb200-disagg-agentic-sglang-config
             - name: shared-model-cache
               persistentVolumeClaim:
                 claimName: shared-model-cache

@@ -20,17 +20,10 @@ data:
     speculative-algorithm: DSPARK
     speculative-draft-model-path: RadixArk/Kimi-K3-DSpark
     speculative-dspark-block-size: 7
-    enable-linear-replayssm-spec: true
     enable-nccl-nvls: true
     enable-hierarchical-cache: true
     hicache-size: 100
     kv-cache-dtype: fp8_e4m3
-    host: 0.0.0.0
-    port: 30000
-    kv-events-config:
-      publisher: zmq
-      topic: kv-events
-      endpoint: tcp://*:5557
     enable-metrics: true
 ---
 apiVersion: resource.nvidia.com/v1beta1
@@ -58,13 +51,12 @@ spec:
         spec:
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/alexandrem:1.4.0-sglang-runtime-pr12513-26ea9a09-arm64@sha256:8a976389818342f7fbd5dca9a6595beeed7edc8ce74d611aa9f9e98b5bf3cdcb
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-267a3244b74ebfe7834bbb59de90a77d35f35d01-sglang-runtime@sha256:80a0704364a7e5789c3ba236182040e60bd63c65e5ddc481716695b5ae6391c4
               imagePullPolicy: IfNotPresent
               command: [python3, -m, dynamo.frontend]
               args:
                 - --http-port
                 - "8000"
-                - --router-kv-events
                 - --router-min-initial-workers
                 - "3"
                 - --dyn-chat-processor
@@ -101,7 +93,7 @@ spec:
           terminationGracePeriodSeconds: 60
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/alexandrem:1.4.0-sglang-runtime-pr12513-26ea9a09-arm64@sha256:8a976389818342f7fbd5dca9a6595beeed7edc8ce74d611aa9f9e98b5bf3cdcb
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-267a3244b74ebfe7834bbb59de90a77d35f35d01-sglang-runtime@sha256:80a0704364a7e5789c3ba236182040e60bd63c65e5ddc481716695b5ae6391c4
               imagePullPolicy: IfNotPresent
               command: [python3, -m, dynamo.sglang]
               args:
@@ -112,6 +104,9 @@ spec:
                 - --dyn-tool-call-parser
                 - kimi_k3
                 - --dyn-enable-structural-tag
+                # The SGLang YAML parser rejects this StoreTrue flag because a
+                # deprecated alias shares its destination. Pass it via CLI.
+                - --enable-linear-replayssm-spec
               env:
                 - name: HF_HUB_OFFLINE
                   value: "1"

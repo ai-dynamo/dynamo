@@ -5,20 +5,13 @@ SPDX-License-Identifier: Apache-2.0
 
 # Kimi-K3 Benchmark Recipe
 
-[`perf.yaml`](perf.yaml) defines an AIPerf schema-v2 ConfigMap and a trace-replay
-Job targeting the Kimi-K3 SGLang GB300 aggregated DGD. The Job runs a
-16-request warmup, replays every row in the configured Mooncake trace at one
-`CONCURRENCY` value, and writes JSON summaries and JSONL records to the shared
-model-cache PVC.
+[`perf.yaml`](perf.yaml) defines a trace-replay Job targeting a deployed DGD.
+The Job waits for the model at `/v1/models`, runs a small warmup, replays the
+configured Mooncake trace at a given `CONCURRENCY` value, and writes JSON
+summaries and JSONL records to the `shared-model-cache` PVC.
 
 Restart the DGD pods and use a unique `ARTIFACT_DIR` between independent
 concurrency points so server state and result files are not reused.
-
-## Target
-
-| Variant target | `INFERENCE_URL` | `MAX_ISL` | `TRACE_FILE` |
-| --- | --- | --- | --- |
-| GB300 aggregated agentic | `http://kimi-k3-sglang-gb300-agg-agentic-frontend:8000/v1/chat/completions` | `1048576` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` |
 
 ## Dataset
 
@@ -48,7 +41,8 @@ export NAMESPACE=your-namespace
 
 ### 1. Deploy the DGD
 
-See the deployment instructions in the [recipe README](../README.md).
+See the [Kimi-K3 documentation](https://docs.nvidia.com/dynamo/dev/recipes/kimi-k3)
+for deployment instructions.
 
 ### 2. Stage the trace on the PVC
 
@@ -63,6 +57,9 @@ kubectl run pvc-helper -n "${NAMESPACE}" \
   --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"shared-model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"shared-model-cache","persistentVolumeClaim":{"claimName":"shared-model-cache"}}]}}' \
   --command -- sleep 3600
 
+kubectl wait --for=condition=Ready pod/pvc-helper \
+  -n "${NAMESPACE}" --timeout=120s
+
 TRACE_SOURCE="$(git rev-parse --show-toplevel)/recipes/kimi-k2.6/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
 kubectl exec -n "${NAMESPACE}" pvc-helper -- mkdir -p /model-cache/traces
 kubectl cp "${TRACE_SOURCE}" \
@@ -73,8 +70,11 @@ Keep `pvc-helper` to fetch artifacts, or delete it after staging.
 
 ### 3. Run the benchmark
 
-Before applying, edit `INFERENCE_URL`, `CONCURRENCY`, and `ARTIFACT_DIR` in
-`perf.yaml` for the target run.
+Before applying, set `INFERENCE_URL` to
+`http://YOUR_DGD_NAME-frontend:8000/v1/chat/completions`, set the pod-affinity
+`nvidia.com/dynamo-graph-deployment-name` value to the same `YOUR_DGD_NAME`, and
+edit `CONCURRENCY` and `ARTIFACT_DIR` for the target run. The affinity
+co-locates the benchmark pod with the selected frontend.
 
 ```bash
 kubectl apply -f perf.yaml -n "${NAMESPACE}"
@@ -144,10 +144,10 @@ errored, and unfinished requests before reporting aggregate throughput.
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | Mooncake trace on the PVC |
 | `CONCURRENCY` | `64` | Profiling concurrency |
 | `MAX_ISL` | `1048576` | Maximum synthesized input length |
-| `CAP_OSL` | `12000` | Maximum synthesized output length |
+| `CAP_OSL` | `12000` | Maximum synthesized output length cap|
 | `ARTIFACT_DIR` | `/model-cache/aiperf-artifacts` | Use a unique directory per run |
 
 ## Artifacts
 
 AIPerf writes a JSON summary and JSONL request records beneath
-`ARTIFACT_DIR`. Preserve the complete directory for every reported result.
+`ARTIFACT_DIR`.
