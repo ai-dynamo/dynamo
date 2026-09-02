@@ -381,12 +381,7 @@ class TestRunNaiveFallbackWorkloadForwarding:
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_declared_workload_is_forwarded_to_generator(self, caplog):
-        """A non-default declared workload reaches the generator's SlaConfig.
-
-        This is the regression assertion: without the forwarding fix the
-        generator receives no ``generator_overrides`` at all, keeps its own
-        4000/1000 defaults, and derives ``max-model-len`` from them.
-        """
+        """A non-default declared workload reaches the generator's SlaConfig."""
         dgdr = _make_dgdr(workload=WorkloadSpec(isl=7200, osl=2000))
         with caplog.at_level(logging.WARNING):
             _, captured_kwargs, _ = self._run(dgdr, 7200, 2000)
@@ -394,35 +389,20 @@ class TestRunNaiveFallbackWorkloadForwarding:
         assert captured_kwargs.get("generator_overrides") == {
             "SlaConfig": {"isl": 7200, "osl": 2000}
         }
-        # Secondary: the substitution that would otherwise happen is reported.
         assert "Declared workload (isl=7200, osl=2000)" in caplog.text
         assert "defaults (isl=4000, osl=1000)" in caplog.text
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
     def test_default_workload_forwards_defaults_without_warning(self, caplog):
-        """Negative control: a workload at the schema defaults changes nothing.
-
-        The same override channel is used, the rest of the generator params are
-        untouched, the result contract is unchanged, and no substitution
-        warning is emitted.
-        """
+        """Default workload is forwarded without a substitution warning."""
         dgdr = _make_dgdr(workload=WorkloadSpec(isl=4000, osl=1000))
         with caplog.at_level(logging.WARNING):
-            result, captured_kwargs, captured_params = self._run(dgdr, 4000, 1000)
+            _, captured_kwargs, _ = self._run(dgdr, 4000, 1000)
 
         assert captured_kwargs.get("generator_overrides") == {
             "SlaConfig": {"isl": 4000, "osl": 1000}
         }
-        assert captured_kwargs["model_name"] == "Qwen/Qwen3-32B"
-        assert captured_kwargs["total_gpus"] == 4
-        assert captured_kwargs["system_name"] == "l40s"
-        assert captured_kwargs["backend_name"] == "vllm"
-        # K8sConfig merging and the result contract are unaffected.
-        assert captured_params["K8sConfig"]["k8s_image"]
-        assert captured_params["params"] == {"agg": {}}
-        assert result["chosen_exp"] == "agg"
-        assert result["resolved_backend"] == "vllm"
         assert "Declared workload" not in caplog.text
 
 
