@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{Request, Response};
+use axum::http::{Request, Response, StatusCode};
 use axum::routing::{get, post};
 use reqwest::{Client, Url};
 use tokio_util::sync::CancellationToken;
@@ -73,10 +73,18 @@ impl SidecarState {
 
 pub fn router(state: SidecarState) -> Router {
     Router::new()
-        .route("/health", get(handle))
-        .route("/ready", get(handle))
+        .route("/health", get(health))
+        .route("/ready", get(ready))
         .route("/v1/chat/completions", post(handle))
         .with_state(state)
+}
+
+async fn health() -> StatusCode {
+    StatusCode::OK
+}
+
+async fn ready() -> StatusCode {
+    StatusCode::OK
 }
 
 async fn handle(
@@ -238,21 +246,27 @@ mod tests {
             reqwest::Url::parse(&format!("http://{address}")).unwrap(),
         ));
 
-        for (method, path) in [
-            (Method::GET, "/health"),
-            (Method::GET, "/ready"),
-            (Method::POST, "/v1/chat/completions"),
-        ] {
-            let request = Request::builder()
-                .method(method)
-                .uri(path)
-                .body(Body::empty())
-                .unwrap();
+        for path in ["/health", "/ready"] {
+            let request = Request::builder().uri(path).body(Body::empty()).unwrap();
             assert_eq!(
                 app.clone().oneshot(request).await.unwrap().status(),
-                StatusCode::NO_CONTENT
+                StatusCode::OK
             );
         }
+
+        let inference_request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(inference_request)
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
 
         let unknown_path = Request::builder()
             .uri("/v1/completions")
