@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Dynamo v1.4.0
-subtitle: Release notes for Dynamo v1.4.0 (GA Aug 14, 2026), including patch release v1.4.1
+subtitle: Release notes for Dynamo v1.4.0 (GA Aug 14, 2026), including patch releases v1.4.1 and v1.4.2
 ---
 
 import { ReferenceStyles } from "@/components/ReferenceStyles";
@@ -499,3 +499,31 @@ The following dependencies changed in this release:
 | google.golang.org/grpc | 1.82.1 |
 
 The Go alignment applies to the `inference-gateway/epp`, `operator` and `snapshot` modules ([#13274](https://github.com/ai-dynamo/dynamo/pull/13274)). Container base images, backend runtimes and Helm charts are unchanged from v1.4.0.
+
+<a id="v142"></a>
+
+### v1.4.2 — Aug 28, 2026
+
+#### Summary
+
+Dynamo v1.4.2 is a patch release on top of v1.4.1. It fixes **NIXL loader-path resolution** in the Frontend and SGLang Runtime images, where the Rust NIXL bindings silently ran against non-functional stubs instead of the real library. It also **removes an unused profiling plugin** from the shipped images and tightens dependency pins in the Frontend and Planner images. With this release, Dynamo also introduces **Dynamo Enterprise**: a curated set of release artifacts published for NVIDIA Enterprise Support.
+
+**Base Branch**: `release/1.4.2`
+
+#### Dynamo Enterprise
+
+Starting with v1.4.2, a curated set of Dynamo release artifacts is also published under the `-enterprise` suffix in the [Dynamo Enterprise collection](https://catalog.ngc.nvidia.com/orgs/nvidia/ai-dynamo/collections/dynamo-enterprise) on NGC. These artifacts are eligible for NVIDIA Enterprise Support under an active NVIDIA AI Enterprise subscription and carry no functional or binary differences from their open-source counterparts. See [Dynamo Enterprise](../../../enterprise/overview.mdx) for scope, supported artifacts, and coverage terms.
+
+#### Bug Fixes
+
+- **Frontend NIXL Loader Path:** Fixed the Frontend image leaving the NIXL library where the dynamic loader could not find it ([#13547](https://github.com/ai-dynamo/dynamo/pull/13547)). The Rust bindings resolve the C API with a bare `dlopen("libnixl_capi.so")` and the runtime extension carries no RPATH, so Rust NIXL silently ran against non-functional stubs while the Python bindings worked in the same interpreter. The image now installs NIXL from PyPI at a target-scoped `nixl_ref` (v1.3.2) and registers the wheel's library directory with `ldconfig`.
+- **SGLang NIXL Loader Path:** Fixed the same loader-path gap in the SGLang Runtime image ([#13649](https://github.com/ai-dynamo/dynamo/pull/13649)). The wheel's library directory is now found during the existing UCX layout scan and registered in `ld.so.conf.d`, keeping the UCX compat directory's priority for `libucp`/`libucs`. The `agg_vision.sh` workaround that exported the directory by hand is removed; the image covers it.
+
+#### Dependency Changes
+
+- **EFA Installer:** Updated the AWS EFA Installer to v1.50 in the EFA image variants ([#13690](https://github.com/ai-dynamo/dynamo/pull/13690)).
+- **Pillow Floor:** Held pillow at the declared v12.3.0 floor in the Frontend and Planner images ([#13741](https://github.com/ai-dynamo/dynamo/pull/13741)).
+- **Plotext Constraint:** Pinned `plotext` below v6 in the Planner image; plotext v6 removes the `plot_size` API that AIConfigurator profiler runs depend on ([#13716](https://github.com/ai-dynamo/dynamo/pull/13716)).
+- **Nsight EFA Metrics Plugin:** Removed the unused plugin from the shipped images; `nsys profile --enable=efa_metrics` is no longer available inside the containers ([#13743](https://github.com/ai-dynamo/dynamo/pull/13743), [#13847](https://github.com/ai-dynamo/dynamo/pull/13847)).
+
+Backend runtime versions, container base images and Helm charts are unchanged from v1.4.1.

@@ -32,6 +32,7 @@ jobs:
       snapshot_sglang: ${{ steps.changes.outputs.snapshot_sglang }}
       snapshot_trtllm: ${{ steps.changes.outputs.snapshot_trtllm }}
       power_agent: ${{ steps.changes.outputs.power_agent }}
+      sidecar: ${{ steps.changes.outputs.sidecar }}
       deploy: ${{ steps.changes.outputs.deploy }}
       dgdr: ${{ steps.changes.outputs.dgdr }}
       vllm: ${{ steps.changes.outputs.vllm }}
@@ -131,6 +132,7 @@ jobs:
       - snapshot-placeholder-sglang
       - snapshot-placeholder-trtllm
       - power-agent
+      - sidecar-build
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -335,6 +337,26 @@ jobs:
           version: 'v3.17.3'  # match deploy/operator/Makefile HELM_VERSION
       - name: Lint and test Helm chart
         run: make -C deploy/helm/charts/power-agent lint test
+
+# ============================================================================
+# Sidecar
+# ============================================================================
+
+  sidecar-build:
+    name: dynamo-sidecar
+    needs: changed-files
+    if: needs.changed-files.outputs.sidecar == 'true'
+    permissions:
+      actions: read
+      contents: read
+    uses: $/.github/workflows/shared-build-sidecar.yml
+    with:
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      artifact_retention_days: '7'
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
 
 # ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -908,6 +930,14 @@ jobs:
     # The frontend process hosts the KV router. Validate the experimental
     # --router-prefill-load-model=aic dependency and native prefill predictor in
     # the shipped frontend image on both architectures.
+    #
+    # This job runs as a GitHub Actions job `container:`, which overrides the
+    # image's own ENTRYPOINT (/epp) to keep the container alive and execs each
+    # step via `docker exec` instead — so /epp never actually starts here. The
+    # "Verify /epp shared library links resolve" step below exists specifically
+    # to catch Dockerfile packaging bugs (e.g. a missing runtime .so that /epp
+    # dynamically links against) that would otherwise only surface once /epp
+    # runs for real as the image's entrypoint in a deployed pod.
     strategy:
       fail-fast: false
       matrix:
@@ -919,6 +949,14 @@ jobs:
         HOME: /home/dynamo
         USER: dynamo
     steps:
+      - name: Verify /epp shared library links resolve
+        run: |
+          echo "Linked libraries for /epp:"
+          ldd /epp
+          if ldd /epp | grep -q "not found"; then
+            echo "::error::One or more shared libraries required by /epp are missing from the frontend image (see ldd output above)"
+            exit 1
+          fi
       - name: Validate router-side AIC in the frontend image
         working-directory: /workspace
         run: python tests/frontend/router_aic_image_smoke.py
@@ -1936,6 +1974,7 @@ jobs:
       - snapshot-placeholder-sglang
       - snapshot-placeholder-trtllm
       - power-agent
+      - sidecar-build
       - planner-test
       - planner-copy-to-acr
       - vllm-copy-to-acr

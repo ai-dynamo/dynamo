@@ -182,6 +182,19 @@ fn unavailable_error_type() -> String {
         .to_string()
 }
 
+/// `error_type` for a genuine 400 that is not a load-shed rejection. Same
+/// reasoning as `unavailable_error_type`: `map_error_code_to_error_type`
+/// checks `code == overload_status_code()` first, and an operator can
+/// configure `DYN_HTTP_OVERLOAD_STATUS_CODE=400`, which would otherwise
+/// label unsupported content "Overloaded" — telling clients to retry a
+/// request that can never succeed.
+fn bad_request_error_type() -> String {
+    StatusCode::BAD_REQUEST
+        .canonical_reason()
+        .expect("400 is IANA-registered")
+        .to_string()
+}
+
 /// `error_type` for a genuine 500 (unhandled panic, bug, misconfiguration)
 /// that is not a load-shed rejection. Same reasoning as `unavailable_error_type`:
 /// `map_error_code_to_error_type` checks `code == overload_status_code()`
@@ -241,8 +254,10 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
             invalid_argument(format!("{CONTEXT}: {message}")).into(),
             CONTEXT,
         ),
-        Some(ResponsesConversionError::NotImplemented(message)) => {
-            ErrorMessage::not_implemented_error(format!("{VALIDATION_PREFIX}{CONTEXT}: {message}"))
+        Some(ResponsesConversionError::UnsupportedContent(message)) => {
+            ErrorMessage::unsupported_content_error(format!(
+                "{VALIDATION_PREFIX}{CONTEXT}: {message}"
+            ))
         }
         None => ErrorMessage::from_anyhow(error, CONTEXT),
     }
@@ -488,6 +503,25 @@ impl ErrorMessage {
                 code: code.as_u16(),
                 details: None,
                 metric_error_type: None,
+            }),
+        )
+    }
+
+    /// Unsupported multimodal content is a client error: no retry can make the
+    /// request succeed, and infrastructure above the frontend counts 5xx as a
+    /// server-side fault. Answered 400 where `not_implemented_error` answers 501.
+    pub fn unsupported_content_error<T: Display>(msg: T) -> ErrorResponse {
+        tracing::debug!("Unsupported Content error: {msg}");
+        let code = StatusCode::BAD_REQUEST;
+        let error_type = bad_request_error_type();
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
+                details: None,
+                metric_error_type: Some(ErrorType::NotImplemented),
             }),
         )
     }
@@ -2245,8 +2279,6 @@ impl BackendErrorInfo {
 fn extract_backend_error_if_present<T: serde::Serialize>(
     event: &Annotated<T>,
 ) -> Option<BackendErrorInfo> {
-    const SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX: &str = "BackendInvalidArgument: ";
-
     #[derive(serde::Deserialize)]
     struct ErrorPayload {
         message: Option<String>,
@@ -2344,30 +2376,6 @@ fn extract_backend_error_if_present<T: serde::Serialize>(
                 status: overload_status_code(),
                 sanitized: Some(SanitizedError::Overloaded),
             });
-        }
-
-        // Some adapter paths encode a typed backend error into the message of
-        // a generic DynamoError. Recover only the exact stable discriminator;
-        // unknown errors without it remain sanitized as 500s.
-        let serialized_invalid_argument = match event.error.as_ref() {
-            Some(error)
-                if matches!(
-                    error.error_type(),
-                    ErrorType::Unknown | ErrorType::Backend(BackendError::Unknown)
-                ) =>
-            {
-                error
-                    .message()
-                    .strip_prefix(SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX)
-            }
-            None => error_str.strip_prefix(SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX),
-            _ => None,
-        };
-        if let Some(message) = serialized_invalid_argument {
-            return Some(BackendErrorInfo::from_status(
-                message.to_string(),
-                StatusCode::BAD_REQUEST,
-            ));
         }
 
         return Some(BackendErrorInfo::from_status(
@@ -7598,6 +7606,21 @@ mod tests {
     #[test]
     fn test_extract_error_type_from_response_not_implemented() {
         let response = ErrorMessage::not_implemented_error("Feature not available");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::NotImplemented
+        );
+    }
+
+    #[test]
+    fn unsupported_content_responses_conversion_errors_are_not_implemented() {
+        let response = responses_conversion_error_response(
+            ResponsesConversionError::UnsupportedContent("feature not available".to_string())
+                .into(),
+        );
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.error_type, "Bad Request");
         assert_eq!(
             extract_error_type_from_response(&response),
             ErrorType::NotImplemented

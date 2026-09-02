@@ -62,8 +62,11 @@ same unified worker lifecycle as the standalone executable.
 ## Deploy on Kubernetes (quick start)
 
 `deploy/agg.yaml` runs an aggregated deployment (a frontend plus one worker pod
-that colocates the sidecar with an SGLang engine). `deploy/disagg.yaml` runs
-disaggregated prefill/decode with NIXL KV transfer.
+that colocates the sidecar with an SGLang engine). `deploy/agg_kv_router.yaml`
+runs two aggregated workers behind Dynamo's KV-aware router.
+`deploy/disagg.yaml` runs disaggregated prefill/decode with NIXL KV transfer;
+`deploy/disagg_kv_router.yaml` expands it to two workers per role and publishes
+KV-cache events for exact routing.
 
 There is no published sidecar image yet, so build and push the image from
 `lib/sidecar/Dockerfile`. It contains all three engine-specific sidecar
@@ -72,15 +75,17 @@ command.
 
 > [!NOTE]
 > The engine image must be a stock SGLang **v0.5.16+** build: the native gRPC
-> server (`--grpc-port`) landed there. The deployment examples use
-> `lmsysorg/sglang:v0.5.17`, matching Dynamo main's SGLang pin.
+> server (`--grpc-port`) landed there. The KV-routing examples require
+> **v0.5.18+** because the sidecar discovers their structured KV-event
+> descriptor through `GetServerInfo`. They use `lmsysorg/sglang:v0.5.18`.
 
 ### Prerequisites
 
 - A Kubernetes cluster (**v1.29+**, or v1.28 with the `SidecarContainers` feature
-  gate) with the Dynamo operator and a GPU node (multiple GPUs plus an RDMA fabric
-  for `disagg.yaml`). The engine runs as a native sidecar (`initContainers` with
-  `restartPolicy: Always`), which requires that version.
+  gate) with the Dynamo operator and a GPU node (two GPUs for
+  `agg_kv_router.yaml`; two or four GPUs plus an RDMA fabric for `disagg.yaml` or
+  `disagg_kv_router.yaml`, respectively). The engine runs as a native sidecar
+  (`initContainers` with `restartPolicy: Always`), which requires that version.
 - `kubectl` set to that cluster, and a namespace to deploy into.
 - A Hugging Face token for the model.
 - A container registry you can push to and the cluster can pull from.
@@ -101,8 +106,9 @@ build. These manifests set the container `command` to
 
 ### 2. Point the manifest at your image
 
-In `deploy/agg.yaml`, set the `main` worker image to the one you just pushed.
-If your registry is private, add `imagePullSecrets` to the worker pod spec.
+In the selected manifest under `deploy/`, set the `main` worker image to the one
+you just pushed. If your registry is private, add `imagePullSecrets` to the
+worker pod spec.
 
 ### 3. Create the Hugging Face token secret
 
@@ -135,8 +141,36 @@ curl -s localhost:8000/v1/chat/completions \
   -d '{"model":"Qwen/Qwen3-0.6B","messages":[{"role":"user","content":"Hello"}],"max_tokens":32}' | jq .
 ```
 
+### KV routing
+
+The KV-routing manifests run multiple workers and configure each SGLang engine
+to publish ZMQ KV-cache events on all pod interfaces. Each sidecar connects to
+the engine over its pod IP and advertises that routable address to the frontend
+for exact KV-aware routing. Restrict the unauthenticated gRPC and ZMQ ports with
+NetworkPolicy.
+
+```bash
+# Aggregated: two workers, two GPUs.
+kubectl apply -f lib/sidecar/sglang/deploy/agg_kv_router.yaml -n <namespace>
+
+# Disaggregated: two prefill + two decode workers, four GPUs and RDMA.
+kubectl apply -f lib/sidecar/sglang/deploy/disagg_kv_router.yaml -n <namespace>
+```
+
+After deploying one of the KV-routing manifests, port-forward its frontend:
+
+```bash
+# Aggregated.
+kubectl port-forward -n <namespace> svc/sglang-sidecar-agg-kv-router-frontend 8000:8000
+
+# Disaggregated.
+kubectl port-forward -n <namespace> svc/sglang-sidecar-disagg-kv-router-frontend 8000:8000
+```
+
 ### Disaggregated
 
 `deploy/disagg.yaml` runs prefill and decode as separate worker pods that hand
 off KV cache over a bootstrap server + NIXL. It needs multiple GPUs and an RDMA
 fabric, and both worker pods must reach `2/2 Running`.
+`deploy/disagg_kv_router.yaml` uses two replicas per role and enables exact KV
+routing from all four event streams.

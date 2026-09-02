@@ -128,7 +128,8 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 				{
 					ComponentName: "epp",
 					ComponentType: v1beta1.ComponentTypeEPP,
-					// The missing EPP config deliberately fails after checkpoint reconciliation.
+					// Invalid legacy Go-EPP config deliberately fails after checkpoint reconciliation.
+					EPPConfig: &v1beta1.EPPConfig{},
 				},
 			},
 		},

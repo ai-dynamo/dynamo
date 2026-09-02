@@ -24,12 +24,20 @@ pub trait Decoder: Clone + Send + 'static {
     fn with_runtime(&self, runtime: Option<&Self>) -> Self;
 
     async fn decode_async(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
+        self.decode_async_with_video_hash(data, false).await
+    }
+
+    async fn decode_async_with_video_hash(
+        &self,
+        data: EncodedMediaData,
+        hash_video: bool,
+    ) -> Result<DecodedMediaData> {
         // light clone (only config params)
         let decoder = self.clone();
         // compute heavy -> rayon
         let result = tokio_rayon::spawn(move || {
             let mut decoded = decoder.decode(data)?;
-            decoded.compute_content_hash();
+            decoded.compute_content_hash(hash_video);
             Ok::<_, anyhow::Error>(decoded)
         })
         .await?;

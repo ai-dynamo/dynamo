@@ -1,6 +1,7 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+sidebar-title: API Reference (K8s)
 ---
 
 > **⚠️ Important**: This documentation is automatically generated from source code.
@@ -443,7 +444,7 @@ _Appears in:_
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
-| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
+| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp".<br />Deprecated: omit this field for the native Rust EPP. Presence of eppConfig<br />keeps the Go EPP Pod contract until migration clears it. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
@@ -488,7 +489,7 @@ _Appears in:_
 | `minAvailable` _integer_ | MinAvailable maps to Grove PodClique minAvailable for single-node and<br />Grove PodCliqueScalingGroup minAvailable for multi-node components.<br />This field determines 1) the minimum number of replicas guaranteed to be<br />gang-scheduled, and 2) when violating minAvailable replicas triggers gang<br />termination.<br />For Grove-backed DynamoGraphDeployment components, minAvailable defaults to<br />1 when omitted and is immutable after creation. Positive replica counts must<br />be greater than or equal to minAvailable. Replicas may be scaled to 0 as a<br />special scale-to-zero state; minAvailable remains configured but is not<br />enforced again until replicas is scaled back to a positive value.<br />For non-Grove deployments, setting this field will result in a validation error. |  | Minimum: 1 <br />Optional: \{\} <br /> |
 | `multinode` _object_ | Multinode is the configuration for multinode components. Standalone DCDs accept only `nodeCount`; `leader` and `worker` are DGD-only provider contexts. |  |  |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed by the DGDSA and external autoscalers scale the service<br />via the Scale subresource; when disabled, replicas are set directly. Opt in with<br />`scalingAdapter: \{enabled: true\}` -- a bare `scalingAdapter: \{\}` is disabled because<br />`enabled` defaults to false. |  | Optional: \{\} <br /> |
-| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp". |  | Optional: \{\} <br /> |
+| `eppConfig` _[EPPConfig](#eppconfig)_ | EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.<br />Only applicable when ComponentType is "epp".<br />Deprecated: omit this field for the native Rust EPP. Presence of eppConfig<br />keeps the Go EPP Pod contract until migration clears it. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _[FrontendSidecarSpec](#frontendsidecarspec)_ | FrontendSidecar configures an auto-generated frontend sidecar container.<br />When specified, the operator injects a fully configured frontend container<br />with all standard Dynamo environment variables, health probes, and ports.<br />This eliminates the need to manually specify these in extraPodSpec.containers. (GAIE) |  | Optional: \{\} <br /> |
 | `checkpoint` _[ServiceCheckpointConfig](#servicecheckpointconfig)_ | Checkpoint configures container checkpointing for this service.<br />When enabled, pods can be restored from a checkpoint files for faster cold start. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | TopologyConstraint for this service. packDomain is required.<br />When both this and spec.topologyConstraint.packDomain are set, packDomain<br />must be narrower than or equal to the spec-level packDomain. |  | Optional: \{\} <br /> |
@@ -805,8 +806,10 @@ _Appears in:_
 
 
 
-EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
-EPP is responsible for intelligent endpoint selection and KV-aware routing.
+EPPConfig contains configuration for the legacy Go EPP (Endpoint Picker Plugin).
+
+Deprecated: Go EPP is deprecated. New EPP components should omit eppConfig and
+use the native Rust EPP. Kept for round-trip and upgrade compatibility.
 
 
 
@@ -1509,6 +1512,8 @@ _Appears in:_
 | `componentName` _string_ | ComponentName is the name of the primary underlying resource.<br />DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.<br />During rolling updates, this reflects the new (target) component name. |  |  |
 | `componentNames` _string array_ | ComponentNames is the list of underlying resource names for this service.<br />During normal operation, this contains a single name.<br />During rolling updates, this contains both old and new component names. |  | Optional: \{\} <br /> |
 | `runtimeNamespace` _string_ | RuntimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers and<br />Grove-backed workers use the base namespace. During rolling updates, worker<br />status keeps the old active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
+| `gpusPerEngine` _integer_ | GPUsPerEngine is the number of GPUs assigned to one inference engine in a<br />service replica, across all of its nodes. Independent auxiliary GPU<br />allocations are excluded. A present zero means the engine itself has no<br />GPUs; consult GPUsPerReplica for auxiliary allocations. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `gpusPerReplica` _integer_ | GPUsPerReplica is the unique GPU allocation added when this service scales<br />by one replica, across all nodes, application and initialization phases,<br />and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod<br />scheduling footprint; shared DRA claims are counted once. A present zero<br />records a successful non-GPU resolution; omission means no current shape<br />is available. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -1819,6 +1824,8 @@ _Appears in:_
 | `componentKind` _[ComponentKind](#componentkind)_ | componentKind is the underlying resource kind (e.g. `PodClique`,<br />`Deployment`, `LeaderWorkerSet`). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
 | `componentNames` _string array_ | componentNames is the list of underlying Kubernetes resource names for<br />this Dynamo component. During normal operation this contains a single<br />name; during rolling updates it contains both old and new resource names. |  | Optional: \{\} <br /> |
 | `runtimeNamespace` _string_ | runtimeNamespace is the effective Dynamo runtime namespace for this<br />component. Worker components may include a generation suffix; non-workers<br />use the base namespace. During rolling updates, worker status keeps the old<br />active revision namespace until cutover completes. |  | Optional: \{\} <br /> |
+| `gpusPerEngine` _integer_ | gpusPerEngine is the number of GPUs assigned to one inference engine in a<br />component replica, across all of its nodes. Independent auxiliary GPU<br />allocations are excluded. A present zero means the engine itself has no<br />GPUs; consult gpusPerReplica for auxiliary allocations. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `gpusPerReplica` _integer_ | gpusPerReplica is the unique GPU allocation added when this component<br />scales by one replica, across all nodes, application and initialization<br />phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective<br />Pod scheduling footprint; shared DRA claims are counted once. A present<br />zero records a successful non-GPU resolution; omission means no current<br />shape is available. |  | Minimum: 0 <br />Optional: \{\} <br /> |
 | `replicas` _integer_ | replicas is the total number of non-terminated replicas. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | updatedReplicas is the number of replicas at the current/desired revision. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | readyReplicas is the number of ready replicas. Populated for<br />`PodClique`, `Deployment`, and `LeaderWorkerSet`; not available for<br />`PodCliqueScalingGroup`. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -1994,7 +2001,7 @@ _Appears in:_
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.<br />Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the<br />`replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the<br />Scale subresource; omit the field to opt out. |  | Optional: \{\} <br /> |
-| `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds EPP-specific configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`. |  | Optional: \{\} <br /> |
+| `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`.<br />Deprecated: omit this field for the native Rust EPP. Presence of<br />`eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config<br />mount) so existing DGDs keep running across operator upgrades until<br />migration is started by clearing this field. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _string_ | frontendSidecar optionally designates a container in<br />`podTemplate.spec.containers` as the frontend sidecar. The value must<br />match the `name` of a container in that list; the operator merges its<br />frontend-sidecar defaults (auto-generated Dynamo env vars, ports,<br />health probes) into that container the same way it merges into `"main"`.<br />The full container definition (image, args, envFrom, env) lives in<br />`podTemplate` -- this eliminates the redundant `image`, `args`,<br />`envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.<br />The validation webhook rejects values that do not match any container<br />name in `podTemplate.spec.containers`. |  | Optional: \{\} <br /> |
 | `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. The operator<br />handles backend-specific mount paths and environment variables, so<br />users do not need to hand-wire them into `podTemplate`. Extracted from<br />v1alpha1's `volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | topologyConstraint applies to this component.<br />`topologyConstraint.packDomain` is required. When both this and<br />`spec.topologyConstraint.packDomain` are set, this field's `packDomain`<br />must be narrower than or equal to the spec-level value. |  | Optional: \{\} <br /> |
@@ -2026,7 +2033,7 @@ _Appears in:_
 | `sharedMemorySize` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ | sharedMemorySize controls the size of the tmpfs mounted at `/dev/shm`.<br />`nil` selects the operator default (8Gi), a positive quantity sets a<br />custom size, and `"0"` disables the shared-memory volume entirely.<br />Simpler replacement for v1alpha1's `SharedMemorySpec` struct with its<br />`disabled bool` + `size Quantity` pattern. |  | Optional: \{\} <br /> |
 | `modelRef` _[ModelReference](#modelreference)_ | modelRef references a model served by this component. When specified,<br />a headless service is created for endpoint discovery. |  | Optional: \{\} <br /> |
 | `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | scalingAdapter opts this component into the DynamoGraphDeploymentScalingAdapter.<br />Setting it (even as an empty object, `scalingAdapter: \{\}`) creates a DGDSA that owns the<br />`replicas` field so that external autoscalers (HPA/KEDA/Planner) can drive scaling via the<br />Scale subresource; omit the field to opt out. |  | Optional: \{\} <br /> |
-| `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds EPP-specific configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`. |  | Optional: \{\} <br /> |
+| `eppConfig` _[EPPConfig](#eppconfig)_ | eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin<br />components. Only meaningful when `type` is `epp`.<br />Deprecated: omit this field for the native Rust EPP. Presence of<br />`eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config<br />mount) so existing DGDs keep running across operator upgrades until<br />migration is started by clearing this field. |  | Optional: \{\} <br /> |
 | `frontendSidecar` _string_ | frontendSidecar optionally designates a container in<br />`podTemplate.spec.containers` as the frontend sidecar. The value must<br />match the `name` of a container in that list; the operator merges its<br />frontend-sidecar defaults (auto-generated Dynamo env vars, ports,<br />health probes) into that container the same way it merges into `"main"`.<br />The full container definition (image, args, envFrom, env) lives in<br />`podTemplate` -- this eliminates the redundant `image`, `args`,<br />`envFromSecret`, and `envs` fields from v1alpha1's `FrontendSidecarSpec`.<br />The validation webhook rejects values that do not match any container<br />name in `podTemplate.spec.containers`. |  | Optional: \{\} <br /> |
 | `compilationCache` _[CompilationCacheConfig](#compilationcacheconfig)_ | compilationCache configures a PVC-backed compilation cache. The operator<br />handles backend-specific mount paths and environment variables, so<br />users do not need to hand-wire them into `podTemplate`. Extracted from<br />v1alpha1's `volumeMount.useAsCompilationCache` flag. |  | Optional: \{\} <br /> |
 | `topologyConstraint` _[TopologyConstraint](#topologyconstraint)_ | topologyConstraint applies to this component.<br />`topologyConstraint.packDomain` is required. When both this and<br />`spec.topologyConstraint.packDomain` are set, this field's `packDomain`<br />must be narrower than or equal to the spec-level value. |  | Optional: \{\} <br /> |
@@ -2295,7 +2302,12 @@ _Appears in:_
 
 
 
-EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
+EPPConfig contains configuration for the legacy Go EPP (Endpoint Picker Plugin).
+
+Deprecated: Go EPP is deprecated. New EPP components should omit `eppConfig`
+and use the native Rust EPP (env-var configuration only). Existing DGDs that
+still set `eppConfig` keep the Go EPP Pod contract until they migrate
+explicitly by clearing `eppConfig` (and updating the image).
 
 
 
@@ -3343,6 +3355,16 @@ _Appears in:_
 | `etcdAddress` _string_ | ETCDAddress is the address of the etcd server |  |  |
 | `modelExpressURL` _string_ | ModelExpressURL is the URL of the Model Express server to inject into all pods |  |  |
 | `prometheusEndpoint` _string_ | PrometheusEndpoint is the URL of the Prometheus endpoint to use for metrics |  |  |
+| `natsTLSCAPath` _string_ | NATSTLSCAPath is the CA certificate path for verifying the NATS server |  |  |
+| `natsTLSClientCertPath` _string_ | NATSTLSClientCertPath is the client certificate path for NATS mTLS |  |  |
+| `natsTLSClientKeyPath` _string_ | NATSTLSClientKeyPath is the client private key path for NATS mTLS |  |  |
+| `tcpTLSCertPath` _string_ | TCPTLSCertPath is the server certificate path for TCP TLS |  |  |
+| `tcpTLSKeyPath` _string_ | TCPTLSKeyPath is the server private key path for TCP TLS |  |  |
+| `tcpTLSCAPath` _string_ | TCPTLSCAPath is the CA certificate path for verifying TCP peers |  |  |
+| `tcpTLSClientCertPath` _string_ | TCPTLSClientCertPath is the client certificate path for TCP mTLS |  |  |
+| `tcpTLSClientKeyPath` _string_ | TCPTLSClientKeyPath is the client private key path for TCP mTLS |  |  |
+| `tcpTLSClientCAPath` _string_ | TCPTLSClientCAPath is the CA certificate path for verifying TCP client certificates (mTLS) |  |  |
+| `tcpTLSServerName` _string_ | TCPTLSServerName overrides the TLS SNI hostname used by TCP clients when<br />verifying the server certificate. Useful when dialing by IP (pod address)<br />to a server whose certificate has a DNS SAN. |  |  |
 
 
 #### IngressConfiguration
