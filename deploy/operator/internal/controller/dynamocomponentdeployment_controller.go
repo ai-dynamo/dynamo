@@ -78,11 +78,15 @@ type DynamoComponentDeploymentReconciler struct {
 	RuntimeConfig         *commonController.RuntimeConfig
 	DockerSecretRetriever DockerSecretRetriever
 	// NodeReader reads Nodes straight from the API server rather than through the
-	// manager's cache. Nodes are cluster-scoped and read once per follower render, so
-	// a cached read would start a cluster-wide Node informer -- which needs a watch
-	// permission no role grants, and would hold every Node in memory for a question
-	// only GB200 elastic EP asks. Same reason TopologyLabelReconciler.NodeReader is
-	// wired this way.
+	// manager's cache. Nodes are cluster-scoped and read once per follower render, so a
+	// cached read would start a cluster-wide Node informer: it would hold every Node in
+	// the cluster in memory to answer a question only GB200 elastic EP asks, and it needs
+	// list and watch, which the manager role does not grant. Those verbs arrive only from
+	// the separate gpu-discovery ClusterRole, and only when GPU discovery is enabled -- so
+	// with it disabled the informer never syncs and the read blocks until the reconcile
+	// context is cancelled. A direct read needs just get, which the manager role already
+	// grants unconditionally. Same reason TopologyLabelReconciler.NodeReader is wired this
+	// way.
 	NodeReader client.Reader
 }
 
