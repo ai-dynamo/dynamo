@@ -25,8 +25,9 @@ use dynamo_kv_router::{
     router_hint::{RouterHint, RouterHintCandidateSource, RouterHintRootCandidates},
     scheduling::{
         AdmissionAttempt, AttemptId, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider,
-        ScheduleMode, ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
-        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
+        RequestClassifier, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
+        WorkerAvailabilityProvider, effective_prefill_tokens,
+        overlap::cache_hit_estimates_from_tiered_matches,
     },
     selector::WorkerInputs,
 };
@@ -883,6 +884,26 @@ where
         registration: dynamo_runtime::discovery::EndpointRegistrationLease,
     ) {
         self.endpoint_registration = Some(registration);
+    }
+
+    /// Attach a request classifier before placing this router into service.
+    // TODO: wire a production installer (Python bindings / router config); hidden until then.
+    #[doc(hidden)]
+    pub fn with_request_classifier(self, classifier: impl RequestClassifier) -> Result<Self> {
+        if !self
+            .scheduler
+            .install_request_classifier(Box::new(classifier), self.cancellation_token.child_token())
+        {
+            anyhow::bail!("request classifier is already configured");
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn begin_request_lifecycle(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<scheduling::RequestLifecycle>, KvSchedulerError> {
+        self.scheduler.begin_request_lifecycle(request_id)
     }
 
     pub(crate) fn set_teardown_task_guard(

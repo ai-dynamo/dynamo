@@ -79,10 +79,68 @@ where
         phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
-        self.select_with_session_affinity(request, phase, is_query_only, |target| {
-            self.select_request(request, phase, is_query_only, target)
-        })
-        .await
+        let mut lifecycle = if is_query_only {
+            None
+        } else {
+            request
+                .migration_state
+                .as_ref()
+                .and_then(|state| state.take_request_lifecycle())
+        };
+        if !is_query_only && lifecycle.is_none() {
+            lifecycle = self
+                .kv_router()
+                .begin_request_lifecycle(request.context().id())
+                .map_err(anyhow::Error::from)?
+                .map(Box::new);
+        }
+
+        let selection = self
+            .select_with_session_affinity(request, phase, is_query_only, |target| {
+                self.select_request(request, phase, is_query_only, target)
+            })
+            .await;
+        let (mut selection, affinity) = match selection {
+            Ok(selection) => selection,
+            Err(error) => {
+                if let Some(mut lifecycle) = lifecycle.take() {
+                    if let Some(classifier_error) = classification_failure(&error) {
+                        // The client only sees the sanitized message below, so this log
+                        // is the operator's sole copy of the original failure.
+                        tracing::error!(
+                            request_id = %request.context().id(),
+                            error = %classifier_error,
+                            "request classifier failed"
+                        );
+                        lifecycle.abort(Some(classifier_abort_error(classifier_error)));
+                        return Err(anyhow::anyhow!(
+                            DynamoError::builder()
+                                .error_type(ErrorType::Unknown)
+                                .message("request classifier failed")
+                                .build()
+                        ));
+                    }
+                    if crate::migration::is_migratable(error.as_ref())
+                        && let Some(state) = request.migration_state.as_ref()
+                    {
+                        lifecycle.prepare_retry();
+                        state.store_request_lifecycle(lifecycle);
+                    } else {
+                        lifecycle.abort(Some(
+                            crate::protocols::common::preprocessor::owned_abort_error(
+                                error.as_ref(),
+                            ),
+                        ));
+                    }
+                }
+                return Err(error);
+            }
+        };
+        if let Some(lifecycle) = lifecycle.as_mut() {
+            lifecycle.selected(selection.worker);
+        }
+        selection.lifecycle = lifecycle;
+        Ok((selection, affinity))
     }
 
     fn route_signals(&self, selection: &WorkerSelection) -> RoutePlanSignals {
@@ -293,9 +351,12 @@ where
         let block_size = chooser.block_size() as usize;
         let selected_worker = selection.worker;
         let mut guard = match cleanup {
-            Some(cleanup) => {
-                RequestGuard::new_kv_with_cleanup(self.request_metrics.clone(), cleanup, request)
-            }
+            Some(cleanup) => RequestGuard::new_kv_with_cleanup(
+                self.request_metrics.clone(),
+                cleanup,
+                request,
+                selection.lifecycle.take(),
+            ),
             None => RequestGuard::new_kv(
                 Arc::clone(chooser),
                 self.request_metrics.clone(),
@@ -303,6 +364,7 @@ where
                 selected_worker,
                 selection.attempt,
                 request,
+                selection.lifecycle.take(),
             ),
         };
 
@@ -382,7 +444,7 @@ where
         .await;
 
         if let Err(error) = record_result {
-            guard.abort().await;
+            guard.abort_with_error(Some(error.as_ref())).await;
             return Err(error);
         }
         Ok(guard)
@@ -470,7 +532,11 @@ where
                     .chain()
                     .find_map(|cause| cause.downcast_ref::<DynamoError>().cloned());
                 guard.record_migration_failure(typed_error);
-                guard.abort().await;
+                if !crate::migration::is_migratable(error.as_ref())
+                    || !guard.release_for_retry().await
+                {
+                    guard.abort_with_error(Some(error.as_ref())).await;
+                }
                 return Err(error);
             }
         };
@@ -540,7 +606,7 @@ where
         let metadata = match prepare(&mut request, selected_target) {
             Ok(metadata) => metadata,
             Err(error) => {
-                guard.abort().await;
+                guard.abort_with_error(Some(error.as_ref())).await;
                 return Err(error);
             }
         };

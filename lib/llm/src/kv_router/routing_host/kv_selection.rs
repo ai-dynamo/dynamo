@@ -39,6 +39,7 @@ pub(super) struct WorkerSelection {
     pub(super) selected_worker_load: Option<AdvisoryWorkerLoad>,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) router_hint: Option<RouterHint>,
+    pub(super) lifecycle: Option<Box<dynamo_kv_router::scheduling::RequestLifecycle>>,
 }
 
 pub(super) enum SelectionOutcome {
@@ -148,6 +149,7 @@ where
                     selected_worker_load: None,
                     routing_hashes,
                     router_hint,
+                    lifecycle: None,
                 })),
                 FindBestMatchOutcome::QueueRejected { rejection } => {
                     Ok(SelectionOutcome::QueueRejected(rejection))
@@ -172,6 +174,7 @@ where
                     selected_worker_load: Some(selected_worker_load),
                     routing_hashes,
                     router_hint: None,
+                    lifecycle: None,
                 })),
                 crate::kv_router::FindBestMatchAdvisoryOutcome::QueueRejected { rejection } => {
                     Ok(SelectionOutcome::QueueRejected(rejection))
