@@ -4026,11 +4026,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
                 for output in res.outputs or []:
-                    index = getattr(output, "index", 0) or 0
-                    total_output_tokens_by_index[
-                        index
-                    ] = total_output_tokens_by_index.get(index, 0) + len(
-                        output.token_ids or []
+                    output_idx = getattr(output, "index", 0) or 0
+                    new_tokens = len(output.token_ids or [])
+                    total_output_tokens_by_index[output_idx] = (
+                        total_output_tokens_by_index.get(output_idx, 0) + new_tokens
                     )
 
                 # A handoff yields exactly one result, so its embedding params are
@@ -4046,7 +4045,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     )
                 )
 
-                output: Dict[str, Any] = {
+                chunk: Dict[str, Any] = {
                     "token_ids": list(token_ids),
                     "disaggregated_params": (
                         None
@@ -4069,10 +4068,10 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 # continuation the router never inspects the stream at all.
                 finish_reason = res.outputs[0].finish_reason if res.outputs else None
                 if prefill_continues and finish_reason:
-                    output["finish_reason"] = normalize_finish_reason(finish_reason)
+                    chunk["finish_reason"] = normalize_finish_reason(finish_reason)
 
                 has_kv_params = res.kv_transfer_params is not None
-                yield output
+                yield chunk
 
             # One line per request. A continuation yields many chunks, so logging
             # inside the loop would repeat this once per token.
