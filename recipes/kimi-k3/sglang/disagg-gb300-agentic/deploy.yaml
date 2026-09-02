@@ -215,7 +215,6 @@ spec:
                   readOnly: true
                 - name: shared-model-cache
                   mountPath: /shared-model-cache
-                  readOnly: true
           volumes:
             - name: sglang-config
               configMap:
@@ -307,7 +306,6 @@ spec:
                   readOnly: true
                 - name: shared-model-cache
                   mountPath: /shared-model-cache
-                  readOnly: true
           volumes:
             - name: sglang-config
               configMap:

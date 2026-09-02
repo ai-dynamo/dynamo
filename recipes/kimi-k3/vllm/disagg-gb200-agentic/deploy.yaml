@@ -226,13 +226,11 @@ spec:
           volumeMounts:
           - name: shared-model-cache
             mountPath: /shared-model-cache
-            readOnly: true
         terminationGracePeriodSeconds: 60
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
 
   - name: DecodeWorker
     type: decode
@@ -389,10 +387,8 @@ spec:
           volumeMounts:
           - name: shared-model-cache
             mountPath: /shared-model-cache
-            readOnly: true
         terminationGracePeriodSeconds: 60
         volumes:
         - name: shared-model-cache
           persistentVolumeClaim:
             claimName: shared-model-cache
-            readOnly: true
