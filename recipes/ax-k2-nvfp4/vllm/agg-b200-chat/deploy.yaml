@@ -25,7 +25,7 @@ spec:
             - name: nvcr-imagepullsecret
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-fp8-ds-mla@sha256:627a6f52b4280acbdd5807997b33bae61827f97ce8944a9204696e1945044118
+              image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-axk2-patches1-4@sha256:d4700ed2346c4766ba9e1c27db215909b58af0151c880828fdc795bd1f629db9
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command:
@@ -89,7 +89,7 @@ spec:
                           - NVIDIA-B200
           containers:
             - name: main
-              image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-fp8-ds-mla@sha256:627a6f52b4280acbdd5807997b33bae61827f97ce8944a9204696e1945044118
+              image: nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-axk2-patches1-4@sha256:d4700ed2346c4766ba9e1c27db215909b58af0151c880828fdc795bd1f629db9
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command:
