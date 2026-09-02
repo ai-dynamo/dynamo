@@ -65,10 +65,14 @@ TEST_PROMPT = "Reply with one short sentence confirming this restored worker can
 DEFAULT_MAX_TOKENS = 24
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = 120
-CHECKPOINT_READY_TIMEOUT = 300
-RESTORE_READY_TIMEOUT = 300
-DECODE_SCALE_TIMEOUT = 180
-DGD_READY_TIMEOUT = 300
+MODEL_READY_MAX_ATTEMPTS = 6
+MODEL_READY_ATTEMPT_TIMEOUT = 10.0
+CHECKPOINT_READY_TIMEOUT = 30
+RESTORE_READY_TIMEOUT = 30
+# Worst case: 750s deployment + 30s checkpoint + 30s restore + 115s model
+# polling/stabilization + 120s inference = 1045s. That leaves 155s of the
+# pytest budget for setup and ManagedDeployment cleanup.
+DEPLOYMENT_READY_TIMEOUT = 750
 TEST_TIMEOUT = 1200
 
 
@@ -105,6 +109,11 @@ CHECKPOINT_BACKENDS = {
             "--gpu-memory-utilization",
             "0.30",
         ),
+        # Avoid cold-worker/restore rollout overlap during initial DGD startup:
+        # without this the automatic capture completes while the cold worker is
+        # still coming up, and the resulting template change rolls the worker
+        # mid-startup. Matches TensorRT-LLM.
+        checkpoint_startup_policy="WaitForCheckpoint",
     ),
     "sglang": CheckpointBackendConfig(
         name="sglang",
@@ -131,6 +140,8 @@ CHECKPOINT_BACKENDS = {
             "--trust-remote-code",
             "--skip-tokenizer-init",
         ),
+        # Same cold-worker/restore rollout race as vLLM; see above.
+        checkpoint_startup_policy="WaitForCheckpoint",
     ),
     "trtllm": CheckpointBackendConfig(
         name="trtllm",
@@ -450,50 +461,9 @@ def _runtime_decode_pods(
     return [pod for pod in pods if not _is_snapshot_job_source(pod)]
 
 
-async def _scale_decode_component(
-    deployment: ManagedDeployment, backend: CheckpointBackendConfig, replicas: int
-) -> None:
-    if deployment._custom_api is None:
-        raise RuntimeError("Kubernetes API not initialized")
-    dgd = await _get_dgd(deployment)
-    components = dgd["spec"]["components"]
-    for component in components:
-        if component.get("name") == backend.decode_component:
-            component["replicas"] = replicas
-            break
-    else:
-        raise AssertionError(f"component {backend.decode_component!r} not found")
-
-    await deployment._custom_api.patch_namespaced_custom_object(
-        group="nvidia.com",
-        version=deployment.deployment_spec.api_version,
-        namespace=deployment.namespace,
-        plural=DGD_PLURAL,
-        name=deployment.deployment_spec.name,
-        body={"spec": {"components": components}},
-        _content_type="application/merge-patch+json",
-    )
-
-
-async def _wait_for_decode_runtime_pod_count(
-    deployment: ManagedDeployment,
-    backend: CheckpointBackendConfig,
-    expected: int,
-    timeout_s: int,
-) -> list[Any]:
-    return await _wait_for(
-        f"{expected} {backend.name} decode runtime pod(s)",
-        lambda: _runtime_decode_pods(deployment, backend),
-        lambda pods: len(pods) == expected,
-        timeout_s=timeout_s,
-        interval_s=2,
-    )
-
-
 async def _wait_for_restored_decode_pod(
     deployment: ManagedDeployment,
     backend: CheckpointBackendConfig,
-    old_pod_names: set[str],
     snapshot_name: str,
 ) -> Any:
     def find_restored() -> Any:
@@ -512,8 +482,6 @@ async def _wait_for_restored_decode_pod(
                     "node": pod.raw.get("spec", {}).get("nodeName"),
                 }
             )
-            if name in old_pod_names:
-                continue
             if annotations.get(RESTORE_FROM_ANNOTATION) != snapshot_name:
                 continue
             restored = _condition(pod.raw, RESTORED_CONDITION)
@@ -532,7 +500,7 @@ async def _wait_for_restored_decode_pod(
         return last_seen
 
     restored = await _wait_for(
-        f"replacement {backend.name} decode pod to restore from checkpoint",
+        f"{backend.name} decode pod to restore from checkpoint",
         find_restored,
         lambda result: not isinstance(result, list),
         timeout_s=RESTORE_READY_TIMEOUT,
@@ -580,7 +548,8 @@ def _assert_inference(base_url: str, endpoint: str, model: str) -> None:
         endpoint=endpoint,
         model=model,
         logger=logger,
-        max_attempts=30,
+        max_attempts=MODEL_READY_MAX_ATTEMPTS,
+        attempt_timeouts=[MODEL_READY_ATTEMPT_TIMEOUT] * MODEL_READY_MAX_ATTEMPTS,
     )
     if not model_ready:
         pytest.fail(f"model {model!r} did not become available", pytrace=False)
@@ -647,6 +616,7 @@ async def test_dgd_checkpoint_restore_deploy(
         deployment_spec=deployment_spec,
         namespace=namespace,
         skip_service_restart=skip_service_restart,
+        readiness_timeout=DEPLOYMENT_READY_TIMEOUT,
     ) as deployment:
         frontend_pods = deployment.get_pods([backend.frontend_component]).get(
             backend.frontend_component, []
@@ -658,36 +628,19 @@ async def test_dgd_checkpoint_restore_deploy(
             pytest.fail("failed to establish frontend port-forward", pytrace=False)
         base_url = f"http://localhost:{port_forward.local_port}"
 
-        logger.info("Validating inference before restore")
-        _assert_inference(base_url, deployment_spec.endpoint, backend.model)
-
         snapshot_name = await _wait_for_checkpoint_ready(deployment, backend)
 
-        old_decode_pods = await _wait_for_decode_runtime_pod_count(
-            deployment,
-            backend=backend,
-            expected=1,
-            timeout_s=DECODE_SCALE_TIMEOUT,
-        )
-        old_pod_names = {pod.name for pod in old_decode_pods}
-        logger.info("Scaling decode down from pods: %s", sorted(old_pod_names))
-        await _scale_decode_component(deployment, backend, replicas=0)
-        await _wait_for_decode_runtime_pod_count(
-            deployment,
-            backend=backend,
-            expected=0,
-            timeout_s=DECODE_SCALE_TIMEOUT,
-        )
-
-        logger.info("Scaling decode back up to trigger restore")
-        await _scale_decode_component(deployment, backend, replicas=1)
+        # Every backend runs WaitForCheckpoint, which holds the decode component
+        # at zero replicas until the automatic capture completes. The first
+        # runtime decode pod is therefore already a restore target, so validating
+        # it here covers the restore path with a single restore per run and
+        # without a cold-worker/restore rollout overlap. Repeated restore cycles
+        # (scale to zero, scale back up) belong in a separate soak test.
         await _wait_for_restored_decode_pod(
             deployment,
             backend=backend,
-            old_pod_names=old_pod_names,
             snapshot_name=snapshot_name,
         )
-        await deployment._wait_for_ready(timeout=DGD_READY_TIMEOUT)
 
-        logger.info("Validating inference after restore")
+        logger.info("Validating inference on the restored worker")
         _assert_inference(base_url, deployment_spec.endpoint, backend.model)

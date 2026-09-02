@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,8 @@ from dynamo.common.snapshot.constants import (
     RESTORE_COMPLETE_FILE,
     SNAPSHOT_COMPLETE_FILE,
     SNAPSHOT_CONTROL_DIR_ENV,
+    SNAPSHOT_RESUME_TIMEOUT_ENV,
+    SNAPSHOT_RESUME_TIMEOUT_SEC,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,6 +176,58 @@ class EngineSnapshotController(Generic[EngineT]):
             *self.pause_args,
         )
 
+    async def resume_after_restore(self, runtime: Any | None = None) -> Any | None:
+        """Resume a Snapshot-restored engine within the configured deadline."""
+        return await elect_and_wake(
+            self.pause_controller,
+            runtime,
+            resume_timeout_sec=_snapshot_resume_timeout_sec(),
+        )
+
+
+def _snapshot_resume_timeout_sec() -> float:
+    """Resolve the post-restore resume deadline. Zero disables it."""
+    raw = os.environ.get(SNAPSHOT_RESUME_TIMEOUT_ENV)
+    if not raw:
+        return SNAPSHOT_RESUME_TIMEOUT_SEC
+    try:
+        timeout = float(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring non-numeric %s=%r; using %ss",
+            SNAPSHOT_RESUME_TIMEOUT_ENV,
+            raw,
+            SNAPSHOT_RESUME_TIMEOUT_SEC,
+        )
+        return SNAPSHOT_RESUME_TIMEOUT_SEC
+    if not math.isfinite(timeout) or timeout < 0:
+        logger.warning(
+            "Ignoring invalid %s=%r; using %ss",
+            SNAPSHOT_RESUME_TIMEOUT_ENV,
+            raw,
+            SNAPSHOT_RESUME_TIMEOUT_SEC,
+        )
+        return SNAPSHOT_RESUME_TIMEOUT_SEC
+    return timeout
+
+
+async def _resume_with_timeout(
+    pause_controller: Any, timeout_sec: float | None
+) -> None:
+    if timeout_sec is None or timeout_sec == 0:
+        await pause_controller.resume()
+        return
+
+    try:
+        await asyncio.wait_for(pause_controller.resume(), timeout=timeout_sec)
+    except asyncio.TimeoutError as error:
+        message = (
+            f"engine resume exceeded {timeout_sec}s; the process will exit so "
+            "Kubernetes can restart the container"
+        )
+        logger.error(message)
+        raise asyncio.TimeoutError(message) from error
+
 
 async def elect_and_wake(
     pause_controller: Any,
@@ -180,6 +235,7 @@ async def elect_and_wake(
     *,
     lock_path: str | None = None,
     failover_metrics: Any = None,
+    resume_timeout_sec: float | None = None,
 ) -> Any | None:
     """Elect a single engine via flock, then wake it.
 
@@ -190,7 +246,8 @@ async def elect_and_wake(
 
     Returns the acquired lock, or None when no election ran. The flock lives on
     the lock's open fd, so callers need not retain it: the kernel releases it
-    when the process exits.
+    when the process exits. ``resume_timeout_sec`` bounds only the engine resume;
+    waiting to acquire the failover lock remains unbounded.
     """
     if lock_path is None:
         lock_path = os.environ.get("FAILOVER_LOCK_PATH")
@@ -220,7 +277,7 @@ async def elect_and_wake(
                 # Only a contended acquire is a failover; a bootup is not a switch.
                 failover_metrics.record_switch_attempt()
 
-    await pause_controller.resume()
+    await _resume_with_timeout(pause_controller, resume_timeout_sec)
     pause_controller.mark_resumed()
     if lock is not None:
         logger.info("[Shadow] Engine awake, registering with discovery")

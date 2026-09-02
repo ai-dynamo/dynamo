@@ -61,15 +61,19 @@ class SGLangEnginePauseController:
             return False
 
         if self._is_paused:
+            logger.info("Starting SGLang memory occupation resume")
             await self._engine.tokenizer_manager.resume_memory_occupation(
                 ResumeMemoryOccupationReqInput(tags=tags),
                 None,
             )
+            logger.info("Completed SGLang memory occupation resume")
         if self._generation_paused:
+            logger.info("Starting SGLang generation resume")
             await self._engine.tokenizer_manager.continue_generation(
                 ContinueGenerationReqInput()
             )
             self._generation_paused = False
+            logger.info("Completed SGLang generation resume")
         return True
 
     def mark_resumed(self) -> None:

@@ -154,9 +154,9 @@ class _SnapshotRuntimeProxy:
             request_plane=config.request_plane,
             event_plane=config.event_plane,
         )
-        from dynamo.common.snapshot.lifecycle import elect_and_wake
-
-        self._failover_lock = await elect_and_wake(pause_controller, self._runtime)
+        self._failover_lock = await snapshot_controller.resume_after_restore(
+            self._runtime
+        )
         logging.info("Dynamo runtime created after TRT-LLM snapshot restore")
 
     def _require_runtime(self) -> Any:
