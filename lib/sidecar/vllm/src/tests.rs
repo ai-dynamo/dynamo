@@ -666,6 +666,31 @@ fn oversized_logprob_counts_are_rejected() {
     assert!(prompt_error.to_string().contains("must fit in i32"));
 }
 
+#[test]
+fn all_logprob_sentinel_selects_all_candidates() {
+    let mut request = request();
+    request.output_options.logprobs = Some(u32::MAX);
+    request.output_options.prompt_logprobs = Some(u32::MAX);
+
+    let response = build_generate_request(
+        request,
+        "all-logprobs".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("all logprobs must be supported")
+    .response
+    .expect("response options");
+
+    assert_eq!(
+        response.output_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::All(true))
+    );
+    assert_eq!(
+        response.prompt_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::All(true))
+    );
+}
+
 struct FakeServer {
     endpoint: String,
     service: FakeVllm,
