@@ -399,13 +399,8 @@ fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdate) -> 
             }
         }
         ModelUpdate::Removed(card) => {
-            // Endpoint availability is process-wide, so a removal may only retract an
-            // endpoint once nothing is left behind it. Emitters do not all pre-filter:
-            // a LoRA adapter card carries its base model's `model_type`, so unloading
-            // one adapter arrives here as a chat-shaped removal while the base model
-            // and its sibling adapters are still registered and serving. Deriving the
-            // retraction from the live catalog instead of from the event makes that
-            // harmless, and makes duplicate or repeated removals idempotent.
+            // Endpoint flags are process-wide and a LoRA adapter card carries its base
+            // model's `model_type`, so only retract units the live catalog has vacated.
             let manager = service.model_manager();
             let vacated = card
                 .model_type
