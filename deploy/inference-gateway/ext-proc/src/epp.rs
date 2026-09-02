@@ -8,6 +8,7 @@
 //! ext_proc server calls these types directly as async Rust.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -119,16 +120,39 @@ pub struct Router {
     served_model: String,
 }
 
-/// Releases a prefill booking if routing fails before the ext-proc server adopts it.
+/// A prefill booking that can be asynchronously released.
 ///
-/// After [`Self::disarm`] transfers the booking into [`Router::prefill_bookings`],
-/// response callbacks own its lifecycle instead.
-struct PrefillReservationGuard {
-    reservation: Option<PrefillReservation>,
+/// Kept monomorphized so the guard and booking map do not allocate a boxed
+/// cleanup closure on the routing path.
+trait PrefillBooking: Send + 'static {
+    fn release(self) -> impl Future<Output = Result<()>> + Send;
+    fn worker_id(&self) -> u64;
+    fn dp_rank(&self) -> u32;
 }
 
-impl PrefillReservationGuard {
-    fn new(reservation: PrefillReservation) -> Self {
+impl PrefillBooking for PrefillReservation {
+    fn release(self) -> impl Future<Output = Result<()>> + Send {
+        async move { PrefillReservation::release(&self).await }
+    }
+
+    fn worker_id(&self) -> u64 {
+        PrefillReservation::worker_id(self)
+    }
+
+    fn dp_rank(&self) -> u32 {
+        PrefillReservation::dp_rank(self)
+    }
+}
+
+/// Releases a prefill booking if routing fails before the ext-proc server adopts it.
+/// After [`Self::disarm`] transfers the booking into [`Router::prefill_bookings`],
+/// response callbacks own its lifecycle instead.
+struct PrefillReservationGuard<R: PrefillBooking = PrefillReservation> {
+    reservation: Option<R>,
+}
+
+impl<R: PrefillBooking> PrefillReservationGuard<R> {
+    fn new(reservation: R) -> Self {
         Self {
             reservation: Some(reservation),
         }
@@ -148,14 +172,14 @@ impl PrefillReservationGuard {
             .dp_rank()
     }
 
-    fn disarm(&mut self) -> PrefillReservation {
+    fn disarm(&mut self) -> R {
         self.reservation
             .take()
             .expect("reservation guard is disarmed once")
     }
 }
 
-impl Drop for PrefillReservationGuard {
+impl<R: PrefillBooking> Drop for PrefillReservationGuard<R> {
     fn drop(&mut self) {
         if let Some(reservation) = self.reservation.take() {
             tokio::spawn(async move {
@@ -167,6 +191,23 @@ impl Drop for PrefillReservationGuard {
     }
 }
 
+/// Remove and release a booking once. Both response lifecycle callbacks use
+/// this helper so terminal completion before first output and duplicate signals
+/// have identical behavior.
+async fn release_prefill_booking<R: PrefillBooking>(
+    prefill_bookings: &DashMap<String, R>,
+    booking_id: &str,
+) {
+    if let Some((_, reservation)) = prefill_bookings.remove(booking_id)
+        && let Err(error) = reservation.release().await
+    {
+        tracing::debug!(
+            reservation_id = booking_id,
+            %error,
+            "Failed to release native EPP prefill reservation"
+        );
+    }
+}
 impl Router {
     /// Initialize the router from discovery.
     ///
@@ -1623,15 +1664,7 @@ impl EndpointPicker for Router {
         if booking_id.is_empty() {
             return;
         }
-        if let Some((_, reservation)) = self.prefill_bookings.remove(booking_id)
-            && let Err(error) = reservation.release().await
-        {
-            tracing::debug!(
-                reservation_id = booking_id,
-                %error,
-                "Failed to release native EPP prefill reservation"
-            );
-        }
+        release_prefill_booking(&self.prefill_bookings, booking_id).await;
         if let Err(e) = self.mark_prefill_complete(booking_id).await {
             tracing::debug!(
                 reservation_id = booking_id,
@@ -1655,15 +1688,7 @@ impl EndpointPicker for Router {
                 "Request complete with usage"
             );
         }
-        if let Some((_, reservation)) = self.prefill_bookings.remove(booking_id)
-            && let Err(error) = reservation.release().await
-        {
-            tracing::debug!(
-                reservation_id = booking_id,
-                %error,
-                "Failed to release native EPP prefill reservation"
-            );
-        }
+        release_prefill_booking(&self.prefill_bookings, booking_id).await;
         if let Err(e) = self.free_request(booking_id).await {
             tracing::debug!(
                 reservation_id = booking_id,
@@ -1678,6 +1703,83 @@ impl EndpointPicker for Router {
 mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::Pod;
+
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct StubPrefillBooking {
+        releases: Arc<AtomicUsize>,
+    }
+
+    impl PrefillBooking for StubPrefillBooking {
+        fn release(self) -> impl Future<Output = Result<()>> + Send {
+            async move {
+                self.releases.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        fn worker_id(&self) -> u64 {
+            0
+        }
+
+        fn dp_rank(&self) -> u32 {
+            0
+        }
+    }
+
+    async fn wait_for_release(releases: &AtomicUsize, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while releases.load(Ordering::SeqCst) != expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("prefill booking release should complete");
+    }
+
+    #[tokio::test]
+    async fn prefill_reservation_guard_releases_only_when_armed() {
+        let releases = Arc::new(AtomicUsize::new(0));
+
+        {
+            let _guard = PrefillReservationGuard::new(StubPrefillBooking {
+                releases: Arc::clone(&releases),
+            });
+        }
+        wait_for_release(&releases, 1).await;
+
+        let mut guard = PrefillReservationGuard::new(StubPrefillBooking {
+            releases: Arc::clone(&releases),
+        });
+        let booking = guard.disarm();
+        drop(guard);
+        tokio::task::yield_now().await;
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        drop(booking);
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn prefill_booking_map_releases_terminal_before_first_output_once() {
+        let releases = Arc::new(AtomicUsize::new(0));
+        let bookings = DashMap::new();
+        bookings.insert(
+            "booking".to_string(),
+            StubPrefillBooking {
+                releases: Arc::clone(&releases),
+            },
+        );
+
+        release_prefill_booking(&bookings, "booking").await;
+        assert!(bookings.is_empty());
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+
+        release_prefill_booking(&bookings, "booking").await;
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn tenant_header_overrides_body_cache_namespace() {

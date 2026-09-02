@@ -568,6 +568,10 @@ mod tests {
             .await
             .unwrap();
         assert!(loads.iter().all(|load| load.potential_prefill_tokens == 0));
+
+        // A terminal callback may arrive after first output already released the
+        // booking; the second release must be an idempotent no-op.
+        reservation.release().await.unwrap();
     }
 
     #[tokio::test]
