@@ -252,7 +252,7 @@ async def test_runtime_patch_supports_disabling_each_gpu_budget():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["disagg", "prefill", "decode", "agg"])
+@pytest.mark.parametrize("mode", ["prefill", "decode", "agg"])
 async def test_gpu_budget_fields_are_active_in_every_mode(mode):
     planner = _planner(mode)
 

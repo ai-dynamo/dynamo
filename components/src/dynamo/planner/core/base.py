@@ -154,6 +154,7 @@ class NativePlannerBase:
         self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
         self._control_api_runner: Optional[aiohttp.web.AppRunner] = None
         self._config_lock = asyncio.Lock()
+        self._effect_admission_lock = asyncio.Lock()
         self._config_generation = 0
         self._effect_submission_task: Optional[asyncio.Task[None]] = None
         self._effect_submission_outcome_unknown: Optional[str] = None
@@ -408,42 +409,46 @@ class NativePlannerBase:
                 + ", ".join(inactive_fields)
             )
 
-        async with self._bounded_config_lock():
-            (
-                prefill_min_endpoint,
-                decode_min_endpoint,
-            ) = self.config.active_min_endpoints()
-            min_gpu_budget = self.config.min_gpu_budget
-            max_gpu_budget = self.config.max_gpu_budget
-            if "prefill_min_endpoint" in updates:
-                prefill_min_endpoint = updates["prefill_min_endpoint"]
-            if "decode_min_endpoint" in updates:
-                decode_min_endpoint = updates["decode_min_endpoint"]
-            if "min_endpoint" in updates:
-                decode_min_endpoint = updates["min_endpoint"]
-            if "min_gpu_budget" in updates:
-                min_gpu_budget = updates["min_gpu_budget"]
-            if "max_gpu_budget" in updates:
-                max_gpu_budget = updates["max_gpu_budget"]
+        # Linearize configuration updates with effect admission. A patch that
+        # wins this lock invalidates the old generation before any remote task
+        # is created; an effect that wins is already admitted before the patch.
+        async with self._effect_admission_lock:
+            async with self._bounded_config_lock():
+                (
+                    prefill_min_endpoint,
+                    decode_min_endpoint,
+                ) = self.config.active_min_endpoints()
+                min_gpu_budget = self.config.min_gpu_budget
+                max_gpu_budget = self.config.max_gpu_budget
+                if "prefill_min_endpoint" in updates:
+                    prefill_min_endpoint = updates["prefill_min_endpoint"]
+                if "decode_min_endpoint" in updates:
+                    decode_min_endpoint = updates["decode_min_endpoint"]
+                if "min_endpoint" in updates:
+                    decode_min_endpoint = updates["min_endpoint"]
+                if "min_gpu_budget" in updates:
+                    min_gpu_budget = updates["min_gpu_budget"]
+                if "max_gpu_budget" in updates:
+                    max_gpu_budget = updates["max_gpu_budget"]
 
-            errors = self._runtime_configuration_errors(
-                prefill_min_endpoint,
-                decode_min_endpoint,
-                min_gpu_budget,
-                max_gpu_budget,
-            )
-            if errors:
-                raise _MinimumEndpointValidationError("; ".join(errors))
+                errors = self._runtime_configuration_errors(
+                    prefill_min_endpoint,
+                    decode_min_endpoint,
+                    min_gpu_budget,
+                    max_gpu_budget,
+                )
+                if errors:
+                    raise _MinimumEndpointValidationError("; ".join(errors))
 
-            before = self._min_endpoint_response()
-            for field, value in updates.items():
-                setattr(self.config, field, value)
-            self._config_generation += 1
-            after = self._min_endpoint_response()
-            logger.info(
-                "Updated planner runtime configuration: %s -> %s", before, after
-            )
-            return after
+                before = self._min_endpoint_response()
+                for field, value in updates.items():
+                    setattr(self.config, field, value)
+                self._config_generation += 1
+                after = self._min_endpoint_response()
+                logger.info(
+                    "Updated planner runtime configuration: %s -> %s", before, after
+                )
+                return after
 
     def _runtime_namespace(self) -> str:
         return self.environment.runtime_namespace()
@@ -672,22 +677,6 @@ class NativePlannerBase:
     async def _apply_effects(self, effects: PlannerEffects) -> None:
         pass
 
-    async def _apply_effects_if_current(
-        self, effects: PlannerEffects, config_generation: int
-    ) -> None:
-        """Submit effects only if their runtime configuration is still current."""
-
-        async with self._config_lock:
-            if config_generation != self._config_generation:
-                logger.info(
-                    "Discarding planner effects computed at runtime config generation "
-                    "%d; current generation is %d",
-                    config_generation,
-                    self._config_generation,
-                )
-                return
-        await self._apply_effects(effects)
-
     def _effect_submission_done(self, task: asyncio.Task[None]) -> None:
         if self._effect_submission_task is not task:
             return
@@ -726,41 +715,56 @@ class NativePlannerBase:
     ) -> None:
         """Submit at most one effect without cancelling an unacknowledged request."""
 
-        if self._effect_submission_outcome_unknown is not None:
-            if not self._effect_submission_hold_logged:
-                logger.error(
-                    "Holding planner effects because a previous submission outcome "
-                    "is unknown; runtime configuration remains available, but "
-                    "automatic submission requires a Planner restart after the "
-                    "deployment state is verified"
-                )
-                self._effect_submission_hold_logged = True
-            return
+        async with self._effect_admission_lock:
+            if self._effect_submission_outcome_unknown is not None:
+                if not self._effect_submission_hold_logged:
+                    logger.error(
+                        "Holding planner effects because a previous submission outcome "
+                        "is unknown; runtime configuration remains available, but "
+                        "automatic submission requires a Planner restart after the "
+                        "deployment state is verified"
+                    )
+                    self._effect_submission_hold_logged = True
+                return
 
-        pending = self._effect_submission_task
-        if pending is not None:
-            if not pending.done():
-                logger.warning(
-                    "Skipping planner effect submission while the previous request "
-                    "is still awaiting acknowledgement"
-                )
-                return
-            if pending.cancelled():
-                self._mark_effect_submission_unknown("submission task was cancelled")
-                return
-            exception = pending.exception()
-            if exception is not None:
-                self._mark_effect_submission_unknown(
-                    f"submission failed: {exception}", exception
-                )
-                return
-            self._effect_submission_task = None
+            pending = self._effect_submission_task
+            if pending is not None:
+                if not pending.done():
+                    logger.warning(
+                        "Skipping planner effect submission while the previous request "
+                        "is still awaiting acknowledgement"
+                    )
+                    return
+                if pending.cancelled():
+                    self._mark_effect_submission_unknown(
+                        "submission task was cancelled"
+                    )
+                    return
+                exception = pending.exception()
+                if exception is not None:
+                    self._mark_effect_submission_unknown(
+                        f"submission failed: {exception}", exception
+                    )
+                    return
+                self._effect_submission_task = None
 
-        task = asyncio.create_task(
-            self._apply_effects_if_current(effects, config_generation)
-        )
-        self._effect_submission_task = task
-        task.add_done_callback(self._effect_submission_done)
+            async with self._config_lock:
+                if config_generation != self._config_generation:
+                    logger.info(
+                        "Discarding planner effects computed at runtime config generation "
+                        "%d; current generation is %d",
+                        config_generation,
+                        self._config_generation,
+                    )
+                    return
+
+                # Creating the remote task is the admission point. PATCH uses
+                # the same outer lock, so no update can linearize between the
+                # generation check and admission.
+                task = asyncio.create_task(self._apply_effects(effects))
+                self._effect_submission_task = task
+                task.add_done_callback(self._effect_submission_done)
+
         try:
             await asyncio.wait_for(
                 asyncio.shield(task), timeout=_EFFECT_SUBMISSION_WAIT_SECONDS

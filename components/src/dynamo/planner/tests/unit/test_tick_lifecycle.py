@@ -203,6 +203,49 @@ async def test_runtime_patch_queued_during_decision_discards_stale_effects():
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(5)
+async def test_effect_admission_linearizes_before_runtime_patch():
+    state = DeploymentState()
+    state.decode.info = WorkerInfo(k8s_name="decode-worker")
+    state.decode.num_gpus = 1
+    environment = MagicMock()
+    environment.deployment_state.return_value = state
+    submitted_effects = []
+
+    class RecordingAggPlanner(AggPlanner):
+        async def _apply_effects(self, effects):
+            submitted_effects.append(effects)
+
+    config = PlannerConfig(
+        mode="agg",
+        namespace="test-namespace",
+        max_gpu_budget=8,
+        metric_reporting_prometheus_port=0,
+        live_dashboard_port=0,
+        report_interval_hours=None,
+    )
+    with patch(
+        "dynamo.planner.core.base.PlannerPrometheusMetrics",
+        return_value=MagicMock(),
+    ):
+        planner = RecordingAggPlanner(None, config, environment)
+
+    effects = PlannerEffects(scale_to=ScalingDecision(num_decode=8))
+    await planner._effect_admission_lock.acquire()
+    submission_task = asyncio.create_task(planner._submit_effects(effects, 0))
+    await asyncio.sleep(0)
+    patch_task = asyncio.create_task(planner.patch_min_endpoints({"max_gpu_budget": 1}))
+    await asyncio.sleep(0)
+    planner._effect_admission_lock.release()
+
+    await submission_task
+    patch_response = await patch_task
+
+    assert submitted_effects == [effects]
+    assert patch_response["max_gpu_budget"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
 async def test_stalled_effect_ack_keeps_runtime_api_available_without_duplicate():
     state = DeploymentState()
     state.decode.info = WorkerInfo(k8s_name="decode-worker")
@@ -358,7 +401,6 @@ async def test_late_submission_error_after_timeout_fails_closed_without_retry(ca
         await pending_submission
     await asyncio.sleep(0)
 
-    # Runtime configuration stays available in the fail-closed state.
     patch_response = await planner.patch_min_endpoints({"max_gpu_budget": 1})
     assert patch_response["max_gpu_budget"] == 1
     assert (await planner.get_min_endpoints())["max_gpu_budget"] == 1
