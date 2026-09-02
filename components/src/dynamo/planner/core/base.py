@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Optional
 
 import aiohttp.web
@@ -21,7 +23,13 @@ from prometheus_client import start_http_server
 
 from dynamo.planner.config.defaults import SubComponentType, TargetReplica
 from dynamo.planner.config.planner_config import PlannerConfig
+from dynamo.planner.control_api import (
+    _MinimumEndpointUnavailableError,
+    _MinimumEndpointValidationError,
+    _start_control_api,
+)
 from dynamo.planner.core import util
+from dynamo.planner.core.budget import minimum_power_footprint_fits
 from dynamo.planner.core.engine_protocol import EngineProtocol
 from dynamo.planner.core.types import (
     EngineCapabilities,
@@ -36,6 +44,7 @@ from dynamo.planner.core.types import (
 )
 from dynamo.planner.environment.interface import PlannerEnvironment
 from dynamo.planner.environment.state import DeploymentState
+from dynamo.planner.errors import DeploymentValidationError, GPUShapeUnavailableError
 from dynamo.planner.monitoring.diagnostics_recorder import DiagnosticsRecorder
 from dynamo.planner.monitoring.live_dashboard import start_live_dashboard
 from dynamo.planner.monitoring.planner_metrics import PlannerPrometheusMetrics
@@ -47,16 +56,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
+_GPU_SHAPE_RETRY_MIN_SECONDS = 0.1
+_GPU_SHAPE_RETRY_MAX_SECONDS = 5.0
+
 
 def _engine_caps(
     worker_info,
     num_gpu: Optional[int],
+    gpu_cost_per_replica: Optional[int],
     power_watts_per_replica: Optional[int] = None,
 ) -> Optional[EngineCapabilities]:
-    if worker_info is None and num_gpu is None and power_watts_per_replica is None:
+    if (
+        worker_info is None
+        and num_gpu is None
+        and gpu_cost_per_replica is None
+        and power_watts_per_replica is None
+    ):
         return None
     return EngineCapabilities(
         num_gpu=num_gpu,
+        gpu_cost_per_replica=gpu_cost_per_replica,
         max_num_batched_tokens=(
             worker_info.max_num_batched_tokens if worker_info else None
         ),
@@ -74,11 +94,13 @@ def build_worker_capabilities(state: DeploymentState) -> WorkerCapabilities:
         prefill=_engine_caps(
             state.prefill.info,
             state.prefill.num_gpus,
+            state.prefill.gpus_per_replica,
             state.prefill.power_watts_per_replica,
         ),
         decode=_engine_caps(
             state.decode.info,
             state.decode.num_gpus,
+            state.decode.gpus_per_replica,
             state.decode.power_watts_per_replica,
         ),
     )
@@ -125,31 +147,245 @@ class NativePlannerBase:
 
         self._recorder = DiagnosticsRecorder(config=config)
         self._dashboard_runner: Optional[aiohttp.web.AppRunner] = None
+        self._control_api_runner: Optional[aiohttp.web.AppRunner] = None
+        self._config_lock = asyncio.Lock()
+        self._diagnostics_finalized = False
+        self._environment_initialized = False
         self._engine: Optional[EngineProtocol] = None
         self._last_worker_counts: Optional[WorkerCounts] = None
 
     async def _async_init(self) -> None:
-        await self.environment.initialize()
+        # Shutdown is safe for a partially initialized environment and is
+        # required if initialize() created subscriptions before failing.
+        self._environment_initialized = True
+        try:
+            await self.environment.initialize()
+            self._validate_min_endpoint_budgets_at_startup()
 
-        await self._bootstrap_regression()
-        await self._bootstrap_engine_plugins_if_needed()
+            await self._bootstrap_regression()
+            await self._bootstrap_engine_plugins_if_needed()
 
-        if self.config.advisory:
-            logger.info(
-                "[ADVISORY] Planner started in advisory mode; "
-                "scaling decisions will be logged but NOT executed."
-            )
-
-        if self.config.live_dashboard_port:
-            try:
-                self._dashboard_runner = await start_live_dashboard(
-                    self._recorder, self.config.live_dashboard_port
+            if self.config.advisory:
+                logger.info(
+                    "[ADVISORY] Planner started in advisory mode; "
+                    "scaling decisions will be logged but NOT executed."
                 )
-            except Exception as exc:
-                logger.error("Failed to start live dashboard: %s", exc)
+
+            if self.config.live_dashboard_port:
+                try:
+                    self._dashboard_runner = await start_live_dashboard(
+                        self._recorder, self.config.live_dashboard_port
+                    )
+                except Exception as exc:
+                    logger.error("Failed to start live dashboard: %s", exc)
+
+            if self.config.control_api_port:
+                try:
+                    self._control_api_runner = await _start_control_api(
+                        self, self.config.control_api_port
+                    )
+                except OSError as exc:
+                    logger.error(
+                        "Failed to start planner runtime configuration API: %s",
+                        exc,
+                    )
+        except BaseException:
+            await self._shutdown_runtime()
+            raise
+
+    async def _shutdown_runtime(self) -> None:
+        """Release initialized planner resources after normal or failed startup."""
+
+        if not self._diagnostics_finalized:
+            self._diagnostics_finalized = True
+            try:
+                self._recorder.finalize()
+            except Exception:
+                logger.exception("Failed to finalize planner diagnostics")
+
+        control_api_runner = self._control_api_runner
+        self._control_api_runner = None
+        if control_api_runner is not None:
+            try:
+                await control_api_runner.cleanup()
+            except Exception:
+                logger.exception("Failed to stop planner runtime configuration API")
+
+        dashboard_runner = self._dashboard_runner
+        self._dashboard_runner = None
+        if dashboard_runner is not None:
+            try:
+                await dashboard_runner.cleanup()
+            except Exception:
+                logger.exception("Failed to stop planner live dashboard")
+
+        engine = self._engine
+        self._engine = None
+        if engine is not None:
+            try:
+                await engine.shutdown()
+            except Exception:
+                logger.exception("Failed to stop planner engine")
+
+        if self._environment_initialized:
+            self._environment_initialized = False
+            try:
+                await self.environment.shutdown()
+            except Exception:
+                logger.exception("Failed to stop planner environment")
 
     def _build_worker_capabilities(self) -> WorkerCapabilities:
         return build_worker_capabilities(self.environment.deployment_state())
+
+    def _minimum_endpoint_budget_errors(
+        self, prefill_min_endpoint: Optional[int], decode_min_endpoint: Optional[int]
+    ) -> list[str]:
+        capabilities = self._build_worker_capabilities()
+        errors: list[str] = []
+
+        required_gpus = 0
+        if prefill_min_endpoint is not None and capabilities.prefill is not None:
+            p_gpu = capabilities.prefill.resolved_gpu_cost_per_replica
+            if p_gpu is not None:
+                required_gpus += prefill_min_endpoint * p_gpu
+        if decode_min_endpoint is not None and capabilities.decode is not None:
+            d_gpu = capabilities.decode.resolved_gpu_cost_per_replica
+            if d_gpu is not None:
+                required_gpus += decode_min_endpoint * d_gpu
+        if (
+            self.config.max_gpu_budget >= 0
+            and required_gpus > self.config.max_gpu_budget
+        ):
+            errors.append(
+                "minimum endpoint footprint requires "
+                f"{required_gpus} GPUs, exceeding max_gpu_budget="
+                f"{self.config.max_gpu_budget}"
+            )
+
+        power_budget = self.config.total_gpu_power_limit
+        if power_budget is not None:
+            p_watts = (
+                capabilities.prefill.power_watts_per_replica
+                if capabilities.prefill is not None
+                else None
+            )
+            d_watts = (
+                capabilities.decode.power_watts_per_replica
+                if capabilities.decode is not None
+                else None
+            )
+            power_known = (prefill_min_endpoint is None or p_watts is not None) and (
+                decode_min_endpoint is None or d_watts is not None
+            )
+            prefill_floor = prefill_min_endpoint or 0
+            decode_floor = decode_min_endpoint or 0
+            if power_known and not minimum_power_footprint_fits(
+                total_budget=power_budget,
+                prefill_min_endpoint=prefill_floor,
+                decode_min_endpoint=decode_floor,
+                p_watts=p_watts,
+                d_watts=d_watts,
+            ):
+                required_watts = prefill_floor * (p_watts or 0) + decode_floor * (
+                    d_watts or 0
+                )
+                errors.append(
+                    "minimum endpoint footprint requires "
+                    f"{required_watts}W, exceeding total_gpu_power_limit="
+                    f"{power_budget}W"
+                )
+        return errors
+
+    def _validate_min_endpoint_budgets_at_startup(self) -> None:
+        errors = self._minimum_endpoint_budget_errors(
+            *self.config.active_min_endpoints()
+        )
+        if errors:
+            raise DeploymentValidationError(errors)
+
+    def _min_endpoint_response(self) -> dict[str, object]:
+        mode = self.config.mode
+        if mode == "agg":
+            return {"mode": mode, "min_endpoint": self.config.min_endpoint}
+        if mode == "prefill":
+            return {
+                "mode": mode,
+                "prefill_min_endpoint": self.config.effective_prefill_min_endpoint,
+            }
+        if mode == "decode":
+            return {
+                "mode": mode,
+                "decode_min_endpoint": self.config.effective_decode_min_endpoint,
+            }
+        return {
+            "mode": mode,
+            "prefill_min_endpoint": self.config.effective_prefill_min_endpoint,
+            "decode_min_endpoint": self.config.effective_decode_min_endpoint,
+        }
+
+    async def get_min_endpoints(self) -> dict[str, object]:
+        """Return the active mode's effective minimum endpoint configuration."""
+
+        async with self._bounded_config_lock():
+            return self._min_endpoint_response()
+
+    @asynccontextmanager
+    async def _bounded_config_lock(self) -> AsyncIterator[None]:
+        """Acquire the tick decision lock or ask the caller to retry."""
+
+        try:
+            await asyncio.wait_for(
+                self._config_lock.acquire(), timeout=_CONFIG_LOCK_TIMEOUT_SECONDS
+            )
+        except TimeoutError:
+            raise _MinimumEndpointUnavailableError(
+                "planner decision in progress; retry the request"
+            ) from None
+        try:
+            yield
+        finally:
+            self._config_lock.release()
+
+    async def patch_min_endpoints(self, updates: dict[str, int]) -> dict[str, object]:
+        """Atomically validate and apply a mode-shaped runtime update."""
+
+        allowed_fields = {
+            "disagg": {"prefill_min_endpoint", "decode_min_endpoint"},
+            "prefill": {"prefill_min_endpoint"},
+            "decode": {"decode_min_endpoint"},
+            "agg": {"min_endpoint"},
+        }[self.config.mode]
+        inactive_fields = sorted(set(updates) - allowed_fields)
+        if inactive_fields:
+            raise _MinimumEndpointValidationError(
+                f"fields are not active in mode='{self.config.mode}': "
+                + ", ".join(inactive_fields)
+            )
+
+        async with self._bounded_config_lock():
+            (
+                prefill_min_endpoint,
+                decode_min_endpoint,
+            ) = self.config.active_min_endpoints()
+            if "prefill_min_endpoint" in updates:
+                prefill_min_endpoint = updates["prefill_min_endpoint"]
+            if "decode_min_endpoint" in updates:
+                decode_min_endpoint = updates["decode_min_endpoint"]
+            if "min_endpoint" in updates:
+                decode_min_endpoint = updates["min_endpoint"]
+
+            errors = self._minimum_endpoint_budget_errors(
+                prefill_min_endpoint, decode_min_endpoint
+            )
+            if errors:
+                raise _MinimumEndpointValidationError("; ".join(errors))
+
+            before = self._min_endpoint_response()
+            for field, value in updates.items():
+                setattr(self.config, field, value)
+            after = self._min_endpoint_response()
+            logger.info("Updated planner minimum endpoints: %s -> %s", before, after)
+            return after
 
     def _runtime_namespace(self) -> str:
         return self.environment.runtime_namespace()
@@ -502,8 +738,8 @@ class NativePlannerBase:
 
         now = tick_input.now_s
         state = self.environment.deployment_state()
-        prefill_gpus = state.prefill.num_gpus or 0
-        decode_gpus = state.decode.num_gpus or 0
+        prefill_gpus = state.prefill.gpus_per_replica or state.prefill.num_gpus or 0
+        decode_gpus = state.decode.gpus_per_replica or state.decode.num_gpus or 0
         if self._last_gpu_hours_update_ts is not None:
             dt_s = max(0.0, now - self._last_gpu_hours_update_ts)
             self._cumulative_gpu_hours += (
@@ -593,7 +829,10 @@ class NativePlannerBase:
         if tick_input.worker_counts is not None:
             self._last_worker_counts = tick_input.worker_counts
 
-        effects = await engine.tick(tick, tick_input)
+        # Runtime floor updates are atomic with decision computation, but the
+        # lock is released before connector rollouts that may take minutes.
+        async with self._config_lock:
+            effects = await engine.tick(tick, tick_input)
         await self._apply_effects(effects)
         emit_diagnostics = self._should_emit_tick_diagnostics(tick, effects)
         if emit_diagnostics:
@@ -620,6 +859,10 @@ class NativePlannerBase:
         engine = self._ensure_engine()
         next_tick = engine.initial_tick(time.time())
         poll_interval = self.config.load_adjustment_interval_seconds / 10
+        gpu_shape_retry_interval = min(
+            max(poll_interval, _GPU_SHAPE_RETRY_MIN_SECONDS),
+            _GPU_SHAPE_RETRY_MAX_SECONDS,
+        )
 
         try:
             while True:
@@ -628,11 +871,14 @@ class NativePlannerBase:
                     await asyncio.sleep(min(next_tick.at_s - now, poll_interval))
                     continue
 
-                next_tick = await self._run_one_tick(engine, next_tick)
+                try:
+                    next_tick = await self._run_one_tick(engine, next_tick)
+                except GPUShapeUnavailableError as exc:
+                    logger.warning(
+                        "Skipping planner tick until the operator publishes a current GPU shape: %s; retrying in %.1fs",
+                        exc,
+                        gpu_shape_retry_interval,
+                    )
+                    await asyncio.sleep(gpu_shape_retry_interval)
         finally:
-            self._recorder.finalize()
-            await self.environment.shutdown()
-            if self._dashboard_runner is not None:
-                await self._dashboard_runner.cleanup()
-            if self._engine is not None:
-                await self._engine.shutdown()
+            await self._shutdown_runtime()

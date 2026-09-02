@@ -73,12 +73,17 @@ type workloadProgram interface {
 }
 
 func (r *DynamoGraphDeploymentReconciler) selectWorkloadProgram(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) workloadProgram {
-	if r.isGrovePathway(dgd) {
-		return r.newGroveProgram()
+	provider workloadProvider,
+) (workloadProgram, error) {
+	// Dispatch each durable provider value to its complete workload program.
+	switch provider {
+	case workloadProviderGrove:
+		return r.newGroveProgram(), nil
+	case workloadProviderComponent:
+		return r.newComponentProgram(), nil
+	default:
+		return nil, fmt.Errorf("unsupported workload provider %q", provider)
 	}
-	return r.newComponentProgram()
 }
 
 func newWorkloadProgramResult(

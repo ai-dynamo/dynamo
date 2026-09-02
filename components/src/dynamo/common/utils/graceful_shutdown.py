@@ -71,6 +71,7 @@ async def graceful_shutdown_with_discovery(
     shutdown_event: Optional[asyncio.Event] = None,
     grace_period_s: Optional[float] = None,
     drain_callback: Optional[Callable[[], Coroutine]] = None,
+    pre_shutdown_callback: Optional[Callable[[], Coroutine]] = None,
     cleanup_callback: Optional[Callable[[], Coroutine]] = None,
 ) -> None:
     """Perform graceful shutdown with endpoint unregistration and optional drain.
@@ -87,6 +88,9 @@ async def graceful_shutdown_with_discovery(
             from segfaulting due to use-after-free on freed GPU memory (#7319).
             Failures derived from Exception are logged and swallowed so shutdown
             proceeds. asyncio.CancelledError propagates and stops shutdown.
+        pre_shutdown_callback: Optional async callable awaited after drain_callback
+            but before shutdown_event is set. Use it for lease-owned control records
+            that must disappear before engine teardown begins.
         cleanup_callback: Optional async callable awaited after drain_callback
             but *before* runtime.shutdown(). Use this when engine resources must
             be released before the runtime tears down. Failures derived from
@@ -126,6 +130,22 @@ async def graceful_shutdown_with_discovery(
                 "Drain callback raised an exception; proceeding with shutdown"
             )
 
+    if pre_shutdown_callback is not None:
+        logger.info("Withdrawing worker lifecycle records before engine shutdown")
+        try:
+            await asyncio.wait_for(
+                pre_shutdown_callback(), timeout=_DEFAULT_CLEANUP_TIMEOUT_SECS
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Pre-shutdown callback timed out after %.0fs, proceeding with shutdown",
+                _DEFAULT_CLEANUP_TIMEOUT_SECS,
+            )
+        except Exception:
+            logger.exception(
+                "Pre-shutdown callback raised an exception; proceeding with shutdown"
+            )
+
     if shutdown_event is not None:
         shutdown_event.set()
 
@@ -156,6 +176,7 @@ def install_signal_handlers(
     shutdown_event: Optional[asyncio.Event] = None,
     grace_period_s: Optional[float] = None,
     drain_callback: Optional[Callable[[], Coroutine]] = None,
+    pre_shutdown_callback: Optional[Callable[[], Coroutine]] = None,
     cleanup_callback: Optional[Callable[[], Coroutine]] = None,
 ) -> None:
     shutdown_task: Optional[asyncio.Task[None]] = None
@@ -185,6 +206,7 @@ def install_signal_handlers(
                 shutdown_event=shutdown_event,
                 grace_period_s=grace_period_s,
                 drain_callback=drain_callback,
+                pre_shutdown_callback=pre_shutdown_callback,
                 cleanup_callback=cleanup_callback,
             )
         )

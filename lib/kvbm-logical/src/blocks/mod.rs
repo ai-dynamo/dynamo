@@ -28,9 +28,9 @@
 //! - [`ImmutableBlock`] — `Registered` state (cheap-to-clone strong handle).
 //! - [`WeakBlock`] — non-owning reference to a registered block.
 //!
-//! Slot bookkeeping lives in [`BlockStore<T>`](crate::pools::BlockStore);
+//! Slot bookkeeping lives in `BlockStore<T>` (`crate::pools::BlockStore`);
 //! `Primary` vs `Duplicate` is captured by an internal flag on
-//! [`ImmutableBlockInner`] and the corresponding slot state.
+//! `ImmutableBlockInner` and the corresponding slot state.
 
 mod complete;
 mod immutable;

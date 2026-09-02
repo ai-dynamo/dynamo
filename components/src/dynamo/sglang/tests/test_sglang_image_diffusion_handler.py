@@ -239,6 +239,13 @@ class TestImageDiffusionWorkerHandler:
         async for result in handler.generate(request, mock_context):
             results.append(result)
 
+        assert (
+            handler.generator.generate.call_args.kwargs["sampling_params_kwargs"][
+                "num_inference_steps"
+            ]
+            == 50
+        )
+
     @pytest.mark.asyncio
     async def test_generate_error_propagates(self, handler, mock_context):
         """Generation failures must raise, not be swallowed.

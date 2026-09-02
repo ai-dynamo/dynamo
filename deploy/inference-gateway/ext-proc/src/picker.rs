@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Defines the `EndpointPicker` trait and its associated types (`Endpoint`,
-//! `RequestInfo`, `PickResult`, `PickError`). This mirrors the Go LW-EPP's
-//! `EndpointPicker` interface from GAIE #2834. The ext_proc server is generic
+//! `RequestInfo`, `PickResult`, `PickError`). The ext_proc server is generic
 //! over this trait — it handles the Envoy protocol, the picker handles the
 //! routing decision.
 
@@ -11,8 +10,7 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 
-/// Endpoint represents a model server pod endpoint available for serving requests.
-/// Mirrors Go `epplight.Endpoint` in pkg/lwepp/datastore/datastore.go
+/// A model server pod endpoint available for serving requests.
 #[derive(Debug, Clone)]
 pub struct Endpoint {
     /// Pod name
@@ -32,8 +30,7 @@ impl Endpoint {
     }
 }
 
-/// RequestInfo contains metadata about the incoming HTTP request.
-/// Mirrors Go `epplight.RequestInfo`.
+/// Metadata about the incoming HTTP request.
 #[derive(Debug, Clone)]
 pub struct RequestInfo {
     /// Unique request ID (from `x-request-id` header or generated UUID).
@@ -52,9 +49,8 @@ pub struct RequestInfo {
     pub candidate_subset: Vec<String>,
 }
 
-/// PickResult contains the endpoint selection result.
-/// Mirrors Go `epplight.PickResult`, extended with Dynamo-specific
-/// routing headers that the backend workers need.
+/// The endpoint selection result, with the Dynamo-specific routing headers
+/// the backend workers need.
 #[derive(Debug, Clone, Default)]
 pub struct PickResult {
     /// Primary endpoint in "ip:port" format
@@ -66,7 +62,7 @@ pub struct PickResult {
     pub headers: Vec<(String, String)>,
     /// Pre-computed token IDs from the picker's tokenization.
     /// Injected into the request body as `nvext.token_data` so the backend
-    /// skips redundant tokenization. Mirrors Go EPP's `setTokenizedPrompt`.
+    /// skips redundant tokenization.
     pub token_ids: Option<Vec<u32>>,
     /// Booking id the picker recorded for this request's load reservation, if
     /// any. The server carries it on the per-stream context and hands it back to
@@ -76,8 +72,7 @@ pub struct PickResult {
     pub reservation_id: Option<String>,
 }
 
-/// EndpointPicker is the central abstraction for endpoint selection.
-/// Mirrors Go `epplight.EndpointPicker` interface.
+/// The central abstraction for endpoint selection.
 ///
 /// Implementations receive request metadata and a list of available endpoints,
 /// and return the chosen endpoint(s). The ext_proc server handles all Envoy
@@ -93,13 +88,12 @@ pub trait EndpointPicker: Send + Sync + 'static {
     /// Called when the first response body arrives from the backend, signalling
     /// prefill is done and decode has started. `booking_id` is the
     /// [`PickResult::reservation_id`] this request returned, or its request id if
-    /// the picker booked nothing. Mirrors Go EPP's PostResponse → MarkPrefillComplete.
+    /// the picker booked nothing.
     async fn on_prefill_complete(&self, _booking_id: &str) {}
 
     /// Called when a request's response is fully complete (end-of-stream on the
     /// response body or trailers). Lets the picker free bookkeeping state.
-    /// `booking_id` is as in [`Self::on_prefill_complete`]. Mirrors Go EPP's
-    /// PostResponse → FreeRequest. Prefer
+    /// `booking_id` is as in [`Self::on_prefill_complete`]. Prefer
     /// [`Self::on_request_complete_with_usage`] when usage is needed.
     async fn on_request_complete(&self, _booking_id: &str) {}
 

@@ -9,6 +9,8 @@ import os
 import uuid
 from typing import Any, Literal
 
+from dynamo.llm.exceptions import HttpError
+
 _MASK_64_BITS = (1 << 64) - 1
 
 
@@ -179,6 +181,67 @@ def make_internal_error(request_id: str, detail: str | None = None) -> dict[str,
             "type": "internal_error",
         }
     }
+
+
+def as_error_envelope(error_payload: dict[str, Any]) -> dict[str, Any]:
+    """Tag an error dict so the binding reads it as an error frame.
+
+    Without ``_dynamo_annotated`` the binding reads the dict as a completion
+    chunk and fails with ``missing field `id```. The client then gets a 500 and
+    never sees the message. The HTTP layer reads the text back off ``comment``.
+    See ``depythonize_annotated`` in ``lib/bindings/python/rust/engine.rs``.
+    """
+    message = (error_payload.get("error") or {}).get("message") or "unknown error"
+    return {"_dynamo_annotated": True, "event": "error", "comment": [message]}
+
+
+_SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX = "BackendInvalidArgument: "
+
+
+def backend_invalid_argument_to_http_error(exc: BaseException) -> HttpError | None:
+    """Recover a worker's own HTTP status from a serialized backend error.
+
+    A worker that rejects a request -- an unsupported sampling parameter, an
+    unparseable grammar -- fails it with ``{"message": ..., "code": 4xx}``.
+    Crossing the Rust boundary turns that into a plain Python exception whose
+    text is ``BackendInvalidArgument: {json}``, so a generic ``except
+    Exception`` reports a 500 and discards both the status and the reason.
+
+    Rust's HTTP service already performs this recovery
+    (``extract_backend_error_if_present`` in
+    ``lib/llm/src/http/service/openai.rs``), but the Python chat processors do
+    not go through it, so they need their own. Mirror its status rules: honour
+    an explicit code, and otherwise fall back to 400 -- the prefix itself is
+    the discriminator proving the argument was invalid.
+
+    Returns None when ``exc`` is not that shape, so callers fall through to
+    their existing handling instead of inventing a status.
+    """
+    # Not ``removeprefix``: adapter paths wrap the error in an outer
+    # ``<ErrorType>: `` before it reaches Python, so the discriminator is not
+    # always at position 0.
+    _, prefix, payload = str(exc).partition(_SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX)
+    if not prefix:
+        return None
+
+    try:
+        parsed = json.loads(payload)
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        # Prefix but no payload: still an invalid argument, just unstructured.
+        return HttpError(400, payload)
+
+    code = parsed.get("code")
+    if isinstance(code, bool) or not isinstance(code, int):
+        code = 400
+    elif not 100 <= code < 600:
+        # Rust degrades an out-of-range code to a 500, which is exactly what
+        # the caller's existing handler already produces -- defer to it.
+        return None
+
+    message = parsed.get("message")
+    return HttpError(code, message if isinstance(message, str) else payload)
 
 
 def handle_engine_error(

@@ -416,7 +416,9 @@ async fn consume_scope(
                             ).await;
                         }
                     }
-                    Ok(DiscoveryEvent::Added(_)) | Ok(DiscoveryEvent::Removed(_)) => {}
+                    Ok(DiscoveryEvent::Added(_))
+                    | Ok(DiscoveryEvent::ModelTaintsUpdated(_))
+                    | Ok(DiscoveryEvent::Removed(_)) => {}
                     Err(error) => {
                         tracing::error!(%error, %kv_state_endpoint, "Direct-ZMQ event-channel discovery failed");
                         break;

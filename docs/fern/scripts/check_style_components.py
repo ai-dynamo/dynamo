@@ -30,6 +30,13 @@ this applies the same rule to the components that hold CSS directly.
 
 Usage: python3 check_style_components.py [files...]
 With no arguments, checks every docs/fern/components/*Styles.tsx.
+
+Coverage stops at *Styles.tsx rather than every components/*.tsx because
+roughly twenty components hold a CSS literal and three of them
+(ModelEABuildCards, TagLookup, TerminalDemo) interpolate into it deliberately,
+which this check reads as a defect. Widening it properly needs a way to mark
+those as intentional. Until then, a component with its own CSS should keep it
+in a *Styles.tsx file, as PublicationsStyles.tsx does.
 """
 
 from __future__ import annotations

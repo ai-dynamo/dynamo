@@ -40,7 +40,10 @@ def _aic_replay_args(backend_name: str):
     payload = {
         "block_size": 512,
         "enable_prefix_caching": True,
-        "enable_chunked_prefill": False,
+        # The SGLang simulator only models chunked-prefill-enabled scheduling.
+        # The chunk size below exceeds every request in this test, so enabling
+        # it satisfies that contract without changing the static-point workload.
+        "enable_chunked_prefill": backend_name == "sglang",
         "max_num_seqs": 16,
         "max_num_batched_tokens": 65536,
         "num_gpu_blocks": 100000,
@@ -72,7 +75,9 @@ def _aic_disagg_replay_args(
     payload = {
         "block_size": 512,
         "enable_prefix_caching": False,
-        "enable_chunked_prefill": False,
+        # SGLang requires chunked prefill.  The configured chunk size is larger
+        # than this test's prefill, so this does not split a request into chunks.
+        "enable_chunked_prefill": backend_name == "sglang",
         "max_num_seqs": max_num_seqs,
         "max_num_batched_tokens": max_num_batched_tokens,
         "num_gpu_blocks": 50000,

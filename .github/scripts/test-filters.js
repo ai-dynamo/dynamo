@@ -12,6 +12,7 @@
  *
  * This validates that tj-actions/changed-files will correctly:
  * - Match backend-specific files to their respective filters (vllm, sglang, trtllm)
+ * - Route docs-artifact tests to recipe-check without core E2E checks
  * - Route sidecar files to sidecar/Rust checks without backend or core E2E checks
  * - Exclude doc files (*.md, *.rst, *.txt) from core via negation patterns
  * - Match CI/infrastructure changes to core
@@ -89,6 +90,26 @@ const testCases = [
     desc: 'trtllm script triggers only trtllm'
   },
   {
+    file: 'recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml',
+    expect: { core: false, examples: true },
+    desc: 'recipe matrix dotfile triggers recipe check without core'
+  },
+  {
+    file: 'scripts/kustomize-matrix.py',
+    expect: { core: false, examples: true },
+    desc: 'recipe generator triggers recipe check without core'
+  },
+  {
+    file: 'tests/test_kustomize_matrix.py',
+    expect: { core: false, examples: true },
+    desc: 'recipe generator test triggers recipe check without core'
+  },
+  {
+    file: 'docs/tests/nested/__ci_filter_probe__',
+    expect: { core: false, docs: true, examples: true },
+    desc: 'any docs/tests descendant triggers recipe check without core'
+  },
+  {
     file: 'components/src/dynamo/vllm/worker.py',
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
@@ -122,8 +143,18 @@ const testCases = [
   },
   {
     file: 'lib/sidecar/README.md',
-    expect: { sidecar: true, rust: false, core: false, frontend: false, docs: false, vllm: false, sglang: false, trtllm: false },
-    desc: 'sidecar README avoids Rust, Fern, and E2E checks'
+    expect: { sidecar: false, ignore: true, rust: false, core: false, frontend: false, docs: false, vllm: false, sglang: false, trtllm: false },
+    desc: 'sidecar README is classification-only and triggers no build'
+  },
+  {
+    file: '.github/workflows/shared-build-sidecar.yml',
+    expect: { sidecar: true },
+    desc: 'sidecar workflow triggers its own job'
+  },
+  {
+    file: 'container/compliance/policy/licenses.toml',
+    expect: { sidecar: true },
+    desc: 'compliance policy changes validate the sidecar image gate'
   },
 
   // Doc files should be excluded from core (negation patterns)

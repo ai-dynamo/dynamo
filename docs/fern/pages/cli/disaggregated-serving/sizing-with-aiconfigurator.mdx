@@ -11,16 +11,17 @@ parallelism (PP), and the number of worker replicas to validate.
 
 AIConfigurator is an analytical performance model and configuration optimizer. It does not start a
 Dynamo frontend, simulate request-by-request scheduler or KV-cache behavior, or benchmark a live
-endpoint. Use [Mocker Live Simulation](../operations/simulation-with-dynosim/mocker-live-simulation.mdx) for a live GPU-free deployment,
-[DynoSim Replay](../operations/simulation-with-dynosim/dynosim-replay.mdx) for request-level offline simulation, and
+endpoint. The direct online Mocker CLI is temporarily unavailable. Use
+[DynoSim Replay](../operations/simulation-with-dynosim/dynosim-replay.mdx) for request-level offline simulation and
 [Benchmarking with AIPerf](../operations/benchmarking-with-aiperf.mdx) for measurements against the running local endpoint.
 
 ## Prerequisites
 
-Install AIConfigurator in the environment where you run the sizing command:
+Use Python 3.11 through 3.13. Install AISimulate, which provides the retained `aiconfigurator`
+sizing command:
 
 ```bash
-pip install aiconfigurator
+python3 -m pip install "aisimulate==0.1.0.dev2"
 ```
 
 Collect:
@@ -87,9 +88,8 @@ for [vLLM](../../recipes/cli-templates/vllm.mdx),
 [SGLang](../../recipes/cli-templates/sglang.mdx), and
 [TensorRT-LLM](../../recipes/cli-templates/tensorrt-llm.mdx).
 
-If one worker requires more GPUs than a node provides, follow
-[Multi-Node Deployment](../model-deployment/multi-node-deployment.mdx) rather than treating the GPU budget as one flat
-local device list.
+If one worker requires more GPUs than a node provides, use a
+[Kubernetes multinode deployment](../../kubernetes/installation/multinode-orchestration.md) instead of treating the GPU budget as one flat local device list.
 
 </Step>
 <Step title="Validate the recommendation" id="validate-the-recommendation">

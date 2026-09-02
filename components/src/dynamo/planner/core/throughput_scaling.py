@@ -14,6 +14,7 @@ import logging
 import math
 from typing import Optional
 
+from dynamo.planner.config.planner_config import resolve_min_endpoint
 from dynamo.planner.core.types import ScalingDecision
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,10 @@ class ThroughputScalingMixin:
         self._diag_engine_rps_prefill = engine_rps
         self._diag_engine_rps_decode = engine_rps
 
-        desired = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
+        desired = max(
+            math.ceil(demand_rps / engine_rps),
+            resolve_min_endpoint(self._config, "decode"),
+        )
         logger.info(
             f"Agg: {demand_rps:.2f} rps / {engine_rps:.2f} engine_rps = {desired} replicas"
         )
@@ -188,7 +192,10 @@ class ThroughputScalingMixin:
 
         self._diag_engine_rps_prefill = engine_rps
 
-        result = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
+        result = max(
+            math.ceil(demand_rps / engine_rps),
+            resolve_min_endpoint(self._config, "prefill"),
+        )
         logger.info(
             f"Prefill: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, "
             f"est_ttft={ttft_ms:.1f}ms, isl_raw={isl:.1f}, "
@@ -219,7 +226,10 @@ class ThroughputScalingMixin:
 
         self._diag_engine_rps_decode = engine_rps
 
-        result = max(math.ceil(demand_rps / engine_rps), self._config.min_endpoint)
+        result = max(
+            math.ceil(demand_rps / engine_rps),
+            resolve_min_endpoint(self._config, "decode"),
+        )
         logger.info(
             f"Decode: {demand_rps:.2f} rps / {engine_rps:.2f} = {result}, "
             f"est_itl={itl_ms:.1f}ms, accept_length={accept_length:.2f}"

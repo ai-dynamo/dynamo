@@ -82,7 +82,8 @@ for the complete flag, environment-variable, and validation reference.
 <Step title="Adjust thresholds at runtime">
 
 Optional. Use the Frontend admin API to change thresholds for a discovered model without redeploying.
-The API is available when `DYN_ENABLE_FRONTEND_ADMIN_API=true`, which is the default.
+The API is available by default. Set `DYN_DISABLE_FRONTEND_ADMIN_API` to a truthy value to turn it
+off, which unregisters both `busy_threshold` routes so they return 404.
 
 ```bash
 kubectl port-forward svc/<deployment-name>-frontend 8000:8000 -n ${NAMESPACE}

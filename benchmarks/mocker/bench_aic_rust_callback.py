@@ -14,7 +14,7 @@ removed fallback, use ``bench_aic_concurrency.py`` (it drives the Python
 
 Measures the end-to-end speedup of replacing the per-predict GIL + pyo3
 round-trip (``PyAicCallback``) with the pure-Rust ``RustAicCallback`` that wraps
-``aiconfigurator_core::AicEngine``.
+``aisimulate_core::AicEngine``.
 
 Both paths run the SAME Rust latency math (post aiconfigurator #1200, where the
 Python ``AicSession`` already dispatches to the compiled Rust engine). The only
@@ -44,9 +44,9 @@ Two things are reported per workload:
   2. SPEEDUP — median wall-clock ratio (python / rust) over ``--repeat`` runs.
 
 Run:  python benchmarks/mocker/bench_aic_rust_callback.py
-Requires: aiconfigurator-core installed with loadable systems/perf data for the
-model/system/backend tuple, and the bindings built with the ``aic-forward-pass``
-feature.
+Requires: AISimulate installed with loadable systems/perf data for the
+model/system/backend tuple (it provides the ``aiconfigurator_core`` compatibility
+namespace), and the bindings built with the ``aic-forward-pass`` feature.
 """
 
 import argparse

@@ -15,10 +15,14 @@ from typing import Any, Dict, Generator, Optional
 
 import yaml
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    parse_worker_router_config,
+    register_worker_router_help,
+)
 from dynamo.common.configuration.groups.runtime_args import DynamoRuntimeArgGroup
 from dynamo.common.configuration.utils import split_served_model_names
 from dynamo.common.constants import DisaggregationMode
@@ -29,7 +33,11 @@ from dynamo.common.snapshot.lifecycle import (
 )
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang._compat import ensure_sglang_tensor_image_size
+from dynamo.sglang._compat import (
+    ConfigArgumentMerger,
+    ensure_sglang_tensor_image_size,
+    resolved_server_args,
+)
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
@@ -41,7 +49,13 @@ class DynamoConfig(DynamoRuntimeConfig, DynamoSGLangConfig):
 
     component: str
     diffusion_worker: bool = False
+    # Whether this worker publishes KV events. Distinct from the router-side
+    # `use_kv_events` on `router_advertisement`, which means the router
+    # subscribes to them -- the reason the two live on separate objects.
     use_kv_events: bool = False
+    # Routing this worker set advertises in its model card; None inherits the
+    # frontend's configuration.
+    router_advertisement: Optional[WorkerRouterConfig] = None
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
@@ -65,6 +79,32 @@ class Config:
             return DisaggregationMode.DECODE
         else:
             return DisaggregationMode.AGGREGATED
+
+    def use_resolved_server_args(self, server_args: Any) -> Any:
+        """Switch post-runtime Dynamo code to SGLang's resolved configuration."""
+        self.server_args = resolved_server_args(server_args)
+        return self.server_args
+
+
+def _diffusion_generator_kwargs(server_args: Any) -> dict[str, Any]:
+    """Translate Dynamo's SGLang config into DiffGenerator arguments."""
+    tp_size = getattr(server_args, "tp_size", 1)
+    dp_size = getattr(server_args, "dp_size", 1)
+    kwargs = {
+        "model_path": server_args.model_path,
+        "num_gpus": tp_size * dp_size,
+        "tp_size": tp_size,
+        "dp_size": dp_size,
+        "dist_timeout": getattr(server_args, "dist_timeout", None),
+    }
+
+    # The text-engine CLI names this --nccl-port; DiffGenerator v0.5.15+
+    # names the same torch.distributed rendezvous setting ``master_port``.
+    # Omit it when unset so SGLang retains its own default/settling behavior.
+    if (master_port := getattr(server_args, "nccl_port", None)) is not None:
+        kwargs["master_port"] = master_port
+
+    return kwargs
 
 
 def _unsupported_fpm_trace_role(dynamo_config: DynamoConfig) -> Optional[str]:
@@ -345,13 +385,21 @@ async def parse_args(args: list[str]) -> Config:
             continue
         sg._group_actions.append(action)
 
+    # Router advertisement flags are parsed into their own config object rather
+    # than flattened onto DynamoConfig: the router's --router-kv-events lands on
+    # `use_kv_events`, which DynamoConfig already uses for "this worker
+    # publishes KV events". Registered here for --help only; parsed below.
+    register_worker_router_help(parser)
+
     dynamo_args, unknown = parser.parse_known_args(args)
 
     dynamo_config = DynamoConfig.from_cli_args(dynamo_args)
+    # Consume the router flags before the SGLang parser sees the remainder.
+    dynamo_config.router_advertisement, unknown = parse_worker_router_config(unknown)
     dynamo_config.validate()
 
     # Dealing with SGLang native configs
-    temp_config_file = None  # Track temp file for cleanup
+    temp_config_file = None
     if dynamo_config.disagg_config and dynamo_config.disagg_config_key:
         section_data = _load_disagg_config_section(
             dynamo_config.disagg_config, dynamo_config.disagg_config_key
@@ -364,21 +412,25 @@ async def parse_args(args: list[str]) -> Config:
         unknown.append("--config")
         unknown.append(temp_config_file)
 
-    if "--config" in unknown:
-        config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
-        unknown = config_merger.merge_config_with_args(unknown)
+    try:
+        if "--config" in unknown:
+            config_merger = ConfigArgumentMerger(parser=sglang_only_parser)
+            unknown = config_merger.merge_config_with_args(unknown)
 
-    unknown = _normalize_multimodal_disaggregation_args(unknown, dynamo_config)
-    dynamo_config.validate_multimodal_topology()
+        unknown = _normalize_multimodal_disaggregation_args(unknown, dynamo_config)
+        dynamo_config.validate_multimodal_topology()
 
-    parsed_args = sglang_only_parser.parse_args(unknown)
-
-    # Clean up temp file if created
-    if temp_config_file and os.path.exists(temp_config_file):
-        try:
-            os.unlink(temp_config_file)
-        except Exception:
-            logging.warning(f"Failed to clean up temp config file: {temp_config_file}")
+        parsed_args = sglang_only_parser.parse_args(unknown)
+    finally:
+        if temp_config_file and os.path.exists(temp_config_file):
+            try:
+                os.unlink(temp_config_file)
+            except OSError as e:
+                logging.warning(
+                    "Failed to clean up temp config file %s: %s",
+                    temp_config_file,
+                    e,
+                )
 
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
 
@@ -509,6 +561,14 @@ async def parse_args(args: list[str]) -> Config:
     video_generation_worker = dynamo_config.video_generation_worker
 
     # ServerArgs is read-only after resolution, so apply Dynamo defaults first.
+    # DYN_GMS_USE_V1 is operator-injected (env-only, like DYN_SNAPSHOT_CONTROL_DIR).
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        if getattr(parsed_args, "load_format", None) == "gms":
+            raise ValueError(
+                "DYN_GMS_USE_V1=true cannot be combined with --load-format gms"
+            )
+        parsed_args.enable_memory_saver = True
+
     fpm_source = _forward_pass_metrics_source(dynamo_config)
     if fpm_source and not getattr(parsed_args, "enable_forward_pass_metrics", False):
         parsed_args.enable_forward_pass_metrics = True
@@ -541,6 +601,14 @@ async def parse_args(args: list[str]) -> Config:
         server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
         server_args.tp_size = getattr(parsed_args, "tp_size", 1)
         server_args.dp_size = getattr(parsed_args, "dp_size", 1)
+        # DiffGenerator calls this ``master_port``. Preserve SGLang's existing
+        # --nccl-port CLI value on the lightweight diffusion config so the init
+        # path can map a test-allocated port into torch.distributed.
+        server_args.nccl_port = getattr(parsed_args, "nccl_port", None)
+        # _diffusion_generator_kwargs forwards dist_timeout to DiffGenerator;
+        # without this copy the stub never carries it and --dist-timeout is
+        # silently dropped for diffusion workers.
+        server_args.dist_timeout = getattr(parsed_args, "dist_timeout", None)
         server_args.speculative_algorithm = None
         server_args.disaggregation_mode = None
         server_args.dllm_algorithm = False

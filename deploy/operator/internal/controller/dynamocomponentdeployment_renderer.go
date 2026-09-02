@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"sync"
 
 	"emperror.dev/errors"
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -54,14 +55,14 @@ type dcdWorkloadRenderer struct {
 	reader                client.Reader
 	config                *configv1alpha1.OperatorConfiguration
 	runtimeConfig         *commonController.RuntimeConfig
-	dockerSecretRetriever dockerSecretRetriever
+	dockerSecretRetriever DockerSecretRetriever
 }
 
 func newDCDWorkloadRenderer(
 	reader client.Reader,
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commonController.RuntimeConfig,
-	dockerSecretRetriever dockerSecretRetriever,
+	dockerSecretRetriever DockerSecretRetriever,
 ) *dcdWorkloadRenderer {
 	return &dcdWorkloadRenderer{
 		reader:                reader,
@@ -86,17 +87,18 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecs(
 	if err != nil {
 		return nil, nil, err
 	}
+	containerGPUs := r.containerGPUCount(ctx, dcd)
 
 	leaderLabels := make(map[string]string, len(podLabels))
 	maps.Copy(leaderLabels, podLabels)
-	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, dcd, leaderLabels)
+	leaderPodTemplateSpec, err := r.generateLeaderPodTemplateSpec(ctx, dcd, leaderLabels, containerGPUs)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	workerLabels := make(map[string]string, len(podLabels))
 	maps.Copy(workerLabels, podLabels)
-	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, dcd, workerLabels)
+	workerPodTemplateSpec, err := r.generateWorkerPodTemplateSpec(ctx, dcd, workerLabels, containerGPUs)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -104,12 +106,22 @@ func (r *dcdWorkloadRenderer) renderMultinodePodTemplateSpecs(
 	return leaderPodTemplateSpec, workerPodTemplateSpec, nil
 }
 
+func (r *dcdWorkloadRenderer) containerGPUCount(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+) dynamo.ContainerGPUCount {
+	return sync.OnceValues(func() (int64, error) {
+		return dynamo.ResolveContainerGPUs(ctx, r.reader, dcd.Namespace, &dcd.Spec.DynamoComponentDeploymentSharedSpec)
+	})
+}
+
 func (r *dcdWorkloadRenderer) generateLeaderPodTemplateSpec(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	labels map[string]string,
+	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
-	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleLeader)
+	leaderPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleLeader, containerGPUs)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate leader pod template")
 	}
@@ -129,8 +141,9 @@ func (r *dcdWorkloadRenderer) generateWorkerPodTemplateSpec(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	labels map[string]string,
+	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
-	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleWorker)
+	workerPodTemplateSpec, err := r.generatePodTemplateSpec(ctx, dcd, dynamo.RoleWorker, containerGPUs)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to generate worker pod template")
 	}
@@ -150,6 +163,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 	ctx context.Context,
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	role dynamo.Role,
+	containerGPUs dynamo.ContainerGPUCount,
 ) (*corev1.PodTemplateSpec, error) {
 	component := &dcd.Spec.DynamoComponentDeploymentSharedSpec
 	componentType, err := r.getDCDWorkloadComponentType(ctx, dcd)
@@ -216,6 +230,7 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		role,
 		commonconsts.MultinodeDeploymentTypeLWS,
 		checkpointInfo,
+		containerGPUs,
 		dynamo.GenerateBasePodSpecForControllerOptions{
 			WorkloadComponentType: nvidiacomv1beta1.ComponentType(componentType),
 		},

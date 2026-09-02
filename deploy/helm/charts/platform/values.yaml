@@ -57,6 +57,12 @@ global:
     # create PodCliqueSets for multinode deployments.
     enabled: false
 
+  snapshot:
+    # -- Whether this chart should install the bundled Snapshot subchart
+    # (github.com/ai-dynamo/snapshot): its operator, node agent, and CRDs.
+    # NOTE: For production environments, it is recommended to install Snapshot separately.
+    install: false
+
 # Subcharts configuration
 
 # Dynamo operator configuration

@@ -48,7 +48,7 @@ def _build_mocker_command(
     command = [
         sys.executable,
         "-m",
-        "dynamo.mocker",
+        "dynamo.mocker._worker",
         "--model-path",
         MODEL_NAME,
         "--endpoint",
@@ -117,6 +117,15 @@ def _build_mocker_command(
             [
                 "--response-replay-trace-path",
                 str(mocker_args["response_replay_trace_path"]),
+            ]
+        )
+    if "router_mode" in mocker_args:
+        command.extend(["--router-mode", str(mocker_args["router_mode"])])
+    if "router_session_affinity_ttl_secs" in mocker_args:
+        command.extend(
+            [
+                "--router-session-affinity-ttl-secs",
+                str(mocker_args["router_session_affinity_ttl_secs"]),
             ]
         )
 
