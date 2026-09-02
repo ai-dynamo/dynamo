@@ -7,7 +7,8 @@ subtitle: How the replay harness composes simulated engines, routing, and Planne
 
 DynoSim connects a workload driver to one or more Mocker engine cores and records request and token
 timing for analysis. The unified `aisimulate predict` and `aisimulate recommend` commands run this
-simulation offline. The former public online replay and Mocker commands are unavailable.
+simulation offline. The former Replay online mode is unavailable. The separate `python3 -m
+dynamo.mocker` command launches live Mocker workers without replay orchestration.
 
 For task-oriented instructions, see [Run a DynoSim Simulation](../../../../cli/operations/simulation-with-dynosim/dynosim-replay.mdx),
 [Sweep DynoSim Configurations](../../../../cli/operations/simulation-with-dynosim/dynosim-sweeps.mdx), and

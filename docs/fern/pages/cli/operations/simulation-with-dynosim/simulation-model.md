@@ -6,13 +6,11 @@ subtitle: Engine behavior, timing sources, KV movement, and fidelity boundaries
 ---
 
 DynoSim builds a distributed serving simulation from Mocker engine cores. Each core owns
-engine-specific scheduler and KV-cache state. Offline prediction and the retained internal worker
-runtime drive the same core through virtual-time and wall-clock execution, respectively.
+engine-specific scheduler and KV-cache state. Offline prediction and live Mocker workers drive the
+same core through virtual-time and wall-clock execution, respectively.
 
-> [!WARNING]
-> The public online Mocker CLI is temporarily unavailable. The internal online behavior described
-> here remains an implementation detail and will return through the unified AISimulate CLI in a
-> future release.
+Run `python3 -m dynamo.mocker` to launch live workers. This worker launcher is separate from the
+former Replay online mode, which remains unavailable in the unified AISimulate CLI.
 
 ## Engine Behavior
 

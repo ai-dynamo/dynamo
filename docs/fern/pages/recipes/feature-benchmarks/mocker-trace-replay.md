@@ -9,7 +9,8 @@ This page has moved to [Run a DynoSim Simulation](../../cli/operations/simulatio
 
 > [!NOTE]
 > The former `online` replay mode has no replacement in the unified AISimulate CLI yet. It will
-> return in a future release. The public `python -m dynamo.mocker` CLI has also been removed.
+> return in a future release. The separate `python3 -m dynamo.mocker` command remains available for
+> launching live Mocker workers; it does not replay a trace by itself.
 
 The old path remains so existing links, including the DynoSim blog post's
 related guide link, continue to resolve.

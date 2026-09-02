@@ -48,7 +48,7 @@ def _build_mocker_command(
     command = [
         sys.executable,
         "-m",
-        "dynamo.mocker._worker",
+        "dynamo.mocker",
         "--model-path",
         MODEL_NAME,
         "--endpoint",
