@@ -26,14 +26,14 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 
 | Crate | Use it for |
 |---|---|
-| `soft-pin-repin` | Retain a soft session-affinity target until its active-request load exceeds a threshold, then repin |
+| [`soft-pin-repin`](soft-pin-repin/README.md) | Retain a soft session-affinity target until its active-request load exceeds a threshold, then repin |
 | `simple-filter-score-pick` | One filter, one scorer, and one picker show the complete policy flow |
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
 
 The `simple-filter-score-pick` policy shows the complete pipeline. It filters on minimum device overlap and scores active requests. Its picker normally selects the lowest cost. Tool-result turns select the worker with the most device overlap through `session_context().input_trigger()`.
 
-The `soft-pin-repin` policy has no filter or scorer. Its picker requests `WorkerInputs::LOAD` and selects the least-loaded worker for a new session. For a session with an advisory `affinity_target()`, it retains that worker while `active_requests()` is at or below `max_active_requests`. When the target exceeds the threshold, the picker selects the least-loaded alternative and Dynamo commits that dispatched worker as the new soft binding. The policy retains an overloaded target when it is the only eligible candidate.
+The [`soft-pin-repin` policy](soft-pin-repin/README.md) documents its load threshold, soft-binding behavior, and two-Mocker `A -> B -> B` walkthrough.
 
 The `disagg-filter-score-pick` policy applies the overlap filter to both worker types. Its factory matches the routing stage and calls separate prefill and decode policy builders. Each builder shows the complete filter, scorer, and picker composition for that stage.
 
@@ -284,47 +284,7 @@ Create `/tmp/worker-selection.yaml` with the policy instances from [Configure a 
 
 Use `min_device_overlap_blocks: 0` for this test. A positive threshold can reject every worker on a cold request or a replay path without raw tier data.
 
-### Soft Affinity Repin Policy
-
-Start the frontend with soft session affinity and the committed policy configuration:
-
-```bash
-DYN_ROUTER_WORKER_SELECTION_POLICY=soft-pin-repin \
-python -m dynamo.frontend \
-  --router-mode kv \
-  --router-policy-config examples/router/custom-policy-example/soft-pin-repin/worker-selection.yaml \
-  --router-session-affinity-ttl-secs 60 \
-  --router-session-affinity-mode soft \
-  --discovery-backend file \
-  --http-port 8000
-```
-
-In a second terminal, start exactly two aggregated Mocker workers through the retained internal launcher:
-
-```bash
-python -c 'from dynamo.mocker.main import main; main()' \
-  --model-path Qwen/Qwen3-0.6B \
-  --discovery-backend file \
-  --decode-speedup-ratio 0.1 \
-  --num-workers 2
-```
-
-The decode slowdown keeps the first request active long enough for the verification script to cross the configured `max_active_requests: 0` threshold deterministically.
-
-After both workers register, run the assertion script. It requires `curl` and `jq`:
-
-```bash
-examples/router/custom-policy-example/soft-pin-repin/verify-repin.sh
-```
-
-The script starts a long streaming request with one `X-Dynamo-Session-ID` and waits until worker A is attributed. While that request remains active, it sends a second request with the same session ID. The configured threshold is zero, so A's active-request count triggers selection of B and Dynamo rebinds the session. After both requests drain, a third request must retain B:
-
-```text
-selected workers: A -> B -> B
-the overload threshold repinned the session and the new soft pin was retained
-```
-
-The second request proves that the policy can override an overloaded advisory target. The third request proves that Dynamo replaced the stored target with B and that the policy retains the new target after its load drains.
+For overload-aware soft affinity, follow the [`soft-pin-repin` two-Mocker walkthrough](soft-pin-repin/README.md#run-with-two-mockers).
 
 ### Aggregated Policy
 
