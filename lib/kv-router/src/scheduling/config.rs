@@ -1038,10 +1038,10 @@ pub struct KvRouterConfig {
     /// Maximum concurrent continuations per prefill worker.
     ///
     /// Required whenever the feature is enabled, and enforced at dispatch,
-    /// where the chosen worker is known. This is the bound that holds: the
+    /// where the chosen worker is known. This is the bound that holds. The
     /// prefill-load interlock reads a figure the router clears at a request's
-    /// first token, so one token into a long continuation it sees no load at
-    /// all and cannot count what is still running.
+    /// first token, so it cannot count a running continuation; the census can,
+    /// but it only advises `Skip::NoRelief` and bounds nothing.
     ///
     /// Set it to at least 2 if migration is in play. A migration retry builds
     /// its replacement stream before dropping the failed attempt, so the two

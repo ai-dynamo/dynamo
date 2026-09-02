@@ -1111,21 +1111,6 @@ where
             continuation_permit,
         })
     }
-
-    /// Take a place in the census for `worker_id`, or put the request back on
-    /// today's handoff.
-    ///
-    /// Two things can refuse here, and both need the chosen worker:
-    ///
-    /// - the worker is already running its share of continuations, and
-    /// - the worker never declared it understands the marker. The pool check
-    ///   before routing reads the routable set, but that set is sampled before
-    ///   selection; a worker that appeared in between reaches this point
-    ///   unchecked. Asking again once it is chosen closes that window.
-    ///
-    /// Demoting means undoing both halves of the ask: the marker comes off, so
-    /// the worker builds its usual handoff, and the one-token clamp goes back
-    /// on, so it stops after the token that handoff carries.
     /// KV blocks a continuation will hold: its prompt plus everything it is
     /// allowed to generate. The budget is a hard bound the request carries, so
     /// this is the worst case, not a guess.
@@ -1142,6 +1127,20 @@ where
             .div_ceil(block_size)
     }
 
+    /// Take a place in the census for `worker_id`, or put the request back on
+    /// today's handoff.
+    ///
+    /// Two things can refuse here, and both need the chosen worker:
+    ///
+    /// - the worker is already running its share of continuations, and
+    /// - the worker never declared it understands the marker. The pool check
+    ///   before routing reads the routable set, but that set is sampled before
+    ///   selection; a worker that appeared in between reaches this point
+    ///   unchecked. Asking again once it is chosen closes that window.
+    ///
+    /// Demoting means undoing both halves of the ask: the marker comes off, so
+    /// the worker builds its usual handoff, and the one-token clamp goes back
+    /// on, so it stops after the token that handoff carries.
     fn admit_continuation(
         &self,
         request: &mut PreprocessedRequest,

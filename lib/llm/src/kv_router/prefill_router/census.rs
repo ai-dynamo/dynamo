@@ -146,6 +146,9 @@ impl ContinuationCensus {
             return;
         };
         running.count -= 1;
+        // Saturating like the count's own underflow check above: a permit that
+        // outlived its row is a bug, not a reason to panic in release.
+        debug_assert!(running.blocks >= blocks, "the block ledger went negative");
         running.blocks = running.blocks.saturating_sub(blocks);
         // Drop the key at zero, so a fleet that churns workers does not grow
         // this map forever.
