@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -131,8 +132,16 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeploymentS
 		grovePathway                      = false
 		validateInferencePoolAvailability = false
 	)
-	allErrs := validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)
-	allErrs = append(allErrs, validateElasticEPSingleReplica(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)...)
+	// Both rules describe the operator-managed Ray path, so they only apply where the
+	// operator runs it. Gated off, the engine flags are the user's own business: nothing
+	// wraps their command, no Service or follower is derived, and vLLM starts a private
+	// in-process Ray, so a component the rules would reject still serves. Rejecting it
+	// would break a working deployment to enforce a rule about a disabled feature.
+	var allErrs field.ErrorList
+	if features.MustGateFrom(v.ctx).Enabled(features.ElasticEPRayPoC) {
+		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)...)
+		allErrs = append(allErrs, validateElasticEPSingleReplica(spec.BackendFramework, &spec.DynamoComponentDeploymentSharedSpec, fldPath)...)
+	}
 	allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 		&spec.DynamoComponentDeploymentSharedSpec,
 		fldPath,

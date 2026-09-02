@@ -126,6 +126,10 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		resources = append(resources, syncedDCD)
 	}
 
+	if err := r.deleteOrphanedElasticEPFollowers(ctx, dgd, dcds); err != nil {
+		return ReconcileResult{}, fmt.Errorf("failed to delete orphaned elastic-EP followers: %w", err)
+	}
+
 	if rollingUpdateCtx.InProgress() {
 		if err := r.rollout.scaleOldWorkerDCDs(ctx, dgd, rollingUpdateCtx); err != nil {
 			logger.Error(err, "failed to scale old worker DCDs")
@@ -271,5 +275,59 @@ func (r *componentWorkloadsReconciler) preserveExistingBackendFramework(
 	}
 
 	desired.Spec.BackendFramework = existing.Spec.BackendFramework
+	return nil
+}
+
+// deleteOrphanedElasticEPFollowers removes synthesized elastic-EP follower DCDs that
+// generation no longer produces.
+//
+// A follower is derived, never declared, so nothing else will ever clean it up. The
+// rollout path prunes worker DCDs by comparing their hash label against the current
+// worker generation, and a follower's label still matches -- the hash is deliberately
+// gate-independent -- so it would survive as an orphan owned by no one.
+//
+// Three things strand a follower this way: an administrator disabling
+// features.ElasticEPRayPoC, a user removing the elastic-EP flags from the leader, and a
+// user deleting the leader component outright. Comparing against what generation
+// actually produced covers all three without asking why.
+func (r *componentWorkloadsReconciler) deleteOrphanedElasticEPFollowers(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	generated map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+) error {
+	logger := log.FromContext(ctx)
+
+	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
+	if err := r.syncer.List(ctx, dcdList,
+		client.InNamespace(dgd.Namespace),
+		client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name},
+	); err != nil {
+		return fmt.Errorf("failed to list DynamoComponentDeployments: %w", err)
+	}
+
+	wanted := make(map[string]struct{}, len(generated))
+	for _, dcd := range generated {
+		if dcd != nil {
+			wanted[dcd.Name] = struct{}{}
+		}
+	}
+
+	var deleteErrors []error
+	for i := range dcdList.Items {
+		existing := &dcdList.Items[i]
+		if existing.GetAnnotations()[consts.KubeAnnotationElasticEPFollower] != consts.KubeLabelValueTrue {
+			continue
+		}
+		if _, keep := wanted[existing.Name]; keep {
+			continue
+		}
+		logger.Info("Deleting orphaned elastic-EP follower", "name", existing.Name)
+		if err := r.syncer.Delete(ctx, existing); err != nil && !apierrors.IsNotFound(err) {
+			deleteErrors = append(deleteErrors, fmt.Errorf("delete %s: %w", existing.Name, err))
+		}
+	}
+	if len(deleteErrors) > 0 {
+		return fmt.Errorf("failed to delete %d orphaned followers: %v", len(deleteErrors), deleteErrors)
+	}
 	return nil
 }

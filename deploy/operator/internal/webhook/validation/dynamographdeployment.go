@@ -297,8 +297,11 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
 		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
 
-		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
-		allErrs = append(allErrs, validateElasticEPSingleReplica(spec.BackendFramework, component, componentPath)...)
+		// Only where the operator runs the Ray path; see the DCD validator for why.
+		if features.MustGateFrom(v.ctx).Enabled(features.ElasticEPRayPoC) {
+			allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
+			allErrs = append(allErrs, validateElasticEPSingleReplica(spec.BackendFramework, component, componentPath)...)
+		}
 
 		allErrs = append(allErrs, v.validateDynamoComponentDeploymentSharedSpec(
 			component,

@@ -18,7 +18,10 @@
 package dynamo
 
 import (
+	"github.com/google/go-cmp/cmp"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -545,5 +548,81 @@ func TestInjectElasticEPFollowerAffinity(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// elasticEPDGDForGate builds the graph an existing user would already have: one
+// elastic-EP leader that a released operator accepted before this feature existed.
+func elasticEPDGDForGate() *v1beta1.DynamoGraphDeployment {
+	return &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "mydgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+				{
+					ComponentName: leaderComponent,
+					ComponentType: commonconsts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(1)),
+					PodTemplate:   elasticEPComponent().PodTemplate,
+				},
+			},
+		},
+	}
+}
+
+// TestElasticEPRayPoCGateIsUpgradeSafe is the regression guard for the property the
+// whole gate exists to protect: rolling out an operator that carries this feature must
+// not change a deployment that already exists.
+//
+// The risk is specific. Everything the Ray path does -- wrapping the leader's command in
+// a Ray head, deriving a follower, emitting a Service -- alters the rendered spec, and
+// altering a pod template rolls a serving deployment. An administrator upgrading the
+// operator for an unrelated fix must not lose their engines to it. Asserting the
+// gated-off render is byte-identical to a graph that never mentioned elastic EP is the
+// only way that property survives changes nobody has written yet.
+func TestElasticEPRayPoCGateIsUpgradeSafe(t *testing.T) {
+	t.Log("Generate an existing elastic-EP graph with the gate off, as a fresh upgrade would")
+	off, err := GenerateDynamoComponentsDeployments(elasticEPDGDForGate(), nil, nil, RollingUpdateContext{}, false)
+	if err != nil {
+		t.Fatalf("generation with the gate off failed: %v", err)
+	}
+
+	t.Log("No follower is derived: nothing new appears in the user's namespace")
+	for name, dcd := range off {
+		if dcd.GetAnnotations()[commonconsts.KubeAnnotationElasticEPFollower] == commonconsts.KubeLabelValueTrue {
+			t.Errorf("gate off derived a follower %q; an upgrade must not create workloads", name)
+		}
+	}
+	if len(off) != 1 {
+		t.Errorf("gate off generated %d DCDs, want exactly the declared leader", len(off))
+	}
+
+	t.Log("The leader is not treated as an elastic-EP leader, so nothing downstream fires")
+	leader := off[leaderComponent]
+	if leader == nil {
+		t.Fatalf("gate off dropped the declared leader; generated %v", maps.Keys(off))
+	}
+	if IsSinglePodElasticEPLeader(&leader.Spec.DynamoComponentDeploymentSharedSpec, false) {
+		t.Error("gate off still reports a single-pod elastic-EP leader; the Service and follower would follow")
+	}
+
+	t.Log("Gate on: the follower appears, proving the switch is not simply broken in the off position")
+	on, err := GenerateDynamoComponentsDeployments(elasticEPDGDForGate(), nil, nil, RollingUpdateContext{}, true)
+	if err != nil {
+		t.Fatalf("generation with the gate on failed: %v", err)
+	}
+	if len(on) != len(off)+1 {
+		t.Fatalf("gate on generated %d DCDs, want one more than the %d generated off", len(on), len(off))
+	}
+	follower := on[elasticEPFollowerName(leaderComponent)]
+	if follower == nil {
+		t.Fatalf("gate on derived no follower; generated %v", slices.Sorted(maps.Keys(on)))
+	}
+	if got := ptr.Deref(follower.Spec.Replicas, -1); got != 0 {
+		t.Errorf("follower replicas = %d, want 0", got)
+	}
+
+	t.Log("The leader itself is byte-identical either way: no pod-template change, so no rollout")
+	if diff := cmp.Diff(off[leaderComponent].Spec, on[leaderComponent].Spec); diff != "" {
+		t.Errorf("the gate changed the leader's spec, which would roll a serving deployment (-off +on):\n%s", diff)
 	}
 }

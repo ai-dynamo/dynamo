@@ -36,7 +36,7 @@ func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
 	dgd.Spec.Components = append(dgd.Spec.Components, dgd.Spec.Components[0])
 
 	validator := newDynamoGraphDeploymentTestValidator(t)
-	ctx := features.WithGate(context.Background(), features.Gates{Grove: true})
+	ctx := features.WithGate(context.Background(), features.Gates{Grove: true, ElasticEPRayPoC: true})
 	_, err := validator.Validate(ctx, dgd, runtimeVersionSourceV1Beta1)
 	if err == nil || !strings.Contains(err.Error(), "failed to reconstruct compatibility view") {
 		t.Fatalf("Validate() error = %v, want fatal conversion error", err)
@@ -320,7 +320,7 @@ func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
 	}
 
 	validator := newDynamoGraphDeploymentTestValidator(t)
-	ctx := features.WithGate(context.Background(), features.Gates{Grove: true})
+	ctx := features.WithGate(context.Background(), features.Gates{Grove: true, ElasticEPRayPoC: true})
 	_, err := validator.Validate(ctx, dgd, runtimeVersionSourceV1Beta1)
 	if err == nil || !k8serrors.IsInvalid(err) {
 		t.Fatalf("Validate() error = %v, want invalid field error", err)
