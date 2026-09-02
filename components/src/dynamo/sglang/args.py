@@ -34,7 +34,7 @@ from dynamo.common.snapshot.lifecycle import (
 )
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang._compat import ensure_sglang_tensor_image_size
+from dynamo.sglang._compat import ensure_sglang_tensor_image_size, resolved_server_args
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()
@@ -76,6 +76,11 @@ class Config:
             return DisaggregationMode.DECODE
         else:
             return DisaggregationMode.AGGREGATED
+
+    def use_resolved_server_args(self, server_args: Any) -> Any:
+        """Switch post-runtime Dynamo code to SGLang's resolved configuration."""
+        self.server_args = resolved_server_args(server_args)
+        return self.server_args
 
 
 def _diffusion_generator_kwargs(server_args: Any) -> dict[str, Any]:
@@ -553,6 +558,14 @@ async def parse_args(args: list[str]) -> Config:
     video_generation_worker = dynamo_config.video_generation_worker
 
     # ServerArgs is read-only after resolution, so apply Dynamo defaults first.
+    # DYN_GMS_USE_V1 is operator-injected (env-only, like DYN_SNAPSHOT_CONTROL_DIR).
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        if getattr(parsed_args, "load_format", None) == "gms":
+            raise ValueError(
+                "DYN_GMS_USE_V1=true cannot be combined with --load-format gms"
+            )
+        parsed_args.enable_memory_saver = True
+
     fpm_source = _forward_pass_metrics_source(dynamo_config)
     if fpm_source and not getattr(parsed_args, "enable_forward_pass_metrics", False):
         parsed_args.enable_forward_pass_metrics = True

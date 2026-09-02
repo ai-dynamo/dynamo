@@ -366,6 +366,15 @@ impl LoadEstimator {
     /// Prune tracking data (and predictors) for any LoRA not in `known`. Bounds memory
     /// against unloaded adapters and unknown/typo request names that never get allocated.
     pub fn retain_known(&self, known: &std::collections::HashSet<&str>) {
+        self.retain_known_at(known, Instant::now());
+    }
+
+    /// Prune tracking data using an explicitly supplied clock.
+    ///
+    /// This keeps deterministic simulation clocks out of the production hot path while allowing
+    /// callers that already own a clock to evaluate recent arrivals consistently.
+    #[doc(hidden)]
+    pub fn retain_known_at(&self, known: &std::collections::HashSet<&str>, now: Instant) {
         // Keep an entry if it is known, OR still has in-flight requests, OR has nonzero arrivals
         // within the current rate window. The in-flight check protects a LoRA whose arrival raced
         // this controller tick before its MDC reached the state tracker (dropping it would make
@@ -379,7 +388,6 @@ impl LoadEstimator {
         // zero and drop the very signal this protects. Once the window slides past with no further
         // arrivals and the name is still unknown, it is pruned, so memory stays bounded against
         // unknown/typo request names.
-        let now = Instant::now();
         self.data.retain(|name, data| {
             known.contains(name.as_str())
                 || data.active_count.load(Ordering::Relaxed) > 0
@@ -543,8 +551,12 @@ impl LoadEstimator {
 
     /// Increment load count for a LORA and record arrival. Lock-free for existing LoRAs.
     pub fn increment_load(&self, lora_name: &str) {
-        let now = Instant::now();
+        self.increment_load_at(lora_name, Instant::now());
+    }
 
+    /// Increment load count and record an arrival at an explicitly supplied instant.
+    #[doc(hidden)]
+    pub fn increment_load_at(&self, lora_name: &str, now: Instant) {
         // Fast path: LoRA already exists
         if let Some(entry) = self.data.get(lora_name) {
             entry.value().active_count.fetch_add(1, Ordering::Relaxed);
@@ -580,6 +592,15 @@ impl LoadEstimator {
     /// or out-of-order `Free` event when `active_count == 0` is silently
     /// ignored rather than wrapping to `usize::MAX`.
     pub fn decrement_load(&self, lora_name: &str) {
+        self.decrement_load_at(lora_name, Instant::now());
+    }
+
+    /// Decrement the in-flight count at an explicitly supplied instant.
+    ///
+    /// The counter itself is not time-dependent, but accepting the timestamp keeps simulation
+    /// request start and completion paths symmetric.
+    #[doc(hidden)]
+    pub fn decrement_load_at(&self, lora_name: &str, _now: Instant) {
         if let Some(entry) = self.data.get(lora_name) {
             entry
                 .value()
@@ -652,7 +673,12 @@ impl LoadEstimator {
 
     /// Get current load using arrival count in the sliding window.
     pub fn get_current_load(&self) -> HashMap<String, usize> {
-        let now = Instant::now();
+        self.get_current_load_at(Instant::now())
+    }
+
+    /// Get current load using an explicitly supplied instant.
+    #[doc(hidden)]
+    pub fn get_current_load_at(&self, now: Instant) -> HashMap<String, usize> {
         let cfg = self.config.read();
         let predictor_type = cfg.predictor_type;
         let ema_alpha = cfg.ema_alpha;
@@ -711,7 +737,12 @@ impl LoadEstimator {
 
     /// Get raw arrival counts from the sliding-window rate counters.
     pub fn get_raw_arrival_counts(&self) -> HashMap<String, u64> {
-        let now = Instant::now();
+        self.get_raw_arrival_counts_at(Instant::now())
+    }
+
+    /// Get raw arrival counts using an explicitly supplied instant.
+    #[doc(hidden)]
+    pub fn get_raw_arrival_counts_at(&self, now: Instant) -> HashMap<String, u64> {
         self.data
             .iter()
             .filter_map(|entry| {

@@ -29,13 +29,15 @@ It is a standalone Rust executable and is also compiled into
 - Opaque `kv_transfer_params` handoff
 - Data-parallel rank routing and KV-event source discovery
 - Capability-gated RL pause/resume, sleep/wake, weight-transfer, and weight-version controls through native gRPC
-- Image URL and data-URI inputs, including media UUIDs
+- Image, video, and audio URL and data-URI inputs; cache UUIDs remain image-only
 
-The protocol does not support LoRA, encode workers, beam search, `n > 1`,
-preprocessed multimodal features, audio/video media, or Dynamo tool-call and
-reasoning parsers. Parser defaults returned by Control are intentionally not
-advertised to the Dynamo frontend because the current inference protocol does
-not preserve all parser-related request semantics.
+Audio and video inputs currently require the `connorcarpenter15/vllm:feat/grpc-audio-video-combined` review branch at commit [`236caaec7221842c307e87e05ea3356539be6b20`](https://github.com/connorcarpenter15/vllm/commit/236caaec7221842c307e87e05ea3356539be6b20), tracked by [connorcarpenter15/vllm#32](https://github.com/connorcarpenter15/vllm/pull/32). The fork's current `main` and stock vLLM releases do not contain this support while that PR remains open.
+
+The protocol does not support LoRA, encode workers, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, audio/video cache UUIDs, or EPD. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
+
+In prefill/decode deployments, both engines independently prepare the original media. Reusing only the prefill-expanded prompt IDs is insufficient because KV transfer does not carry model-specific multimodal position metadata.
+
+The official `Qwen/Qwen3-ASR-1.7B` repository currently needs Rust-frontend-compatible tokenizer and config metadata (`tokenizer.json` and a top-level `vocab_size`). Dynamo's Rust chat renderer also does not yet insert the model-native audio placeholder for `audio_url` content parts; callers can supply those prompt token IDs through `nvext.token_data`. These are model-loading and request-rendering gaps rather than sidecar media-transport limitations.
 
 ## Run
 

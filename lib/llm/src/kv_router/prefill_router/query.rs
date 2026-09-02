@@ -424,7 +424,13 @@ mod tests {
             .await
             .unwrap();
             Arc::new(
-                RoutingHost::new_builtin_with_coordinator(push_router, load_context, None).unwrap(),
+                RoutingHost::new_builtin_with_coordinator(
+                    push_router,
+                    load_context,
+                    None,
+                    crate::session_affinity::SessionAffinityMode::Hard,
+                )
+                .unwrap(),
             )
         };
         // The harness must build the plane the test asked for. The built-in
