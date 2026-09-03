@@ -10,7 +10,9 @@ use dynamo_kv_router::{
         BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
     },
     router_hint::RouterHint,
-    scheduling::{AdmissionAttempt, AdvisoryWorkerLoad, QueueRejection, RoutingEligibility},
+    scheduling::{
+        AdmissionAttempt, AdvisoryWorkerLoad, QueueRejection, RequestLifecycle, RoutingEligibility,
+    },
     selector::WorkerSelector,
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
@@ -39,7 +41,7 @@ pub(super) struct WorkerSelection {
     pub(super) selected_worker_load: Option<AdvisoryWorkerLoad>,
     pub(super) routing_hashes: Option<RoutingDecisionHashes>,
     pub(super) router_hint: Option<RouterHint>,
-    pub(super) lifecycle: Option<Box<dynamo_kv_router::scheduling::RequestLifecycle>>,
+    pub(super) request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
 pub(super) enum SelectionOutcome {
@@ -149,7 +151,7 @@ where
                     selected_worker_load: None,
                     routing_hashes,
                     router_hint,
-                    lifecycle: None,
+                    request_lifecycle: None,
                 })),
                 FindBestMatchOutcome::QueueRejected { rejection } => {
                     Ok(SelectionOutcome::QueueRejected(rejection))
@@ -174,7 +176,7 @@ where
                     selected_worker_load: Some(selected_worker_load),
                     routing_hashes,
                     router_hint: None,
-                    lifecycle: None,
+                    request_lifecycle: None,
                 })),
                 crate::kv_router::FindBestMatchAdvisoryOutcome::QueueRejected { rejection } => {
                     Ok(SelectionOutcome::QueueRejected(rejection))
