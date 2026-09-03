@@ -40,6 +40,16 @@ docker exec -it <container_id> bash
     ```
 
     Larger models may need more than one GPU — see **Set parallelism** for how to size that.
+
+    <Note>
+    A model published as a [CNCF ModelPack](https://github.com/modelpack/model-spec) OCI artifact can be used anywhere a Hugging Face repo id can, by prefixing the registry reference with `oci://`:
+
+    ```bash
+    export MODEL="oci://ghcr.io/org/model:tag"
+    ```
+
+    This pulls from an ordinary container registry, reusing the registry, credentials and mirroring a deployment already has for container images — which is often easier to run air-gapped than Hugging Face. It requires the [`llmman`](https://github.com/llmmanorg/llmman) binary on `PATH` (or `DYN_LLMMAN_BIN` pointing at it), and is only consulted for references that actually carry the `oci://` scheme.
+    </Note>
   </Step>
 
   <Step title="Start the frontend">
