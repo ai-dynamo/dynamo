@@ -46,14 +46,6 @@ func (r *componentRestartProgressResolver) Resolve(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	inProgress []string,
-) []string {
-	return r.resolve(ctx, dgd, inProgress, nil)
-}
-
-func (r *componentRestartProgressResolver) ResolveWithManagedWorkerRollout(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	inProgress []string,
 	rollout *managedWorkerRollout,
 ) []string {
 	return r.resolve(ctx, dgd, inProgress, rollout)

@@ -62,6 +62,7 @@ type restartProgressResolver func(
 	context.Context,
 	*nvidiacomv1beta1.DynamoGraphDeployment,
 	[]string,
+	*managedWorkerRollout,
 ) []string
 
 // workloadProgram owns the complete graph-workload state machine for one

@@ -42,6 +42,7 @@ func (r *groveRestartProgressResolver) Resolve(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	inProgress []string,
+	_ *managedWorkerRollout,
 ) []string {
 	logger := log.FromContext(ctx)
 

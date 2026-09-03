@@ -2356,7 +2356,7 @@ func TestDGDRestartReconciler_ComputeStatus(t *testing.T) {
 			if tt.groveEnabled {
 				resolveProgress = newGroveRestartProgressResolver(reconciler.Client).Resolve
 			}
-			result := restartReconciler.computeRestartStatusWithProgressResolver(ctx, dgd, resolveProgress)
+			result := restartReconciler.computeRestartStatusWithProgressResolver(ctx, dgd, nil, resolveProgress)
 
 			if tt.wantRestartStatus == nil {
 				g.Expect(result).To(gomega.BeNil())

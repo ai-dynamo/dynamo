@@ -121,6 +121,7 @@ func (p *groveProgram) Reconcile(
 		ctx,
 		req.DGD,
 		&programResult.Status,
+		nil,
 		p.restartProgress.Resolve,
 	)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)

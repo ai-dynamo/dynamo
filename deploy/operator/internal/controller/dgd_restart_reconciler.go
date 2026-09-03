@@ -42,11 +42,12 @@ func (r *dgdRestartReconciler) Resolve(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
+	rollout *managedWorkerRollout,
 	resolveProgress restartProgressResolver,
 ) programRestart {
 	statusView := dgd.DeepCopy()
 	statusView.Status = *status
-	restartStatus := r.computeRestartStatusWithProgressResolver(ctx, statusView, resolveProgress)
+	restartStatus := r.computeRestartStatusWithProgressResolver(ctx, statusView, rollout, resolveProgress)
 	return programRestart{
 		State:  dynamo.DetermineRestartState(statusView, restartStatus),
 		Status: restartStatus,
@@ -80,6 +81,7 @@ func isNewRestartRequest(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
 func (r *dgdRestartReconciler) computeParallelRestartStatus(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	rollout *managedWorkerRollout,
 	resolveProgress restartProgressResolver,
 ) *nvidiacomv1beta1.RestartStatus {
 	logger := log.FromContext(ctx)
@@ -118,7 +120,7 @@ func (r *dgdRestartReconciler) computeParallelRestartStatus(
 		}
 	}
 
-	updatedInProgress := resolveProgress(ctx, dgd, componentsToCheck)
+	updatedInProgress := resolveProgress(ctx, dgd, componentsToCheck, rollout)
 	if len(updatedInProgress) == 0 {
 		logger.Info("Restart completed for all components")
 		return &nvidiacomv1beta1.RestartStatus{
@@ -139,6 +141,7 @@ func (r *dgdRestartReconciler) computeSequentialRestartStatus(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	order []string,
+	rollout *managedWorkerRollout,
 	resolveProgress restartProgressResolver,
 ) *nvidiacomv1beta1.RestartStatus {
 	logger := log.FromContext(ctx)
@@ -172,7 +175,7 @@ func (r *dgdRestartReconciler) computeSequentialRestartStatus(
 		}
 	}
 
-	updatedInProgress := resolveProgress(ctx, dgd, []string{currentComponent})
+	updatedInProgress := resolveProgress(ctx, dgd, []string{currentComponent}, rollout)
 	if len(updatedInProgress) > 0 {
 		logger.Info("Component restart not completed", "component", currentComponent, "updatedInProgress", updatedInProgress)
 		return &nvidiacomv1beta1.RestartStatus{
@@ -227,6 +230,7 @@ func getNextComponentInOrder(order []string, currentComponent string) (string, b
 func (r *dgdRestartReconciler) computeRestartStatusWithProgressResolver(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	rollout *managedWorkerRollout,
 	resolveProgress restartProgressResolver,
 ) *nvidiacomv1beta1.RestartStatus {
 	if dgd.Spec.Restart == nil || dgd.Spec.Restart.ID == "" {
@@ -250,7 +254,7 @@ func (r *dgdRestartReconciler) computeRestartStatusWithProgressResolver(
 	}
 
 	if dynamo.IsParallelRestart(dgd) {
-		return r.computeParallelRestartStatus(ctx, dgd, resolveProgress)
+		return r.computeParallelRestartStatus(ctx, dgd, rollout, resolveProgress)
 	}
-	return r.computeSequentialRestartStatus(ctx, dgd, dynamo.GetRestartOrder(dgd), resolveProgress)
+	return r.computeSequentialRestartStatus(ctx, dgd, dynamo.GetRestartOrder(dgd), rollout, resolveProgress)
 }

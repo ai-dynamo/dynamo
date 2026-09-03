@@ -118,9 +118,8 @@ func (p *componentProgram) Reconcile(
 		ctx,
 		req.DGD,
 		&programResult.Status,
-		func(restartCtx context.Context, restartDGD *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
-			return p.restartProgress.ResolveWithManagedWorkerRollout(restartCtx, restartDGD, inProgress, rollout)
-		},
+		rollout,
+		p.restartProgress.Resolve,
 	)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
 	programResult.Status.Restart = restart.Status

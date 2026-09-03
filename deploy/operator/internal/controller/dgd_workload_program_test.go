@@ -514,6 +514,7 @@ func TestRecordRestartTransitionQueuesSupersededTransition(t *testing.T) {
 		dgd,
 		&result.Status,
 		nil,
+		nil,
 	)
 	recordRestartTransition(result.Status.Restart, restart.Status, &result)
 	result.Status.Restart = restart.Status
