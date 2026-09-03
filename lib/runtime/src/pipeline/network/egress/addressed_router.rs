@@ -860,6 +860,14 @@ mod rejection_detection_tests {
     }
 
     #[test]
+    fn unavailable_payload_maps_to_unavailable() {
+        // The TCP server answers a request for an unregistered path with this prefix.
+        let err = detect_worker_rejection_response(b"Server unavailable: unknown endpoint x")
+            .expect("should detect unavailable");
+        assert_eq!(err.error_type(), ErrorType::Unavailable);
+    }
+
+    #[test]
     fn empty_ack_is_not_overload() {
         // The success-path ACK is empty; misreading it as overload breaks every request.
         assert!(detect_worker_rejection_response(b"").is_none());
