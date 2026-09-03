@@ -296,6 +296,33 @@ For prefill and decode, the selection order is the role-specific CLI or environm
   Role selections are startup settings. Configure them in the worker-selection YAML, with the CLI flags or environment variables above, or through the Python `KvRouterConfig` constructor. They are not part of serialized `KvRouterConfig` JSON, and `KvRouterConfig.from_json` rejects those keys.
 </Note>
 
+### Register a Request Classifier
+
+The same catalog can install one process-wide request classifier. A classifier observes each request before queue admission and may override its policy class, due time, scheduling cost, or worker-selection target; Dynamo keeps final selection authority. Implement `RequestClassifier` in the policy crate, expose a provider that validates its parameters, and export the registration function from the catalog next to `register`:
+
+```rust
+use dynamo_kv_router::scheduling::{
+    RequestClassifierRegistry, RequestClassifierRegistryError,
+};
+
+pub fn register_request_classifiers(
+    registry: &mut RequestClassifierRegistry,
+) -> Result<(), RequestClassifierRegistryError> {
+    registry.register("acme-classifier", Arc::new(provider))
+}
+```
+
+The provider receives the YAML `parameters` mapping and returns a factory; the factory is invoked once per routed model with a `RequestClassifierContext` carrying the router block size and a non-blocking snapshot of live workers with their published KV-block capacity. Select the classifier in the same YAML file:
+
+```yaml
+request_classifier:
+  type: acme-classifier
+  parameters:
+    pause_threshold: 0.9
+```
+
+The type `default` is reserved: omit `request_classifier` to keep Dynamo's pass-through behavior. Dynamo calls `register_request_classifiers` on every catalog build, so an existing custom catalog must export the function even when its registry stays empty.
+
 ### Check the Policy and Catalog
 
 ```bash

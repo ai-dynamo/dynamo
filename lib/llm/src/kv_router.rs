@@ -906,6 +906,7 @@ where
         {
             anyhow::bail!("request classifier is already configured");
         }
+        tracing::info!(model = %self.tracking_model_name, "installed linked request classifier");
         Ok(())
     }
 

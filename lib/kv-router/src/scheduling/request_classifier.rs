@@ -633,14 +633,12 @@ impl RequestLifecycle {
     /// Order matters: [`Self::observe_context_tokens`] floors the same total,
     /// so report a context before its outputs or the floor erases them.
     pub fn observe_output_tokens(&mut self, output_tokens: usize) {
-        self.context_tokens = Some(
-            self.context_tokens
-                .unwrap_or_default()
-                .saturating_add(output_tokens),
-        );
-        if let Some(context_tokens) = self.context_tokens {
-            self.progress_updater.update_context_tokens(context_tokens);
-        }
+        let context_tokens = self
+            .context_tokens
+            .unwrap_or_default()
+            .saturating_add(output_tokens);
+        self.context_tokens = Some(context_tokens);
+        self.progress_updater.update_context_tokens(context_tokens);
     }
 
     /// Raise the context total to at least `context_tokens` (an
