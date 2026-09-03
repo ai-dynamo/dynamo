@@ -28,6 +28,20 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
+// ExtraPodSpecMergeStrategy selects how a component pod template overlays generated defaults.
+// +kubebuilder:validation:Enum=override;strategic
+type ExtraPodSpecMergeStrategy string
+
+const (
+	ExtraPodSpecMergeStrategyOverride  ExtraPodSpecMergeStrategy = "override"
+	ExtraPodSpecMergeStrategyStrategic ExtraPodSpecMergeStrategy = "strategic"
+)
+
+// IsValid reports whether the merge strategy is supported.
+func (s ExtraPodSpecMergeStrategy) IsValid() bool {
+	return s == ExtraPodSpecMergeStrategyOverride || s == ExtraPodSpecMergeStrategyStrategic
+}
+
 const (
 	// DynamoComponentDeploymentConditionTypeAvailable indicates the component is
 	// available and serving traffic.
@@ -133,6 +147,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// required fields, including image.
 	// +optional
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+
+	// extraPodSpecMergeStrategy controls how podTemplate is merged with the
+	// operator-generated pod and container defaults. When omitted, the operator
+	// uses its configured defaultExtraPodSpecMergeStrategy, which defaults to
+	// "override".
+	// +optional
+	ExtraPodSpecMergeStrategy ExtraPodSpecMergeStrategy `json:"extraPodSpecMergeStrategy,omitempty"`
 
 	// replicas is the desired number of Pods for this component. When
 	// `scalingAdapter` is set on this component, this field is managed by

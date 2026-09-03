@@ -29,6 +29,40 @@ import (
 	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
+// ExtraPodSpecMergeStrategy selects how a component pod template overlays generated defaults.
+// +kubebuilder:validation:Enum=override;strategic
+type ExtraPodSpecMergeStrategy string
+
+const (
+	ExtraPodSpecMergeStrategyOverride  ExtraPodSpecMergeStrategy = "override"
+	ExtraPodSpecMergeStrategyStrategic ExtraPodSpecMergeStrategy = "strategic"
+	DefaultExtraPodSpecMergeStrategy   ExtraPodSpecMergeStrategy = ExtraPodSpecMergeStrategyOverride
+)
+
+// IsValid reports whether the merge strategy is supported.
+func (s ExtraPodSpecMergeStrategy) IsValid() bool {
+	return s == ExtraPodSpecMergeStrategyOverride || s == ExtraPodSpecMergeStrategyStrategic
+}
+
+// ResolveExtraPodSpecMergeStrategy resolves component, operator, and built-in defaults in priority order.
+func ResolveExtraPodSpecMergeStrategy(
+	explicitStrategy ExtraPodSpecMergeStrategy,
+	defaultStrategy ExtraPodSpecMergeStrategy,
+) (ExtraPodSpecMergeStrategy, error) {
+	resolved := explicitStrategy
+	if resolved == "" {
+		resolved = defaultStrategy
+	}
+	if resolved == "" {
+		resolved = DefaultExtraPodSpecMergeStrategy
+	}
+	if !resolved.IsValid() {
+		return "", fmt.Errorf("invalid extraPodSpec merge strategy %q", resolved)
+	}
+
+	return resolved, nil
+}
+
 const (
 	DynamoGraphDeploymentConditionTypeAvailable            = "Available"
 	DynamoGraphDeploymentConditionTypeDynamoComponentReady = "DynamoComponentReady"
@@ -132,6 +166,13 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// extraPodSpec and provide a non-empty mainContainer image. Existing components created
 	// without extraPodSpec may remain unchanged.
 	ExtraPodSpec *ExtraPodSpec `json:"extraPodSpec,omitempty"`
+
+	// ExtraPodSpecMergeStrategy controls how extraPodSpec is merged with the
+	// operator-generated pod and container defaults. When omitted, the operator
+	// uses its configured defaultExtraPodSpecMergeStrategy, which defaults to
+	// "override".
+	// +optional
+	ExtraPodSpecMergeStrategy ExtraPodSpecMergeStrategy `json:"extraPodSpecMergeStrategy,omitempty"`
 
 	// LivenessProbe to detect and restart unhealthy containers.
 	LivenessProbe *corev1.Probe `json:"livenessProbe,omitempty"`

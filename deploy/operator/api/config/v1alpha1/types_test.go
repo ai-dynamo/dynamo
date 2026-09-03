@@ -17,7 +17,44 @@
 
 package v1alpha1
 
-import "testing"
+import (
+	"testing"
+)
+
+func TestExtraPodSpecMergeStrategy_IsValid(t *testing.T) {
+	tests := []struct {
+		name     string
+		strategy ExtraPodSpecMergeStrategy
+		want     bool
+	}{
+		{name: "override", strategy: ExtraPodSpecMergeStrategyOverride, want: true},
+		{name: "strategic", strategy: ExtraPodSpecMergeStrategyStrategic, want: true},
+		{name: "empty", strategy: "", want: false},
+		{name: "unknown", strategy: "replace", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Check whether the config-local merge strategy is supported")
+			if got := tt.strategy.IsValid(); got != tt.want {
+				t.Fatalf("ExtraPodSpecMergeStrategy(%q).IsValid() = %v, want %v", tt.strategy, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSetDefaultsOperatorConfiguration_PodGeneration(t *testing.T) {
+	t.Log("Build an empty operator configuration")
+	config := &OperatorConfiguration{}
+
+	t.Log("Apply the operator defaults")
+	SetDefaultsOperatorConfiguration(config)
+
+	t.Log("Verify pod generation uses the built-in merge strategy")
+	if got, want := config.PodGeneration.DefaultExtraPodSpecMergeStrategy, DefaultExtraPodSpecMergeStrategy; got != want {
+		t.Fatalf("DefaultExtraPodSpecMergeStrategy = %q, want %q", got, want)
+	}
+}
 
 func TestEffectiveSeccompProfile(t *testing.T) {
 	tests := []struct {

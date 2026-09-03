@@ -10694,6 +10694,16 @@ spec:
                       x-kubernetes-list-type: map
                   required: []
                   type: object
+                extraPodSpecMergeStrategy:
+                  description: |-
+                    ExtraPodSpecMergeStrategy controls how extraPodSpec is merged with the
+                    operator-generated pod and container defaults. When omitted, the operator
+                    uses its configured defaultExtraPodSpecMergeStrategy, which defaults to
+                    "override".
+                  enum:
+                    - override
+                    - strategic
+                  type: string
                 failover:
                   description: |-
                     Failover configures GMS (GPU Memory Service) failover for this service.
@@ -12237,6 +12247,16 @@ spec:
                           type: boolean
                       type: object
                   type: object
+                extraPodSpecMergeStrategy:
+                  description: |-
+                    extraPodSpecMergeStrategy controls how podTemplate is merged with the
+                    operator-generated pod and container defaults. When omitted, the operator
+                    uses its configured defaultExtraPodSpecMergeStrategy, which defaults to
+                    "override".
+                  enum:
+                    - override
+                    - strategic
+                  type: string
                 frontendSidecar:
                   description: |-
                     frontendSidecar optionally designates a container in

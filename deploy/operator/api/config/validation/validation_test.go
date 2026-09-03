@@ -86,6 +86,33 @@ func TestValidateOperatorConfiguration_InvalidDiscoveryBackend(t *testing.T) {
 	}
 }
 
+func TestValidateOperatorConfiguration_InvalidDefaultExtraPodSpecMergeStrategy(t *testing.T) {
+	t.Log("Decode the operator-facing camelCase pod-generation setting")
+	cfg := validConfig()
+	rawConfig := []byte(`{
+		"podGeneration": {
+			"defaultExtraPodSpecMergeStrategy": "replace"
+		}
+	}`)
+	if err := json.Unmarshal(rawConfig, cfg); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+
+	t.Log("Validate the unsupported merge strategy")
+	errs := ValidateOperatorConfiguration(cfg)
+
+	t.Log("Verify validation reports the public camelCase field path")
+	if len(errs) != 1 {
+		t.Fatalf("ValidateOperatorConfiguration() errors = %v, want exactly one", errs)
+	}
+	if got, want := errs[0].Field, "podGeneration.defaultExtraPodSpecMergeStrategy"; got != want {
+		t.Fatalf("ValidateOperatorConfiguration() field = %q, want %q", got, want)
+	}
+	if got, want := errs[0].Type, field.ErrorTypeNotSupported; got != want {
+		t.Fatalf("ValidateOperatorConfiguration() error type = %q, want %q", got, want)
+	}
+}
+
 func TestValidateOperatorConfiguration_ClusterWideMissingPlannerRole(t *testing.T) {
 	cfg := validConfig()
 	cfg.RBAC.PlannerClusterRoleName = ""

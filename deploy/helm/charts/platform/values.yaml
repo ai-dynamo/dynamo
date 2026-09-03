@@ -124,6 +124,9 @@ dynamo-operator:
       namespace: ""
 
     manager:
+      # -- Default strategy for merging component pod templates with operator-generated defaults. `override` preserves the component's supplied fields; `strategic` uses Kubernetes strategic merge semantics. Supported values: `override`, `strategic`.
+      defaultExtraPodSpecMergeStrategy: override
+
       # Container image configuration for the operator manager
       image:
         # -- Official NVIDIA Dynamo operator image repository

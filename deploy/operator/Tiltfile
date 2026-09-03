@@ -73,6 +73,7 @@ ENABLE_KAI_SCHEDULER = settings['enable_kai_scheduler']
 ENABLE_GROVE         = settings['enable_grove']
 IMAGE_PULL_SECRET    = settings['image_pull_secret']
 GOARCH               = settings['goarch']
+DEFAULT_EXTRA_POD_SPEC_MERGE_STRATEGY = settings.get('default_extra_pod_spec_merge_strategy', 'override')
 
 # ---------------------------------------------------------------------------
 # Operator version — passed as --operator-version to the manager binary.
@@ -233,6 +234,7 @@ def render_helm():
         '--set', 'dynamo-operator.controllerManager.manager.image.repository=' + IMG,
         '--set', 'dynamo-operator.controllerManager.manager.image.tag=' + IMG_TAG,
         '--set', 'dynamo-operator.controllerManager.manager.image.pullPolicy=IfNotPresent',
+        '--set', 'dynamo-operator.controllerManager.manager.defaultExtraPodSpecMergeStrategy=' + DEFAULT_EXTRA_POD_SPEC_MERGE_STRATEGY,
         # We apply CRDs ourselves in the local_resource above
         '--set', 'dynamo-operator.upgradeCRD=false',
     ]
