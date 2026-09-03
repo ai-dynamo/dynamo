@@ -331,21 +331,49 @@ func activeWorkerHashCandidates(
 	return candidates
 }
 
-type managedWorkerInventory struct {
-	desiredHash string
-	targetHash  string
-	desired     map[string]*nvidiacomv1beta1.DynamoComponentDeployment
-	targets     map[string]*nvidiacomv1beta1.DynamoComponentDeployment
-	old         []nvidiacomv1beta1.DynamoComponentDeployment
+// managedWorkerRollout is the controller's observed worker-DCD state and the
+// exact actions permitted from that observation. It is the single source of
+// truth for a managed rolling update.
+type managedWorkerRollout struct {
+	desiredV2Hash      string
+	targetDCDSuffix    string
+	targetsByComponent map[string]*nvidiacomv1beta1.DynamoComponentDeployment
+	oldDCDs            []managedOldWorkerDCD
+
+	newReplicaTargetsByComponent map[string]int32
 }
 
-func (i managedWorkerInventory) targetComplete() bool {
-	return len(i.desired) == len(i.targets)
+// managedOldWorkerDCD couples an observed DCD to the replica target computed
+// from that same observation. A nil target means no destructive action is
+// permitted yet.
+type managedOldWorkerDCD struct {
+	dcd            nvidiacomv1beta1.DynamoComponentDeployment
+	targetReplicas *int32
 }
 
-type managedWorkerRolloutPlan struct {
-	inventory managedWorkerInventory
-	context   dynamo.RollingUpdateContext
+func (r managedWorkerRollout) targetPending() bool {
+	for _, target := range r.targetsByComponent {
+		if target == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (r managedWorkerRollout) targetsReady() bool {
+	if r.targetPending() {
+		return false
+	}
+	for _, target := range r.targetsByComponent {
+		if !workerDCDReady(target) {
+			return false
+		}
+	}
+	return true
+}
+
+func (r managedWorkerRollout) inProgress() bool {
+	return r.targetPending() || !r.targetsReady() || len(r.oldDCDs) > 0
 }
 
 type workerDCDIdentityCollisionError struct {
@@ -358,40 +386,34 @@ func (e *workerDCDIdentityCollisionError) Error() string {
 	return fmt.Sprintf("worker DCD identity collision for component %q at %q: %s", e.component, e.name, e.detail)
 }
 
-// buildManagedWorkerRolloutPlan resolves the owned DCD cohort by its canonical
+// buildManagedWorkerRollout resolves the owned DCD cohort by its canonical
 // name. A persisted v1 suffix is eligible only as an explicit v1-to-v2 bridge;
 // worker specs are not used to identify a generation.
-func (r *dgdWorkerRolloutReconciler) buildManagedWorkerRolloutPlan(
+func (r *dgdWorkerRolloutReconciler) buildManagedWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) (managedWorkerRolloutPlan, error) {
+) (managedWorkerRollout, error) {
 	hash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	if err != nil {
-		return managedWorkerRolloutPlan{}, fmt.Errorf("compute desired worker hash: %w", err)
+		return managedWorkerRollout{}, fmt.Errorf("compute desired worker hash: %w", err)
 	}
 
-	rendered, err := dynamo.GenerateDynamoComponentsDeployments(
-		dgd, nil, nil, dynamo.RollingUpdateContext{NewWorkerHash: hash},
-	)
-	if err != nil {
-		return managedWorkerRolloutPlan{}, fmt.Errorf("render desired worker DCDs: %w", err)
+	rollout := managedWorkerRollout{
+		desiredV2Hash:                hash,
+		targetDCDSuffix:              hash,
+		targetsByComponent:           make(map[string]*nvidiacomv1beta1.DynamoComponentDeployment),
+		newReplicaTargetsByComponent: make(map[string]int32),
 	}
-
-	inventory := managedWorkerInventory{
-		desiredHash: hash,
-		targetHash:  hash,
-		desired:     make(map[string]*nvidiacomv1beta1.DynamoComponentDeployment),
-		targets:     make(map[string]*nvidiacomv1beta1.DynamoComponentDeployment),
-	}
-	for componentName, dcd := range rendered {
-		if dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
-			inventory.desired[componentName] = dcd
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			rollout.targetsByComponent[component.ComponentName] = nil
 		}
 	}
 
 	observed, err := r.listOwnedWorkerDCDs(ctx, dgd)
 	if err != nil {
-		return managedWorkerRolloutPlan{}, err
+		return managedWorkerRollout{}, err
 	}
 	nonTerminatingByName := make(map[string]*nvidiacomv1beta1.DynamoComponentDeployment, len(observed))
 	for i := range observed {
@@ -400,75 +422,48 @@ func (r *dgdWorkerRolloutReconciler) buildManagedWorkerRolloutPlan(
 		}
 	}
 
-	bridgeHash := managedWorkerBridgeHash(dgd, hash)
-	if !hasManagedWorkerTarget(inventory.desired, nonTerminatingByName, dgd, hash) &&
-		bridgeHash != "" &&
-		hasManagedWorkerTarget(inventory.desired, nonTerminatingByName, dgd, bridgeHash) {
-		inventory.targetHash = bridgeHash
-	}
+	rollout.targetDCDSuffix = selectManagedWorkerTargetDCDSuffix(
+		dgd,
+		hash,
+		rollout.targetsByComponent,
+		nonTerminatingByName,
+	)
 
 	matched := make(map[string]struct{}, len(observed))
-	for componentName := range inventory.desired {
-		targetName := dynamo.GetDCDResourceName(dgd, componentName, inventory.targetHash)
+	for componentName := range rollout.targetsByComponent {
+		targetName := dynamo.GetDCDResourceName(dgd, componentName, rollout.targetDCDSuffix)
 		if target, ok := nonTerminatingByName[targetName]; ok {
-			inventory.targets[componentName] = target
+			rollout.targetsByComponent[componentName] = target
 			matched[target.Name] = struct{}{}
 			continue
 		}
 		if err := r.rejectDesiredWorkerDCDNameCollision(ctx, dgd, componentName, targetName); err != nil {
-			return managedWorkerRolloutPlan{}, err
+			return managedWorkerRollout{}, err
 		}
 	}
 	for i := range observed {
 		if _, ok := matched[observed[i].Name]; !ok {
-			inventory.old = append(inventory.old, observed[i])
+			rollout.oldDCDs = append(rollout.oldDCDs, managedOldWorkerDCD{dcd: observed[i]})
 		}
 	}
 
-	plan := managedWorkerRolloutPlan{inventory: inventory}
-	plan.context = dynamo.RollingUpdateContext{
-		NewWorkerHash:                      inventory.desiredHash,
-		WorkerHashByComponent:              make(map[string]string, len(inventory.desired)),
-		TargetDCDNames:                     make(map[string]string, len(inventory.desired)),
-		OldWorkerDCDNames:                  make(map[string]struct{}, len(inventory.old)),
-		ObservedOldWorkerDCDs:              make(map[string]*nvidiacomv1beta1.DynamoComponentDeployment, len(inventory.old)),
-		TargetComplete:                     inventory.targetComplete(),
-		MayMutateOld:                       inventory.targetComplete(),
-		OldWorkerReplicaTargetsByComponent: make(map[string]int32),
-		OldWorkerReplicaTargetsByDCD:       make(map[string]int32),
-		NewWorkerReplicaTargetsByComponent: make(map[string]int32),
-	}
-	for componentName := range inventory.desired {
-		plan.context.WorkerHashByComponent[componentName] = inventory.targetHash
-		plan.context.TargetDCDNames[componentName] = dynamo.GetDCDResourceName(dgd, componentName, inventory.targetHash)
-	}
-	for i := range inventory.old {
-		plan.context.OldWorkerDCDNames[inventory.old[i].Name] = struct{}{}
-		plan.context.ObservedOldWorkerDCDs[inventory.old[i].Name] = inventory.old[i].DeepCopy()
+	if len(rollout.targetsByComponent) == 0 {
+		for i := range rollout.oldDCDs {
+			target := int32(0)
+			rollout.oldDCDs[i].targetReplicas = &target
+		}
+		return rollout, nil
 	}
 
-	if len(inventory.desired) == 0 {
-		plan.context.MayMutateOld = true
-		plan.context.WorkerInventoryInProgress = len(inventory.old) > 0
-		for i := range inventory.old {
-			componentName := dynamo.GetDCDComponentName(&inventory.old[i])
-			plan.context.OldWorkerReplicaTargetsByComponent[componentName] = 0
-			plan.context.OldWorkerReplicaTargetsByDCD[inventory.old[i].Name] = 0
-		}
-		return plan, nil
+	if rollout.targetPending() {
+		return rollout, nil
 	}
-
-	if !plan.context.TargetComplete {
-		plan.context.WorkerInventoryInProgress = true
-		return plan, nil
-	}
-	if len(inventory.old) > 0 {
-		if err := r.populateManagedOldWorkerTargets(ctx, dgd, &plan); err != nil {
-			return managedWorkerRolloutPlan{}, err
+	if len(rollout.oldDCDs) > 0 {
+		if err := r.populateManagedOldWorkerTargets(ctx, dgd, &rollout); err != nil {
+			return managedWorkerRollout{}, err
 		}
 	}
-	plan.context.WorkerInventoryInProgress = len(inventory.old) > 0 || !managedWorkerTargetsReady(inventory)
-	return plan, nil
+	return rollout, nil
 }
 
 func managedWorkerBridgeHash(dgd *nvidiacomv1beta1.DynamoGraphDeployment, desiredHash string) string {
@@ -479,13 +474,32 @@ func managedWorkerBridgeHash(dgd *nvidiacomv1beta1.DynamoGraphDeployment, desire
 	return current.v1
 }
 
+// selectManagedWorkerTargetDCDSuffix prefers the canonical v2 cohort. It
+// retains a v1 suffix only for the persisted {v1:H, v2:A} bridge when no v2
+// target has been observed.
+func selectManagedWorkerTargetDCDSuffix(
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	desiredV2Hash string,
+	targetsByComponent map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+	observedByName map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+) string {
+	if hasManagedWorkerTarget(targetsByComponent, observedByName, dgd, desiredV2Hash) {
+		return desiredV2Hash
+	}
+	bridgeHash := managedWorkerBridgeHash(dgd, desiredV2Hash)
+	if bridgeHash != "" && hasManagedWorkerTarget(targetsByComponent, observedByName, dgd, bridgeHash) {
+		return bridgeHash
+	}
+	return desiredV2Hash
+}
+
 func hasManagedWorkerTarget(
-	desired map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+	targetsByComponent map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 	observedByName map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	hash string,
 ) bool {
-	for componentName := range desired {
+	for componentName := range targetsByComponent {
 		if _, ok := observedByName[dynamo.GetDCDResourceName(dgd, componentName, hash)]; ok {
 			return true
 		}
@@ -534,19 +548,6 @@ func (r *dgdWorkerRolloutReconciler) rejectDesiredWorkerDCDNameCollision(
 	}
 }
 
-func managedWorkerTargetsReady(inventory managedWorkerInventory) bool {
-	if !inventory.targetComplete() {
-		return false
-	}
-	for componentName := range inventory.desired {
-		target := inventory.targets[componentName]
-		if target == nil || !workerDCDReady(target) {
-			return false
-		}
-	}
-	return true
-}
-
 func workerDCDReady(dcd *nvidiacomv1beta1.DynamoComponentDeployment) bool {
 	if dcd == nil || dcd.Status.ObservedGeneration < dcd.Generation {
 		return false
@@ -565,15 +566,15 @@ func workerDCDReady(dcd *nvidiacomv1beta1.DynamoComponentDeployment) bool {
 func (r *dgdWorkerRolloutReconciler) populateManagedOldWorkerTargets(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	plan *managedWorkerRolloutPlan,
+	rollout *managedWorkerRollout,
 ) error {
-	oldByComponent := make(map[string][]*nvidiacomv1beta1.DynamoComponentDeployment)
+	oldByComponent := make(map[string][]*managedOldWorkerDCD)
 	oldStates := make(map[string]dcdComponentState)
-	for i := range plan.inventory.old {
-		dcd := &plan.inventory.old[i]
-		componentName := dynamo.GetDCDComponentName(dcd)
-		oldByComponent[componentName] = append(oldByComponent[componentName], dcd)
-		state := dcdComponentStateFromDCD(dcd)
+	for i := range rollout.oldDCDs {
+		old := &rollout.oldDCDs[i]
+		componentName := dynamo.GetDCDComponentName(&old.dcd)
+		oldByComponent[componentName] = append(oldByComponent[componentName], old)
+		state := dcdComponentStateFromDCD(&old.dcd)
 		aggregate := oldStates[componentName]
 		aggregate.Spec += state.Spec
 		aggregate.Available += state.Available
@@ -591,14 +592,18 @@ func (r *dgdWorkerRolloutReconciler) populateManagedOldWorkerTargets(
 		if spec.Replicas != nil {
 			desired = *spec.Replicas
 		}
-		newState := dcdComponentStateFromDCD(plan.inventory.targets[componentName])
+		newState := dcdComponentStateFromDCD(rollout.targetsByComponent[componentName])
 		oldState := oldStates[componentName]
 		annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, spec)
 		strategy := deploymentStrategyFromAnnotations(annotations)
 
 		var oldTarget, newTarget int32
 		if strategy == common.DeploymentStrategyRecreate {
-			drained, err := r.oldWorkerComponentDrained(ctx, dgd, componentName, oldByComponent[componentName])
+			oldDCDs := make([]*nvidiacomv1beta1.DynamoComponentDeployment, 0, len(oldByComponent[componentName]))
+			for _, old := range oldByComponent[componentName] {
+				oldDCDs = append(oldDCDs, &old.dcd)
+			}
+			drained, err := r.oldWorkerComponentDrained(ctx, dgd, componentName, oldDCDs)
 			if err != nil {
 				return err
 			}
@@ -616,24 +621,28 @@ func (r *dgdWorkerRolloutReconciler) populateManagedOldWorkerTargets(
 			scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
 			newTarget = min(desired, newState.Spec+scaleUpBudget)
 		}
-		plan.context.OldWorkerReplicaTargetsByComponent[componentName] = oldTarget
-		plan.context.NewWorkerReplicaTargetsByComponent[componentName] = newTarget
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldByComponent[componentName], oldTarget) {
-			plan.context.OldWorkerReplicaTargetsByDCD[dcdName] = target
+		rollout.newReplicaTargetsByComponent[componentName] = newTarget
+		oldDCDs := make([]*nvidiacomv1beta1.DynamoComponentDeployment, 0, len(oldByComponent[componentName]))
+		for _, old := range oldByComponent[componentName] {
+			oldDCDs = append(oldDCDs, &old.dcd)
+		}
+		oldTargets := allocateOldWorkerDCDReplicas(oldDCDs, oldTarget)
+		for _, old := range oldByComponent[componentName] {
+			target := oldTargets[old.dcd.Name]
+			old.targetReplicas = &target
 		}
 	}
 	return nil
 }
 
-func (r *dgdWorkerRolloutReconciler) reconcileManagedWorkerInventory(
+func (r *dgdWorkerRolloutReconciler) advanceManagedWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-	plan managedWorkerRolloutPlan,
+	rollout managedWorkerRollout,
 ) error {
-	inventory := plan.inventory
-	if len(inventory.desired) == 0 {
-		if len(inventory.old) == 0 {
+	if len(rollout.targetsByComponent) == 0 {
+		if len(rollout.oldDCDs) == 0 {
 			if err := r.clearProjectedWorkerHashes(ctx, dgd); err != nil {
 				return err
 			}
@@ -641,34 +650,34 @@ func (r *dgdWorkerRolloutReconciler) reconcileManagedWorkerInventory(
 			return nil
 		}
 		setManagedRollingUpdatePhase(status, nvidiacomv1beta1.RollingUpdatePhaseInProgress)
-		drained, err := r.managedOldWorkersDrained(ctx, dgd, inventory.old)
+		drained, err := r.managedOldWorkersDrained(ctx, dgd, rollout.oldDCDs)
 		if err != nil {
 			return err
 		}
 		if drained {
-			return r.deleteObservedOldWorkerDCDs(ctx, inventory.old)
+			return r.deleteObservedOldWorkerDCDs(ctx, rollout.oldDCDs)
 		}
 		return nil
 	}
 
-	if !plan.context.TargetComplete {
+	if rollout.targetPending() {
 		setManagedRollingUpdatePhase(status, nvidiacomv1beta1.RollingUpdatePhasePending)
 		return nil
 	}
 
-	targetsReady := managedWorkerTargetsReady(inventory)
-	if len(inventory.old) > 0 {
+	targetsReady := rollout.targetsReady()
+	if len(rollout.oldDCDs) > 0 {
 		setManagedRollingUpdatePhase(status, nvidiacomv1beta1.RollingUpdatePhaseInProgress)
-		status.RollingUpdate.UpdatedComponents = managedUpdatedWorkerComponents(dgd, inventory)
+		status.RollingUpdate.UpdatedComponents = managedUpdatedWorkerComponents(dgd, rollout)
 		if !targetsReady {
 			return nil
 		}
-		drained, err := r.managedOldWorkersDrained(ctx, dgd, inventory.old)
+		drained, err := r.managedOldWorkersDrained(ctx, dgd, rollout.oldDCDs)
 		if err != nil {
 			return err
 		}
 		if drained {
-			return r.deleteObservedOldWorkerDCDs(ctx, inventory.old)
+			return r.deleteObservedOldWorkerDCDs(ctx, rollout.oldDCDs)
 		}
 		return nil
 	}
@@ -677,7 +686,7 @@ func (r *dgdWorkerRolloutReconciler) reconcileManagedWorkerInventory(
 		setManagedRollingUpdatePhase(status, nvidiacomv1beta1.RollingUpdatePhaseInProgress)
 		return nil
 	}
-	if err := r.projectCompletedWorkerHash(ctx, dgd, inventory.desiredHash, inventory.targetHash); err != nil {
+	if err := r.projectCompletedWorkerHash(ctx, dgd, rollout.desiredV2Hash, rollout.targetDCDSuffix); err != nil {
 		return err
 	}
 	completeManagedRollingUpdate(status, workerComponentNames(dgd))
@@ -730,18 +739,18 @@ func workerComponentNames(dgd *nvidiacomv1beta1.DynamoGraphDeployment) []string 
 
 func managedUpdatedWorkerComponents(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	inventory managedWorkerInventory,
+	rollout managedWorkerRollout,
 ) []string {
 	oldReady := make(map[string]int32)
-	for i := range inventory.old {
-		dcd := &inventory.old[i]
+	for i := range rollout.oldDCDs {
+		dcd := &rollout.oldDCDs[i].dcd
 		if dcd.Status.Component != nil && dcd.Status.Component.ReadyReplicas != nil {
 			oldReady[dynamo.GetDCDComponentName(dcd)] += *dcd.Status.Component.ReadyReplicas
 		}
 	}
 	updated := make([]string, 0)
-	for componentName := range inventory.desired {
-		if workerDCDReady(inventory.targets[componentName]) && oldReady[componentName] == 0 {
+	for componentName := range rollout.targetsByComponent {
+		if workerDCDReady(rollout.targetsByComponent[componentName]) && oldReady[componentName] == 0 {
 			updated = append(updated, componentName)
 		}
 	}
@@ -752,11 +761,11 @@ func managedUpdatedWorkerComponents(
 func (r *dgdWorkerRolloutReconciler) managedOldWorkersDrained(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	old []nvidiacomv1beta1.DynamoComponentDeployment,
+	oldDCDs []managedOldWorkerDCD,
 ) (bool, error) {
 	byComponent := make(map[string][]*nvidiacomv1beta1.DynamoComponentDeployment)
-	for i := range old {
-		dcd := &old[i]
+	for i := range oldDCDs {
+		dcd := &oldDCDs[i].dcd
 		componentName := dynamo.GetDCDComponentName(dcd)
 		byComponent[componentName] = append(byComponent[componentName], dcd)
 	}
@@ -771,12 +780,13 @@ func (r *dgdWorkerRolloutReconciler) managedOldWorkersDrained(
 
 func (r *dgdWorkerRolloutReconciler) deleteObservedOldWorkerDCDs(
 	ctx context.Context,
-	old []nvidiacomv1beta1.DynamoComponentDeployment,
+	oldDCDs []managedOldWorkerDCD,
 ) error {
-	for i := range old {
-		uid := old[i].UID
-		if err := r.Delete(ctx, &old[i], client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete old worker DCD %s: %w", old[i].Name, err)
+	for i := range oldDCDs {
+		dcd := &oldDCDs[i].dcd
+		uid := dcd.UID
+		if err := r.Delete(ctx, dcd, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete old worker DCD %s: %w", dcd.Name, err)
 		}
 	}
 	return nil
@@ -910,34 +920,6 @@ func dcdComponentStateFromDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) d
 		}
 	}
 	return s
-}
-
-// getOldWorkerDCDsByComponent returns old DCDs grouped by component and per-component state
-// aggregated across all old generations.
-func (r *dgdWorkerRolloutReconciler) getOldWorkerDCDsByComponent(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	newWorkerHash string,
-) (map[string][]*nvidiacomv1beta1.DynamoComponentDeployment, map[string]dcdComponentState, error) {
-	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, newWorkerHash)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	dcdsByComponent := make(map[string][]*nvidiacomv1beta1.DynamoComponentDeployment)
-	states := make(map[string]dcdComponentState)
-	for i := range oldDCDs {
-		componentName := dynamo.GetDCDComponentName(&oldDCDs[i])
-		dcdsByComponent[componentName] = append(dcdsByComponent[componentName], &oldDCDs[i])
-		s := dcdComponentStateFromDCD(&oldDCDs[i])
-		agg := states[componentName]
-		agg.Spec += s.Spec
-		agg.Available += s.Available
-		agg.Actual += s.Actual
-		states[componentName] = agg
-	}
-
-	return dcdsByComponent, states, nil
 }
 
 // oldWorkerDCDsAtZero reports whether every old DCD has observed its desired
@@ -1134,34 +1116,22 @@ func replicaTargetsByDCDName(plans []oldWorkerReplicaPlan) map[string]int32 {
 // before reducing old generations that are still serving traffic.
 func (r *dgdWorkerRolloutReconciler) scaleOldWorkerDCDs(
 	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	rollingUpdateCtx dynamo.RollingUpdateContext,
+	rollout managedWorkerRollout,
 ) error {
 	logger := log.FromContext(ctx)
 
-	if !rollingUpdateCtx.InProgress() {
-		return nil
-	}
-	if !rollingUpdateCtx.MayMutateOld {
+	if !rollout.inProgress() || rollout.targetPending() {
 		return nil
 	}
 
-	oldDCDs, err := r.oldWorkerDCDsForRollingUpdate(ctx, dgd, rollingUpdateCtx)
-	if err != nil {
-		return fmt.Errorf("failed to list old worker DCDs: %w", err)
-	}
-
-	for i := range oldDCDs {
-		dcd := &oldDCDs[i]
+	for i := range rollout.oldDCDs {
+		old := &rollout.oldDCDs[i]
+		if old.targetReplicas == nil {
+			return fmt.Errorf("missing old worker DCD replica target for %s", old.dcd.Name)
+		}
+		dcd := old.dcd.DeepCopy()
 		componentName := dynamo.GetDCDComponentName(dcd)
-		if _, ok := rollingUpdateCtx.OldWorkerReplicaTargetsByComponent[componentName]; !ok {
-			continue
-		}
-
-		desiredReplicas, ok := rollingUpdateCtx.OldWorkerReplicaTargetsByDCD[dcd.Name]
-		if !ok {
-			return fmt.Errorf("missing old worker DCD replica target for %s", dcd.Name)
-		}
+		desiredReplicas := *old.targetReplicas
 
 		currentReplicas := int32(1)
 		if dcd.Spec.Replicas != nil {
@@ -1191,95 +1161,32 @@ func (r *dgdWorkerRolloutReconciler) scaleOldWorkerDCDs(
 	return nil
 }
 
-// oldWorkerDCDsForRollingUpdate returns the inventory snapshot when the
-// managed-DCD reconciler has one. Re-listing by hash would turn an old DCD
-// back into a target if a stale cache reports the desired suffix on it.
-func (r *dgdWorkerRolloutReconciler) oldWorkerDCDsForRollingUpdate(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	rollingUpdateCtx dynamo.RollingUpdateContext,
-) ([]nvidiacomv1beta1.DynamoComponentDeployment, error) {
-	if rollingUpdateCtx.ObservedOldWorkerDCDs == nil {
-		return r.listOldWorkerDCDs(ctx, dgd, rollingUpdateCtx.NewWorkerHash)
-	}
-
-	oldDCDs := make([]nvidiacomv1beta1.DynamoComponentDeployment, 0, len(rollingUpdateCtx.ObservedOldWorkerDCDs))
-	for _, dcd := range rollingUpdateCtx.ObservedOldWorkerDCDs {
-		if dcd != nil {
-			oldDCDs = append(oldDCDs, *dcd.DeepCopy())
-		}
-	}
-	return oldDCDs, nil
-}
-
-// listOldWorkerDCDs returns all worker DCDs for this DGD whose worker hash label
-// does NOT match the given newWorkerHash. This captures all old generations (including legacy).
-func (r *dgdWorkerRolloutReconciler) listOldWorkerDCDs(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	newWorkerHash string,
-) ([]nvidiacomv1beta1.DynamoComponentDeployment, error) {
-	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
-	listOpts := []client.ListOption{
-		client.InNamespace(dgd.Namespace),
-		client.MatchingLabels{
-			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-		},
-	}
-
-	if err := r.List(ctx, dcdList, listOpts...); err != nil {
-		return nil, err
-	}
-
-	var workers []nvidiacomv1beta1.DynamoComponentDeployment
-	for _, dcd := range dcdList.Items {
-		if !dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
-			continue
-		}
-		if dcd.Labels[consts.KubeLabelDynamoWorkerHash] != newWorkerHash {
-			workers = append(workers, dcd)
-		}
-	}
-	return workers, nil
-}
-
-// aggregateOldWorkerComponentStatuses fetches all non-current worker DCDs and returns their
-// aggregated component statuses keyed by component name. Accumulates across multiple old generations.
+// aggregateOldWorkerComponentStatuses returns status from the observed old DCDs
+// selected by the managed rollout.
 func (r *dgdWorkerRolloutReconciler) aggregateOldWorkerComponentStatuses(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	rollingUpdateCtx dynamo.RollingUpdateContext,
-) (map[string]nvidiacomv1beta1.ComponentReplicaStatus, error) {
+	rollout managedWorkerRollout,
+) map[string]nvidiacomv1beta1.ComponentReplicaStatus {
 	oldStatuses := make(map[string]nvidiacomv1beta1.ComponentReplicaStatus)
 	oldDCDsByComponent := make(map[string][]nvidiacomv1beta1.DynamoComponentDeployment)
+	replicaTargets := make(map[string]int32)
 
-	oldDCDs, err := r.oldWorkerDCDsForRollingUpdate(ctx, dgd, rollingUpdateCtx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list old worker DCDs for status aggregation: %w", err)
-	}
-
-	for _, dcd := range oldDCDs {
-		componentName := dynamo.GetDCDComponentName(&dcd)
-		if _, inRollout := rollingUpdateCtx.OldWorkerReplicaTargetsByComponent[componentName]; !inRollout {
+	for _, old := range rollout.oldDCDs {
+		if old.targetReplicas == nil || old.dcd.Status.Component == nil {
 			continue
 		}
-		if dcd.Status.Component == nil {
-			continue
-		}
-		oldDCDsByComponent[componentName] = append(oldDCDsByComponent[componentName], dcd)
+		componentName := dynamo.GetDCDComponentName(&old.dcd)
+		oldDCDsByComponent[componentName] = append(oldDCDsByComponent[componentName], old.dcd)
+		replicaTargets[old.dcd.Name] = *old.targetReplicas
 	}
 
 	for componentName, dcds := range oldDCDsByComponent {
 		sortOldWorkerDCDsNewestFirst(dcds)
 		status := aggregateOldWorkerDCDStatuses(dcds)
-		status.RuntimeNamespace = selectOldWorkerRuntimeNamespace(
-			dcds,
-			rollingUpdateCtx.OldWorkerReplicaTargetsByDCD,
-		)
+		status.RuntimeNamespace = selectOldWorkerRuntimeNamespace(dcds, replicaTargets)
 		oldStatuses[componentName] = status
 	}
 
-	return oldStatuses, nil
+	return oldStatuses
 }
 
 func sortOldWorkerDCDsNewestFirst(dcds []nvidiacomv1beta1.DynamoComponentDeployment) {
@@ -1362,124 +1269,6 @@ func resolveRollingUpdateParams(annotations map[string]string, desiredReplicas i
 	}
 
 	return int32(surge), int32(unavail)
-}
-
-// buildRollingUpdateContext creates a RollingUpdateContext.
-func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) (dynamo.RollingUpdateContext, error) {
-	logger := log.FromContext(ctx)
-
-	desiredHashes, err := desiredWorkerHashes(dgd)
-	if err != nil {
-		return dynamo.RollingUpdateContext{}, err
-	}
-	newWorkerHash := r.activeWorkerHashForDCDGeneration(dgd, desiredHashes)
-	currentHashes := r.currentWorkerHashes(dgd)
-
-	if currentHashes.contains(newWorkerHash) {
-		return dynamo.RollingUpdateContext{
-			NewWorkerHash:                      newWorkerHash,
-			OldWorkerReplicaTargetsByComponent: make(map[string]int32),
-			OldWorkerReplicaTargetsByDCD:       make(map[string]int32),
-			NewWorkerReplicaTargetsByComponent: make(map[string]int32),
-		}, nil
-	}
-
-	oldDCDsByComponent, oldStates, err := r.getOldWorkerDCDsByComponent(ctx, dgd, newWorkerHash)
-	if err != nil {
-		return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get old worker component states: %w", err)
-	}
-
-	oldWorkerComponentReplicas := make(map[string]int32)
-	oldWorkerDCDReplicas := make(map[string]int32)
-	newWorkerReplicas := make(map[string]int32)
-
-	for i := range dgd.Spec.Components {
-		spec := &dgd.Spec.Components[i]
-		componentName := spec.ComponentName
-		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
-			continue
-		}
-
-		desired := int32(1)
-		if spec.Replicas != nil {
-			desired = *spec.Replicas
-		}
-
-		var newState dcdComponentState
-		newDCDName := dynamo.GetDCDResourceName(dgd, componentName, newWorkerHash)
-		newDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
-		if err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD); err == nil {
-			newState = dcdComponentStateFromDCD(newDCD)
-		} else if !apierrors.IsNotFound(err) {
-			return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
-		}
-
-		oldState := oldStates[componentName]
-		annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, componentName, spec)
-		strategy := deploymentStrategyFromAnnotations(annotations)
-
-		var oldTarget, newTarget, maxSurge, maxUnavailable, minAvailable int32
-		switch strategy {
-		case common.DeploymentStrategyRecreate:
-			// Recreate deliberately permits the full component to be unavailable.
-			// Keep declaring every old generation at zero until their controllers
-			// have observed the drain and every old workload pod is terminal; only
-			// then start the replacement generation.
-			maxUnavailable = desired
-			oldDCDs := oldDCDsByComponent[componentName]
-			drained, err := r.oldWorkerComponentDrained(ctx, dgd, componentName, oldDCDs)
-			if err != nil {
-				return dynamo.RollingUpdateContext{}, err
-			}
-			if drained {
-				newTarget = desired
-			}
-		default:
-			maxSurge, maxUnavailable = resolveRollingUpdateParams(annotations, desired)
-			minAvailable = desired - maxUnavailable
-
-			newUnavailable := max(int32(0), newState.Spec-newState.Available)
-			// maxScaledDown is the maximum number of old replicas that can be scaled down
-			maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
-			oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
-			// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
-			availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
-			oldTarget = max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
-
-			// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
-			scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
-			newTarget = min(desired, newState.Spec+scaleUpBudget)
-		}
-
-		oldWorkerComponentReplicas[componentName] = oldTarget
-		newWorkerReplicas[componentName] = newTarget
-
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDsByComponent[componentName], oldTarget) {
-			oldWorkerDCDReplicas[dcdName] = target
-		}
-
-		logger.V(1).Info("Worker update replica calculation",
-			"component", componentName,
-			"strategy", strategy,
-			"desired", desired,
-			"maxSurge", maxSurge,
-			"maxUnavailable", maxUnavailable,
-			"minAvailable", minAvailable,
-			"old", oldState,
-			"new", newState,
-			"oldTarget", oldTarget,
-			"newTarget", newTarget)
-	}
-
-	return dynamo.RollingUpdateContext{
-		NewWorkerHash:                      newWorkerHash,
-		OldWorkerReplicaTargetsByComponent: oldWorkerComponentReplicas,
-		OldWorkerReplicaTargetsByDCD:       oldWorkerDCDReplicas,
-		NewWorkerReplicaTargetsByComponent: newWorkerReplicas,
-	}, nil
 }
 
 // mergeWorkerComponentStatuses merges old worker component statuses into the existing component statuses.

@@ -45,7 +45,8 @@ func ComputeDGDWorkersSpecHash(dgd *v1beta1.DynamoGraphDeployment) (string, erro
 		dgd,
 		nil,
 		nil,
-		RollingUpdateContext{NewWorkerHash: dgdWorkerHashPlaceholderValue},
+		dgdWorkerHashPlaceholderValue,
+		nil,
 	)
 	if err != nil {
 		return "", err

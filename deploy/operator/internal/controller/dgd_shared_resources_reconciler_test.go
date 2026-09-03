@@ -78,7 +78,7 @@ func TestDGDSharedResourcesReconciler_ValidatesGMSResourceClaimTemplatesBeforePa
 		nil,
 		nil,
 	)
-	_, err := sharedResources.Reconcile(ctx, dgd)
+	_, err := sharedResources.Reconcile(ctx, dgd, "")
 
 	t.Log("Verify DRA validation fails before workload-path reconciliation")
 	g.Expect(err).To(gomega.HaveOccurred())
@@ -158,7 +158,7 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 	)
 
 	t.Log("Reconcile the ordered shared-resource sequence")
-	result, err := reconciler.Reconcile(ctx, dgd)
+	result, err := reconciler.Reconcile(ctx, dgd, "")
 
 	t.Log("Verify the later error preserves checkpoint progress")
 	require.ErrorContains(t, err, "EPP configuration is required")

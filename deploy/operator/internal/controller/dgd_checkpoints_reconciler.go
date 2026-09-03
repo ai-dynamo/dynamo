@@ -78,7 +78,7 @@ func newDGDCheckpointsReconciler(
 func (r *dgdCheckpointsReconciler) Reconcile(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	workerHashByComponents ...map[string]string,
+	workerDCDSuffix string,
 ) (dgdCheckpointsResult, error) {
 	result := dgdCheckpointsResult{
 		Statuses: make(map[string]nvidiacomv1beta1.ComponentCheckpointStatus),
@@ -117,7 +117,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 		var err error
 		hasCheckpointRef := checkpointConfig.CheckpointRef != nil && *checkpointConfig.CheckpointRef != ""
 		if !hasCheckpointRef {
-			workerHash, hashErr := checkpointWorkerHashForComponent(dgd, componentName, workerHashByComponents...)
+			workerHash, hashErr := checkpointWorkerHashForComponent(dgd, componentName, workerDCDSuffix)
 			if hashErr != nil {
 				return dgdCheckpointsResult{}, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, hashErr)
 			}
@@ -166,7 +166,7 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 			if !info.Exists {
 				logger.Info("Creating DGD-managed DynamoCheckpoint CR", "component", componentName)
 			}
-			ckpt, err := r.createCheckpointCR(ctx, dgd, componentName, component, workerHashByComponents...)
+			ckpt, err := r.createCheckpointCR(ctx, dgd, componentName, component, workerDCDSuffix)
 			if err != nil {
 				logger.Error(err, "Failed to create DynamoCheckpoint CR", "component", componentName)
 				return dgdCheckpointsResult{}, fmt.Errorf("failed to create checkpoint for component %s: %w", componentName, err)
@@ -202,14 +202,14 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 	dynamoDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	componentName string,
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
-	workerHashByComponents ...map[string]string,
+	workerDCDSuffix string,
 ) (*nvidiacomv1alpha1.DynamoCheckpoint, error) {
 	checkpointConfig := dynamo.GetCheckpoint(component)
 	if checkpointConfig == nil {
 		return nil, fmt.Errorf("checkpoint config is required")
 	}
 
-	workerHash, err := checkpointWorkerHashForComponent(dynamoDeployment, componentName, workerHashByComponents...)
+	workerHash, err := checkpointWorkerHashForComponent(dynamoDeployment, componentName, workerDCDSuffix)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute checkpoint worker hash for component %s: %w", componentName, err)
 	}
@@ -515,19 +515,17 @@ func (r *dgdCheckpointsReconciler) detachRetainedAutoCheckpoint(
 func checkpointWorkerHashForComponent(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	componentName string,
-	workerHashByComponents ...map[string]string,
+	workerDCDSuffix string,
 ) (string, error) {
-	if len(workerHashByComponents) > 0 {
-		if workerHash, ok := workerHashByComponents[0][componentName]; ok {
-			return workerHash, nil
-		}
-	}
 	if dgd == nil {
 		return "", nil
 	}
 	component := dgd.GetComponentByName(componentName)
 	if component == nil || !dynamo.IsWorkerComponent(string(component.ComponentType)) {
 		return "", nil
+	}
+	if workerDCDSuffix != "" {
+		return workerDCDSuffix, nil
 	}
 	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {

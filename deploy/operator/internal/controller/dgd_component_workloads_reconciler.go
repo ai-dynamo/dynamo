@@ -59,38 +59,36 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	restartState *dynamo.RestartState,
 	checkpointInfos map[string]*checkpoint.CheckpointInfo,
-	rollingUpdateContexts ...dynamo.RollingUpdateContext,
+	rollout *managedWorkerRollout,
 ) (ReconcileResult, error) {
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
-	var rollingUpdateCtx dynamo.RollingUpdateContext
-	if len(rollingUpdateContexts) > 0 {
-		rollingUpdateCtx = rollingUpdateContexts[0]
-	} else {
-		var err error
-		rollingUpdateCtx, err = r.rollout.buildRollingUpdateContext(ctx, dgd)
-		if err != nil {
-			return ReconcileResult{}, fmt.Errorf("failed to build rolling update context: %w", err)
-		}
+	workerDCDSuffix := ""
+	var newWorkerReplicaTargets map[string]int32
+	if rollout != nil {
+		workerDCDSuffix = rollout.targetDCDSuffix
+		newWorkerReplicaTargets = rollout.newReplicaTargetsByComponent
 	}
 
-	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd, rollingUpdateCtx)
+	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dgd, rollout)
 	if err != nil {
 		logger.Error(err, "failed to get existing restart annotations")
 		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
 	}
-	if rollingUpdateCtx.InProgress() {
+	if rollout != nil && rollout.inProgress() {
 		logger.Info("Rolling update in progress",
-			"newWorkerHash", rollingUpdateCtx.NewWorkerHash,
-			"oldWorkerComponentReplicas", rollingUpdateCtx.OldWorkerReplicaTargetsByComponent)
+			"desiredV2Hash", rollout.desiredV2Hash,
+			"targetDCDSuffix", rollout.targetDCDSuffix,
+			"oldWorkerDCDs", len(rollout.oldDCDs))
 	}
 
 	dcds, err := dynamo.GenerateDynamoComponentsDeployments(
 		dgd,
 		restartState,
 		existingRestartAnnotations,
-		rollingUpdateCtx,
+		workerDCDSuffix,
+		newWorkerReplicaTargets,
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the DynamoComponentsDeployments")
@@ -121,19 +119,17 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		resources = append(resources, syncedDCD)
 	}
 
-	if rollingUpdateCtx.InProgress() {
-		if err := r.rollout.scaleOldWorkerDCDs(ctx, dgd, rollingUpdateCtx); err != nil {
+	if rollout != nil && rollout.inProgress() {
+		if err := r.rollout.scaleOldWorkerDCDs(ctx, *rollout); err != nil {
 			logger.Error(err, "failed to scale old worker DCDs")
 			return ReconcileResult{}, fmt.Errorf("failed to scale old worker DCDs: %w", err)
 		}
 	}
 
 	result := checkResourcesReadiness(resources)
-	if rollingUpdateCtx.InProgress() {
-		oldWorkerStatuses, err := r.rollout.aggregateOldWorkerComponentStatuses(ctx, dgd, rollingUpdateCtx)
-		if err != nil {
-			logger.Error(err, "failed to aggregate old worker component statuses")
-		} else if len(oldWorkerStatuses) > 0 {
+	if rollout != nil && rollout.inProgress() {
+		oldWorkerStatuses := r.rollout.aggregateOldWorkerComponentStatuses(*rollout)
+		if len(oldWorkerStatuses) > 0 {
 			mergeWorkerComponentStatuses(result.ComponentStatus, oldWorkerStatuses)
 		}
 	}
@@ -144,10 +140,10 @@ func (r *componentWorkloadsReconciler) Reconcile(
 func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsDCD(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	rollingUpdateContexts ...dynamo.RollingUpdateContext,
+	rollout *managedWorkerRollout,
 ) (map[string]string, error) {
-	if len(rollingUpdateContexts) > 0 && rollingUpdateContexts[0].TargetDCDNames != nil {
-		return r.getExistingRestartAnnotationsFromInventory(ctx, dgd, rollingUpdateContexts[0])
+	if rollout != nil {
+		return r.getExistingRestartAnnotationsForWorkerSuffix(ctx, dgd, rollout.targetDCDSuffix)
 	}
 	logger := log.FromContext(ctx)
 	hashes, err := desiredWorkerHashes(dgd)
@@ -188,20 +184,17 @@ func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsDCD(
 	return restartAnnotations, nil
 }
 
-func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsFromInventory(
+func (r *componentWorkloadsReconciler) getExistingRestartAnnotationsForWorkerSuffix(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	rollingUpdateCtx dynamo.RollingUpdateContext,
+	workerDCDSuffix string,
 ) (map[string]string, error) {
 	restartAnnotations := make(map[string]string)
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 		name := dynamo.GetDCDResourceName(dgd, component.ComponentName, "")
 		if dynamo.IsWorkerComponent(string(component.ComponentType)) {
-			name = rollingUpdateCtx.TargetDCDNames[component.ComponentName]
-		}
-		if name == "" {
-			continue
+			name = dynamo.GetDCDResourceName(dgd, component.ComponentName, workerDCDSuffix)
 		}
 		existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
 		err := r.syncer.Get(ctx, types.NamespacedName{Name: name, Namespace: dgd.Namespace}, existing)

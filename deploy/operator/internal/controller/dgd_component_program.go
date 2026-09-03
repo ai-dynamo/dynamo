@@ -23,7 +23,6 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -88,12 +87,16 @@ func (p *componentProgram) Reconcile(
 	)
 
 	previousRolloutPhase := rollingUpdatePhase(programResult.Status.RollingUpdate)
-	rollingUpdateCtx, err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status)
+	rollout, err := p.reconcileWorkerRollout(ctx, req.DGD, &programResult.Status)
 	if err != nil {
 		return programResult, err
 	}
-	p.recordRollingUpdateTransition(previousRolloutPhase, rollingUpdateCtx, &programResult)
-	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD, rollingUpdateCtx.WorkerHashByComponent)
+	p.recordRollingUpdateTransition(previousRolloutPhase, rollout, &programResult)
+	workerDCDSuffix := ""
+	if rollout != nil {
+		workerDCDSuffix = rollout.targetDCDSuffix
+	}
+	checkpoints, err := p.sharedResources.Reconcile(ctx, req.DGD, workerDCDSuffix)
 	if checkpoints.Statuses != nil {
 		programResult.Status.Checkpoints = checkpoints.Statuses
 	}
@@ -117,7 +120,7 @@ func (p *componentProgram) Reconcile(
 		req.DGD,
 		&programResult.Status,
 		func(restartCtx context.Context, restartDGD *nvidiacomv1beta1.DynamoGraphDeployment, inProgress []string) []string {
-			return p.restartProgress.ResolveWithRollingUpdateContext(restartCtx, restartDGD, inProgress, rollingUpdateCtx)
+			return p.restartProgress.ResolveWithManagedWorkerRollout(restartCtx, restartDGD, inProgress, rollout)
 		},
 	)
 	recordRestartTransition(previousRestart, restart.Status, &programResult)
@@ -128,7 +131,7 @@ func (p *componentProgram) Reconcile(
 		req.DGD,
 		restart.State,
 		checkpoints.Infos,
-		rollingUpdateCtx,
+		rollout,
 	)
 	if err != nil {
 		// Preserve newly observed component status while leaving the generation unobserved.
@@ -153,14 +156,14 @@ func (p *componentProgram) reconcileWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-) (dynamo.RollingUpdateContext, error) {
+) (*managedWorkerRollout, error) {
 	if supportsManagedRollingUpdate(dgd) {
 		return p.reconcileManagedWorkerRollout(ctx, dgd, status)
 	}
 
 	// LWS has no controller-owned rollout contract. Its DCD and LWS writes are
 	// receipts only, so this program does not project them into DGD generation state.
-	return dynamo.RollingUpdateContext{}, nil
+	return nil, nil
 }
 
 // supportsManagedRollingUpdate selects the component pathway with a controller-owned
@@ -175,26 +178,29 @@ func (p *componentProgram) reconcileManagedWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
-) (dynamo.RollingUpdateContext, error) {
-	plan, err := p.rollout.buildManagedWorkerRolloutPlan(ctx, dgd)
+) (*managedWorkerRollout, error) {
+	rollout, err := p.rollout.buildManagedWorkerRollout(ctx, dgd)
 	if err != nil {
 		var collision *workerDCDIdentityCollisionError
 		if errors.As(err, &collision) {
-			return dynamo.RollingUpdateContext{}, failWorkloadProgram(reasonDCDIdentityCollision, err)
+			return nil, failWorkloadProgram(reasonDCDIdentityCollision, err)
 		}
-		return dynamo.RollingUpdateContext{}, failWorkloadProgram(reasonRollingUpdateFailed, err)
+		return nil, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
-	if err := p.rollout.reconcileManagedWorkerInventory(ctx, dgd, status, plan); err != nil {
-		return plan.context, failWorkloadProgram(reasonRollingUpdateFailed, err)
+	if err := p.rollout.advanceManagedWorkerRollout(ctx, dgd, status, rollout); err != nil {
+		return &rollout, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
-	return plan.context, nil
+	return &rollout, nil
 }
 
 func (p *componentProgram) recordRollingUpdateTransition(
 	previous nvidiacomv1beta1.RollingUpdatePhase,
-	rollingUpdateCtx dynamo.RollingUpdateContext,
+	rollout *managedWorkerRollout,
 	result *workloadProgramResult,
 ) {
+	if rollout == nil {
+		return
+	}
 	current := rollingUpdatePhase(result.Status.RollingUpdate)
 	switch {
 	case current == nvidiacomv1beta1.RollingUpdatePhasePending && previous != current:
@@ -202,14 +208,14 @@ func (p *componentProgram) recordRollingUpdateTransition(
 			corev1.EventTypeNormal,
 			"RollingUpdateStarted",
 			"Starting rolling update to worker hash %s",
-			rollingUpdateCtx.NewWorkerHash,
+			rollout.desiredV2Hash,
 		)
 	case current == nvidiacomv1beta1.RollingUpdatePhaseCompleted && previous != current:
 		result.Eventf(
 			corev1.EventTypeNormal,
 			"RollingUpdateCompleted",
 			"Rolling update completed, worker hash %s",
-			rollingUpdateCtx.NewWorkerHash,
+			rollout.desiredV2Hash,
 		)
 	}
 }

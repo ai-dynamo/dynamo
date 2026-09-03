@@ -266,73 +266,14 @@ func ParseDynDeploymentConfig(jsonContent []byte) (DynDeploymentConfig, error) {
 	return config, err
 }
 
-func (r RollingUpdateContext) InProgress() bool {
-	return r.WorkerInventoryInProgress || len(r.OldWorkerReplicaTargetsByComponent) > 0
-}
-
-// WorkerHashForComponent returns the suffix used to render one worker DCD.
-// Existing generations can use a legacy suffix while a newly-created target
-// always uses NewWorkerHash. Non-worker callers may safely use the same value;
-// GetDCDResourceName ignores suffixes for non-worker components.
-func (r RollingUpdateContext) WorkerHashForComponent(componentName string) string {
-	if hash, ok := r.WorkerHashByComponent[componentName]; ok {
-		return hash
-	}
-	return r.NewWorkerHash
-}
-
-// RollingUpdateContext provides information about an in-progress rolling update.
-type RollingUpdateContext struct {
-	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
-	NewWorkerHash string
-
-	// WorkerHashByComponent contains the suffix selected by the managed DCD
-	// inventory for each component. A component absent from this map is rendered
-	// with NewWorkerHash.
-	WorkerHashByComponent map[string]string
-
-	// TargetDCDNames is the per-component DCD name selected by the managed
-	// worker inventory. It is an observation, not a parent-annotation-derived
-	// guess, and is used by restart and checkpoint consumers.
-	TargetDCDNames map[string]string
-
-	// OldWorkerDCDNames contains only DCDs observed as old in the inventory
-	// pass that built this context. Mutating old DCDs outside this set is unsafe
-	// when the controller cache is stale.
-	OldWorkerDCDNames map[string]struct{}
-
-	// ObservedOldWorkerDCDs are the immutable inventory snapshot used for old
-	// DCD scaling and status aggregation. They prevent a hash-label query from
-	// reclassifying a DCD during a stale-cache reconcile.
-	ObservedOldWorkerDCDs map[string]*v1beta1.DynamoComponentDeployment
-
-	// TargetComplete requires exactly one semantically matching owned DCD for
-	// every desired worker component. MayMutateOld is false until that target is
-	// observed, preventing stale cached absence from scaling or deleting a
-	// serving generation.
-	TargetComplete            bool
-	MayMutateOld              bool
-	WorkerInventoryInProgress bool
-
-	// Aggregate desired replica targets for old worker generations, keyed by logical component name.
-	// Example: worker -> 3 means all old DCDs for component "worker" should sum to 3 replicas.
-	OldWorkerReplicaTargetsByComponent map[string]int32
-
-	// Concrete desired replica targets for each old worker DCD, keyed by DCD object name.
-	// Example: dgd-worker-a -> 3, dgd-worker-b -> 0.
-	OldWorkerReplicaTargetsByDCD map[string]int32
-
-	// Desired replica targets for the new worker generation, keyed by logical component name.
-	NewWorkerReplicaTargetsByComponent map[string]int32
-}
-
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig.
 // The map key is the component name.
 func GenerateDynamoComponentsDeployments(
 	parentDGD *v1beta1.DynamoGraphDeployment,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
-	rollingUpdateCtx RollingUpdateContext,
+	workerDCDSuffix string,
+	newWorkerReplicaTargets map[string]int32,
 ) (map[string]*v1beta1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1beta1.DynamoComponentDeployment)
 	backendFramework, err := backendFrameworkForGeneratedDCDs(parentDGD)
@@ -358,7 +299,7 @@ func GenerateDynamoComponentsDeployments(
 		}
 
 		dynamoNamespace := parentDGD.GetDynamoNamespaceForComponent(component)
-		dcd, err := generateSingleDCD(parentDGD, componentName, component, dynamoNamespace, backendFramework, restartState, existingRestartAnnotations, rollingUpdateCtx)
+		dcd, err := generateSingleDCD(parentDGD, componentName, component, dynamoNamespace, backendFramework, restartState, existingRestartAnnotations, workerDCDSuffix, newWorkerReplicaTargets)
 		if err != nil {
 			return nil, err
 		}
@@ -462,11 +403,12 @@ func generateSingleDCD(
 	backendFramework string,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
-	rollingUpdateCtx RollingUpdateContext,
+	workerDCDSuffix string,
+	newWorkerReplicaTargets map[string]int32,
 ) (*v1beta1.DynamoComponentDeployment, error) {
 	deployment := &v1beta1.DynamoComponentDeployment{}
 	deployment.Spec.DynamoComponentDeploymentSharedSpec = *component.DeepCopy()
-	workerHash := rollingUpdateCtx.WorkerHashForComponent(componentName)
+	workerHash := workerDCDSuffix
 	deployment.Name = GetDCDResourceName(parentDGD, componentName, workerHash)
 	deployment.Spec.BackendFramework = backendFramework
 	deployment.Namespace = parentDGD.Namespace
@@ -549,8 +491,8 @@ func generateSingleDCD(
 		return nil, err
 	}
 
-	// during a rolling update, the replica count is determined by the rollingUpdateCtx instead of the component spec
-	if newReplicas, ok := rollingUpdateCtx.NewWorkerReplicaTargetsByComponent[componentName]; rollingUpdateCtx.InProgress() && IsWorkerComponent(string(component.ComponentType)) && ok {
+	// During a managed rollout, the replica target overrides the component spec.
+	if newReplicas, ok := newWorkerReplicaTargets[componentName]; IsWorkerComponent(string(component.ComponentType)) && ok {
 		deployment.Spec.Replicas = ptr.To(newReplicas)
 	} else if component.Replicas != nil {
 		deployment.Spec.Replicas = component.Replicas

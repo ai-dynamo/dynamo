@@ -3000,12 +3000,16 @@ func TestComponentWorkloadsReconciler_Reconcile(t *testing.T) {
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{},
 			}
+			rollout := &managedWorkerRollout{
+				targetDCDSuffix: dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2],
+			}
 
 			result, err := reconciler.newComponentProgram().workloads.Reconcile(
 				ctx,
 				dgd,
 				nil,
 				nil,
+				rollout,
 			)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 

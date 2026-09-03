@@ -136,7 +136,7 @@ func TestDGDCheckpointsReconciler_CreateDoesNotReuseExistingCapture(t *testing.T
 	}
 
 	t.Log("Create the DGD-managed checkpoint")
-	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", betaComponent(t, component))
+	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", betaComponent(t, component), "")
 	if err != nil {
 		t.Fatalf("createCheckpointCR() error = %v", err)
 	}
@@ -145,7 +145,7 @@ func TestDGDCheckpointsReconciler_CreateDoesNotReuseExistingCapture(t *testing.T
 	if ckpt.Name == "existing-worker-checkpoint" {
 		t.Fatalf("createCheckpointCR() reused existing checkpoint")
 	}
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker", "")
 	if err != nil {
 		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
 	}
@@ -252,11 +252,11 @@ func TestDGDCheckpointsReconciler_CreateDoesNotAdoptLegacyIdentityTemplate(t *te
 	}
 
 	t.Log("Create the DGD-managed checkpoint")
-	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", component)
+	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", component, "")
 	require.NoError(t, err)
 
 	t.Log("Verify the new checkpoint does not adopt the legacy template")
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker", "")
 	require.NoError(t, err)
 	checkpointID := checkpoint.DGDCheckpointID(
 		dgd.Namespace,
@@ -346,7 +346,7 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	}
 
 	t.Log("Create the GMS-backed checkpoint")
-	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", betaComponent(t, component))
+	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", betaComponent(t, component), "")
 	if err != nil {
 		t.Fatalf("createCheckpointCR() error = %v", err)
 	}
@@ -377,7 +377,7 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	assert.Empty(t, server.Args)
 	assert.Contains(t, server.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
 	assert.Contains(t, main.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker", "")
 	require.NoError(t, err)
 	checkpointID := checkpoint.DGDCheckpointID(
 		dgd.Namespace,
@@ -502,7 +502,7 @@ func TestDGDCheckpointsReconciler_CreateAppliesDGDDefaults(t *testing.T) {
 	}
 
 	t.Log("Create the checkpoint job pod template")
-	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", component)
+	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", component, "")
 	require.NoError(t, err)
 
 	t.Log("Verify graph defaults reach the checkpoint job")
@@ -576,7 +576,7 @@ func TestDGDCheckpointsReconciler_CreateUsesTargetContainer(t *testing.T) {
 	}
 
 	t.Log("Create the target-container checkpoint")
-	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", component)
+	ckpt, err := newTestDGDCheckpointsReconciler(reconciler).createCheckpointCR(ctx, dgd, "worker", component, "")
 	require.NoError(t, err)
 
 	t.Log("Verify target and GMS containers are retained")
@@ -628,7 +628,7 @@ func TestDGDCheckpointsReconciler_AutoUsesTargetContainerWithoutIdentity(t *test
 	}
 
 	t.Log("Reconcile the auto checkpoint")
-	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd, "")
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
 	require.NoError(t, err)
@@ -680,7 +680,7 @@ func TestDGDCheckpointsReconciler_RejectsDisabledFeatureBeforeCreatingResources(
 	}
 
 	t.Log("Reconcile checkpoint resources")
-	_, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	_, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd, "")
 	require.ErrorContains(t, err, "checkpoint functionality is disabled")
 
 	t.Log("Verify rejection happens before checkpoint or storage resources are created")
@@ -734,7 +734,7 @@ func TestDGDCheckpointsReconciler_PropagatesManagedCheckpointResolveError(t *tes
 	}
 
 	t.Log("Reconcile the managed checkpoint")
-	_, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	_, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd, "")
 
 	t.Log("Verify the read failure is returned instead of dereferencing a nil result")
 	require.ErrorIs(t, err, resolveErr)
@@ -788,7 +788,7 @@ func TestDGDCheckpointsReconciler_AutoPreservesPodTemplateMetadata(t *testing.T)
 	}
 
 	t.Log("Reconcile the auto checkpoint")
-	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd, "")
 	checkpointStatuses := checkpointResult.Statuses
 	require.NoError(t, err)
 	require.NotEmpty(t, checkpointStatuses["worker"].CheckpointName)
@@ -841,7 +841,7 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 			}},
 		},
 	}
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker", "")
 	require.NoError(t, err)
 	checkpointID := checkpoint.DGDCheckpointID(
 		dgd.Namespace,
@@ -900,7 +900,7 @@ func TestDGDCheckpointsReconciler_SyncsExistingAutoLifecycle(t *testing.T) {
 		Build()
 
 	t.Log("Reconcile the existing managed checkpoint")
-	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd, "")
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
 	require.NoError(t, err)
@@ -990,7 +990,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefSkipsAutoCreateWhileReferencedCRI
 	})
 
 	t.Log("Reconcile the not-ready checkpoint reference")
-	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd, "")
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
 	if err != nil {
@@ -1087,7 +1087,7 @@ func TestDGDCheckpointsReconciler_CheckpointRefUsesReadyReferencedCR(t *testing.
 	})
 
 	t.Log("Reconcile the ready checkpoint reference")
-	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd, "")
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
 	if err != nil {
@@ -1184,7 +1184,7 @@ func TestDGDCheckpointsReconciler_OverlaysServiceGMSLoader(t *testing.T) {
 	})
 
 	t.Log("Reconcile the referenced GMS checkpoint")
-	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd, "")
 	checkpointInfos := checkpointResult.Infos
 	if err != nil {
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
@@ -1262,7 +1262,7 @@ func TestDGDCheckpointsReconciler_RejectsServiceGMSWithNonGMSCheckpoint(t *testi
 	})
 
 	t.Log("Reconcile the incompatible checkpoint reference")
-	_, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	_, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd, "")
 
 	t.Log("Verify the incompatibility is returned with checkpoint context")
 	require.Error(t, err)
@@ -1343,7 +1343,7 @@ func TestDGDCheckpointsReconciler_CreatesCheckpointStoragePVC(t *testing.T) {
 	})
 
 	t.Log("Reconcile checkpoint resources")
-	if _, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd); err != nil {
+	if _, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd, ""); err != nil {
 		t.Fatalf("reconcileCheckpoints() error = %v", err)
 	}
 
@@ -1442,7 +1442,7 @@ func TestDGDCheckpointsReconciler_AutoModeWaitsForExistingCreatingCheckpoint(t *
 	})
 
 	t.Log("Reconcile the automatic checkpoint")
-	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	checkpointResult, err := newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd, "")
 	checkpointStatuses := checkpointResult.Statuses
 	checkpointInfos := checkpointResult.Infos
 	if err != nil {
@@ -1463,7 +1463,7 @@ func TestDGDCheckpointsReconciler_AutoModeWaitsForExistingCreatingCheckpoint(t *
 	if info.Hash == hash {
 		t.Fatalf("auto checkpoint unexpectedly reused legacy identity hash %s", hash)
 	}
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker", "")
 	if err != nil {
 		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
 	}
@@ -1519,7 +1519,7 @@ func TestCheckpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
 		t.Fatalf("desiredWorkerHashes() error = %v", err)
 	}
 
-	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker", "")
 	if err != nil {
 		t.Fatalf("checkpointWorkerHashForComponent() error = %v", err)
 	}
