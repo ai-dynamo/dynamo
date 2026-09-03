@@ -97,9 +97,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
-	// A successful write only acknowledges the requested change. Project the parent
-	// hash only when the transition needs a commit and the informer cache reflects
-	// the updated PCS with the target suffix on every worker clique.
+	// Project the hash only once the informer cache reflects the target suffix on every worker clique.
 	if workerHashTransition.needsCommit() {
 		observed, err := podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing, workerHashTransition.isFirstGeneration)
 		if err != nil {

@@ -280,9 +280,6 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			builder.WithPredicates(dgdWorkerPodEventPredicate()),
 		).
 		Owns(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
-			// Creating a DCD is only a write receipt. Enqueue the owner after the
-			// informer observes it so worker-hash projection can proceed without
-			// depending on a subsequent DCD controller update.
 			CreateFunc:  func(ce event.CreateEvent) bool { return true },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },

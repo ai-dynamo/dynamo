@@ -227,16 +227,9 @@ func podCliqueSetUsesGroveWorkerHashSuffix(
 	return true
 }
 
-// podCliqueSetObservesWorkerHash reports whether the informer snapshot contains
-// one coherent observed worker generation. A write receipt is not an observation:
-// callers must pass the PodCliqueSet read before any sync.
-//
-// Two states are accepted as observed:
-//   - canonical: every worker clique carries the desired hash label.
-//   - unstamped: every worker clique has an empty hash label, which is valid
-//     only when isFirstGeneration is true. This covers PodCliqueSets that were
-//     created before hash-suffix stamping was introduced, as well as genuinely
-//     new deployments whose cliques have not yet been stamped.
+// podCliqueSetObservesWorkerHash reports whether every worker clique carries a
+// coherent hash. Accepts all-canonical (desired hash on every clique) or, when
+// isFirstGeneration is true, all-unstamped (no clique has a hash yet).
 func podCliqueSetObservesWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,

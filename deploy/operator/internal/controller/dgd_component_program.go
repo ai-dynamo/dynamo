@@ -158,9 +158,7 @@ func (p *componentProgram) reconcileWorkerRollout(
 	return p.reconcileMultinodeWorkerRollout(ctx, dgd)
 }
 
-// reconcileMultinodeWorkerRollout projects the worker-generation hash onto the
-// DGD only after an informer observation confirms the target hash is present on
-// an owned worker DCD. LWS owns the actual rollout; DCD writes are receipts.
+// reconcileMultinodeWorkerRollout gates hash projection on informer observation of the target DCD.
 func (p *componentProgram) reconcileMultinodeWorkerRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,

@@ -49,7 +49,7 @@ type workerGenerationHashes struct {
 // corresponding generation.
 type unsupportedWorkerHashTransition struct {
 	next             workerGenerationHashes
-	isFirstGeneration bool // no prior hash annotation existed; child may not be stamped yet
+	isFirstGeneration bool // no prior hash annotation; child workload may not be stamped yet
 	hashChanged      bool // hash annotation exists but does not match desired
 }
 
@@ -533,9 +533,7 @@ func (r *dgdWorkerRolloutReconciler) reconcileRollingUpdate(
 		"desiredV2WorkerHash", desired.v2)
 
 	if rollingUpdateStatus.Phase == nvidiacomv1beta1.RollingUpdatePhaseCompleted && !current.contains(newWorkerHash) {
-		// Resume a rollout from observed target and old-generation state. The
-		// completion path performs the destructive-action barriers before it
-		// projects the new hash onto the parent.
+		// Target generation is ahead of current: drain old DCDs before projecting.
 		newInfo, err := r.getWorkerInfoForWorkerHash(ctx, dgd, newWorkerHash)
 		oldInfo, oldErr := r.getOldWorkerInfo(ctx, dgd, newWorkerHash)
 		if err == nil && oldErr == nil && workerGenerationComplete(dgd, oldInfo, newInfo) {
@@ -699,9 +697,8 @@ func workerGenerationComplete(
 	return totalWorkerComponents > 0 && len(updatedComponents) == totalWorkerComponents
 }
 
-// completeRollingUpdate retires old resources only after the target has been
-// observed ready by continueRollingUpdate. It records completion on a later
-// cache observation after the UID-preconditioned deletes have disappeared.
+// completeRollingUpdate drains and deletes old DCDs once the target is ready,
+// then records completion after the deletes disappear from the cache.
 func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -1459,9 +1456,6 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			continue
 		}
 
-		// Skip drain budget calculation for components with no old DCDs. Inserting
-		// a zero-target entry would cause InProgress() to return true in steady
-		// state, triggering rollout-only paths unnecessarily.
 		oldDCDs := oldDCDsByComponent[componentName]
 		if len(oldDCDs) == 0 {
 			continue
@@ -1537,10 +1531,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			"newTarget", newTarget)
 	}
 
-	// Assign zero replica target to old-only components that have been removed
-	// from the spec. Without this, scaleOldWorkerDCDs skips them (they are not
-	// in OldWorkerReplicaTargetsByComponent) and their DCDs are never drained,
-	// permanently stalling completeRollingUpdate.
+	// Components removed from the spec still have old DCDs that must be drained.
 	for componentName, oldDCDs := range oldDCDsByComponent {
 		if _, ok := oldWorkerComponentReplicas[componentName]; ok {
 			continue

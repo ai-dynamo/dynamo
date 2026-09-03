@@ -51,8 +51,6 @@ func newGroveWatchSetup(reader client.Reader) *groveWatchSetup {
 func (s *groveWatchSetup) addTo(ctrlBuilder *builder.Builder) *builder.Builder {
 	return ctrlBuilder.
 		Owns(&grovev1alpha1.PodCliqueSet{}, builder.WithPredicates(predicate.Funcs{
-			// Creating a PodCliqueSet is only a write receipt. Enqueue the owner
-			// after the informer observes it so worker-hash projection can proceed.
 			CreateFunc:  func(event.CreateEvent) bool { return true },
 			DeleteFunc:  func(event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(event.UpdateEvent) bool { return true },
