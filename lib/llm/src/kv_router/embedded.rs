@@ -3,15 +3,14 @@
 
 //! Embedded selection backend for the frontend `KvRouter`.
 //!
-//! When `KvRouterConfig::router_embedded_selection` is set, the router runs its
-//! scheduling and active-sequence accounting on one partition of an in-process
-//! `SelectionService` (the same core the standalone selection service and the
-//! EPP use) instead of the runtime-bound `KvScheduler`. The router keeps its own
-//! KV indexer and request transport: it computes overlap against that indexer
-//! and hands the partition scheduler a fully formed `ScheduleRequest`, exactly
-//! as it does with `KvScheduler`. The partition's worker catalog is fed from the
-//! runtime-config watch, so discovery remains the source of truth for
-//! membership while the scheduler and its replica sync become runtime-free.
+//! The router runs its scheduling and active-sequence accounting on one
+//! partition of an in-process `SelectionService` (the same core the standalone
+//! selection service and the EPP use). The router keeps its own KV indexer and
+//! request transport: it computes overlap against that indexer and hands the
+//! partition scheduler a fully formed `ScheduleRequest`. The partition's worker
+//! catalog is fed from the runtime-config watch, so discovery remains the source
+//! of truth for membership while the scheduler and its replica sync are
+//! runtime-free.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

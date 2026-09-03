@@ -95,14 +95,6 @@ const fn default_decode_active_request_weight() -> f64 {
 // Default-valued post-v1.3 fields are omitted so v1.3 frontends can read v1.4 MDCs during
 // rolling upgrades. Non-default values still serialize and fail closed on the older frontend.
 // TODO(v1.5): Remove these compatibility skips when v1.3 falls outside the N-1 window.
-fn default_true() -> bool {
-    true
-}
-
-fn is_true(value: &bool) -> bool {
-    *value
-}
-
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     value == &T::default()
 }
@@ -283,9 +275,6 @@ fn kv_router_config_from_lookup(
     }
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_TRACK_PREFILL_TOKENS") {
         config.router_track_prefill_tokens = value;
-    }
-    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_EMBEDDED_SELECTION") {
-        config.router_embedded_selection = value;
     }
     if let Some(value) = get_env("DYN_ROUTER_TRACKING_HASH") {
         config.router_tracking_hash = value.parse()?;
@@ -677,8 +666,6 @@ struct KvRouterConfigSerde {
     router_track_output_blocks: bool,
     router_assume_kv_reuse: bool,
     router_track_prefill_tokens: bool,
-    #[serde(default = "default_true")]
-    router_embedded_selection: bool,
     router_tracking_hash: TrackingHashAlgorithm,
     router_tracking_key_file: Option<PathBuf>,
     router_tracking_key_id: Option<String>,
@@ -725,7 +712,6 @@ impl Default for KvRouterConfigSerde {
             router_track_output_blocks: config.router_track_output_blocks,
             router_assume_kv_reuse: config.router_assume_kv_reuse,
             router_track_prefill_tokens: config.router_track_prefill_tokens,
-            router_embedded_selection: config.router_embedded_selection,
             router_tracking_hash: config.router_tracking_hash,
             router_tracking_key_file: config.router_tracking_key_file,
             router_tracking_key_id: config.router_tracking_key_id,
@@ -810,12 +796,6 @@ pub struct KvRouterConfig {
     /// and potential prefill-token load calculations.
     #[serde(default = "default_track_prefill_tokens")]
     pub router_track_prefill_tokens: bool,
-
-    /// Deprecated and ignored: the frontend router always schedules on an
-    /// embedded selection-service partition. Kept so existing configurations
-    /// and wire records still parse; `false` logs a warning.
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
-    pub router_embedded_selection: bool,
 
     /// Hash algorithm used for router-derived active-sequence identities.
     #[serde(default, skip_serializing_if = "is_default")]
@@ -979,7 +959,6 @@ impl Default for KvRouterConfig {
             router_track_output_blocks: false,
             router_assume_kv_reuse: true,
             router_track_prefill_tokens: default_track_prefill_tokens(),
-            router_embedded_selection: true,
             router_tracking_hash: TrackingHashAlgorithm::default(),
             router_tracking_key_file: None,
             router_tracking_key_id: None,
@@ -1044,7 +1023,6 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_track_output_blocks: compat.router_track_output_blocks,
             router_assume_kv_reuse: compat.router_assume_kv_reuse,
             router_track_prefill_tokens: compat.router_track_prefill_tokens,
-            router_embedded_selection: compat.router_embedded_selection,
             router_tracking_hash: compat.router_tracking_hash,
             router_tracking_key_file: compat.router_tracking_key_file,
             router_tracking_key_id: compat.router_tracking_key_id,

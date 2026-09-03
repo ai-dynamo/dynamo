@@ -771,12 +771,6 @@ where
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
-        if !kv_router_config.router_embedded_selection {
-            tracing::warn!(
-                "router_embedded_selection=false is ignored: the runtime-bound KV router scheduler \
-                 was removed and scheduling always runs on the embedded selection partition"
-            );
-        }
         // Scheduling and active-sequence accounting run on a selection-service
         // partition. A caller-injected `WorkerSelector` type (anything other than
         // the default selector or a registry `WorkerSelectionPolicy`) runs inside

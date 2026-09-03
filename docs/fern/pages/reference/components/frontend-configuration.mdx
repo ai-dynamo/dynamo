@@ -213,15 +213,6 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_REPLICA_SYNC`
 </ParamField>
 
-<ParamField path="--router-embedded-selection / --no-router-embedded-selection" type="boolean" default="true">
-  Deprecated and ignored. The router's scheduling and active-sequence accounting always run on an
-  embedded selection-service partition (the same core as the standalone selection service); the
-  runtime-bound scheduler was removed. `--router-replica-sync` and overload detection apply to
-  the embedded partition. `--no-router-embedded-selection` only logs a warning.
-
-  Environment variable: `DYN_ROUTER_EMBEDDED_SELECTION`
-</ParamField>
-
 <ParamField path="--router-tracking-hash" type="string" default="public-xxh3-v1">
   Hash function for router-derived active-sequence identities. `keyed-xxh3-v1` is experimental and
   requires both a tracking key file and key ID.

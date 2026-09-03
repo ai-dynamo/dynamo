@@ -1195,7 +1195,6 @@ async fn router_with_worker_configs_in_mode(
         skip_initial_worker_wait: true,
         use_kv_events: false,
         router_track_active_blocks: false,
-        router_embedded_selection: true,
         ..Default::default()
     };
     let chooser = KvRouter::new(
