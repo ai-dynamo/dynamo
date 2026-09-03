@@ -46,6 +46,8 @@ struct ClassificationOverrides {
     policy_class: Option<String>,
     due_at: Option<Instant>,
     scheduling_cost_tokens: Option<usize>,
+    /// Outer `None` leaves session affinity untouched; `Some(None)` clears it;
+    /// `Some(Some(target))` replaces it for this request.
     worker_selection_target: Option<Option<WorkerAffinityTarget>>,
 }
 
@@ -294,6 +296,8 @@ impl RequestClassifierWorker {
         self.worker
     }
 
+    /// Total KV blocks of [`RequestClassifierContext::block_size`] tokens on this rank, from the
+    /// worker's published runtime config. `None` when the worker did not publish a value.
     pub fn total_kv_blocks(&self) -> Option<u64> {
         self.total_kv_blocks
     }
@@ -317,11 +321,13 @@ impl RequestClassifierContext {
         }
     }
 
+    /// Tokens per KV block for this router's hash domain.
     pub fn block_size(&self) -> u32 {
         self.block_size
     }
 
     /// Return a non-blocking snapshot from the host's existing discovery watcher.
+    /// Ranks appear as workers register and leave when they deregister.
     pub fn workers(&self) -> Vec<RequestClassifierWorker> {
         (self.workers)()
     }
@@ -432,13 +438,12 @@ impl RequestClassifierRuntime {
                 live_request.overrides.clone(),
             ))
         });
-        let cached_overrides = live_request.and_then(|(progress, overrides)| {
+        if let Some((progress, overrides)) = live_request {
             request.progress = progress;
-            overrides
-        });
-        if let Some(overrides) = cached_overrides {
-            request.overrides = overrides;
-            return Ok(request);
+            if let Some(overrides) = overrides {
+                request.overrides = overrides;
+                return Ok(request);
+            }
         }
 
         let classification_id = NEXT_CLASSIFICATION_ID.fetch_add(1, Ordering::Relaxed);

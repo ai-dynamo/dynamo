@@ -187,8 +187,7 @@ request_classifier:
         registry.register("test", Arc::new(provider)).unwrap();
         let (_policy, valid_config) = config(VALID_CONFIG);
         let factory = registry.resolve(&valid_config).unwrap().unwrap();
-        let classifier = factory(super::super::RequestClassifierContext::new(16, Vec::new));
-        let _: Box<dyn RequestClassifier> = classifier;
+        let _classifier = factory(super::super::RequestClassifierContext::new(16, Vec::new));
 
         let (_policy, invalid) = config(
             r#"
