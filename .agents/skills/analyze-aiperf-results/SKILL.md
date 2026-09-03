@@ -29,6 +29,7 @@ Read:
 - `agent-docs/rules/benchmarking/evidence-eligibility.md`;
 - `agent-docs/rules/benchmarking/result-storage.md`;
 - `agent-docs/rules/benchmarking/series-boundaries.md`;
+- `agent-docs/rules/benchmarking/tool-version.md`;
 - `agent-docs/rules/optimization/evidence-before-spend.md`;
 - `agent-docs/rules/optimization/one-variable.md`;
 - `agent-docs/rules/verification/config-engagement.md`;
@@ -94,7 +95,14 @@ invalid run.
 
 ## Select Comparable History
 
-Use only valid runs whose benchmark-series ID matches the active plan. From that set identify:
+Use only valid runs whose benchmark-series ID matches the active plan AND whose recorded AIPerf runtime version
+(and source commit, when the plan pins one) matches the version pinned in that plan. A series ID alone does not
+establish comparability: a reused or hand-edited series can contain runs from different tool versions, and per
+`agent-docs/rules/benchmarking/tool-version.md` results measured under different tool versions are never directly
+comparable. Record the version check in `benchmark_audit.json`; a run whose recorded version disagrees with the plan
+is excluded from every comparison, its exclusion is listed as a limitation, and when the CURRENT run is the one
+that disagrees, its audit status is `invalid` for comparison purposes and the mismatch is reported as a series
+boundary rather than silently compared across. From the remaining set identify:
 
 - `series_baseline`: earliest valid result in the series;
 - `previous_valid`: most recent valid iteration before the current one;
