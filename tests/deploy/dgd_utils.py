@@ -1777,7 +1777,11 @@ class ManagedDeployment:
             url = f"http://localhost:{active_port_forward.local_port}{endpoint}"
             try:
                 return request_sender(url, payload, timeout=timeout, method="POST")
-            except (requests.ConnectionError, httpx.TransportError) as error:
+            except (
+                requests.ConnectionError,
+                requests.Timeout,
+                httpx.TransportError,
+            ) as error:
                 if attempt == 1:
                     raise
 

@@ -107,17 +107,22 @@ async def test_context_exit_reraises_unexpected_cleanup_error(tmp_path) -> None:
         await deployment.__aexit__(ValueError, ValueError("test failed"), None)
 
 
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        requests.ConnectionError("forward dropped"),
+        requests.Timeout("forward stalled"),
+    ],
+)
 def test_request_rebuilds_port_forward_after_transport_failure(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, transport_error
 ) -> None:
     deployment = managed_deployment(tmp_path)
     original_port_forward = MagicMock(local_port=31001)
     replacement_port_forward = MagicMock(local_port=31002)
     deployment.port_forward = MagicMock(return_value=replacement_port_forward)
     response = MagicMock(spec=requests.Response)
-    request_sender = MagicMock(
-        side_effect=[requests.ConnectionError("forward dropped"), response]
-    )
+    request_sender = MagicMock(side_effect=[transport_error, response])
     sleep = MagicMock()
     monkeypatch.setattr("tests.deploy.dgd_utils.time.sleep", sleep)
 

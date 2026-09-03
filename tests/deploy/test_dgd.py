@@ -200,10 +200,8 @@ async def test_deployment(
             model_ready
         ), f"Model '{model}' did not become available within the timeout period"
 
-        # Send test request. A transient vCluster API tunnel interruption also
-        # tears down the pod port-forward, so rebuild it and retry once on
-        # transport errors. Chat completion requests are side-effect free in
-        # this test, making one retry safe.
+        # This chat-completion request is side-effect free, so one retry after a
+        # dropped port-forward is safe.
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": TEST_PROMPT}],
