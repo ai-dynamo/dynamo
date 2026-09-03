@@ -34,6 +34,7 @@ use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use crate::epp_router::endpoint_in_subset;
+use crate::lifecycle::EppRequestLifecycle;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
 
 const BOOKKEEPING_TIMEOUT: Duration = Duration::from_secs(5);
@@ -525,6 +526,65 @@ impl Router {
             )
             .await
             .map_err(|e| anyhow::anyhow!("Decode query failed: {:?}", e))
+    }
+
+    /// Begin a classifier lifecycle for `request_id`, so that
+    /// `RequestClassifier::classify` runs for this request and its
+    /// `ClassifyEvent`s are delivered.
+    ///
+    /// Returns [`EppRequestLifecycle::disabled`] when no classifier is
+    /// installed, so callers never branch on classifier presence.
+    ///
+    /// TODO(router-lifecycle-visibility): `KvRouter::begin_request_lifecycle`
+    /// is `pub(crate)` in `dynamo-llm` and `dynamo-ext-proc` is a separate
+    /// crate, so this cannot be implemented today. `ManagedKvRouter` needs to
+    /// re-export it publicly. Note this is a *separate* gate from
+    /// `track_lifecycle`: without registration,
+    /// `LocalScheduler::classify_request` short-circuits on
+    /// `!classifier.has_request(request_id)` even when the schedule mode is
+    /// `TrackedWithLifecycle`.
+    pub fn begin_request_lifecycle(&self, _request_id: &str) -> Result<EppRequestLifecycle> {
+        todo!("blocked on router-lifecycle-visibility")
+    }
+
+    /// Lifecycle-tracked variant of [`Self::route_decode`].
+    ///
+    /// This is the call that must reach the router with `track_lifecycle:
+    /// true`. [`Self::route_decode`] cannot: it calls
+    /// `ManagedKvRouter::find_best_match` with `context_id: None` and
+    /// `update_states: false`, which resolves to `ScheduleMode::QueryOnly`,
+    /// whose `tracked_request_id()` is `None` — so classification is skipped
+    /// before the `has_request` gate is even consulted.
+    ///
+    /// The lifecycle-tracked call must pass `context_id: Some(request_id)`,
+    /// `update_states: true`, and `track_lifecycle: true` to land in
+    /// `ScheduleMode::TrackedWithLifecycle`.
+    ///
+    /// TODO(router-lifecycle-entrypoint): no public entry point accepts
+    /// `track_lifecycle`. `find_best_match` hardcodes
+    /// `FindBestMatchAdmission::WithAdmission { track_lifecycle: false }`, and
+    /// `FindBestMatchAdmission` is `pub(super)`, so an external crate cannot
+    /// name it. `dynamo-llm` must add something like
+    /// `find_best_match_tracked(context_id, .., track_lifecycle: bool)`.
+    ///
+    /// TODO(epp-atomic-admission): once this lands, selection and booking
+    /// become one tracked operation and the separate [`Self::add_request`]
+    /// call should be removed rather than run alongside it — otherwise the
+    /// request is booked twice.
+    #[expect(clippy::too_many_arguments)]
+    pub async fn route_decode_tracked(
+        &self,
+        _request_id: &str,
+        _lifecycle: &mut EppRequestLifecycle,
+        _tokens: &[u32],
+        _is_disaggregated: bool,
+        _cache_namespace: Option<String>,
+        _priority_jump: f64,
+        _strict_priority: u32,
+        _allowed_worker_ids: Option<HashSet<u64>>,
+        _routing_constraints: RoutingConstraints,
+    ) -> Result<(WorkerWithDpRank, u32)> {
+        todo!("blocked on router-lifecycle-entrypoint")
     }
 
     /// Register a request with the decode router for bookkeeping.

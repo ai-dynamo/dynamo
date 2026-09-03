@@ -16,6 +16,7 @@ pub mod epp;
 pub mod epp_router;
 pub mod epp_standalone_config;
 pub mod inference_pool;
+pub mod lifecycle;
 pub mod metrics;
 pub mod peer_discovery;
 pub mod picker;
@@ -33,6 +34,7 @@ pub use epp_standalone_config::{
     EppMode, EppStandaloneConfig, PeerReplicationConfig, TokenizerProtocol,
 };
 pub use inference_pool::PoolState;
+pub use lifecycle::{EppRequestLifecycle, LifecycleOutcome};
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo, ResponseUsage};
 pub use pod_discovery::{PodDiscovery, RawWorker};
 pub use runner::run;
