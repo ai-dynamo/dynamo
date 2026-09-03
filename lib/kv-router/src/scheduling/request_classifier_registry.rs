@@ -76,10 +76,6 @@ pub enum RequestClassifierRegistryError {
 }
 
 impl RequestClassifierRegistry {
-    pub fn is_empty(&self) -> bool {
-        self.providers.is_empty()
-    }
-
     pub fn register(
         &mut self,
         name: impl Into<String>,
