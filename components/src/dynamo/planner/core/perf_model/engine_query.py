@@ -184,7 +184,7 @@ class _PrefillChunkPlan:
 
 
 class AicCoreEnginePerfModel:
-    """Dynamo engine-query layer backed directly by the AIC core wheel."""
+    """Dynamo engine-query layer backed by the AIC SDK shipped in AISimulate."""
 
     def __init__(
         self,

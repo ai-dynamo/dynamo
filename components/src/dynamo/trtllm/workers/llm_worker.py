@@ -41,6 +41,7 @@ from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
+from dynamo.common.utils.media_decoder import build_frontend_image_decoder_options
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
@@ -352,11 +353,18 @@ async def init_llm_worker(
         "max_seq_len": config.max_seq_len,
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
-        "return_perf_metrics": config.publish_events_and_metrics,
-        # enable_iter_perf_stats is required for PyTorch backend to compute iteration-level
-        # stats (KV cache utilization, hit rate). TensorRT backend always has this enabled.
-        # See TRT-LLM PR #11243: MetricsCollector.log_iteration_stats() needs these stats.
-        "enable_iter_perf_stats": config.publish_events_and_metrics,
+        # Engine-level perf metrics turn on the PyExecutor detailed per-step timing
+        # collector: growing `step_metrics` / `ctx_chunk_metrics` lists that get
+        # attached to the final response, then pickled for the rank gather and again
+        # for worker->proxy IPC under attention DP. Nothing in Dynamo reads
+        # `time_breakdown_metrics`, so default it off rather than tying it to
+        # publishing. This is a default, not a hard disable: `--extra-engine-args`
+        # and `--override-engine-args` are merged over `arg_map` below and can set
+        # it back to true for custom instrumentation.
+        "return_perf_metrics": False,
+        # Iteration stats drive the metrics-publishing path but are independent
+        # of KV-event publication. TensorRT backend always has this enabled.
+        "enable_iter_perf_stats": config.publish_metrics,
         "kv_connector_config": kv_connector_config,
     }
 
@@ -398,7 +406,7 @@ async def init_llm_worker(
     _strip_postprocess_workers(arg_map)
 
     event_buffer_max_size = 0
-    if config.publish_events_and_metrics:
+    if config.publish_kv_events:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML
         current_kv_config = arg_map["kv_cache_config"]
@@ -511,9 +519,11 @@ async def init_llm_worker(
         )
     default_sampling_params = SamplingParams()
 
-    # Enable perf metrics so prompt_tokens_details can be returned
+    # Request-level performance metrics belong to the metrics-publishing path;
+    # KV-event publication does not require them. `cached_tokens` is unaffected:
+    # it comes from `res.cached_tokens`, not from `request_perf_metrics`.
     if hasattr(default_sampling_params, "return_perf_metrics"):
-        default_sampling_params.return_perf_metrics = True
+        default_sampling_params.return_perf_metrics = config.publish_metrics
     model_input = ModelInput.Tokens
 
     # Set model type based on disaggregation mode. Prefill and encode workers
@@ -704,7 +714,7 @@ async def init_llm_worker(
             config.enable_local_indexer
             and config.disaggregation_mode != DisaggregationMode.DECODE
         )
-        runtime_config.kv_event_publishing_enabled = config.publish_events_and_metrics
+        runtime_config.kv_event_publishing_enabled = config.publish_kv_events
         # Set data_parallel_size for attention DP mode
         # This enables the router's scheduler to correctly iterate over all dp_ranks
         # Need to name ADP as `data_parallel_size` for parity with other frameworks
@@ -735,7 +745,7 @@ async def init_llm_worker(
         # This enables exposing TRT-LLM's native Prometheus metrics (request latency, TTFT, TPOT, etc.)
         metrics_collector = None
         additional_metrics = None
-        if config.publish_events_and_metrics:
+        if config.publish_metrics:
             try:
                 model_name_for_metrics = config.served_model_name or config.model
                 metrics_collector = MetricsCollector(
@@ -824,7 +834,7 @@ async def init_llm_worker(
         media_fetcher = None
         if config.frontend_decoding:
             media_decoder = MediaDecoder()
-            media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+            media_decoder.enable_image(build_frontend_image_decoder_options())
             media_fetcher = MediaFetcher()
             media_fetcher.timeout_ms(30000)
             allow_internal = os.getenv("DYN_MM_ALLOW_INTERNAL", "0") == "1"
@@ -893,9 +903,8 @@ async def init_llm_worker(
             disaggregation_mode=config.disaggregation_mode,
         ).to_dict()
 
-        if config.publish_events_and_metrics:
-            # Initialize and pass in the publisher to the request handler to
-            # publish events and metrics.
+        if config.publish_kv_events or config.publish_metrics:
+            # Initialize the independently gated KV-event and metrics publishers.
             # Use model as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model
             metrics_labels = [
@@ -912,7 +921,7 @@ async def init_llm_worker(
             # Create worker-side publisher for consolidated events if consolidator is enabled
             # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
             consolidator_publisher = None
-            if consolidator_output_endpoint:
+            if consolidator_output_endpoint and config.publish_kv_events:
                 # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
                 consolidator_publisher = KvEventPublisher(
                     endpoint=endpoint,
@@ -942,6 +951,8 @@ async def init_llm_worker(
                 metrics_collector=metrics_collector,
                 kv_state_endpoint=config.kv_state_endpoint,
                 image_token_id=image_token_id,
+                publish_kv_events=config.publish_kv_events,
+                publish_metrics=config.publish_metrics,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)

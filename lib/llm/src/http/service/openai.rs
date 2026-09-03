@@ -35,8 +35,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
-        ConnectionHandle, create_connection_monitor, monitor_for_disconnects,
-        monitor_for_disconnects_with_activity,
+        ConnectionHandle, StreamErrorSignal, create_connection_monitor, monitor_for_disconnects,
+        monitor_for_disconnects_with_activity, monitor_for_disconnects_with_error_signal,
     },
     error::{HttpError, invalid_argument},
     metadata::{attach_x_request_id, extract_metadata_from_http},
@@ -50,7 +50,7 @@ use super::{
     service_v2,
 };
 use crate::engines::ValidateRequest;
-use crate::preprocessor::PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY;
+use crate::preprocessor::{PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, decode_base64_to_floats};
 use crate::protocols::common::extensions::{
     AGENT_CONTEXT_CONTEXT_KEY, AgentContext, InputTrigger, NvExt as CommonNvExt,
     SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId, agent_context_from_headers,
@@ -89,6 +89,9 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_protocols::types::responses::{
+    CountInputTokensRequest, CountInputTokensResponse, ErrorObject,
+};
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use tracing::Instrument;
 
@@ -179,6 +182,19 @@ fn unavailable_error_type() -> String {
         .to_string()
 }
 
+/// `error_type` for a genuine 400 that is not a load-shed rejection. Same
+/// reasoning as `unavailable_error_type`: `map_error_code_to_error_type`
+/// checks `code == overload_status_code()` first, and an operator can
+/// configure `DYN_HTTP_OVERLOAD_STATUS_CODE=400`, which would otherwise
+/// label unsupported content "Overloaded" — telling clients to retry a
+/// request that can never succeed.
+fn bad_request_error_type() -> String {
+    StatusCode::BAD_REQUEST
+        .canonical_reason()
+        .expect("400 is IANA-registered")
+        .to_string()
+}
+
 /// `error_type` for a genuine 500 (unhandled panic, bug, misconfiguration)
 /// that is not a load-shed rejection. Same reasoning as `unavailable_error_type`:
 /// `map_error_code_to_error_type` checks `code == overload_status_code()`
@@ -238,10 +254,20 @@ fn responses_conversion_error_response(error: anyhow::Error) -> ErrorResponse {
             invalid_argument(format!("{CONTEXT}: {message}")).into(),
             CONTEXT,
         ),
-        Some(ResponsesConversionError::NotImplemented(message)) => {
-            ErrorMessage::not_implemented_error(format!("{VALIDATION_PREFIX}{CONTEXT}: {message}"))
+        Some(ResponsesConversionError::UnsupportedContent(message)) => {
+            ErrorMessage::unsupported_content_error(format!(
+                "{VALIDATION_PREFIX}{CONTEXT}: {message}"
+            ))
         }
         None => ErrorMessage::from_anyhow(error, CONTEXT),
+    }
+}
+
+fn responses_error_code(status_code: StatusCode) -> &'static str {
+    match status_code {
+        StatusCode::TOO_MANY_REQUESTS => "rate_limit_exceeded",
+        code if code.is_client_error() => "invalid_prompt",
+        _ => "server_error",
     }
 }
 
@@ -477,6 +503,25 @@ impl ErrorMessage {
                 code: code.as_u16(),
                 details: None,
                 metric_error_type: None,
+            }),
+        )
+    }
+
+    /// Unsupported multimodal content is a client error: no retry can make the
+    /// request succeed, and infrastructure above the frontend counts 5xx as a
+    /// server-side fault. Answered 400 where `not_implemented_error` answers 501.
+    pub fn unsupported_content_error<T: Display>(msg: T) -> ErrorResponse {
+        tracing::debug!("Unsupported Content error: {msg}");
+        let code = StatusCode::BAD_REQUEST;
+        let error_type = bad_request_error_type();
+        (
+            code,
+            Json(ErrorMessage {
+                message: msg.to_string(),
+                error_type,
+                code: code.as_u16(),
+                details: None,
+                metric_error_type: Some(ErrorType::NotImplemented),
             }),
         )
     }
@@ -1479,12 +1524,12 @@ async fn embeddings(
             err_response
         })?;
 
-    // Worker always emits Base64 -- convert back to Float when the client
-    // asked for float (or didn't specify, defaulting to float per spec).
+    // Convert an optimized internal Base64 payload back to Float when the
+    // client asked for float (or omitted the format, which defaults to float).
     if client_wants_float {
         for embedding_obj in response.inner.data.iter_mut() {
             if let dynamo_protocols::types::EmbeddingVector::Base64(s) = &embedding_obj.embedding {
-                match decode_base64_embedding_to_floats(s) {
+                match decode_base64_to_floats(s) {
                     Ok(floats) => {
                         embedding_obj.embedding =
                             dynamo_protocols::types::EmbeddingVector::Float(floats);
@@ -1511,27 +1556,6 @@ async fn embeddings(
         .observe_embedding_latency(&model_name, embedding_start.elapsed().as_secs_f64());
     inflight.mark_ok();
     Ok(Json(response).into_response())
-}
-
-/// Decode a base64-encoded little-endian f32 byte string back into a float
-/// vector. The byte length must be a multiple of 4; trailing bytes are
-/// rejected. Mirrors the encoder in `lib/llm/src/preprocessor.rs` and the
-/// Python `_encode_floats_to_base64` helper in
-/// `components/src/dynamo/vllm/handlers.py`.
-fn decode_base64_embedding_to_floats(s: &str) -> Result<Vec<f32>, anyhow::Error> {
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
-    let bytes = STANDARD.decode(s)?;
-    if bytes.len() % std::mem::size_of::<f32>() != 0 {
-        anyhow::bail!(
-            "base64-decoded byte length {} is not a multiple of 4",
-            bytes.len()
-        );
-    }
-    let mut floats = Vec::with_capacity(bytes.len() / std::mem::size_of::<f32>());
-    for chunk in bytes.chunks_exact(std::mem::size_of::<f32>()) {
-        floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-    }
-    Ok(floats)
 }
 
 #[tracing::instrument(skip_all)]
@@ -3226,6 +3250,25 @@ pub fn validate_completion_fields_generic(
     })
 }
 
+/// OpenAI Responses input-token counting handler.
+///
+/// Handles `POST /v1/responses/input_tokens` and returns an estimated input
+/// token count using a len/3 heuristic.
+///
+/// Like the Anthropic `/v1/messages/count_tokens` handler, this deliberately
+/// performs neither a readiness nor a model-serving check: clients routinely
+/// send routing names this frontend does not serve, and a pre-flight estimate
+/// does not need a live model.
+async fn handler_responses_input_tokens(
+    State((_state, _template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: CountInputTokensRequest = parse_json_request("responses input_tokens", &body)?;
+    Ok(Json(CountInputTokensResponse::new(request.estimate_tokens())).into_response())
+}
+
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
@@ -3556,6 +3599,8 @@ async fn responses(
         };
 
         let mut http_queue_guard = Some(http_queue_guard);
+        let error_signal = StreamErrorSignal::default();
+        let producer_error_signal = error_signal.clone();
 
         let mut engine_stream = Box::pin(engine_stream);
         let full_stream = async_stream::stream! {
@@ -3565,8 +3610,8 @@ async fn responses(
                 yield event.map_err(axum::Error::new);
             }
 
-            // Track whether the backend sent an error event during the stream.
-            let mut saw_error = false;
+            // Preserve the first backend error for the terminal Responses event.
+            let mut backend_error = None;
 
             while let Some(annotated_chunk) = engine_stream.next().await {
                 process_chat_response_and_observe_metrics(
@@ -3575,8 +3620,16 @@ async fn responses(
                     &mut http_queue_guard,
                 );
 
-                if extract_backend_error_if_present(&annotated_chunk).is_some() {
-                    saw_error = true;
+                if let Some(backend_error_info) =
+                    extract_backend_error_if_present(&annotated_chunk)
+                {
+                    let error_response = backend_error_response(backend_error_info);
+                    producer_error_signal
+                        .set(extract_error_type_from_response(&error_response));
+                    backend_error.get_or_insert_with(|| ErrorObject {
+                        code: responses_error_code(error_response.0).to_string(),
+                        message: error_response.1.message.clone(),
+                    });
                     continue;
                 }
 
@@ -3590,19 +3643,34 @@ async fn responses(
                 }
             }
 
-            if saw_error {
-                converter.append_error_events(&mut events);
+            if let Some(error) = backend_error {
+                let terminal_event = converter.append_error_events(error, &mut events);
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
+                }
+                if terminal_event.is_ok() {
+                    // From this yield onward, response.failed is sufficient for
+                    // a client to stop consuming without being a disconnect.
+                    producer_error_signal.mark_terminal_event_emitted();
+                }
+                yield terminal_event.map_err(axum::Error::new);
             } else {
                 converter.append_end_events(&mut events);
-            }
-            for event in events.drain(..) {
-                yield event.map_err(axum::Error::new);
+                for event in events.drain(..) {
+                    yield event.map_err(axum::Error::new);
+                }
             }
         };
 
         // Wrap with disconnect monitoring: detects client disconnects, cancels generation,
         // and defers inflight_guard.mark_ok() until the stream completes.
-        let stream = monitor_for_disconnects(full_stream, ctx, inflight_guard, stream_handle);
+        let stream = monitor_for_disconnects_with_error_signal(
+            full_stream,
+            ctx,
+            inflight_guard,
+            stream_handle,
+            error_signal,
+        );
 
         let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = state.sse_keep_alive_for_response(stream_can_defer_all_output) {
@@ -4184,7 +4252,8 @@ fn get_model_readiness(
     Ok(Json(model.namespace_readiness()).into_response())
 }
 
-/// Create an Axum [`Router`] for the OpenAI API Responses endpoint
+/// Create an Axum [`Router`] for the OpenAI API Responses endpoints
+/// (`/v1/responses` and `/v1/responses/input_tokens`).
 /// If not path is provided, the default path is `/v1/responses`
 pub fn responses_router(
     state: Arc<service_v2::State>,
@@ -4192,25 +4261,36 @@ pub fn responses_router(
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/responses".to_string());
+    // Derive the subroute from the parent with any trailing slash trimmed.
+    // `DYN_HTTP_SVC_RESPONSES_PATH=/custom/` is a working configuration for the
+    // parent — axum matches `POST /custom/` — but naively appending would
+    // register `/custom//input_tokens`, and axum does not treat that as
+    // equivalent to the `/custom/input_tokens` a client would actually call.
+    // The parent is registered verbatim, so trimming here changes only the
+    // derived path and leaves existing configurations behaving as they do now.
+    let input_tokens_path = format!("{}/input_tokens", path.trim_end_matches('/'));
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let input_tokens_doc = RouteDoc::new(axum::http::Method::POST, &input_tokens_path);
     let router = Router::new()
         .route(&path, post(handler_responses))
+        .route(&input_tokens_path, post(handler_responses_input_tokens))
         .layer(middleware::from_fn(smart_json_error_middleware))
         .layer(axum::extract::DefaultBodyLimit::max(get_body_limit()))
         .with_state((state, template));
-    (vec![doc], router)
+    (vec![doc, input_tokens_doc], router)
 }
 
 async fn images(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateImageRequest>,
+    Json(mut request): Json<NvCreateImageRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
     // ImageModel enum into a string; see below)
     check_ready(&state)?;
 
+    request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
@@ -4345,12 +4425,13 @@ pub fn images_router(
 async fn videos(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateVideoRequest>,
+    Json(mut request): Json<NvCreateVideoRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
+    request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
@@ -4467,11 +4548,12 @@ async fn videos(
 async fn video_stream(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateVideoRequest>,
+    Json(mut request): Json<NvCreateVideoRequest>,
 ) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
+    request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let model = request.model.clone();
@@ -4686,6 +4768,7 @@ async fn handler_audio_speech(
             .get_or_insert_default()
             .frontend_accepts_audio_chunks = Some(true);
     }
+    request.nest_passthrough();
     let request = context_from_headers(request, request_id, &headers)?;
 
     // model is optional in the request; fall back to a model that can actually
@@ -7534,6 +7617,21 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_content_responses_conversion_errors_are_not_implemented() {
+        let response = responses_conversion_error_response(
+            ResponsesConversionError::UnsupportedContent("feature not available".to_string())
+                .into(),
+        );
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.error_type, "Bad Request");
+        assert_eq!(
+            extract_error_type_from_response(&response),
+            ErrorType::NotImplemented
+        );
+    }
+
+    #[test]
     fn untyped_responses_conversion_errors_remain_internal() {
         let response = responses_conversion_error_response(anyhow::anyhow!(
             "internal response conversion details"
@@ -8797,59 +8895,5 @@ mod tests {
         assert_eq!(response.inner.id, "test");
         assert_eq!(response.inner.choices[0].text, "content");
         assert!(response.inner.usage.is_none());
-    }
-
-    // ── decode_base64_embedding_to_floats ────────────────────────────────
-    //
-    // The Python embedding worker always emits ``embedding`` as a base64
-    // string in the new internal wire format; the HTTP handler decodes
-    // back to ``Vec<f32>`` at the response boundary when the client
-    // requested float. These tests cover the decoder's three invariants:
-    // little-endian f32 byte-for-byte equivalence, invalid base64
-    // rejection, and non-multiple-of-4 byte length rejection.
-
-    #[test]
-    fn decode_base64_embedding_to_floats_round_trips_little_endian_f32() {
-        use base64::Engine as _;
-        // Avoid 3.14 to side-step ``clippy::approx_constant`` -- the lint
-        // would force importing ``std::f32::consts::PI``, which isn't the
-        // point of the test.
-        let floats: Vec<f32> = vec![0.0, 1.0, -1.0, 2.5, -42.5, f32::MIN, f32::MAX];
-        let mut bytes: Vec<u8> = Vec::with_capacity(floats.len() * 4);
-        for f in &floats {
-            bytes.extend_from_slice(&f.to_le_bytes());
-        }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let decoded = decode_base64_embedding_to_floats(&encoded)
-            .expect("valid base64 of f32 bytes should decode");
-        assert_eq!(decoded, floats);
-    }
-
-    #[test]
-    fn decode_base64_embedding_to_floats_rejects_invalid_base64() {
-        // Padding and alphabet violations: standard base64 alphabet is
-        // A-Za-z0-9+/= -- the '!' byte forces a decode error.
-        let result = decode_base64_embedding_to_floats("not!valid!base64");
-        assert!(
-            result.is_err(),
-            "non-base64 input should fail decode, got Ok({:?})",
-            result.ok()
-        );
-    }
-
-    #[test]
-    fn decode_base64_embedding_to_floats_rejects_non_multiple_of_4_byte_length() {
-        // 5 raw bytes -> base64 string. The handler must reject because
-        // 5 is not a whole number of f32 values.
-        use base64::Engine as _;
-        let bytes: Vec<u8> = vec![1, 2, 3, 4, 5];
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        let result = decode_base64_embedding_to_floats(&encoded);
-        assert!(result.is_err(), "5-byte payload must fail, got Ok");
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("not a multiple of 4"),
-            "error should mention the multiple-of-4 check, got: {err_msg}"
-        );
     }
 }
