@@ -359,10 +359,7 @@ class TestSigtermGracePeriod:
 
 # ---------------------------------------------------------------------------
 # Scenario 7: Process dies during the health-check loop
-# Each test finishes in about a second, but every one of them waits on a
-# subprocess under a ManagedProcess timeout of 10s and then goes through
-# teardown's SIGTERM grace period, so the marker is set above that ceiling
-# rather than at 3x the measured average.
+# The timeout covers the ManagedProcess wait plus the teardown grace period.
 @pytest.mark.timeout(60)
 class TestHealthCheckFailureDiagnostics:
     def test_error_carries_process_output_and_log_path(self, tmp_path):

@@ -9,6 +9,7 @@ import signal
 import socket
 import subprocess
 import time
+from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -677,43 +678,47 @@ class ManagedProcess:
                 self._logger.warning("Error draining output pipeline: %s", e)
                 break
 
+    def _read_log_tail(self, lines: int) -> List[str]:
+        """Return at most the last `lines` lines of the log file.
+
+        Streams the file through a bounded deque rather than reading it whole,
+        because a server can emit a very large log before it dies and this runs
+        on the failure path. Returns an empty list if the log is unavailable.
+        """
+        if not self._log_path or not os.path.exists(self._log_path):
+            return []
+        try:
+            with open(self._log_path, "r", encoding="utf-8", errors="ignore") as f:
+                return list(deque(f, maxlen=lines))
+        except Exception as e:
+            self._logger.warning("Could not read log file %s: %s", self._log_path, e)
+            return []
+
     def _log_tail_on_error(self, lines=20):
         """Print the last few lines of the log file when process dies."""
         self._drain_output_pipeline()
-        if self._log_path and os.path.exists(self._log_path):
-            try:
-                with open(self._log_path, "r") as f:
-                    log_lines = f.readlines()
-                    if log_lines:
-                        self._logger.error(
-                            "=== Last %d lines from %s ===",
-                            min(lines, len(log_lines)),
-                            self._log_path,
-                        )
-                        for line in log_lines[-lines:]:
-                            self._logger.error(line.rstrip())
-                        self._logger.error("=== End of log tail ===")
-            except Exception as e:
-                self._logger.warning("Could not read log file: %s", e)
+        log_lines = self._read_log_tail(lines)
+        if log_lines:
+            self._logger.error(
+                "=== Last %d lines from %s ===", len(log_lines), self._log_path
+            )
+            for line in log_lines:
+                self._logger.error(line.rstrip())
+            self._logger.error("=== End of log tail ===")
 
     def _check_process_alive(self, context="", *, log_tail_lines=ERROR_LOG_TAIL_LINES):
         """Check if the main process is still alive. Raises RuntimeError if dead.
 
         The raised message carries the log path and a bounded tail of the
-        process output, so the reason the process died reaches the pytest
-        failure report and the JUnit XML `message` attribute instead of only the
-        logger stream. Note that pytest's short summary line shows just the
-        first line of the message, which is unchanged; the gain is in the
-        traceback body and in the XML.
+        process output, so a CI report keeps the reason the process died rather
+        than only its exit code.
 
-        The first line of that message is deliberately byte-for-byte what it has
-        always been. CI greps and the retryable-marker substring matching in
-        `tests/utils/pytest_parallel_gpu.py` read it, and `log_tail_lines` is
-        keyword-only with a default so every existing caller keeps working.
-
-        `log_tail_lines` must be positive. Python's `[-0:]` is the whole list,
-        so a zero or negative value would quietly turn the bounded tail into
-        the entire log.
+        The first line is deliberately byte-for-byte what it has always been:
+        CI greps and the retryable-marker matching in
+        `tests/utils/pytest_parallel_gpu.py` read it. `log_tail_lines` is
+        keyword-only with a default, so existing callers are unaffected, and it
+        must be positive — zero would silently produce an empty tail and a
+        negative value is not a bound.
         """
         if log_tail_lines <= 0:
             raise ValueError(f"log_tail_lines must be positive, got {log_tail_lines}")
@@ -728,12 +733,8 @@ class ManagedProcess:
             )
             # Try to get last few lines from log for debugging
             self._log_tail_on_error()
-            log_content = self.read_logs()
-            if log_content:
-                log_tail = "".join(
-                    log_content.splitlines(keepends=True)[-log_tail_lines:]
-                ).rstrip()
-            else:
+            log_tail = "".join(self._read_log_tail(log_tail_lines)).rstrip()
+            if not log_tail:
                 log_tail = NO_LOGS_CAPTURED
             raise RuntimeError(
                 f"Main server process exited with code {returncode}{context_suffix}\n"
