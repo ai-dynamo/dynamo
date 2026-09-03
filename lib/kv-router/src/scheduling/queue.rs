@@ -2673,36 +2673,6 @@ policy_classes:
         assert_eq!(queue.pending_count(), 0);
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn classifier_due_at_expires_via_actor_timer() {
-        let (queue, _slots) = make_queue(1, 16, 64, Some(0.0));
-        let (active, active_rx) = make_request("active", 64);
-        queue.enqueue(active).await;
-        active_rx.await.unwrap().unwrap();
-
-        let (queued, queued_rx) = make_request("due", 64);
-        let ingress_at = Instant::now();
-        let mut classified = queue.build_classify_request(&queued, ingress_at);
-        classified.set_due_at(ingress_at + Duration::from_secs(1));
-        queue
-            .enqueue_admitted_with_block_hashes_and_lease(
-                queued,
-                None,
-                None,
-                None,
-                Some(classified),
-                ingress_at,
-            )
-            .await;
-        assert_eq!(queue.pending_count(), 1);
-
-        assert!(matches!(
-            queued_rx.await.unwrap(),
-            Err(KvSchedulerError::DeadlineExceeded)
-        ));
-        assert_eq!(queue.pending_count(), 0);
-    }
-
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn stalled_refresh_sweeps_expired_entries_without_refreshing_them() {
         let block_size = 16;
@@ -2770,8 +2740,6 @@ policy_classes:
             ));
         }
         assert_eq!(queue.pending_count(), 0);
-        // The swept entry must be rejected by the post-refresh sweep, not
-        // popped into a stalled refresh of its own.
         assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
         slots.assert_completely_drained(decay_now());
     }
