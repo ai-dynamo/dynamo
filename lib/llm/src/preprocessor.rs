@@ -125,7 +125,7 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
     (priority_jump, strict_priority, priority)
 }
 
-fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
+pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
     DynamoError::builder()
         .error_type(ErrorType::InvalidArgument)
         .message(message.into())

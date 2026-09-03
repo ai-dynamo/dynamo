@@ -265,7 +265,7 @@ pub(crate) fn contains_unquoted_marker(content: &str, marker: &str) -> bool {
 /// if it never appears outside a quoted span. Shared scanner behind
 /// [`contains_unquoted_marker`] and [`detect_prefill`], which needs the position (not
 /// just presence) to compare two markers' first occurrences.
-fn first_unquoted_marker_position(content: &str, marker: &str) -> Option<usize> {
+pub(crate) fn first_unquoted_marker_position(content: &str, marker: &str) -> Option<usize> {
     let chars: Vec<(usize, char)> = content.char_indices().collect();
     // Whether an unescaped `"`, `'`, or `` ` `` appears anywhere at or after each
     // position, precomputed once in O(n) so the scan below doesn't rescan the

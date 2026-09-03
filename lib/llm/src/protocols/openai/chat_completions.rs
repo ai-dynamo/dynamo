@@ -591,6 +591,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_guided_decoding(self)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
@@ -653,6 +654,103 @@ mod tests {
     };
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
+
+    /// Two guided-decoding constraints in one request is a malformed
+    /// request, and it has to be rejected at the request-validation boundary so the
+    /// HTTP layer answers 400 with the conflict named. Before this ran here, the
+    /// conflict was only caught later inside `extract_sampling_options`, where the
+    /// error reached the HTTP layer untyped and became a 500.
+    #[test]
+    fn test_conflicting_guided_decoding_options_fail_request_validation() {
+        // Each pair is two constraints set at once; every one of them must be rejected.
+        let conflicts = [
+            json!({"guided_json": {"type": "object"}, "guided_regex": "a+"}),
+            json!({"guided_regex": "a+", "guided_choice": ["x", "y"]}),
+            json!({"guided_grammar": "root ::= \"a\"", "guided_json": {"type": "object"}}),
+        ];
+
+        for extra in conflicts {
+            let mut body = json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 20
+            });
+            for (key, value) in extra.as_object().expect("conflict fixture is an object") {
+                body[key] = value.clone();
+            }
+
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(body.clone()).expect("Failed to deserialize request");
+
+            let error = ValidateRequest::validate(&request)
+                .expect_err(&format!("expected {body} to fail validation"));
+            // The caller has to be told which rule it broke, not just that something
+            // was wrong -- that reason text is what the HTTP 400 body carries.
+            assert!(
+                error.to_string().contains("Only one of"),
+                "validation error should name the conflict, got: {error}"
+            );
+        }
+    }
+
+    /// The guard for the above: a request with exactly ONE guided-decoding constraint
+    /// is legal and must keep validating, so the new check cannot be satisfied by
+    /// rejecting guided decoding outright.
+    #[test]
+    fn test_single_guided_decoding_option_passes_request_validation() {
+        for extra in [
+            json!({"guided_json": {"type": "object"}}),
+            json!({"guided_regex": "a+"}),
+            json!({"guided_choice": ["x", "y"]}),
+        ] {
+            let mut body = json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 20
+            });
+            for (key, value) in extra.as_object().expect("fixture is an object") {
+                body[key] = value.clone();
+            }
+
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(body.clone()).expect("Failed to deserialize request");
+            ValidateRequest::validate(&request)
+                .unwrap_or_else(|e| panic!("{body} must stay valid, got: {e}"));
+        }
+    }
+
+    #[test]
+    fn test_guided_json_with_whitespace_pattern_is_valid() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "guided_json": {"type": "object"},
+            "guided_whitespace_pattern": "[\\n ]?"
+        }))
+        .expect("request should deserialize");
+
+        ValidateRequest::validate(&request).expect("whitespace pattern is a modifier");
+        let options = request
+            .extract_sampling_options()
+            .expect("sampling options should extract")
+            .guided_decoding
+            .expect("guided options should be present");
+        assert_eq!(options.json, Some(json!({"type": "object"})));
+        assert_eq!(options.whitespace_pattern.as_deref(), Some("[\\n ]?"));
+    }
+
+    #[test]
+    fn test_whitespace_pattern_without_primary_constraint_is_rejected() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "guided_whitespace_pattern": "[\\n ]?"
+        }))
+        .expect("request should deserialize");
+
+        let error = ValidateRequest::validate(&request).expect_err("request is meaningless");
+        assert!(error.to_string().contains("requires a primary"));
+    }
 
     #[test]
     fn test_top_k_sentinel_contract() {

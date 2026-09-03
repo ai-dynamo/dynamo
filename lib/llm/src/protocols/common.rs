@@ -432,7 +432,7 @@ pub struct SamplingOptions {
 
 /// Guided Decoding Options
 ///
-/// Only one of `json`, `regex`, `choice`, or `grammar` should be set.
+/// Exactly one primary constraint may be set; `whitespace_pattern` is an optional modifier.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct GuidedDecodingOptions {
     /// If specified, the output will follow the JSON schema. Can be a string, an object, or null.
@@ -524,7 +524,6 @@ impl GuidedDecodingOptions {
             && regex.is_none()
             && is_empty_choice
             && grammar.is_none()
-            && whitespace_pattern.is_none()
             && structural_tag.is_none()
         {
             return Ok(None);
@@ -544,22 +543,27 @@ impl GuidedDecodingOptions {
     /// Validate that only one guided decoding option is set, and that
     /// grammar nesting depth is bounded.
     pub fn validate(&self) -> Result<()> {
-        let count = [
+        let primary_count = [
             self.json.is_some(),
             self.regex.is_some(),
             self.choice.as_ref().is_some_and(|v| !v.is_empty()),
             self.grammar.is_some(),
-            self.whitespace_pattern.is_some(),
             self.structural_tag.is_some(),
         ]
         .iter()
         .filter(|&&v| v)
         .count();
 
-        if count > 1 {
+        if primary_count > 1 {
             return Err(anyhow::anyhow!(
                 "Only one of json, regex, choice, grammar, or structural_tag can be set, but multiple are specified: {:?}",
                 self
+            ));
+        }
+
+        if primary_count == 0 && self.whitespace_pattern.is_some() {
+            return Err(anyhow::anyhow!(
+                "whitespace_pattern requires a primary guided-decoding constraint"
             ));
         }
 
@@ -1009,7 +1013,7 @@ mod tests {
         assert!(opts.choice.is_none());
         assert!(opts.whitespace_pattern.is_none());
 
-        // Only whitespace_pattern set
+        // A whitespace modifier without a primary constraint is invalid.
         let whitespace_pattern = Some(r"\s+".to_string());
         let opts = GuidedDecodingOptions::validated(
             None,
@@ -1020,13 +1024,20 @@ mod tests {
             whitespace_pattern.clone(),
             None,
         );
-        assert!(opts.is_ok());
-        let opts = opts.unwrap();
+        assert!(opts.is_err());
+
+        let opts = GuidedDecodingOptions::validated(
+            Some(serde_json::json!({"type": "object"})),
+            None,
+            None,
+            None,
+            backend,
+            whitespace_pattern.clone(),
+            None,
+        )
+        .unwrap();
         assert_eq!(opts.whitespace_pattern, whitespace_pattern);
-        assert!(opts.json.is_none());
-        assert!(opts.regex.is_none());
-        assert!(opts.choice.is_none());
-        assert!(opts.grammar.is_none());
+        assert!(opts.json.is_some());
 
         // Only structural_tag set
         let structural_tag = Some(serde_json::json!({"type": "structural_tag"}));
@@ -1082,7 +1093,7 @@ mod tests {
         );
         assert!(opts.is_err());
 
-        // All fields None (should be ok, but not useful)
+        // All fields None are accepted by the low-level constructor.
         let opts = GuidedDecodingOptions::validated(None, None, None, None, None, None, None);
         assert!(opts.is_ok());
     }
@@ -1155,6 +1166,19 @@ mod tests {
         assert!(val.is_some());
         let val = val.unwrap();
         assert_eq!(val.choice, Some(vec!["A".to_string()]));
+
+        // A whitespace modifier alone does not create backend options.
+        let opts = GuidedDecodingOptions::from_optional(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(r"\s+".to_string()),
+            None,
+        );
+        assert!(opts.is_ok());
+        assert!(opts.unwrap().is_none());
     }
 
     #[test]
