@@ -36,6 +36,12 @@ struct EndpointTask {
     _endpoint_name: String,
 }
 
+/// NATS subject and handler-map key for one endpoint instance. Several instances in one
+/// process can register the same endpoint name, so the key must carry the instance id.
+fn instance_subject(endpoint_name: &str, instance_id: u64) -> String {
+    format!("{endpoint_name}-{instance_id:x}")
+}
+
 impl NatsMultiplexedServer {
     /// Create a new multiplexed NATS server
     ///
@@ -99,10 +105,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
 
         tracing::info!("Successfully retrieved service group");
 
-        // Construct the full NATS subject with instance ID
-        // Format: {endpoint_name}-{instance_id_hex}
-        // This matches Endpoint::name_with_id() and subject_to() format
-        let endpoint_with_id = format!("{}-{:x}", endpoint_name, instance_id);
+        let endpoint_with_id = instance_subject(&endpoint_name, instance_id);
 
         // Create NATS service endpoint with the full subject
         let service_endpoint = service_group
@@ -178,7 +181,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
 
         // Store task info for later cleanup
         self.handlers.insert(
-            endpoint_name.clone(),
+            endpoint_with_id,
             EndpointTask {
                 cancel_token: endpoint_cancel,
                 join_handle,
@@ -189,11 +192,12 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         Ok(())
     }
 
-    // The NATS server keys registrations by endpoint name alone.
-    async fn unregister_endpoint(&self, endpoint_name: &str, _instance_id: u64) -> Result<()> {
-        if let Some((_, task)) = self.handlers.remove(endpoint_name) {
+    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+        let endpoint_with_id = instance_subject(endpoint_name, instance_id);
+        if let Some((_, task)) = self.handlers.remove(&endpoint_with_id) {
             tracing::info!(
                 endpoint_name = %endpoint_name,
+                endpoint_with_id = %endpoint_with_id,
                 "Unregistering NATS endpoint"
             );
             // Cancel the token to trigger graceful shutdown
