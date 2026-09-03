@@ -768,6 +768,15 @@ impl TieredMatchProvider for Indexer {
     ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
         self.find_tiered_matches(sequence.to_vec()).await
     }
+
+    async fn find_tiered_matches_with_options(
+        &self,
+        sequence: &[LocalBlockHash],
+        options: LowerTierQueryOptions,
+    ) -> std::result::Result<TieredMatchDetails, KvRouterError> {
+        self.find_tiered_matches_with_options(sequence.to_vec(), options)
+            .await
+    }
 }
 
 #[cfg(test)]

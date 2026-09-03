@@ -1155,6 +1155,27 @@ async fn router_with_worker_configs(
     session_affinity_ttl: Option<Duration>,
     workers: HashMap<u64, ModelRuntimeConfig>,
 ) -> (RoutingHost, Runtime) {
+    router_with_worker_configs_in_mode(session_affinity_ttl, workers, false).await
+}
+
+/// Same router, scheduling on an embedded selection-service partition.
+async fn embedded_router_with_workers(
+    session_affinity_ttl: Option<Duration>,
+    worker_ids: &[u64],
+) -> (RoutingHost, Runtime) {
+    let workers = worker_ids
+        .iter()
+        .copied()
+        .map(|worker_id| (worker_id, ModelRuntimeConfig::default()))
+        .collect();
+    router_with_worker_configs_in_mode(session_affinity_ttl, workers, true).await
+}
+
+async fn router_with_worker_configs_in_mode(
+    session_affinity_ttl: Option<Duration>,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+    embedded_selection: bool,
+) -> (RoutingHost, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -1172,6 +1193,7 @@ async fn router_with_worker_configs(
         skip_initial_worker_wait: true,
         use_kv_events: false,
         router_track_active_blocks: false,
+        router_embedded_selection: embedded_selection,
         ..Default::default()
     };
     let chooser = KvRouter::new(
@@ -1403,6 +1425,98 @@ async fn track_request(
         .await
         .unwrap();
     (request, selection, guard)
+}
+
+/// The embedded selection partition books and releases exactly like the
+/// runtime scheduler: preview does not book, plan books, abort releases, and
+/// a tracked request frees on guard completion.
+#[tokio::test]
+#[serial_test::serial]
+async fn embedded_selection_books_and_releases_like_the_runtime_scheduler() {
+    let (router, runtime) = embedded_router_with_workers(None, &[7, 9]).await;
+    let request = Context::new(request());
+
+    let preview = router
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .expect("decode preview should select one worker");
+    let loads = router
+        .kv_router()
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        loads.iter().all(|load| load.active_requests == 0),
+        "a preview must not book: {loads:?}"
+    );
+
+    let plan = router
+        .plan_kv_route_from_preview(&request, preview)
+        .await
+        .expect("decode plan should admit one request");
+    let planned_worker = plan.signals().worker.worker_id;
+    assert!([7, 9].contains(&planned_worker));
+    let loads = router
+        .kv_router()
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        loads
+            .iter()
+            .find(|load| load.worker_id == planned_worker && load.dp_rank == 0)
+            .expect("selected worker must be reported")
+            .active_requests,
+        1
+    );
+    plan.abort().await;
+    let loads = router
+        .kv_router()
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        loads.iter().all(|load| load.active_requests == 0),
+        "abandoned plans must release their embedded reservation: {loads:?}"
+    );
+
+    // A tracked request books on admission and frees when its guard finishes.
+    let (_request, selection, mut guard) = track_request(&router, false).await;
+    let loads = router
+        .kv_router()
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        loads
+            .iter()
+            .find(|load| load.worker_id == selection.worker.worker_id)
+            .expect("tracked worker must be reported")
+            .active_requests,
+        1
+    );
+    guard.abort().await;
+    let released = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let loads = router
+                .kv_router()
+                .get_potential_loads(&[], None, None, None, None)
+                .await
+                .unwrap();
+            if loads.iter().all(|load| load.active_requests == 0) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        released.is_ok(),
+        "guard drop must release the embedded booking"
+    );
+
+    drop(router);
+    runtime.shutdown();
 }
 
 #[tokio::test]

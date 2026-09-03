@@ -20,8 +20,11 @@ mod types;
 mod tests;
 
 pub use crate::WorkerSelectionPolicyFactory;
-pub use crate::services::common::replica_sync::ReplicaPeerError;
-pub use core::{SelectionCore, SelectionHostHooks, SelectionServiceConfig};
+pub use crate::services::common::replica_sync::{ReplicaPeerError, ScopedSequencePublisher};
+pub use core::{
+    OverlapRefreshSource, RefreshProvider, SelectionCore, SelectionHostHooks, SelectionPartition,
+    SelectionScheduler, SelectionServiceConfig,
+};
 pub use error::SelectionError;
 pub use input::PromptRequest;
 pub use pending::SelectionCacheConfig;

@@ -13,7 +13,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::identity::RoutingPartitionId;
 use crate::indexer::{
-    LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
+    KvRouterError, LowerTierQueryOptions, RoutingDecisionHashes, SharedKvCache, TieredMatchDetails,
+    TieredMatchProvider,
 };
 use crate::kv_hints::{
     KvHint, KvHintAction, KvSourceLocationsPayload, KvTransferCandidateSource, KvTransferCandidates,
@@ -55,12 +56,77 @@ use super::types::{
 use crate::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
 
-type SelectionScheduler = LocalScheduler<
+/// Source of dequeue-time overlap refreshes for a partition scheduler: the
+/// partition's own indexer, or one the embedding host supplies when it keeps
+/// its own index (the frontend `KvRouter` in embedded mode).
+#[derive(Clone)]
+pub enum RefreshProvider {
+    Local(Arc<Indexer>),
+    External(Arc<dyn TieredMatchProvider>),
+}
+
+#[async_trait::async_trait]
+impl TieredMatchProvider for RefreshProvider {
+    async fn find_tiered_matches(
+        &self,
+        sequence: &[LocalBlockHash],
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        match self {
+            Self::Local(indexer) => indexer.find_tiered_matches(sequence.to_vec()).await,
+            Self::External(provider) => provider.find_tiered_matches(sequence).await,
+        }
+    }
+
+    async fn find_tiered_matches_with_options(
+        &self,
+        sequence: &[LocalBlockHash],
+        options: LowerTierQueryOptions,
+    ) -> Result<TieredMatchDetails, KvRouterError> {
+        match self {
+            Self::Local(indexer) => {
+                indexer
+                    .find_tiered_matches_with_options(sequence.to_vec(), options)
+                    .await
+            }
+            Self::External(provider) => {
+                provider
+                    .find_tiered_matches_with_options(sequence, options)
+                    .await
+            }
+        }
+    }
+}
+
+/// The scheduler type every partition runs.
+pub type SelectionScheduler = LocalScheduler<
     ScopedSequencePublisher,
     SelectionWorkerConfig,
     WorkerSelectionPolicy,
-    TieredOverlapRefresher<Indexer>,
+    TieredOverlapRefresher<RefreshProvider>,
 >;
+
+/// Handle to one partition's scheduler and indexer for an embedding host that
+/// drives scheduling directly (bypassing the request-shaped `select` API).
+#[derive(Clone)]
+pub struct SelectionPartition(Arc<SelectionEntry>);
+
+impl SelectionPartition {
+    pub fn key(&self) -> &RoutingPartitionId {
+        &self.0.key
+    }
+
+    pub fn block_size(&self) -> u32 {
+        self.0.block_size
+    }
+
+    pub fn scheduler(&self) -> &SelectionScheduler {
+        &self.0.scheduler
+    }
+
+    pub fn indexer(&self) -> &Indexer {
+        &self.0.indexer
+    }
+}
 
 struct SelectionEntry {
     key: RoutingPartitionId,
@@ -132,6 +198,33 @@ pub struct SelectionHostHooks {
     /// Narrows candidates to the workers that can serve the request's LoRA
     /// adapter, strictly within the caller's `allowed_worker_ids`.
     pub lora_worker_filter: Option<Arc<dyn LoraWorkerFilter>>,
+    /// Where dequeue-time overlap refresh reads from. An embedding host that
+    /// keeps its own index and drives the scheduler directly points this at
+    /// that index so queued requests are re-scored against the index that
+    /// scored them, or disables refresh when its index cannot serve it.
+    pub overlap_refresh: OverlapRefreshSource,
+}
+
+/// Source of dequeue-time overlap refreshes for partition schedulers.
+#[derive(Clone, Default)]
+pub enum OverlapRefreshSource {
+    /// The partition's own indexer (standalone service default).
+    #[default]
+    PartitionIndexer,
+    /// A host-owned index.
+    External(Arc<dyn TieredMatchProvider>),
+    /// No refresh: queued requests keep their admission-time scores.
+    Disabled,
+}
+
+impl std::fmt::Debug for OverlapRefreshSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::PartitionIndexer => "PartitionIndexer",
+            Self::External(_) => "External",
+            Self::Disabled => "Disabled",
+        })
+    }
 }
 
 impl std::fmt::Debug for SelectionHostHooks {
@@ -144,6 +237,7 @@ impl std::fmt::Debug for SelectionHostHooks {
             )
             .field("shared_cache", &self.shared_cache.is_some())
             .field("lora_worker_filter", &self.lora_worker_filter.is_some())
+            .field("overlap_refresh", &self.overlap_refresh)
             .field(
                 "overloaded_worker_provider",
                 &self.overloaded_worker_provider.is_some(),
@@ -191,8 +285,8 @@ pub struct SelectionCore {
     /// runs inside the host runtime; construction itself may not.
     reservation_sweep_started: OnceCell<()>,
     /// Whether this core subscribes to worker KV events itself. False when
-    /// events are disabled or when the primary indexer is a remote service
-    /// that workers publish to directly.
+    /// events are disabled, when the primary indexer is a remote service that
+    /// workers publish to directly, or when the embedding host feeds events.
     listens_for_kv_events: bool,
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
@@ -247,7 +341,14 @@ impl SelectionCore {
             cache_config,
             tracking_hash,
             indexer_policy,
+            false,
         ))
+    }
+
+    /// Scheduler and indexer handle for `key`, once a worker has been upserted
+    /// into that partition.
+    pub fn partition(&self, key: &RoutingPartitionId) -> Option<SelectionPartition> {
+        self.entry(key).map(SelectionPartition)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -263,13 +364,15 @@ impl SelectionCore {
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
         indexer_policy: IndexerPolicy,
+        external_kv_events: bool,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
         let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token(
             indexer_threads,
             cancel_token.clone(),
         ));
-        let listens_for_kv_events = kv_router_config.use_kv_events && !indexer_policy.is_remote();
+        let listens_for_kv_events =
+            kv_router_config.use_kv_events && !indexer_policy.is_remote() && !external_kv_events;
         indexer_registry.set_indexer_policy(indexer_policy);
         if signal_indexer_ready {
             indexer_registry.signal_ready();
@@ -507,8 +610,35 @@ impl SelectionCore {
         let block_size = record
             .block_size
             .ok_or_else(|| SelectionError::BadRequest("block_size is required".to_string()))?;
-        let is_eagle = record.is_eagle.unwrap_or(false);
-        let key = record.key();
+        self.ensure_entry_for(record.key(), block_size, record.is_eagle.unwrap_or(false))
+    }
+
+    /// Create the partition scheduler and indexer for `key` before any worker
+    /// registers, so an embedding host can hold the scheduler handle from
+    /// construction. Idempotent; a later worker with a different block size or
+    /// eagle setting is rejected at reconciliation.
+    pub fn ensure_partition(
+        &self,
+        key: RoutingPartitionId,
+        block_size: u32,
+        is_eagle: bool,
+    ) -> Result<SelectionPartition, SelectionError> {
+        self.ensure_running()?;
+        if block_size == 0 {
+            return Err(SelectionError::BadRequest(
+                "block_size must be greater than 0".to_string(),
+            ));
+        }
+        self.ensure_entry_for(key, block_size, is_eagle)
+            .map(SelectionPartition)
+    }
+
+    fn ensure_entry_for(
+        &self,
+        key: RoutingPartitionId,
+        block_size: u32,
+        is_eagle: bool,
+    ) -> Result<Arc<SelectionEntry>, SelectionError> {
         self.reservation_sweep_started.get_or_init(|| {
             spawn_reservation_index_sweep(
                 Arc::clone(&self.entries),
@@ -551,11 +681,22 @@ impl SelectionCore {
                 let indexer = self
                     .indexer_registry
                     .get_or_create_indexer(key.clone(), block_size);
-                let overlap_refresh = Arc::new(TieredOverlapRefresher::new(
-                    indexer.clone(),
-                    self.kv_router_config.clone(),
-                    block_size,
-                ));
+                let refresh_provider = match &self.host_hooks.overlap_refresh {
+                    OverlapRefreshSource::PartitionIndexer => {
+                        Some(RefreshProvider::Local(Arc::new(indexer.clone())))
+                    }
+                    OverlapRefreshSource::External(provider) => {
+                        Some(RefreshProvider::External(Arc::clone(provider)))
+                    }
+                    OverlapRefreshSource::Disabled => None,
+                };
+                let overlap_refresh = refresh_provider.map(|provider| {
+                    Arc::new(TieredOverlapRefresher::new(
+                        provider,
+                        self.kv_router_config.clone(),
+                        block_size,
+                    ))
+                });
                 let selector = self.worker_selection_policy_factory.as_ref().map_or_else(
                     || WorkerSelectionPolicy::default(self.kv_router_config.clone(), worker_label),
                     |factory| factory(&self.kv_router_config, self.worker_type, key.as_ref()),
@@ -571,7 +712,7 @@ impl SelectionCore {
                     block_size,
                     selector,
                     self.host_hooks.prefill_load_estimator.clone(),
-                    Some(overlap_refresh),
+                    overlap_refresh,
                     // Standalone selection has no router Client snapshot, so
                     // these stay `None` unless an embedding host injects them.
                     self.host_hooks.overloaded_worker_provider.clone(),
@@ -1824,6 +1965,7 @@ mod tests {
                 SelectionCacheConfig::default(),
                 tracking_hash,
                 IndexerPolicy::from_router_config(&test_config(false)).expect("indexer policy"),
+                false,
             );
 
             core.upsert_worker(worker(1)).await.expect("worker upsert");
@@ -1863,6 +2005,7 @@ mod tests {
             SelectionCacheConfig::default(),
             tracking_hash,
             indexer_policy,
+            false,
         )
     }
 
@@ -2023,6 +2166,7 @@ mod tests {
             SelectionCacheConfig::default(),
             tracking_hash,
             indexer_policy,
+            false,
         );
         assert!(!core.listens_for_kv_events);
         for worker_id in [1, 2] {
@@ -2321,6 +2465,7 @@ mod tests {
                     calls: Arc::clone(&calls),
                 })),
                 lora_worker_filter: None,
+                overlap_refresh: OverlapRefreshSource::default(),
             },
             Some(factory),
         );
@@ -2421,6 +2566,7 @@ mod tests {
             available_worker_provider: Some(Arc::new(move || provider_state.lock().clone())),
             shared_cache: None,
             lora_worker_filter: None,
+            overlap_refresh: OverlapRefreshSource::default(),
         });
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         core.upsert_worker(worker(2)).await.expect("worker upsert");
@@ -2442,6 +2588,7 @@ mod tests {
             available_worker_provider: None,
             shared_cache: None,
             lora_worker_filter: None,
+            overlap_refresh: OverlapRefreshSource::default(),
         });
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         core.upsert_worker(worker(2)).await.expect("worker upsert");

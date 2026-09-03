@@ -55,6 +55,7 @@ pub use dynamo_kv_router::protocols;
 pub use dynamo_kv_router::scheduling;
 pub use dynamo_kv_router::selector;
 
+pub(crate) mod embedded;
 pub mod encoder_router;
 pub mod indexer;
 pub mod metrics;
@@ -534,7 +535,7 @@ where
     Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
 {
     indexer: Indexer,
-    scheduler: KvScheduler<Sel, TieredOverlapRefresher<Indexer>>,
+    scheduler: RouterScheduler<Sel>,
     required_worker_inputs: dynamo_kv_router::selector::WorkerInputs,
     workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
@@ -558,6 +559,39 @@ where
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
+}
+
+/// The scheduler behind a `KvRouter`: the runtime-bound `KvScheduler`, or one
+/// partition of an embedded selection service
+/// (`KvRouterConfig::router_embedded_selection`). Both expose the same
+/// surface; every router method dispatches statically through this enum.
+enum RouterScheduler<Sel>
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
+{
+    Runtime(KvScheduler<Sel, TieredOverlapRefresher<Indexer>>),
+    Embedded(embedded::EmbeddedSelection),
+}
+
+macro_rules! dispatch_scheduler {
+    ($self:expr, $scheduler:ident => $body:expr) => {
+        match &$self.scheduler {
+            RouterScheduler::Runtime($scheduler) => $body,
+            RouterScheduler::Embedded($scheduler) => $body,
+        }
+    };
+}
+
+impl<Sel> RouterScheduler<Sel>
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    fn booking_cleanup(&self) -> scheduler::SchedulerBookingCleanup {
+        match self {
+            Self::Runtime(scheduler) => scheduler.booking_cleanup(),
+            Self::Embedded(scheduler) => scheduler.booking_cleanup(),
+        }
+    }
 }
 
 fn resolve_tracking_model_name(
@@ -773,27 +807,61 @@ where
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
-        let scheduler = KvScheduler::start_with_shared_request_leases(
-            endpoint.clone(),
-            block_size,
-            workers_with_configs.clone(),
-            selector,
-            &kv_router_config,
-            prefill_load_estimator.clone(),
-            overlap_scores_refresh,
-            Some(overloaded_worker_provider),
-            Some(available_worker_provider),
-            model_name.as_deref(),
-            metric_worker_type,
-            scheduler_load,
-            cancellation_token.child_token(),
-        )
-        .await?;
+        let scheduler = if kv_router_config.router_embedded_selection {
+            // The router keeps its indexer and transport; scheduling and
+            // active-sequence accounting run on a selection-service partition.
+            let overlap_refresh: Option<Arc<dyn dynamo_kv_router::indexer::TieredMatchProvider>> =
+                indexer
+                    .supports_overlap_refresh()
+                    .then(|| Arc::new(indexer.clone()) as Arc<_>);
+            drop(overlap_scores_refresh);
+            RouterScheduler::Embedded(
+                embedded::EmbeddedSelection::start(
+                    embedded::EmbeddedSelectionArgs {
+                        kv_router_config: kv_router_config.clone(),
+                        worker_role,
+                        metric_worker_type,
+                        model_name: model_name.clone(),
+                        block_size,
+                        is_eagle,
+                        prefill_load_estimator: prefill_load_estimator.clone(),
+                        overloaded_worker_provider,
+                        available_worker_provider,
+                        overlap_refresh,
+                    },
+                    workers_with_configs.clone(),
+                    cancellation_token.child_token(),
+                )
+                .await?,
+            )
+        } else {
+            RouterScheduler::Runtime(
+                KvScheduler::start_with_shared_request_leases(
+                    endpoint.clone(),
+                    block_size,
+                    workers_with_configs.clone(),
+                    selector,
+                    &kv_router_config,
+                    prefill_load_estimator.clone(),
+                    overlap_scores_refresh,
+                    Some(overloaded_worker_provider),
+                    Some(available_worker_provider),
+                    model_name.as_deref(),
+                    metric_worker_type,
+                    scheduler_load,
+                    cancellation_token.child_token(),
+                )
+                .await?,
+            )
+        };
         let request_leases = request_lease::RequestLeaseManager::new(
             scheduler.booking_cleanup(),
             cancellation_token.child_token(),
         );
-        if !scheduler.set_replica_request_lease_observer(Arc::new(request_leases.clone())) {
+        if let RouterScheduler::Runtime(runtime_scheduler) = &scheduler
+            && !runtime_scheduler
+                .set_replica_request_lease_observer(Arc::new(request_leases.clone()))
+        {
             return Err(anyhow::anyhow!(
                 "request lease observer is already installed for this router"
             ));
@@ -1600,7 +1668,8 @@ where
         let seq_hash_elapsed = start.elapsed();
 
         let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission { .. });
-        let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
+        let supports_overlap_refresh =
+            dispatch_scheduler!(self, scheduler => scheduler.supports_overlap_refresh());
         let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
         let has_transfer_capable_workers = self.has_transfer_capable_workers();
         let should_prepare_transfer_hint = is_admitted_routing && has_transfer_capable_workers;
@@ -1691,41 +1760,43 @@ where
             shared_cache_hits,
         };
         let (response, attempt, selected_worker_load) = match admission {
-            FindBestMatchAdmission::WithAdmission { .. } => match self
-                .scheduler
+            FindBestMatchAdmission::WithAdmission { .. } => {
+                match dispatch_scheduler!(self, scheduler => scheduler
                 .schedule_request_admitted(schedule_request)
                 .instrument(tracing::info_span!("kv_router.schedule"))
-                .await
-            {
-                Ok(admitted) => (admitted.response, admitted.attempt, None),
-                Err(KvSchedulerError::QueueRejected(rejection)) => {
-                    return Ok(FindBestMatchInnerOutcome::WithAdmission(
-                        AdmittedFindBestMatchOutcome {
-                            outcome: FindBestMatchOutcome::QueueRejected { rejection },
-                            attempt: AdmissionAttempt::Untracked,
-                        },
-                    ));
+                .await)
+                {
+                    Ok(admitted) => (admitted.response, admitted.attempt, None),
+                    Err(KvSchedulerError::QueueRejected(rejection)) => {
+                        return Ok(FindBestMatchInnerOutcome::WithAdmission(
+                            AdmittedFindBestMatchOutcome {
+                                outcome: FindBestMatchOutcome::QueueRejected { rejection },
+                                attempt: AdmissionAttempt::Untracked,
+                            },
+                        ));
+                    }
+                    Err(error) => return Err(map_scheduler_error(error)),
                 }
-                Err(error) => return Err(map_scheduler_error(error)),
-            },
-            FindBestMatchAdmission::WithoutAdmission => match self
-                .scheduler
+            }
+            FindBestMatchAdmission::WithoutAdmission => {
+                match dispatch_scheduler!(self, scheduler => scheduler
                 .select_without_admission(schedule_request)
                 .instrument(tracing::info_span!("kv_router.select_without_admission"))
-                .await
-            {
-                Ok(advisory) => (
-                    advisory.response,
-                    AdmissionAttempt::Untracked,
-                    Some(advisory.selected_worker_load),
-                ),
-                Err(KvSchedulerError::QueueRejected(rejection)) => {
-                    return Ok(FindBestMatchInnerOutcome::WithoutAdmission(
-                        FindBestMatchAdvisoryOutcome::QueueRejected { rejection },
-                    ));
+                .await)
+                {
+                    Ok(advisory) => (
+                        advisory.response,
+                        AdmissionAttempt::Untracked,
+                        Some(advisory.selected_worker_load),
+                    ),
+                    Err(KvSchedulerError::QueueRejected(rejection)) => {
+                        return Ok(FindBestMatchInnerOutcome::WithoutAdmission(
+                            FindBestMatchAdvisoryOutcome::QueueRejected { rejection },
+                        ));
+                    }
+                    Err(error) => return Err(map_scheduler_error(error)),
                 }
-                Err(error) => return Err(map_scheduler_error(error)),
-            },
+            }
         };
         let kv_hint = if is_admitted_routing {
             self.kv_hint_for_selection(
@@ -1855,7 +1926,7 @@ where
 
     /// Register externally-provided workers in the slot tracker.
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
-        self.scheduler.register_workers(worker_ids);
+        dispatch_scheduler!(self, scheduler => scheduler.register_workers(worker_ids));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1895,18 +1966,18 @@ where
         let prefill_load_hint =
             self.prefill_load_hint_for(isl_tokens, cached_tokens, track_prefill_tokens);
 
-        let admission = self
-            .scheduler
-            .add_request_admitted(SequenceRequest {
-                request_id: request_id.clone(),
-                token_sequence: maybe_seq_hashes,
-                track_prefill_tokens,
-                expected_output_tokens,
-                prefill_load_hint,
-                worker,
-                lora_name,
-            })
-            .await;
+        let sequence_request = SequenceRequest {
+            request_id: request_id.clone(),
+            token_sequence: maybe_seq_hashes,
+            track_prefill_tokens,
+            expected_output_tokens,
+            prefill_load_hint,
+            worker,
+            lora_name,
+        };
+        let admission = dispatch_scheduler!(self, scheduler => scheduler
+            .add_request_admitted(sequence_request)
+            .await);
         let attempt_id = match admission {
             Ok(attempt_id) => attempt_id,
             Err(error) => {
@@ -1927,7 +1998,7 @@ where
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
-        self.scheduler.mark_prefill_completed(request_id).await?;
+        dispatch_scheduler!(self, scheduler => scheduler.mark_prefill_completed(request_id).await)?;
         self.request_leases.touch_request(request_id);
         Ok(())
     }
@@ -1936,7 +2007,7 @@ where
         if self.request_leases.finish_request(request_id).await {
             return Ok(());
         }
-        self.scheduler.free(request_id).await
+        dispatch_scheduler!(self, scheduler => scheduler.free(request_id).await)
     }
 
     /// Release a booking only if it still belongs to `worker`.
@@ -1948,7 +2019,7 @@ where
         request_id: &str,
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
-        self.scheduler.free_if_worker(request_id, worker).await
+        dispatch_scheduler!(self, scheduler => scheduler.free_if_worker(request_id, worker).await)
     }
 
     #[doc(hidden)]
@@ -1964,19 +2035,19 @@ where
         &self,
         booking: &scheduler::SchedulerBookingDescriptor,
     ) -> Result<(), KvSchedulerError> {
-        self.scheduler
+        dispatch_scheduler!(self, scheduler => scheduler
             .mark_prefill_completed_if_booking(booking)
-            .await
+            .await)
     }
 
     /// Number of requests currently parked in the scheduler queue.
     pub fn pending_count(&self) -> usize {
-        self.scheduler.pending_count()
+        dispatch_scheduler!(self, scheduler => scheduler.pending_count())
     }
 
     /// Sum of ISL tokens for requests currently parked in the scheduler queue.
     pub fn pending_isl_tokens(&self) -> usize {
-        self.scheduler.pending_isl_tokens()
+        dispatch_scheduler!(self, scheduler => scheduler.pending_isl_tokens())
     }
 
     fn prefill_load_hint_for(
@@ -2019,7 +2090,7 @@ where
     /// Get the worker type for this router ("prefill" or "decode").
     /// Used for Prometheus metric labeling.
     pub fn worker_type(&self) -> &'static str {
-        self.scheduler.worker_type()
+        dispatch_scheduler!(self, scheduler => scheduler.worker_type())
     }
 
     /// Return the worker's unique global DP rank when it owns exactly one rank.
@@ -2034,7 +2105,7 @@ where
         request_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
-        self.scheduler.add_output_block(request_id, decay_fraction)
+        dispatch_scheduler!(self, scheduler => scheduler.add_output_block(request_id, decay_fraction))
     }
 
     pub(crate) async fn enqueue_output_block_if_booking(
@@ -2042,9 +2113,9 @@ where
         booking: &scheduler::SchedulerBookingDescriptor,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
-        self.scheduler
+        dispatch_scheduler!(self, scheduler => scheduler
             .enqueue_output_block_if_booking(booking, decay_fraction)
-            .await
+            .await)
     }
 
     pub fn block_size(&self) -> u32 {
@@ -2156,12 +2227,16 @@ where
         let tiered_matches = self.indexer.find_matches_by_tier(block_hashes).await?;
         let cache_hit_estimates = self.cache_hit_estimates_from_tiered_matches(&tiered_matches);
 
-        Ok(self.scheduler.get_potential_loads(
-            maybe_seq_hashes,
-            isl_tokens,
-            cache_hit_estimates.cached_tokens.into_iter().collect(),
-            track_prefill_tokens,
-        ))
+        let effective_cached_tokens: HashMap<WorkerWithDpRank, usize> =
+            cache_hit_estimates.cached_tokens.into_iter().collect();
+        Ok(
+            dispatch_scheduler!(self, scheduler => scheduler.get_potential_loads(
+                maybe_seq_hashes,
+                isl_tokens,
+                effective_cached_tokens,
+                track_prefill_tokens,
+            )),
+        )
     }
 
     /// Return per-worker KV overlap by storage tier.

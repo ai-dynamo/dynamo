@@ -276,6 +276,9 @@ fn kv_router_config_from_lookup(
     if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_TRACK_PREFILL_TOKENS") {
         config.router_track_prefill_tokens = value;
     }
+    if let Some(value) = parse_bool(&get_env, "DYN_ROUTER_EMBEDDED_SELECTION") {
+        config.router_embedded_selection = value;
+    }
     if let Some(value) = get_env("DYN_ROUTER_TRACKING_HASH") {
         config.router_tracking_hash = value.parse()?;
     }
@@ -666,6 +669,8 @@ struct KvRouterConfigSerde {
     router_track_output_blocks: bool,
     router_assume_kv_reuse: bool,
     router_track_prefill_tokens: bool,
+    #[serde(default)]
+    router_embedded_selection: bool,
     router_tracking_hash: TrackingHashAlgorithm,
     router_tracking_key_file: Option<PathBuf>,
     router_tracking_key_id: Option<String>,
@@ -712,6 +717,7 @@ impl Default for KvRouterConfigSerde {
             router_track_output_blocks: config.router_track_output_blocks,
             router_assume_kv_reuse: config.router_assume_kv_reuse,
             router_track_prefill_tokens: config.router_track_prefill_tokens,
+            router_embedded_selection: config.router_embedded_selection,
             router_tracking_hash: config.router_tracking_hash,
             router_tracking_key_file: config.router_tracking_key_file,
             router_tracking_key_id: config.router_tracking_key_id,
@@ -796,6 +802,12 @@ pub struct KvRouterConfig {
     /// and potential prefill-token load calculations.
     #[serde(default = "default_track_prefill_tokens")]
     pub router_track_prefill_tokens: bool,
+
+    /// Run the frontend router's scheduling and active-sequence accounting on
+    /// an embedded selection-service partition instead of the runtime-bound
+    /// scheduler (default: false). Frontend-local; workers ignore it.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub router_embedded_selection: bool,
 
     /// Hash algorithm used for router-derived active-sequence identities.
     #[serde(default, skip_serializing_if = "is_default")]
@@ -959,6 +971,7 @@ impl Default for KvRouterConfig {
             router_track_output_blocks: false,
             router_assume_kv_reuse: true,
             router_track_prefill_tokens: default_track_prefill_tokens(),
+            router_embedded_selection: false,
             router_tracking_hash: TrackingHashAlgorithm::default(),
             router_tracking_key_file: None,
             router_tracking_key_id: None,
@@ -1023,6 +1036,7 @@ impl TryFrom<KvRouterConfigSerde> for KvRouterConfig {
             router_track_output_blocks: compat.router_track_output_blocks,
             router_assume_kv_reuse: compat.router_assume_kv_reuse,
             router_track_prefill_tokens: compat.router_track_prefill_tokens,
+            router_embedded_selection: compat.router_embedded_selection,
             router_tracking_hash: compat.router_tracking_hash,
             router_tracking_key_file: compat.router_tracking_key_file,
             router_tracking_key_id: compat.router_tracking_key_id,

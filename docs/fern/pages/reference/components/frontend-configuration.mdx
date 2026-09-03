@@ -213,6 +213,15 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_REPLICA_SYNC`
 </ParamField>
 
+<ParamField path="--router-embedded-selection / --no-router-embedded-selection" type="boolean" default="false">
+  **Experimental.** Run the router's scheduling and active-sequence accounting on an embedded
+  selection-service partition (the same core as the standalone selection service) instead of the
+  runtime-bound scheduler. The KV indexer, request transport, and worker discovery are unchanged;
+  `--router-replica-sync` is not applied to the embedded partition.
+
+  Environment variable: `DYN_ROUTER_EMBEDDED_SELECTION`
+</ParamField>
+
 <ParamField path="--router-tracking-hash" type="string" default="public-xxh3-v1">
   Hash function for router-derived active-sequence identities. `keyed-xxh3-v1` is experimental and
   requires both a tracking key file and key ID.

@@ -1784,6 +1784,7 @@ class KvRouterConfig:
         use_kv_events: bool = True,
         *,
         router_replica_sync: bool = False,
+        router_embedded_selection: bool = False,
         router_track_active_blocks: bool = True,
         router_track_output_blocks: bool = False,
         router_assume_kv_reuse: bool = True,
@@ -1829,6 +1830,8 @@ class KvRouterConfig:
             router_temperature: Temperature for normalized worker sampling via softmax (default: 0.0)
             use_kv_events: Whether to use KV events from workers (default: True)
             router_replica_sync: Enable replica synchronization (default: False)
+            router_embedded_selection: Run scheduling on an embedded selection-service
+                partition instead of the runtime-bound scheduler (default: False). Experimental.
             router_track_active_blocks: Track active blocks for load balancing (default: True)
             router_track_output_blocks: Track output blocks during generation (default: False).
                 When enabled, the router adds placeholder blocks as tokens are generated

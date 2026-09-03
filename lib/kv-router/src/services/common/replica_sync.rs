@@ -118,7 +118,7 @@ pub(crate) struct ScopedReplicaSync {
 }
 
 #[derive(Clone)]
-pub(crate) struct ScopedSequencePublisher {
+pub struct ScopedSequencePublisher {
     replica: Option<ScopedReplicaPublisher>,
 }
 

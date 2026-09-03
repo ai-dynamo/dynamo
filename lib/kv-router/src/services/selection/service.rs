@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::WorkerSelectionPolicyFactory;
 use crate::config::KvRouterConfig;
+use crate::identity::RoutingPartitionId;
 use crate::protocols::WorkerId;
 use crate::scheduling::PotentialLoad;
 use crate::services::common::replica_sync::{
@@ -14,7 +16,7 @@ use crate::services::common::replica_sync::{
 use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::TrackingHashContext;
 
-use super::core::{SelectionCore, SelectionHostHooks, SelectionServiceConfig};
+use super::core::{SelectionCore, SelectionHostHooks, SelectionPartition, SelectionServiceConfig};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::policy_registry::WorkerSelectionPolicyRegistry;
@@ -36,6 +38,8 @@ pub struct SelectionServiceBuilder {
     worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
     host_hooks: SelectionHostHooks,
     remote_indexer_url: Option<String>,
+    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    external_kv_events: bool,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -75,7 +79,26 @@ impl SelectionServiceBuilder {
             worker_selection_policy_registry,
             host_hooks: SelectionHostHooks::default(),
             remote_indexer_url: None,
+            worker_selection_policy_factory: None,
+            external_kv_events: false,
         }
+    }
+
+    /// Use `factory` for every partition's worker-selection policy instead of
+    /// resolving one from router configuration through the registry.
+    pub fn worker_selection_policy_factory(
+        mut self,
+        factory: WorkerSelectionPolicyFactory,
+    ) -> Self {
+        self.worker_selection_policy_factory = Some(factory);
+        self
+    }
+
+    /// The embedding host feeds KV state itself: workers become schedulable
+    /// without `kv_events_endpoint(s)` and no ZMQ listener is started here.
+    pub fn external_kv_events(mut self) -> Self {
+        self.external_kv_events = true;
+        self
     }
 
     /// Serve the primary KV index from a standalone indexer at `base_url`
@@ -119,9 +142,12 @@ impl SelectionServiceBuilder {
         self.kv_router_config
             .validate_config()
             .map_err(anyhow::Error::msg)?;
-        let worker_selection_policy_factory = self
-            .worker_selection_policy_registry
-            .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?;
+        let worker_selection_policy_factory = match self.worker_selection_policy_factory {
+            Some(factory) => Some(factory),
+            None => self
+                .worker_selection_policy_registry
+                .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?,
+        };
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
         let mut indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
         if let Some(base_url) = &self.remote_indexer_url {
@@ -162,6 +188,7 @@ impl SelectionServiceBuilder {
             self.selection_cache,
             tracking_hash,
             indexer_policy,
+            self.external_kv_events,
         ));
 
         if recover_from_peers {
@@ -292,6 +319,23 @@ impl SelectionService {
         req: WorkerRequest,
     ) -> Result<WorkerCatalogRecord, SelectionError> {
         self.core.upsert_worker(req).await
+    }
+
+    /// Scheduler and indexer handle for `key`, once a worker has been upserted
+    /// into that partition. Embedding hosts that keep their own index drive
+    /// the partition scheduler through this handle.
+    pub fn partition(&self, key: &RoutingPartitionId) -> Option<SelectionPartition> {
+        self.core.partition(key)
+    }
+
+    /// Create (or fetch) the partition for `key` ahead of worker registration.
+    pub fn ensure_partition(
+        &self,
+        key: RoutingPartitionId,
+        block_size: u32,
+        is_eagle: bool,
+    ) -> Result<SelectionPartition, SelectionError> {
+        self.core.ensure_partition(key, block_size, is_eagle)
     }
 
     /// The port this service uses for replica synchronization, if enabled.
