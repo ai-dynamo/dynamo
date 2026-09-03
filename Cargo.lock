@@ -2571,6 +2571,7 @@ dependencies = [
  "prost-types 0.13.5",
  "rcgen",
  "reqwest 0.12.28",
+ "rmp-serde",
  "rustls 0.23.40",
  "rustls-pemfile",
  "serde",
@@ -2588,6 +2589,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "validator",
+ "zmq",
 ]
 
 [[package]]

@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use crate::block_size_calibration::BlockSizeCalibration;
 use crate::epp_standalone_config::EppStandaloneConfig;
 use crate::pod_discovery::{PodDiscovery, RawWorker};
 use crate::selector::{Selector, WorkerRegistration};
@@ -22,15 +23,17 @@ pub struct RegistrationDefaults {
     pub block_size: u32,
     pub total_kv_blocks: Option<u64>,
     pub max_num_batched_tokens: Option<u64>,
+    pub block_size_state_file: String,
 }
 
 impl RegistrationDefaults {
     pub fn from_config(cfg: &EppStandaloneConfig) -> Self {
         Self {
             model_name: cfg.model_name.clone(),
-            block_size: cfg.block_size,
+            block_size: cfg.effective_block_size(),
             total_kv_blocks: cfg.total_kv_blocks,
             max_num_batched_tokens: cfg.max_num_batched_tokens,
+            block_size_state_file: cfg.block_size_state_file.clone(),
         }
     }
 }
@@ -47,15 +50,56 @@ impl TopologyAdapter {
         reflector: PodDiscovery,
         selector: Arc<Selector>,
         defaults: RegistrationDefaults,
+        calibration: Option<BlockSizeCalibration>,
     ) -> Self {
         let cancel = CancellationToken::new();
         let cancel_child = cancel.clone();
         tokio::spawn(async move {
             let mut pod_changes = reflector.subscribe_changes();
+            let mut observed_changes = calibration.as_ref().map(BlockSizeCalibration::subscribe);
             loop {
-                reconcile_once(&reflector, selector.as_ref(), &defaults).await;
+                // The selection service pins the block size per model for the
+                // process lifetime (scheduler, slots and indexer are built once
+                // per model), so a newly calibrated size cannot be adopted live:
+                // persist it and exit; the next boot registers with it directly.
+                if let Some(observed) = calibration
+                    .as_ref()
+                    .and_then(BlockSizeCalibration::observed)
+                    && observed != defaults.block_size
+                {
+                    tracing::info!(
+                        previous = defaults.block_size,
+                        block_size = observed,
+                        state_file = %defaults.block_size_state_file,
+                        "Calibrated block size differs; persisting and restarting to adopt it"
+                    );
+                    match crate::block_size_calibration::persist_block_size(
+                        &defaults.block_size_state_file,
+                        observed,
+                    ) {
+                        Ok(()) => std::process::exit(0),
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to persist calibrated block size");
+                        }
+                    }
+                }
+                reconcile_once(
+                    &reflector,
+                    selector.as_ref(),
+                    &defaults,
+                    calibration.as_ref(),
+                )
+                .await;
                 tokio::select! {
                     _ = cancel_child.cancelled() => break,
+                    // Re-register workers once calibration observes the real
+                    // block size (or stop watching if the probe went away).
+                    changed = async { observed_changes.as_mut().expect("guarded by if").changed().await },
+                        if observed_changes.is_some() => {
+                        if changed.is_err() {
+                            observed_changes = None;
+                        }
+                    }
                     // Re-reconcile on a pod change. Exit if the sender drops
                     // (reflector gone).
                     changed = pod_changes.changed() => {
@@ -91,9 +135,17 @@ async fn reconcile_once(
     reflector: &PodDiscovery,
     selector: &Selector,
     defaults: &RegistrationDefaults,
+    calibration: Option<&BlockSizeCalibration>,
 ) {
-    let desired: Vec<WorkerRegistration> = reflector
-        .ready_workers()
+    let workers = reflector.ready_workers();
+    if let Some(calibration) = calibration
+        && calibration.observed().is_none()
+    {
+        for w in &workers {
+            calibration.add_endpoint(&w.kv_events_endpoint);
+        }
+    }
+    let desired: Vec<WorkerRegistration> = workers
         .into_iter()
         .map(|w| build_registration(w, defaults))
         .collect();
@@ -138,6 +190,7 @@ mod tests {
             tokenizer_max_response_bytes: 16 * 1024 * 1024,
             tokenization_timeout_ms: 5_000,
             block_size: 16,
+            block_size_state_file: "/tmp/test-epp-block-size".to_string(),
             kv_event_port: 5557,
             replay_port: None,
             total_kv_blocks: Some(1000),
@@ -152,6 +205,7 @@ mod tests {
             block_size: 16,
             total_kv_blocks: Some(1000),
             max_num_batched_tokens: None,
+            block_size_state_file: "/tmp/test-epp-block-size".to_string(),
         }
     }
 
@@ -191,7 +245,7 @@ mod tests {
             .expect("selector should build"),
         );
         let (discovery, changes_tx) = PodDiscovery::for_test(vec![worker(7, "10.0.0.1")]);
-        let adapter = TopologyAdapter::spawn(discovery, selector.clone(), defaults());
+        let adapter = TopologyAdapter::spawn(discovery, selector.clone(), defaults(), None);
 
         tokio::time::timeout(Duration::from_secs(1), async {
             while !selector.any_ready().await {
