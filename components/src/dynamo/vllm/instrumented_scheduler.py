@@ -252,6 +252,10 @@ class _BenchmarkCapacityEnvelope:
     usable_blocks_without_watermark: int
     usable_blocks_with_watermark: int
     grid_invariants_digest: str
+    # KV warm-up eligibility is host-local (dataset availability, model
+    # layout); folding it into the negotiated envelope makes every rank take
+    # the same real/fake plan before the grid digest is synchronized.
+    kvwarm_eligible: bool = True
 
     @classmethod
     def from_dict(cls, payload: object) -> _BenchmarkCapacityEnvelope:
@@ -286,6 +290,11 @@ class _BenchmarkCapacityEnvelope:
             raise RuntimeError(
                 "attention-DP benchmark capacity has invalid grid invariants digest"
             )
+        eligible = payload.get("kvwarm_eligible", True)
+        if not isinstance(eligible, bool):
+            raise RuntimeError(
+                f"attention-DP benchmark capacity has invalid kvwarm_eligible={eligible!r}"
+            )
         return cls(
             max_model_len=values["max_model_len"],
             max_num_scheduled_tokens=values["max_num_scheduled_tokens"],
@@ -293,6 +302,7 @@ class _BenchmarkCapacityEnvelope:
             usable_blocks_without_watermark=values["usable_blocks_without_watermark"],
             usable_blocks_with_watermark=values["usable_blocks_with_watermark"],
             grid_invariants_digest=digest,
+            kvwarm_eligible=eligible,
         )
 
     @classmethod
@@ -317,6 +327,7 @@ class _BenchmarkCapacityEnvelope:
             usable_blocks_without_watermark=min(
                 capacity.usable_blocks_without_watermark for capacity in capacities
             ),
+            kvwarm_eligible=all(capacity.kvwarm_eligible for capacity in capacities),
             usable_blocks_with_watermark=min(
                 capacity.usable_blocks_with_watermark for capacity in capacities
             ),
@@ -2372,6 +2383,13 @@ class InstrumentedScheduler(AsyncScheduler):
             usable_blocks_without_watermark=available_blocks,
             usable_blocks_with_watermark=max(0, available_blocks - watermark_blocks),
             grid_invariants_digest=self._bench_grid_invariants_digest(),
+            # Resolve eligibility (and the seeding dataset) here, before the
+            # grid digest is negotiated, so a host-local failure demotes the
+            # whole group instead of forking one rank onto a different plan.
+            kvwarm_eligible=(
+                self._bench_config.mode in ("decode", "agg")
+                and self._kvwarm_warm_eligible()
+            ),
         )
 
     def _bench_capacity_limit(self, name: str) -> int:
@@ -2500,6 +2518,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 len(warmup_points),
             )
         self._bench_expected_points = len(self._bench_grid) - len(warmup_points)
+        # Finalize execution order BEFORE numbering: IDs then follow execution
+        # order, so a soft-timeout artifact holds the contiguous prefix 1..k
+        # the native-artifact contract requires, and the grid digest covers
+        # the order every rank will actually run.
+        self._kvwarm_prepare(mode)
         # Published results must carry contiguous benchmark IDs starting at 1
         # (the native-artifact contract), so real points are numbered first;
         # discarded warmup replicas take IDs after the real range. counter_id
@@ -2527,7 +2550,6 @@ class InstrumentedScheduler(AsyncScheduler):
                 missing_phases=self._bench_missing_phases,
             )
         logger.info("Benchmark grid: %d points (%s mode)", len(self._bench_grid), mode)
-        self._kvwarm_prepare(mode)
 
     def _bench_build_explicit_grid(
         self, points: BenchmarkPoints, *, generated: bool = False
@@ -4329,7 +4351,9 @@ class InstrumentedScheduler(AsyncScheduler):
         import urllib.request
 
         logger.info("KVWARM: downloading dataset %s -> %s", spec, cached)
-        tmp = cached + ".part"
+        # Per-process temp name: same-host ranks may download concurrently;
+        # the final os.replace is atomic and both produce identical bytes.
+        tmp = f"{cached}.{os.getpid()}.part"
         with urllib.request.urlopen(
             spec, timeout=self._KVWARM_DOWNLOAD_TIMEOUT_S
         ) as resp, open(tmp, "wb") as out:
@@ -4457,8 +4481,17 @@ class InstrumentedScheduler(AsyncScheduler):
             return
         if not self._kvwarm_flag_on():
             return
-        self._kvwarm_meta_init()
+        meta = self._kvwarm_meta_init()
         if not self._kvwarm_warm_eligible():
+            return
+        negotiated = getattr(self, "_bench_negotiated_capacity", None)
+        if negotiated is not None and not getattr(negotiated, "kvwarm_eligible", True):
+            # A peer rank could not warm up (dataset, layout); the group
+            # follows the least capable rank so every rank runs one plan.
+            meta["warm_eligible"] = False
+            meta["skip_reason"] = "peer_ineligible"
+            self._kvwarm_eligible_cache = False
+            logger.info("KVWARM: warm-up skipped (peer_ineligible)")
             return
         # Point reordering: the decode segment runs in (batch desc, kv desc)
         # order. Execution order is contractually decoupled from benchmark_id
@@ -4540,6 +4573,14 @@ class InstrumentedScheduler(AsyncScheduler):
         nxt = grid[0] if grid and grid[0].point_type == "decode" else None
         if nxt is None:
             self._kvwarm_shed_chains()
+            return False
+        if self._bench_soft_timeout_elapsed() or getattr(
+            self, "_bench_stop_requested", False
+        ):
+            # Soft timeout: never build another fleet. Release the chains and
+            # let the decode step reach the coordinated timeout boundary.
+            if self._kvwarm_chain_ids:
+                self._kvwarm_shed_chains()
             return False
         if not self._kvwarm_plan_covers(nxt):
             # Fake-fallback points need the whole pool: release the chains back
