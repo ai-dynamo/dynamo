@@ -90,11 +90,21 @@ async def test_context_exit_preserves_original_error_when_cleanup_fails(
     tmp_path,
 ) -> None:
     deployment = managed_deployment(tmp_path)
-    deployment._cleanup = AsyncMock(side_effect=RuntimeError("cleanup failed"))
+    deployment._cleanup = AsyncMock(
+        side_effect=httpx.ConnectError("tunnel unavailable")
+    )
 
     result = await deployment.__aexit__(ValueError, ValueError("test failed"), None)
 
     assert result is False
+
+
+async def test_context_exit_reraises_unexpected_cleanup_error(tmp_path) -> None:
+    deployment = managed_deployment(tmp_path)
+    deployment._cleanup = AsyncMock(side_effect=RuntimeError("cleanup defect"))
+
+    with pytest.raises(RuntimeError, match="cleanup defect"):
+        await deployment.__aexit__(ValueError, ValueError("test failed"), None)
 
 
 def test_request_rebuilds_port_forward_after_transport_failure(
@@ -131,3 +141,21 @@ def test_request_rebuilds_port_forward_after_transport_failure(
     original_port_forward.stop.assert_called_once_with()
     deployment.port_forward.assert_called_once()
     sleep.assert_called_once_with(5)
+
+
+def test_request_reraises_unexpected_port_forward_stop_error(tmp_path) -> None:
+    deployment = managed_deployment(tmp_path)
+    original_port_forward = MagicMock(local_port=31001)
+    original_port_forward.stop.side_effect = ValueError("stop defect")
+    request_sender = MagicMock(side_effect=requests.ConnectionError("forward dropped"))
+
+    with pytest.raises(ValueError, match="stop defect"):
+        deployment.send_request_with_port_forward_retry(
+            pod=MagicMock(),
+            remote_port=8000,
+            endpoint="/v1/chat/completions",
+            payload={"model": "test"},
+            timeout=120,
+            port_forward=original_port_forward,
+            request_sender=request_sender,
+        )

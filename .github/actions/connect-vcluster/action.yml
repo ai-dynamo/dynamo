@@ -161,7 +161,7 @@ runs:
               fi
               sleep 5
             done
-          ' _ "${PF_PID_FILE}" "${PF_LOG}" "${NAMESPACE}" "${VCLUSTER_NAME}" > "${WATCHDOG_LOG}" 2>&1 &
+          ' _ "${PF_PID_FILE}" "${WATCHDOG_LOG}" "${NAMESPACE}" "${VCLUSTER_NAME}" > "${WATCHDOG_LOG}" 2>&1 &
           echo "$!" > "${WATCHDOG_PID_FILE}"
           echo "Started vCluster API port-forward watchdog; log: ${WATCHDOG_LOG}"
         fi

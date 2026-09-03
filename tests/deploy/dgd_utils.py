@@ -1788,9 +1788,15 @@ class ManagedDeployment:
                 )
                 try:
                     active_port_forward.stop()
-                except Exception as stop_error:
+                except RuntimeError as stop_error:
+                    if "anext()" not in str(
+                        stop_error
+                    ) and "already running" not in str(stop_error):
+                        raise
                     self._logger.debug(
-                        "Error stopping failed frontend port-forward: %s", stop_error
+                        "Ignoring expected error while stopping failed frontend "
+                        "port-forward: %s",
+                        stop_error,
                     )
 
                 time.sleep(VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
@@ -1846,10 +1852,10 @@ class ManagedDeployment:
         except BaseException:
             try:
                 await self._cleanup()
-            except Exception:
+            except (aiohttp.ClientConnectionError, httpx.TransportError):
                 self._logger.exception(
-                    "Cleanup failed while handling deployment setup failure; "
-                    "preserving the original error"
+                    "vCluster connection failed during cleanup after deployment "
+                    "setup failure; preserving the original error"
                 )
             raise
         return self
@@ -1861,9 +1867,10 @@ class ManagedDeployment:
 
         try:
             await self._cleanup()
-        except Exception:
+        except (aiohttp.ClientConnectionError, httpx.TransportError):
             self._logger.exception(
-                "Cleanup failed while handling test failure; preserving the original error"
+                "vCluster connection failed during cleanup after test failure; "
+                "preserving the original error"
             )
         return False
 
