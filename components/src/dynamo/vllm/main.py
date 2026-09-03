@@ -26,10 +26,12 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model
+from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
 )
+from dynamo.common.utils.env import env_bool
 from dynamo.common.utils.graceful_shutdown import install_signal_handlers
 from dynamo.common.utils.prometheus import (
     EMBEDDING_CACHE_METRIC_PREFIX,
@@ -60,8 +62,15 @@ from .capacity import (
     per_rank_kv_blocks,
     publish_vllm_token_budget,
 )
+from .dp_topology import get_dp_range_for_worker
+from .embedding_worker_processes import (
+    EmbeddingEngineCleanupResource,
+    create_shared_embedding_engine_client,
+    is_embedding_process_child,
+    start_embedding_parent_watchdog,
+)
 from .engine_generate import publish_engine_generate_capability
-from .handlers import apply_data_parallel_runtime_config, get_dp_range_for_worker
+from .handlers import apply_data_parallel_runtime_config
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .kv_connector_protocols import (
@@ -69,13 +78,24 @@ from .kv_connector_protocols import (
 )
 from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
 from .multimodal_utils.media_config import create_frontend_media_config
+from .multimodal_utils.models.qwen_video_routing import (
+    publish_vllm_qwen_video_processor_contract,
+)
 from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
 from .snapshot import prepare_snapshot_engine
+from .state_agent import (
+    StateAgentLifecycle,
+    start_attachment_owner,
+    state_agent_settings,
+)
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
+TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
+    "tool_call_structural_tag_excludes_reasoning"
+)
 MX_LOAD_FORMATS = {"modelexpress", "mx"}
 
 
@@ -87,6 +107,27 @@ def should_prefetch_model(config: Config) -> bool:
     if os.path.exists(config.model):
         return False
     return not uses_modelexpress_load_format(config)
+
+
+def publish_vllm_structural_tag_reasoning_policy(
+    runtime_config: ModelRuntimeConfig, vllm_config: VllmConfig
+) -> None:
+    """Tell the frontend whether the vLLM tool tag must exclude reasoning.
+
+    vLLM delays its tool grammar only when reasoning constraints are disabled
+    *and* its engine-side reasoning parser can detect the end of reasoning. In
+    that case, the frontend tag must not model the reasoning block again.
+
+    Otherwise, keep the frontend's compatibility behavior so its response
+    parser can close the prompt-injected reasoning block before parsing tools.
+    """
+    structured_outputs_config = vllm_config.structured_outputs_config
+    enable_in_reasoning = structured_outputs_config.enable_in_reasoning
+    has_reasoning_parser = bool(structured_outputs_config.reasoning_parser)
+    runtime_config.set_engine_specific(
+        TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY,
+        json.dumps(has_reasoning_parser and not enable_in_reasoning),
+    )
 
 
 def should_register_model_ignore_weights(config: Config) -> bool:
@@ -121,7 +162,20 @@ async def worker(argv: list[str] | None = None) -> None:
         argv = sys.argv[1:]
     config = parse_args(argv)
 
-    dump_config(config.dump_config_to, config)
+    embedding_process_child = is_embedding_process_child()
+    if config.embedding_worker_processes > 1 and os.environ.get(
+        "DYN_SNAPSHOT_CONTROL_DIR"
+    ):
+        raise ValueError(
+            "--embedding-worker-processes greater than 1 is incompatible with "
+            "checkpoint mode (DYN_SNAPSHOT_CONTROL_DIR is set)."
+        )
+    if embedding_process_child:
+        start_embedding_parent_watchdog()
+    else:
+        # Internal endpoint children have identical configuration. Only the
+        # owning process writes the requested dump path.
+        dump_config(config.dump_config_to, config)
 
     # Name the model. Use either the full path (vllm and sglang do the same),
     # or the HF name (e.g. "Qwen/Qwen3-0.6B"), depending on cmd line params.
@@ -141,7 +195,7 @@ async def worker(argv: list[str] | None = None) -> None:
     # vllm will attempt to download the model again, but find it in the HF cache.
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
-    if should_prefetch_model(config):
+    if not embedding_process_child and should_prefetch_model(config):
         await fetch_model(config.model)
 
     # Snapshot mode: load engine before runtime creation so there are no
@@ -158,6 +212,7 @@ async def worker(argv: list[str] | None = None) -> None:
             config,
             lambda: parse_snapshot_restore_runtime_config(argv),
         )
+        config.gms_shadow_mode = env_bool("DYN_VLLM_GMS_SHADOW_MODE")
 
     # HEADLESS MODE: bypass DistributedRuntime entirely.
     # Workers run vLLM only (no NATS, etcd, or dynamo endpoints).
@@ -166,23 +221,37 @@ async def worker(argv: list[str] | None = None) -> None:
         return
 
     shutdown_event = asyncio.Event()
+    state_agent_lifecycle = StateAgentLifecycle()
     runtime, loop = create_runtime(
         discovery_backend=config.discovery_backend,
         request_plane=config.request_plane,
         event_plane=config.event_plane,
     )
 
+    if snapshot_controller is not None:
+        # The flock lives on the open fd, not on any Python reference; the
+        # kernel releases it when the process exits.
+        await elect_and_wake(snapshot_controller.pause_controller, runtime)
+
     # [gluo FIXME] should be after init() below? 'shutdown_endpoints' are populated
     # there
-    install_signal_handlers(loop, runtime, shutdown_endpoints, shutdown_event)
+    install_signal_handlers(
+        loop,
+        runtime,
+        shutdown_endpoints,
+        shutdown_event,
+        pre_shutdown_callback=state_agent_lifecycle.close,
+    )
 
     # Use WorkerFactory to appropriate initialize worker based on config flags
     factory = WorkerFactory(
         setup_vllm_engine_fn=setup_vllm_engine,
         setup_kv_event_publisher_fn=setup_kv_event_publisher,
+        setup_kv_state_attachment_owner_fn=setup_kv_state_attachment_owner,
         register_vllm_model_fn=register_vllm_model,
         setup_fpm_relay_fn=setup_fpm_relay,
         setup_metrics_collection_fn=setup_metrics_collection,
+        state_agent_lifecycle=state_agent_lifecycle,
     )
     await factory.create(
         runtime,
@@ -361,6 +430,15 @@ def _resolve_image_token_id(config: Config, vllm_config: VllmConfig) -> Optional
     return resolve_routing_image_token_id(config.model, model_dir)
 
 
+def _resolve_video_token_id(vllm_config: VllmConfig) -> Optional[int]:
+    hf_config = vllm_config.model_config.hf_config
+    for field in ("video_token_id", "video_token_index"):
+        token_id = getattr(hf_config, field, None)
+        if token_id is not None:
+            return int(token_id)
+    return None
+
+
 def setup_kv_event_publisher(
     config: Config,
     generate_endpoint: Endpoint,
@@ -400,12 +478,12 @@ def setup_kv_event_publisher(
     dp_start, dp_size = get_dp_range_for_worker(vllm_config)
     kv_publishers = []
     kv_event_block_size = get_configured_kv_event_block_size(vllm_config)
-    # The image-placeholder token id the frontend substitutes pad_value over.
-    # Passed to the KV publisher so the router-side normalizer rewrites those
-    # runs in vLLM BlockStored events to the same canonical pad_value scheme.
-    # None (no mm-routing, model not in registry, text-only) leaves events
-    # unchanged — consistent with the frontend also skipping MM routing.
+    # Placeholder token ids the frontend substitutes pad_value over. Pass them
+    # to the KV publisher so the router-side normalizer rewrites image and
+    # video runs in vLLM BlockStored events to the same canonical scheme.
+    # Missing ids leave their modality unchanged.
     image_token_id = _resolve_image_token_id(config, vllm_config)
+    video_token_id = _resolve_video_token_id(vllm_config)
 
     for dp_rank in range(dp_start, dp_start + dp_size):
         if consolidator_enabled:
@@ -433,6 +511,7 @@ def setup_kv_event_publisher(
             dp_rank=dp_rank,
             image_token_id=image_token_id,
             kv_state_endpoint=config.kv_state_endpoint,
+            video_token_id=video_token_id,
         )
         kv_publishers.append(kv_publisher)
 
@@ -441,6 +520,19 @@ def setup_kv_event_publisher(
         )
 
     return kv_publishers if kv_publishers else None
+
+
+async def setup_kv_state_attachment_owner(
+    config: Config,
+    generate_endpoint: Endpoint,
+    vllm_config: VllmConfig,
+):
+    return await start_attachment_owner(
+        config,
+        generate_endpoint,
+        vllm_config,
+        _resolve_image_token_id(config, vllm_config),
+    )
 
 
 def setup_fpm_relay(
@@ -623,13 +715,28 @@ def setup_vllm_engine(
 
     # Time engine initialization
     start_time = time.time()
-    engine_client = AsyncLLM.from_vllm_config(
-        vllm_config=vllm_config,
-        usage_context=usage_context,
-        stat_loggers=factory,
-        enable_log_requests=engine_args.enable_log_requests,
-        disable_log_stats=engine_args.disable_log_stats,
-    )
+    embedding_process_group = None
+    if config.embedding_worker and config.embedding_worker_processes > 1:
+        (
+            engine_client,
+            vllm_config,
+            embedding_process_group,
+        ) = create_shared_embedding_engine_client(
+            vllm_config=vllm_config,
+            process_count=config.embedding_worker_processes,
+            usage_context=usage_context,
+            stat_loggers=factory,
+            enable_log_requests=engine_args.enable_log_requests,
+            disable_log_stats=engine_args.disable_log_stats,
+        )
+    else:
+        engine_client = AsyncLLM.from_vllm_config(
+            vllm_config=vllm_config,
+            usage_context=usage_context,
+            stat_loggers=factory,
+            enable_log_requests=engine_args.enable_log_requests,
+            disable_log_stats=engine_args.disable_log_stats,
+        )
     load_time = time.time() - start_time
 
     # Record model load time. ``component_gauges`` is None on the
@@ -641,15 +748,44 @@ def setup_vllm_engine(
 
     logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
 
-    # update block_size in vllm_config based on final engine cache info for later use
-    runtime_values = get_engine_cache_info(engine_client)
+    embedding_cleanup_resource: EmbeddingEngineCleanupResource | None = None
+    if embedding_process_group is not None:
+        embedding_cleanup_resource = EmbeddingEngineCleanupResource(
+            embedding_process_group,
+            prometheus_temp_dir,
+        )
+    engine_cleanup_resource = (
+        embedding_cleanup_resource
+        if embedding_cleanup_resource is not None
+        else prometheus_temp_dir
+    )
+
+    # The shared embedding EngineCore is already running at this point, so make
+    # startup failure transactional and do not leave child endpoints behind.
+    try:
+        runtime_values = get_engine_cache_info(engine_client)
+    except BaseException:
+        if embedding_cleanup_resource is not None:
+            try:
+                engine_client.shutdown()
+            except Exception:
+                logger.exception(
+                    "Failed to shut down parent embedding client after startup error"
+                )
+            try:
+                embedding_cleanup_resource.cleanup()
+            except Exception:
+                logger.exception(
+                    "Failed to clean up shared embedding EngineCore after startup error"
+                )
+        raise
     vllm_config.cache_config.block_size = runtime_values["block_size"]
 
     return (
         engine_client,
         vllm_config,
         default_sampling_params,
-        prometheus_temp_dir,
+        engine_cleanup_resource,
         component_gauges,
     )
 
@@ -685,14 +821,29 @@ async def register_vllm_model(
             (list of alternative AND-sets).
     """
     runtime_config = ModelRuntimeConfig()
+    publish_vllm_structural_tag_reasoning_policy(runtime_config, vllm_config)
+    publish_vllm_qwen_video_processor_contract(runtime_config, vllm_config)
     dp_range = get_dp_range_for_worker(vllm_config)
+    state_agent_enabled = state_agent_settings(config) is not None
     apply_data_parallel_runtime_config(runtime_config, dp_range)
     enable_router_hint_support(
-        runtime_config, config.engine_args, worker_type, dp_range
+        runtime_config,
+        config.engine_args,
+        worker_type,
+        dp_range,
+        publish_source_endpoints=not state_agent_enabled,
     )
     runtime_config.context_length = vllm_config.model_config.max_model_len
+    tower_connector_lora_enabled = bool(
+        vllm_config.lora_config
+        and getattr(vllm_config.lora_config, "enable_tower_connector_lora", False)
+    )
     if publish_engine_generate_capability(
-        runtime_config, model_input, model_type, worker_type
+        runtime_config,
+        model_input,
+        model_type,
+        worker_type,
+        tower_connector_lora_enabled,
     ):
         logging.info("Published vLLM engine-native generate capability")
     if model_type != ModelType.Embedding:
@@ -725,6 +876,8 @@ async def register_vllm_model(
     runtime_config.enable_local_indexer = config.enable_local_indexer
     runtime_config.kv_event_publishing_enabled = config.use_kv_events
     runtime_config.kv_state_endpoint = config.kv_state_endpoint
+    if state_agent_enabled:
+        runtime_config.kv_event_source_mode = "state_agent_v2"
 
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
     # workers have no OpenAI surface and don't run a parser — key off
@@ -763,8 +916,7 @@ async def register_vllm_model(
     # Set topology and KV transfer policy for topology-aware routing
     apply_topology_config(runtime_config)
 
-    # Configure media decoder for frontend image decoding when enabled
-    # This enables frontend to decode images and transfer via NIXL RDMA
+    # Configure frontend media decoding and transfer via NIXL RDMA.
     media_decoder, media_fetcher = create_frontend_media_config(
         config.frontend_decoding
     )

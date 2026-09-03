@@ -16,10 +16,10 @@ KUBERNETES_OPTIONAL_ENV_NAMES = {"DYN_NAMESPACE_WORKER_SUFFIX"}
 SNAPSHOT_CONTROL_DIR_ENV = "DYN_SNAPSHOT_CONTROL_DIR"
 SNAPSHOT_CONTROL_DIR = "/snapshot-control"
 SNAPSHOT_RESTORE_CONTEXT_FILE = "restore-context.json"
-SNAPSHOT_RESTORE_STANDBY_ENV = "DYN_SNAPSHOT_RESTORE_STANDBY"
+SNAPSHOT_RESTORE_STANDBY_ENV = "SNAPSHOT_RESTORE_STANDBY"
 
-# Must match snapshotprotocol.{SnapshotCompleteFile,RestoreCompleteFile,
-# ReadyForSnapshotFile}.
+# Must match the public file-name constants in
+# github.com/ai-dynamo/snapshot/api/podcontract.
 SNAPSHOT_COMPLETE_FILE = "snapshot-complete"
 RESTORE_COMPLETE_FILE = "restore-complete"
 READY_FOR_SNAPSHOT_FILE = "ready-for-snapshot"
@@ -44,6 +44,11 @@ RESTORE_RUNTIME_ENV_NAMES = {
     # Kubernetes discovery mode env read when the restored runtime registers.
     "DYN_KUBE_DISCOVERY_MODE",
     "CONTAINER_NAME",
+    # Target identity and failover policy consumed after engine construction.
+    "ENGINE_ID",
+    "FAILOVER_LOCK_PATH",
+    "DYN_VLLM_GMS_SHADOW_MODE",
+    "DYN_GMS_USE_V1",
     # Optional non-secret platform endpoints that may be consumed after restore.
     "MODEL_EXPRESS_URL",
     "PROMETHEUS_ENDPOINT",

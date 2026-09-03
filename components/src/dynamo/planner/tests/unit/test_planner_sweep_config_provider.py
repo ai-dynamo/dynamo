@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-# Optional-dependency preflight must run before the simulation imports.
 # ruff: noqa: E402
+# Optional-dependency preflight must run before the simulation imports.
 
 """Unit tests for the Planner-owned Sweeper sweep configuration provider."""
 
 from __future__ import annotations
 
+import json
+import warnings
 from dataclasses import replace
 
 import pytest
@@ -16,9 +18,14 @@ pytest.importorskip(
     reason="AI Simulate is an optional Dynamo simulation dependency",
 )
 
-import dynamo.planner.simulation.provider as planner_provider_module
+from aisimulate.config_adapter import (
+    PredictionAdapterContext,
+    RecommendationAdapterContext,
+)
 from aisimulate.sweeper.provider import CandidateContext, SweepContext
 from aisimulate.sweeper.replay import BackendDeploymentSpec
+
+import dynamo.planner.simulation.provider as planner_provider_module
 from dynamo.planner.simulation import create_provider
 from dynamo.planner.simulation.load_predictor import LoadPredictorResult
 
@@ -73,17 +80,219 @@ def _candidate_context() -> CandidateContext:
     return CandidateContext(sample=sample, backend_deployment=deployment)
 
 
+def test_structured_preset_subitems_preserve_all_families() -> None:
+    space = planner_provider_module.PlannerSearchSpace.model_validate(
+        {
+            "scaling_policy": {"preset": ["hybrid_180_5"]},
+            "fpm_sampling": {"preset": ["fine"]},
+            "load_sensitivity": {"preset": ["conservative"]},
+            "load_predictor": {"preset": ["kalman_reactive_log1p"]},
+        }
+    )
+
+    assert space.scaling_policy.preset == ["hybrid_180_5"]
+    assert space.fpm_sampling.preset == ["fine"]
+    assert space.load_sensitivity.preset == ["conservative"]
+    assert space.load_predictor.preset == ["kalman_reactive_log1p"]
+
+
+def test_custom_predictor_preset_is_completed_with_every_knob() -> None:
+    space = planner_provider_module.PlannerSearchSpace.model_validate(
+        {
+            "load_predictor": {
+                "preset": [{"load_predictor": "kalman"}],
+            }
+        }
+    )
+
+    entry = space.load_predictor.preset[0]
+    assert isinstance(entry, dict)
+    assert set(entry) == planner_provider_module._PREDICTOR_KEYS
+    assert entry["load_predictor"] == "kalman"
+    assert entry["prophet_window_size"] == 50
+    assert entry["kalman_min_points"] == 5
+
+
+def test_custom_predictor_preset_rejects_unknown_knob() -> None:
+    with pytest.raises(ValueError, match="unknown keys"):
+        planner_provider_module.PlannerSearchSpace.model_validate(
+            {
+                "load_predictor": {
+                    "preset": [
+                        {
+                            "load_predictor": "constant",
+                            "unknown": 1,
+                        }
+                    ]
+                }
+            }
+        )
+
+
+def test_structured_custom_preset_rejects_missing_subitem_knob() -> None:
+    with pytest.raises(ValueError, match="missing required keys"):
+        planner_provider_module.PlannerSearchSpace.model_validate(
+            {
+                "scaling_policy": {
+                    "preset": [{"enable_throughput_scaling": True}],
+                }
+            }
+        )
+
+
+def test_legacy_flat_presets_warn_and_remain_compatible() -> None:
+    with pytest.warns(FutureWarning, match="removed after the 1.5 release"):
+        space = planner_provider_module.PlannerSearchSpace.model_validate(
+            {
+                "scaling_policy": ["throughput_180_5"],
+                "fpm_sampling": ["default"],
+                "load_sensitivity": ["default"],
+                "load_predictor_candidates": ["constant_last"],
+            }
+        )
+
+    assert space.scaling_policy.preset == ["throughput_180_5"]
+    assert space.fpm_sampling.preset == ["default"]
+    assert space.load_sensitivity.preset == ["default"]
+    assert space.load_predictor.preset == ["constant_last"]
+
+
+def test_legacy_warning_points_to_user_callsite() -> None:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        create_provider().generate_search_space(
+            {"scaling_policy": ["disabled"]},
+            _sweep_context(),
+        )
+
+    assert len(caught) == 1
+    assert caught[0].category is FutureWarning
+    assert caught[0].filename == __file__
+
+
+def test_legacy_and_structured_inputs_generate_identical_plans() -> None:
+    adapter = create_provider()
+    structured = {
+        "scaling_policy": {"preset": ["throughput_180_5"]},
+        "fpm_sampling": {"preset": ["fine"]},
+        "load_sensitivity": {"preset": ["conservative"]},
+        "load_predictor": {"preset": ["constant_last"]},
+        "min_endpoint": 2,
+    }
+    legacy = {
+        "scaling_policy": ["throughput_180_5"],
+        "fpm_sampling": ["fine"],
+        "load_sensitivity": ["conservative"],
+        "load_predictor_candidates": ["constant_last"],
+        "min_endpoint": 2,
+    }
+
+    structured_plan = adapter.generate_search_space(structured, _sweep_context())
+    with pytest.warns(FutureWarning, match="removed after the 1.5 release"):
+        legacy_plan = adapter.generate_search_space(legacy, _sweep_context())
+
+    assert legacy_plan == structured_plan
+    selection = {
+        "scaling_policy": "throughput_180_5",
+        "fpm_sampling": "fine",
+        "load_sensitivity": "conservative",
+    }
+    assert adapter.materialize_replay(
+        legacy_plan,
+        selection,
+        _candidate_context(),
+    ) == adapter.materialize_replay(
+        structured_plan,
+        selection,
+        _candidate_context(),
+    )
+
+
+def test_pre_refactor_serialized_plan_state_still_materializes() -> None:
+    adapter = create_provider()
+    structured_plan = adapter.generate_search_space(
+        {
+            "scaling_policy": {"preset": ["throughput_180_5"]},
+            "fpm_sampling": {"preset": ["fine"]},
+            "load_sensitivity": {"preset": ["conservative"]},
+            "load_predictor": {"preset": ["constant_last"]},
+        },
+        _sweep_context(),
+    )
+    legacy_state = dict(structured_plan.state)
+    legacy_state["search_space"] = {
+        "scaling_policy": ["throughput_180_5"],
+        "fpm_sampling": ["fine"],
+        "load_sensitivity": ["conservative"],
+        "load_predictor_candidates": ["constant_last"],
+    }
+    legacy_plan = replace(structured_plan, state=legacy_state)
+    selection = {
+        "scaling_policy": "throughput_180_5",
+        "fpm_sampling": "fine",
+        "load_sensitivity": "conservative",
+    }
+
+    with pytest.warns(FutureWarning, match="removed after the 1.5 release"):
+        legacy_spec = adapter.materialize_replay(
+            legacy_plan,
+            selection,
+            _candidate_context(),
+        )
+
+    assert legacy_spec == adapter.materialize_replay(
+        structured_plan,
+        selection,
+        _candidate_context(),
+    )
+
+
+def test_legacy_predictor_field_conflicts_with_structured_subitem() -> None:
+    with pytest.raises(
+        ValueError,
+        match="load_predictor_candidates cannot be combined with load_predictor",
+    ):
+        planner_provider_module.PlannerSearchSpace.model_validate(
+            {
+                "load_predictor": {"preset": ["constant_last"]},
+                "load_predictor_candidates": ["arima_raw"],
+            }
+        )
+
+
+def test_legacy_partial_predictor_mapping_is_completed() -> None:
+    with pytest.warns(FutureWarning, match="removed after the 1.5 release"):
+        space = planner_provider_module.PlannerSearchSpace.model_validate(
+            {
+                "load_predictor_candidates": [
+                    {
+                        "load_predictor": "kalman",
+                        "kalman_q_level": 3.0,
+                    }
+                ]
+            }
+        )
+
+    entry = space.load_predictor.preset[0]
+    assert isinstance(entry, dict)
+    assert set(entry) == planner_provider_module._PREDICTOR_KEYS
+    assert entry["kalman_q_level"] == 3.0
+    assert entry["kalman_min_points"] == 5
+
+
 def test_non_goodput_filters_predictive_throughput_policies() -> None:
     adapter = create_provider()
 
     plan = adapter.generate_search_space(
         {
-            "scaling_policy": [
-                "disabled",
-                "throughput_180_5",
-                "load_180_5",
-                "hybrid_600_5",
-            ]
+            "scaling_policy": {
+                "preset": [
+                    "disabled",
+                    "throughput_180_5",
+                    "load_180_5",
+                    "hybrid_600_5",
+                ]
+            }
         },
         _sweep_context(target="throughput"),
     )
@@ -112,10 +321,10 @@ def test_pareto_goodput_uses_sla_planner_target() -> None:
 
     plan = adapter.generate_search_space(
         {
-            "scaling_policy": ["throughput_180_5"],
-            "fpm_sampling": ["default"],
-            "load_sensitivity": ["default"],
-            "load_predictor_candidates": ["constant_last"],
+            "scaling_policy": {"preset": ["throughput_180_5"]},
+            "fpm_sampling": {"preset": ["default"]},
+            "load_sensitivity": {"preset": ["default"]},
+            "load_predictor": {"preset": ["constant_last"]},
         },
         context,
     )
@@ -145,7 +354,7 @@ def test_default_pareto_keeps_throughput_planner_target() -> None:
     )
 
     plan = create_provider().generate_search_space(
-        {"scaling_policy": ["disabled"]},
+        {"scaling_policy": {"preset": ["disabled"]}},
         context,
     )
 
@@ -156,7 +365,7 @@ def test_default_pareto_keeps_throughput_planner_target() -> None:
 def test_disabled_policy_materializes_no_runtime_hook() -> None:
     adapter = create_provider()
     plan = adapter.generate_search_space(
-        {"scaling_policy": ["disabled"]},
+        {"scaling_policy": {"preset": ["disabled"]}},
         _sweep_context(),
     )
 
@@ -180,10 +389,10 @@ def test_scaling_policy_materializes_legacy_planner_payload() -> None:
     adapter = create_provider()
     plan = adapter.generate_search_space(
         {
-            "scaling_policy": ["throughput_180_5"],
-            "fpm_sampling": ["fine"],
-            "load_sensitivity": ["conservative"],
-            "load_predictor_candidates": ["constant_last"],
+            "scaling_policy": {"preset": ["throughput_180_5"]},
+            "fpm_sampling": {"preset": ["fine"]},
+            "load_sensitivity": {"preset": ["conservative"]},
+            "load_predictor": {"preset": ["constant_last"]},
             "min_endpoint": 2,
         },
         _sweep_context(),
@@ -211,8 +420,6 @@ def test_scaling_policy_materializes_legacy_planner_payload() -> None:
         "load_adjustment_interval_seconds": 5,
         "max_num_fpm_samples": 128,
         "fpm_sample_bucket_size": 64,
-        "load_scaling_down_sensitivity": 90,
-        "load_min_observations": 8,
         "load_predictor": "constant",
         "load_predictor_log1p": False,
         "max_gpu_budget": 32,
@@ -239,10 +446,10 @@ def test_custom_float_interval_resolves_predictor_and_preserves_selection() -> N
     }
     plan = adapter.generate_search_space(
         {
-            "scaling_policy": [custom_policy],
-            "fpm_sampling": ["default"],
-            "load_sensitivity": ["default"],
-            "load_predictor_candidates": ["constant_last"],
+            "scaling_policy": {"preset": [custom_policy]},
+            "fpm_sampling": {"preset": ["default"]},
+            "load_sensitivity": {"preset": ["default"]},
+            "load_predictor": {"preset": ["constant_last"]},
         },
         _sweep_context(),
     )
@@ -270,9 +477,9 @@ def test_disaggregated_scaling_preserves_both_engine_gpu_counts() -> None:
     adapter = create_provider()
     plan = adapter.generate_search_space(
         {
-            "scaling_policy": ["load_180_5"],
-            "fpm_sampling": ["default"],
-            "load_sensitivity": ["default"],
+            "scaling_policy": {"preset": ["load_180_5"]},
+            "fpm_sampling": {"preset": ["default"]},
+            "load_sensitivity": {"preset": ["default"]},
             "prefill_min_endpoint": 2,
             "decode_min_endpoint": 3,
         },
@@ -333,6 +540,296 @@ def test_provider_owns_its_adapter_and_hook_abi_versions() -> None:
     assert planner_provider_module._PROVIDER_API_VERSION == 1
     assert planner_provider_module._PLANNER_HOOK_API_VERSION == 1
     assert adapter.api_version == planner_provider_module._PROVIDER_API_VERSION
+    assert adapter.config_adapter_api_version == 3
+    assert adapter.section == "planner"
+
+
+def test_public_planner_validation_is_owned_by_dynamo_adapter() -> None:
+    adapter = create_provider()
+    prediction_context = PredictionAdapterContext(engine={}, traffic={}, evaluation={})
+    recommendation_context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={},
+        optimization={},
+        sweep=_sweep_context(target="goodput_per_gpu"),
+    )
+
+    assert adapter.compile_prediction({}, prediction_context).config == {
+        "policy": "disabled"
+    }
+    plan = adapter.compile_recommendation({}, recommendation_context)
+    assert plan.fragment.choices_by_branch["agg"]["policy"] == [
+        "disabled",
+        "enabled",
+    ]
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        adapter.compile_prediction({"not_a_planner_knob": True}, prediction_context)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        adapter.compile_recommendation(
+            {
+                "scaling_policy": {"preset": "default"},
+                "enable_load_scaling": {"choices": [False, True]},
+            },
+            recommendation_context,
+        )
+
+
+def test_public_planner_prediction_requires_sla_for_throughput_scaling() -> None:
+    with pytest.raises(ValueError, match="throughput scaling requires"):
+        create_provider().compile_prediction(
+            {"policy": "enabled"},
+            PredictionAdapterContext(engine={}, traffic={}, evaluation={}),
+        )
+
+
+def test_planner_default_preset_conflicts_and_off_exposes_leaf_dimensions() -> None:
+    adapter = create_provider()
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+        optimization={"target": "goodput_per_gpu"},
+        sweep=_sweep_context(target="goodput_per_gpu"),
+    )
+    with pytest.raises(ValueError, match="default preset"):
+        adapter.compile_recommendation(
+            {"enable_load_scaling": {"choices": [False, True]}}, context
+        )
+
+    plan = adapter.compile_recommendation(
+        {
+            "scaling_policy": {"preset": False},
+            "enable_throughput_scaling": {"choices": [False, True]},
+            "enable_load_scaling": {"choices": [False, True]},
+            "throughput_adjustment_interval_seconds": {"choices": [180, 600]},
+            "load_adjustment_interval_seconds": {"choices": [5, 10]},
+        },
+        context,
+    )
+    choices = plan.fragment.choices_by_branch["agg"]
+    assert "scaling_policy" not in choices
+    assert {
+        "enable_throughput_scaling",
+        "enable_load_scaling",
+        "throughput_adjustment_interval_seconds",
+        "load_adjustment_interval_seconds",
+    }.issubset(choices)
+
+
+def test_fpm_bucket_range_keeps_only_perfect_square_choices() -> None:
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+        optimization={"target": "goodput"},
+        sweep=_sweep_context(target="goodput"),
+    )
+    plan = create_provider().compile_recommendation(
+        {
+            "fpm_sampling": {"preset": False},
+            "max_num_fpm_samples": 64,
+            "fpm_sample_bucket_size": {"range": {"min": 4, "max": 64, "step": 4}},
+        },
+        context,
+    )
+
+    assert plan.fragment.choices_by_branch["agg"]["fpm_sample_bucket_size"] == [
+        4,
+        16,
+        36,
+        64,
+    ]
+
+    with pytest.raises(ValueError, match="contains no perfect squares"):
+        create_provider().compile_recommendation(
+            {
+                "fpm_sampling": {"preset": False},
+                "max_num_fpm_samples": 64,
+                "fpm_sample_bucket_size": {"range": {"min": 5, "max": 8, "step": 1}},
+            },
+            context,
+        )
+
+
+def test_planner_custom_preset_values_are_strict_and_concrete() -> None:
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+        optimization={"target": "goodput"},
+        sweep=_sweep_context(target="goodput"),
+    )
+    with pytest.raises(ValueError):
+        create_provider().compile_recommendation(
+            {
+                "fpm_sampling": {
+                    "preset": [
+                        {
+                            "max_num_fpm_samples": 64,
+                            "fpm_sample_bucket_size": 5,
+                        }
+                    ]
+                }
+            },
+            context,
+        )
+
+
+def test_custom_disabled_scaling_preset_uses_null_inactive_intervals() -> None:
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+        optimization={"target": "goodput"},
+        sweep=_sweep_context(target="goodput"),
+    )
+    disabled = {
+        "enable_throughput_scaling": False,
+        "enable_load_scaling": False,
+        "throughput_adjustment_interval_seconds": None,
+        "load_adjustment_interval_seconds": None,
+    }
+    plan = create_provider().compile_recommendation(
+        {"scaling_policy": {"preset": [disabled]}}, context
+    )
+    assert plan.fragment.choices_by_branch["agg"]["scaling_policy"] == [disabled]
+
+    invalid = dict(disabled)
+    invalid["throughput_adjustment_interval_seconds"] = 180
+    invalid["load_adjustment_interval_seconds"] = 5
+    with pytest.raises(ValueError, match="requires null adjustment intervals"):
+        create_provider().compile_recommendation(
+            {"scaling_policy": {"preset": [invalid]}}, context
+        )
+
+
+def test_preset_off_rejects_infeasible_recombined_scaling_intervals() -> None:
+    adapter = create_provider()
+    context = RecommendationAdapterContext(
+        engine={},
+        traffic={},
+        evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+        optimization={"target": "goodput"},
+        sweep=_sweep_context(target="goodput"),
+    )
+    plan = adapter.compile_recommendation(
+        {
+            "scaling_policy": {"preset": False},
+            "enable_throughput_scaling": False,
+            "enable_load_scaling": {"choices": [False, True]},
+            "throughput_adjustment_interval_seconds": {"choices": [20, 40]},
+            "load_adjustment_interval_seconds": {"choices": [10, 30]},
+        },
+        context,
+    )
+    selection = {
+        name: values[0]
+        for name, values in plan.fragment.choices_by_branch["agg"].items()
+    }
+    selection.update(
+        policy="enabled",
+        enable_throughput_scaling=False,
+        enable_load_scaling=True,
+        throughput_adjustment_interval_seconds=20,
+        load_adjustment_interval_seconds=30,
+    )
+    with pytest.raises(ValueError, match="independent Planner scaling-policy"):
+        adapter.materialize_candidate(plan, selection, _candidate_context())
+
+
+def test_enabled_planner_prediction_keeps_public_config_separate_from_hook() -> None:
+    context = PredictionAdapterContext(
+        engine={
+            "mode": "aggregated",
+            "workers": {"aggregated": {"parallelism": {"tensor": 1}}},
+        },
+        traffic={},
+        evaluation={},
+    )
+    spec = create_provider().compile_prediction(
+        {
+            "policy": "enabled",
+            "target": "load",
+            "enable_throughput_scaling": False,
+            "enable_load_scaling": True,
+        },
+        context,
+    )
+    assert "mode" not in spec.config
+    assert "max_gpu_budget" not in spec.config
+    assert spec.config["policy"] == "enabled"
+    assert spec.runtime_hooks[0].config["planner_config"]["mode"] == "agg"
+
+
+def test_planner_recommendation_target_is_derived_not_user_configurable() -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        create_provider().compile_recommendation(
+            {"target": "load"},
+            RecommendationAdapterContext(
+                engine={},
+                traffic={},
+                evaluation={},
+                optimization={"target": "throughput"},
+                sweep=_sweep_context(target="throughput"),
+            ),
+        )
+
+
+def test_static_predictor_fallback_stays_within_configured_preset_list() -> None:
+    plan = create_provider().compile_recommendation(
+        {
+            "scaling_policy": {"preset": ["throughput_180_5"]},
+            "load_predictor": {"preset": ["arima_raw"]},
+        },
+        RecommendationAdapterContext(
+            engine={},
+            traffic={},
+            evaluation={"sla": {"ttft_ms": 2000.0, "itl_ms": 30.0}},
+            optimization={"target": "goodput"},
+            sweep=_sweep_context(target="goodput"),
+        ),
+    )
+    assert plan.state["load_predictor"]["best_by_interval"] == {"180": "arima_raw"}
+
+
+def test_native_dynamo_agentic_trace_is_detected_after_payload_header(tmp_path) -> None:
+    trace = tmp_path / "trace.jsonl"
+    trace.write_text(
+        json.dumps({"event_type": "request_payload"})
+        + "\n"
+        + json.dumps(17)
+        + "\n"
+        + json.dumps({"event_type": "request_end", "request": {}})
+        + "\n"
+        + json.dumps(
+            {
+                "event": {
+                    "event_type": "request_end",
+                    "agent_context": {"session_id": "s"},
+                }
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(ValueError, match=r"planner\.policy=disabled"):
+        create_provider().compile_recommendation(
+            {"policy": "enabled"},
+            RecommendationAdapterContext(
+                engine={},
+                traffic={
+                    "source": {
+                        "type": "trace",
+                        "format": "dynamo",
+                        "paths": [str(trace)],
+                    }
+                },
+                evaluation={},
+                optimization={"target": "throughput"},
+                sweep=_sweep_context(target="throughput"),
+            ),
+        )
 
 
 def test_policy_pruning_diagnostics_remain_visible(monkeypatch) -> None:
@@ -340,9 +837,62 @@ def test_policy_pruning_diagnostics_remain_visible(monkeypatch) -> None:
     monkeypatch.setattr(planner_provider_module.tqdm, "write", messages.append)
 
     create_provider().generate_search_space(
-        {"scaling_policy": ["disabled", "throughput_180_5"]},
+        {"scaling_policy": {"preset": ["disabled", "throughput_180_5"]}},
         replace(_sweep_context(target="throughput"), show_progress=True),
     )
 
     assert len(messages) == 1
     assert "dropped 1 throughput-scaling policy" in messages[0]
+
+
+def test_public_policy_and_min_workers_are_independent_dimensions() -> None:
+    adapter = create_provider()
+    plan = adapter.generate_search_space(
+        {
+            "policy": {"choices": ["disabled", "enabled"]},
+            "scaling_policy": {"preset": ["load_180_5"]},
+            "fpm_sampling": {"preset": ["default"]},
+            "load_sensitivity": {"preset": ["default"]},
+            "min_workers": {"choices": [0, 2]},
+        },
+        _sweep_context(target="throughput"),
+    )
+    choices = plan.fragment.choices_by_branch["agg"]
+    assert choices["policy"] == ["disabled", "enabled"]
+    assert choices["min_workers"] == [0, 2]
+
+    common_selection = {
+        "scaling_policy": "load_180_5",
+        "fpm_sampling": "default",
+        "load_sensitivity": "default",
+        "min_workers": 2,
+    }
+    disabled = adapter.materialize_replay(
+        plan,
+        {**common_selection, "policy": "disabled"},
+        _candidate_context(),
+    )
+    enabled = adapter.materialize_replay(
+        plan,
+        {**common_selection, "policy": "enabled"},
+        _candidate_context(),
+    )
+
+    assert disabled.config == {"policy": "disabled"}
+    assert disabled.runtime_hooks == ()
+    assert enabled.config["policy"] == "enabled"
+    assert enabled.config["min_workers"] == 2
+    assert enabled.config["max_num_gpus"] == 8
+    assert enabled.runtime_hooks[0].config["planner_config"]["min_endpoint"] == 2
+
+
+def test_public_custom_predictor_preset_requires_every_knob() -> None:
+    with pytest.raises(ValueError, match="missing required keys"):
+        planner_provider_module.PlannerSearchSpace.model_validate(
+            {
+                "policy": "enabled",
+                "load_predictor": {
+                    "preset": [{"load_predictor": "arima"}],
+                },
+            }
+        )

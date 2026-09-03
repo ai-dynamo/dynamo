@@ -24,7 +24,7 @@ mod kv_store;
 pub use kv_store::KVStoreDiscovery;
 
 mod kube;
-pub use kube::{KubeDiscoveryClient, hash_pod_name};
+pub use kube::{KubeDiscoveryClient, hash_container_name, hash_pod_name};
 
 pub mod utils;
 use crate::{
@@ -56,7 +56,7 @@ impl EventTransportKind {
     /// Returns `Zmq` if the variable is not set or is empty: ZMQ is the default
     /// event plane for all backends. NATS remains available as an explicit opt-in
     /// (`DYN_EVENT_PLANE=nats`). When you have access to a runtime, prefer
-    /// [`DistributedRuntime::default_event_transport_kind`], which resolves the same
+    /// `DistributedRuntime::default_event_transport_kind`, which resolves the same
     /// default through the configured discovery backend.
     ///
     /// Returns an error for unrecognised values.

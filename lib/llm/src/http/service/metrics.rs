@@ -16,6 +16,8 @@ use dynamo_runtime::{
 };
 use prometheus::{
     Encoder, GaugeVec, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
+    core::{Collector, Desc},
+    proto::{Gauge, LabelPair, Metric, MetricFamily, MetricType},
 };
 use serde::Serialize;
 use std::{
@@ -23,6 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::discovery::ModelManager;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::model_card::ModelDeploymentCard;
 use crate::protocols::{
@@ -68,6 +71,88 @@ use super::RouteDoc;
 pub use crate::discovery::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 const UNSET_DP_RANK_LABEL: &str = "none";
 const ITL_LOCAL_FLUSH_TOKENS: u64 = 64;
+
+const MODEL_READY_HELP: &str = "Whether the frontend can route at least one inference request for the model (1 = ready, 0 = not ready)";
+
+fn model_ready_metric_name(metrics_prefix: Option<&str>) -> String {
+    let prefix =
+        sanitize_frontend_prometheus_prefix(metrics_prefix.unwrap_or(name_prefix::FRONTEND));
+    format!("{}_{}", prefix, frontend_service::MODEL_READY)
+}
+
+/// Collects current model readiness directly from the frontend's routing catalog.
+///
+/// This is evaluated at scrape time so worker registration and removal are
+/// reflected without maintaining a second, potentially stale readiness state.
+struct ModelReadyCollector {
+    manager: Arc<ModelManager>,
+    desc: Desc,
+    metric_name: String,
+}
+
+impl ModelReadyCollector {
+    fn new(
+        manager: Arc<ModelManager>,
+        metrics_prefix: Option<String>,
+    ) -> Result<Self, prometheus::Error> {
+        let metric_name = model_ready_metric_name(metrics_prefix.as_deref());
+        let desc = Desc::new(
+            metric_name.clone(),
+            MODEL_READY_HELP.to_string(),
+            vec!["model".to_string()],
+            Default::default(),
+        )?;
+        Ok(Self {
+            manager,
+            desc,
+            metric_name,
+        })
+    }
+}
+
+impl Collector for ModelReadyCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        vec![&self.desc]
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        let readiness = self.manager.registered_model_readiness();
+        if readiness.is_empty() {
+            return Vec::new();
+        }
+
+        let mut metrics = Vec::with_capacity(readiness.len());
+        for (model, ready) in readiness {
+            let mut model_label = LabelPair::default();
+            model_label.set_name("model".to_string());
+            model_label.set_value(model);
+
+            let mut gauge = Gauge::default();
+            gauge.set_value(if ready { 1.0 } else { 0.0 });
+
+            let mut metric = Metric::default();
+            metric.set_label(vec![model_label]);
+            metric.set_gauge(gauge);
+            metrics.push(metric);
+        }
+
+        let mut family = MetricFamily::default();
+        family.set_name(self.metric_name.clone());
+        family.set_help(MODEL_READY_HELP.to_string());
+        family.set_field_type(MetricType::GAUGE);
+        family.set_metric(metrics);
+        vec![family]
+    }
+}
+
+/// Register the scrape-time model readiness collector with the frontend registry.
+pub fn register_model_ready_metric(
+    registry: &Registry,
+    manager: Arc<ModelManager>,
+    metrics_prefix: Option<String>,
+) -> Result<(), prometheus::Error> {
+    registry.register(Box::new(ModelReadyCollector::new(manager, metrics_prefix)?))
+}
 
 /// Global Prometheus gauge for last observed TTFT per worker (in seconds)
 /// Labels: worker_id, dp_rank, worker_type
@@ -418,6 +503,7 @@ pub struct Metrics {
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
     model_migration_total: IntCounterVec,
+    model_migration_duration_seconds: HistogramVec,
     model_migration_max_seq_len_exceeded_total: IntCounterVec,
     model_cancellation_total: IntCounterVec,
     model_rejection_total: IntCounterVec,
@@ -513,6 +599,23 @@ pub struct CancellationLabels {
 pub enum Status {
     Success,
     Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestCompletion {
+    Success,
+    Cancelled,
+    Error,
+}
+
+impl RequestCompletion {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Cancelled => "cancelled",
+            Self::Error => "error",
+        }
+    }
 }
 
 /// Error type classification for fine-grained observability
@@ -972,6 +1075,22 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_migration_duration_seconds = HistogramVec::new(
+            HistogramOpts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_DURATION_SECONDS),
+                "Time from detecting a migratable failure until recovery, terminal failure, or cancellation",
+            )
+            .buckets(vec![
+                0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0, 40.0, 60.0,
+            ]),
+            &[
+                "model",
+                frontend_service::MIGRATION_TYPE_LABEL,
+                frontend_service::MIGRATION_OUTCOME_LABEL,
+            ],
+        )
+        .unwrap();
+
         let model_migration_max_seq_len_exceeded_total = IntCounterVec::new(
             Opts::new(
                 frontend_metric_name(frontend_service::MODEL_MIGRATION_MAX_SEQ_LEN_EXCEEDED_TOTAL),
@@ -1026,6 +1145,7 @@ impl Metrics {
             model_kv_cache_block_size,
             model_migration_limit,
             model_migration_total,
+            model_migration_duration_seconds,
             model_migration_max_seq_len_exceeded_total,
             model_cancellation_total,
             model_rejection_total,
@@ -1186,6 +1306,7 @@ impl Metrics {
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
         registry.register(Box::new(self.model_migration_total.clone()))?;
+        registry.register(Box::new(self.model_migration_duration_seconds.clone()))?;
         registry.register(Box::new(
             self.model_migration_max_seq_len_exceeded_total.clone(),
         ))?;
@@ -1272,6 +1393,31 @@ impl Metrics {
         self.model_migration_total
             .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
             .get()
+    }
+
+    /// Observe the elapsed time for a completed migration event.
+    pub fn observe_migration_duration(
+        &self,
+        model: &str,
+        migration_type: &str,
+        outcome: &str,
+        duration: Duration,
+    ) {
+        self.model_migration_duration_seconds
+            .with_label_values(&[model, migration_type, outcome])
+            .observe(duration.as_secs_f64());
+    }
+
+    /// Get the number of observed migration durations for the given dimensions.
+    pub fn get_migration_duration_sample_count(
+        &self,
+        model: &str,
+        migration_type: &str,
+        outcome: &str,
+    ) -> u64 {
+        self.model_migration_duration_seconds
+            .with_label_values(&[model, migration_type, outcome])
+            .get_sample_count()
     }
 
     /// Increment the counter for migrations disabled by max_seq_len being exceeded
@@ -1443,6 +1589,14 @@ impl InflightGuard {
         self.status = Status::Error;
         self.error_type = error_type;
     }
+
+    fn request_completion(&self) -> RequestCompletion {
+        match (&self.status, &self.error_type) {
+            (Status::Success, _) => RequestCompletion::Success,
+            (Status::Error, ErrorType::Cancelled) => RequestCompletion::Cancelled,
+            (Status::Error, _) => RequestCompletion::Error,
+        }
+    }
 }
 
 impl Drop for InflightGuard {
@@ -1462,12 +1616,14 @@ impl Drop for InflightGuard {
             .with_label_values(&[&self.model])
             .observe(duration);
 
+        let completion = self.request_completion();
+        self.span.record("request.outcome", completion.as_str());
+
         let elapsed_ms = (duration * 1000.0) as u64;
         let status_str = self.status.as_str();
-        match self.status {
-            Status::Error => {
+        match completion {
+            RequestCompletion::Error => {
                 let detail = match self.error_type {
-                    ErrorType::Cancelled => "cancelled before completion",
                     ErrorType::ResponseTimeout => "backend stream inactivity timeout",
                     ErrorType::Internal => "internal server error during processing",
                     ErrorType::Validation => "invalid request parameters",
@@ -1475,7 +1631,11 @@ impl Drop for InflightGuard {
                     ErrorType::Overload => "service overloaded or rate limited",
                     ErrorType::Unavailable => "no backend worker available",
                     ErrorType::NotImplemented => "requested feature not implemented",
-                    ErrorType::None => "unknown error",
+                    // `request_completion()` routes `(Error, Cancelled)` to
+                    // `RequestCompletion::Cancelled`, so only `None` reaches
+                    // here. `Cancelled` is listed to keep the match total
+                    // without a panic in a `Drop` impl.
+                    ErrorType::None | ErrorType::Cancelled => "unknown error",
                 };
                 tracing::error!(
                     request_id = %self.request_id,
@@ -1489,7 +1649,20 @@ impl Drop for InflightGuard {
                     "request completed"
                 );
             }
-            Status::Success => {
+            RequestCompletion::Cancelled => {
+                tracing::info!(
+                    request_id = %self.request_id,
+                    model = %self.model,
+                    endpoint = %self.endpoint,
+                    request_type = %self.request_type,
+                    status = %completion.as_str(),
+                    error_type = %self.error_type,
+                    error_detail = "cancelled before completion",
+                    elapsed_ms = %elapsed_ms,
+                    "request completed"
+                );
+            }
+            RequestCompletion::Success => {
                 tracing::info!(
                     request_id = %self.request_id,
                     model = %self.model,
@@ -2239,6 +2412,77 @@ async fn handler_metrics(State(state): State<Arc<MetricsHandlerState>>) -> impl 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model_ready_value_with_name(
+        registry: &Registry,
+        metric_name: &str,
+        model: &str,
+    ) -> Option<f64> {
+        registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == metric_name)?
+            .get_metric()
+            .iter()
+            .find(|metric| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == "model" && label.value() == model)
+            })
+            .map(|metric| metric.get_gauge().value())
+    }
+
+    fn model_ready_value(registry: &Registry, model: &str) -> Option<f64> {
+        model_ready_value_with_name(registry, &model_ready_metric_name(None), model)
+    }
+
+    #[test]
+    fn model_ready_metric_tracks_live_routing_catalog() {
+        let manager = Arc::new(ModelManager::new());
+        let registry = Registry::new();
+        register_model_ready_metric(&registry, manager.clone(), None).unwrap();
+
+        assert_eq!(model_ready_value(&registry, "test-model"), None);
+
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        let mut worker_set = crate::discovery::WorkerSet::new(
+            "watched".to_string(),
+            "watched-mdc".to_string(),
+            card,
+        );
+        let (worker_tx, worker_rx) = tokio::sync::watch::channel(Vec::new());
+        worker_set.set_instance_watcher(worker_rx);
+        worker_set.chat_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
+        assert!(manager.add_worker_set("test-model", "watched", worker_set));
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
+
+        let custom_registry = Registry::new();
+        register_model_ready_metric(
+            &custom_registry,
+            manager.clone(),
+            Some("custom_frontend".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            model_ready_value_with_name(
+                &custom_registry,
+                "custom_frontend_model_ready",
+                "test-model"
+            ),
+            Some(0.0)
+        );
+        assert_eq!(model_ready_value(&custom_registry, "test-model"), None);
+
+        worker_tx.send(vec![1]).unwrap();
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(1.0));
+
+        worker_tx.send(Vec::new()).unwrap();
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(0.0));
+    }
 
     #[test]
     fn test_round_to_sig_figs() {
@@ -3137,6 +3381,41 @@ mod tests {
             "internal metrics leaked to client SSE: {wire}"
         );
 
+        // A choice-less Dynamo metadata frame is client-visible.
+        let metadata: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
+            serde_json::from_value(serde_json::json!({
+                "id": "chatcmpl-x", "object": "chat.completion.chunk", "created": 1,
+                "model": "test-model", "choices": [],
+                "nvext": {"engine_data": {"prompt_token_ids": [1, 2]}}
+            }))
+            .unwrap();
+        let metadata = Annotated {
+            id: None,
+            data: Some(metadata),
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let mut http_queue_guard = None;
+        let event = process_chat_response_using_event_converter_and_observe_metrics(
+            EventConverter::from(metadata),
+            &mut collector,
+            &mut http_queue_guard,
+            ReasoningField::default(),
+        )
+        .expect("conversion ok")
+        .expect("nvext chunk should yield a client event");
+        let sse = Sse::new(futures::stream::once(async move {
+            Ok::<_, std::convert::Infallible>(event)
+        }));
+        let body = sse.into_response().into_body();
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        let wire = String::from_utf8_lossy(&bytes);
+        assert!(
+            wire.contains("engine_data") && wire.contains("prompt_token_ids"),
+            "nvext metadata did not reach client SSE: {wire}"
+        );
+
         // (2) Payload-only usage chunk (event = payload_usage, carries usage data).
         let usage: crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse =
             serde_json::from_value(serde_json::json!({
@@ -3154,10 +3433,11 @@ mod tests {
         };
 
         let mut http_queue_guard = None;
-        let result = process_response_using_event_converter_and_observe_metrics(
+        let result = process_chat_response_using_event_converter_and_observe_metrics(
             EventConverter::from(payload_usage),
             &mut collector,
             &mut http_queue_guard,
+            ReasoningField::default(),
         )
         .expect("conversion ok");
         assert!(
@@ -3452,6 +3732,39 @@ mod tests {
                 RequestType::Unary.as_str(),
                 Status::Error.as_str(),
                 ErrorType::Validation.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
+    }
+
+    #[test]
+    fn test_inflight_guard_classifies_cancellation_separately_for_tracing() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let mut guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::ChatCompletions,
+            true,
+            "cancelled-request",
+        );
+        guard.mark_error(ErrorType::Cancelled);
+
+        assert_eq!(guard.request_completion(), RequestCompletion::Cancelled);
+        drop(guard);
+
+        // Keep the existing Prometheus contract while tracing reports cancellation
+        // as an expected request outcome rather than a span error.
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Stream.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Cancelled.as_str(),
             ])
             .get();
         assert_eq!(counter_value, 1);

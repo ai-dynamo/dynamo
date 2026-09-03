@@ -12,6 +12,48 @@ from urllib.parse import unquote
 from dynamo.llm import HttpError
 
 
+def admits_only_empty_object(schema: Any) -> bool:
+    """Return whether ``schema`` permits exactly the JSON value ``{}``."""
+    if not isinstance(schema, dict):
+        return False
+    if (
+        schema.get("type") != "object"
+        or schema.get("additionalProperties") is not False
+    ):
+        return False
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+    if not isinstance(properties, dict) or properties:
+        return False
+    if not isinstance(required, list) or required:
+        return False
+    for key, value in schema.items():
+        if key in {
+            "type",
+            "properties",
+            "required",
+            "additionalProperties",
+            "title",
+            "description",
+        }:
+            continue
+        if key == "minProperties" and type(value) is int and value == 0:
+            continue
+        if key == "maxProperties" and type(value) is int and value >= 0:
+            continue
+        if key in {
+            "$comment",
+            "default",
+            "deprecated",
+            "examples",
+            "readOnly",
+            "writeOnly",
+        }:
+            continue
+        return False
+    return True
+
+
 def _schema_error(message: str) -> HttpError:
     return HttpError(400, f"Invalid guided_json schema: {message}")
 

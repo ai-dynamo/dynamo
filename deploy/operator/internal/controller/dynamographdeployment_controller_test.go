@@ -32,6 +32,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,7 +47,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/scale"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -67,6 +67,7 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 		v1alpha1.AddToScheme,
 		v1beta1.AddToScheme,
 		grovev1alpha1.AddToScheme,
+		snapshotv1alpha1.AddToScheme,
 	} {
 		if err := addToScheme(s); err != nil {
 			t.Fatalf("failed to add type to scheme: %v", err)
@@ -182,6 +183,45 @@ func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompat
 	require.NoError(t, err)
 	require.Equal(t, ctrl.Result{}, result)
 
+	var stored v1beta1.DynamoGraphDeployment
+	err = kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored)
+	if !apierrors.IsNotFound(err) {
+		require.NoError(t, err)
+		require.False(t, controller_common.ContainsFinalizer(&stored))
+	}
+}
+
+func TestDynamoGraphDeploymentReconcileFinalizesWithoutSnapshotTypes(t *testing.T) {
+	t.Log("Create a deleting DGD in a scheme without the optional Snapshot API types")
+	now := metav1.Now()
+	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		Name:              "test-dgd",
+		Namespace:         "default",
+		DeletionTimestamp: &now,
+	}}
+	controller_common.AddFinalizer(dgd)
+	testScheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(testScheme))
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(dgd).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        kubeClient,
+		Recorder:      events.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+	}
+
+	t.Log("Finalize while treating unregistered Snapshot resources as unavailable")
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dgd),
+	})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	t.Log("Verify the DGD finalizer was removed")
 	var stored v1beta1.DynamoGraphDeployment
 	err = kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored)
 	if !apierrors.IsNotFound(err) {
@@ -638,9 +678,9 @@ func TestDGDScalingAdaptersReconciler_EmitsDeleteEventOnlyAfterSuccessfulDelete(
 	}
 }
 
-func TestDynamoGraphDeploymentReconciler_mapAutoCheckpointToDGDRequestsAllowsRetainedWithoutOwnerReference(t *testing.T) {
+func TestDynamoGraphDeploymentReconciler_mapAutoSnapshotJobToDGDRequestsAllowsRetainedWithoutOwnerReference(t *testing.T) {
 	reconciler := &DynamoGraphDeploymentReconciler{}
-	ckpt := &v1alpha1.DynamoCheckpoint{
+	job := &snapshotv1alpha1.SnapshotJob{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "retained",
 			Namespace: "default",
@@ -654,34 +694,9 @@ func TestDynamoGraphDeploymentReconciler_mapAutoCheckpointToDGDRequestsAllowsRet
 		},
 	}
 
-	got := reconciler.mapAutoCheckpointToDGDRequests(context.Background(), ckpt)
+	got := reconciler.mapAutoSnapshotJobToDGDRequests(context.Background(), job)
 	require.Len(t, got, 1)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "test-dgd"}, got[0].NamespacedName)
-}
-
-// mockScaleClient implements scale.ScalesGetter for testing
-type mockScaleClient struct{}
-
-func (m *mockScaleClient) Scales(namespace string) scale.ScaleInterface {
-	return &mockScaleInterface{}
-}
-
-// mockScaleInterface implements scale.ScaleInterface for testing
-type mockScaleInterface struct{}
-
-func (m *mockScaleInterface) Get(ctx context.Context, resource schema.GroupResource, name string, opts metav1.GetOptions) (*autoscalingv1.Scale, error) {
-	// Return a dummy scale object - we don't actually need scaling in the test
-	return &autoscalingv1.Scale{}, nil
-}
-
-func (m *mockScaleInterface) Update(ctx context.Context, resource schema.GroupResource, scale *autoscalingv1.Scale, opts metav1.UpdateOptions) (*autoscalingv1.Scale, error) {
-	// Return success without actually doing anything
-	return scale, nil
-}
-
-func (m *mockScaleInterface) Patch(ctx context.Context, gvr schema.GroupVersionResource, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions) (*autoscalingv1.Scale, error) {
-	// Return a dummy scale object
-	return &autoscalingv1.Scale{}, nil
 }
 
 func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
@@ -1022,9 +1037,10 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 
 			fakeKubeClient := fake.NewClientBuilder().
 				WithScheme(s).
+				WithRESTMapper(groveScaleRESTMapper()).
 				WithObjects(objects...).
 				WithStatusSubresource(objects...).
-				WithInterceptorFuncs(tt.interceptorFuncs).
+				WithInterceptorFuncs(groveScaleInterceptor(tt.interceptorFuncs, nil)).
 				Build()
 
 			recorder := events.NewFakeRecorder(100)
@@ -1033,7 +1049,6 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
 				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{DRA: tt.draEnabled}},
-				ScaleClient:   &mockScaleClient{},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -1054,7 +1069,25 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			}
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
-			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
+			t.Log("Expect workers to withhold their runtime namespace until a PCS revision is accepted")
+			want := tt.wantReconcileResult
+			want.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus, len(tt.wantReconcileResult.ComponentStatus))
+			for componentName, componentStatus := range tt.wantReconcileResult.ComponentStatus {
+				componentStatus.GPUsPerEngine = ptr.To(int64(0))
+				componentStatus.GPUsPerReplica = ptr.To(int64(0))
+				want.ComponentStatus[componentName] = componentStatus
+			}
+			for i := range dgd.Spec.Components {
+				component := &dgd.Spec.Components[i]
+				if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+					continue
+				}
+				componentStatus := want.ComponentStatus[component.ComponentName]
+				componentStatus.RuntimeNamespace = ""
+				want.ComponentStatus[component.ComponentName] = componentStatus
+			}
+
+			g.Expect(result).To(gomega.Equal(want))
 		})
 	}
 }
@@ -1100,6 +1133,7 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 
 	fakeKubeClient := fake.NewClientBuilder().
 		WithScheme(s).
+		WithRESTMapper(groveScaleRESTMapper()).
 		WithObjects(dgd).
 		Build()
 
@@ -1108,7 +1142,6 @@ func TestGroveWorkloadsReconciler_UsesPreservedAlphaServiceIngress(t *testing.T)
 		Recorder:      events.NewFakeRecorder(100),
 		Config:        &configv1alpha1.OperatorConfiguration{},
 		RuntimeConfig: &controller_common.RuntimeConfig{},
-		ScaleClient:   &mockScaleClient{},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -1205,9 +1238,10 @@ func TestGroveWorkloadRendererRenderPreservesLegacyWorkerSelectors(t *testing.T)
 		nil,
 	)
 
-	generatedPCS, err := renderer.Render(ctx, dgd, nil, nil)
+	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	renderDGD := groveRenderDeployment(dgd, generatedPCS)
+	generatedPCS := renderedPCS.desired
+	renderDGD := renderedPCS.renderDeployment
 	g.Expect(dgd.GetComponentByName("VllmDecodeWorker").ComponentType).To(gomega.Equal(v1beta1.ComponentTypeDecode))
 
 	prefill := renderDGD.GetComponentByName("VllmPrefillWorker")
@@ -1478,9 +1512,9 @@ func TestGroveWorkloadRendererRenderKeepsNativeWorkerSelectors(t *testing.T) {
 		&controller_common.RuntimeConfig{},
 		nil,
 	)
-	desired, err := renderer.Render(ctx, dgd, nil, nil)
+	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	renderDGD := groveRenderDeployment(dgd, desired)
+	renderDGD := renderedPCS.renderDeployment
 	prefill := renderDGD.GetComponentByName("prefill")
 	if prefill == nil {
 		t.Fatal("expected rendered prefill component")
@@ -3092,6 +3126,31 @@ func TestDGDGroveTopologyConditionReconciler_Reconcile(t *testing.T) {
 			wantEventCount: 1,
 		},
 		{
+			name: "provider override topology projects unavailable condition",
+			dgd: &v1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Spec: v1beta1.DynamoGraphDeploymentSpec{
+					ProviderOverride: rootTopologyOverride(`{"topologyName":"test-topology","pack":{"required":"rack"}}`),
+				},
+			},
+			pcs: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+				Status: grovev1alpha1.PodCliqueSetStatus{
+					Conditions: []metav1.Condition{{
+						Type:    groveconstants.ConditionTopologyLevelsUnavailable,
+						Status:  metav1.ConditionTrue,
+						Reason:  groveconstants.ConditionReasonTopologyLevelsUnavailable,
+						Message: "Topology level 'rack' is no longer available",
+					}},
+				},
+			},
+			groveEnabled:   true,
+			wantCondition:  true,
+			wantStatus:     metav1.ConditionFalse,
+			wantReason:     v1alpha1.ConditionReasonTopologyLevelsUnavailable,
+			wantEventCount: 1,
+		},
+		{
 			name: "PCS reports TopologyLevelsUnavailable=True with ClusterTopologyNotFound",
 			dgd: betaDGD(t, &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
@@ -3437,12 +3496,13 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 		return &grovev1alpha1.PodClique{
 			Spec: grovev1alpha1.PodCliqueSpec{Replicas: 3},
 			Status: grovev1alpha1.PodCliqueStatus{
-				Replicas:              3,
-				ReadyReplicas:         1,
-				UpdatedReplicas:       3,
-				ScheduledReplicas:     1,
-				ScheduleGatedReplicas: 0,
-				ObservedGeneration:    ptr.To(int64(1)),
+				Replicas:                          3,
+				ReadyReplicas:                     1,
+				UpdatedReplicas:                   3,
+				ScheduledReplicas:                 1,
+				ScheduleGatedReplicas:             0,
+				ObservedGeneration:                ptr.To(int64(1)),
+				CurrentPodCliqueSetGenerationHash: ptr.To("previous-revision"),
 			},
 		}
 	}
@@ -3495,6 +3555,21 @@ func TestPodCliqueStatusChangeIsSignificant(t *testing.T) {
 			want:   true,
 		},
 		{
+			name: "current PCS revision change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) {
+				pc.Status.CurrentPodCliqueSetGenerationHash = ptr.To("target-revision")
+			},
+			want: true,
+		},
+		{
+			name: "update completion change is significant",
+			mutate: func(pc *grovev1alpha1.PodClique) {
+				updateEndedAt := metav1.Now()
+				pc.Status.UpdateProgress = &grovev1alpha1.PodCliqueUpdateProgress{UpdateEndedAt: &updateEndedAt}
+			},
+			want: true,
+		},
+		{
 			name:   "generation-only change is filtered",
 			mutate: func(pc *grovev1alpha1.PodClique) { pc.Generation = 2 },
 			want:   false,
@@ -3539,11 +3614,12 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 		return &grovev1alpha1.PodCliqueScalingGroup{
 			Spec: grovev1alpha1.PodCliqueScalingGroupSpec{Replicas: 3},
 			Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-				Replicas:           3,
-				AvailableReplicas:  1,
-				UpdatedReplicas:    3,
-				ScheduledReplicas:  1,
-				ObservedGeneration: ptr.To(int64(1)),
+				Replicas:                          3,
+				AvailableReplicas:                 1,
+				UpdatedReplicas:                   3,
+				ScheduledReplicas:                 1,
+				ObservedGeneration:                ptr.To(int64(1)),
+				CurrentPodCliqueSetGenerationHash: ptr.To("previous-revision"),
 			},
 		}
 	}
@@ -3587,6 +3663,21 @@ func TestPCSGStatusChangeIsSignificant(t *testing.T) {
 			name:   "observedGeneration change is significant",
 			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) { pcsg.Status.ObservedGeneration = ptr.To(int64(2)) },
 			want:   true,
+		},
+		{
+			name: "current PCS revision change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) {
+				pcsg.Status.CurrentPodCliqueSetGenerationHash = ptr.To("target-revision")
+			},
+			want: true,
+		},
+		{
+			name: "update completion change is significant",
+			mutate: func(pcsg *grovev1alpha1.PodCliqueScalingGroup) {
+				updateEndedAt := metav1.Now()
+				pcsg.Status.UpdateProgress = &grovev1alpha1.PodCliqueScalingGroupUpdateProgress{UpdateEndedAt: &updateEndedAt}
+			},
+			want: true,
 		},
 		{
 			name:   "generation-only change is filtered",

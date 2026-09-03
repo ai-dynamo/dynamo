@@ -466,9 +466,15 @@ vllm_configs = {
             "2",
         ],
         timeout=700,
+        # Each request is bounded by BasePayload.timeout (60s, tests/utils/
+        # payloads.py), not by the readiness budget above. This deployment
+        # decodes at ~15.5 tok/s, so the 1000-token payload default needs ~65s
+        # and cannot fit; 128 tokens finishes in ~8s and leaves ~7x headroom.
+        # Keep the cap small here — a longer decode turns the read timeout back
+        # into an accidental throughput assertion.
         request_payloads=[
-            chat_payload_default(),
-            completion_payload_default(),
+            chat_payload_default(max_tokens=128),
+            completion_payload_default(max_tokens=128),
         ],
     ),
     "aggregated_toolcalling": VLLMConfig(

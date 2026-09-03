@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional
 
 import kr8s
+import pytest
 import requests
 import yaml
 from kr8s.objects import Pod, Service
@@ -20,6 +21,94 @@ from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
 from tests.utils.test_output import resolve_test_output_path
+
+logger = logging.getLogger(__name__)
+
+# Shared chat-completion request defaults and response validation.
+#
+# These live here rather than in a test module so every deploy test asserts the
+# same thing: a second copy is free to lose an assertion, and one did -- the EFA
+# test's private validator had dropped the role and key checks below.
+# tests/deploy/test_dgd.py and tests/deploy/test_deploy_efa.py both import them.
+
+# Test prompt designed to validate model capabilities:
+# - Long enough to test context handling (multiple sentences, ~150 words)
+# - Descriptive content requiring multi-sentence responses
+# - Consistent across test runs for reproducibility
+# This prompt is maintained from the original shell-based deployment tests.
+TEST_PROMPT = """In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, \
+lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried \
+beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, \
+known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at \
+the city's location. Your journey will take you through treacherous deserts, enchanted forests, \
+and across perilous mountain ranges. Describe your first steps into the ruins of Aeloria."""
+
+DEFAULT_MAX_TOKENS = 30
+DEFAULT_TEMPERATURE = 0.0
+DEFAULT_REQUEST_TIMEOUT = 120
+# Minimum response content length to validate that the model is generating meaningful output.
+# This matches the validation threshold from the original shell-based deployment tests.
+MIN_RESPONSE_CONTENT_LENGTH = 100
+
+
+def validate_chat_response(
+    response: requests.Response,
+    expected_model: str,
+    min_content_length: int = MIN_RESPONSE_CONTENT_LENGTH,
+) -> dict[str, Any]:
+    """Validate the structure and content of a chat completion response.
+
+    Args:
+        response: HTTP response from the chat completion endpoint
+        expected_model: Expected model name in the response
+        min_content_length: Minimum required length for response content
+
+    Returns:
+        Parsed response JSON on success
+
+    Raises:
+        AssertionError: If validation fails
+    """
+    # Check HTTP status
+    assert response.status_code == 200, (
+        f"Expected status 200, got {response.status_code}. "
+        f"Response: {response.text[:500]}"
+    )
+
+    try:
+        data = response.json()
+    except ValueError as e:
+        pytest.fail(f"Response is not valid JSON: {e}. Response: {response.text[:500]}")
+
+    assert "choices" in data, f"Response missing 'choices' field: {data}"
+    assert len(data["choices"]) > 0, f"Response has empty 'choices': {data}"
+
+    choice = data["choices"][0]
+    assert "message" in choice, f"Choice missing 'message' field: {choice}"
+
+    message = choice["message"]
+    assert (
+        message.get("role") == "assistant"
+    ), f"Expected role 'assistant', got '{message.get('role')}'"
+    assert "content" in message, f"Message missing 'content' field: {message}"
+
+    content = message["content"]
+    assert len(content) >= min_content_length, (
+        f"Response content too short: {len(content)} chars (min: {min_content_length}). "
+        f"Content: {content[:200]}"
+    )
+
+    assert "model" in data, f"Response missing 'model' field: {data}"
+    assert (
+        data["model"] == expected_model
+    ), f"Expected model '{expected_model}', got '{data['model']}'"
+
+    logger.info(
+        f"Response validation passed: model={data['model']}, "
+        f"content_length={len(content)}"
+    )
+
+    return data
 
 
 def _get_workspace_dir() -> str:
@@ -569,7 +658,8 @@ class DeploymentSpec:
         Returns:
             dict with 'jsonl_enabled' and 'log_level' keys
         """
-        envs = self._deployment_spec.get("spec", {}).get("envs", [])
+        env_key = "env" if self._schema == SCHEMA_V1BETA1 else "envs"
+        envs = self._deployment_spec.get("spec", {}).get(env_key, [])
 
         jsonl_enabled = False
         log_level = None
@@ -789,6 +879,10 @@ class ManagedDeployment:
     # the service containing component_type: Frontend determines what is actually the frontend service
     frontend_service_name: str = "Frontend"
     skip_service_restart: bool = False
+    # Readiness budget for __aenter__. Tests carrying a pytest timeout should set
+    # this below it, so _wait_for_condition raises with pod-status diagnostics
+    # instead of pytest-timeout killing the test mid-wait with a bare traceback.
+    readiness_timeout: int = 1800
 
     _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[client.CoreV1Api] = None
@@ -1157,14 +1251,31 @@ class ManagedDeployment:
                         warning += f" lastExitCode={last_exit}"
 
                     prev_log = await self._fetch_previous_container_log(
-                        pod_name, cs.name, tail_lines=prev_log_tail_lines
+                        pod_name, cs.name
                     )
                     if prev_log:
+                        restart_log_dir = os.path.join(self.log_dir, "restarts")
+                        try:
+                            os.makedirs(restart_log_dir, exist_ok=True)
+                            restart_log_path = os.path.join(
+                                restart_log_dir,
+                                f"{pod_name}.{cs.name}.restart-{after}.previous.log",
+                            )
+                            with open(restart_log_path, "w") as f:
+                                f.write(prev_log)
+                        except OSError as e:
+                            self._logger.debug(
+                                "Failed to preserve previous log for %s: %s", key, e
+                            )
+
+                        prev_log_tail = "\n".join(
+                            prev_log.splitlines()[-prev_log_tail_lines:]
+                        )
                         warning += (
                             f"\n      --- last {prev_log_tail_lines} lines of "
                             f"previous {cs.name} log ({pod_name}) ---\n"
                         )
-                        for line in prev_log.splitlines():
+                        for line in prev_log_tail.splitlines():
                             warning += f"      {line}\n"
                         warning += f"      --- end of previous {cs.name} log ---"
                     else:
@@ -1193,15 +1304,12 @@ class ManagedDeployment:
         self,
         pod_name: str,
         container: str,
-        tail_lines: int = 100,
     ) -> Optional[str]:
-        """Fetch the previous (pre-restart) instance log for a container.
+        """Fetch a bounded previous-instance log for a container.
 
-        Returns the tail of the log as a single string, or None if no previous
-        instance exists or the API call fails. This is the artifact that
-        normally lives in ``<pod>.<container>.previous.log`` on disk; we
-        surface it inline so failed CI runs are self-diagnosing without
-        needing an artifact download.
+        Returns the log as a single string, or None if no previous instance
+        exists or the API call fails. The caller preserves it before a later
+        restart rotates it out of Kubernetes' single previous-log slot.
         """
         try:
             assert self._core_api is not None, "Kubernetes API not initialized"
@@ -1210,7 +1318,7 @@ class ManagedDeployment:
                 namespace=self.namespace,
                 container=container,
                 previous=True,
-                tail_lines=tail_lines,
+                tail_lines=50000,
             )
             return log if isinstance(log, str) else str(log)
         except exceptions.ApiException as e:
@@ -1580,46 +1688,14 @@ class ManagedDeployment:
                         f"Connection test failed for pod {pod.name} (attempt {attempt+1}/{max_connection_attempts}): {e}"
                     )
 
-                # Restart port-forward for next attempt (except on last attempt)
-                if attempt == max_connection_attempts - 1:
-                    continue
-                try:
-                    port_forward.stop()
-                except Exception as e:
-                    self._logger.debug(
-                        f"Error stopping port forward for pod {pod.name}: {e}"
-                    )
-                # kr8s' sync stop() can return before the background thread has
-                # fully torn down (or even finished starting), so we can't assume
-                # the old forward is dead once stop() returns. Track it so
-                # _cleanup() stops it later regardless of whether stop() raised,
-                # rather than losing the reference when we replace the object.
-                if port_forward not in self._active_port_forwards:
-                    self._active_port_forwards.append(port_forward)
-                # Create a fresh portforward object so local_port=0 picks a new
-                # ephemeral port rather than re-binding the previously assigned
-                # port that may still be in TIME_WAIT.
-                try:
-                    port_forward = pod.portforward(
-                        remote_port=remote_port,
-                        local_port=0,
-                        address="127.0.0.1",
-                    )
-                    port_forward.start()
-                except Exception as e:
-                    self._logger.debug(
-                        f"Error restarting port forward for pod {pod.name}: {e}"
-                    )
-                    break
-
             # All attempts failed
             self._logger.warning(
                 f"Port forward failed after {max_connection_attempts} attempts for pod {pod.name}"
             )
             try:
                 port_forward.stop()
-            except Exception:
-                pass  # Ignore errors during cleanup
+            except Exception as e:
+                self._logger.debug("Error stopping port forward: %s", e)
             return None
 
         except Exception as e:
@@ -1638,17 +1714,11 @@ class ManagedDeployment:
             for port_forward in self._active_port_forwards:
                 try:
                     port_forward.stop()
-                except RuntimeError as e:
-                    # Expected error when pod is terminated:
-                    # "anext(): asynchronous generator is already running"
-                    if "anext()" in str(e) or "already running" in str(e):
-                        self._logger.debug(f"Port forward cleanup: {e}")
-                    else:
-                        self._logger.warning(
-                            f"Unexpected error stopping port forward: {e}"
-                        )
                 except Exception as e:
-                    self._logger.debug(f"Error stopping port forward: {e}")
+                    # Port-forward teardown is best-effort. A third-party cleanup
+                    # failure must not mask the deployment test result or prevent
+                    # the remaining forwards from being stopped.
+                    self._logger.debug("Error stopping port forward: %s", e)
             self._active_port_forwards.clear()
         finally:
             await self._delete_deployment()
@@ -1668,7 +1738,7 @@ class ManagedDeployment:
             await asyncio.gather(*tasks)
 
             await self._create_deployment()
-            await self._wait_for_ready()
+            await self._wait_for_ready(timeout=self.readiness_timeout)
 
         except:
             await self._cleanup()

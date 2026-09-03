@@ -250,13 +250,11 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamocheckpoints
   - dynamocomponentdeployments
   - dynamographdeploymentrequests
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
-  - podsnapshotcontents
   verbs:
   - create
   - delete
@@ -268,25 +266,20 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamocheckpoints/finalizers
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
-  - podsnapshots/finalizers
   verbs:
   - update
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamocheckpoints/status
   - dynamocomponentdeployments/status
   - dynamographdeploymentrequests/status
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
-  - podsnapshotcontents/status
-  - podsnapshots/status
   verbs:
   - get
   - patch
@@ -296,11 +289,21 @@ rules:
   resources:
   - podsnapshots
   verbs:
-  - create
+  - delete
   - get
   - list
   - patch
-  - update
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
+  - snapshotjobs
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
   - watch
 - apiGroups:
   - rbac.authorization.k8s.io
