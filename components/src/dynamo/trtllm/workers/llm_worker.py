@@ -466,17 +466,19 @@ async def init_llm_worker(
             sys.exit(1)
 
     streaming_kv_events_config = _resolve_streaming_kv_events_config(arg_map)
-    if streaming_kv_events_config is not None:
-        _validate_streaming_kv_events_backend()
-    kv_event_publication_mode = (
-        KvEventPublicationMode.STREAMING
-        if streaming_kv_events_config is not None
-        else (
-            KvEventPublicationMode.POLLING
-            if config.publish_kv_events
-            else KvEventPublicationMode.DISABLED
-        )
-    )
+    if config.publish_kv_events:
+        if streaming_kv_events_config is not None:
+            _validate_streaming_kv_events_backend()
+            kv_event_publication_mode = KvEventPublicationMode.STREAMING
+        else:
+            kv_event_publication_mode = KvEventPublicationMode.POLLING
+    else:
+        kv_event_publication_mode = KvEventPublicationMode.DISABLED
+        if streaming_kv_events_config is not None:
+            logging.warning(
+                "TRT-LLM kv_events_config is set but publish_kv_events is disabled; "
+                "Dynamo KV event handling is off"
+            )
 
     _sync_config_from_engine_args(config, arg_map)
     _strip_postprocess_workers(arg_map)

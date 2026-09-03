@@ -374,7 +374,7 @@ def test_streaming_kv_events_create_direct_subscribers_without_engine_polling(
         monkeypatch,
         attention_dp_size=2,
         fpm_enabled=True,
-        publish_kv_events=False,
+        publish_kv_events=True,
     )
     pub.kv_event_publication_mode = publisher_mod.KvEventPublicationMode.STREAMING
     pub.streaming_kv_events_config = {
