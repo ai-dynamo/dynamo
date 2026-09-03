@@ -142,8 +142,8 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 
 		// Pin HOME rather than inheriting whatever the image sets. The native
 		// Rust EPP's default image (frontend) uses /home/dynamo while the
-		// standalone dynamo-epp image runs as nonroot, so without this the
-		// mount below can only be right for one of them.
+		// dedicated dynamo-epp image runs as nonroot, so without this the mount
+		// below can only be right for one of them.
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "HOME",
 			Value: nativeRustEPPHome,
@@ -154,14 +154,20 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		// a mount that does not match is silently inert and the blobs grow on
 		// the container's writable layer instead.
 		//
-		// Native Rust EPP only. Four contract/image combinations reach this
-		// renderer, and the image's own HOME differs across them:
+		// Native Rust EPP only. Recipes render the native path on
+		// dynamo-frontend, but the image is the user's to set, and the images an
+		// EPP component can carry disagree on HOME:
 		//
 		//   contract  image                     image HOME      mounted
 		//   native    dynamo-frontend:1.5.0+    /home/dynamo    yes, HOME pinned
 		//   native    dynamo-epp:1.5.0          /home/nonroot   yes, HOME pinned
 		//   legacy    epp-image:1.4.x           /home/nonroot   no
 		//   legacy    dynamo-frontend:1.4.x     /home/dynamo    no
+		//
+		// A DYN_EPP_MODE=standalone EPP is absent from that list on both counts:
+		// it is applied as hand-written YAML rather than rendered here, and it
+		// needs no cache anyway, since runner.rs takes the
+		// EppRouter::from_selector branch and never reaches download_config.
 		//
 		// The two native images disagree just as the legacy pair does, but the
 		// operator sets HOME itself above, so both converge on /home/dynamo and
