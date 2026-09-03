@@ -102,12 +102,11 @@ _MEDIA_CONTENT_TYPES = ("image_url", "audio_url", "video_url")
 def extract_mm_urls(
     messages: list[dict[str, Any]],
 ) -> tuple[dict[str, list[dict[str, str]]] | None, dict[str, list[str | None]] | None,]:
-    """Extract media and vLLM image processor-cache UUIDs from chat messages.
+    """Extract media and vLLM processor-cache UUIDs from chat messages.
 
     URL-backed parts become ``Url`` variants. Image parts with no URL and an
     opaque ``uuid`` become ``UuidOnly`` variants for vLLM's multimodal
-    processor cache. Cache UUIDs on audio and video are rejected. Image UUID
-    lists preserve slot order::
+    processor cache. UUID lists preserve slot order for every media type::
 
         ({"image_url": [{"Url": "https://..."}, {"UuidOnly": "image-1"}]},
          {"image_url": ["image-1", "image-1"]})
@@ -138,25 +137,23 @@ def extract_mm_urls(
                 not isinstance(uuid_value, str) or not uuid_value
             ):
                 raise ValueError(f"{part_type} uuid must be a non-empty string")
-            if uuid_value is not None and part_type != "image_url":
-                raise ValueError(
-                    "multimodal cache UUIDs are supported only for "
-                    "image_url parts with vLLM"
-                )
-
             url = media_value.get("url") if isinstance(media_value, dict) else None
             if isinstance(url, str) and url:
                 mm_data.setdefault(part_type, []).append({"Url": url})
-            elif isinstance(uuid_value, str):
+            elif isinstance(uuid_value, str) and part_type == "image_url":
                 mm_data.setdefault(part_type, []).append({"UuidOnly": uuid_value})
+            elif isinstance(uuid_value, str):
+                raise ValueError(
+                    "UUID-only cache reuse is not supported for media modality "
+                    f"`{part_type}`; provide a media URL"
+                )
             else:
                 raise ValueError(
                     f"{part_type} part must contain a non-empty URL or uuid"
                 )
 
-            if part_type == "image_url":
-                mm_uuids.setdefault(part_type, []).append(uuid_value)
-                has_user_uuid |= uuid_value is not None
+            mm_uuids.setdefault(part_type, []).append(uuid_value)
+            has_user_uuid |= uuid_value is not None
 
     return mm_data or None, mm_uuids if has_user_uuid else None
 

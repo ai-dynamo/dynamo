@@ -151,7 +151,7 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
                     "video_url": {"url": "https://example.com/video.mp4"},
                     "uuid": "cached-video",
                 },
-                "supported only for image_url",
+                "supported only by the vLLM backend",
             ),
             (
                 {
