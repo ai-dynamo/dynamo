@@ -187,7 +187,7 @@ def get_main_container_dict(component: dict[str, Any]) -> dict[str, Any] | None:
     )
 
 
-def break_arguments(args: list[str] | None) -> list[str]:
+def break_arguments(args: list[str] | str | None) -> list[str]:
     ans: list[str] = []
     if args is None:
         return ans
