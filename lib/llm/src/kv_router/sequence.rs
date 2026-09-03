@@ -516,6 +516,70 @@ impl SequenceSubscriber for RuntimeSequenceSubscriber {
 /// Type alias for the runtime-wired multi-worker sequence tracker.
 pub type ActiveSequencesMulti = ActiveSequencesMultiWorker<RuntimeSequencePublisher>;
 
+/// Replica-sync channels for an embedded selection partition, carried over the
+/// runtime event plane exactly like the runtime scheduler's replica sync:
+/// outbound events are published on `ACTIVE_SEQUENCES_SUBJECT`, peer events
+/// are subscribed from it and forwarded to the partition.
+pub(crate) async fn host_replica_channels(
+    endpoint: &Endpoint,
+    router_id: u64,
+    cancellation_token: CancellationToken,
+) -> Result<dynamo_kv_router::services::selection::HostReplicaChannels> {
+    let transport_kind = endpoint.drt().default_event_transport_kind();
+    let (outbound, outbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+    let event_publisher = EventPublisher::for_endpoint_with_transport(
+        endpoint,
+        ACTIVE_SEQUENCES_SUBJECT,
+        transport_kind,
+    )
+    .await?;
+    match active_sequence_event_wire_format(transport_kind) {
+        ActiveSequenceEventWireFormat::Singleton => {
+            tokio::spawn(run_replica_singleton_publisher(
+                event_publisher,
+                outbound_rx,
+                cancellation_token.clone(),
+            ));
+        }
+        ActiveSequenceEventWireFormat::Batch => {
+            tokio::spawn(run_replica_batch_publisher(
+                event_publisher,
+                outbound_rx,
+                cancellation_token.clone(),
+            ));
+        }
+    }
+
+    let (inbound_tx, inbound_rx) = mpsc::channel(REPLICA_EVENT_CHANNEL_CAPACITY);
+    let mut subscriber = RuntimeSequenceSubscriber::for_endpoint(endpoint).await?;
+    let forward_tx = inbound_tx.clone();
+    tokio::spawn(async move {
+        loop {
+            let next = tokio::select! {
+                _ = cancellation_token.cancelled() => break,
+                next = subscriber.next_event() => next,
+            };
+            match next {
+                Some(Ok(event)) => {
+                    if forward_tx.send(event).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "replica-sync subscriber error; continuing");
+                }
+                None => break,
+            }
+        }
+    });
+    Ok(dynamo_kv_router::services::selection::HostReplicaChannels {
+        outbound,
+        inbound_tx,
+        inbound_rx,
+        process_id: router_id,
+    })
+}
+
 /// Convenience async constructor that creates the event-plane publishers/subscribers
 /// and returns an `Arc<ActiveSequencesMulti>` with replica sync already running.
 pub async fn create_multi_worker_sequences(

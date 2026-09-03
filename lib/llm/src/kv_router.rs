@@ -840,6 +840,8 @@ where
                         available_worker_provider,
                         overlap_refresh,
                         scheduler_load,
+                        endpoint: endpoint.clone(),
+                        router_id: endpoint.drt().discovery().instance_id(),
                     },
                     workers_with_configs.clone(),
                     cancellation_token.child_token(),

@@ -35,8 +35,8 @@ use crate::sequences::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequenceRequest,
 };
 use crate::services::common::replica_sync::{
-    ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent, ScopedSequencePublisher,
-    setup_scoped_replica_sync,
+    HostReplicaSyncFactory, ReplicaSyncConfig, SchedulerLoadSink, ScopedReplicaEvent,
+    ScopedSequencePublisher, setup_scoped_replica_sync,
 };
 use crate::services::indexer::backend::{Indexer, IndexerPolicy};
 use crate::services::indexer::recovery;
@@ -208,6 +208,10 @@ pub struct SelectionHostHooks {
     /// blocks and prefill tokens per worker) so the host can run overload
     /// detection on the numbers the scheduler books against.
     pub scheduler_load_sink: Option<Arc<dyn SchedulerLoadSink>>,
+    /// Replica sync carried by the host's own transport for partitions this
+    /// service does not mesh itself (ignored when the service runs its own
+    /// ZMQ replica sync).
+    pub replica_sync: Option<HostReplicaSyncFactory>,
 }
 
 /// Source of dequeue-time overlap refreshes for partition schedulers.
@@ -663,8 +667,17 @@ impl SelectionCore {
         let entry = entry_cell
             .get_or_try_init(|| -> Result<Arc<SelectionEntry>, SelectionError> {
                 let (workers_tx, workers_rx) = watch::channel(HashMap::new());
-                let scoped_replica_sync =
-                    setup_scoped_replica_sync(self.replica_config.as_ref(), &key, block_size);
+                let host_replica = self
+                    .host_hooks
+                    .replica_sync
+                    .as_ref()
+                    .and_then(|factory| factory(&key));
+                let scoped_replica_sync = setup_scoped_replica_sync(
+                    self.replica_config.as_ref(),
+                    &key,
+                    block_size,
+                    host_replica,
+                );
                 let worker_label = self.worker_type.as_str();
                 let slots = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
                     scoped_replica_sync
@@ -2474,6 +2487,7 @@ mod tests {
                 lora_worker_filter: None,
                 overlap_refresh: OverlapRefreshSource::default(),
                 scheduler_load_sink: None,
+                replica_sync: None,
             },
             Some(factory),
         );
@@ -2576,6 +2590,7 @@ mod tests {
             lora_worker_filter: None,
             overlap_refresh: OverlapRefreshSource::default(),
             scheduler_load_sink: None,
+            replica_sync: None,
         });
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         core.upsert_worker(worker(2)).await.expect("worker upsert");
@@ -2599,6 +2614,7 @@ mod tests {
             lora_worker_filter: None,
             overlap_refresh: OverlapRefreshSource::default(),
             scheduler_load_sink: None,
+            replica_sync: None,
         });
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         core.upsert_worker(worker(2)).await.expect("worker upsert");

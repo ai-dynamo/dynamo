@@ -57,6 +57,11 @@ pub(crate) struct EmbeddedSelectionArgs {
     /// Scheduler-owned load snapshots for the worker monitor's overload
     /// detection, the same feed the runtime scheduler publishes.
     pub scheduler_load: crate::kv_router::routing_load::SchedulerLoadSender,
+    /// Endpoint whose event plane carries replica sync when
+    /// `router_replica_sync` is set.
+    pub endpoint: dynamo_runtime::component::Endpoint,
+    /// This router replica's id (ignored on receipt of its own events).
+    pub router_id: u64,
 }
 
 /// One `SelectionService` partition driven directly by the router.
@@ -110,12 +115,24 @@ impl EmbeddedSelection {
                 }),
             };
 
-        if args.kv_router_config.router_replica_sync {
-            tracing::warn!(
-                "router_replica_sync is not carried over to the embedded selection partition; \
-                 active-load replica sync must be configured on the selection service"
-            );
-        }
+        // Replica sync rides the runtime event plane, as the runtime scheduler's
+        // did; the partition publishes and consumes through host channels.
+        let replica_sync: Option<dynamo_kv_router::services::selection::HostReplicaSyncFactory> =
+            if args.kv_router_config.router_replica_sync {
+                let channels = crate::kv_router::sequence::host_replica_channels(
+                    &args.endpoint,
+                    args.router_id,
+                    cancellation_token.child_token(),
+                )
+                .await
+                .context("start replica sync for the embedded selection partition")?;
+                let slot = std::sync::Mutex::new(Some(channels));
+                Some(Arc::new(move |_partition| {
+                    slot.lock().ok().and_then(|mut s| s.take())
+                }))
+            } else {
+                None
+            };
 
         let service = SelectionServiceBuilder::new(
             args.kv_router_config.clone(),
@@ -136,6 +153,7 @@ impl EmbeddedSelection {
                 None => OverlapRefreshSource::Disabled,
             },
             scheduler_load_sink: Some(Arc::new(SenderLoadSink(args.scheduler_load))),
+            replica_sync,
         })
         .build()
         .await

@@ -131,9 +131,28 @@ pub trait SchedulerLoadSink: Send + Sync {
     }
 }
 
+/// Replica-sync plumbing an embedding host supplies for one partition when it
+/// carries active-sequence events over its own transport (for example the
+/// Dynamo runtime event plane) instead of the service's ZMQ peer mesh:
+/// events the partition emits go to `outbound`; events from peer replicas
+/// arrive on `inbound_rx` (the host also holds `inbound_tx`).
+pub struct HostReplicaChannels {
+    pub outbound: mpsc::Sender<ActiveSequenceEvent>,
+    pub inbound_tx: mpsc::Sender<ActiveSequenceEvent>,
+    pub inbound_rx: mpsc::Receiver<ActiveSequenceEvent>,
+    /// This replica's id; events carrying it are ignored on receipt.
+    pub process_id: u64,
+}
+
+/// Per-partition factory for [`HostReplicaChannels`]; `None` disables replica
+/// sync for that partition.
+pub type HostReplicaSyncFactory =
+    Arc<dyn Fn(&RoutingPartitionId) -> Option<HostReplicaChannels> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct ScopedSequencePublisher {
     replica: Option<ScopedReplicaPublisher>,
+    host_tx: Option<mpsc::Sender<ActiveSequenceEvent>>,
     load_sink: Option<Arc<dyn SchedulerLoadSink>>,
 }
 
@@ -149,6 +168,16 @@ impl ScopedSequencePublisher {
     pub(crate) fn disabled() -> Self {
         Self {
             replica: None,
+            host_tx: None,
+            load_sink: None,
+        }
+    }
+
+    /// Publish through an embedding host's outbound channel.
+    pub(crate) fn host(outbound: mpsc::Sender<ActiveSequenceEvent>) -> Self {
+        Self {
+            replica: None,
+            host_tx: Some(outbound),
             load_sink: None,
         }
     }
@@ -172,6 +201,7 @@ impl ScopedSequencePublisher {
                 tx,
                 cancel_token,
             }),
+            host_tx: None,
             load_sink: None,
         }
     }
@@ -179,6 +209,19 @@ impl ScopedSequencePublisher {
 
 impl SequencePublisher for ScopedSequencePublisher {
     fn enqueue_event(&self, event: ActiveSequenceEvent) -> Result<()> {
+        if let Some(host_tx) = &self.host_tx {
+            return match host_tx.try_send(event) {
+                Ok(()) => Ok(()),
+                Err(mpsc::error::TrySendError::Full(event)) => Err(anyhow::Error::new(
+                    SequencePublishQueueError::full(event, host_tx.max_capacity()),
+                )
+                .context("host replica publisher")),
+                Err(mpsc::error::TrySendError::Closed(event)) => Err(anyhow::Error::new(
+                    SequencePublishQueueError::closed(event, host_tx.max_capacity(), true),
+                )
+                .context("host replica publisher")),
+            };
+        }
         let Some(replica) = &self.replica else {
             return Ok(());
         };
@@ -299,8 +342,21 @@ pub(crate) fn setup_scoped_replica_sync(
     config: Option<&ReplicaSyncConfig>,
     partition: &RoutingPartitionId,
     block_size: u32,
+    host: Option<HostReplicaChannels>,
 ) -> ScopedReplicaSync {
     let Some(config) = config else {
+        // No peer mesh: an embedding host may still carry replica events.
+        if let Some(host) = host {
+            return ScopedReplicaSync {
+                publisher: ScopedSequencePublisher::host(host.outbound),
+                enabled: true,
+                process_id: host.process_id,
+                channel: Some((
+                    host.inbound_tx,
+                    ChannelSequenceSubscriber::new(host.inbound_rx),
+                )),
+            };
+        }
         return ScopedReplicaSync {
             publisher: ScopedSequencePublisher::disabled(),
             enabled: false,
