@@ -910,10 +910,8 @@ def run_migration_test(
             shutdown_context = graceful_shutdown(worker)
 
     # Step 5: Validate the request outcome via its response (the user-facing
-    # contract). A drained worker must complete the request it already admitted,
-    # whatever the migration settings are. Otherwise migration is expected to
-    # succeed only when it is enabled and the request does not exceed the
-    # migration seq-len cap; otherwise the in-flight request must fail.
+    # contract). A drained worker completes its admitted request; otherwise
+    # migration succeeds only when enabled and under the seq-len cap, else fails.
     with shutdown_context:
         if expect_drain:
             validate_response(request_thread, response_list)
@@ -942,22 +940,13 @@ def run_migration_test(
     # log strings. `ongoing_request` counts an error from an established
     # stream, including an attempt that cannot retry because migration_limit is
     # zero. It is the structured equivalent of the old "Stream disconnected,
-    # recreating stream" log assertion.
-    #
-    # `max_seq_len_exceeded` is deliberately NOT part of the drain contract. It
-    # is not a migration outcome: RetryManager increments it from ordinary token
-    # accounting in `exceed_max_seq_len` (lib/llm/src/migration.rs), which runs
-    # once at request build time against the prompt and then per response chunk
-    # from `track_response`. No fault, stream break, or migration is involved,
-    # and the counter fires at most once because it zeroes `retries_left`. So a
-    # request that drains perfectly with migration_max_seq_len=1 still records
-    # exactly one seq-cap event, and both arms share the same expectation.
+    # recreating stream" log assertion. `max_seq_len_exceeded` records the
+    # seq-len cap from token accounting, not migration, so both arms share it.
     expected_max_seq_len_exceeded_count = 1 if migration_max_seq_len == 1 else 0
 
     if expect_drain:
-        # A drain migrates nothing, so both migration counters must be exactly
-        # zero -- under the default lower-bound mode a zero expectation asserts
-        # nothing at all, hence exact_counts=True.
+        # A drain migrates nothing. Under the default lower-bound mode a zero
+        # expectation asserts nothing, hence exact_counts=True.
         verify_migration_metrics(
             frontend.frontend_port,
             expected_ongoing_request_count=0,
