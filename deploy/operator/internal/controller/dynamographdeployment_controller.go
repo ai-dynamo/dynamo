@@ -73,6 +73,7 @@ type rbacManager interface {
 // DynamoGraphDeploymentReconciler reconciles a DynamoGraphDeployment object
 type DynamoGraphDeploymentReconciler struct {
 	client.Client
+	DirectClient          client.Reader
 	Config                *configv1alpha1.OperatorConfiguration
 	RuntimeConfig         *commoncontroller.RuntimeConfig
 	RestConfig            *rest.Config
@@ -224,6 +225,11 @@ func (r *DynamoGraphDeploymentReconciler) persistWorkloadProgramResult(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	result workloadProgramResult,
 ) error {
+	namespacedName := types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}
+	// Re-fetch object to avoid "the object has been modified" errors
+	if err := r.DirectClient.Get(ctx, namespacedName, dgd); err != nil {
+		return fmt.Errorf("Failed to re-fetch DynamoGraphDeployment: %w", err)
+	}
 	dgd.Status = result.Status
 	if err := r.Status().Update(ctx, dgd); err != nil {
 		return fmt.Errorf("update DynamoGraphDeployment status: %w", err)
