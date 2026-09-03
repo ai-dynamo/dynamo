@@ -346,7 +346,7 @@ class OmniHandler(BaseOmniHandler):
 
         try:
             inputs = await self.build_engine_inputs(
-                parsed_request, request_type, image=image
+                parsed_request, request_type, image=image, request_id=request_id
             )
         except (ValueError, NotImplementedError, RuntimeError) as e:
             logger.error(f"Invalid request {request_id}: {e}")
@@ -373,7 +373,7 @@ class OmniHandler(BaseOmniHandler):
         previous_text = ""
         audio_stream_state = AudioStreamState() if inputs.stream_audio else None
         audio_aggregate_state = (
-            AudioAggregateState()
+            AudioAggregateState(cumulative=self.audio.emits_cumulative_waveforms())
             if inputs.request_type == RequestType.AUDIO_GENERATION
             and not inputs.stream_audio
             else None
@@ -563,6 +563,7 @@ class OmniHandler(BaseOmniHandler):
         ],
         request_type: RequestType,
         image: PIL.Image.Image | None = None,
+        request_id: str | None = None,
     ) -> EngineInputs:
         """Convert a parsed request into AsyncOmni engine inputs.
 
@@ -571,6 +572,8 @@ class OmniHandler(BaseOmniHandler):
                 for image/video/audio requests, or a raw dict for chat completions.
             request_type: The RequestType determined by parse_request_type.
             image: Pre-loaded PIL Image for I2V requests (from input_reference).
+            request_id: Final request id, used by audio models (Audex) that bind
+                per-request state such as the CFG pair id to it.
 
         Returns:
             EngineInputs ready for engine_client.generate().
@@ -586,7 +589,9 @@ class OmniHandler(BaseOmniHandler):
             return self._engine_inputs_from_video(parsed_request, image=image)
         elif request_type == RequestType.AUDIO_GENERATION:
             assert isinstance(parsed_request, NvCreateAudioSpeechRequest)
-            return await self.audio.build_engine_inputs(parsed_request)
+            return await self.audio.build_engine_inputs(
+                parsed_request, request_id=request_id
+            )
 
         raise ValueError(f"Unknown request type: {request_type}")
 

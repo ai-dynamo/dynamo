@@ -736,6 +736,156 @@ class TestAudioFormatterFormat:
         assert len(channel_major_chunk) == 44 + 8 * 2 * 2
 
 
+class TestAudioFormatterCumulativeAggregate:
+    """Audex's decoder emits the waveform repeatedly, each payload a cumulative
+    snapshot and some of them empty, so an ``AudioAggregateState(cumulative=True)``
+    request must answer from the longest snapshot rather than from whichever
+    payload arrived last, or from all of them concatenated."""
+
+    @pytest.fixture
+    def formatter(self):
+        """A bare AudioFormatter with no media sink configured."""
+        return AudioFormatter(model_name="test", media_fs=None, media_http_url=None)
+
+    @staticmethod
+    def _payload(samples, sr=24000):
+        """One streamed audio payload holding the given samples."""
+        return {"audio": np.asarray(samples, dtype=np.float32), "sr": sr}
+
+    async def _buffer(self, formatter, payloads, *, cumulative=True):
+        """Feed payloads through format() and return the aggregate state.
+
+        Every buffering call must answer None: the aggregated path emits one
+        response at the end of the stream, from finish_aggregate.
+        """
+        state = AudioAggregateState(cumulative=cumulative)
+        for payload in payloads:
+            response = await formatter.format(
+                payload, "req-1", audio_aggregate_state=state
+            )
+            assert response is None
+        return state
+
+    @staticmethod
+    async def _finish(formatter, state):
+        """Encode the buffered snapshots as raw PCM (2 bytes per sample)."""
+        response = await formatter.finish_aggregate("req-1", state, output_format="pcm")
+        return response, base64.b64decode(response["data"][0]["b64_json"])
+
+    @pytest.mark.asyncio
+    async def test_cumulative_snapshots_are_not_concatenated(self, formatter):
+        """Each payload already contains the earlier audio; joining repeats it."""
+        state = await self._buffer(
+            formatter, [self._payload([0.1, 0.2]), self._payload([0.1, 0.2, 0.3])]
+        )
+
+        assert [chunk.shape for chunk in state.chunks] == [(3,)]
+        _, pcm = await self._finish(formatter, state)
+        assert len(pcm) == 3 * 2
+
+    @pytest.mark.asyncio
+    async def test_incremental_frames_are_still_concatenated(self, formatter):
+        """The de-duplication is scoped to the cumulative flag.
+
+        Models that emit newly decoded frames keep the concatenating path;
+        de-duplicating those would silently drop audio.
+        """
+        state = await self._buffer(
+            formatter,
+            [self._payload([0.1, 0.2]), self._payload([0.1, 0.2, 0.3])],
+            cumulative=False,
+        )
+
+        assert [chunk.shape for chunk in state.chunks] == [(2,), (3,)]
+        _, pcm = await self._finish(formatter, state)
+        assert len(pcm) == 5 * 2
+
+    @pytest.mark.asyncio
+    async def test_cumulative_list_payload_is_taken_whole(self, formatter):
+        """A cumulative list payload must not be sliced by emitted_chunks.
+
+        Tracking the newly appended entries would keep only the first snapshot,
+        since every later snapshot's new entries are the tail of a waveform the
+        keep-longest rule then discards.
+        """
+        first = torch.tensor([0.1, 0.2], dtype=torch.float32)
+        second = torch.tensor([0.3], dtype=torch.float32)
+        state = await self._buffer(
+            formatter,
+            [{"audio": [first], "sr": 24000}, {"audio": [first, second], "sr": 24000}],
+        )
+
+        assert state.emitted_chunks == 0
+        assert [chunk.shape for chunk in state.chunks] == [(3,)]
+
+    @pytest.mark.asyncio
+    async def test_empty_payload_does_not_discard_buffered_audio(self, formatter):
+        """Empty payloads occur mid-stream and carry no waveform."""
+        state = await self._buffer(
+            formatter, [self._payload([0.1, 0.2]), self._payload([])]
+        )
+
+        assert [chunk.shape for chunk in state.chunks] == [(2,)]
+
+    @pytest.mark.asyncio
+    async def test_leading_empty_payload_does_not_become_the_result(self, formatter):
+        """The first payload of a stream can be the empty one."""
+        state = await self._buffer(
+            formatter, [self._payload([]), self._payload([0.1, 0.2])]
+        )
+
+        assert [chunk.shape for chunk in state.chunks] == [(2,)]
+
+    @pytest.mark.asyncio
+    async def test_shorter_late_payload_cannot_truncate_the_result(self, formatter):
+        """Snapshots are kept by length, so a short late one cannot win."""
+        state = await self._buffer(
+            formatter, [self._payload([0.1, 0.2, 0.3]), self._payload([0.1])]
+        )
+
+        assert [chunk.shape for chunk in state.chunks] == [(3,)]
+        _, pcm = await self._finish(formatter, state)
+        assert len(pcm) == 3 * 2
+
+    @pytest.mark.asyncio
+    async def test_payload_without_audio_reports_failure(self, formatter):
+        """A payload carrying no audio key is a broken engine contract."""
+        state = AudioAggregateState(cumulative=True)
+
+        response = await formatter.format(
+            {"sr": 24000}, "req-1", audio_aggregate_state=state
+        )
+
+        assert response["status"] == "failed"
+        assert "No audio data in multimodal_output" in response["error"]
+        assert state.chunks == []
+
+    @pytest.mark.asyncio
+    async def test_buffered_snapshots_encode_to_one_response(self, formatter):
+        """The buffered snapshots encode to a single completed WAV."""
+        state = await self._buffer(
+            formatter, [self._payload([0.1] * 1200), self._payload([0.1] * 2400)]
+        )
+
+        response = await formatter.finish_aggregate("req-1", state, output_format="wav")
+        audio = base64.b64decode(response["data"][0]["b64_json"])
+
+        assert response["status"] == "completed"
+        assert len(response["data"]) == 1
+        assert audio.count(b"RIFF") == 1
+        assert len(audio) == 44 + 2400 * 2
+
+    @pytest.mark.asyncio
+    async def test_no_audio_at_all_is_an_error_not_a_silent_file(self, formatter):
+        """A header-only file would otherwise be reported as a success."""
+        state = await self._buffer(formatter, [self._payload([])])
+
+        response = await formatter.finish_aggregate("req-1", state)
+
+        assert response["status"] == "failed"
+        assert "No audio generated" in response["error"]
+
+
 # ── OutputFormatter dispatcher ─────────────────────────────
 
 
