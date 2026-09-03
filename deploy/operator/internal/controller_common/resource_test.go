@@ -25,10 +25,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 
 	"github.com/bsm/gomega"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -1010,4 +1012,133 @@ func TestSyncObservedResourceUsesProvidedObservation(t *testing.T) {
 	g.Expect(getCalls).To(gomega.Equal(1), "sync must use the caller's exact observation")
 	g.Expect(observed.Data["value"]).To(gomega.Equal("before"), "sync must not mutate the caller's observation")
 	g.Expect(synced.Data["value"]).To(gomega.Equal("after"))
+}
+
+func TestSyncObservedResourceUpdatesControllerReference(t *testing.T) {
+	tests := []struct {
+		name          string
+		oldParentName string
+		oldParentUID  types.UID
+		currentData   string
+		desiredData   string
+		wantModified  bool
+		preserveOwner bool
+	}{
+		{
+			name:         "sets missing controller reference with spec update",
+			currentData:  "before",
+			desiredData:  "after",
+			wantModified: true,
+		},
+		{
+			name:         "sets missing controller reference without spec update",
+			currentData:  "same",
+			desiredData:  "same",
+			wantModified: true,
+		},
+		{
+			name:          "repairs stale controller reference without spec update",
+			oldParentName: "parent",
+			oldParentUID:  types.UID("old-parent"),
+			currentData:   "same",
+			desiredData:   "same",
+			wantModified:  true,
+		},
+		{
+			name:          "skips update for current controller reference and spec",
+			oldParentName: "parent",
+			oldParentUID:  types.UID("current-parent"),
+			currentData:   "same",
+			desiredData:   "same",
+			wantModified:  false,
+		},
+		{
+			name:          "preserves another controller without spec update",
+			oldParentName: "other-parent",
+			oldParentUID:  types.UID("other-parent"),
+			currentData:   "same",
+			desiredData:   "same",
+			preserveOwner: true,
+		},
+		{
+			name:          "preserves another controller with spec update",
+			oldParentName: "other-parent",
+			oldParentUID:  types.UID("other-parent"),
+			currentData:   "before",
+			desiredData:   "after",
+			wantModified:  true,
+			preserveOwner: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+			scheme := runtime.NewScheme()
+			g.Expect(corev1.AddToScheme(scheme)).To(gomega.Succeed())
+
+			parent := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "parent",
+					Namespace: "default",
+					UID:       types.UID("current-parent"),
+				},
+			}
+			existing := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "child",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Data: map[string]string{"value": tt.currentData},
+			}
+			hash, err := GetSpecHash(existing)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			updateAnnotations(existing, hash, existing.Generation)
+
+			if tt.oldParentName != "" {
+				oldParent := parent.DeepCopy()
+				oldParent.Name = tt.oldParentName
+				oldParent.UID = tt.oldParentUID
+				g.Expect(ctrl.SetControllerReference(oldParent, existing, scheme)).To(gomega.Succeed())
+			}
+
+			kubeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existing).Build()
+			reconciler := observedResourceTestReconciler{
+				Client:   kubeClient,
+				recorder: events.NewFakeRecorder(10),
+			}
+			observed := &corev1.ConfigMap{}
+			g.Expect(kubeClient.Get(t.Context(), client.ObjectKeyFromObject(existing), observed)).To(gomega.Succeed())
+			observedOwnerReferences := append([]metav1.OwnerReference(nil), observed.OwnerReferences...)
+			desired := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: existing.Name, Namespace: existing.Namespace},
+				Data:       map[string]string{"value": tt.desiredData},
+			}
+
+			t.Log("Synchronize the desired child against the exact observation")
+			modified, synced, err := SyncObservedResource(t.Context(), reconciler, parent, observed, desired)
+
+			t.Log("Verify the child content and controller reference converge")
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			g.Expect(modified).To(gomega.Equal(tt.wantModified))
+			g.Expect(observed.OwnerReferences).To(gomega.Equal(observedOwnerReferences), "sync must not mutate the caller's observation")
+			g.Expect(synced.Data["value"]).To(gomega.Equal(tt.desiredData))
+
+			got := &corev1.ConfigMap{}
+			g.Expect(kubeClient.Get(t.Context(), client.ObjectKeyFromObject(existing), got)).To(gomega.Succeed())
+			g.Expect(got.Data["value"]).To(gomega.Equal(tt.desiredData))
+			controllerReference := metav1.GetControllerOf(got)
+			g.Expect(controllerReference).NotTo(gomega.BeNil())
+			g.Expect(controllerReference.APIVersion).To(gomega.Equal("v1"))
+			g.Expect(controllerReference.Kind).To(gomega.Equal("ConfigMap"))
+			if tt.preserveOwner {
+				g.Expect(controllerReference.Name).To(gomega.Equal(tt.oldParentName))
+				g.Expect(controllerReference.UID).To(gomega.Equal(tt.oldParentUID))
+			} else {
+				g.Expect(controllerReference.Name).To(gomega.Equal(parent.Name))
+				g.Expect(controllerReference.UID).To(gomega.Equal(parent.UID))
+			}
+		})
+	}
 }
