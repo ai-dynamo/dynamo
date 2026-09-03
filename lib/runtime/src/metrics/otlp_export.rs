@@ -614,6 +614,63 @@ mod tests {
         );
     }
 
+    /// The exporter participates in graceful shutdown, so a final in-flight
+    /// export is not abandoned mid-RPC.
+    ///
+    /// The hazard worth pinning is a deadlock rather than the wait itself:
+    /// Phase 2 blocks on the guard, so if the exporter only stopped on the
+    /// main token -- cancelled in Phase 3, after that wait -- it would hold
+    /// the guard until the timeout fired. `child_token()` derives from the
+    /// endpoint shutdown token, which Phase 1 cancels first, so the guard is
+    /// released promptly.
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    async fn exporter_is_waited_for_and_releases_on_phase_one() {
+        use crate::distributed::distributed_test_utils::create_test_drt_async;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+
+        temp_env::async_with_vars(
+            [
+                (env_otlp::OTEL_METRICS_EXPORTER, Some("otlp")),
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_METRICS_ENDPOINT,
+                    Some(format!("http://127.0.0.1:{port}").as_str()),
+                ),
+                // Long enough that the exporter is idle at its tick when
+                // shutdown lands, so this measures the guard and not a race
+                // against a busy export.
+                (env_otlp::OTEL_METRIC_EXPORT_INTERVAL, Some("600000")),
+            ],
+            async {
+                let drt = create_test_drt_async().await;
+                let tracker = drt.runtime().graceful_shutdown_tracker();
+                assert!(
+                    tracker.get_count() > 0,
+                    "exporter did not register for graceful shutdown"
+                );
+
+                drt.runtime().shutdown();
+
+                // Phase 1 cancels the endpoint token; the exporter should drop
+                // its guard well before Phase 2's timeout.
+                let released = tokio::time::timeout(Duration::from_secs(10), async {
+                    while tracker.get_count() > 0 {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await;
+                assert!(
+                    released.is_ok(),
+                    "exporter never released its shutdown guard; Phase 2 would block until timeout"
+                );
+            },
+        )
+        .await;
+    }
+
     /// The exporter must not depend on the system status server, which is
     /// disabled by default (`DYN_SYSTEM_PORT=-1`). Gating export on it made
     /// the documented `OTEL_METRICS_EXPORTER=otlp` opt-in a silent no-op in
