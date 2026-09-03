@@ -20,6 +20,7 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{
     component::{Endpoint, Instance, build_transport_type},
+    config::environment_names::llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS as HOST_DISCOVERY_TIMEOUT_ENV,
     discovery::{
         Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventScope, EventSourceQuery,
     },
@@ -40,7 +41,6 @@ use crate::discovery::kv_state_agent::{
 };
 
 const HOST_COMPONENT: &str = "kv_state_agent";
-const HOST_DISCOVERY_TIMEOUT_ENV: &str = "DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS";
 const DEFAULT_HOST_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const JSON_SAFE_MASK: u64 = (1u64 << 53) - 1;
 
@@ -190,10 +190,12 @@ async fn discover_single_host(
 ) -> Result<KvStateHostAdvertisement> {
     let namespace = component.namespace().name();
     let discovery = component.drt().discovery();
+    let shutdown = component.drt().primary_token();
     await_single_host(
         discovery.as_ref(),
         &namespace,
         host_discovery_timeout(|key| std::env::var_os(key)),
+        &shutdown,
     )
     .await
 }
@@ -224,11 +226,12 @@ fn host_discovery_timeout(mut get_env: impl FnMut(&str) -> Option<OsString>) -> 
 /// wake-up to re-list while no host is advertised yet — a watch event is
 /// never trusted directly because initial-snapshot events are
 /// indistinguishable from later additions. A zero timeout preserves the
-/// original single-snapshot behavior.
+/// original single-snapshot behavior; cancelling `shutdown` aborts the wait.
 async fn await_single_host(
     discovery: &dyn Discovery,
     namespace: &str,
     timeout: Duration,
+    shutdown: &CancellationToken,
 ) -> Result<KvStateHostAdvertisement> {
     // NOTE: V2 assumes one host per control scope that remains alive for the
     // deployment run. This wait covers only start ordering: source mode is
@@ -236,30 +239,30 @@ async fn await_single_host(
     // advertisement would otherwise serve without KV routing until it
     // restarts. TODO(#13044): watch and reselect the host after startup when
     // rolling host replacement and Kubernetes lifecycle are supported.
-    if let Some(host) = list_single_host(discovery, namespace).await? {
-        return Ok(host);
-    }
     if timeout.is_zero() {
-        return Err(exactly_one_host_error(0));
+        return match list_single_host(discovery, namespace).await? {
+            Some(host) => Ok(host),
+            None => Err(exactly_one_host_error(0)),
+        };
     }
-    tracing::info!(
-        namespace,
-        timeout_secs = timeout.as_secs(),
-        "KV state-agent host is not advertised yet; waiting"
-    );
-    let watch_cancel = CancellationToken::new();
+    // The deadline is fixed before any backend I/O: the initial list, watch
+    // setup, and every re-list all run under it.
+    let expiry = host_discovery_expiry(timeout);
+    let watch_cancel = shutdown.child_token();
     // Cancelled on every exit path; without this the discovery watch task
     // outlives the wait for the rest of the process.
     let _watch_guard = watch_cancel.clone().drop_guard();
-    // A timeout too large for the clock is effectively unbounded, not a panic.
-    let expiry = tokio::time::Instant::now()
-        .checked_add(timeout)
-        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(u32::MAX.into()));
-    // The bound covers the whole wait: watch setup and every re-list, not
-    // just the idle gaps between events.
     let wait = async {
+        if let Some(host) = list_single_host(discovery, namespace).await? {
+            return Ok(host);
+        }
+        tracing::info!(
+            namespace,
+            timeout_secs = timeout.as_secs(),
+            "KV state-agent host is not advertised yet; waiting"
+        );
         let mut events = discovery
-            .list_and_watch(host_query(namespace), Some(watch_cancel))
+            .list_and_watch(host_query(namespace), Some(watch_cancel.clone()))
             .await
             .context("failed to watch for the KV state-agent host")?;
         while let Some(event) = events.next().await {
@@ -270,15 +273,29 @@ async fn await_single_host(
         }
         anyhow::bail!("KV state-agent host discovery watch ended before a host appeared")
     };
-    match tokio::time::timeout_at(expiry, wait).await {
-        Ok(result) => result,
-        Err(_elapsed) => anyhow::bail!(
-            "no live V2 KV state-agent host appeared within {}s \
-             (topic {KV_STATE_HOST_TOPIC_V2} on {namespace}/{HOST_COMPONENT}; \
-             set {HOST_DISCOVERY_TIMEOUT_ENV} to adjust the startup wait)",
-            timeout.as_secs()
-        ),
+    tokio::select! {
+        biased;
+        _ = watch_cancel.cancelled() => {
+            anyhow::bail!("runtime shutdown before the KV state-agent host appeared")
+        }
+        result = tokio::time::timeout_at(expiry, wait) => match result {
+            Ok(result) => result,
+            Err(_elapsed) => anyhow::bail!(
+                "no live V2 KV state-agent host appeared within {}s \
+                 (topic {KV_STATE_HOST_TOPIC_V2} on {namespace}/{HOST_COMPONENT}; \
+                 set {HOST_DISCOVERY_TIMEOUT_ENV} to adjust the startup wait)",
+                timeout.as_secs()
+            ),
+        },
     }
+}
+
+/// Absolute deadline for the wait; a span too large for the clock is
+/// effectively unbounded, not a panic.
+fn host_discovery_expiry(timeout: Duration) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    now.checked_add(timeout)
+        .unwrap_or_else(|| now + Duration::from_secs(u32::MAX.into()))
 }
 
 /// Shared so the zero-timeout path stays byte-identical to the legacy error message.
@@ -741,9 +758,14 @@ mod tests {
     async fn advertised_host_is_returned_without_waiting() {
         let discovery = mock_discovery();
         register_host(discovery.as_ref(), 41, &host()).await;
-        let found = await_single_host(discovery.as_ref(), "ns", Duration::ZERO)
-            .await
-            .unwrap();
+        let found = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            Duration::ZERO,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(found.host_instance, host().host_instance);
     }
 
@@ -752,24 +774,67 @@ mod tests {
     async fn host_advertised_during_the_wait_is_discovered() {
         let discovery = mock_discovery();
         let register = discovery.clone();
-        tokio::spawn(async move {
+        let registration = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
             register_host(register.as_ref(), 41, &host()).await;
         });
-        // u64::MAX also proves an expiry too large for the clock waits
-        // instead of panicking.
-        let found = await_single_host(discovery.as_ref(), "ns", Duration::from_secs(u64::MAX))
-            .await
-            .unwrap();
+        // The outer timeout bounds the test if registration fails or the
+        // watch never wakes.
+        let found = tokio::time::timeout(
+            Duration::from_secs(10),
+            await_single_host(
+                discovery.as_ref(),
+                "ns",
+                Duration::from_secs(30),
+                &CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("discovery must resolve well before the outer deadline")
+        .unwrap();
+        registration.await.unwrap();
         assert_eq!(found.host_instance, host().host_instance);
+    }
+
+    #[tokio::test]
+    async fn oversized_timeout_expiry_saturates_instead_of_panicking() {
+        let expiry = host_discovery_expiry(Duration::from_secs(u64::MAX));
+        assert!(expiry > tokio::time::Instant::now());
+    }
+
+    /// Runtime shutdown must unblock the wait instead of running out the timeout.
+    #[tokio::test]
+    async fn shutdown_cancels_the_wait_before_the_timeout() {
+        let discovery = mock_discovery();
+        let shutdown = CancellationToken::new();
+        let cancel = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel.cancel();
+        });
+        let started = tokio::time::Instant::now();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            await_single_host(discovery.as_ref(), "ns", Duration::from_secs(30), &shutdown),
+        )
+        .await
+        .expect("cancellation must resolve the wait")
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(format!("{error:#}").contains("shutdown"), "{error:#}");
     }
 
     #[tokio::test]
     async fn missing_host_fails_with_a_diagnosable_error_after_the_deadline() {
         let discovery = mock_discovery();
-        let error = await_single_host(discovery.as_ref(), "ns", Duration::from_millis(200))
-            .await
-            .unwrap_err();
+        let error = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            Duration::from_millis(200),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         let message = format!("{error:#}");
         assert!(
             message.contains("no live V2 KV state-agent host appeared"),
@@ -781,9 +846,14 @@ mod tests {
     #[tokio::test]
     async fn zero_timeout_preserves_the_single_snapshot_failure() {
         let discovery = mock_discovery();
-        let error = await_single_host(discovery.as_ref(), "ns", Duration::ZERO)
-            .await
-            .unwrap_err();
+        let error = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            Duration::ZERO,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(format!("{error:#}").contains("exactly one live V2 host, found 0"));
     }
 
@@ -803,9 +873,14 @@ mod tests {
         // existing instance and would silently collapse this into one host.
         register_host(discovery.as_ref(), 42, &second).await;
         let started = tokio::time::Instant::now();
-        let error = await_single_host(discovery.as_ref(), "ns", Duration::from_secs(30))
-            .await
-            .unwrap_err();
+        let error = await_single_host(
+            discovery.as_ref(),
+            "ns",
+            Duration::from_secs(30),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(format!("{error:#}").contains("exactly one live V2 host, found 2"));
     }
