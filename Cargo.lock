@@ -2756,6 +2756,7 @@ dependencies = [
  "tonic-build 0.13.1",
  "tower-http",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "url",
  "utoipa",
