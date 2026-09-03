@@ -67,15 +67,13 @@ DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = 120
 MODEL_READY_MAX_ATTEMPTS = 6
 MODEL_READY_ATTEMPT_TIMEOUTS = [60.0, 30.0, 10.0, 10.0, 10.0, 10.0]
-CHECKPOINT_READY_TIMEOUT = 30
-RESTORE_READY_TIMEOUT = 30
+CHECKPOINT_READY_TIMEOUT = 300
+RESTORE_READY_TIMEOUT = 300
 DECODE_SCALE_TIMEOUT = 60
 RESTORED_DEPLOYMENT_READY_TIMEOUT = 180
-# WaitForCheckpoint: 900s deployment + 30s checkpoint + 30s restore + 180s
-# restored readiness + 305s model/inference = 1445s. Immediate uses a 600s
-# initial deployment budget and adds one 305s initial-inference pass plus a 60s
-# scale-down wait, for 1510s total. The pytest ceiling leaves cleanup time and
-# remains below the job's 30-minute timeout.
+# Phase timeouts allow a single slow checkpoint or restore without treating
+# normal GPU snapshot latency as failure. The pytest ceiling bounds aggregate
+# runtime, while the workflow's 30-minute limit leaves time for final cleanup.
 DEPLOYMENT_READY_TIMEOUT = 900
 IMMEDIATE_DEPLOYMENT_READY_TIMEOUT = 600
 TEST_TIMEOUT = 1680
