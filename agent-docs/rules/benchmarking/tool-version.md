@@ -11,15 +11,24 @@ The benchmark client is part of the measurement instrument; its version is part 
   immutable plan, and use that single version for every run in the series. Do not inherit a version pin from a
   repo recipe's perf manifest by default: that pin exists to reproduce THAT recipe's reference numbers, not to
   govern a new series, and it goes stale.
-- Never change the tool version within a series. A version change is a series boundary
-  (`series-boundaries.md`): results measured under different tool versions are not directly comparable, because
-  releases may change measurement semantics (windowing, pacing, accounting), not just fix bugs. Deliberately
-  adopting a newer version mid-engagement is allowed, but it requires a new plan and a new series; never mix the
-  resulting rows with the old series.
+- Do not change the tool version within a series without accounting for it. Record every run's tool version in
+  the audit and compare it to the plan's pin; when versions differ, respond in proportion to the difference rather
+  than discarding history:
+  - a PATCH difference is comparable; note the delta in the audit and the comparison;
+  - a MINOR difference is comparable when either the release notes for the span show no measurement-affecting
+    change (metric definitions, timing or windowing, request accounting, tokenizer handling) or one BRIDGING RUN
+    exists: the current best-prior configuration re-measured once under the newer version, which yields a measured
+    version delta instead of an assumed one; record which of the two justified the comparison;
+  - a MAJOR difference, a release-notes-flagged measurement change, or a minor difference with neither
+    justification is a series boundary (`series-boundaries.md`): report absolute results, no gain or loss claims,
+    and open a new plan and series for the newer version.
+  A bridging run costs one benchmark; re-measuring a whole series costs many. Prefer the bridging run. If a
+  bridging run shows a shift beyond the series noise floor, treat that as a finding about the instrument and
+  record it as an ask.
 - Exception 1: when the engagement's goal is to reproduce or compare against an external reference (for example a
   recipe's published perf numbers), match the reference's pinned version for that comparison and record the choice.
 - Exception 2: an operator-specified version always wins; record it in the plan.
-- The audit already records the tool version per run; the analyzer must reject a series whose runs disagree on it.
+- The audit records the tool version per run; the analyzer must check it against the plan before any same-series comparison and apply the graded response above, never compare across an unaccounted version difference.
 - RECORD THE RESOLUTION: the benchmark plan must state the mechanism used to resolve "latest stable" (for example
   the package-index query and its output) and the date. A version asserted from memory is not a resolution;
   models otherwise resolve "latest" from training priors and land releases behind.

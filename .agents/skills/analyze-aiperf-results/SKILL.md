@@ -95,14 +95,22 @@ invalid run.
 
 ## Select Comparable History
 
-Use only valid runs whose benchmark-series ID matches the active plan AND whose recorded AIPerf runtime version
-(and source commit, when the plan pins one) matches the version pinned in that plan. A series ID alone does not
-establish comparability: a reused or hand-edited series can contain runs from different tool versions, and per
-`agent-docs/rules/benchmarking/tool-version.md` results measured under different tool versions are never directly
-comparable. Record the version check in `benchmark_audit.json`; a run whose recorded version disagrees with the plan
-is excluded from every comparison, its exclusion is listed as a limitation, and when the CURRENT run is the one
-that disagrees, its audit status is `invalid` for comparison purposes and the mismatch is reported as a series
-boundary rather than silently compared across. From the remaining set identify:
+Use only valid runs whose benchmark-series ID matches the active plan, then check every candidate run's recorded
+AIPerf runtime version (and source commit, when the plan pins one) against the plan's pin. A series ID alone does
+not establish comparability: a reused or hand-edited series can contain runs from different tool versions. Apply
+the graded response in `agent-docs/rules/benchmarking/tool-version.md` and record the check and its outcome in
+`benchmark_audit.json`:
+
+- same version, or a patch-level difference: comparable; note the delta;
+- a minor difference: comparable only if the audit records a justification, either release notes for the span
+  showing no measurement-affecting change, or a bridging run (the best-prior configuration re-measured under the
+  newer version) whose delta is within the series noise floor; if the justification is missing, request the
+  bridging run as the next action rather than comparing or discarding;
+- a major difference, a flagged measurement change, or a bridging delta beyond the noise floor: exclude the
+  mismatched runs from every comparison, list the exclusion as a limitation, and when the CURRENT run is the
+  mismatched one report absolute performance only and mark the mismatch as a series boundary.
+
+From the comparable set identify:
 
 - `series_baseline`: earliest valid result in the series;
 - `previous_valid`: most recent valid iteration before the current one;
