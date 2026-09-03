@@ -40,20 +40,7 @@ fn contains_harmony_protocol(text: &str) -> bool {
 /// `unified_parser::contains_unquoted_marker` so a marker embedded inside a quoted string
 /// is not misread as native tool-call markup.
 fn contains_native_tool_call_marker(content: &str, parser: &str) -> bool {
-    native_tool_call_marker_start(content, parser).is_some()
-}
-
-/// Return the first unquoted native tool-call marker in `content`.
-fn native_tool_call_marker_start(content: &str, parser: &str) -> Option<usize> {
-    let parser_key = if parser.is_empty() { "default" } else { parser };
-    let config = dynamo_parsers::tool_calling::parsers::get_tool_parser_map().get(parser_key)?;
-    config
-        .parser_config
-        .tool_call_start_tokens()
-        .iter()
-        .filter(|marker| !marker.is_empty())
-        .filter_map(|marker| super::unified_parser::first_unquoted_marker_position(content, marker))
-        .min()
+    super::unified_parser::first_unquoted_native_tool_call_marker(content, parser).is_some()
 }
 
 /// Drops any recovered native-fallback calls that don't match the forced
@@ -245,7 +232,9 @@ fn suppress_incomplete_structured_content(
         return;
     }
 
-    if let Some(marker_start) = native_tool_call_marker_start(&choice.text, parser) {
+    if let Some(marker_start) =
+        super::unified_parser::first_unquoted_native_tool_call_marker(&choice.text, parser)
+    {
         tracing::warn!(
             parser,
             suppressed_bytes = choice.text.len() - marker_start,
@@ -2138,7 +2127,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_length_only_drops_the_final_invalid_structured_tool_call() {
+    async fn test_length_retains_a_nonfinal_invalid_structured_tool_call() {
         let make_name = |idx: u32, id: &str, name: &str| {
             dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
                 index: idx,
@@ -2193,6 +2182,62 @@ mod tests {
         assert_eq!(tool_calls.len(), 2);
         assert_eq!(tool_calls[0].function.arguments, "{\"city\":");
         assert_eq!(tool_calls[1].function.arguments, "{\"tz\":\"UTC\"}");
+    }
+
+    #[tokio::test]
+    async fn test_length_drops_the_final_invalid_structured_tool_call() {
+        let make_name = |idx: u32, id: &str, name: &str| {
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                index: idx,
+                id: Some(id.to_string()),
+                r#type: Some(dynamo_protocols::types::FunctionType::Function),
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: Some(name.to_string()),
+                    arguments: None,
+                }),
+            }
+        };
+        let make_args = |idx: u32, fragment: &str| {
+            dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+                index: idx,
+                id: None,
+                r#type: None,
+                function: Some(dynamo_protocols::types::FunctionCallStream {
+                    name: None,
+                    arguments: Some(fragment.to_string()),
+                }),
+            }
+        };
+        let first = create_test_delta_with_tool_chunks(
+            0,
+            vec![
+                make_name(0, "first", "get_weather"),
+                make_args(0, "{\"city\":\"Paris\"}"),
+            ],
+            None,
+            Some(dynamo_protocols::types::Role::Assistant),
+        );
+        let final_invalid = create_test_delta_with_tool_chunks(
+            0,
+            vec![make_name(1, "second", "get_time"), make_args(1, "{\"tz\":")],
+            Some(dynamo_protocols::types::FinishReason::Length),
+            None,
+        );
+        let result = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![first, final_invalid])),
+            ParsingOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let tool_calls = result.inner.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("the complete first call must remain visible");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[0].function.arguments, "{\"city\":\"Paris\"}");
     }
 
     #[tokio::test]

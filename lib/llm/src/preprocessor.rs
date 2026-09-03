@@ -5407,32 +5407,18 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingDynamoMetadata::default()));
         let pending_in = Arc::clone(&pending);
 
-        // Per-choice recovery state — allocated only for glm47 since only that
-        // parser emits <tool_call> XML that can be truncated at max_tokens.
-        // Buffers raw input and tracks what the jail emitted per choice.index
-        // so n > 1 is handled correctly and double-emit is avoided.
+        // The legacy jail recognizes markers with a substring search. Retain
+        // GLM47 text per choice so the terminal chunk can use the shared
+        // quote-aware marker policy before exposing content to the client.
         #[derive(Default)]
         struct ChoiceRecovery {
             input_text: String,
             emitted_text: String,
-            recovered: bool,
-        }
-        // Named so the bool in the recoveries tuple is legible at each use site.
-        struct PendingRecovery {
-            choice_idx: u32,
-            tail: String,
-            tail_already_emitted: bool,
         }
         let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
-        // Token strings from the parser config so recovery matches the parser
-        // even if the defaults are ever overridden.
-        let glm47_cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
-        let glm47_start = glm47_cfg.tool_call_start;
-        let glm47_end = glm47_cfg.tool_call_end;
         let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
         let choice_recovery_in = Arc::clone(&choice_recovery);
-        let glm47_start_jail = glm47_start.clone();
 
         // The jail's own (vendored, out-of-scope) finalize logic cannot tell an
         // error-terminated input stream from one that genuinely completed — it
@@ -5494,34 +5480,18 @@ impl OpenAIPreprocessor {
                     merge_response_nvext(&mut p.nvext, nv.nvext.take());
                 }
             }
-            // Buffer input content only for glm47 (truncation recovery).
-            // Only retain from the last <tool_call> marker onward to bound
-            // memory on long responses.
             if is_glm47 && let Some(data) = &a.data {
-                let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
+                let mut recovery = choice_recovery_in
+                    .lock()
+                    .expect("choice recovery buffer poisoned");
                 for choice in &data.inner.choices {
                     if let Some(ChatCompletionMessageContent::Text(content)) = &choice.delta.content
                     {
-                        let state = cr.entry(choice.index).or_default();
-                        state.input_text.push_str(content);
-                        // Drop everything before the last marker to keep
-                        // the buffer small. Walk back to a char boundary
-                        // before draining so a multi-byte char split
-                        // across chunks never triggers a panic.
-                        let mut keep_from = match state.input_text.rfind(glm47_start_jail.as_str())
-                        {
-                            Some(pos) => pos,
-                            // No marker yet — keep enough tail to
-                            // catch a marker split across two chunks.
-                            None => state
-                                .input_text
-                                .len()
-                                .saturating_sub(glm47_start_jail.len() - 1),
-                        };
-                        while keep_from > 0 && !state.input_text.is_char_boundary(keep_from) {
-                            keep_from -= 1;
-                        }
-                        state.input_text.drain(..keep_from);
+                        recovery
+                            .entry(choice.index)
+                            .or_default()
+                            .input_text
+                            .push_str(content);
                     }
                 }
             }
@@ -5609,139 +5579,36 @@ impl OpenAIPreprocessor {
                 error: None,
             };
 
-            // glm47: on finish_reason=length, recover the last incomplete
-            // <tool_call> block. rfind skips complete blocks so earlier parsed
-            // calls are never duplicated. Recovered content WILL contain raw
-            // markup — callers that require "no tool tags in content" must
-            // filter on finish_reason=length.
-            //
-            // TODO: this recovery runs inside apply_tool_calling_jail, which
-            // the v2 path bypasses (use_parsers_v2 branch above). Adding
-            // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
-            // streaming recovery while aggregator.rs keeps running. At that
-            // point hoist this above the jail/v2 branch — it only needs
-            // buffered input text + finish_reason, both available there.
-            // Pass 1 (immutable): compute the recovery tail per choice and
-            // whether the jail already released it as content on this chunk.
-            // We collect into a Vec so we can release the immutable borrow on
-            // nv_chunk before mutating it in pass 2.
-            let recoveries: Vec<PendingRecovery> = if is_glm47 {
-                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
-                nv_chunk
-                    .data
-                    .iter()
-                    .flat_map(|data| data.inner.choices.iter())
-                    .filter_map(|choice| {
-                        let state = cr.entry(choice.index).or_default();
-                        if !state.recovered
-                            && let Some(ChatCompletionMessageContent::Text(t)) =
-                                &choice.delta.content
-                        {
-                            state.emitted_text.push_str(t);
-                            // Bound like input_text: retain only the suffix from
-                            // the last marker onward — all the contains(&tail)
-                            // check needs.
-                            let mut keep_from = match state.emitted_text.rfind(glm47_start.as_str())
-                            {
-                                Some(pos) => pos,
-                                None => state
-                                    .emitted_text
-                                    .len()
-                                    .saturating_sub(glm47_start.len() - 1),
-                            };
-                            while keep_from > 0 && !state.emitted_text.is_char_boundary(keep_from) {
-                                keep_from -= 1;
-                            }
-                            state.emitted_text.drain(..keep_from);
-                        }
-                        if state.recovered
-                            || !matches!(
-                                choice.finish_reason,
-                                Some(dynamo_protocols::types::FinishReason::Length)
-                            )
-                        {
-                            return None;
-                        }
-                        let tail =
-                            state
-                                .input_text
-                                .rfind(glm47_start.as_str())
-                                .and_then(|pos| {
-                                    let t = &state.input_text[pos..];
-                                    if !t.contains(glm47_end.as_str()) {
-                                        Some(t.to_string())
-                                    } else {
-                                        None
-                                    }
-                                })?;
-                        let tail_already_emitted = state.emitted_text.contains(&tail);
-                        state.recovered = true;
-                        Some(PendingRecovery {
-                            choice_idx: choice.index,
-                            tail,
-                            tail_already_emitted,
-                        })
-                    })
-                    .collect()
-            } else {
-                vec![]
-            };
-
-            // Pass 2 (mutable): when the jail already released the tail verbatim,
-            // suppress the finish chunk's content entirely. The recovery chunk
-            // carries just the marker-onwards tail, matching the non-streaming
-            // path (rfind result only, no post-call prose).
-            for pr in &recoveries {
-                if !pr.tail_already_emitted {
-                    continue;
-                }
-                if let Some(ref mut data) = nv_chunk.data {
-                    for rc in data
-                        .inner
-                        .choices
-                        .iter_mut()
-                        .filter(|c| c.index == pr.choice_idx)
+            if is_glm47 && let Some(data) = &mut nv_chunk.data {
+                let mut recovery = choice_recovery
+                    .lock()
+                    .expect("choice recovery buffer poisoned");
+                for choice in &mut data.inner.choices {
+                    let state = recovery.entry(choice.index).or_default();
+                    let marker_start = crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47");
+                    let desired_content = marker_start.map_or(state.input_text.as_str(), |start| {
+                        &state.input_text[..start]
+                    });
+                    let replacement = desired_content
+                        .strip_prefix(&state.emitted_text)
+                        .unwrap_or(desired_content);
+                    if choice.finish_reason
+                        == Some(dynamo_protocols::types::FinishReason::Length)
+                        && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some()
                     {
-                        // The jail released the truncated block verbatim as content
-                        // on this chunk, potentially preceded by post-call prose.
-                        // glm47's parser drops post-call prose deliberately, so
-                        // suppress the whole content here and let the recovery
-                        // chunk carry just the marker-onwards tail — matching batch.
-                        rc.delta.content = None;
+                        tracing::warn!(
+                            choice_index = choice.index,
+                            suppressed_bytes = state.input_text.len() - desired_content.len(),
+                            "glm47 streaming: suppressing incomplete native tool output on length finish"
+                        );
                     }
+                    choice.delta.content = (!replacement.is_empty())
+                        .then(|| ChatCompletionMessageContent::Text(replacement.to_string()));
+                    state.emitted_text.push_str(replacement);
                 }
             }
 
-            // Pass 3: emit a recovery chunk per affected choice carrying just
-            // the truncated tail (marker onwards, no post-call prose).
-            let recovery_chunks: Vec<_> = recoveries
-                .into_iter()
-                .filter_map(|pr| {
-                    let PendingRecovery {
-                        choice_idx, tail, ..
-                    } = pr;
-                    tracing::warn!(
-                        choice_index = choice_idx,
-                        recovered_bytes = tail.len(),
-                        "glm47 streaming: partial <tool_call> emitted as content \
-                         on length finish"
-                    );
-                    let mut rec = nv_chunk.clone();
-                    rec.id = None;
-                    scrub_synthetic_chunk_metadata(&mut rec);
-                    let rd = rec.data.as_mut()?;
-                    rd.inner.choices.retain(|c| c.index == choice_idx);
-                    for rc in &mut rd.inner.choices {
-                        rc.delta.content = Some(ChatCompletionMessageContent::Text(tail.clone()));
-                        rc.delta.tool_calls = None;
-                        rc.finish_reason = None;
-                        rc.logprobs = None;
-                    }
-                    Some(rec)
-                })
-                .collect();
-
-            futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
+            futures::stream::iter(std::iter::once(nv_chunk))
         });
 
         // Once an upstream error is latched, drop any output the jail synthesized
@@ -7643,6 +7510,95 @@ mod tests {
         choice.delta.content = None;
         choice.finish_reason = Some(FinishReason::Stop);
         chunk
+    }
+
+    fn glm47_stream_chunk(
+        content: &str,
+        finish_reason: Option<FinishReason>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, Some(Role::Assistant));
+        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = Some(ChatCompletionMessageContent::Text(content.to_string()));
+        choice.finish_reason = finish_reason;
+        chunk
+    }
+
+    async fn apply_glm47_streaming_length(
+        chunks: &[&str],
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        let chunks: Vec<String> = chunks.iter().map(|chunk| (*chunk).to_string()).collect();
+        let chunk_count = chunks.len();
+        OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("glm47".to_string()),
+            None,
+            None,
+            false,
+            false,
+            stream::iter(chunks.into_iter().enumerate().map(move |(index, content)| {
+                glm47_stream_chunk(
+                    &content,
+                    (index + 1 == chunk_count).then_some(FinishReason::Length),
+                )
+            })),
+        )
+        .collect()
+        .await
+    }
+
+    fn stream_content(output: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> String {
+        output
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter_map(|choice| match &choice.delta.content {
+                Some(ChatCompletionMessageContent::Text(content)) => Some(content.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_length_preserves_prose_and_suppresses_incomplete_marker() {
+        let output = apply_glm47_streaming_length(&[
+            "I can help. <tool_call>get_weather<arg_key>city</arg_key><arg_value>Par",
+        ])
+        .await;
+
+        assert_eq!(stream_content(&output), "I can help. ");
+        assert!(
+            output
+                .iter()
+                .flat_map(|response| response.data.iter())
+                .flat_map(|data| data.inner.choices.iter())
+                .any(|choice| choice.finish_reason == Some(FinishReason::Length))
+        );
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_length_preserves_quoted_marker_prose() {
+        let content = r#"The literal "<tool_call>" marker is part of the explanation."#;
+        for split in content.char_indices().map(|(index, _)| index).skip(1) {
+            let output =
+                apply_glm47_streaming_length(&[&content[..split], &content[split..]]).await;
+            assert_eq!(
+                stream_content(&output),
+                content,
+                "split at byte {split} must preserve quoted marker prose"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_length_suppresses_incomplete_marker_at_every_split() {
+        let input = "I can help. <tool_call>get_weather<arg_key>city</arg_key><arg_value>Par";
+        for split in input.char_indices().map(|(index, _)| index).skip(1) {
+            let output = apply_glm47_streaming_length(&[&input[..split], &input[split..]]).await;
+            assert_eq!(
+                stream_content(&output),
+                "I can help. ",
+                "split at byte {split} must not expose truncated marker content"
+            );
+        }
     }
 
     async fn apply_kimi_k3_no_tools(

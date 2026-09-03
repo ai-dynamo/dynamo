@@ -318,6 +318,66 @@ pub(crate) fn first_unquoted_marker_position(content: &str, marker: &str) -> Opt
     None
 }
 
+/// Return the first unquoted native tool-call marker configured for `parser`.
+///
+/// Native markers quoted as prose remain visible text in both streaming and
+/// aggregated responses.
+pub(crate) fn first_unquoted_native_tool_call_marker(content: &str, parser: &str) -> Option<usize> {
+    native_tool_call_start_tokens(parser)?
+        .iter()
+        .filter_map(|marker| first_unquoted_marker_position(content, marker))
+        .min()
+}
+
+/// Return the start of an unquoted native marker, including an unquoted
+/// partial marker suffix that must remain buffered for the next stream chunk.
+pub(crate) fn unquoted_native_tool_call_marker_or_prefix_start(
+    content: &str,
+    parser: &str,
+) -> Option<usize> {
+    let markers = native_tool_call_start_tokens(parser)?;
+    if let Some(marker_start) = markers
+        .iter()
+        .filter_map(|marker| first_unquoted_marker_position(content, marker))
+        .min()
+    {
+        return Some(marker_start);
+    }
+
+    markers
+        .iter()
+        .flat_map(|marker| {
+            marker
+                .char_indices()
+                .skip(1)
+                .map(move |(end, _)| &marker[..end])
+        })
+        .filter(|prefix| {
+            let before = content.strip_suffix(prefix).unwrap_or(content);
+            first_unquoted_marker_position(before, prefix).is_none()
+        })
+        .filter_map(|prefix| {
+            let before = content.strip_suffix(prefix)?;
+            let position = first_unquoted_marker_position(content, prefix)?;
+            (position == before.len()).then_some(position)
+        })
+        .min()
+}
+
+fn native_tool_call_start_tokens(parser: &str) -> Option<Vec<String>> {
+    let parser_key = if parser.is_empty() { "default" } else { parser };
+    Some(
+        dynamo_parsers::tool_calling::parsers::get_tool_parser_map()
+            .get(parser_key)?
+            .parser_config
+            .tool_call_start_tokens()
+            .iter()
+            .filter(|marker| !marker.is_empty())
+            .cloned()
+            .collect(),
+    )
+}
+
 /// Index into the fixed-size "which quote characters close later" arrays used by
 /// [`later_unescaped_quote_closes`].
 fn quote_slot(character: char) -> Option<usize> {
