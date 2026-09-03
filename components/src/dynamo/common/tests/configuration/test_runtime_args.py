@@ -42,6 +42,15 @@ def test_structural_tags_default_on_for_supported_parsers(monkeypatch):
     assert config.dyn_structural_tag_schema == "auto"
 
 
+def test_structural_tag_schema_help_describes_omitted_strict(monkeypatch):
+    monkeypatch.delenv("DYN_STRUCTURAL_TAG_SCHEMA", raising=False)
+
+    _, help_text = _parse_runtime_args([])
+
+    assert "strict omitted or true" in help_text
+    assert "overriding strict=false" in help_text
+
+
 def test_structural_tag_global_opt_out(monkeypatch):
     monkeypatch.setenv("DYN_ENABLE_STRUCTURAL_TAG", "false")
 
