@@ -148,6 +148,16 @@
       "from_tag": "v0.5.18-cu130-runtime",
       "layer_prefix_check_skipped": true,
       "platform": "linux/arm64"
+    },
+    {
+      "baseline_digest": "sha256:4756b66a077627133cee653b551f6f5eaa1b9a981b5eea13edd33fcd3b0d3ca3",
+      "baseline_image": "vllm/vllm-openai-xpu",
+      "baseline_sbom": "vllm-openai-xpu@4756b66a-amd64.cdx.json",
+      "baseline_tag": "v0.28.0",
+      "from_digest": "sha256:4756b66a077627133cee653b551f6f5eaa1b9a981b5eea13edd33fcd3b0d3ca3",
+      "from_image": "vllm/vllm-openai-xpu",
+      "from_tag": "v0.28.0",
+      "platform": "linux/amd64"
     }
   ],
   "entry_schema": {
@@ -162,6 +172,6 @@
     "platform": "platform pinned for layer-prefix verification, e.g. linux/amd64"
   },
   "format": "CycloneDX 1.6 JSON, slim filter (drop properties/hashes/dependencies; keep evidence). Hard cap 5 MB per file.",
-  "generated_at": "2026-08-25T02:02:28+00:00",
+  "generated_at": "2026-09-03T04:34:33+00:00",
   "schema_version": 2
 }
