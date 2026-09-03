@@ -82,6 +82,19 @@ sequenceDiagram
 7. **Decode phase**: Decode worker generates tokens using the transferred KV cache
 8. **Streaming**: Tokens are streamed back to the client as they're generated
 
+### Parallel Sampling (`n > 1`)
+
+SGLang cannot pair parallel samples across a prefill-decode handoff: its scheduler clones one bootstrap room for every sample, so prefill registers a single sender while decode waits for `n` receivers and the request never completes. Dynamo keeps SGLang blind to `n` in disaggregated mode instead:
+
+- The frontend's prefill router draws one bootstrap room per choice and carries them as `bootstrap_info.bootstrap_rooms`, alongside the single `bootstrap_room` that older workers read. Every router-drawn room keeps `room % dp_size == dp_rank`, which the SGLang decode receiver uses to derive the prefill DP rank.
+- The prefill and decode workers turn the request into `n` independent `n=1` sub-requests, one room each, and the decode worker merges the sub-streams back into one multi-choice response. If one sub-request fails, the decode worker aborts its siblings.
+- The single-choice wire format is unchanged. A frontend that predates per-choice rooms sends one room only, and the worker rejects its `n > 1` requests with HTTP 400 rather than hanging. The dedicated multimodal prefill and decode workers still reject `n > 1`.
+
+> [!IMPORTANT]
+> **Cost.** Each choice is a separate prefill sub-request and a separate KV transfer: an `n > 1` request prefills the prompt up to `n` times and holds `n` copies of the prompt KV on the decode worker, unlike aggregated SGLang, which shares one prefix primer across samples. The frontend caps `n` at 128. For long prompts, prefer `n=1` and fan out on the client.
+>
+> **Upgrade order.** Upgrade prefill workers before decode workers and frontends. An older prefill worker ignores `bootstrap_rooms` and registers one sender, so `n > 1` requests from a newer frontend wait for SGLang's bootstrap timeout instead of failing fast.
+
 ### Performance Characteristics
 
 - **RDMA transfer**: Zero-copy GPU-to-GPU transfer with minimal CPU involvement

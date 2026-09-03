@@ -193,6 +193,15 @@ Prefill and decode workers coordinate via a bootstrap mechanism:
 Key functions: `BaseWorkerHandler._get_bootstrap_info()`,
 `BaseWorkerHandler._generate_bootstrap_room()`.
 
+**Parallel sampling (`n > 1`)**: SGLang cannot pair parallel samples across a PD
+handoff (#14098), so `parallel_sampling.py` fans an `n > 1` request out into `n`
+independent `n=1` sub-requests, one bootstrap room each (`bootstrap_info.bootstrap_rooms`,
+drawn by the frontend's prefill router), and `DecodeWorkerHandler._merge_choice_outputs()`
+merges the sub-streams by choice index and aborts the siblings if one fails. An older
+frontend sends one room and gets HTTP 400 for `n > 1`; an older *prefill* worker cannot be
+detected, so upgrade prefill workers first. The dedicated multimodal PD workers reject
+`n > 1`.
+
 ## Metrics & Publishing
 
 `publisher.py:DynamoSglangPublisher` manages:
@@ -383,6 +392,7 @@ sglang/
   register.py              # Model registration (LLM, image, video)
   publisher.py             # Metrics + KV event publishing
   protocol.py              # Request/response Pydantic models
+  parallel_sampling.py     # n>1 fan-out for disaggregated serving (#14098)
   health_check.py          # Health check payloads per worker type
   shutdown.py              # Graceful shutdown with deferred signal handling
   request_handlers/

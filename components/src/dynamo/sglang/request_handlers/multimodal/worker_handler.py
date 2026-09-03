@@ -15,7 +15,9 @@ from dynamo.common.constants import DisaggregationMode, EmbeddingTransferMode
 from dynamo.common.multimodal import EMBEDDING_RECEIVER_FACTORIES, TransferRequest
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.engine_response import normalize_finish_reason
+from dynamo.llm import HttpError
 from dynamo.sglang.args import Config
+from dynamo.sglang.parallel_sampling import raise_if_disagg_parallel_sampling
 from dynamo.sglang.protocol import (
     DisaggSglangMultimodalRequest,
     SglangMultimodalRequest,
@@ -516,6 +518,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
                 finally:
                     _nvtx.end_range(rng_agg)
 
+        except HttpError:
+            # Carries a client-facing status; let the request plane forward it.
+            raise
         except Exception as e:
             logger.error(f"Error in multimodal generation: {e}", exc_info=True)
             yield ErrorResponseBuilder.build_error_response(e)
@@ -535,6 +540,8 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             raise ValueError("input_ids is required")
 
         sampling_params = SglangUtils.build_sampling_params(request)
+        # One room per request here, so n > 1 is not fanned out (#14098).
+        raise_if_disagg_parallel_sampling(sampling_params)
 
         # Request bootstrap info from prefill worker
         bootstrap_info = await self._get_bootstrap_from_prefill(
@@ -745,6 +752,7 @@ class MultimodalPrefillWorkerHandler(
         try:
             # Validate and parse request
             disagg_request = self._validate_and_parse_disagg_request(disagg_request)
+            raise_if_disagg_parallel_sampling(disagg_request.sampling_params)
 
             rid = context.trace_id or context.id()
             bootstrap_room = self._generate_bootstrap_room()
