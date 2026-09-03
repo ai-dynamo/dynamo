@@ -19,7 +19,8 @@ use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use minijinja::value::Value as TemplateValue;
 use serde_json::{Map, Value, json};
 use switchyard_protocol::llm::{
-    ContentBlock, ImageSource, LlmRequest, MediaSource, Message, Role, ToolChoice, ToolResult,
+    ContentBlock, ImageSource, InstructionBlock, LlmRequest, MediaSource, Message, Role,
+    ToolChoice, ToolResult,
 };
 use switchyard_translation::{
     LossyConversionPolicy, PreservationPolicy, TranslationEngine, TranslationPolicy,
@@ -76,6 +77,9 @@ pub fn decode_wire_request(
         );
     }
     let mut request = decoded.request;
+    if format == WireFormat::OpenAiResponses {
+        normalize_responses_prompt_contract(&mut request)?;
+    }
     normalize_dynamo_media_blocks(&mut request)?;
     Ok(DynamoLlmRequest { request, execution })
 }
@@ -95,6 +99,52 @@ fn normalize_wire_request(format: WireFormat, body: &mut Value) {
             item.insert("type".to_string(), Value::String("message".to_string()));
         }
     }
+}
+
+/// Preserve the template-facing behavior of Dynamo's existing Responses path
+/// before the provider-neutral request enters generic preprocessing.
+fn normalize_responses_prompt_contract(request: &mut LlmRequest) -> Result<()> {
+    for message in &mut request.messages {
+        if matches!(message.role, Role::System | Role::Developer) {
+            message.role = Role::System;
+        }
+        if message.role == Role::Assistant {
+            for block in &mut message.content {
+                if let ContentBlock::Refusal { text } = block {
+                    *block = ContentBlock::Text {
+                        text: std::mem::take(text),
+                    };
+                }
+            }
+        }
+    }
+
+    let leading_system_count = request
+        .messages
+        .iter()
+        .take_while(|message| message.role == Role::System)
+        .count();
+    if request.instructions.is_empty() && leading_system_count == 0 {
+        return Ok(());
+    }
+
+    let mut segments = Vec::with_capacity(request.instructions.len() + leading_system_count);
+    for instruction in std::mem::take(&mut request.instructions) {
+        segments.push(plain_text(&instruction.content, "Responses instruction")?);
+    }
+    for message in request.messages.drain(..leading_system_count) {
+        segments.push(plain_text(
+            &message.content,
+            "Responses leading system message",
+        )?);
+    }
+    request.instructions.push(InstructionBlock {
+        role: Role::System,
+        content: vec![ContentBlock::Text {
+            text: segments.join("\n\n"),
+        }],
+    });
+    Ok(())
 }
 
 /// Capture Dynamo execution controls from a Chat request without using Chat as
@@ -1049,6 +1099,35 @@ mod tests {
         }
     }
 
+    async fn assert_responses_direct_lowering_matches_legacy(body: Value) -> LlmRequest {
+        let legacy_request = legacy_chat_request(WireFormat::OpenAiResponses, body.clone());
+        let canonical = decode_wire_request(
+            WireFormat::OpenAiResponses,
+            body,
+            execution_from_chat(&legacy_request).unwrap(),
+        )
+        .unwrap();
+        let preprocessor = preprocessor();
+
+        let legacy = preprocessor
+            .preprocess_request(&legacy_request, None)
+            .await
+            .unwrap()
+            .0;
+        let direct = preprocessor
+            .preprocess_llm_request(&canonical.request, &canonical.execution, None)
+            .await
+            .unwrap()
+            .0;
+
+        assert_eq!(
+            serde_json::to_value(direct).unwrap(),
+            serde_json::to_value(legacy).unwrap(),
+            "direct Responses preprocessing diverged from the compatibility path"
+        );
+        canonical.request
+    }
+
     #[tokio::test]
     async fn direct_multimodal_lowering_matches_chat_compatibility_path() {
         let cases = [
@@ -1201,6 +1280,67 @@ mod tests {
                 "direct preprocessing diverged for {format}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn responses_instructions_and_developer_lowering_matches_current_path() {
+        let canonical = assert_responses_direct_lowering_matches_legacy(json!({
+            "model": "test-model",
+            "instructions": "You are a coding agent.",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{ "type": "input_text", "text": "Follow safety guidelines." }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "What is 2+2?" }]
+                }
+            ],
+            "max_output_tokens": 17
+        }))
+        .await;
+
+        assert_eq!(canonical.instructions.len(), 1);
+        assert_eq!(
+            plain_text(&canonical.instructions[0].content, "test").unwrap(),
+            "You are a coding agent.\n\nFollow safety guidelines."
+        );
+        assert_eq!(canonical.messages.len(), 1);
+        assert_eq!(canonical.messages[0].role, Role::User);
+    }
+
+    #[tokio::test]
+    async fn responses_refusal_lowering_matches_current_path() {
+        let canonical = assert_responses_direct_lowering_matches_legacy(json!({
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "try again" }]
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "refusal", "refusal": "I cannot help with that." }]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "ok different question" }]
+                }
+            ],
+            "max_output_tokens": 17
+        }))
+        .await;
+
+        assert!(matches!(
+            canonical.messages[1].content.as_slice(),
+            [ContentBlock::Text { text }] if text == "I cannot help with that."
+        ));
     }
 
     struct CaptureBackend {
