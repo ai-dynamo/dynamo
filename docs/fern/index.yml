@@ -1127,7 +1127,7 @@ navigation:
           - page: Overview
             path: pages/reference/nixl-connect/overview.mdx
 
-      # The Dynamo release artifacts eligible for NVIDIA Enterprise Support.
+      # The Dynamo release artifacts eligible for enterprise support.
       # Same binaries as the open-source artifacts; the -enterprise suffix
       # marks the curated publication channel and the commercial support
       # boundary. Commercial support requires an NVIDIA AI Enterprise
