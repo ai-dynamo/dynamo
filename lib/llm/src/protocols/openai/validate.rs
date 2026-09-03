@@ -262,19 +262,6 @@ pub fn validate_top_k(top_k: Option<i32>) -> Result<(), anyhow::Error> {
     }
 }
 
-/// Validates mutual exclusion of temperature and top_p
-pub fn validate_temperature_top_p_exclusion(
-    temperature: Option<f32>,
-    top_p: Option<f32>,
-) -> Result<(), anyhow::Error> {
-    match (temperature, top_p) {
-        (Some(t), Some(p)) if t != 1.0 && p != 1.0 => {
-            anyhow::bail!("Only one of temperature or top_p should be set (not both)");
-        }
-        _ => Ok(()),
-    }
-}
-
 /// Validates frequency penalty parameter
 pub fn validate_frequency_penalty(frequency_penalty: Option<f32>) -> Result<(), anyhow::Error> {
     if let Some(penalty) = frequency_penalty
@@ -732,15 +719,6 @@ fn validate_prompt_embeds_format(embeds: &str) -> Result<(), anyhow::Error> {
         );
     }
 
-    Ok(())
-}
-
-/// Validates prompt_embeds field (public wrapper for standalone validation)
-/// Format: PyTorch tensor serialized with torch.save() and base64-encoded
-pub fn validate_prompt_embeds(prompt_embeds: Option<&str>) -> Result<(), anyhow::Error> {
-    if let Some(embeds) = prompt_embeds {
-        validate_prompt_embeds_format(embeds)?;
-    }
     Ok(())
 }
 
