@@ -524,7 +524,6 @@ where
         if let Err(error) = handler(envelope) {
             tracing::warn!(%error, publisher_id, generation, "direct-ZMQ source handler rejected an envelope");
         }
-        tokio::task::consume_budget().await;
     }
 }
 
@@ -613,7 +612,7 @@ mod tests {
         collections::{HashMap, HashSet},
         sync::{
             Arc, Condvar, Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
@@ -659,6 +658,58 @@ mod tests {
             SequenceCursor::new(ContinuityMode::Disabled, None).observe(9),
             None
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ready_source_messages_are_not_double_charged_against_coop_budget() {
+        const MESSAGE_COUNT: usize = 1_025;
+
+        let (sender, mut receiver) = mpsc::channel(MESSAGE_COUNT);
+        for sequence in 0..MESSAGE_COUNT as u64 {
+            sender
+                .try_send(DirectZmqSubItem::Envelope(ValidatedEnvelope {
+                    publisher_id: 1,
+                    sequence,
+                    published_at: 0,
+                    payload: Default::default(),
+                }))
+                .unwrap();
+        }
+        drop(sender);
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let (first_seen_tx, mut first_seen_rx) = mpsc::unbounded_channel();
+        let probe_seen = seen.clone();
+        let probe = tokio::spawn(async move {
+            first_seen_rx.recv().await.unwrap();
+            probe_seen.load(Ordering::SeqCst)
+        });
+        let consumer_seen = seen.clone();
+        let handler = move |envelope: ValidatedEnvelope| {
+            let previous = consumer_seen.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(envelope.sequence, previous as u64);
+            if previous == 0 {
+                first_seen_tx.send(()).unwrap();
+            }
+            Ok(())
+        };
+        let mut cursor = SequenceCursor::new(ContinuityMode::Disabled, None);
+
+        assert!(
+            consume_connection(
+                1,
+                1,
+                &mut receiver,
+                &CancellationToken::new(),
+                &mut cursor,
+                &handler,
+                &|_| {},
+                &CancellationToken::new(),
+            )
+            .await
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), MESSAGE_COUNT);
+        assert!(probe.await.unwrap() > 64);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

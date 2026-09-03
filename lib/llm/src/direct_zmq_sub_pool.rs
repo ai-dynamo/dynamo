@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 const GROUP_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) const ENDPOINTS_PER_SUB_ENV: &str = "DYN_ROUTER_KV_ZMQ_ENDPOINTS_PER_SUB";
+pub(crate) const ENDPOINTS_PER_SUB_ENV: &str = "DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB";
 pub(crate) const DEFAULT_ENDPOINTS_PER_SUB: usize = 64;
 pub(crate) const KV_ZMQ_RCVHWM: i32 = 100_000;
 
