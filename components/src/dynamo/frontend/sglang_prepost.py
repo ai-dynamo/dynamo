@@ -762,11 +762,12 @@ def preprocess_chat_request(
     # Convert tools to SGLang format (done once, shared with parser creation)
     sglang_tools = convert_tools(request.get("tools"))
 
-    # Reject a named tool_choice whose function is missing from tools —
-    # otherwise the chat template would render with zero tools while
-    # guided decoding still constrains the output to that function's
-    # schema, producing confusing model behavior.
+    # Reject a forced tool_choice that cannot be satisfied by the provided tools.
+    # Otherwise the chat template and guided decoding cannot enforce the request.
     tool_choice = request.get("tool_choice", "auto")
+    forced_tool_choice = tool_choice == "required" or _is_named_tool_choice(tool_choice)
+    if tool_choice == "required" and not sglang_tools:
+        raise PreprocessError('tool_choice is "required" but tools is empty')
     if _is_named_tool_choice(tool_choice):
         chosen_name = tool_choice["function"]["name"]
         available_names = {t.function.name for t in (sglang_tools or [])}
@@ -775,6 +776,17 @@ def preprocess_chat_request(
                 f"tool_choice names function {chosen_name!r}, but it is not "
                 f"present in tools (available: {sorted(available_names) or 'none'})"
             )
+
+    response_format = request.get("response_format")
+    if (
+        forced_tool_choice
+        and isinstance(response_format, dict)
+        and response_format.get("type") == "structural_tag"
+    ):
+        raise PreprocessError(
+            "tool_choice forces a tool call and cannot be combined with a "
+            "structural_tag response format"
+        )
 
     template_tools = _filter_template_tools(
         request,
@@ -835,15 +847,6 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
-    # TODO: response_format wins here even when tool_choice is "required" or names
-    # a function, so a request that demanded a tool call can come back with none
-    # -- the tool constraint is dropped and only logged. The other two paths do
-    # the opposite: preprocessor/tool_choice.rs clears the response_format JSON
-    # and keeps the tool constraint, and prepost.py does the same after narrowing
-    # its conflict check. response_format is scoped by the OpenAI spec to the
-    # message the model returns to the user, not to tool calls, so the tool
-    # constraint is the one that must survive.
-    #
     # This path also never reads the legacy guided_json / guided_regex /
     # guided_grammar / guided_choice fields at all, so those are dropped silently
     # while both other paths honor them (and reject them against a forced choice).
@@ -851,10 +854,19 @@ def preprocess_chat_request(
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None
     ):
-        logger.warning(
-            "Tool-call guided decoding will be ignored because of response_format already exists."
-        )
-    guided_decoding = response_format_guided_decoding or tool_call_guided_decoding
+        if forced_tool_choice:
+            logger.warning(
+                "response_format guided decoding will be ignored because tool_choice is forced."
+            )
+        else:
+            logger.warning(
+                "Tool-call guided decoding will be ignored because response_format already exists."
+            )
+    guided_decoding = (
+        tool_call_guided_decoding
+        if forced_tool_choice
+        else response_format_guided_decoding or tool_call_guided_decoding
+    )
 
     return SglangPreprocessResult(
         prompt_token_ids=prompt_token_ids,
