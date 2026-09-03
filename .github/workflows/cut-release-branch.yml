@@ -1,0 +1,247 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Cut a release branch (one-time): stamp the release version across the tree and
+# push release/<version> — plus a release/<branch> CI twin for a bare named release
+# so post-merge builds it. RC staging is the separate "Stage Release RC" workflow.
+# Dispatch restricted to the ai-dynamo/devops team.
+
+name: Cut Release Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Ref to fork from: 'main', a 'release/*' branch, a bare named release branch (v<X.Y.Z>[-<name>]), or a 40-char commit SHA."
+        required: false
+        type: string
+        default: main
+      release_version:
+        description: 'Version to STAMP into the tree, X.Y.Z[.devN|.postN] (PEP 440; .devN = pre-release, .postN = post-release; e.g. 0.0.0, 0.0.0.dev3). Not the branch name.'
+        required: true
+        type: string
+      release_branch:
+        description: 'Branch to create (default release/<version>). Also accepts a bare named release v<X.Y.Z>[-<name>], e.g. v1.3.0-nemotron-ultra-dev.1 — must start with v + the release_version base; a release/<branch> CI twin is pushed for the builds, and artifact versions stay numeric (the name lives only in the branch). For a throwaway rehearsal use e.g. release/0.0.0test — post-merge + release-branch checks run, but it is never staged.'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  # OPS GATE — only active ai-dynamo/devops members may run this. Fail-closed:
+  # a missing app Members:read permission or any API error denies. Checks BOTH
+  # github.actor and github.triggering_actor (actor does not re-resolve on re-runs).
+  authorize:
+    name: Verify release-ops membership
+    runs-on: prod-default-small-v2
+    environment: automated-release
+    permissions:
+      contents: read
+    steps:
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - name: Require release-ops team membership
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          TEAM: devops
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          for USER in $(printf '%s\n%s\n' "${ACTOR}" "${TRIGGERING_ACTOR}" | sort -u); do
+            HTTP=$(curl -sS -o "${RUNNER_TEMP}/membership.json" -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/orgs/${ORG}/teams/${TEAM}/memberships/${USER}")
+            STATE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('state',''))" \
+              "${RUNNER_TEMP}/membership.json" 2>/dev/null || echo "")
+            if [ "${HTTP}" != "200" ] || [ "${STATE}" != "active" ]; then
+              echo "::error::@${USER} is not an active member of ${ORG}/${TEAM} (HTTP ${HTTP}); only release ops may run this workflow."
+              exit 1
+            fi
+            echo "@${USER} authorized via ${ORG}/${TEAM}"
+          done
+
+  # APPROVAL GATE — a release reviewer must approve before any branch is cut.
+  # Enforced by the manual-release-approval environment's required-reviewers rule.
+  cut-approval:
+    name: Cut approval gate
+    needs: [authorize]
+    runs-on: prod-default-small-v2
+    environment: manual-release-approval
+    permissions:
+      contents: read
+    steps:
+      - name: Record approval
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          # Show the fork point so the reviewer approves a known source, not an
+          # arbitrary ref/SHA.
+          SOURCE_REF: ${{ inputs.source_ref }}
+          ACTOR: ${{ github.actor }}
+        run: echo "Cut ${RELEASE_BRANCH:-release/${RELEASE_VERSION}} (version ${RELEASE_VERSION}) from ${SOURCE_REF} — approved by ${ACTOR}"
+
+  # CREATE RELEASE BRANCH + VERSION BUMP. Pushes with a dedicated app token (not
+  # GITHUB_TOKEN) so the push triggers post-merge CI to build the release images.
+  prepare-branch:
+    name: Create release branch + version bump
+    needs: [authorize, cut-approval]
+    runs-on: prod-default-small-v2
+    environment: automated-release
+    permissions:
+      contents: read
+    outputs:
+      branch: ${{ steps.bump.outputs.branch }}
+      bump_sha: ${{ steps.bump.outputs.bump_sha }}
+      is_test: ${{ steps.bump.outputs.is_test }}
+    steps:
+      - name: Validate inputs
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
+            echo "::error::release_version must be X.Y.Z[.devN|.postN] (got '${RELEASE_VERSION}')"
+            exit 1
+          fi
+          if [[ -n "${RELEASE_BRANCH}" && ! "${RELEASE_BRANCH}" =~ ^release/[A-Za-z0-9._-]+$ \
+                && ! "${RELEASE_BRANCH}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?$ ]]; then
+            echo "::error::release_branch must be release/<name> or a bare named release v<X.Y.Z>[-<name>] (got '${RELEASE_BRANCH}')"
+            exit 1
+          fi
+          # A bare named branch must carry the version it stamps (v<X.Y.Z base>-<name>);
+          # artifact versions stay numeric, so this prefix is the only tie between them.
+          if [[ "${RELEASE_BRANCH}" =~ ^v[0-9] ]]; then
+            BASE="${RELEASE_VERSION%%.dev*}"; BASE="${BASE%%.post*}"
+            if [[ "${RELEASE_BRANCH}" != "v${BASE}" && "${RELEASE_BRANCH}" != "v${BASE}-"* ]]; then
+              echo "::error::named branch '${RELEASE_BRANCH}' must start with v${BASE} (the release_version base)"
+              exit 1
+            fi
+          fi
+          if [[ ! "${SOURCE_REF}" =~ ^(main|release/[A-Za-z0-9._-]+|v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?|[0-9a-f]{40})$ ]]; then
+            echo "::error::source_ref must be 'main', a release/* branch, a named release branch (v<X.Y.Z>[-<name>]), or a 40-char SHA (got '${SOURCE_REF}')"
+            exit 1
+          fi
+
+      - name: Mint app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Set version and create branch
+        id: bump
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          RELEASE_BRANCH: ${{ inputs.release_branch }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          BRANCH="${RELEASE_BRANCH:-release/${RELEASE_VERSION}}"
+          # Real releases: release/X.Y.Z[.devN|.postN] or bare named v<X.Y.Z>[-<name>];
+          # anything else is a throwaway test branch. A bare v-branch matches no CI
+          # push filter (post-merge fires only on main/release/*), so a release/<branch>
+          # CI twin is pushed to build the images.
+          CI_BRANCH="${BRANCH}"
+          if [[ "${BRANCH}" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
+            IS_TEST=false
+          elif [[ "${BRANCH}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?$ ]]; then
+            IS_TEST=false
+            CI_BRANCH="release/${BRANCH}"
+          else
+            IS_TEST=true
+            echo "::warning::branch '${BRANCH}' is not release/X.Y.Z[.devN|.postN] or v<X.Y.Z>[-<name>] — treated as a THROWAWAY TEST branch: it is cut and built, but Stage Release RC will refuse to stage it."
+          fi
+
+          # Fetch the version-bump script from THIS workflow's commit (GITHUB_SHA);
+          # source_ref may predate --set-version.
+          git show "${GITHUB_SHA}:.github/scripts/apply_dev_version.py" > "${RUNNER_TEMP}/apply_dev_version.py"
+
+          # Reuse the existing branch when present (a re-run adds only the diff);
+          # else base on source_ref. Never clobber. refs/heads/ refspecs everywhere:
+          # a bare v-branch can collide with a GA tag (v1.4.1).
+          if git ls-remote --exit-code --heads origin "${BRANCH}" >/dev/null 2>&1; then
+            git fetch origin "refs/heads/${BRANCH}"
+            git checkout -B "${BRANCH}" FETCH_HEAD
+            EXISTED=1
+          else
+            git checkout -b "${BRANCH}"
+            EXISTED=0
+          fi
+
+          # Stamp the version + FULL image-ref set: the branch serves every RC and RC
+          # staging never re-stamps, so a subset here would strand un-selected images
+          # on the my-registry/:my-tag placeholder. --containers all also avoids the
+          # partial-selection helm-pin failure. wheels/crates aren't passed — the
+          # package version stamp is unified.
+          python3 "${RUNNER_TEMP}/apply_dev_version.py" "" . --set-version "${RELEASE_VERSION}" \
+            --containers all --helm all --image-refs
+
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 --retry 5 --retry-delay 2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+            source "${HOME}/.cargo/env"
+          fi
+          # Sync EVERY Cargo.lock (root + nested workspaces: bindings/python, kvbm,
+          # runtime/examples): a root-only `cargo update` leaves their pins stale and
+          # fails the `--locked` checks. Discovered from git so a newly added nested
+          # workspace can't silently regress.
+          git ls-files | grep -E '(^|/)Cargo\.lock$' | sort | while IFS= read -r lock; do
+            manifest="$(dirname "${lock}")/Cargo.toml"
+            manifest="${manifest#./}"
+            echo "Syncing ${lock}"
+            cargo update --workspace --manifest-path "${manifest}"
+          done
+
+          APP_USER_ID=$(curl -fsSL --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/users/${APP_SLUG}%5Bbot%5D" \
+            | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${APP_USER_ID}+${APP_SLUG}[bot]@users.noreply.github.com"
+          # Commit + push only on a diff. No diff on an existing branch => reuse (no
+          # push); no diff on a new branch => empty commit so the push fires post-merge.
+          git add -A
+          if git diff --cached --quiet; then
+            if [ "${EXISTED}" = "1" ]; then
+              echo "${BRANCH} already matches the release scripts; nothing to commit (reuse, no push)."
+            else
+              git commit -s --allow-empty -m "release: set version ${RELEASE_VERSION}"
+              git push origin "HEAD:refs/heads/${BRANCH}"
+            fi
+          else
+            git commit -s -m "release: set version ${RELEASE_VERSION}"
+            git push origin "HEAD:refs/heads/${BRANCH}"
+          fi
+          # Keep the CI twin of a bare named branch on this commit (fast-forward;
+          # no-op when already there) so post-merge CI builds it.
+          if [ "${CI_BRANCH}" != "${BRANCH}" ]; then
+            git push origin "HEAD:refs/heads/${CI_BRANCH}"
+          fi
+
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "bump_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "is_test=${IS_TEST}" >> "$GITHUB_OUTPUT"
+          echo "Prepared ${BRANCH} @ $(git rev-parse HEAD) (is_test=${IS_TEST}, existed=${EXISTED})"
+          echo "Next: run 'Stage Release RC' with release_branch=${BRANCH} once post-merge CI has built the images."

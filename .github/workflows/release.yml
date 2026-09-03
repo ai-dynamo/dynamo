@@ -156,8 +156,75 @@ jobs:
   # GATE: Version Extraction
   # ============================================================================
 
+  # OPS GATE — operator-driven runs (on-demand staging and direct rc dispatch)
+  # require an active ai-dynamo/devops member. The nightly path (scheduled /
+  # nightly=true) is exempt so unattended runs are not blocked. Lives here (not
+  # only in the on-demand wrapper) so it binds EVERY caller of this reusable
+  # workflow — including a rogue workflow that calls it with on_demand=true.
+  # In automated-release to reach the RELEASE_APP secrets; carries no approval.
+  authorize:
+    name: Ops gate
+    runs-on: prod-default-small-v2
+    environment: automated-release
+    permissions:
+      contents: read
+    steps:
+      - name: Mint app token
+        if: ${{ inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly) }}
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - name: Require release-ops team membership
+        if: ${{ inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly) }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ORG: ${{ github.repository_owner }}
+          TEAM: devops
+          ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          for USER in $(printf '%s\n%s\n' "${ACTOR}" "${TRIGGERING_ACTOR}" | sort -u); do
+            HTTP=$(curl -sS -o "${RUNNER_TEMP}/membership.json" -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/orgs/${ORG}/teams/${TEAM}/memberships/${USER}")
+            STATE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('state',''))" \
+              "${RUNNER_TEMP}/membership.json" 2>/dev/null || echo "")
+            if [ "${HTTP}" != "200" ] || [ "${STATE}" != "active" ]; then
+              echo "::error::@${USER} is not an active member of ${ORG}/${TEAM} (HTTP ${HTTP}); only release ops may stage a release."
+              exit 1
+            fi
+            echo "@${USER} authorized via ${ORG}/${TEAM}"
+          done
+      - name: Gate mode
+        run: echo "ops gate applied=${{ inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly) }} (nightly is exempt)"
+
+  # APPROVAL GATE — operator runs also require a manual-release-approval reviewer.
+  # Dynamic environment: empty (no gate) on the nightly path so unattended runs are
+  # not blocked. Enforced by the environment's required-reviewers rule; no secrets
+  # here, so its environment scope is independent of the RELEASE_APP secrets.
+  approval:
+    name: Approval gate
+    needs: [authorize]
+    runs-on: prod-default-small-v2
+    environment: ${{ (inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly)) && 'manual-release-approval' || '' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Record approval
+        env:
+          SHA: ${{ inputs.commit_sha }}
+          VER: ${{ inputs.release_version }}
+          RC: ${{ inputs.rc_number }}
+          ACTOR: ${{ github.actor }}
+        run: echo "Release gate cleared for ${VER:-<branch-derived>} rc.${RC} @ ${SHA} by ${ACTOR}"
+
   prepare-release:
     name: Prepare Release
+    needs: [approval]
     runs-on: prod-default-small-v2
     outputs:
       version: ${{ steps.extract.outputs.version }}
