@@ -891,83 +891,78 @@ async def init_llm_worker(
             disaggregation_mode=config.disaggregation_mode,
         ).to_dict()
 
-        if config.publish_kv_events or config.publish_metrics:
-            # Initialize the independently gated KV-event and metrics publishers.
-            # Use model as fallback if served_model_name is not provided
-            model_name_for_metrics = config.served_model_name or config.model
-            metrics_labels = [
-                (
-                    prometheus_names.labels.MODEL,
-                    model_name_for_metrics,
-                ),  # OpenAI standard
-                (
-                    prometheus_names.labels.MODEL_NAME,
-                    model_name_for_metrics,
-                ),  # Native engine compatibility
-            ]
+        metrics_labels = [
+            (
+                prometheus_names.labels.MODEL,
+                model_name_for_metrics,
+            ),  # OpenAI standard
+            (
+                prometheus_names.labels.MODEL_NAME,
+                model_name_for_metrics,
+            ),  # Native engine compatibility
+        ]
 
-            # Create worker-side publisher for consolidated events if consolidator is enabled
-            # This subscribes to consolidator's ZMQ output and publishes to NATS with worker_id
-            consolidator_publisher = None
-            if consolidator_output_endpoint and config.publish_kv_events:
-                # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
-                consolidator_publisher = KvEventPublisher(
-                    endpoint=endpoint,
-                    kv_block_size=kv_cache_block_size,
-                    zmq_endpoint=consolidator_output_connect_endpoint,
-                    zmq_topic="",
-                    enable_local_indexer=config.enable_local_indexer,
-                    kv_state_endpoint=config.kv_state_endpoint,
-                    image_token_id=image_token_id,
-                )
-                logging.info(
-                    f"Created worker-side publisher for consolidated events: "
-                    f"subscribing to {consolidator_output_connect_endpoint}, worker_id={endpoint.connection_id()}"
-                )
-
-            async with get_publisher(
-                endpoint,
-                engine,
-                int(endpoint.connection_id()),
-                kv_cache_block_size,
-                metrics_labels,
-                component_gauges=component_gauges,
-                additional_metrics=additional_metrics,
-                event_buffer_max_size=event_buffer_max_size,
-                zmq_endpoint=trtllm_zmq_bind_endpoint,
+        # Worker-side publisher for consolidated KV events. It subscribes to the
+        # consolidator's ZMQ output and republishes to NATS tagged with this
+        # worker_id, so it only exists when both KV-event publishing and the
+        # consolidator are enabled.
+        consolidator_publisher = None
+        if consolidator_output_endpoint and config.publish_kv_events:
+            # Use the connect endpoint directly (already provided by get_consolidator_endpoints)
+            consolidator_publisher = KvEventPublisher(
+                endpoint=endpoint,
+                kv_block_size=kv_cache_block_size,
+                zmq_endpoint=consolidator_output_connect_endpoint,
+                zmq_topic="",
                 enable_local_indexer=config.enable_local_indexer,
-                metrics_collector=metrics_collector,
                 kv_state_endpoint=config.kv_state_endpoint,
                 image_token_id=image_token_id,
-                publish_kv_events=config.publish_kv_events,
-                publish_metrics=config.publish_metrics,
-            ) as publisher:
-                handler_config.publisher = publisher
-                handler = RequestHandlerFactory().get_request_handler(handler_config)
-                if config.load_format == "gms":
-                    _register_memory_routes(runtime, handler)
+            )
+            logging.info(
+                "Created worker-side publisher for consolidated events: "
+                "subscribing to %s, worker_id=%s",
+                consolidator_output_connect_endpoint,
+                endpoint.connection_id(),
+            )
 
-                encoder_cache = getattr(handler, "_encoder_cache", None)
-                if encoder_cache is not None:
-                    register_embedding_cache_metrics(
-                        endpoint=endpoint,
-                        cache=encoder_cache,
-                        model_name=model_name_for_metrics,
-                        component_name=config.component,
-                    )
-                await endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=metrics_labels,
-                    health_check_payload=health_check_payload,
-                )
-
-            # Shutdown consolidator publisher if it was created
-            if consolidator_publisher:
-                consolidator_publisher.shutdown()
-        else:
+        # The Publisher builds nothing and starts no thread when both flags are
+        # off, so it wraps the serving path unconditionally.
+        async with get_publisher(
+            endpoint,
+            engine,
+            int(endpoint.connection_id()),
+            kv_cache_block_size,
+            metrics_labels,
+            component_gauges=component_gauges,
+            additional_metrics=additional_metrics,
+            event_buffer_max_size=event_buffer_max_size,
+            zmq_endpoint=trtllm_zmq_bind_endpoint,
+            enable_local_indexer=config.enable_local_indexer,
+            metrics_collector=metrics_collector,
+            kv_state_endpoint=config.kv_state_endpoint,
+            image_token_id=image_token_id,
+            publish_kv_events=config.publish_kv_events,
+            publish_metrics=config.publish_metrics,
+        ) as publisher:
+            handler_config.publisher = publisher
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             if config.load_format == "gms":
                 _register_memory_routes(runtime, handler)
+
+            encoder_cache = getattr(handler, "_encoder_cache", None)
+            if encoder_cache is not None:
+                register_embedding_cache_metrics(
+                    endpoint=endpoint,
+                    cache=encoder_cache,
+                    model_name=model_name_for_metrics,
+                    component_name=config.component,
+                )
             await endpoint.serve_endpoint(
-                handler.generate, health_check_payload=health_check_payload
+                handler.generate,
+                metrics_labels=metrics_labels,
+                health_check_payload=health_check_payload,
             )
+
+        # Shutdown consolidator publisher if it was created
+        if consolidator_publisher:
+            consolidator_publisher.shutdown()
