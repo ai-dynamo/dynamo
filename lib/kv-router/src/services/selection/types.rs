@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::protocols::{
-    DpRank, KvTransferEnforcement, RoutingConstraints, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+    DpRank, KvTransferEnforcement, RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::PotentialLoad;
 use crate::scheduling::config::RouterConfigOverride;
@@ -409,6 +410,8 @@ pub struct SelectRequest {
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
+    pub affinity_target: Option<WorkerAffinityTarget>,
+    #[serde(default)]
     pub pinned_worker: Option<WorkerWithDpRank>,
     #[serde(default)]
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
@@ -436,6 +439,8 @@ pub struct SelectAndReserveRequest {
     pub strict_priority: Option<u32>,
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub affinity_target: Option<WorkerAffinityTarget>,
     #[serde(default)]
     pub pinned_worker: Option<WorkerWithDpRank>,
     #[serde(default)]
