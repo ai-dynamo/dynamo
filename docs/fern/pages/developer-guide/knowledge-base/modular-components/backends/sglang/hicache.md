@@ -227,6 +227,7 @@ curl -s localhost:8000/metrics | grep shared_cache
 | Workers registered but router never tracks shared cache | `--shared-cache-type` left at default `none`                                | Set `--shared-cache-type hicache` on the frontend.                                        |
 | Shared hits do not affect worker selection              | `--shared-cache-multiplier 0.0`                                             | Raise the multiplier — typical starting range is `0.3`–`0.7`.                             |
 | Page-size mismatch warnings                              | Router `--page-size` doesn't match worker `--page-size`                      | They must agree; the router hashes pages using the worker's page size.                        |
+| Mooncake page-size mismatch on a DCP worker              | DCP widens radix-event blocks but Mooncake objects retain the physical page size | DCP with Mooncake shared-cache tracking is unsupported; use `--shared-cache-type none`.     |
 | Router logs "no workers have HiCache enabled"            | No worker published `sglang_hicache_mooncake` metadata                       | Confirm workers started with `--hicache-storage-backend mooncake`.                            |
 
 ## Further Reading
@@ -234,5 +235,4 @@ curl -s localhost:8000/metrics | grep shared_cache
 - [SGLang HiCache Design](https://docs.sglang.io/docs/advanced_features/hicache_design) and [Best Practices](https://docs.sglang.io/docs/advanced_features/hicache_best_practices)
 - [Mooncake](https://github.com/kvcache-ai/Mooncake) — the shared KV store used as the external tier
 - [SGLang PR #22894](https://github.com/sgl-project/sglang/pull/22894) — the tier-annotated events prerequisite
-- [KVBM Guide](../../kvbm/kvbm-guide.md) — Dynamo's own block manager, an alternative to HiCache
 - [KV Events for Custom Engines](../../../../advanced-customizations/writing-custom-backends/publish-kv-events.md) — the event protocol contract for backends other than SGLang

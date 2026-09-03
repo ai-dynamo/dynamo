@@ -33,7 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
@@ -61,7 +61,7 @@ func TestDGDSharedResourcesReconciler_ValidatesGMSResourceClaimTemplatesBeforePa
 		WithScheme(s).
 		WithObjects(dgd).
 		Build()
-	recorder := record.NewFakeRecorder(100)
+	recorder := events.NewFakeRecorder(100)
 	config := &configv1alpha1.OperatorConfiguration{
 		Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"},
 	}
@@ -128,7 +128,8 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 				{
 					ComponentName: "epp",
 					ComponentType: v1beta1.ComponentTypeEPP,
-					// The missing EPP config deliberately fails after checkpoint reconciliation.
+					// Invalid legacy Go-EPP config deliberately fails after checkpoint reconciliation.
+					EPPConfig: &v1beta1.EPPConfig{},
 				},
 			},
 		},
@@ -147,7 +148,7 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 	}
 	reconciler := newDGDSharedResourcesReconciler(
 		kubeClient,
-		record.NewFakeRecorder(10),
+		events.NewFakeRecorder(10),
 		config,
 		runtimeConfig,
 		nil,

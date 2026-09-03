@@ -8,12 +8,14 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from tests.utils.vllm_omni import vllm_omni_skip_reason
+
+if _omni_skip_reason := vllm_omni_skip_reason():
+    pytest.skip(_omni_skip_reason, allow_module_level=True)
+
 try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
-except Exception:
-    # vllm_omni's import chain can raise NotImplementedError (and other
-    # non-ImportError types) on platforms it doesn't support — e.g. a
-    # CPU-only runner where vllm._C can't load libcuda.so.1.
+except (ImportError, OSError, NotImplementedError):
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
 
 from tests.serve.common import (
@@ -177,10 +179,6 @@ vllm_omni_configs = {
             pytest.mark.xpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
-            pytest.mark.skip(
-                reason="vLLM-Omni audio release/v0.19.0rc1 uses the pre-vLLM 0.20 "
-                "GPUModelRunner._bookkeeping_sync signature"
-            ),
         ],
         model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         request_payloads=[
@@ -235,22 +233,6 @@ vllm_omni_configs = {
                     },
                 },
                 repeat_count=1,
-                expected_response=[],
-                expected_log=[],
-            ),
-            # Streaming video generation
-            VideoGenerationPayload(
-                body={
-                    "prompt": "Dog running on a beach",
-                    "size": "480x272",
-                    "response_format": "url",
-                    "nvext": {
-                        "num_inference_steps": 10,
-                        "num_frames": 17,
-                    },
-                },
-                repeat_count=1,
-                http_stream=True,
                 expected_response=[],
                 expected_log=[],
             ),

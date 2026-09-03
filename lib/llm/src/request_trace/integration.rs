@@ -210,7 +210,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::protocols::common::extensions::AgentContext;
+    use crate::protocols::common::extensions::{AgentCompaction, AgentContext, InputTrigger};
     use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use crate::request_trace::BUS;
     use crate::request_trace::RequestTraceEventSource;
@@ -363,28 +363,34 @@ mod tests {
         let mut receiver = BUS.subscribe();
         let tracker = Arc::new(RequestTracker::new());
         let dropped = Arc::new(AtomicBool::new(false));
-        let state = RequestEndTraceState {
-            agent: Some(AgentContextTraceState {
-                agent_context: AgentContext {
-                    session_id: "root".to_string(),
-                    parent_session_id: None,
-                    session_final: None,
-                    kv_hints: None,
-                },
-                request_model: "test-model".to_string(),
-                request_tracker: Some(tracker.clone()),
-                x_request_id: Some("llm-call-1".to_string()),
-                finish_reason_metadata: SharedFinishReasonMetadata::default(),
+        let mut request = preprocessed_request(SamplingOptions::default());
+        request.agent_context = Some(AgentContext {
+            session_id: "root".to_string(),
+            parent_session_id: None,
+            session_final: None,
+            compaction: Some(AgentCompaction {
+                trigger: Some("manual".to_string()),
+                reason: Some("user_requested".to_string()),
+                implementation: Some("responses_compact".to_string()),
+                phase: Some("standalone_turn".to_string()),
+                strategy: Some("memento".to_string()),
             }),
-            request: RequestTraceRequestEndState {
-                request_tracker: tracker.clone(),
-                replay_metrics: Arc::new(RequestReplayMetrics {
-                    trace_block_size: 2,
-                    input_length: 2,
-                    input_sequence_hashes: vec![11],
-                }),
-            },
-        };
+            kv_hints: None,
+            input_trigger: Some(InputTrigger::ToolResult),
+        });
+        let mut context = Context::new(());
+        context.insert(
+            crate::request_trace::X_REQUEST_ID_CONTEXT_KEY,
+            "llm-call-1".to_string(),
+        );
+        let state = build_request_end_trace_state_for_policy(
+            &request,
+            &Some(tracker.clone()),
+            &context,
+            2,
+            true,
+        )
+        .unwrap();
         let stream = TrackerDropStream {
             tracker,
             dropped: dropped.clone(),
@@ -410,13 +416,15 @@ mod tests {
         .unwrap();
         assert!(dropped.load(Ordering::Acquire));
         assert_eq!(record.event_source, Some(RequestTraceEventSource::Dynamo));
+        let agent_context = record.agent_context.as_ref().expect("agent context");
+        assert_eq!(agent_context.session_id, "root");
+        assert_eq!(agent_context.input_trigger, Some(InputTrigger::ToolResult));
         assert_eq!(
-            record
-                .agent_context
+            agent_context
+                .compaction
                 .as_ref()
-                .expect("agent context")
-                .session_id,
-            "root"
+                .and_then(|compaction| compaction.strategy.as_deref()),
+            Some("memento")
         );
         let request = record.request.as_ref().expect("request payload");
         assert_eq!(request.model.as_deref(), Some("test-model"));
@@ -428,7 +436,7 @@ mod tests {
                 .as_ref()
                 .expect("replay metrics")
                 .input_length,
-            2
+            3
         );
     }
 
@@ -442,7 +450,9 @@ mod tests {
             session_id: "root".to_string(),
             parent_session_id: None,
             session_final: None,
+            compaction: None,
             kv_hints: None,
+            input_trigger: None,
         });
         let tracker = Some(Arc::new(RequestTracker::new()));
         let context = Context::new(());

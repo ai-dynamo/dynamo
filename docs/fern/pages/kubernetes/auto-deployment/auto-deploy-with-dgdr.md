@@ -162,7 +162,6 @@ GPU SKUs use **lowercase underscore format** (`h100_sxm`, not `H100-SXM5-80GB`).
 **Large and MoE models that span nodes.** When a model needs more GPUs than one node provides, the deployment is multinode and requires a gang scheduler. Install an orchestrator first — the operator returns a hard error otherwise:
 
 - [Multinode Orchestration](../installation/multinode-orchestration.md) — install-time prerequisites (Grove + KAI, or LWS + Volcano).
-- [Grove](../../developer-guide/knowledge-base/kubernetes/multinode/grove.md) (default) and [LWS](../../developer-guide/knowledge-base/kubernetes/multinode/lws.md) — the two orchestration backends.
 
 For **Mixture-of-Experts (MoE)** models (DeepSeek-R1, Qwen3-MoE), use **SGLang** for full support — vLLM and TensorRT-LLM have partial MoE support still under development. The profiler sweeps MoE models across up to **4 nodes**; beyond that, it selects the best config within range and you may need to adjust replica counts manually. See the [Profiler support matrix](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md#support-matrix).
 
@@ -191,9 +190,9 @@ spec:
 
 The operator mounts the PVC read-only into the profiling job and passes it through to the generated DGD, so both profiling and serving use the cached weights.
 
-`pvcModelPath` must be the HuggingFace snapshot path inside the PVC: `hub/models--<org>--<model>/snapshots/<commit-hash>`. Substitute `/` with `--` in the model ID, and replace `<commit-hash>` with the actual snapshot revision. See [Model Caching — Find the Snapshot Path](../model-deployment/model-loading/model-caching.mdx#find-the-snapshot-path) for how to look it up.
+`pvcModelPath` must be the HuggingFace snapshot path inside the PVC: `hub/models--<org>--<model>/snapshots/<commit-hash>`. Substitute `/` with `--` in the model ID, and replace `<commit-hash>` with the actual snapshot revision.
 
-**Setup:** create a `ReadWriteMany` PVC ([Installation Guide — Shared Storage](../installation/install-dynamo.md#shared-storage-for-model-caching)), run a one-time download Job to populate it, then reference it here. See [Model Caching](../model-deployment/model-loading/model-caching.mdx) for the full walkthrough.
+**Setup:** create a `ReadWriteMany` PVC ([Installation Guide — Shared Storage](../installation/install-dynamo.md#shared-storage-for-model-caching)), run a one-time download Job to populate it, then reference it here. See the [Model Storage Overview](../installation/model-storage/overview.md) to choose a storage backend.
 
 For gated models, create the token secret the profiler and pods read automatically:
 
@@ -393,9 +392,24 @@ spec:
                   value: kv
 ```
 
-Inspect `.status.profilingResults.selectedConfig` with `autoApply: false` to find the generated
-component names. An override can modify only components already present in that generated DGD; it
-cannot add a new worker, EPP, or other topology component.
+Add overrides before profiling starts, using the exact, case-sensitive component names generated
+for the selected backend and topology. To discover the names for a specific Dynamo release:
+
+1. Create a temporary DGDR with `autoApply: false` and without component overrides.
+2. Wait for the DGDR to reach the `Ready` phase, then list the generated names:
+
+```bash
+kubectl get dgdr <name> -n <namespace> \
+  -o jsonpath='{range .status.profilingResults.selectedConfig.spec.components[*]}{.name}{"\n"}{end}'
+```
+
+3. Delete the temporary DGDR, then create the final DGDR with overrides that use those names.
+
+The DGDR spec becomes immutable after profiling starts, so you cannot add or change overrides on
+the temporary resource. An override can modify only components already present in the generated
+DGD; it cannot add a new worker, EPP, or other topology component. See
+[Generated component names](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-component-names)
+for the current profiler names by backend and topology.
 
 > [!IMPORTANT]
 > Older overrides used the `nvidia.com/v1alpha1` DGD shape. They remain supported for compatibility,
@@ -403,7 +417,37 @@ cannot add a new worker, EPP, or other topology component.
 > `extraPodSpec.mainContainer.args` values append to the generated arguments. In `v1beta1`, map lists
 > such as components, containers, and environment variables merge by `name`, while atomic lists such
 > as graph-level `spec.env` and container `args` replace the generated list. Use `v1beta1` for new
-> overrides and include the complete desired argument list when overriding `args`.
+> overrides. Include the complete desired argument list for replacement, or use the append modifier
+> described below.
+
+For example, append KV routing flags to the generated frontend arguments:
+
+```yaml
+spec:
+  overrides:
+    dgd:
+      apiVersion: nvidia.com/v1beta1
+      kind: DynamoGraphDeployment
+      spec:
+        components:
+        - name: Frontend
+          podTemplate:
+            spec:
+              containers:
+              - name: main
+                $patch:
+                  args: append
+                args:
+                - --router-mode
+                - kv
+```
+
+To add flags to a container with explicit generated arguments, set `$patch.args` to `append` on that
+named container. The override helper combines the argument lists before returning the final DGD and
+removes the `$patch` directive. The append modifier supports only `args: append`, requires a
+non-empty argument list, and fails when the generated DGD does not contain the target container or
+the target does not define `args`. Without `$patch`, specifying `args` retains the standard
+replacement behavior and requires the complete desired argument list.
 
 For the complete merge, metadata, and validation rules, see
 [DGDR Reference — Generated DGD overrides](../../reference/kubernetes-api/dynamo-graph-deployment-request.mdx#generated-dgd-overrides).
@@ -417,4 +461,4 @@ For the complete merge, metadata, and validation rules, see
 | Author the deployment by hand instead | [DGD Guide](../model-deployment/deploy-with-dgd.md) |
 | Profiling algorithms and modes | [Profiler Guide](../../developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) |
 | Runtime autoscaling details | [Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/planner-guide.md) |
-| Full CRD reference | [API Reference](../../reference/kubernetes-api/additional-resources/api-reference-k8s.md) |
+| Full CRD reference | [API Reference](../../reference/kubernetes-api/full-api-reference.mdx) |

@@ -103,6 +103,8 @@ def _bare_adapter(capabilities):
         enable_power_awareness=True,
         total_gpu_power_limit=5000,
         min_endpoint=1,
+        prefill_min_endpoint=None,
+        decode_min_endpoint=None,
         min_gpu_budget=-1,
         max_gpu_budget=-1,
         mode="disagg",

@@ -23,8 +23,114 @@ fn is_harmony_parser(parser: &str) -> bool {
     parser == "harmony"
 }
 
+fn is_kimi_k3_parser(parser: &str) -> bool {
+    matches!(parser, "kimi_k3" | "kimi-k3")
+}
+
 fn contains_harmony_protocol(text: &str) -> bool {
     text.contains("<|channel|>")
+}
+
+/// Quote/escape-aware replacement for `dynamo_parsers::tool_calling::detect_tool_call_start`,
+/// which does a naive substring search and false-positives on a marker token that only
+/// appears as a quoted JSON string value (e.g. a tool argument literally containing the
+/// text `<tool_call>`). Looks up the real per-family marker tokens for `parser` from
+/// `dynamo_parsers`' own parser map (falling back to its "default" key exactly as
+/// `detect_tool_call_start` does for `None`/empty), then checks each with
+/// `unified_parser::contains_unquoted_marker` so a marker embedded inside a quoted string
+/// is not misread as native tool-call markup.
+fn contains_native_tool_call_marker(content: &str, parser: &str) -> bool {
+    let parser_key = if parser.is_empty() { "default" } else { parser };
+    let Some(config) = dynamo_parsers::tool_calling::parsers::get_tool_parser_map().get(parser_key)
+    else {
+        return false;
+    };
+    config
+        .parser_config
+        .tool_call_start_tokens()
+        .iter()
+        .any(|marker| {
+            !marker.is_empty() && super::unified_parser::contains_unquoted_marker(content, marker)
+        })
+}
+
+/// Drops any recovered native-fallback calls that don't match the forced
+/// `tool_name` from a `GuidedJsonNamed` constraint. Guided-JSON failure only
+/// tells us the *shape* was wrong; it says nothing about which tool the
+/// native markup named, so a malformed guided output that happens to embed
+/// native markup for a different tool must never be handed back to a client
+/// that pinned `tool_choice` to one specific function.
+fn filter_calls_to_forced_tool_name(
+    calls: Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
+    constraint: &crate::protocols::openai::GuidedToolConstraint,
+) -> Vec<dynamo_parsers::tool_calling::ToolCallResponse> {
+    let crate::protocols::openai::GuidedToolConstraint::GuidedJsonNamed { tool_name } = constraint
+    else {
+        return calls;
+    };
+    let (matched, dropped): (Vec<_>, Vec<_>) = calls
+        .into_iter()
+        .partition(|call| &call.function.name == tool_name);
+    if !dropped.is_empty() {
+        tracing::warn!(
+            tool_name,
+            dropped = dropped.len(),
+            "dropped native-fallback tool call(s) whose name did not match the tool_choice-forced tool_name"
+        );
+    }
+    matched
+}
+
+async fn parse_complete_tool_output(
+    content: &str,
+    parser: &str,
+    constraint: &crate::protocols::openai::GuidedToolConstraint,
+) -> anyhow::Result<(
+    Vec<dynamo_parsers::tool_calling::ToolCallResponse>,
+    Option<String>,
+)> {
+    if constraint.installs_guided_json() {
+        match super::tool_parser_v2::parse_complete_guided_json(content, constraint) {
+            Ok(calls) => return Ok((calls, Some(String::new()))),
+            Err(guided_error) => {
+                if !contains_native_tool_call_marker(content, parser) {
+                    return Err(guided_error);
+                }
+                tracing::warn!(
+                    parser,
+                    why = "guided_json_reconstructed_but_native_markup_observed",
+                    recovered_bytes = content.len(),
+                    "falling back to the configured native tool parser"
+                );
+            }
+        }
+    }
+
+    let result =
+        if super::tool_parser_v2::enabled() && super::tool_parser_v2::supports_family(parser) {
+            super::tool_parser_v2::parse_complete(content, None, parser)
+                .map(|(calls, normal)| (calls, Some(normal)))
+        } else {
+            try_tool_call_parse_aggregate_finalize(content, Some(parser), None).await
+        };
+
+    result.and_then(|(calls, normal)| {
+        let filtered = filter_calls_to_forced_tool_name(calls, constraint);
+        if filtered.is_empty()
+            && matches!(
+                constraint,
+                crate::protocols::openai::GuidedToolConstraint::GuidedJsonNamed { .. }
+            )
+        {
+            // Mirror the "no native markup found" behavior above: a fallback
+            // that recovered nothing usable for the forced tool is treated
+            // the same as a fallback that found nothing at all.
+            return Err(anyhow::anyhow!(
+                "native tool-call fallback recovered no call matching the tool_choice-forced tool name"
+            ));
+        }
+        Ok((filtered, normal))
+    })
 }
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
@@ -81,6 +187,16 @@ struct DeltaChoice {
 
     /// Accumulated content parts for multimodal responses
     content_parts: Vec<dynamo_protocols::types::ChatCompletionResponseContentPart>,
+}
+
+fn suppress_tool_call_output(choice: &mut DeltaChoice) {
+    // Fail closed when the decoded turn contains only an unauthorized tool call.
+    // We cannot safely reconstruct parser-specific wire markup as assistant text;
+    // in that case content remains empty and the terminal reason becomes `stop`.
+    choice.tool_calls = None;
+    if choice.finish_reason == Some(dynamo_protocols::types::FinishReason::ToolCalls) {
+        choice.finish_reason = Some(dynamo_protocols::types::FinishReason::Stop);
+    }
 }
 
 impl Default for DeltaAggregator {
@@ -353,7 +469,93 @@ impl DeltaAggregator {
             }
         }
 
-        if let Some(parser) = parsing_options.tool_call_parser.as_deref() {
+        // This is both a defense-in-depth check for structured deltas and a
+        // prerequisite for whole-response decoders such as Harmony: clear any
+        // already-structured calls before parsing so the decoder can still
+        // inspect ordinary text below.
+        if parsing_options.suppress_tool_calls {
+            for choice in aggregator.choices.values_mut() {
+                suppress_tool_call_output(choice);
+            }
+        }
+
+        // Two independent families each own ONE unified parser (topology B: raw
+        // model text reaches the frontend un-split) that replaces the split
+        // reasoning/tool-call finalize below outright: Qwen3 (`unified_parser`,
+        // gated on DYN_ENABLE_EXPERIMENTAL_PARSERS_V2) and muse (`tool_parser_v2`,
+        // default-on). This is the safety net for output that reached the
+        // aggregator unparsed; a request the worker already streamed through the
+        // matching `apply_stream`/`apply_unified_stream` arrives with `tool_calls`
+        // populated and is skipped by each guard below.
+        let qwen3_unified_family = super::unified_parser::selected_batch_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        );
+        if let Some(family) = qwen3_unified_family {
+            for choice in aggregator.choices.values_mut() {
+                if choice.text.is_empty()
+                    || choice
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| !calls.is_empty())
+                {
+                    continue;
+                }
+                match super::unified_parser::parse_complete(
+                    family,
+                    &choice.text,
+                    &parsing_options.guided_tool_constraint,
+                    &parsing_options.tools,
+                ) {
+                    Ok(parsed) => {
+                        choice.text = parsed.text;
+                        if !parsed.reasoning.is_empty() {
+                            choice
+                                .reasoning_content
+                                .get_or_insert_with(String::new)
+                                .push_str(&parsed.reasoning);
+                        }
+                        if !parsed.tool_calls.is_empty() && !parsing_options.suppress_tool_calls {
+                            choice.tool_calls = Some(parsed.tool_calls);
+                            // OpenAI contract: a message carrying tool calls finishes
+                            // with `ToolCalls`, not `Stop`.
+                            if choice.finish_reason
+                                == Some(dynamo_protocols::types::FinishReason::Stop)
+                            {
+                                choice.finish_reason =
+                                    Some(dynamo_protocols::types::FinishReason::ToolCalls);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        // Best-effort: the aggregated text is served as-is rather than
+                        // failing a request the model already answered.
+                        tracing::warn!(
+                            error = %error,
+                            family,
+                            "failed to parse aggregated unified output; serving it unparsed"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Muse finalizes through the UNIFIED parser (topology B: raw model text
+        // reaches the frontend un-split). Keyed on EITHER parser name to match the
+        // streaming guard, so a reasoning-only card (`--dyn-reasoning-parser
+        // muse_glimmer`, no tool-call parser) splits its markup here too. Default-on,
+        // so muse never falls into the v1 aggregate-finalize below. The gate is wider
+        // than main's `tool_call_parser.is_some()` for that reason; `parser` is bound
+        // inside the loop, after the muse branch has taken its `continue`. Excluded
+        // when Qwen3 already claimed the request above, since Qwen3 also configures a
+        // `tool_call_parser` and would otherwise fall through into this block too.
+        let unified_family = super::tool_parser_v2::unified_family(
+            parsing_options.tool_call_parser.as_deref(),
+            parsing_options.reasoning_parser.as_deref(),
+        );
+        if qwen3_unified_family.is_none()
+            && (unified_family.is_some() || parsing_options.tool_call_parser.is_some())
+        {
             for choice in aggregator.choices.values_mut() {
                 if choice
                     .tool_calls
@@ -364,13 +566,117 @@ impl DeltaAggregator {
                     continue;
                 }
 
+                if let Some(family) = unified_family.as_deref() {
+                    // Only the guided-JSON success arm below returns a synthetic
+                    // empty `content` placeholder (there is no separate message
+                    // text distinct from the tool-call JSON itself). Every other
+                    // arm — the native-fallback-after-guided-error reconstruction,
+                    // and the plain non-guided `else` branch — returns REAL
+                    // stripped content from `parse_complete_unified` that must
+                    // always replace `choice.text`, matching the sibling Qwen3
+                    // block's unconditional assignment, regardless of whether any
+                    // tool calls were found.
+                    let mut content_is_guided_placeholder = false;
+                    let parse_result = if parsing_options
+                        .guided_tool_constraint
+                        .installs_guided_json()
+                    {
+                        match super::tool_parser_v2::parse_complete_guided_json(
+                            &choice.text,
+                            &parsing_options.guided_tool_constraint,
+                        ) {
+                            Ok(calls) => {
+                                content_is_guided_placeholder = true;
+                                Ok((calls, String::new(), String::new()))
+                            }
+                            Err(guided_error) => {
+                                match super::tool_parser_v2::parse_complete_unified(
+                                    &choice.text,
+                                    None,
+                                    family,
+                                ) {
+                                    Ok((calls, reasoning, content)) => {
+                                        // A GuidedJsonNamed constraint pins one tool
+                                        // name; the native fallback must never hand
+                                        // back a call for a different tool just
+                                        // because it happened to find markup naming
+                                        // one in the malformed guided output.
+                                        let calls = filter_calls_to_forced_tool_name(
+                                            calls,
+                                            &parsing_options.guided_tool_constraint,
+                                        );
+                                        if !calls.is_empty()
+                                            || !reasoning.is_empty()
+                                            || content != choice.text
+                                        {
+                                            tracing::warn!(
+                                                family,
+                                                why = "guided_json_reconstructed_but_native_markup_observed",
+                                                recovered_bytes = choice.text.len(),
+                                                "falling back to the configured unified parser"
+                                            );
+                                            Ok((calls, reasoning, content))
+                                        } else {
+                                            Err(guided_error)
+                                        }
+                                    }
+                                    Err(native_error) => Err(native_error.context(format!(
+                                        "guided JSON parse also failed: {guided_error:#}"
+                                    ))),
+                                }
+                            }
+                        }
+                    } else {
+                        super::tool_parser_v2::parse_complete_unified(&choice.text, None, family)
+                    };
+                    match parse_result {
+                        Ok((calls, reasoning, content)) => {
+                            let calls_is_empty = calls.is_empty();
+                            // Same rule the streaming path applies: `none` still gets the
+                            // reasoning/content split and the marker stripping, but a
+                            // caller that disabled tools must not receive `tool_calls`.
+                            if !calls_is_empty && !parsing_options.suppress_tool_calls {
+                                choice.tool_calls = Some(
+                                    calls
+                                        .into_iter()
+                                        .map(super::tool_call_response_to_protocol)
+                                        .collect(),
+                                );
+                            }
+                            if !reasoning.is_empty() {
+                                choice
+                                    .reasoning_content
+                                    .get_or_insert_with(String::new)
+                                    .push_str(&reasoning);
+                            }
+                            if !calls_is_empty || !content_is_guided_placeholder {
+                                choice.text = content;
+                            } else {
+                                tracing::warn!(
+                                    family,
+                                    why = "guided_json_produced_zero_calls_under_tool_choice_required",
+                                    original_bytes = choice.text.len(),
+                                    "guided-JSON parse returned zero tool calls; preserving original text"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::debug!(error = %error, family, "muse unified batch parse failed");
+                        }
+                    }
+                    continue;
+                }
+
+                // Not muse: the loop gate guarantees a tool-call parser is set here.
+                let Some(parser) = parsing_options.tool_call_parser.as_deref() else {
+                    continue;
+                };
+
                 // With DYN_ENABLE_EXPERIMENTAL_PARSERS_V2, supported families use the
                 // v2 parser for batch too (no jail / no aggregate-finalize):
                 // parse_complete drops a value truncated at EOF instead of guessing it.
-                // Other families, the flag off, and guided-decoded requests
-                // (tool_choice=required/named or structural-tag, gated by
-                // experimental_v2_batch_eligible — see tool_parser_v2::batch_tool_choice_eligible)
-                // keep the v1 finalize path.
+                // Other families and the flag-off path keep the v1 finalize path.
+                // Guided JSON is handled above from the exact carried constraint.
                 // Extract the truncated tail BEFORE parsing so a second <tool_call>
                 // truncated after a complete first one is not silently dropped.
                 // Token strings come from the parser config so this stays in sync
@@ -396,15 +702,12 @@ impl DeltaAggregator {
                     None
                 };
 
-                let parse_result = if super::tool_parser_v2::enabled()
-                    && super::tool_parser_v2::supports_family(parser)
-                    && parsing_options.experimental_v2_batch_eligible
-                {
-                    super::tool_parser_v2::parse_complete(&choice.text, None, parser)
-                        .map(|(calls, normal)| (calls, Some(normal)))
-                } else {
-                    try_tool_call_parse_aggregate_finalize(&choice.text, Some(parser), None).await
-                };
+                let parse_result = parse_complete_tool_output(
+                    &choice.text,
+                    parser,
+                    &parsing_options.guided_tool_constraint,
+                )
+                .await;
                 let (tool_calls, content) = match parse_result {
                     Ok(result) => result,
                     Err(error) => {
@@ -425,7 +728,9 @@ impl DeltaAggregator {
                             .collect(),
                     );
                     choice.text = content.unwrap_or_default();
-                } else if is_harmony_parser(parser) && contains_harmony_protocol(&choice.text) {
+                } else if (is_harmony_parser(parser) && contains_harmony_protocol(&choice.text))
+                    || is_kimi_k3_parser(parser)
+                {
                     choice.text = content.unwrap_or_default();
                 } else if parser == "glm47"
                     && matches!(
@@ -459,6 +764,16 @@ impl DeltaAggregator {
             }
         }
 
+        // A retained whole-response parser may discover a syntactically valid
+        // call while removing model-internal channel markup. Parser activation
+        // is not permission to expose that call; enforce the request policy
+        // again after aggregate parsing.
+        if parsing_options.suppress_tool_calls {
+            for choice in aggregator.choices.values_mut() {
+                suppress_tool_call_output(choice);
+            }
+        }
+
         // Enforce parallel_tool_calls == false as a universal post-parse fallback,
         // similar to vLLM's maybe_filter_parallel_tool_calls
         if parsing_options.parallel_tool_calls == Some(false) {
@@ -467,6 +782,38 @@ impl DeltaAggregator {
                     && calls.len() > 1
                 {
                     calls.truncate(1);
+                }
+            }
+        }
+
+        // for non-streaming `force_nonempty_content=true`
+        // requests, a reasoning-only turn leaves `content` empty because all
+        // output was split into `reasoning_content`. The chat template promised
+        // non-empty content, so surface the reasoning as content. Only when no
+        // content and no tool calls were produced; when content exists,
+        // reasoning stays in `reasoning_content`.
+        if parsing_options.move_reasoning_to_content_when_empty {
+            for choice in aggregator.choices.values_mut() {
+                let has_tool_calls = choice
+                    .tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| !calls.is_empty());
+                // `content_parts` (multimodal) counts as content too — `From<DeltaChoice>`
+                // prefers parts over `text`, so moving reasoning into `text` here would be
+                // dropped. Only move when there is no content of either kind.
+                // Whitespace-only text counts as empty — matching vLLM's
+                // NemotronV3ReasoningParser (`not final_content.strip()`): a
+                // trailing newline after `</think>` must not block the move and
+                // leave semantically empty content.
+                if choice.text.trim().is_empty()
+                    && choice.content_parts.is_empty()
+                    && !has_tool_calls
+                    && choice
+                        .reasoning_content
+                        .as_deref()
+                        .is_some_and(|r| !r.trim().is_empty())
+                {
+                    choice.text = choice.reasoning_content.take().unwrap_or_default();
                 }
             }
         }
@@ -506,16 +853,27 @@ impl From<DeltaChoice> for dynamo_protocols::types::ChatChoice {
     /// # Note
     /// The `function_call` field is deprecated.
     fn from(delta: DeltaChoice) -> Self {
-        // TODO: Revisit whether tool calls produced at the output-token limit should
-        // preserve Length and yield an incomplete Responses result.
-        let finish_reason = if delta
+        // A terminal reason that already explains why generation ended
+        // outranks the tool-call rewrite. Only `Stop` and a missing reason are
+        // rewritten. The streaming path applies the same rule in two parts:
+        // `unified_parser::ChoiceState::normalize_finish_reason` rewrites `Stop`, and
+        // `unified_parser::ChoiceState::unterminated_finish_reason` supplies `ToolCalls`
+        // when no reason arrives at all. The two paths used to disagree, so a call
+        // truncated at the token limit reached a non-streaming caller labelled
+        // `tool_calls` with no sign it had been cut off.
+        //
+        // Preserving `Length` is also what makes the Responses conversion reachable:
+        // `responses::chat_completion_to_response` keys `status: "incomplete"` and
+        // `incomplete_details.reason: "max_output_tokens"` off this exact value.
+        let has_tool_calls = delta
             .tool_calls
             .as_ref()
-            .is_some_and(|calls| !calls.is_empty())
-        {
-            Some(dynamo_protocols::types::FinishReason::ToolCalls)
-        } else {
-            delta.finish_reason
+            .is_some_and(|calls| !calls.is_empty());
+        let finish_reason = match delta.finish_reason {
+            Some(dynamo_protocols::types::FinishReason::Stop) | None if has_tool_calls => {
+                Some(dynamo_protocols::types::FinishReason::ToolCalls)
+            }
+            other => other,
         };
 
         // Determine content format based on what we accumulated
@@ -681,6 +1039,184 @@ mod tests {
             comment: None,
             error: None,
         }
+    }
+
+    /// Build a stream delta with `reasoning_content` set and optional (possibly
+    /// empty) text content — mirrors what the reasoning parser emits after
+    /// splitting think tags. Used by the force_nonempty_content test.
+    fn create_reasoning_delta(
+        index: u32,
+        content: &str,
+        reasoning_content: &str,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        // ALLOW: function_call is deprecated
+        #[allow(deprecated)]
+        let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+            content: Some(ChatCompletionMessageContent::Text(content.to_string())),
+            function_call: None,
+            tool_calls: None,
+            role: Some(dynamo_protocols::types::Role::Assistant),
+            refusal: None,
+            reasoning_content: Some(reasoning_content.to_string()),
+        };
+        let choice = dynamo_protocols::types::ChatChoiceStream {
+            index,
+            delta,
+            finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+            logprobs: None,
+        };
+        let data = NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                model: "nvidia/nvidia-nemotron-3-ultra".to_string(),
+                created: 1234567890,
+                service_tier: None,
+                usage: None,
+                system_fingerprint: None,
+                choices: vec![choice],
+                object: "chat.completion".to_string(),
+            },
+            nvext: None,
+            llm_metrics: None,
+        };
+        Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+            error: None,
+        }
+    }
+
+    /// with Nemotron `force_nonempty_content=true`, a non-streaming
+    /// reasoning-only turn must surface its reasoning as `content` (the chat
+    /// template promised non-empty content), but only when no content was
+    /// generated. Gated by `ParsingOptions::move_reasoning_to_content_when_empty`.
+    #[tokio::test]
+    async fn test_move_reasoning_to_content_when_empty() {
+        let reasoning_only = || {
+            Box::pin(stream::iter(vec![create_reasoning_delta(
+                0,
+                "",
+                "Let me think.",
+            )]))
+        };
+
+        // Repro: without the flag, a reasoning-only turn leaves content empty
+        // (None) even though force_nonempty_content promised non-empty content.
+        let resp = DeltaAggregator::apply(reasoning_only(), ParsingOptions::default())
+            .await
+            .unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert!(
+            msg.content.is_none(),
+            "repro: content empty without the flag"
+        );
+        assert_eq!(msg.reasoning_content.as_deref(), Some("Let me think."));
+
+        // Fixed: with the flag, reasoning is moved into content and cleared.
+        let opts = ParsingOptions::default().with_move_reasoning_to_content_when_empty(true);
+        let resp = DeltaAggregator::apply(reasoning_only(), opts.clone())
+            .await
+            .unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert_eq!(
+            msg.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Let me think.".to_string()),
+        );
+        assert_eq!(msg.reasoning_content, None);
+
+        // Whitespace-only content counts as empty (a trailing newline after
+        // `</think>` from the incremental parser) — matches vLLM's
+        // `not final_content.strip()` check; the move must still fire.
+        let whitespace_content = Box::pin(stream::iter(vec![create_reasoning_delta(
+            0,
+            "\n",
+            "Let me think.",
+        )]));
+        let resp = DeltaAggregator::apply(whitespace_content, opts.clone())
+            .await
+            .unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert_eq!(
+            msg.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("Let me think.".to_string()),
+        );
+        assert_eq!(msg.reasoning_content, None);
+
+        // When content WAS generated, reasoning stays in reasoning_content.
+        let with_content = Box::pin(stream::iter(vec![create_reasoning_delta(
+            0,
+            "The answer is 42.",
+            "Let me think.",
+        )]));
+        let resp = DeltaAggregator::apply(with_content, opts).await.unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert_eq!(
+            msg.content.as_ref().unwrap(),
+            &ChatCompletionMessageContent::Text("The answer is 42.".to_string()),
+        );
+        assert_eq!(msg.reasoning_content.as_deref(), Some("Let me think."));
+    }
+
+    /// Multimodal content lives in `content_parts`, and `From<DeltaChoice>` prefers
+    /// parts over `text` — so reasoning must NOT be moved when parts are present
+    /// (it would be silently dropped). Guards the `content_parts` half of the
+    /// no-content check.
+    #[tokio::test]
+    async fn test_move_reasoning_skips_when_content_parts_present() {
+        #[allow(deprecated)]
+        let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+            content: Some(ChatCompletionMessageContent::Parts(vec![
+                dynamo_protocols::types::ChatCompletionResponseContentPart::Text(
+                    dynamo_protocols::types::ChatCompletionResponseContentPartText {
+                        text: "an image".to_string(),
+                    },
+                ),
+            ])),
+            function_call: None,
+            tool_calls: None,
+            role: Some(dynamo_protocols::types::Role::Assistant),
+            refusal: None,
+            reasoning_content: Some("thinking".to_string()),
+        };
+        let choice = dynamo_protocols::types::ChatChoiceStream {
+            index: 0,
+            delta,
+            finish_reason: Some(dynamo_protocols::types::FinishReason::Stop),
+            logprobs: None,
+        };
+        let data = NvCreateChatCompletionStreamResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                id: "test_id".to_string(),
+                model: "m".to_string(),
+                created: 1,
+                service_tier: None,
+                usage: None,
+                system_fingerprint: None,
+                choices: vec![choice],
+                object: "chat.completion".to_string(),
+            },
+            nvext: None,
+            llm_metrics: None,
+        };
+        let annotated = Annotated {
+            data: Some(data),
+            id: Some("test_id".to_string()),
+            event: None,
+            comment: None,
+            error: None,
+        };
+        let opts = ParsingOptions::default().with_move_reasoning_to_content_when_empty(true);
+        let resp = DeltaAggregator::apply(Box::pin(stream::iter(vec![annotated])), opts)
+            .await
+            .unwrap();
+        let msg = &resp.inner.choices[0].message;
+        assert!(matches!(
+            msg.content.as_ref().unwrap(),
+            ChatCompletionMessageContent::Parts(_)
+        ));
+        assert_eq!(msg.reasoning_content.as_deref(), Some("thinking"));
     }
 
     /// Build a stream delta carrying a raw list of tool-call chunks (no content).
@@ -1252,7 +1788,33 @@ mod tests {
         annotated_delta2.data.as_mut().expect("delta data").nvext =
             Some(serde_json::json!({ "stop_reason": 128001 }));
 
-        let stream = Box::pin(stream::iter(vec![annotated_delta1, annotated_delta2]));
+        let mut metadata = annotated_delta2.clone();
+        let metadata_data = metadata.data.as_mut().expect("metadata data");
+        metadata_data.inner.choices.clear();
+        metadata_data.nvext = Some(serde_json::json!({
+            "engine_data": {
+                "prompt_token_ids": [1, 2],
+                "completion_token_ids": [10, 11],
+                "completion_logprobs": [-0.1, -0.2],
+            }
+        }));
+
+        let mut usage = metadata.clone();
+        let usage_data = usage.data.as_mut().expect("usage data");
+        usage_data.nvext = None;
+        usage_data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 2,
+            completion_tokens: 2,
+            total_tokens: 4,
+            ..Default::default()
+        });
+
+        let stream = Box::pin(stream::iter(vec![
+            annotated_delta1,
+            annotated_delta2,
+            metadata,
+            usage,
+        ]));
         let response = DeltaAggregator::apply(stream, ParsingOptions::default())
             .await
             .expect("aggregate stream");
@@ -1260,9 +1822,18 @@ mod tests {
         assert_eq!(
             response.nvext,
             Some(serde_json::json!({
-                "engine_data": { "trace_id": "abc" },
+                "engine_data": {
+                    "prompt_token_ids": [1, 2],
+                    "completion_token_ids": [10, 11],
+                    "completion_logprobs": [-0.1, -0.2],
+                },
                 "stop_reason": 128001,
             }))
+        );
+        assert_eq!(response.inner.choices.len(), 1);
+        assert_eq!(
+            response.inner.usage.expect("aggregated usage").total_tokens,
+            4
         );
     }
 
@@ -1416,9 +1987,17 @@ mod tests {
         );
     }
 
+    /// `Length` must survive a tool call, because it is the only thing
+    /// telling the caller that generation was cut off before the call finished.
+    ///
+    /// This test previously asserted the opposite. That made it contradict
+    /// `tool_choice_finish_reasons.rs::test_required_tool_choice_preserves_length_finish_reason`,
+    /// which feeds the same truncated `required` payload through the streaming path and
+    /// requires `Length` to be preserved. Both passed, because they exercised different
+    /// stages of the same request.
     #[tokio::test]
-    async fn test_tool_calling_finish_reason_override_from_length() {
-        // Test that when tool calls are present but finish reason is Length, it gets overridden to ToolCalls
+    async fn test_tool_calling_finish_reason_preserves_length() {
+        // Tool calls are present AND generation hit the token limit: `Length` wins.
         let tool_call_json = r#"{"name": "search", "arguments": {"query": "rust programming"}}"#;
 
         let annotated_delta = create_test_delta(
@@ -1456,10 +2035,38 @@ mod tests {
             dynamo_protocols::types::FunctionType::Function
         );
 
-        // Verify that finish reason was overridden to ToolCalls despite original being Length
+        // The terminal reason explains why generation stopped and is not replaced.
         assert_eq!(
             choice.finish_reason,
-            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+            Some(dynamo_protocols::types::FinishReason::Length)
+        );
+    }
+
+    /// The guard for the rule above: `ContentFilter` is also a terminal reason that
+    /// explains itself, so it must survive a tool call for the same reason `Length` does.
+    #[tokio::test]
+    async fn test_tool_calling_finish_reason_preserves_content_filter() {
+        let tool_call_json = r#"{"name": "search", "arguments": {"query": "rust programming"}}"#;
+
+        let annotated_delta = create_test_delta(
+            0,
+            "Let me search for that.",
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::ContentFilter),
+            None,
+            Some(tool_call_json),
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let response = DeltaAggregator::apply(stream, ParsingOptions::default())
+            .await
+            .expect("aggregation should succeed");
+
+        let choice = &response.inner.choices[0];
+        assert!(choice.message.tool_calls.is_some());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ContentFilter)
         );
     }
 
@@ -1735,6 +2342,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_disabled_tool_parsing_preserves_structured_content_with_name() {
+        let json = r#"{"name":"Science Fair","date":"Friday","participants":["Alice","Bob"]}"#;
+        let annotated_delta = create_test_delta(
+            0,
+            json,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::Stop),
+            None,
+            None,
+        );
+
+        let stream = Box::pin(stream::iter(vec![annotated_delta]));
+        let response = DeltaAggregator::apply(
+            stream,
+            ParsingOptions::new(Some("hermes".to_string()), None)
+                .with_tool_call_parsing_enabled(false),
+        )
+        .await
+        .expect("aggregation should preserve assistant content");
+        let choice = &response.inner.choices[0];
+
+        assert_eq!(
+            choice.message.content,
+            Some(ChatCompletionMessageContent::Text(json.to_string()))
+        );
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
     async fn test_preserves_non_tool_content_when_parsing_aggregated_tool_calls() {
         let annotated_delta = create_test_delta(
             0,
@@ -1770,7 +2410,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_harmony_aggregate_zero_call_drops_internal_analysis() {
+    async fn test_disabled_harmony_aggregate_drops_internal_analysis() {
         let annotated_delta = create_test_delta(
             0,
             r#"<|channel|>analysis<|message|>Need current weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_current_weather <|constrain|>json<|message|>{"location":"Hidden City"}"#,
@@ -1783,7 +2423,8 @@ mod tests {
         let stream = Box::pin(stream::iter(vec![annotated_delta]));
         let result = DeltaAggregator::apply(
             stream,
-            ParsingOptions::new(Some("harmony".to_string()), None),
+            ParsingOptions::new(Some("harmony".to_string()), None)
+                .with_tool_call_parsing_enabled(false),
         )
         .await;
 
@@ -1791,6 +2432,33 @@ mod tests {
         let response = result.unwrap();
         let choice = &response.inner.choices[0];
         assert_eq!(choice.message.content, None);
+        assert!(choice.message.tool_calls.is_none());
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Stop)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_disabled_harmony_aggregate_suppresses_parsed_tool_call() {
+        let annotated_delta = create_test_delta(
+            0,
+            r#"<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"location":"Paris"}<|call|>"#,
+            Some(dynamo_protocols::types::Role::Assistant),
+            Some(dynamo_protocols::types::FinishReason::ToolCalls),
+            None,
+            None,
+        );
+
+        let response = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![annotated_delta])),
+            ParsingOptions::new(Some("harmony".to_string()), None)
+                .with_tool_call_parsing_enabled(false),
+        )
+        .await
+        .expect("Harmony decoding should succeed");
+        let choice = &response.inner.choices[0];
+
         assert!(choice.message.tool_calls.is_none());
         assert_eq!(
             choice.finish_reason,
@@ -1826,6 +2494,47 @@ mod tests {
             ))
         );
         assert!(choice.message.tool_calls.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_disabled_kimi_k3_aggregate_decodes_tool_free_response() {
+        let raw = concat!(
+            "<|open|>response<|sep|>",
+            "323",
+            "<|close|>response<|sep|>",
+            "<|close|>message<|sep|>",
+            "<|end_of_msg|>"
+        );
+
+        for parser in ["kimi_k3", "kimi-k3"] {
+            let annotated_delta = create_test_delta(
+                0,
+                raw,
+                Some(dynamo_protocols::types::Role::Assistant),
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                None,
+                None,
+            );
+            let response = DeltaAggregator::apply(
+                Box::pin(stream::iter(vec![annotated_delta])),
+                ParsingOptions::new(Some(parser.to_string()), Some("kimi_k3".to_string()))
+                    .with_tool_call_parsing_enabled(false),
+            )
+            .await
+            .expect("Kimi K3 response decoding should succeed");
+            let choice = &response.inner.choices[0];
+
+            assert_eq!(
+                choice.message.content,
+                Some(ChatCompletionMessageContent::Text("323".to_string())),
+                "parser alias {parser} must strip K3 XTML wrappers"
+            );
+            assert!(choice.message.tool_calls.is_none());
+            assert_eq!(
+                choice.finish_reason,
+                Some(dynamo_protocols::types::FinishReason::Stop)
+            );
+        }
     }
 
     #[test]

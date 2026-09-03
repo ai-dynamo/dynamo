@@ -6,14 +6,19 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from functools import cache
 from uuid import UUID
+
+from gpu_memory_service.common.vmm.cuda_utils import cuda_ensure_initialized
 
 try:
     from cuda.bindings import driver as cuda
 except ImportError:
     cuda = None
+
+_AF_UNIX_PATH_LIMIT = 104 if sys.platform == "darwin" else 108
 
 
 def _check_cuda(result, operation: str) -> None:
@@ -44,8 +49,7 @@ def get_device_uuid(device: int) -> str:
             "cuda-python is required for GPU Memory Service device identity"
         )
 
-    (result,) = cuda.cuInit(0)
-    _check_cuda(result, "cuInit")
+    cuda_ensure_initialized()
     result, cuda_device = cuda.cuDeviceGet(device)
     _check_cuda(result, "cuDeviceGet")
     result, uuid = cuda.cuDeviceGetUuid(cuda_device)
@@ -61,7 +65,14 @@ def invalidate_device_uuid_cache() -> None:
 def get_socket_path(device: int, tag: str = "weights") -> str:
     """Return the V1 socket path for a CUDA-visible device and domain."""
     socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
-    return os.path.join(
+    path = os.path.join(
         socket_dir,
-        f"gms_{get_device_uuid(device)}_{tag}.sock",
+        f"gms_{device}_{tag}.sock",
     )
+    path_bytes = len(os.fsencode(path))
+    if path_bytes >= _AF_UNIX_PATH_LIMIT:
+        raise ValueError(
+            "GMS socket path is too long for AF_UNIX "
+            f"({path_bytes} bytes, limit {_AF_UNIX_PATH_LIMIT - 1}): {path}"
+        )
+    return path

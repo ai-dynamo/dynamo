@@ -59,6 +59,7 @@ class _GMSClientSession:
                 self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 try:
                     self._socket.connect(path)
+                    self._socket.settimeout(connect_timeout)
                     break
                 except (FileNotFoundError, ConnectionRefusedError) as cause:
                     self._socket.close()
@@ -82,10 +83,10 @@ class _GMSClientSession:
                 response, received_fd = receive_message(self._socket)
             except TimeoutError as cause:
                 raise ConnectionError(
-                    "Timed out waiting for GMS lock admission"
+                    "Timed out waiting for GMS handshake or lock admission"
                 ) from cause
             finally:
-                self._socket.settimeout(None)
+                self._socket.settimeout(connect_timeout)
             handshake = self._decode(
                 "handshake",
                 response,

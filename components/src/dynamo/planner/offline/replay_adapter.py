@@ -468,6 +468,7 @@ class ReplayPlannerAdapter:
             "report_interval_hours",
             "report_write_gzip_log",
             "live_dashboard_port",
+            "control_api_port",
             "plugin_registration.auth",
             "plugin_registration.transport",
             "plugin_registration.protocol_version_min",
@@ -482,16 +483,8 @@ class ReplayPlannerAdapter:
         ]
         config = self._config.model_dump(mode="json", by_alias=True)
         decision_config = dict(config)
-        for field in excluded_fields[:5]:
-            parent = decision_config
-            parts = field.split(".")
-            for part in parts[:-1]:
-                child = parent.get(part)
-                if not isinstance(child, dict):
-                    parent = {}
-                    break
-                parent = child
-            parent.pop(parts[-1], None)
+        for field in (name for name in excluded_fields if "." not in name):
+            decision_config.pop(field, None)
         registration = dict(decision_config.get("plugin_registration", {}))
         in_process = []
         for plugin in registration.get("in_process_plugins", []):

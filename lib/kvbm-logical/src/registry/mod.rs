@@ -199,7 +199,7 @@ impl BlockRegistry {
     /// Returns `Vec<(SequenceHash, bool)>` where `bool` is true if a block
     /// exists for at least one of the supplied tier `TypeId`s.
     ///
-    /// Same consistency caveats as [`check_presence`]: this is a
+    /// Same consistency caveats as `check_presence`: this is a
     /// refcounted shadow of authoritative store state, not a linearizable
     /// snapshot. May briefly disagree with the store mid-mutation.
     ///

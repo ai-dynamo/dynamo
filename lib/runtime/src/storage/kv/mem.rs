@@ -141,8 +141,8 @@ impl Bucket for MemoryBucketRef {
             }
             Entry::Occupied(mut entry) => {
                 let (rev, _v) = entry.get();
-                if *rev == revision {
-                    StoreOutcome::Exists(revision)
+                if revision == 0 || *rev == revision {
+                    StoreOutcome::Exists(*rev)
                 } else {
                     entry.insert((revision, value.clone()));
                     let _ = self.inner.change_sender.send(MemoryEvent::Put {
@@ -155,6 +155,33 @@ impl Bucket for MemoryBucketRef {
             }
         };
         Ok(outcome)
+    }
+
+    async fn compare_and_replace(
+        &self,
+        key: &Key,
+        expected: bytes::Bytes,
+        value: bytes::Bytes,
+    ) -> Result<StoreOutcome, StoreError> {
+        let mut locked_data = self.inner.data.lock();
+        let bucket = locked_data
+            .get_mut(&self.name)
+            .ok_or_else(|| StoreError::MissingBucket(self.name.to_string()))?;
+        let entry = bucket
+            .data
+            .get_mut(&key.0)
+            .ok_or_else(|| StoreError::MissingKey(key.to_string()))?;
+        if entry.1 != expected {
+            return Err(StoreError::Retry);
+        }
+        let next_revision = entry.0.saturating_add(1).max(1);
+        *entry = (next_revision, value.clone());
+        let _ = self.inner.change_sender.send(MemoryEvent::Put {
+            bucket: self.name.clone(),
+            key: key.to_string(),
+            value,
+        });
+        Ok(StoreOutcome::Created(next_revision))
     }
 
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
@@ -267,10 +294,73 @@ impl Bucket for MemoryBucketRef {
 #[cfg(test)]
 mod tests {
     use super::MEMORY_EVENT_BUFFER_CAPACITY;
-    use crate::storage::kv::{Bucket as _, Key, MemoryStore, Store as _, WatchEvent};
+    use crate::storage::kv::{
+        Bucket as _, Key, MemoryStore, Store as _, StoreError, StoreOutcome, WatchEvent,
+    };
     use futures::StreamExt;
     use std::collections::HashSet;
+    use std::sync::Arc;
     use std::time::Duration;
+    use tokio::sync::Barrier;
+
+    #[tokio::test]
+    async fn delete_wins_race_with_compare_and_replace() {
+        let store = MemoryStore::new();
+        let bucket = Arc::new(store.get_or_create_bucket("bucket", None).await.unwrap());
+        let key = Key::new("model".to_string());
+        bucket.insert(&key, "old".into(), 0).await.unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let update_bucket = bucket.clone();
+        let update_key = key.clone();
+        let update_barrier = barrier.clone();
+        let update = tokio::spawn(async move {
+            update_barrier.wait().await;
+            update_bucket
+                .compare_and_replace(&update_key, "old".into(), "new".into())
+                .await
+        });
+        let delete_bucket = bucket.clone();
+        let delete_key = key.clone();
+        let delete_barrier = barrier.clone();
+        let delete = tokio::spawn(async move {
+            delete_barrier.wait().await;
+            delete_bucket.delete(&delete_key).await
+        });
+
+        barrier.wait().await;
+        let update_result = update.await.unwrap();
+        delete.await.unwrap().unwrap();
+        assert!(update_result.is_ok() || matches!(update_result, Err(StoreError::MissingKey(_))));
+        assert_eq!(bucket.get(&key).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn revision_zero_replay_preserves_cas_update() {
+        let store = MemoryStore::new();
+        let bucket = store.get_or_create_bucket("bucket", None).await.unwrap();
+        let key = Key::new("model".to_string());
+
+        assert_eq!(
+            bucket.insert(&key, "initial".into(), 0).await.unwrap(),
+            StoreOutcome::Created(0)
+        );
+        assert_eq!(
+            bucket
+                .compare_and_replace(&key, "initial".into(), "updated".into())
+                .await
+                .unwrap(),
+            StoreOutcome::Created(1)
+        );
+        assert_eq!(
+            bucket.insert(&key, "initial".into(), 0).await.unwrap(),
+            StoreOutcome::Exists(1)
+        );
+        assert_eq!(
+            bucket.get(&key).await.unwrap().unwrap().as_ref(),
+            b"updated"
+        );
+    }
 
     #[tokio::test]
     async fn multiple_watchers_receive_updates_without_cross_bucket_stealing() {

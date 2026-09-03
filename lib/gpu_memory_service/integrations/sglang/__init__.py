@@ -7,7 +7,8 @@ Usage:
     from gpu_memory_service.integrations.sglang import setup_gms
 
     if server_args.load_format == "gms":
-        server_args.load_format = setup_gms(server_args)
+        load_format = setup_gms(server_args)
+        server_args.override("dynamo.gms", load_format=load_format)
 """
 
 from __future__ import annotations
@@ -57,7 +58,13 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
             "Cannot use --enable-draft-weights-cpu-backup with --load-format gms."
         )
 
-    server_args.enable_memory_saver = True
+    override = getattr(server_args, "override", None)
+    if callable(override):
+        override("dynamo.gms", enable_memory_saver=True)
+    else:
+        # The separately pinned XPU image still uses SGLang 0.5.11, which
+        # predates ServerArgs.override. Remove after that pin reaches 0.5.16+.
+        server_args.enable_memory_saver = True
     # Resolve lock mode and RO reconnect timeout from model_loader_extra_config
     # before patches fire.
     global _gms_lock_mode
