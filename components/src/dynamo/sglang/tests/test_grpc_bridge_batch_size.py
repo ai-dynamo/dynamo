@@ -75,8 +75,7 @@ class FakeRuntimeHandle:
         gen = self.generate_request(obj)
         if stream:
             # The defect: obj.batch_size is read before the generator body runs.
-            # Upstream wraps this in `except Exception` and forwards the message
-            # to the client, which is how it surfaces as an HTTP 500 body.
+            # Upstream forwards the resulting error to the client as HTTP 500.
             expected_choices = obj.batch_size * obj.parallel_sample_num
             completed = set()
             async for chunk in gen:

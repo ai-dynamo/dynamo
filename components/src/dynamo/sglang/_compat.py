@@ -65,10 +65,8 @@ except ModuleNotFoundError as exc:
         # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
         from sglang.srt.server_args_config_parser import ConfigArgumentMerger
     elif exc.name == "sglang" or (exc.name or "").startswith("sglang."):
-        # SGLang is not installed at all. Every other SGLang import in this
-        # module already degrades to None, so match that instead of making the
-        # whole module unimportable: ensure_sglang_grpc_bridge_batch_size() has
-        # a SGLang-free code path that callers and tests exercise directly.
+        # SGLang absent entirely: degrade to None like every other SGLang import
+        # here, so this module's SGLang-free code paths stay importable.
         ConfigArgumentMerger = None  # type: ignore[assignment,misc]
     else:
         raise
@@ -170,9 +168,8 @@ def _normalize_generate_request_once(obj: Any) -> None:
     early is therefore only safe if SGLang's own later call is neutralized.
     """
     if hasattr(obj, "batch_size"):
-        # Either SGLang normalized already or this release assigns batch_size
-        # itself. Nothing to do, and re-normalizing here would be the very
-        # double expansion described above.
+        # Already normalized, or this release assigns batch_size itself.
+        # Re-normalizing here would cause the double expansion described above.
         return
 
     normalize = getattr(obj, "normalize_batch_and_arguments", None)
@@ -182,9 +179,8 @@ def _normalize_generate_request_once(obj: Any) -> None:
     try:
         normalize()
     except Exception:
-        # Leave the failure to SGLang. generate_request() normalizes again
-        # inside the generator body, where the bridge's own exception handler
-        # turns the error into a client-visible message. Do not neutralize.
+        # Leave the failure to SGLang: generate_request() normalizes again in the
+        # generator body and surfaces the error there, so do not neutralize it.
         logger.debug("Early SGLang request normalization failed", exc_info=True)
         return
 

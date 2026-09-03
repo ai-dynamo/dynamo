@@ -32,18 +32,16 @@ def main() -> None:
     try:
         ensure_sglang_grpc_bridge_batch_size()
     except Exception:
-        # Starting the engine matters more than the override. On a release that
-        # does not need it, or one that restructured the bridge, log and hand
-        # off anyway rather than failing a launch that would otherwise work.
+        # Starting the engine matters more than the override: a release that does
+        # not need it, or restructured the bridge, must still launch.
         logger.warning(
             "Could not install the SGLang gRPC bridge compatibility override; "
             "continuing to launch the engine",
             exc_info=True,
         )
 
-    # run_module rather than an import: sglang.launch_server does its work under
-    # `if __name__ == "__main__"`, so this reproduces `python -m sglang.launch_server`
-    # exactly, including its sys.argv handling.
+    # run_module, not import: sglang.launch_server does its work under
+    # `if __name__ == "__main__"`, so this reproduces `python -m` exactly.
     runpy.run_module("sglang.launch_server", run_name="__main__")
 
 
