@@ -3816,6 +3816,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_expected_fpms = 1
         self._schedule_times.clear()
         self._last_update_time = 0.0
+        self._kvwarm_release_heavy_state()
         if resume_publisher:
             self._publisher.resume()
 
@@ -4171,6 +4172,63 @@ class InstrumentedScheduler(AsyncScheduler):
             self._kvwarm_meta = meta
         return meta
 
+    def _kvwarm_state_layer_groups(self) -> list[str]:
+        """Names of KV-cache groups backed by recurrent state (Mamba/linear
+        attention). Their per-request state is updated in place, so a borrowed
+        shadow write would corrupt the chain; the warm-up must not run on them
+        until scratch state blocks exist."""
+        manager = getattr(self, "kv_cache_manager", None)
+        config = getattr(manager, "kv_cache_config", None)
+        groups = getattr(config, "kv_cache_groups", None) or []
+        names = []
+        for group in groups:
+            spec_name = type(getattr(group, "kv_cache_spec", None)).__name__
+            if "Mamba" in spec_name:
+                names.append(spec_name)
+        return names
+
+    def _kvwarm_seed_regime(self, point) -> str:
+        """Row-level KV seed provenance for artifact consumers.
+
+        ``real_kv`` / ``fake_fallback`` come from the injection stamp;
+        ``legacy`` means the warm-up was switched off; ``skip:<reason>`` means
+        the gate rejected the configuration; ``unstamped`` is a decode point
+        that never reached injection (e.g. skipped before it); prefill points
+        are ``not_applicable``.
+        """
+        if getattr(point, "point_type", None) != "decode":
+            return "not_applicable"
+        reasons = list(getattr(point, "sample_reasons", None) or [])
+        if "kvwarm_real_kv" in reasons:
+            return "real_kv"
+        if "kvwarm_fake_fallback" in reasons:
+            return "fake_fallback"
+        if not self._kvwarm_flag_on():
+            return "legacy"
+        meta = getattr(self, "_kvwarm_meta", None) or {}
+        if meta.get("warm_eligible") is False:
+            return f"skip:{meta.get('skip_reason')}"
+        return "unstamped"
+
+    def _kvwarm_release_heavy_state(self) -> None:
+        """Drop benchmark-only host state before the scheduler resumes serving.
+
+        The seeding texts, tokenizer, per-chain token caches and the real-text
+        prompt pool can hold hundreds of MB; none of it is needed once the
+        sweep is over (success or abort).
+        """
+        if getattr(self, "_kvwarm_chain_ids", None):
+            self._kvwarm_shed_chains()
+        for attr in (
+            "_kvwarm_texts",
+            "_kvwarm_tok",
+            "_kvwarm_token_cache",
+            "_kvwarm_chain_prompts",
+            "_bench_prefill_pool",
+        ):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+
     def _kvwarm_warm_eligible(self) -> bool:
         """Warmup only matters to first order for EP-sharded MoE; dense and
         moe_tp topologies are physically immune -- skip."""
@@ -4218,6 +4276,8 @@ class InstrumentedScheduler(AsyncScheduler):
                 # to deepen incrementally; with prefix cache off a full chain
                 # rebuild is prohibitively expensive -- prefer skipping.
                 reason = "prefix_caching_disabled"
+            elif self._kvwarm_state_layer_groups():
+                reason = "hybrid_state_layers_unsupported"
             else:
                 try:
                     # Resolve (and, on first use, download) the seeding dataset
@@ -4542,20 +4602,27 @@ class InstrumentedScheduler(AsyncScheduler):
             else:
                 pending = True
         if vanished:
-            self._kvwarm_chain_ids = [
-                r for r in self._kvwarm_chain_ids if r not in set(vanished)
-            ]
-            for r in vanished:
-                self._kvwarm_chain_prompts.pop(r, None)
+            # A partially built fleet cannot serve its rung: surviving chains
+            # would only pin KV that fake injection needs. Fail the whole
+            # stage -- zero its plan depth so every point of this rung takes
+            # the fake-injection fallback -- and release the survivors.
+            batch = self._kvwarm_stage_batch
+            logger.warning(
+                "KVWARM: %d chain(s) of stage batch=%s vanished during the "
+                "build; failing the stage, its points fall back to fake injection",
+                len(vanished),
+                batch,
+            )
+            if batch is not None:
+                self._kvwarm_plan[batch] = 0
+            self._kvwarm_meta_init()["stages"].append(
+                {"batch": batch, "failed": True, "vanished": len(vanished)}
+            )
+            self._kvwarm_shed_chains()
+            return True
         if pending:
             return True
         self._kvwarm_building = False
-        if not self._kvwarm_chain_prompts:
-            logger.warning(
-                "KVWARM: every chain of stage batch=%s vanished during the "
-                "build; its points fall back to fake injection",
-                self._kvwarm_stage_batch,
-            )
         secs = time.monotonic() - getattr(self, "_kvwarm_stage_t0", time.monotonic())
         self._kvwarm_meta_init()["stages"].append(
             {
@@ -5240,11 +5307,20 @@ class InstrumentedScheduler(AsyncScheduler):
                 ),
             },
             "results": [
-                {"point": asdict(r.point), "fpms": r.fpms} for r in self._bench_results
+                {
+                    "point": asdict(r.point),
+                    "kv_seed_regime": self._kvwarm_seed_regime(r.point),
+                    "fpms": r.fpms,
+                }
+                for r in self._bench_results
             ],
             "iteration_groups": iteration_groups,
             "skipped_points": [
-                {"point": asdict(skipped.point), "reason": skipped.reason}
+                {
+                    "point": asdict(skipped.point),
+                    "kv_seed_regime": self._kvwarm_seed_regime(skipped.point),
+                    "reason": skipped.reason,
+                }
                 for skipped in self._bench_skipped_points
             ],
             "missing_phases": missing_phases,

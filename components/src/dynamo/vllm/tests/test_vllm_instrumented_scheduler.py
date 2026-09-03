@@ -2936,7 +2936,11 @@ def test_benchmark_output_marks_skipped_kv_point_invalid(tmp_path):
         "skipped_points": 1,
     }
     assert output["skipped_points"] == [
-        {"point": point.__dict__, "reason": "seed_cache_validation_failed"}
+        {
+            "point": point.__dict__,
+            "kv_seed_regime": "not_applicable",
+            "reason": "seed_cache_validation_failed",
+        }
     ]
     assert output["missing_phases"] == []
 
@@ -4092,3 +4096,164 @@ def test_skip_point_exempts_warmup_replicas_on_every_path():
     assert stub._bench_skipped_points == [
         SkippedBenchmarkPoint(point=real, reason="prefill_injection_failed")
     ]
+
+
+# ---------------------------------------------------------------------------
+# KV warm-up lifecycle hardening (review follow-ups)
+# ---------------------------------------------------------------------------
+
+
+def _kvwarm_gate_stub(*, state_groups=(), experts=8, ep=True, prefix=True):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(enable_expert_parallel=ep),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(num_experts=experts), hf_text_config=None
+        ),
+    )
+    stub.cache_config = SimpleNamespace(enable_prefix_caching=prefix)
+    groups = [
+        SimpleNamespace(kv_cache_spec=type(name, (), {})()) for name in state_groups
+    ]
+    stub.kv_cache_manager = SimpleNamespace(
+        kv_cache_config=SimpleNamespace(kv_cache_groups=groups)
+    )
+    stub._kvwarm_resolve_dataset = lambda: "/dev/null"
+    return stub
+
+
+def test_kvwarm_gate_rejects_recurrent_state_layers(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_gate_stub(state_groups=("FullAttentionSpec", "MambaSpec"))
+    assert InstrumentedScheduler._kvwarm_warm_eligible(stub) is False
+    assert stub._kvwarm_meta["skip_reason"] == "hybrid_state_layers_unsupported"
+
+
+def test_kvwarm_gate_admits_pure_attention_moe_ep(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_gate_stub(state_groups=("FullAttentionSpec",))
+    assert InstrumentedScheduler._kvwarm_warm_eligible(stub) is True
+
+
+def test_kvwarm_gate_disables_warmup_when_dataset_unavailable(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = _kvwarm_gate_stub()
+
+    def _boom():
+        raise RuntimeError("no egress")
+
+    stub._kvwarm_resolve_dataset = _boom
+    assert InstrumentedScheduler._kvwarm_warm_eligible(stub) is False
+    assert stub._kvwarm_meta["skip_reason"].startswith("dataset_unavailable")
+
+
+def test_kvwarm_seed_regime_vocabulary(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._kvwarm_meta = {"warm_eligible": True, "skip_reason": None}
+    decode = BenchmarkPoint(point_type="decode", total_kv_read_tokens=64, batch_size=2)
+    prefill = BenchmarkPoint(
+        point_type="prefill", total_prefill_tokens=64, batch_size=1
+    )
+    regime = InstrumentedScheduler._kvwarm_seed_regime
+    assert regime(stub, prefill) == "not_applicable"
+    assert regime(stub, decode) == "unstamped"
+    assert regime(stub, replace(decode, sample_reasons=["kvwarm_real_kv"])) == "real_kv"
+    assert (
+        regime(stub, replace(decode, sample_reasons=["kvwarm_fake_fallback"]))
+        == "fake_fallback"
+    )
+    stub._kvwarm_meta = {
+        "warm_eligible": False,
+        "skip_reason": "prefix_caching_disabled",
+    }
+    assert regime(stub, decode) == "skip:prefix_caching_disabled"
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "off")
+    assert regime(stub, decode) == "legacy"
+
+
+def test_kvwarm_release_heavy_state_drops_benchmark_only_memory():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._kvwarm_chain_ids = []
+    stub._kvwarm_texts = ["x"] * 10
+    stub._kvwarm_tok = object()
+    stub._kvwarm_token_cache = {1: ([1, 2], 0, [0])}
+    stub._kvwarm_chain_prompts = {"c": [1]}
+    stub._bench_prefill_pool = [1] * 100
+    InstrumentedScheduler._kvwarm_release_heavy_state(stub)
+    assert stub._kvwarm_texts is None
+    assert stub._kvwarm_tok is None
+    assert stub._kvwarm_token_cache is None
+    assert stub._bench_prefill_pool is None
+
+
+def test_kvwarm_partial_chain_loss_fails_the_stage():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._kvwarm_chain_ids = ["chain-a", "chain-b"]
+    stub._kvwarm_chain_prompts = {"chain-a": [1] * 8, "chain-b": [1] * 8}
+    stub.requests = {
+        "chain-b": SimpleNamespace(request_id="chain-b", num_computed_tokens=2)
+    }
+    stub.running = []
+    stub._kvwarm_plan = {4: 64}
+    stub._kvwarm_stage_batch = 4
+    stub._kvwarm_building = True
+    meta = {"stages": []}
+    stub._kvwarm_meta_init = lambda: meta
+    stub._kvwarm_shed_chains = MagicMock()
+
+    assert InstrumentedScheduler._kvwarm_monitor_build(stub) is True
+    assert stub._kvwarm_plan[4] == 0
+    stub._kvwarm_shed_chains.assert_called_once_with()
+    assert meta["stages"] == [{"batch": 4, "failed": True, "vanished": 1}]
+
+
+def test_capacity_envelope_folds_kvwarm_eligibility():
+    Envelope = instrumented_scheduler_module._BenchmarkCapacityEnvelope
+    base = dict(
+        max_model_len=1024,
+        max_num_scheduled_tokens=512,
+        max_num_running_reqs=64,
+        usable_blocks_without_watermark=100,
+        usable_blocks_with_watermark=90,
+        grid_invariants_digest="0" * 64,
+    )
+    eligible = Envelope(**base, kvwarm_eligible=True)
+    ineligible = Envelope(**base, kvwarm_eligible=False)
+    assert Envelope.common([eligible, eligible]).kvwarm_eligible is True
+    assert Envelope.common([eligible, ineligible]).kvwarm_eligible is False
+    # Older peers that do not report the field are treated as eligible.
+    assert Envelope.from_dict(base).kvwarm_eligible is True
+    with pytest.raises(RuntimeError, match="kvwarm_eligible"):
+        Envelope.from_dict({**base, "kvwarm_eligible": "yes"})
+
+
+def test_kvwarm_prepare_follows_peer_ineligibility(monkeypatch):
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    meta = {"warm_eligible": True, "skip_reason": None}
+    stub._kvwarm_meta_init = lambda: meta
+    stub._kvwarm_warm_eligible = lambda: True
+    stub._bench_negotiated_capacity = SimpleNamespace(kvwarm_eligible=False)
+    stub._bench_grid = deque()
+    InstrumentedScheduler._kvwarm_prepare(stub, "decode")
+    assert meta["skip_reason"] == "peer_ineligible"
+    assert stub._kvwarm_eligible_cache is False
+
+
+def test_kvwarm_step_busy_stops_building_after_soft_timeout():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._kvwarm_plan = {4: 64}
+    stub._bench_active_req_ids = set()
+    stub._bench_current_point = None
+    stub._bench_grid = deque(
+        [BenchmarkPoint(point_type="decode", total_kv_read_tokens=256, batch_size=4)]
+    )
+    stub._bench_deadline_monotonic = 0.0  # already elapsed
+    stub._kvwarm_chain_ids = ["chain-a"]
+    stub._kvwarm_shed_chains = MagicMock()
+    stub._kvwarm_start_stage = MagicMock()
+    stub._kvwarm_building = False
+    assert InstrumentedScheduler._kvwarm_step_busy(stub) is False
+    stub._kvwarm_shed_chains.assert_called_once_with()
+    stub._kvwarm_start_stage.assert_not_called()

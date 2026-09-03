@@ -306,7 +306,7 @@ These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mo
   Optional tag mixed into the real-text pool draw so repeated collections sample different content windows under otherwise identical settings.
 </ParamField>
 
-Rows produced by the collector carry a `kv_seed_regime` stamp (`real_kv`, `fake_fallback`, or `skip:<reason>`) plus `kvwarm` and `synthetic_prompts` metadata blocks, so downstream consumers can filter by seeding provenance.
+Every result and skipped-point entry in the artifact carries a `kv_seed_regime` field — `real_kv`, `fake_fallback`, `legacy` (warm-up switched off), `skip:<reason>` (gate rejected the configuration), `unstamped` (decode point that never reached injection), or `not_applicable` (prefill) — plus `kvwarm` and `synthetic_prompts` metadata blocks, so downstream consumers can filter by seeding provenance.
 
 ## Request tracing
 
