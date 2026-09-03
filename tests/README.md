@@ -392,16 +392,22 @@ pytest tests/serve/test_sglang.py::test_sglang_deployment[aggregated-2] -v --tb=
 pytest tests/serve/test_trtllm.py::test_deployment[aggregated-2] -v --tb=short
 ```
 
-**Pre-merge CI equivalent** -- this is what [`pr.yaml`](../.github/workflows/pr.yaml) runs via [`dynamo-pipeline.yml`](../.github/workflows/dynamo-pipeline.yml) on every PR. Tests marked `parallel` run with `pytest-xdist`; the rest run sequentially:
+**Pre-merge CI equivalent** -- for relevant runtime changes, [`pr.yaml`](../.github/workflows/pr.yaml) runs the general, router, and core-sequential stages via [`dynamo-pipeline.yml`](../.github/workflows/dynamo-pipeline.yml). Planner is a sibling `pr.yaml` job that runs from the planner image. These jobs are path-gated. Functional areas with their own jobs are excluded from the general CPU stages:
 ```bash
-# Parallel pre-merge tests (4 workers, CPU-only; typically <5min)
-pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm) and gpu_0" -n 4 --dist=loadscope -v --tb=short
+# General parallel/defaulted placement stage (currently sequential)
+pytest -m "pre_merge and (parallel or defaulted) and not (planner or router or vllm or sglang or trtllm) and gpu_0" -n 0 --dist=loadscope -v --tb=short
 
-# Sequential pre-merge tests (CPU-only; typically <10min)
-pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm) and gpu_0" -v --tb=short
+# Router stage (4 workers, balanced by individual test)
+DYN_RUNTIME_NUM_WORKER_THREADS=2 DYN_RUNTIME_MAX_BLOCKING_THREADS=4 pytest -m "pre_merge and router and not (planner or vllm or sglang or trtllm) and gpu_0" -n 4 --dist=load -v --tb=short
+
+# Core sequential stage
+pytest -m "pre_merge and not parallel and not defaulted and not (planner or router or vllm or sglang or trtllm) and gpu_0" -n 0 --dist=loadscope -v --tb=short
+
+# Planner stage (runs in the planner image)
+pytest -m "pre_merge and planner and gpu_0" -n 2 --dist=loadscope -v --tb=short
 ```
 
-> **Parallel vs sequential:** CPU-only tests (`gpu_0`) marked `parallel` run with `pytest-xdist` (`-n auto` or `-n <workers>`, `--dist=loadscope`). GPU tests (`gpu_1`, `gpu_2`, etc.) run sequentially by default, but can run in parallel with `--max-vram-gib=N -n auto` (uses a custom VRAM-aware scheduler, not xdist). See [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml).
+> **Parallel vs sequential:** The router stage uses pytest-xdist with `--dist=load`, because its process E2Es live in one large module; `loadscope` would pin that module to one worker. Router cases use unique namespaces, and isolation-sensitive cases retain per-test services. The general parallel/defaulted stage is currently a placement boundary only and runs with `-n 0`. GPU tests (`gpu_1`, `gpu_2`, etc.) run sequentially by default, but can run in parallel with `--max-vram-gib=N -n auto` (uses a custom VRAM-aware scheduler, not xdist). See [`.github/actions/pytest-local/action.yml`](../.github/actions/pytest-local/action.yml).
 
 **Full E2E suite** -- launches engines for every test configuration; slowest, requires GPU and a framework container (typically <30min depending on framework and model):
 ```bash
@@ -457,11 +463,11 @@ Source workflow files (see [`.github/workflows/`](../.github/workflows/) for the
 - **Pre-merge (Python):** [`.github/workflows/pr.yaml`](../.github/workflows/pr.yaml) -> [`.github/workflows/dynamo-pipeline.yml`](../.github/workflows/dynamo-pipeline.yml)
 - **Post-merge:** [`.github/workflows/post-merge-ci.yml`](../.github/workflows/post-merge-ci.yml)
 - **Nightly:** [`.github/workflows/nightly-ci.yml`](../.github/workflows/nightly-ci.yml)
-- **Pytest action:** [`.github/actions/pytest/action.yml`](../.github/actions/pytest/action.yml)
+- **Pytest action:** [`.github/actions/pytest-local/action.yml`](../.github/actions/pytest-local/action.yml)
 
 ### Pre-merge (every PR)
 
-Two workflows run on every PR. See [`pre-merge.yml`](../.github/workflows/pre-merge.yml) and [`pr.yaml`](../.github/workflows/pr.yaml).
+Two workflows are triggered on every PR, with individual jobs gated by changed paths. See [`pre-merge.yml`](../.github/workflows/pre-merge.yml) and [`pr.yaml`](../.github/workflows/pr.yaml).
 
 **Rust checks** (only if Rust files changed) -- runs `pre-commit`, then the full sequence from [Running Rust Checks and Tests](#running-rust-checks-and-tests) across 4 workspace dirs (`.`, `lib/bindings/python`, `lib/runtime/examples`, `lib/bindings/kvbm`): format, clippy, cargo-deny, machete, compile, doc tests, unit tests.
 
@@ -469,8 +475,10 @@ Two workflows run on every PR. See [`pre-merge.yml`](../.github/workflows/pre-me
 
 | Stage | Marker expression | Local equivalent |
 |-------|------------------|-----------------|
-| Parallel (xdist, 4 workers) | `pre_merge and parallel and not (vllm or sglang or trtllm) and gpu_0` | `pytest -m "pre_merge and parallel and not (vllm or sglang or trtllm) and gpu_0" -n 4 --dist=loadscope -v --tb=short` |
-| Sequential | `pre_merge and not parallel and not (vllm or sglang or trtllm) and gpu_0` | `pytest -m "pre_merge and not parallel and not (vllm or sglang or trtllm) and gpu_0" -v --tb=short` |
+| Parallel/defaulted placement (currently `-n 0`) | `pre_merge and (parallel or defaulted) and not (planner or router or vllm or sglang or trtllm) and gpu_0` | `pytest -m "pre_merge and (parallel or defaulted) and not (planner or router or vllm or sglang or trtllm) and gpu_0" -n 0 --dist=loadscope -v --tb=short` |
+| Router (xdist, 4 workers; Tokio 2/4) | `pre_merge and router and not (planner or vllm or sglang or trtllm) and gpu_0` | `DYN_RUNTIME_NUM_WORKER_THREADS=2 DYN_RUNTIME_MAX_BLOCKING_THREADS=4 pytest -m "pre_merge and router and not (planner or vllm or sglang or trtllm) and gpu_0" -n 4 --dist=load -v --tb=short` |
+| Core sequential | `pre_merge and not parallel and not defaulted and not (planner or router or vllm or sglang or trtllm) and gpu_0` | `pytest -m "pre_merge and not parallel and not defaulted and not (planner or router or vllm or sglang or trtllm) and gpu_0" -n 0 --dist=loadscope -v --tb=short` |
+| Planner (xdist, 2 workers) | `pre_merge and planner and gpu_0` | `pytest -m "pre_merge and planner and gpu_0" -n 2 --dist=loadscope -v --tb=short` |
 
 ### Post-merge (push to release branches)
 

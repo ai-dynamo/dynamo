@@ -69,6 +69,21 @@ on:
         required: false
         type: string
         default: 'auto'
+      cpu_parallel_dist:
+        description: 'pytest-xdist distribution mode for CPU-only tests'
+        required: false
+        type: string
+        default: 'loadscope'
+      cpu_dynamo_runtime_num_worker_threads:
+        description: 'Optional Tokio worker-thread cap for Dynamo CPU test processes'
+        required: false
+        type: string
+        default: ''
+      cpu_dynamo_runtime_max_blocking_threads:
+        description: 'Optional Tokio blocking-thread cap for Dynamo CPU test processes'
+        required: false
+        type: string
+        default: ''
       run_gpu_tests:
         description: 'Whether to run GPU tests'
         required: false
@@ -85,6 +100,11 @@ on:
         default: 30
       run_gpu_parallel_tests:
         description: 'Whether to run the GPU-parallel stage (VRAM-aware concurrent subprocesses) before the sequential stage. Tests carrying @pytest.mark.profiled_vram_gib(N) within gpu_test_markers run here; the sequential stage runs the rest.'
+        required: false
+        type: boolean
+        default: false
+      gpu_sequential_allow_no_tests:
+        description: 'Allow the sequential GPU fallback to succeed when its marker expression collects no tests. Other pytest errors still fail.'
         required: false
         type: boolean
         default: false
@@ -218,6 +238,9 @@ jobs:
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: ${{ inputs.cpu_parallel_mode }}
+          parallel_dist: ${{ inputs.cpu_parallel_dist }}
+          dynamo_runtime_num_worker_threads: ${{ inputs.cpu_dynamo_runtime_num_worker_threads }}
+          dynamo_runtime_max_blocking_threads: ${{ inputs.cpu_dynamo_runtime_max_blocking_threads }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'false'
       - name: Run GPU tests (parallel)
@@ -254,5 +277,6 @@ jobs:
           platform_arch: ${{ matrix.platform }}
           hf_token: ${{ secrets.HF_TOKEN }}
           parallel_mode: 'none'
+          allow_no_tests: ${{ inputs.gpu_sequential_allow_no_tests }}
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'

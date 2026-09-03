@@ -21,8 +21,8 @@ from tests.router.mocker_process import MockerProcess
 from tests.utils.constants import ROUTER_MODEL_NAME
 from tests.utils.managed_process import DynamoFrontendProcess
 
-# Do not add pytest.mark.parallel: existing Mocker Router tests document races in
-# process-global DistributedRuntime state under pytest-xdist.
+# Router process E2Es are scheduled by the dedicated, capped router shard. Keep this
+# out of the general ``parallel`` marker pool so it does not inherit unbounded xdist.
 pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,

@@ -52,6 +52,20 @@ on:
       cpu_parallel_test_markers:
         required: true
         type: string
+      cpu_sequential_test_markers:
+        description: 'CPU tests owned by the sequential stage; callers exclude any dedicated suites they schedule separately'
+        required: true
+        type: string
+      cpu_sequential_test_timeout_minutes:
+        description: 'Timeout for the sequential CPU test stage'
+        required: false
+        type: number
+        default: 45
+      run_router_tests:
+        description: 'Run the dedicated xdist router shard'
+        required: false
+        type: boolean
+        default: false
       gpu_test_markers:
         required: true
         type: string
@@ -222,6 +236,38 @@ jobs:
       image_tag_suffix: ${{ inputs.image_tag_suffix }}
     secrets: inherit
 
+  # Router process E2Es are independently namespaced. Most mocker cases share one
+  # session-scoped NATS/etcd pair; restart and NATS-free cases retain isolated
+  # services. Use per-test load balancing: loadscope would pin their large test
+  # module to one worker and serialize nearly all of the runtime.
+  router:
+    name: test
+    needs: image
+    if: inputs.run_router_tests
+    uses: $/.github/workflows/shared-test.yml
+    with:
+      test_suite_name: dynamo
+      test_type: router
+      amd_runner: prod-tester-amd-v2
+      target_tag_plain: ${{ needs.image.outputs.target_tag_plain }}
+      cuda_version: '["${{ inputs.cuda_version }}"]'
+      platform: '["amd64", "arm64"]'
+      run_sanity_check: false
+      run_cpu_only_tests: true
+      cpu_only_test_markers: 'pre_merge and router and not (planner or vllm or sglang or trtllm) and (gpu_0)'
+      cpu_only_test_timeout_minutes: 15
+      cpu_parallel_mode: '4'
+      cpu_parallel_dist: 'load'
+      # Each E2E starts several Dynamo processes. Without caps, every process
+      # sizes Tokio from the whole runner and the 4-worker shard exceeds 1,500
+      # observed threads without improving wall time.
+      cpu_dynamo_runtime_num_worker_threads: '2'
+      cpu_dynamo_runtime_max_blocking_threads: '4'
+      run_gpu_tests: false
+      source_ref: ${{ inputs.source_ref }}
+      image_tag_suffix: ${{ inputs.image_tag_suffix }}
+    secrets: inherit
+
   sequential:
     name: test
     needs: image
@@ -235,8 +281,8 @@ jobs:
       platform: '["amd64", "arm64"]'
       run_sanity_check: false
       run_cpu_only_tests: true
-      cpu_only_test_markers: 'pre_merge and not parallel and not defaulted and not (vllm or sglang or trtllm) and (gpu_0)'
-      cpu_only_test_timeout_minutes: 45
+      cpu_only_test_markers: ${{ inputs.cpu_sequential_test_markers }}
+      cpu_only_test_timeout_minutes: ${{ inputs.cpu_sequential_test_timeout_minutes }}
       cpu_parallel_mode: 'none'
       run_gpu_tests: false
       source_ref: ${{ inputs.source_ref }}
