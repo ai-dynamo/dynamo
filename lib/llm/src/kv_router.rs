@@ -828,6 +828,7 @@ where
                         overloaded_worker_provider,
                         available_worker_provider,
                         overlap_refresh,
+                        scheduler_load,
                     },
                     workers_with_configs.clone(),
                     cancellation_token.child_token(),

@@ -117,9 +117,24 @@ pub(crate) struct ScopedReplicaSync {
     pub channel: Option<(mpsc::Sender<ActiveSequenceEvent>, ChannelSequenceSubscriber)>,
 }
 
+/// Receives the scheduler-owned load snapshots a partition's active-sequence
+/// tracker publishes (per worker: active decode blocks, active prefill
+/// tokens). An embedding host uses it to drive overload detection from the
+/// same numbers the scheduler books against.
+pub trait SchedulerLoadSink: Send + Sync {
+    fn publish(&self, snapshot: crate::sequences::SchedulerLoadSnapshot);
+
+    fn publish_batch(&self, snapshots: Vec<crate::sequences::SchedulerLoadSnapshot>) {
+        for snapshot in snapshots {
+            self.publish(snapshot);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ScopedSequencePublisher {
     replica: Option<ScopedReplicaPublisher>,
+    load_sink: Option<Arc<dyn SchedulerLoadSink>>,
 }
 
 #[derive(Clone)]
@@ -132,7 +147,16 @@ struct ScopedReplicaPublisher {
 
 impl ScopedSequencePublisher {
     pub(crate) fn disabled() -> Self {
-        Self { replica: None }
+        Self {
+            replica: None,
+            load_sink: None,
+        }
+    }
+
+    /// Forward scheduler load snapshots to `sink` in addition to replica sync.
+    pub(crate) fn with_load_sink(mut self, sink: Option<Arc<dyn SchedulerLoadSink>>) -> Self {
+        self.load_sink = sink;
+        self
     }
 
     pub(crate) fn enabled(
@@ -148,6 +172,7 @@ impl ScopedSequencePublisher {
                 tx,
                 cancel_token,
             }),
+            load_sink: None,
         }
     }
 }
@@ -186,7 +211,17 @@ impl SequencePublisher for ScopedSequencePublisher {
         }
     }
 
-    fn publish_scheduler_load(&self, _load: crate::sequences::SchedulerLoadSnapshot) {}
+    fn publish_scheduler_load(&self, load: crate::sequences::SchedulerLoadSnapshot) {
+        if let Some(sink) = &self.load_sink {
+            sink.publish(load);
+        }
+    }
+
+    fn publish_scheduler_load_batch(&self, loads: Vec<crate::sequences::SchedulerLoadSnapshot>) {
+        if let Some(sink) = &self.load_sink {
+            sink.publish_batch(loads);
+        }
+    }
 
     fn observe_load(
         &self,

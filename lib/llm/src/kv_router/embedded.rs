@@ -54,6 +54,9 @@ pub(crate) struct EmbeddedSelectionArgs {
     /// The router's own indexer, used for dequeue-time overlap refresh so
     /// queued requests are re-scored against the index that scored them.
     pub overlap_refresh: Option<Arc<dyn TieredMatchProvider>>,
+    /// Scheduler-owned load snapshots for the worker monitor's overload
+    /// detection, the same feed the runtime scheduler publishes.
+    pub scheduler_load: crate::kv_router::routing_load::SchedulerLoadSender,
 }
 
 /// One `SelectionService` partition driven directly by the router.
@@ -63,6 +66,20 @@ pub(crate) struct EmbeddedSelection {
     _service: Arc<SelectionService>,
     partition: SelectionPartition,
     worker_type: &'static str,
+}
+
+/// Bridges the partition's scheduler load snapshots to the router's
+/// `SchedulerLoadSender`, which feeds `KvWorkerMonitor`.
+struct SenderLoadSink(crate::kv_router::routing_load::SchedulerLoadSender);
+
+impl dynamo_kv_router::services::selection::SchedulerLoadSink for SenderLoadSink {
+    fn publish(&self, snapshot: dynamo_kv_router::sequences::SchedulerLoadSnapshot) {
+        self.0.publish(snapshot);
+    }
+
+    fn publish_batch(&self, snapshots: Vec<dynamo_kv_router::sequences::SchedulerLoadSnapshot>) {
+        self.0.publish_batch(snapshots);
+    }
 }
 
 impl EmbeddedSelection {
@@ -118,6 +135,7 @@ impl EmbeddedSelection {
                 Some(provider) => OverlapRefreshSource::External(provider),
                 None => OverlapRefreshSource::Disabled,
             },
+            scheduler_load_sink: Some(Arc::new(SenderLoadSink(args.scheduler_load))),
         })
         .build()
         .await
