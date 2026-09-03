@@ -1873,6 +1873,46 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
                 reasoning_parser_name=None,
             )
 
+    def test_legacy_guided_constraint_matching_forced_tool_is_allowed(self, tokenizer):
+        """An explicit constraint identical to the generated one displaces nothing.
+
+        A named zero-argument tool builds {"regex": r"\\{\\}"}, and a caller may send
+        exactly that as guided_regex. Rejecting it would refuse a request both
+        sides agree on, and would break the named_zero_arg_tool reconstruction
+        that keys off this exact value.
+        """
+        result = preprocess_chat_request(
+            {
+                "model": MODEL,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_server_time",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "required": [],
+                                "additionalProperties": False,
+                            },
+                        },
+                    }
+                ],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_server_time"},
+                },
+                "guided_regex": r"\{\}",
+            },
+            tokenizer=tokenizer,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+        )
+
+        assert result.guided_decoding == {"regex": r"\{\}"}
+        assert result.named_zero_arg_tool == "get_server_time"
+
     @pytest.mark.parametrize(
         "tool_choice",
         ["required", {"type": "function", "function": {"name": "get_weather"}}],

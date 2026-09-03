@@ -748,17 +748,6 @@ def preprocess_chat_request(
     """
     request = _with_thinking_template_kwargs(request, default_thinking_mode)
     legacy_guidance = legacy_guided_decoding(request)
-    # A forced tool choice constrains the same token stream a legacy guided_*
-    # constraint would, so only one of them can be honored. Reject rather than
-    # drop one silently, matching prepost.py and preprocessor/tool_choice.rs.
-    tool_choice = request.get("tool_choice")
-    if legacy_guidance and (
-        tool_choice == "required" or _is_named_tool_choice(tool_choice)
-    ):
-        raise InvalidArgument(
-            "tool_choice forces a tool call and cannot be combined with an "
-            "explicit guided_* constraint."
-        )
     messages = _materialize_messages(request.get("messages", []))
 
     # Generation mode is independent of whether the client wants reasoning
@@ -864,9 +853,32 @@ def preprocess_chat_request(
         logger.warning(
             "Tool-call guided decoding will be ignored because of response_format already exists."
         )
+    # A forced tool choice and a legacy guided_* constrain the same token stream,
+    # so honoring the guided_* would drop the tool constraint while the forced-tool
+    # parser stays selected. Reject that rather than drop one silently, matching
+    # prepost.py and preprocessor/tool_choice.rs.
+    #
+    # Only when they actually differ. A named zero-argument tool builds
+    # {"regex": r"\{\}"} above, and a caller may send exactly that as
+    # guided_regex; nothing is displaced, and named_zero_arg_tool below still
+    # recognizes it. Rejecting an identical constraint would refuse a request the
+    # two paths agree on.
+    tool_choice = request.get("tool_choice", "auto")
+    if (
+        legacy_guidance
+        and tool_call_guided_decoding is not None
+        and legacy_guidance != tool_call_guided_decoding
+        and (tool_choice == "required" or _is_named_tool_choice(tool_choice))
+    ):
+        raise InvalidArgument(
+            "tool_choice forces a tool call and cannot be combined with an "
+            "explicit guided_* constraint."
+        )
+
     # Explicit legacy constraints outrank automatic guidance, matching the vLLM
-    # processor. The forced-tool-choice collision is rejected above rather than
-    # resolved here, so anything reaching this point is safe to order.
+    # processor. response_format is NOT covered by the check above -- see the TODO
+    # further up: it still wins over a forced tool choice here, unlike the other
+    # two paths.
     guided_decoding = (
         legacy_guidance or response_format_guided_decoding or tool_call_guided_decoding
     )
