@@ -13,6 +13,7 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/router-plugins/catalog",
+    "examples/router/custom-policy-example/soft-pin-repin",
     "examples/router/custom-policy-example/simple-filter-score-pick",
     "examples/router/custom-policy-example/catalog",
     "examples/router/custom-policy-example/disagg-filter-score-pick",
@@ -53,7 +54,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.1.0-dev.1" }
+aisimulate-core = { version = "=0.1.0-dev.2" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }
@@ -213,4 +214,3 @@ lto = "thin"
 inherits = "release"
 debug = true
 strip = false
-

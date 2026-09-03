@@ -46,9 +46,7 @@ const DEFAULT_PUBLICATION_DELAY: Duration = Duration::from_millis(1);
 const RECOVERY_REBUILD_BATCH_WINDOW: Duration = Duration::from_millis(5);
 
 #[derive(Debug)]
-// NOTE: This is the intentional producer snapshot/delta seam for the future non-local adapter.
-// It remains crate-private until that transport has delivery cursors and recovery semantics.
-#[allow(dead_code)]
+// Keep actor subscriptions crate-private because delivery cursors and recovery belong above it.
 pub(crate) struct DcCkfSubscription {
     pub(crate) snapshot: DcCkfSnapshot,
     pub(crate) deltas: broadcast::Receiver<DcCkfDelta>,
@@ -539,19 +537,30 @@ impl KvDcRelayHandle {
             .await
     }
 
-    // Kept with `DcCkfSubscription` as the crate-private producer boundary described above.
-    #[allow(dead_code)]
     pub(crate) async fn subscribe(
         &self,
         lease: LaneLease,
     ) -> Result<DcCkfSubscription, KvDcRelayError> {
         let subscription = self
-            .submit(|response| ActorCommand::Subscribe { lease, response })
+            .submit(|response| ActorCommand::Subscribe {
+                lease,
+                response,
+                #[cfg(test)]
+                test_work: None,
+            })
             .await?;
         Ok(DcCkfSubscription {
             snapshot: subscription.snapshot,
             deltas: subscription.deltas,
         })
+    }
+
+    pub(super) async fn retire_publication_lease(
+        &self,
+        lease: LaneLease,
+    ) -> Result<(), KvDcRelayError> {
+        self.submit(|response| ActorCommand::RetirePublicationLease { lease, response })
+            .await
     }
 
     pub(super) async fn shutdown(&self) -> Result<(), KvDcRelayError> {
@@ -924,6 +933,12 @@ enum ActorCommand {
     Subscribe {
         lease: LaneLease,
         response: oneshot::Sender<Result<ActorSubscription, KvDcRelayError>>,
+        #[cfg(test)]
+        test_work: Option<TestSnapshotWork>,
+    },
+    RetirePublicationLease {
+        lease: LaneLease,
+        response: oneshot::Sender<Result<(), KvDcRelayError>>,
     },
     #[cfg(any(test, feature = "ckf-diagnostics"))]
     Stats {
@@ -954,6 +969,33 @@ struct ActorSubscription {
     deltas: broadcast::Receiver<DcCkfDelta>,
 }
 
+struct ActorCore {
+    state: DcCkfState,
+    publisher: DcCkfPublisher<BroadcastDeltaSink>,
+}
+
+#[cfg(test)]
+enum TestSnapshotWork {
+    Gate {
+        entered: oneshot::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    },
+    Panic,
+}
+
+#[cfg(test)]
+impl TestSnapshotWork {
+    fn run(self) {
+        match self {
+            Self::Gate { entered, release } => {
+                let _ = entered.send(());
+                let _ = release.recv();
+            }
+            Self::Panic => panic!("injected snapshot worker failure"),
+        }
+    }
+}
+
 impl ActorCommand {
     #[cfg(feature = "ckf-diagnostics")]
     fn kind(&self) -> &'static str {
@@ -964,6 +1006,7 @@ impl ActorCommand {
             Self::Flush { .. } => "flush",
             Self::Snapshot { .. } => "snapshot",
             Self::Subscribe { .. } => "subscribe",
+            Self::RetirePublicationLease { .. } => "retire_publication_lease",
             #[cfg(any(test, feature = "ckf-diagnostics"))]
             Self::Stats { .. } => "stats",
             Self::Shutdown { .. } => "shutdown",
@@ -975,10 +1018,50 @@ impl ActorCommand {
     }
 }
 
+async fn snapshot_after_barrier_blocking(
+    core: ActorCore,
+    lease: LaneLease,
+    #[cfg(test)] test_work: Option<TestSnapshotWork>,
+) -> Result<(ActorCore, Result<ActorSubscription, KvDcRelayError>), tokio::task::JoinError> {
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some(work) = test_work {
+            work.run();
+        }
+
+        let ActorCore {
+            mut state,
+            mut publisher,
+        } = core;
+        let result = publisher
+            .snapshot_after_barrier(&mut state, lease)
+            .map_err(|error| KvDcRelayError::Publisher(format!("{error:?}")))
+            .map(|snapshot| {
+                // Prevent a gap after snapshot sequence N by subscribing before the actor can
+                // resume mutations.
+                let deltas = publisher.sink().sender.subscribe();
+                ActorSubscription { snapshot, deltas }
+            });
+        (ActorCore { state, publisher }, result)
+    })
+    .await
+}
+
+fn send_subscription_response(
+    core: &mut ActorCore,
+    response: oneshot::Sender<Result<ActorSubscription, KvDcRelayError>>,
+    result: Result<ActorSubscription, KvDcRelayError>,
+) {
+    if let Err(Ok(subscription)) = response.send(result) {
+        drop(subscription);
+        core.publisher.retire_lease();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_actor(
-    mut state: DcCkfState,
-    mut publisher: DcCkfPublisher<BroadcastDeltaSink>,
+    state: DcCkfState,
+    publisher: DcCkfPublisher<BroadcastDeltaSink>,
     mut receiver: mpsc::Receiver<ActorCommand>,
     publication_delay: Duration,
     fault_tx: mpsc::Sender<ActorFault>,
@@ -986,6 +1069,7 @@ async fn run_actor(
     fence: CancellationToken,
     stopped: CancellationToken,
 ) {
+    let mut core = ActorCore { state, publisher };
     let _stopped_guard = CancelOnDrop(stopped);
     let mut unknown_removal_events = 0u64;
     let mut capacity_omission_events = 0u64;
@@ -1004,8 +1088,12 @@ async fn run_actor(
             command = receiver.recv() => command,
             _ = &mut publication_timer, if publication_timer_armed => {
                 publication_timer_armed = false;
-                if state.has_pending_publication()
-                    && let Err(error) = publish_pending(&mut state, &mut publisher, &diagnostics)
+                if core.state.has_pending_publication()
+                    && let Err(error) = publish_pending(
+                        &mut core.state,
+                        &mut core.publisher,
+                        &diagnostics,
+                    )
                 {
                     diagnostics.record_error(&error);
                 }
@@ -1016,6 +1104,7 @@ async fn run_actor(
             break;
         };
         diagnostics.start_command(&command);
+        let ActorCore { state, publisher } = &mut core;
         match command {
             ActorCommand::Apply {
                 publisher_id,
@@ -1025,9 +1114,6 @@ async fn run_actor(
                 let worker_id = event.worker_id;
                 let dp_rank = event.event.dp_rank;
                 let event_id = event.event.event_id;
-                // NOTE: Subscriber-free Relay operation is transitional or diagnostic, not an
-                // optimized steady-state mode. Keep one publication path until an unsubscribed
-                // deployment is measured; a useful Relay is expected to have a consumer.
                 let outcome = state.apply_event(event);
                 let first_error = outcome.first_error().copied();
                 let publication_boundary = outcome.publication_boundary();
@@ -1054,7 +1140,7 @@ async fn run_actor(
                     }
                 }
                 if let Some(batch) = outcome.into_publication() {
-                    if let Err(error) = publish_batch(batch, &mut publisher, &diagnostics) {
+                    if let Err(error) = publish_batch(batch, publisher, &diagnostics) {
                         diagnostics.record_error(&error);
                     }
                 } else if publication_boundary {
@@ -1134,7 +1220,7 @@ async fn run_actor(
                         .map_err(Into::into)
                         .and_then(|publication| {
                             if let Some(batch) = publication {
-                                publish_batch(batch, &mut publisher, &diagnostics)?;
+                                publish_batch(batch, publisher, &diagnostics)?;
                             } else {
                                 diagnostics.record_no_publication();
                             }
@@ -1184,7 +1270,7 @@ async fn run_actor(
                             diagnostics.record_degraded_reset();
                         }
                         if let Some(batch) = publication {
-                            publish_batch(batch, &mut publisher, &diagnostics)?;
+                            publish_batch(batch, publisher, &diagnostics)?;
                         } else {
                             diagnostics.record_no_publication();
                         }
@@ -1193,26 +1279,58 @@ async fn run_actor(
                 let _ = response.send(result);
             }
             ActorCommand::Flush { response } => {
-                let result = publish_pending(&mut state, &mut publisher, &diagnostics);
+                let result = publish_pending(state, publisher, &diagnostics);
                 let _ = response.send(result);
             }
             #[cfg(feature = "ckf-diagnostics")]
             ActorCommand::Snapshot { response } => {
-                let result = diagnostic_barrier_snapshot(&mut state, &mut publisher, &diagnostics);
+                let result = diagnostic_barrier_snapshot(state, publisher, &diagnostics);
                 let _ = response.send(result);
             }
-            ActorCommand::Subscribe { lease, response } => {
-                let result = publisher
-                    .snapshot_after_barrier(&mut state, lease)
-                    .map_err(|error| KvDcRelayError::Publisher(format!("{error:?}")))
-                    .map(|snapshot| {
-                        // The actor cannot process a continuation mutation until this command
-                        // returns. Subscribe after any old-lease tail so the new receiver starts
-                        // exactly after snapshot sequence N.
-                        let deltas = publisher.sink().sender.subscribe();
-                        ActorSubscription { snapshot, deltas }
-                    });
-                let _ = response.send(result);
+            ActorCommand::Subscribe {
+                lease,
+                response,
+                #[cfg(test)]
+                test_work,
+            } => {
+                match snapshot_after_barrier_blocking(
+                    core,
+                    lease,
+                    #[cfg(test)]
+                    test_work,
+                )
+                .await
+                {
+                    Ok((returned_core, result)) => {
+                        core = returned_core;
+                        if fence.is_cancelled() {
+                            let _ = response.send(Err(KvDcRelayError::ShuttingDown));
+                            diagnostics.finish_command();
+                            discard_tail = true;
+                            break;
+                        }
+                        send_subscription_response(&mut core, response, result);
+                    }
+                    Err(join_error) => {
+                        tracing::error!(
+                            error = %join_error,
+                            "KV DC Relay snapshot worker failed"
+                        );
+                        let error = KvDcRelayError::Publisher(format!(
+                            "snapshot blocking task failed: {join_error}"
+                        ));
+                        diagnostics.record_error(&error);
+                        let _ = response.send(Err(error));
+                        diagnostics.finish_command();
+                        return;
+                    }
+                }
+            }
+            ActorCommand::RetirePublicationLease { lease, response } => {
+                if publisher.lease() == Some(lease) {
+                    publisher.retire_lease();
+                }
+                let _ = response.send(Ok(()));
             }
             #[cfg(any(test, feature = "ckf-diagnostics"))]
             ActorCommand::Stats { response } => {
@@ -1244,16 +1362,18 @@ async fn run_actor(
                 }
             }
         }
-        if !state.has_pending_publication() {
+        if !core.state.has_pending_publication() {
             publication_timer_armed = false;
         }
         diagnostics.finish_command();
     }
 
-    if !discard_tail && let Err(error) = publish_pending(&mut state, &mut publisher, &diagnostics) {
+    if !discard_tail
+        && let Err(error) = publish_pending(&mut core.state, &mut core.publisher, &diagnostics)
+    {
         diagnostics.record_error(&error);
     }
-    publisher.retire_lease();
+    core.publisher.retire_lease();
     drop(fault_tx);
     if let Some(response) = shutdown_response {
         let _ = response.send(Ok(()));
@@ -1434,6 +1554,175 @@ mod tests {
             .unwrap();
         entered_rx.await.unwrap();
         release_tx
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_subscribe_snapshot_keeps_runtime_responsive_and_shutdown_ordered() {
+        let (handle, _faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("blocking-snapshot")).unwrap();
+        let (response_tx, response_rx) = oneshot::channel();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (safety_tx, safety_rx) = std::sync::mpsc::channel();
+        let safety_release = release_tx.clone();
+        let safety = std::thread::spawn(move || {
+            if safety_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+                let _ = safety_release.send(());
+            }
+        });
+
+        handle
+            .sender
+            .send(ActorCommand::Subscribe {
+                lease: lease(1),
+                response: response_tx,
+                test_work: Some(TestSnapshotWork::Gate {
+                    entered: entered_tx,
+                    release: release_rx,
+                }),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(250), async {
+            entered_rx.await.unwrap();
+            tokio::task::yield_now().await;
+        })
+        .await
+        .expect("snapshot work must not block the current-thread Tokio runtime");
+
+        let shutdown_handle = handle.clone();
+        let mut shutdown = tokio::spawn(async move { shutdown_handle.shutdown().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown queued after subscribe must not overtake its snapshot"
+        );
+
+        release_tx.send(()).unwrap();
+        let _ = safety_tx.send(());
+        safety.join().unwrap();
+        let subscription = tokio::time::timeout(Duration::from_secs(1), response_rx)
+            .await
+            .expect("snapshot worker did not rejoin the actor")
+            .unwrap()
+            .unwrap();
+        assert_eq!(subscription.snapshot.sequence(), 0);
+        tokio::time::timeout(Duration::from_secs(1), &mut shutdown)
+            .await
+            .expect("ordered shutdown did not complete")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fence_during_subscribe_snapshot_rejects_the_inflight_subscription() {
+        let (handle, _faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("fenced-snapshot")).unwrap();
+        let (response_tx, response_rx) = oneshot::channel();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        handle
+            .sender
+            .send(ActorCommand::Subscribe {
+                lease: lease(1),
+                response: response_tx,
+                test_work: Some(TestSnapshotWork::Gate {
+                    entered: entered_tx,
+                    release: release_rx,
+                }),
+            })
+            .await
+            .unwrap();
+        entered_rx.await.unwrap();
+
+        let fence_handle = handle.clone();
+        let mut fence = tokio::spawn(async move { fence_handle.fence().await });
+        tokio::task::yield_now().await;
+        assert!(!fence.is_finished());
+        release_tx.send(()).unwrap();
+
+        assert!(matches!(
+            response_rx.await.unwrap(),
+            Err(KvDcRelayError::ShuttingDown)
+        ));
+        tokio::time::timeout(Duration::from_secs(1), &mut fence)
+            .await
+            .expect("actor did not stop after the snapshot worker rejoined")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_subscribe_response_retires_the_unobserved_lease() {
+        let worker = WorkerWithDpRank::new(1, 0);
+        let (handle, _faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("dropped-snapshot")).unwrap();
+        let (response_tx, response_rx) = oneshot::channel();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        handle
+            .sender
+            .send(ActorCommand::Subscribe {
+                lease: lease(1),
+                response: response_tx,
+                test_work: Some(TestSnapshotWork::Gate {
+                    entered: entered_tx,
+                    release: release_rx,
+                }),
+            })
+            .await
+            .unwrap();
+        entered_rx.await.unwrap();
+        drop(response_rx);
+        release_tx.send(()).unwrap();
+
+        handle
+            .admit_event(0, stored(worker, 1, &[1]))
+            .await
+            .unwrap();
+        handle
+            .flush()
+            .await
+            .expect("a cancelled subscriber must not leave a delivery-uncertain lease");
+        assert_eq!(
+            handle
+                .state_stats()
+                .await
+                .unwrap()
+                .0
+                .aggregation()
+                .unique_block_count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_snapshot_worker_failure_is_reported_and_stops_the_actor() {
+        let (handle, _faults) =
+            KvDcRelayHandle::spawn(CkfConfig::new(32), scope("snapshot-panic")).unwrap();
+        let (response_tx, response_rx) = oneshot::channel();
+        handle
+            .sender
+            .send(ActorCommand::Subscribe {
+                lease: lease(1),
+                response: response_tx,
+                test_work: Some(TestSnapshotWork::Panic),
+            })
+            .await
+            .unwrap();
+
+        let error = match response_rx.await.unwrap() {
+            Ok(_) => panic!("failed snapshot worker returned a subscription"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("snapshot blocking task failed"));
+        tokio::time::timeout(Duration::from_secs(1), handle.stopped.cancelled())
+            .await
+            .expect("actor must stop after losing its state to a failed worker");
+        assert!(matches!(
+            handle.flush().await,
+            Err(KvDcRelayError::ShuttingDown)
+        ));
     }
 
     #[cfg(feature = "ckf-diagnostics")]

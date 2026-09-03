@@ -381,15 +381,47 @@ impl ZmqSubTransport {
         topic: &str,
         rcvhwm: i32,
     ) -> Result<ZmqWireStream> {
-        let mut socket = Self::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
-        let expected_topic = topic.as_bytes().to_vec();
-
+        let socket = Self::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
         tracing::info!(
             endpoint,
             topic,
             rcvhwm,
-            "Direct ZMQ single-consumer stream connected"
+            "ZMQ single-consumer stream connected"
         );
+        Self::single_consumer_stream(socket, topic)
+    }
+
+    /// Connect one consumer directly to multiple ZMQ endpoints.
+    ///
+    /// The returned stream owns one SUB socket connected to every endpoint. It
+    /// avoids the lossy local broadcast hop used by [`Self::connect_multiple`].
+    pub async fn connect_single_consumer_multiple(
+        endpoints: &[String],
+        topic: &str,
+    ) -> Result<ZmqWireStream> {
+        let mut endpoint_iter = endpoints.iter();
+        let Some(first_endpoint) = endpoint_iter.next() else {
+            anyhow::bail!("Cannot connect to zero endpoints");
+        };
+
+        let endpoint_count = endpoints.len();
+        let socket = Self::connect_socket(first_endpoint, topic)?;
+        for endpoint in endpoint_iter {
+            socket.get_socket().connect(endpoint)?;
+        }
+
+        tracing::info!(
+            endpoint_count,
+            topic,
+            rcvhwm = ZMQ_RCVHWM,
+            "ZMQ single-consumer stream connected to multiple endpoints"
+        );
+        tracing::debug!(?endpoints, topic, "ZMQ single-consumer stream endpoints");
+        Self::single_consumer_stream(socket, topic)
+    }
+
+    fn single_consumer_stream(mut socket: Subscribe, topic: &str) -> Result<ZmqWireStream> {
+        let expected_topic = topic.as_bytes().to_vec();
 
         let stream = stream! {
             while let Some(result) = socket.next().await {
@@ -408,7 +440,7 @@ impl ZmqSubTransport {
                         payload: message.payload,
                     }),
                     Err(error) => {
-                        tracing::warn!(%error, "Dropping malformed direct-ZMQ message");
+                        tracing::warn!(%error, "Dropping malformed ZMQ message");
                     }
                 }
             }

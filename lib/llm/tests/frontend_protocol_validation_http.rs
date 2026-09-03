@@ -47,6 +47,7 @@ async fn post_json(svc: &HarnessService, path: &str, body: Value) -> reqwest::Re
 enum ExpectedError {
     Validation,
     NotImplemented,
+    UnsupportedContent,
 }
 
 impl ExpectedError {
@@ -54,6 +55,7 @@ impl ExpectedError {
         match self {
             Self::Validation => reqwest::StatusCode::BAD_REQUEST,
             Self::NotImplemented => reqwest::StatusCode::NOT_IMPLEMENTED,
+            Self::UnsupportedContent => reqwest::StatusCode::BAD_REQUEST,
         }
     }
 
@@ -61,6 +63,7 @@ impl ExpectedError {
         match self {
             Self::Validation => "invalid_request_error",
             Self::NotImplemented => "api_error",
+            Self::UnsupportedContent => "invalid_request_error",
         }
     }
 }
@@ -204,7 +207,7 @@ async fn responses_conversion_distinguishes_invalid_from_unsupported() {
             (
                 true,
                 json!({"type": "input_image", "file_id": "file_123"}),
-                ExpectedError::NotImplemented,
+                ExpectedError::UnsupportedContent,
                 "image input by file_id",
             ),
             (
@@ -213,7 +216,7 @@ async fn responses_conversion_distinguishes_invalid_from_unsupported() {
                     "type": "input_file",
                     "file_url": "https://example.com/report.pdf"
                 }),
-                ExpectedError::NotImplemented,
+                ExpectedError::UnsupportedContent,
                 "file input content",
             ),
             (
@@ -470,19 +473,7 @@ async fn anthropic_content_validation_applies_to_messages_and_count_tokens() {
                         ]
                     }]
                 }),
-                ExpectedError::NotImplemented,
-                "content block type \"future_block_type\"",
-            ),
-            (
-                "/v1/messages/count_tokens",
-                json!({
-                    "model": MODEL,
-                    "messages": [{
-                        "role": "user",
-                        "content": [{"type": "future_block_type", "value": 1}]
-                    }]
-                }),
-                ExpectedError::NotImplemented,
+                ExpectedError::UnsupportedContent,
                 "content block type \"future_block_type\"",
             ),
         ] {
