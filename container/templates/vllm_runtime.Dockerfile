@@ -200,6 +200,16 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     export VLLM_OMNI_TARGET_DEVICE={{ device }}; \
     bash /tmp/install_vllm_omni.sh
 
+{% if device == "cuda" %}
+# Apply vLLM hotfixes to the installed package tree. Patches are applied with
+# --fuzz=5 to tolerate minor line-number drift across nightly builds.
+RUN --mount=type=bind,source=./container/deps/vllm/patches,target=/tmp/vllm_patches,readonly \
+    SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
+    for p in $(ls /tmp/vllm_patches/*.patch 2>/dev/null | sort); do \
+        patch --fuzz=5 -p1 -d "${SITE_PACKAGES}" < "$p"; \
+    done
+{% endif %}
+
 {% if device == "xpu" %}
 # Remove conflicting standard triton package for XPU and reinstall triton-xpu
 # This must be done after vLLM-Omni installation to ensure no dependencies re-install triton

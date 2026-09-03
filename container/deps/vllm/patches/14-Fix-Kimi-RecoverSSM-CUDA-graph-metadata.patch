@@ -1,0 +1,44 @@
+From 62cb2857dd08b38d1b90347d2a64cbffcc10dd00 Mon Sep 17 00:00:00 2001
+From: Wei Zhao <weizha@oci-aga-slurm-1-vscode-02.cm.cluster>
+Date: Sat, 15 Aug 2026 22:22:22 -0700
+Subject: [PATCH 13/13] Fix Kimi RecoverSSM CUDA graph metadata
+
+Handle oversized piecewise-capture dummy rows as prefills and retain the layer names needed to build the RecoverSSM commit context.
+
+Co-authored-by: OpenAI Codex <codex@openai.com>
+Signed-off-by: Wei Zhao <weizha@oci-aga-slurm-1-vscode-02.cm.cluster>
+
+Signed-off-by: Shreyas Misra <shreyasm@nvidia.com>
+---
+ vllm/models/kimi_k3/nvidia/kda_metadata.py | 7 ++++---
+ 1 file changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/vllm/models/kimi_k3/nvidia/kda_metadata.py b/vllm/models/kimi_k3/nvidia/kda_metadata.py
+index adc5a50845..2783957fba 100644
+--- a/vllm/models/kimi_k3/nvidia/kda_metadata.py
++++ b/vllm/models/kimi_k3/nvidia/kda_metadata.py
+@@ -304,6 +304,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
+         device: torch.device,
+     ) -> None:
+         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
++        self.layer_names = layer_names
+         self.use_recoverssm = vllm_config.cache_config.use_kda_recoverssm
+         self.spec_state_slots = 1 if self.use_recoverssm else self.num_spec + 1
+         self.recoverssm_num_accepted_tokens: torch.Tensor | None = None
+@@ -373,10 +374,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
+             if self.use_recoverssm:
+                 assert m.is_prefilling is not None
+                 assert m.is_prefilling.device.type == "cpu"
+-                active_decode_mask_cpu = (~m.is_prefilling) & (
+-                    query_start_loc_cpu.diff() > 0
+-                )
++                query_lens_cpu = query_start_loc_cpu.diff()
++                active_decode_mask_cpu = (~m.is_prefilling) & (query_lens_cpu > 0)
+                 spec_sequence_masks_cpu |= active_decode_mask_cpu
++                spec_sequence_masks_cpu &= query_lens_cpu <= self.num_spec + 1
+             # Native KDA can use its regular decode path when no draft token
+             # was scheduled. RecoverSSM must preserve its extended conv window.
+             if (
+-- 
+2.34.1
+

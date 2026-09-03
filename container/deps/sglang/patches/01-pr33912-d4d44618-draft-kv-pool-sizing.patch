@@ -1,0 +1,129 @@
+diff --git a/python/sglang/srt/model_executor/model_runner_components/spec_aux_hidden_state.py b/python/sglang/srt/model_executor/model_runner_components/spec_aux_hidden_state.py
+index 95c887636ae1f6dc5e8ed04f156b75766e11c7a7..7452d7d743d02aa2f1ac02a020f1bd4ecf7e198b 100644
+--- a/python/sglang/srt/model_executor/model_runner_components/spec_aux_hidden_state.py
++++ b/python/sglang/srt/model_executor/model_runner_components/spec_aux_hidden_state.py
+@@ -20,6 +20,10 @@ class SpecAuxHiddenStateConfig(msgspec.Struct, kw_only=True):
+     eagle_aux_hidden_state_layer_ids: Any = None
+     dflash_use_aux_hidden_state: bool = False
+     dflash_draft_num_layers: Optional[int] = None
++    dflash_draft_total_num_kv_heads: Optional[int] = None
++    dflash_draft_head_dim: Optional[int] = None
++    dflash_draft_v_head_dim: Optional[int] = None
++    dflash_draft_kv_element_size: Optional[int] = None
+     dflash_target_layer_ids: Any = None
+ 
+ 
+diff --git a/python/sglang/srt/model_executor/pool_configurator.py b/python/sglang/srt/model_executor/pool_configurator.py
+index 1fc00f5403e13bb6478410ada0d53fa667017362..89fbc18330eff4fa5a14225f20564ac0457f22a4 100644
+--- a/python/sglang/srt/model_executor/pool_configurator.py
++++ b/python/sglang/srt/model_executor/pool_configurator.py
+@@ -174,10 +174,36 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
+                 and int(draft_num_layers) > 0
+                 and int(num_layers) > 0
+             ):
++                draft_geometry = (
++                    kvc.spec_aux_config.dflash_draft_total_num_kv_heads,
++                    kvc.spec_aux_config.dflash_draft_head_dim,
++                    kvc.spec_aux_config.dflash_draft_v_head_dim,
++                    kvc.spec_aux_config.dflash_draft_kv_element_size,
++                )
++                if any(value is None for value in draft_geometry):
++                    raise ValueError("DFLASH draft KV geometry or dtype is missing.")
++
++                total_num_kv_heads, head_dim, v_head_dim, kv_element_size = (
++                    draft_geometry
++                )
++                local_num_kv_heads = max(
++                    1,
++                    int(total_num_kv_heads) // get_parallel().attn_tp_size,
++                )
++                draft_cell_size_per_token = (
++                    int(draft_num_layers)
++                    * local_num_kv_heads
++                    * (int(head_dim) + int(v_head_dim))
++                    * int(kv_element_size)
++                    * get_parallel().attn_dcp_size
++                )
++
+                 self._cell_size = scale_kv_cell_size_per_token_for_dflash(
+                     target_cell_size_per_token=self._cell_size,
+                     target_num_layers=int(num_layers),
+-                    draft_num_layers=int(draft_num_layers) * kvc.server_args.dcp_size,
++                    draft_num_layers=int(draft_num_layers)
++                    * get_parallel().attn_dcp_size,
++                    draft_cell_size_per_token=draft_cell_size_per_token,
+                 )
+ 
+     def _compute_cell_size(self, kvc: KVCacheConfigurator, num_layers: int) -> int:
+diff --git a/python/sglang/srt/speculative/dflash_worker_v2.py b/python/sglang/srt/speculative/dflash_worker_v2.py
+index 64ee3ea60d2779077531c8952fc49d8fff3eea67..52155cc3d9f07e4621782928d23cd62e9bee5e33 100644
+--- a/python/sglang/srt/speculative/dflash_worker_v2.py
++++ b/python/sglang/srt/speculative/dflash_worker_v2.py
+@@ -196,7 +196,7 @@ class DFlashWorkerV2(BaseSpecWorker):
+             gpu_id=gpu_id,
+             ps=replace(ps, pp_rank=0),
+             nccl_port=nccl_port,
+-            target_model_config=target_worker.model_runner.model_config,
++            target_model_runner=target_worker.model_runner,
+             algo_label="DFLASH",
+         )
+         self._draft_worker = bundle.draft_worker
+diff --git a/python/sglang/srt/speculative/draft_worker_common.py b/python/sglang/srt/speculative/draft_worker_common.py
+index 2e1685da19d1bac279ea198187dec44caa73f931..e4ca626a1c99dfdeeb1dad914e19acde5d1ac6c1 100644
+--- a/python/sglang/srt/speculative/draft_worker_common.py
++++ b/python/sglang/srt/speculative/draft_worker_common.py
+@@ -16,7 +16,6 @@ from sglang.srt.speculative.dflash_info import DFlashVerifyInput
+ from sglang.srt.speculative.dflash_info_v2 import DFlashDraftInputV2
+ 
+ if TYPE_CHECKING:
+-    from sglang.srt.configs.model_config import ModelConfig
+     from sglang.srt.distributed.parallel_state_wrapper import ParallelState
+     from sglang.srt.model_executor.model_runner import ModelRunner
+ 
+@@ -129,10 +128,11 @@ def build_draft_tp_worker(
+     gpu_id: int,
+     ps: ParallelState,
+     nccl_port: int,
+-    target_model_config: ModelConfig,
++    target_model_runner: ModelRunner,
+     algo_label: str,
+     attention_backend_override: Optional[str] = None,
+ ) -> DraftWorkerBundle:
++    target_model_config = target_model_runner.model_config
+     draft_server_args = deepcopy(server_args)
+     # An override names a draft-specific backend the caller has already
+     # validated (e.g. a self-drafting architecture); it skips the generic
+@@ -162,6 +162,20 @@ def build_draft_tp_worker(
+ 
+     draft_model_runner = draft_worker.model_runner
+     draft_worker.draft_runner = draft_model_runner
++
++    # Pool sizing runs after the draft worker is built, so record the loaded
++    # draft's actual KV geometry and resolved dtype for both DFLASH and DSPARK.
++    draft_model_config = draft_model_runner.model_config
++    target_spec_aux_config = target_model_runner.spec_aux_config
++    target_spec_aux_config.dflash_draft_total_num_kv_heads = int(
++        draft_model_config.get_total_num_kv_heads()
++    )
++    target_spec_aux_config.dflash_draft_head_dim = int(draft_model_config.head_dim)
++    target_spec_aux_config.dflash_draft_v_head_dim = int(draft_model_config.v_head_dim)
++    target_spec_aux_config.dflash_draft_kv_element_size = torch._utils._element_size(
++        draft_model_runner.kv_cache_dtype
++    )
++
+     return DraftWorkerBundle(
+         draft_worker=draft_worker,
+         draft_model_runner=draft_model_runner,
+diff --git a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
+index d5b1ec03b6d1a5cfea6b4081b4ca3163a003c2f1..7c78d08f8d0df3a65da7eede38c56e14ab17c957 100644
+--- a/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
++++ b/python/sglang/srt/speculative/dspark_components/dspark_worker_v2.py
+@@ -113,7 +113,7 @@ class DSparkWorkerV2(BaseSpecWorker):
+                 gpu_id=gpu_id,
+                 ps=replace(ps, pp_rank=0),
+                 nccl_port=nccl_port,
+-                target_model_config=target_worker.model_runner.model_config,
++                target_model_runner=target_worker.model_runner,
+                 algo_label="DSPARK",
+                 attention_backend_override=(
+                     DSV4_DRAFT_ATTENTION_BACKEND if self._draft_is_moe else None

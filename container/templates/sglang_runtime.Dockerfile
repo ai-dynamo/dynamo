@@ -162,11 +162,91 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 
+{% if device == "cuda" %}
+
+# Patch stock DeepEP for Kimi K3, then rebuild a fat binary containing sm_90,
+# sm_100a, and sm_103a cubins. The same GPU cubin set is retained in both the
+# amd64 and arm64 runtime images. The stable runtime omits the RDMA development
+# headers required by DeepEP, so install them only for this build step.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libibverbs-dev && \
+    test -f /sgl-workspace/sglang/docker/kimi_k3/apply_deepep_k3_patch.sh && \
+    TORCH_CUDA_ARCH_LIST="9.0;10.0a;10.3a" \
+      bash /sgl-workspace/sglang/docker/kimi_k3/apply_deepep_k3_patch.sh && \
+    rm -rf /sgl-workspace/DeepEP/build /sgl-workspace/DeepEP/dist && \
+    apt-get purge -y --auto-remove libibverbs-dev && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# High-fidelity GPU JPEG decode. The K3 processor enables nvJPEG interpolated
+# chroma upsampling through nvImageCodec and zero-copy DLPack handoff to Torch.
+# The requested [all] extra intentionally installs its codec runtime plugins.
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    export PIP_CACHE_DIR=/root/.cache/pip && \
+    python3 -m pip install --break-system-packages \
+      "nvidia-nvimgcodec-cu13[all]==0.9.0.20"
+
+# The selected v0.5.17 runtime already carries the matching FlashInfer package trio,
+# its CuTeDSL MLA DCP runtime patch, and the pinned GenMoE cubin pool. Verify
+# those inherited Kimi prerequisites instead of reinstalling or reapplying them.
+RUN set -eu; \
+    for package in flashinfer-python flashinfer-cubin flashinfer-jit-cache; do \
+        if ! package_info="$(python3 -m pip show "${package}")"; then \
+            echo "Missing inherited ${package} package" >&2; \
+            exit 1; \
+        fi; \
+        actual_version="$(printf '%s\n' "${package_info}" | sed -n 's/^Version: //p')"; \
+        actual_version="${actual_version%%+*}"; \
+        if [ "${actual_version}" != "0.6.15.post1" ]; then \
+            echo "Inherited ${package} version ${actual_version}; expected 0.6.15.post1" >&2; \
+            exit 1; \
+        fi; \
+    done; \
+    cubin_pool="${SGLANG_TRTLLM_GEN_MOE_CUBIN_POOL:-}"; \
+    cubin_count="$(find "${cubin_pool}" -type f -name '*.cubin' 2>/dev/null | wc -l)"; \
+    if [ "${cubin_count}" -ne 1696 ]; then \
+        echo "Inherited GenMoE pool has ${cubin_count} cubins; expected 1696" >&2; \
+        exit 1; \
+    fi; \
+    flashinfer_site_packages="$(python3 -m pip show flashinfer-python | sed -n 's/^Location: //p')"; \
+    flashinfer_dispatch="${flashinfer_site_packages}/flashinfer/cute_dsl/attention/mla_dispatch.py"; \
+    flashinfer_mla_decode="${flashinfer_site_packages}/flashinfer/cute_dsl/attention/monolithic/mla_decode.py"; \
+    if ! grep -Fq 'DCP_KWARGS = (' "${flashinfer_dispatch}" \
+        || ! grep -Fq 'def _validate_dcp_kwargs' "${flashinfer_dispatch}" \
+        || ! grep -Fq 'causal_seqlens_kv_global' "${flashinfer_mla_decode}"; then \
+        echo "Inherited FlashInfer CuTeDSL MLA DCP patch is missing" >&2; \
+        exit 1; \
+    fi
+
+# Apply pinned SGLang hotfixes to the source tree carried by the upstream runtime
+# image and assert the vendored patches contain no test-path hunks.
+RUN --mount=type=bind,source=./container/deps/sglang/patches,target=/tmp/sglang_patches \
+    set -eu; \
+    SGLANG_DIR="/sgl-workspace/sglang"; \
+    python3 -c "import importlib.util, os; spec = importlib.util.find_spec('sglang'); assert spec and spec.origin; assert os.path.realpath(spec.origin).startswith('${SGLANG_DIR}/'), spec.origin"; \
+    patch_series="$(find /tmp/sglang_patches -maxdepth 1 -type f -name '*.patch' | sort)"; \
+    test -n "${patch_series}"; \
+    set +e; \
+    grep -El '^(---|\+\+\+) [ab]/(test|tests|.*/test|.*/tests)/' ${patch_series} > /tmp/sglang_patch_test_hunks; \
+    grep_status="$?"; \
+    set -e; \
+    if [ "${grep_status}" -eq 0 ]; then \
+        echo "SGLang runtime patches contain test hunks:" >&2; \
+        cat /tmp/sglang_patch_test_hunks >&2; \
+        exit 1; \
+    elif [ "${grep_status}" -ne 1 ]; then \
+        exit "${grep_status}"; \
+    fi; \
+    git -C "${SGLANG_DIR}" apply ${patch_series}
+{% endif %}
+
 # Copy tests, deploy and components for CI with correct ownership
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
 COPY --chmod=775 --chown=dynamo:0 dev /workspace/dev
+
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/common /workspace/components/src/dynamo/common
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/frontend /workspace/components/src/dynamo/frontend
 COPY --chmod=775 --chown=dynamo:0 components/src/dynamo/sglang /workspace/components/src/dynamo/sglang
@@ -200,8 +280,7 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
 # the non-root `dynamo` user, which cannot write .pyc back to site-packages, and
 # the test harness forks a fresh process per test. Without baked .pyc, every test
 # process recompiles torch/transformers/sglang from source on first import (~+3.5s
-# each), which previously added ~8-10 min to the sglang CI job. This was implicitly
-# provided by the now-removed vendored-patch step that ran `import sglang` at build.
+# each), which previously added ~8-10 min to the sglang CI job.
 RUN SITE_PACKAGES="$(python3 -c 'import site; print(site.getsitepackages()[0])')" && \
     python3 -m compileall -q -j0 "$SITE_PACKAGES" && \
     (python3 -m compileall -q -j0 /sgl-workspace/sglang/python || true)

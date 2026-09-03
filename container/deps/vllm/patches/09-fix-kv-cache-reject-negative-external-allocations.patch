@@ -1,0 +1,67 @@
+From 24c6293790c5e05d02afaa3cc99954d258c9ec19 Mon Sep 17 00:00:00 2001
+From: Wei Zhao <weizha@oci-aga-slurm-1-vscode-02.cm.cluster>
+Date: Wed, 12 Aug 2026 13:45:13 -0700
+Subject: [PATCH 08/13] fix(kv-cache): reject negative external allocations
+
+Clamp already-satisfied external block deficits to zero and reject negative free-list pops before they can corrupt the queue count.
+
+Co-authored-by: OpenAI Codex <codex@openai.com>
+
+Signed-off-by: Wei Zhao <weizha@oci-aga-slurm-1-vscode-02.cm.cluster>
+
+Signed-off-by: Shreyas Misra <shreyasm@nvidia.com>
+---
+ vllm/v1/core/block_pool.py                   | 4 ++++
+ vllm/v1/core/kv_cache_utils.py               | 2 ++
+ vllm/v1/core/single_type_kv_cache_manager.py | 6 ++++--
+ 3 files changed, 10 insertions(+), 2 deletions(-)
+
+diff --git a/vllm/v1/core/block_pool.py b/vllm/v1/core/block_pool.py
+index 19d2709a5d..b3ad67a233 100644
+--- a/vllm/v1/core/block_pool.py
++++ b/vllm/v1/core/block_pool.py
+@@ -655,6 +655,10 @@ class BlockPool:
+         Returns:
+             A list of new block.
+         """
++        if num_blocks < 0:
++            raise ValueError(
++                f"Cannot allocate a negative number of blocks: {num_blocks}"
++            )
+         if num_blocks > self.get_num_free_blocks():
+             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
+ 
+diff --git a/vllm/v1/core/kv_cache_utils.py b/vllm/v1/core/kv_cache_utils.py
+index ad51e4b2b3..cc0b7d2d3b 100644
+--- a/vllm/v1/core/kv_cache_utils.py
++++ b/vllm/v1/core/kv_cache_utils.py
+@@ -280,6 +280,8 @@ class FreeKVCacheBlockQueue:
+         Returns:
+             A list of n free blocks.
+         """
++        if n < 0:
++            raise ValueError(f"Cannot pop a negative number of blocks: {n}")
+         if n == 0:
+             return []
+         assert self.num_free_blocks >= n
+diff --git a/vllm/v1/core/single_type_kv_cache_manager.py b/vllm/v1/core/single_type_kv_cache_manager.py
+index b1c2b3f04d..ec65880cc4 100644
+--- a/vllm/v1/core/single_type_kv_cache_manager.py
++++ b/vllm/v1/core/single_type_kv_cache_manager.py
+@@ -320,9 +320,11 @@ class SingleTypeKVCacheManager(ABC):
+             return
+ 
+         req_blocks = self.req_to_blocks[request_id]
+-        allocated_blocks = self.block_pool.get_new_blocks(
+-            cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
++        num_blocks_to_allocate = max(
++            0,
++            cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks),
+         )
++        allocated_blocks = self.block_pool.get_new_blocks(num_blocks_to_allocate)
+         req_blocks.extend(allocated_blocks)
+         if self._record_new_block_ids:
+             self.new_block_ids.extend(b.block_id for b in allocated_blocks)
+-- 
+2.34.1
+
