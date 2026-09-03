@@ -159,7 +159,9 @@ fn create_request_context<T: rs::pipeline::Data>(
                 parent_ctx.metadata_snapshot(),
             );
             parent_ctx.inner().link_child(child_ctx.context());
-            if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {
+            if parent_ctx.inner().is_killed() {
+                child_ctx.context().kill();
+            } else if parent_ctx.inner().is_stopped() {
                 // Let the server handle the cancellation for now since not all backends are
                 // properly handling request exceptions
                 // TODO: (DIS-830) Return an error if context is cancelled
@@ -169,6 +171,36 @@ fn create_request_context<T: rs::pipeline::Data>(
         }
         // Otherwise if there is no parent context, use the request as-is
         _ => request.into(),
+    }
+}
+
+#[cfg(test)]
+mod request_context_tests {
+    use super::*;
+    use rs::pipeline::AsyncEngineContext;
+    use rs::pipeline::context::Controller;
+
+    #[test]
+    fn create_request_context_preserves_killed_state() {
+        let parent_controller = Arc::new(Controller::new("parent".to_string()));
+        parent_controller.kill();
+        let parent = context::Context::new(parent_controller, None, None, Default::default());
+
+        let child = create_request_context(rmpv::Value::Nil, &Some(parent));
+
+        assert!(child.context().is_killed());
+    }
+
+    #[test]
+    fn create_request_context_preserves_stopped_state() {
+        let parent_controller = Arc::new(Controller::new("parent".to_string()));
+        parent_controller.stop_generating();
+        let parent = context::Context::new(parent_controller, None, None, Default::default());
+
+        let child = create_request_context(rmpv::Value::Nil, &Some(parent));
+
+        assert!(child.context().is_stopped());
+        assert!(!child.context().is_killed());
     }
 }
 

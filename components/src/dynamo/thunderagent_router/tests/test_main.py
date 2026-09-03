@@ -128,7 +128,9 @@ class FakeKvRouter:
         self.sent: Optional[dict[str, Any]] = None
         self.context: Any = None
 
-    async def generate_from_request(self, preprocessed, context=None):
+    async def generate_from_request(
+        self, preprocessed, response_buffer_size=100, context=None
+    ):
         self.sent = preprocessed
         self.context = context
 
