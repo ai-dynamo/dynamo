@@ -12,6 +12,7 @@ pub mod policy_queue;
 pub mod prefill_load;
 pub mod queue;
 mod queue_admission;
+pub mod request_classifier;
 pub mod selector;
 
 mod worker_selection_config;
@@ -38,4 +39,8 @@ pub use prefill_load::{
     prefill_load_hint_from_effective_tokens,
 };
 pub use queue_admission::{RequestProgress, RequestProgressUpdater, WorkerPlacement};
+pub use request_classifier::{
+    AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
+    RequestLifecycle,
+};
 pub use types::*;
