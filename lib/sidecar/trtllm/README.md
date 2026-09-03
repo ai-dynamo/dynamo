@@ -40,12 +40,12 @@ The engine image has to meet the requirements noted under
 TensorRT-LLM with its native gRPC listener:
 
 ```bash
-python -m tensorrt_llm.commands.serve <model> --grpc --host 0.0.0.0 --port 50051
+python -m tensorrt_llm.commands.serve <model> --grpc --host 127.0.0.1 --port 50051
 ```
 
-This listener is unauthenticated and plaintext. Keep colocated deployments on
-loopback or a private interface. Remote access requires network controls or a
-secure proxy.
+This listener is unauthenticated and plaintext, so the command binds it to
+loopback, which is all a colocated sidecar needs. Widening the bind address is an
+explicit opt-in and requires network controls or a secure proxy in front of it.
 
 Start the Dynamo worker:
 
