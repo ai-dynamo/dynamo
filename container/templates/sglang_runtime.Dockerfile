@@ -14,7 +14,9 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 ARG MODELEXPRESS_VERSION
+{% if device == "cuda" %}
 ARG CUDA_MAJOR
+{% endif %}
 
 WORKDIR /workspace
 
@@ -204,7 +206,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
         --requirement /tmp/requirements.sglang.nonvidia.txt && \
     rm -f /tmp/requirements.sglang.nonvidia.txt && \
     python3 -c "import importlib.util,sys; sys.exit(1 if importlib.util.find_spec('PyNvVideoCodec') else 0)" && \
-    python3 -c "import importlib.metadata as m, re; names={re.sub(r'[-_.]+', '-', d.metadata['Name']).lower() for d in m.distributions() if d.metadata is not None}; exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
+    python3 -c "import importlib.metadata as m, re, sys; names={re.sub(r'[-_.]+', '-', n).lower() for d in m.distributions() if (n := (d.metadata or {}).get('Name'))}; sys.exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
 {% endif %}
 
 # Remove the codec-bearing video-DECODE components from the upstream SGLang image

@@ -388,8 +388,10 @@ RUN set -eu; \
 # --no-binary directive lives in the requirements file itself.
 # The upstream vllm-openai base bakes its own uv cache into the image at
 # /opt/uv/cache; the archived wheel copies there duplicate installed packages
-# (and keep stale versions on disk after the floors above refresh them), so
-# drop the cache in the same layer.
+# (and keep stale versions on disk after the floors above refresh them). That
+# cache lives in an inherited base layer, so removing it here does not shrink
+# the pulled image -- it only drops it from the final filesystem view, which
+# is what the compliance scanners see, so drop it in the same layer.
 {% if device == "cuda" %}
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
@@ -428,7 +430,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
         --requirement /tmp/requirements.vllm.nonvidia.txt && \
     rm -f /tmp/requirements.vllm.nonvidia.txt && \
     ! /opt/venv/bin/python -c "import PyNvVideoCodec" 2>/dev/null && \
-    /opt/venv/bin/python -c "import importlib.metadata as m, re; names={re.sub(r'[-_.]+', '-', d.metadata['Name']).lower() for d in m.distributions() if d.metadata is not None}; exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
+    /opt/venv/bin/python -c "import importlib.metadata as m, re, sys; names={re.sub(r'[-_.]+', '-', n).lower() for d in m.distributions() if (n := (d.metadata or {}).get('Name'))}; sys.exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)" && \
+    rm -rf /opt/uv/cache
 {% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest
