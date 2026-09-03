@@ -104,10 +104,6 @@ We also support running lightweight mock engines that simulate vLLM behavior wit
 
 #### Disaggregated Serving with Mockers (No GPU Required)
 
-> [!WARNING]
-> The public online Mocker CLI is temporarily unavailable. The direct commands below do not run in
-> this release and are retained only to document the workflow that will return in a future release.
-
 You can test disaggregated serving entirely with mockers by launching separate prefill and decode mocker groups that share a namespace. This is useful for validating routing logic, metrics, and the prefill-decode handoff without any GPUs.
 
 ```bash
@@ -115,13 +111,13 @@ NAMESPACE="test-disagg"
 MODEL="Qwen/Qwen3-0.6B"
 
 # Terminal 1: Decode mockers (2 workers)
-python -m dynamo.mocker --model-path "$MODEL" \
+python3 -m dynamo.mocker --model-path "$MODEL" \
     --endpoint "dyn://${NAMESPACE}.backend.generate" \
     --disaggregation-mode decode --num-workers 2 \
     --speedup-ratio 10 --block-size 16
 
 # Terminal 2: Prefill mockers (2 workers)
-python -m dynamo.mocker --model-path "$MODEL" \
+python3 -m dynamo.mocker --model-path "$MODEL" \
     --endpoint "dyn://${NAMESPACE}.prefill.generate" \
     --disaggregation-mode prefill --num-workers 2 \
     --speedup-ratio 10 --block-size 16

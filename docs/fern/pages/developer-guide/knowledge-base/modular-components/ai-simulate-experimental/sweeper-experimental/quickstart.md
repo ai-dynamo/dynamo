@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: Sweeper Quickstart
 subtitle: Run a backend-neutral sweep with an injected replay runtime
@@ -9,10 +9,10 @@ subtitle: Run a backend-neutral sweep with an injected replay runtime
 > **Experimental.** Sweeper is intended for evaluation and feedback, not production capacity
 > planning.
 
-Install AI Simulate:
+Install AISimulate:
 
 ```bash
-python -m pip install "aisimulate==0.1.0.dev1"
+python3 -m pip install "aisimulate==0.1.0.dev2"
 ```
 
 Sweeper requires a `RunnerFactory` supplied by the application that owns replay execution:
