@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
@@ -28,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -952,4 +954,122 @@ func TestComponentWorkloadsReconciler_ApplyPendingAutomaticSnapshotPolicy(t *tes
 				dcd.Spec.PodTemplate.Annotations[commonconsts.SnapshotJobCandidateUIDAnnotation])
 		})
 	}
+}
+
+// TestComponentWorkloadsReconciler_FirstGenMultinodeStampsWorkerHash guards the full
+// render path for brand-new multinode DGDs. The DGD has no worker hash annotations
+// (first generation), so workerHashForDCDGeneration must return the v2 hash — not "".
+// A regression here deadlocks: the commit gate waits for a DCD labelled H while the
+// renderer writes one labelled "", and the two never match.
+func TestComponentWorkloadsReconciler_FirstGenMultinodeStampsWorkerHash(t *testing.T) {
+	t.Log("Build a brand-new multinode DGD with no worker hash annotations")
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"prefill": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
+		},
+		"decode": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
+		},
+	})
+
+	expectedHash := betaDGDWorkersSpecHash(t, dgd)
+
+	t.Log("Wire the component workloads reconciler backed by a fake client seeded with only the DGD")
+	r := createTestDGDReconcilerWithStatus(dgd)
+	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
+	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
+
+	t.Log("Reconcile: every generated worker DCD must carry the computed hash in its label and name")
+	_, err := workloads.Reconcile(context.Background(), dgd, nil, nil)
+	require.NoError(t, err)
+
+	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
+	require.NoError(t, r.Client.List(context.Background(), dcdList, client.InNamespace(dgd.Namespace)))
+
+	var workerDCDs []*nvidiacomv1beta1.DynamoComponentDeployment
+	for i := range dcdList.Items {
+		dcd := &dcdList.Items[i]
+		if dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
+			workerDCDs = append(workerDCDs, dcd)
+		}
+	}
+	require.Len(t, workerDCDs, 2, "both worker components must produce a DCD")
+
+	for _, dcd := range workerDCDs {
+		assert.Equal(t, expectedHash, dcd.Labels[commonconsts.KubeLabelDynamoWorkerHash],
+			"DCD %s must carry the worker hash label", dcd.Name)
+		assert.True(t, strings.HasSuffix(dcd.Name, expectedHash),
+			"DCD %s must have the worker hash as name suffix", dcd.Name)
+	}
+}
+
+// TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero guards the
+// drain path for a component that has been removed from the DGD spec mid-rollout.
+// Without the fix, buildRollingUpdateContext only iterates desired components, so
+// the removed component never gets a target in OldWorkerReplicaTargetsByComponent.
+// scaleOldWorkerDCDs then skips it, the DCD stays at 1, and completeRollingUpdate
+// can never drain-and-delete it — permanently stalling the rollout.
+func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *testing.T) {
+	t.Log("Compute the old hash from the full two-component DGD that existed before the removal")
+	fullDGD := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"prefill": {ComponentType: commonconsts.ComponentTypeWorker},
+		"decode":  {ComponentType: commonconsts.ComponentTypeWorker},
+	})
+	oldHash := betaDGDWorkersSpecHash(t, fullDGD)
+
+	t.Log("Build the reduced DGD with decode removed; annotate it with the old hash to signal an active rollout")
+	reducedDGD := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"prefill": {ComponentType: commonconsts.ComponentTypeWorker},
+	})
+	reducedDGD.Annotations = map[string]string{
+		commonconsts.AnnotationCurrentWorkerHashV2: oldHash,
+	}
+
+	t.Log("Seed the fake cache with old-gen DCDs for both prefill and decode carrying the old hash")
+	prefillOldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd-prefill-" + oldHash, Namespace: "default"},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				ServiceName:   "prefill",
+				Replicas:      ptr.To(int32(1)),
+				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					commonconsts.KubeLabelDynamoWorkerHash:          oldHash,
+				},
+			},
+		},
+	})
+	decodeOldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd-decode-" + oldHash, Namespace: "default"},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeWorker,
+				ServiceName:   "decode",
+				Replicas:      ptr.To(int32(1)),
+				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					commonconsts.KubeLabelDynamoWorkerHash:          oldHash,
+				},
+			},
+		},
+	})
+
+	r := createTestDGDReconcilerWithStatus(reducedDGD, withObjects(prefillOldDCD, decodeOldDCD))
+	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
+	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
+
+	t.Log("Reconcile: the removed decode component must be targeted at zero replicas")
+	_, err := workloads.Reconcile(context.Background(), reducedDGD, nil, nil)
+	require.NoError(t, err)
+
+	t.Log("Verify the decode old DCD has been patched to zero replicas so the rollout can drain and complete")
+	gotDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	require.NoError(t, r.Client.Get(context.Background(),
+		client.ObjectKeyFromObject(decodeOldDCD), gotDCD))
+	require.NotNil(t, gotDCD.Spec.Replicas, "decode old DCD must have an explicit replica count")
+	assert.Equal(t, int32(0), *gotDCD.Spec.Replicas,
+		"decode old DCD must be scaled to zero so completeRollingUpdate can drain and delete it")
 }

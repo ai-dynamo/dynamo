@@ -213,7 +213,7 @@ func workerHashForDCDGeneration(current, desired workerGenerationHashes) string 
 	if current.v2 != "" {
 		return desired.v2
 	}
-	return desired.v1
+	return desired.v2
 }
 
 func workerHashesForCompletedGeneration(newWorkerHash string, desired workerGenerationHashes) workerGenerationHashes {
@@ -1528,6 +1528,20 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			"new", newState,
 			"oldTarget", oldTarget,
 			"newTarget", newTarget)
+	}
+
+	// Assign zero replica target to old-only components that have been removed
+	// from the spec. Without this, scaleOldWorkerDCDs skips them (they are not
+	// in OldWorkerReplicaTargetsByComponent) and their DCDs are never drained,
+	// permanently stalling completeRollingUpdate.
+	for componentName, oldDCDs := range oldDCDsByComponent {
+		if _, ok := oldWorkerComponentReplicas[componentName]; ok {
+			continue
+		}
+		oldWorkerComponentReplicas[componentName] = 0
+		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, 0) {
+			oldWorkerDCDReplicas[dcdName] = target
+		}
 	}
 
 	return dynamo.RollingUpdateContext{

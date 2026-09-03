@@ -4118,7 +4118,7 @@ func TestReconcileRollingUpdate_PendingToInProgress(t *testing.T) {
 	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
 }
 
-func TestReconcileRollingUpdate_StuckDetection(t *testing.T) {
+func TestReconcileRollingUpdate_HashMatchWithoutDrainRemainsInProgress(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {ComponentType: consts.ComponentTypeWorker},
 	})
@@ -4291,7 +4291,7 @@ func TestReconcileRollingUpdate_NonePhaseStartsRollout(t *testing.T) {
 	assert.Nil(t, dgd.Status.RollingUpdate.UpdatedComponents)
 }
 
-func TestReconcileRollingUpdate_StuckDetectionWaitsForObservedTarget(t *testing.T) {
+func TestReconcileRollingUpdate_InProgressAwaitsTargetDCDCacheObservation(t *testing.T) {
 	// Hash annotations are parent-side receipts, not target-readiness evidence.
 	// A resumed reconciliation must wait for the target DCD generation to exist
 	// and report ready before it can enter completion.
