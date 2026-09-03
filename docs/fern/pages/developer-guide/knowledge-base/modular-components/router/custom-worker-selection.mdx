@@ -316,6 +316,7 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `block_size()` | Tokens in one KV block |
 | `tracks_prefill_tokens()` | Whether the request contributes to prefill-load tracking |
 | `session_context()` | Optional session metadata described below |
+| `affinity_target()` | Optional advisory worker and data-parallel rank from soft session affinity |
 | `expected_output_tokens()` | Optional expected output length |
 | `priority_jump()` | Scheduler priority boost. Queue policies treat negative values as zero |
 | `strict_priority()` | Strict integer priority. The queue orders larger values first |
@@ -335,6 +336,24 @@ Request context and worker identity are always available. Dynamo calculates opti
 | `input_trigger()` | Optional `UserMessage`, `ToolResult`, or `Other` request trigger |
 
 The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) use `input_trigger()` to give tool-result turns a cache-local picker path.
+
+### Soft Session Affinity
+
+Set `--router-session-affinity-mode soft` with a session-affinity TTL to let a custom policy influence an existing session binding. The current binding enters the normal selection pipeline as `affinity_target()`. The policy still receives the full host-eligible candidate set, subject to its own filters, and may select another worker. Dynamo rebinds the session after dispatch returns a response stream.
+
+```mermaid
+flowchart LR
+    Lookup["Session binding lookup"] --> Context["affinity_target()"]
+    Context --> Policy["Custom filter, score, and pick"]
+    Policy --> Dispatch["Dispatch selected worker"]
+    Dispatch --> Rebind["Commit selected worker as new binding"]
+```
+
+Match both fields when a policy wants to recognize the target. A target with `dp_rank: None` matches every rank on its worker; a populated rank matches only that worker-rank pair. The target can be absent from the candidate table when the worker is unavailable or a custom filter rejects it.
+
+Hard affinity remains the default. A hard binding and every explicit request target take the exact-target path instead of advisory custom selection. A selection, setup, or dispatch failure before a response stream leaves the previous soft binding intact. An error or cancellation after the stream is returned does not roll back a completed rebind.
+
+The [custom policy examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/router/custom-policy-example/README.md) include an overload-aware soft pinning policy that retains the advisory target until its active-request count exceeds a configured threshold, then selects the least-loaded alternative. Its two-Mocker walkthrough holds the first request open and verifies an `A -> B -> B` worker sequence: overload moves the second request to B, and the third request retains B after load drains, proving that the plugin-selected dispatch updated the binding.
 
 ### Worker Identity and Cost
 

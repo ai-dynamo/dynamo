@@ -48,6 +48,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 )
 
 const (
@@ -93,7 +94,8 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
 // +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.istio.io,resources=destinationrules,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotjobs,verbs=get;list;watch;create;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=resourceclaimtemplates,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=resource.k8s.io,resources=deviceclasses,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -123,6 +125,9 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// Finalize deleting resources before validating their now-immutable live configuration.
 	if !dynamoDeployment.GetDeletionTimestamp().IsZero() {
 		_, err = commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
+		if errors.Is(err, errAutomaticSnapshotCleanupPending) {
+			return ctrl.Result{Requeue: true}, nil
+		}
 		if err != nil {
 			logger.Error(err, "failed to handle the finalizer")
 		}
@@ -239,21 +244,23 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		return fmt.Errorf("register DGD component Pod index: %w", err)
 	}
 
+	// Index native PodSnapshot references so dependency events can find affected DGDs.
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		if err := mgr.GetFieldIndexer().IndexField(
+			context.Background(),
+			&nvidiacomv1beta1.DynamoGraphDeployment{},
+			dgdPodSnapshotRefIndex,
+			dgdPodSnapshotRefIndexValues,
+		); err != nil {
+			return fmt.Errorf("register DGD PodSnapshot reference index: %w", err)
+		}
+	}
+
 	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoGraphDeployment{}, builder.WithPredicates(
 			generationOrDeletionChangedPredicate(),
 		)).
 		Named(consts.ResourceTypeDynamoGraphDeployment).
-		Watches(
-			&nvidiacomv1alpha1.DynamoCheckpoint{},
-			handler.EnqueueRequestsFromMapFunc(r.mapAutoCheckpointToDGDRequests),
-			builder.WithPredicates(predicate.Funcs{
-				CreateFunc:  func(ce event.CreateEvent) bool { return false },
-				DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-				UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
-				GenericFunc: func(ge event.GenericEvent) bool { return true },
-			}),
-		).
 		Watches(
 			&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(mapDGDWorkerPodToRequests),
@@ -291,6 +298,26 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+
+	// Watch standalone Snapshot resources only when their external APIs were detected.
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		ctrlBuilder = ctrlBuilder.
+			Watches(
+				&snapshotv1alpha1.SnapshotJob{},
+				handler.EnqueueRequestsFromMapFunc(r.mapAutoSnapshotJobToDGDRequests),
+				builder.WithPredicates(predicate.Funcs{
+					CreateFunc:  func(ce event.CreateEvent) bool { return false },
+					DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+					UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
+					GenericFunc: func(ge event.GenericEvent) bool { return true },
+				}),
+			).
+			Watches(
+				&snapshotv1alpha1.PodSnapshot{},
+				handler.EnqueueRequestsFromMapFunc(r.mapPodSnapshotToDGDRequests),
+				builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+			)
+	}
 	if r.RuntimeConfig.Gate.Enabled(features.DRA) {
 		ctrlBuilder = ctrlBuilder.Watches(
 			&resourcev1.ResourceClaim{},
@@ -405,20 +432,20 @@ func mapDGDWorkerPodToRequests(_ context.Context, obj client.Object) []ctrl.Requ
 	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: obj.GetNamespace(), Name: dgdName}}}
 }
 
-func (r *DynamoGraphDeploymentReconciler) mapAutoCheckpointToDGDRequests(ctx context.Context, obj client.Object) []ctrl.Request {
-	ckpt, ok := obj.(*nvidiacomv1alpha1.DynamoCheckpoint)
-	if !ok || ckpt == nil {
+func (r *DynamoGraphDeploymentReconciler) mapAutoSnapshotJobToDGDRequests(ctx context.Context, obj client.Object) []ctrl.Request {
+	snapshotJob, ok := obj.(*snapshotv1alpha1.SnapshotJob)
+	if !ok || snapshotJob == nil {
 		return nil
 	}
-	if ckpt.Annotations == nil || ckpt.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+	if snapshotJob.Annotations == nil || snapshotJob.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
 		return nil
 	}
-	if ckpt.Labels == nil {
+	if snapshotJob.Labels == nil {
 		return nil
 	}
-	dgdName := ckpt.Labels[consts.KubeLabelDynamoGraphDeploymentName]
+	dgdName := snapshotJob.Labels[consts.KubeLabelDynamoGraphDeploymentName]
 	if dgdName == "" {
 		return nil
 	}
-	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: ckpt.Namespace, Name: dgdName}}}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: snapshotJob.Namespace, Name: dgdName}}}
 }

@@ -22,15 +22,13 @@ import (
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -87,30 +85,9 @@ func TestDGDSharedResourcesReconciler_ValidatesGMSResourceClaimTemplatesBeforePa
 }
 
 func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t *testing.T) {
-	t.Log("Build a ready checkpoint and a DGD that fails later EPP reconciliation")
+	t.Log("Build a Ready PodSnapshot and a DGD that fails later EPP reconciliation")
 	ctx := context.Background()
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	require.NoError(t, err)
 	reference := "referenced-checkpoint"
-	referenced := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{Name: reference, Namespace: "default"},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-			Job: v1alpha1.DynamoCheckpointJobConfig{
-				PodTemplateSpec: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
-				},
-			},
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			Phase:        v1alpha1.DynamoCheckpointPhaseReady,
-			IdentityHash: hash,
-		},
-	}
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default", UID: types.UID("dgd-uid")},
 		Spec: v1beta1.DynamoGraphDeploymentSpec{
@@ -134,11 +111,16 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 			},
 		},
 	}
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHashV2: betaDGDWorkersSpecHash(t, dgd),
+	}
+	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
+	require.NoError(t, err)
+	referenced := dgdTestPodSnapshot(reference, workerHash, true)
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
 	kubeClient := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(referenced).
-		WithStatusSubresource(referenced).
 		Build()
 	config := &configv1alpha1.OperatorConfiguration{
 		Namespace: configv1alpha1.NamespaceConfiguration{Restricted: "default"},
@@ -165,5 +147,5 @@ func TestDGDSharedResourcesReconciler_PreservesCheckpointResultOnLaterFailure(t 
 	require.Contains(t, result.Infos, "worker")
 	assert.True(t, result.Infos["worker"].Ready)
 	assert.Equal(t, reference, result.Statuses["worker"].CheckpointName)
-	assert.Equal(t, hash, result.Statuses["worker"].CheckpointID)
+	assert.Empty(t, result.Statuses["worker"].CheckpointID)
 }

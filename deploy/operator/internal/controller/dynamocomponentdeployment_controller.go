@@ -43,6 +43,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -83,7 +84,6 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
@@ -212,15 +212,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		if err != nil {
 			return
 		}
-	}
-
-	checkpointStorageReconciler := newDCDCheckpointStorageReconciler(
-		r.Client,
-		r.Config.Checkpoint.Storage,
-		r.RuntimeConfig.Gate,
-	)
-	if err = checkpointStorageReconciler.Reconcile(ctx, dynamoComponentDeployment); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile checkpoint storage: %w", err)
 	}
 
 	// Create the appropriate workload resource based on deployment type
@@ -962,6 +953,18 @@ func hasLegacyWorkerSelector(labels map[string]string, componentType string) boo
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Index native PodSnapshot references so dependency events can find affected DCDs.
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		if err := mgr.GetFieldIndexer().IndexField(
+			context.Background(),
+			&nvidiacomv1beta1.DynamoComponentDeployment{},
+			dcdPodSnapshotRefIndex,
+			dcdPodSnapshotRefIndexValues,
+		); err != nil {
+			return fmt.Errorf("register DCD PodSnapshot reference index: %w", err)
+		}
+	}
+
 	m := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(generationOrDeletionChangedPredicate())).
 		Named(commonconsts.ResourceTypeDynamoComponentDeployment).
@@ -975,6 +978,15 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+
+	// Watch PodSnapshot changes that can unblock native DCD restore reconciliation.
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		m = m.Watches(
+			&snapshotv1alpha1.PodSnapshot{},
+			handler.EnqueueRequestsFromMapFunc(r.mapPodSnapshotToDCDRequests),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		)
+	}
 
 	if r.RuntimeConfig.Gate.Enabled(features.DRA) {
 		m = m.Watches(
