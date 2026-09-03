@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::CancellationToken;
-use crate::discovery::{DiscoveryMetadata, MetadataSnapshot};
+use crate::discovery::{
+    DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryMetadata,
+    reconcile_discovery_snapshot,
+};
 use anyhow::Result;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
@@ -13,7 +16,7 @@ use kube::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, RwLock, broadcast};
 
 use super::crd::DynamoWorkerMetadata;
 use super::utils::{KubeDiscoveryMode, PodInfo, extract_endpoint_info, extract_ready_containers};
@@ -48,8 +51,8 @@ impl JoinTable {
         }
     }
 
-    fn apply_readiness_scan(&mut self, new_left: HashMap<String, u64>) -> bool {
-        let mut changed = false;
+    fn apply_readiness_scan(&mut self, new_left: HashMap<String, u64>) -> Vec<DiscoveryEvent> {
+        let mut events = Vec::new();
 
         let departed: Vec<(String, u64)> = self
             .left
@@ -60,14 +63,16 @@ impl JoinTable {
 
         for (cr_key, instance_id) in departed {
             self.left.remove(&cr_key);
-            if self.known.remove(&instance_id).is_some() {
+            if let Some(metadata) = self.known.remove(&instance_id) {
                 self.revisions.remove(&instance_id);
+                for instance in metadata.get_all() {
+                    events.push(DiscoveryEvent::Removed(instance.id()));
+                }
                 tracing::info!(
                     cr_key = %cr_key,
                     instance_id = format!("{instance_id:x}"),
                     "Pod no longer ready, removed from known"
                 );
-                changed = true;
             }
         }
 
@@ -80,6 +85,9 @@ impl JoinTable {
         for (cr_key, instance_id) in arrived {
             self.left.insert(cr_key.clone(), instance_id);
             if let Some(cached) = self.right.get(&cr_key) {
+                for instance in cached.metadata.get_all() {
+                    events.push(DiscoveryEvent::Added(instance));
+                }
                 self.known.insert(instance_id, cached.metadata.clone());
                 self.revisions.insert(
                     instance_id,
@@ -93,15 +101,17 @@ impl JoinTable {
                     instance_id = format!("{instance_id:x}"),
                     "Pod became ready, joined with existing CR"
                 );
-                changed = true;
             }
         }
 
-        changed
+        events
     }
 
-    fn apply_cr_scan(&mut self, new_right: HashMap<String, CachedCrMetadata>) -> bool {
-        let mut changed = false;
+    fn apply_cr_scan(
+        &mut self,
+        new_right: HashMap<String, CachedCrMetadata>,
+    ) -> Vec<DiscoveryEvent> {
+        let mut events = Vec::new();
 
         let removed: Vec<String> = self
             .right
@@ -113,15 +123,17 @@ impl JoinTable {
         for cr_key in removed {
             self.right.remove(&cr_key);
             if let Some(&instance_id) = self.left.get(&cr_key)
-                && self.known.remove(&instance_id).is_some()
+                && let Some(metadata) = self.known.remove(&instance_id)
             {
                 self.revisions.remove(&instance_id);
+                for instance in metadata.get_all() {
+                    events.push(DiscoveryEvent::Removed(instance.id()));
+                }
                 tracing::info!(
                     cr_key = %cr_key,
                     instance_id = format!("{instance_id:x}"),
                     "CR removed, evicted from known"
                 );
-                changed = true;
             }
         }
 
@@ -141,17 +153,34 @@ impl JoinTable {
             match self.known.entry(instance_id) {
                 std::collections::hash_map::Entry::Occupied(mut e) => {
                     if old_revision.as_ref() != Some(&new_revision) {
+                        let old_metadata = e.get().clone();
                         e.insert(new_cached.metadata.clone());
                         self.revisions.insert(instance_id, new_revision);
+                        let old_flat: HashMap<DiscoveryInstanceId, DiscoveryInstance> =
+                            old_metadata
+                                .get_all()
+                                .into_iter()
+                                .map(|i| (i.id(), i))
+                                .collect();
+                        let new_flat: HashMap<DiscoveryInstanceId, DiscoveryInstance> = new_cached
+                            .metadata
+                            .get_all()
+                            .into_iter()
+                            .map(|i| (i.id(), i))
+                            .collect();
+                        let (diff, _) = reconcile_discovery_snapshot(&old_flat, new_flat);
+                        events.extend(diff);
                         tracing::debug!(
                             cr_key = %cr_key,
                             instance_id = format!("{instance_id:x}"),
                             "CR updated for ready pod"
                         );
-                        changed = true;
                     }
                 }
                 std::collections::hash_map::Entry::Vacant(e) => {
+                    for instance in new_cached.metadata.get_all() {
+                        events.push(DiscoveryEvent::Added(instance));
+                    }
                     e.insert(new_cached.metadata.clone());
                     self.revisions.insert(instance_id, new_revision);
                     tracing::info!(
@@ -159,25 +188,11 @@ impl JoinTable {
                         instance_id = format!("{instance_id:x}"),
                         "CR arrived for ready pod, added to known"
                     );
-                    changed = true;
                 }
             }
         }
 
-        changed
-    }
-
-    fn to_snapshot(&self, sequence: u64) -> MetadataSnapshot {
-        MetadataSnapshot {
-            instances: self.known.clone(),
-            generations: self
-                .revisions
-                .iter()
-                .map(|(id, rev)| (*id, rev.generation))
-                .collect(),
-            sequence,
-            timestamp: std::time::Instant::now(),
-        }
+        events
     }
 }
 
@@ -296,7 +311,8 @@ impl DiscoveryDaemon {
 
     pub async fn run(
         self,
-        watch_tx: tokio::sync::watch::Sender<Arc<MetadataSnapshot>>,
+        list_state: Arc<RwLock<HashMap<u64, Arc<DiscoveryMetadata>>>>,
+        event_tx: broadcast::Sender<DiscoveryEvent>,
     ) -> Result<()> {
         tracing::info!("Discovery daemon starting");
 
@@ -337,7 +353,6 @@ impl DiscoveryDaemon {
             });
         tokio::spawn(cr_reflector_stream);
 
-        let mut sequence = 0u64;
         let mut join_table = JoinTable::new();
         let mut valid_cr_cache: HashMap<String, CachedCrMetadata> = HashMap::new();
 
@@ -351,22 +366,24 @@ impl DiscoveryDaemon {
                 _ = es_notify.notified() => {
                     tracing::trace!("Readiness store updated, scanning");
                     let new_left = source.ready_entries();
-                    if join_table.apply_readiness_scan(new_left) {
-                        sequence += 1;
-                        if watch_tx.send(Arc::new(join_table.to_snapshot(sequence))).is_err() {
-                            tracing::debug!("No watch subscribers, daemon stopping");
-                            break;
+                    let events = join_table.apply_readiness_scan(new_left);
+                    if !events.is_empty() {
+                        let mut state = list_state.write().await;
+                        *state = join_table.known.clone();
+                        for event in &events {
+                            event_tx.send(event.clone()).ok();
                         }
                     }
                 }
                 _ = cr_notify.notified() => {
                     tracing::trace!("CR store updated, scanning");
                     let new_right = scan_cr_store(&cr_reader, &mut valid_cr_cache);
-                    if join_table.apply_cr_scan(new_right) {
-                        sequence += 1;
-                        if watch_tx.send(Arc::new(join_table.to_snapshot(sequence))).is_err() {
-                            tracing::debug!("No watch subscribers, daemon stopping");
-                            break;
+                    let events = join_table.apply_cr_scan(new_right);
+                    if !events.is_empty() {
+                        let mut state = list_state.write().await;
+                        *state = join_table.known.clone();
+                        for event in &events {
+                            event_tx.send(event.clone()).ok();
                         }
                     }
                 }
@@ -506,11 +523,32 @@ fn managed_fields_summary(cr: &DynamoWorkerMetadata) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::{Instance, TransportType};
+    use crate::discovery::DiscoveryEvent;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ManagedFieldsEntry;
 
     fn make_cached(uid: &str, generation: i64) -> CachedCrMetadata {
         CachedCrMetadata {
             metadata: Arc::new(DiscoveryMetadata::new()),
+            generation,
+            uid: Some(uid.to_string()),
+        }
+    }
+
+    fn make_cached_with_endpoint(uid: &str, generation: i64) -> CachedCrMetadata {
+        let mut meta = DiscoveryMetadata::new();
+        meta.register_endpoint(DiscoveryInstance::Endpoint(Instance {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+            instance_id: 99,
+            transport: TransportType::Tcp("127.0.0.1:1234".to_string()),
+            device_type: None,
+            request_plane_codec: None,
+        }))
+        .unwrap();
+        CachedCrMetadata {
+            metadata: Arc::new(meta),
             generation,
             uid: Some(uid.to_string()),
         }
@@ -522,22 +560,23 @@ mod tests {
 
         table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
 
-        let changed = table.apply_cr_scan(HashMap::from([(
+        table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached("uid-1", 1),
+            make_cached_with_endpoint("uid-1", 1),
         )]));
-        assert!(changed);
         assert!(table.known.contains_key(&1u64));
 
-        let changed = table.apply_cr_scan(HashMap::from([(
+        table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached("uid-2", 1),
+            make_cached_with_endpoint("uid-2", 1),
         )]));
-        assert!(
-            changed,
+        // UID change is detected (revision updated) even though same-content metadata
+        // produces no events.
+        assert_eq!(
+            table.revisions[&1u64].uid.as_deref(),
+            Some("uid-2"),
             "UID change must be detected even at same generation"
         );
-        assert_eq!(table.revisions[&1u64].uid.as_deref(), Some("uid-2"));
     }
 
     #[test]
@@ -547,29 +586,33 @@ mod tests {
         table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
         table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached("uid-1", 1),
+            make_cached_with_endpoint("uid-1", 1),
         )]));
         assert!(table.known.contains_key(&1u64));
 
-        let changed = table.apply_readiness_scan(HashMap::new());
-        assert!(changed);
+        let events = table.apply_readiness_scan(HashMap::new());
         assert!(!table.known.contains_key(&1u64));
         assert!(table.revisions.is_empty());
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::Removed(_)))
+        );
     }
 
     #[test]
     fn join_table_adds_when_cr_arrives_after_pod_ready() {
         let mut table = JoinTable::new();
 
-        let changed = table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
-        assert!(!changed, "no CR yet, should not enter known");
+        let events = table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
+        assert!(events.is_empty(), "no CR yet, should have no events");
         assert!(!table.known.contains_key(&1u64));
 
-        let changed = table.apply_cr_scan(HashMap::from([(
+        let events = table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached("uid-1", 1),
+            make_cached_with_endpoint("uid-1", 1),
         )]));
-        assert!(changed);
+        assert!(!events.is_empty());
         assert!(table.known.contains_key(&1u64));
     }
 
@@ -580,13 +623,17 @@ mod tests {
         table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
         table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached("uid-1", 1),
+            make_cached_with_endpoint("uid-1", 1),
         )]));
         assert!(table.known.contains_key(&1u64));
 
-        let changed = table.apply_cr_scan(HashMap::new());
-        assert!(changed);
+        let events = table.apply_cr_scan(HashMap::new());
         assert!(!table.known.contains_key(&1u64));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::Removed(_)))
+        );
     }
 
     #[test]
@@ -596,14 +643,14 @@ mod tests {
         table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
         table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached("uid-1", 1),
+            make_cached_with_endpoint("uid-1", 1),
         )]));
 
-        let changed = table.apply_cr_scan(HashMap::from([(
+        let events = table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached("uid-1", 1),
+            make_cached_with_endpoint("uid-1", 1),
         )]));
-        assert!(!changed);
+        assert!(events.is_empty());
     }
 
     #[test]
