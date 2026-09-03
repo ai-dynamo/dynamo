@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Timing notes (measured in H100 parallel CI):
-# - Two-worker GPU-1 router cases took up to 157s, including process teardown.
+# Timing notes (nightly run 33193163913, H100 GPU-parallel stage, 2 slots):
+# - Two-worker GPU-1 router cases: kv_router_basic 137s, indexers_sync 129s,
+#   router_decisions_multiple_workers 120s, including process teardown.
 # These tests load a real model and can be slow/flaky when GPU resources are contended,
 # so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
 import logging
@@ -239,11 +240,13 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
 
 
 @pytest.mark.gpu_1
-@pytest.mark.nightly
+# TODO: revert to pytest.mark.nightly after pre_merge validation
+# on this PR (see .ai/ci-guidelines.md).
+@pytest.mark.pre_merge
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.timeout(300)
+@pytest.mark.timeout(420)  # 3x slowest two-worker run (137s, nightly 33193163913)
 def test_trtllm_kv_router_basic(
     request,
     runtime_services_dynamic_ports,
@@ -303,11 +306,13 @@ def test_router_decisions_trtllm_attention_dp(
 
 
 @pytest.mark.gpu_1
-@pytest.mark.nightly
+# TODO: revert to pytest.mark.nightly after pre_merge validation
+# on this PR (see .ai/ci-guidelines.md).
+@pytest.mark.pre_merge
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
-@pytest.mark.timeout(480)  # 3x observed 157s H100 runtime incl. teardown
+@pytest.mark.timeout(420)  # 3x slowest two-worker run (137s, nightly 33193163913)
 def test_router_decisions_trtllm_multiple_workers(
     request,
     runtime_services_dynamic_ports,
@@ -365,10 +370,12 @@ def test_router_decisions_trtllm_disagg(
 
 
 @pytest.mark.gpu_1
-@pytest.mark.nightly
+# TODO: revert to pytest.mark.nightly after pre_merge validation
+# on this PR (see .ai/ci-guidelines.md).
+@pytest.mark.pre_merge
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
-@pytest.mark.timeout(480)  # 3x observed 157s H100 runtime incl. teardown
+@pytest.mark.timeout(420)  # 3x slowest two-worker run (137s, nightly 33193163913)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.parametrize("event_plane", ["nats"], indirect=True)
 def test_trtllm_indexers_sync(

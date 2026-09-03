@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import tempfile
+from pathlib import Path
 
 _logger = logging.getLogger(__name__)
 
@@ -90,22 +91,30 @@ def auto_worker_count(
     return len(gpus) * workers_per_gpu
 
 
-def _cgroup_cpu_budget() -> int | None:
-    """Return the cgroup CPU quota, or ``None`` when no quota is detectable."""
+def _cgroup_cpu_budget(
+    cgroup_root: str | os.PathLike[str] = "/sys/fs/cgroup",
+) -> int | None:
+    """Return the cgroup CPU quota, or ``None`` when no quota is detectable.
+
+    Check cgroup v2 ``cpu.max`` before the cgroup v1 CPU controller files.
+    """
+    root = Path(cgroup_root)
     try:
-        with open("/sys/fs/cgroup/cpu.max") as cpu_max:
+        with (root / "cpu.max").open() as cpu_max:
             quota_s, period_s = cpu_max.read().split()[:2]
         if quota_s != "max":
-            # Floor at 1: fractional --cpus (e.g. 0.5 -> int 0) must not fall
-            # through to the host os.cpu_count() and defeat the cap. Matches the
-            # cgroup-v1 branch below.
-            return max(1, int(int(quota_s) / int(period_s)))
-    except (OSError, ValueError, ZeroDivisionError):
+            quota = int(quota_s)
+            period = int(period_s)
+            if quota > 0 and period > 0:
+                # Floor at 1: fractional --cpus must not fall through to the
+                # host CPU count. This behavior matches cgroup v1 below.
+                return max(1, quota // period)
+    except (OSError, ValueError):
         pass
     try:
-        with open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us") as quota_file:
+        with (root / "cpu" / "cpu.cfs_quota_us").open() as quota_file:
             quota = int(quota_file.read())
-        with open("/sys/fs/cgroup/cpu/cpu.cfs_period_us") as period_file:
+        with (root / "cpu" / "cpu.cfs_period_us").open() as period_file:
             period = int(period_file.read())
         if quota > 0 and period > 0:
             return max(1, quota // period)
@@ -136,6 +145,11 @@ def effective_cpu_budget() -> int:
                 return min(requested_budget, detected_budget)
         except (OverflowError, ValueError):
             pass
+        _logger.warning(
+            "Ignoring invalid NUM_CPUS=%r; using detected CPU budget %d",
+            env,
+            detected_budget,
+        )
     return detected_budget
 
 

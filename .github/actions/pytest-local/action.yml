@@ -117,8 +117,6 @@ runs:
         DYNAMO_TEST_TYPE: ${{ inputs.test_type }}
         DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
         DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
-        DYNAMO_TEST_SUITE_NAME: ${{ inputs.test_suite_name }}
-        PYTEST_MAX_VRAM_GIB: ${{ inputs.max_vram_gib }}
         HF_XET_HIGH_PERFORMANCE: 1
       run: |
         # Run pytest with detailed output and JUnit XML
@@ -164,17 +162,13 @@ runs:
         # that reads HOME (git, getpass.getuser) gets a writable path.
         export HOME="${GITHUB_WORKSPACE}"
 
-        # TRT-LLM starts MPI ranks and several runtime processes per test. The
-        # H100 lane has two GPUs, so allow at most one TRT-heavy test per GPU;
-        # higher slot counts still starve startup even when VRAM fits.
-        # effective_cpu_budget() treats NUM_CPUS as an upper bound and also
-        # enforces the detected cgroup quota.
-        if [[ -n "${PYTEST_MAX_VRAM_GIB}" && "${DYNAMO_TEST_SUITE_NAME}" == "trtllm" ]]; then
-          if ! [[ "${NUM_CPUS:-}" =~ ^[1-9][0-9]*$ ]] || [[ ${NUM_CPUS} -gt 2 ]]; then
-            NUM_CPUS=2
-          fi
-          export NUM_CPUS
-          echo "📊 TRT-LLM GPU parallelism: requesting at most ${NUM_CPUS} scheduler slots"
+        # TRT-LLM starts MPI ranks and several runtime processes per test.
+        # Higher slot counts can starve startup even when VRAM fits.
+        # PYTEST_XDIST_AUTO_NUM_WORKERS controls `-n auto`; tests/conftest.py
+        # saves that result as the GPU scheduler slot count.
+        if [[ -n "${{ inputs.max_vram_gib }}" && "${{ inputs.test_suite_name }}" == trtllm* ]]; then
+          export PYTEST_XDIST_AUTO_NUM_WORKERS=2
+          echo "📊 TRT-LLM GPU parallelism: capping at ${PYTEST_XDIST_AUTO_NUM_WORKERS} concurrent tests"
         fi
 
 
