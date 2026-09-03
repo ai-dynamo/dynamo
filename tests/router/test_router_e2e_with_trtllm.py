@@ -240,9 +240,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
 
 
 @pytest.mark.gpu_1
-# TODO: revert to pytest.mark.nightly after pre_merge validation
-# on this PR (see .ai/ci-guidelines.md).
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
@@ -306,9 +304,7 @@ def test_router_decisions_trtllm_attention_dp(
 
 
 @pytest.mark.gpu_1
-# TODO: revert to pytest.mark.nightly after pre_merge validation
-# on this PR (see .ai/ci-guidelines.md).
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
@@ -370,9 +366,7 @@ def test_router_decisions_trtllm_disagg(
 
 
 @pytest.mark.gpu_1
-# TODO: revert to pytest.mark.nightly after pre_merge validation
-# on this PR (see .ai/ci-guidelines.md).
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.profiled_vram_gib(7.8)
 @pytest.mark.requested_trtllm_kv_tokens(2592)
 @pytest.mark.timeout(420)  # 3x slowest two-worker run (137s, nightly 33193163913)
