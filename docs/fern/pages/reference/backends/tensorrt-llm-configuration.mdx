@@ -155,13 +155,13 @@ Each field is both a CLI flag and an environment variable. The CLI flag takes pr
 </ParamField>
 
 <ParamField path="--publish-kv-events" type="boolean" default="false">
-  Publish KV cache events to the Dynamo KV router, enabling KV-aware routing and disaggregated KV transfer. This flag does not enable TensorRT-LLM metric reporting. The deprecated `--publish-events-and-metrics` flag enables both this flag and `--publish-metrics`.
+  Publish KV cache events to the Dynamo KV router, enabling KV-aware routing and disaggregated KV transfer. Also publishes the worker-load telemetry the KV router schedules on and the forward-pass metrics the Planner reads, so it enables `enable_iter_perf_stats`. This flag does not expose Prometheus metrics. The deprecated `--publish-events-and-metrics` flag enables both this flag and `--publish-metrics`.
 
   Environment variable: `DYN_TRTLLM_PUBLISH_KV_EVENTS`
 </ParamField>
 
 <ParamField path="--publish-metrics" type="boolean" default="false">
-  Publish TensorRT-LLM iteration and Prometheus metrics. This flag does not publish KV cache events. It enables `enable_iter_perf_stats` but keeps the engine's `return_perf_metrics` disabled.
+  Expose TensorRT-LLM iteration and request metrics on this worker's Prometheus endpoint. This sends nothing to the KV router or the Planner, so scraping a worker does not change how it is scheduled. It enables `enable_iter_perf_stats` and the per-request `SamplingParams.return_perf_metrics`, but keeps the engine's `return_perf_metrics` disabled.
 
   Environment variable: `DYN_TRTLLM_PUBLISH_METRICS`
 </ParamField>
