@@ -97,6 +97,8 @@ xpu:
       - any-glob-to-any-file:
           - '**/xpu/**'
           - '**/*xpu*'
+          - container/context.yaml
+          - container/templates/vllm_runtime.Dockerfile
 
 multimodal:
   - changed-files:

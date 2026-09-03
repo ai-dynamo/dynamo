@@ -42,7 +42,7 @@ ENV TORCH_LIB_DIR=${SITE_PACKAGES}/torch/lib
 {% if device == "xpu" %}
 ENV NIXL_PREFIX=/opt/intel/intel_nixl
 ENV NIXL_LIB_DIR=${NIXL_PREFIX}/lib/x86_64-linux-gnu
-# vLLM 0.27.1's XPU image installs the oneAPI runtime and SYCL headers in
+# vLLM 0.28.0's XPU image installs the oneAPI runtime and SYCL headers in
 # /opt/venv through the intel-sycl-rt wheel. Do not set ONEAPI_ROOT to the
 # removed /opt/intel/oneapi tree: Triton gives that variable priority over its
 # wheel-metadata fallback and would search a nonexistent compiler include path.
@@ -262,11 +262,18 @@ RUN --mount=type=bind,source=./container/deps/vllm/protected_packages.txt,target
     bash /tmp/install_vllm_omni.sh
 
 {% if device == "xpu" %}
-# Remove conflicting standard triton package for XPU and reinstall triton-xpu
-# This must be done after vLLM-Omni installation to ensure no dependencies re-install triton
-# Reinstalling triton-xpu ensures the triton namespace is properly configured
+# Remove conflicting standard triton package for XPU and reinstall triton-xpu.
+# This must be done after vLLM-Omni installation to ensure no dependencies re-install triton.
+# Reinstalling triton-xpu ensures the triton namespace is properly configured.
+# The version is pinned because vLLM 0.28.0's XPU image ships BOTH `triton 3.7.2+xpu`
+# and `triton-xpu 3.7.2`, so this uninstall is no longer a no-op: it removes the Triton
+# build vLLM itself was solved against. With --force-reinstall --no-deps and no pin, a
+# newer triton-xpu release on the PyTorch XPU wheel index
+# (download.pytorch.org/whl/xpu) would silently drift the image away from the
+# Triton version vLLM 0.28.0 expects -- 3.8.0 is already published there. Bump
+# this pin together with the vLLM XPU image pins in container/context.yaml.
 RUN uv pip uninstall triton && \
-    uv pip install --force-reinstall --no-deps triton-xpu
+    uv pip install --force-reinstall --no-deps triton-xpu==3.7.2
 
 # Resolve the same include directories Triton's XPU driver will use for its
 # first-request JIT, and fail the image build if the SYCL development headers

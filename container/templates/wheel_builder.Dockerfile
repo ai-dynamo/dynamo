@@ -233,10 +233,14 @@ ENV VIRTUAL_ENV=/workspace/.venv
 # Cache uv downloads; uv handles its own locking for this cache.
 # pyyaml: needed by the compliance NOTICES-bundling steps below (overrides.py
 # imports yaml at module scope); the system python3 doesn't ship it.
+# auditwheel (xpu only): the ENABLE_MEDIA_FFMPEG branch of runtime_wheel_builder
+# calls `auditwheel repair`, but neither vllm/vllm-openai-xpu:v0.27.1 nor :v0.28.0
+# ships it, so the XPU build fails with `auditwheel: command not found` (exit 127).
+# The cuda wheel-builder base already provides it, hence the xpu-only scope.
 RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=shared \
     export UV_CACHE_DIR=/root/.cache/uv UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 && \
     uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION --seed && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit pyyaml{% if device == "xpu" %} auditwheel{% endif %}
 
 ARG NIXL_UCX_REF
 
@@ -613,8 +617,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             --exclude 'libavutil.so.*' \
             --exclude 'libswresample.so.*' \
             --exclude 'libswscale.so.*' \
-            --plat manylinux_2_28_${ARCH_ALT} \
-            --wheel-dir /opt/dynamo/dist \
+{% if device == "xpu" %}            --plat manylinux_2_39_${ARCH_ALT} \
+{% else %}            --plat manylinux_2_28_${ARCH_ALT} \
+{% endif %}            --wheel-dir /opt/dynamo/dist \
             target/wheels/ai_dynamo_runtime-*.whl; \
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist; \
