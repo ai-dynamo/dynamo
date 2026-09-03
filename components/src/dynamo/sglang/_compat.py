@@ -179,12 +179,35 @@ def _normalize_generate_request_once(obj: Any) -> None:
     try:
         normalize()
     except Exception:
-        # Leave the failure to SGLang: generate_request() normalizes again in the
-        # generator body and surfaces the error there, so do not neutralize it.
+        # A rejected request keeps whatever the failed pass already changed:
+        # normalization assigns batch_size and expands parallel-sampling inputs
+        # before the validation that rejects it. Handing that partial state to
+        # the bridge would let SGLang normalize the same object again and
+        # re-derive the batch size from the expanded list -- the n * n expansion
+        # this shim exists to prevent -- so surface the error here instead.
         logger.debug("Early SGLang request normalization failed", exc_info=True)
-        return
+        raise
 
     obj.normalize_batch_and_arguments = _already_normalized
+
+
+_GRPC_BRIDGE_MODULE = "sglang.srt.entrypoints.grpc_bridge"
+
+
+def _is_absent_grpc_bridge(exc: ImportError) -> bool:
+    """Report whether an import failure means the native gRPC bridge is absent.
+
+    A release that does not ship the bridge, and one that renamed
+    ``RuntimeHandle``, both name the bridge module in ``exc.name``; an
+    environment without SGLang at all names one of its parent packages. Any
+    other name -- a dependency the bridge itself imports -- means the bridge is
+    present but failed to load, which is a broken install rather than a release
+    that does not need the override.
+    """
+    name = getattr(exc, "name", None)
+    if not name:
+        return False
+    return name == _GRPC_BRIDGE_MODULE or _GRPC_BRIDGE_MODULE.startswith(f"{name}.")
 
 
 def ensure_sglang_grpc_bridge_batch_size(bridge_class: Any = None) -> None:
@@ -201,7 +224,9 @@ def ensure_sglang_grpc_bridge_batch_size(bridge_class: Any = None) -> None:
 
     This only affects engines launched through ``dynamo.sglang.launch_server``.
     A stock engine that does not need the shim must still start, so an absent
-    or already-fixed bridge is logged at debug level and left alone.
+    or already-fixed bridge is logged at debug level and left alone. An SGLang
+    that is installed but fails to import raises: that is a broken environment,
+    not a release outside the support window.
 
     ``bridge_class`` patches an explicit class instead of importing SGLang's;
     tests use it to exercise the wrapper without SGLang installed.
@@ -213,7 +238,9 @@ def ensure_sglang_grpc_bridge_batch_size(bridge_class: Any = None) -> None:
     if bridge_class is None:
         try:
             from sglang.srt.entrypoints.grpc_bridge import RuntimeHandle
-        except ImportError:
+        except ImportError as exc:
+            if not _is_absent_grpc_bridge(exc):
+                raise
             logger.debug(
                 "SGLang does not expose a native gRPC bridge; "
                 "skipping the batch_size normalization override"

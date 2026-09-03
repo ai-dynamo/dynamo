@@ -15,6 +15,7 @@ import asyncio
 import pytest
 
 from dynamo.sglang._compat import (
+    _is_absent_grpc_bridge,
     _normalize_generate_request_once,
     ensure_sglang_grpc_bridge_batch_size,
 )
@@ -175,12 +176,56 @@ def test_shim_leaves_an_already_normalized_request_alone():
     assert obj.text == ["hello", "hello"]
 
 
+def test_failed_normalization_never_reaches_the_bridge():
+    """A request SGLang rejects must fail before its partial state is reused.
+
+    Normalization assigns ``batch_size`` and expands parallel-sampling inputs
+    before the validation that rejects the request, so a failed pass still
+    mutates the object. Letting it through would leave SGLang to normalize that
+    already-expanded input a second time.
+    """
+
+    class RejectedGenerateReqInput(FakeGenerateReqInput):
+        def normalize_batch_and_arguments(self) -> None:
+            super().normalize_batch_and_arguments()
+            raise ValueError("the rids length mismatches the batch size")
+
+    class Bridge(FakeRuntimeHandle):
+        pass
+
+    ensure_sglang_grpc_bridge_batch_size(Bridge)
+
+    obj = RejectedGenerateReqInput("hello", n=2)
+    with pytest.raises(ValueError, match="rids length"):
+        _drive(Bridge(), obj)
+
+    assert obj.normalize_calls == 1, "SGLang re-normalized a half-expanded request"
+    assert obj.text == ["hello", "hello"]
+
+
+@pytest.mark.parametrize(
+    "missing, absent",
+    [
+        ("sglang", True),
+        ("sglang.srt.entrypoints", True),
+        ("sglang.srt.entrypoints.grpc_bridge", True),
+        ("grpc", False),
+        ("sglang.srt.entrypoints.grpc_bridge_helpers", False),
+        (None, False),
+    ],
+)
+def test_an_absent_bridge_is_distinguished_from_a_broken_install(missing, absent):
+    """Only the bridge's own absence is tolerable; a broken dependency is not."""
+    assert _is_absent_grpc_bridge(ImportError("boom", name=missing)) is absent
+
+
 def test_missing_sglang_bridge_is_not_an_error():
     """A stock engine without the native gRPC bridge must still start."""
     try:
         import sglang.srt.entrypoints.grpc_bridge  # noqa: F401
-    except Exception:
-        pass
+    except ImportError as exc:
+        if not _is_absent_grpc_bridge(exc):
+            raise
     else:
         # Skip rather than patch the real class process-wide for other tests.
         pytest.skip("SGLang's native gRPC bridge is importable here")

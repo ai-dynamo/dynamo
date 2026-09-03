@@ -19,26 +19,19 @@ image with no Dynamo Python available; that requires an SGLang release which
 fixes the ordering upstream.
 """
 
-import logging
 import runpy
 
 from dynamo.sglang._compat import ensure_sglang_grpc_bridge_batch_size
 
-logger = logging.getLogger(__name__)
-
 
 def main() -> None:
     """Install Dynamo's SGLang compat overrides, then run SGLang's launcher."""
-    try:
-        ensure_sglang_grpc_bridge_batch_size()
-    except Exception:
-        # Starting the engine matters more than the override: a release that does
-        # not need it, or restructured the bridge, must still launch.
-        logger.warning(
-            "Could not install the SGLang gRPC bridge compatibility override; "
-            "continuing to launch the engine",
-            exc_info=True,
-        )
+    # Deliberately unguarded. The override already returns quietly for a release
+    # that does not need it or that restructured the bridge, so anything raising
+    # here is a real failure -- and launching anyway would start an engine whose
+    # every streaming request fails with HTTP 500, the defect this module exists
+    # to avoid. Failing at startup reports that far better than a served 500.
+    ensure_sglang_grpc_bridge_batch_size()
 
     # run_module, not import: sglang.launch_server does its work under
     # `if __name__ == "__main__"`, so this reproduces `python -m` exactly.
