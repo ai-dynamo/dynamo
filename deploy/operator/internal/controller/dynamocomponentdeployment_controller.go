@@ -43,6 +43,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -50,6 +51,7 @@ import (
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -82,7 +84,6 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
-// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
@@ -144,6 +145,9 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	if compatibilityErr := stderrors.Join(checkpoint.ValidateCheckpointCompatibility(
 		dynamoComponentDeployment.Spec.Experimental,
 	)...); compatibilityErr != nil {
+		if clearErr := r.clearDCDGPUShape(ctx, req); clearErr != nil {
+			return ctrl.Result{}, fmt.Errorf("clear GPU shape for invalid checkpoint configuration: %w", clearErr)
+		}
 		if _, statusErr := r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
@@ -167,6 +171,9 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		logs.Error(reconcileErr, "Failed to reconcile DynamoComponentDeployment.")
 		r.Recorder.Eventf(dynamoComponentDeployment, nil, corev1.EventTypeWarning, "ReconcileError", "Reconcile",
 			"Failed to reconcile DynamoComponentDeployment: %v", reconcileErr)
+		if clearErr := r.clearDCDGPUShape(ctx, req); clearErr != nil {
+			logs.Error(clearErr, "Failed to clear DynamoComponentDeployment GPU shape after reconcile error")
+		}
 		if _, statusErr := r.setStatusConditions(ctx, req,
 			metav1.Condition{
 				Type:    nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
@@ -205,15 +212,6 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		if err != nil {
 			return
 		}
-	}
-
-	checkpointStorageReconciler := newDCDCheckpointStorageReconciler(
-		r.Client,
-		r.Config.Checkpoint.Storage,
-		r.RuntimeConfig.Gate,
-	)
-	if err = checkpointStorageReconciler.Reconcile(ctx, dynamoComponentDeployment); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile checkpoint storage: %w", err)
 	}
 
 	// Create the appropriate workload resource based on deployment type
@@ -285,6 +283,7 @@ type ComponentReconcileResult struct {
 	reason               string
 	message              string
 	serviceReplicaStatus *nvidiacomv1beta1.ComponentReplicaStatus
+	gpuShape             *dynamo.GPUShape
 }
 
 func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
@@ -315,6 +314,17 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		ReadyReplicas:     &deployment.Status.ReadyReplicas,
 		AvailableReplicas: &deployment.Status.AvailableReplicas,
 	}
+	gpuShape, err := dynamo.ResolveGPUShape(
+		ctx,
+		r.Client,
+		dynamoComponentDeployment.Namespace,
+		&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
+		[]dynamo.PodSpecMultiplicity{{PodSpec: &deployment.Spec.Template.Spec, Count: 1}},
+	)
+	if err != nil {
+		return ComponentReconcileResult{}, fmt.Errorf("resolve Deployment GPU shape: %w", err)
+	}
+	gpuShapeStatus := &gpuShape
 
 	if IsDeploymentReady(deployment) {
 		return ComponentReconcileResult{
@@ -323,6 +333,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 			reason:               "DeploymentReady",
 			message:              "Deployment is ready",
 			serviceReplicaStatus: serviceReplicaStatus,
+			gpuShape:             gpuShapeStatus,
 		}, nil
 	}
 	return ComponentReconcileResult{
@@ -331,6 +342,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		reason:               "DeploymentNotReady",
 		message:              "Deployment is not ready",
 		serviceReplicaStatus: serviceReplicaStatus,
+		gpuShape:             gpuShapeStatus,
 	}, nil
 }
 
@@ -411,6 +423,21 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 
 	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
 	lwsReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dynamoComponentDeployment)
+	groupSize := dynamoComponentDeployment.GetNumberOfNodes()
+	gpuShape, err := dynamo.ResolveGPUShape(
+		ctx,
+		r.Client,
+		dynamoComponentDeployment.Namespace,
+		&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
+		[]dynamo.PodSpecMultiplicity{
+			{PodSpec: &lwsObj.Spec.LeaderWorkerTemplate.LeaderTemplate.Spec, Count: 1},
+			{PodSpec: &lwsObj.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec, Count: groupSize - 1},
+		},
+	)
+	if err != nil {
+		return ComponentReconcileResult{}, fmt.Errorf("resolve LeaderWorkerSet GPU shape: %w", err)
+	}
+	gpuShapeStatus := &gpuShape
 	if IsLeaderWorkerSetReady(lwsObj) {
 		return ComponentReconcileResult{
 			modified:             anyModified,
@@ -418,6 +445,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 			reason:               "LeaderWorkerSetReady",
 			message:              "LeaderWorkerSet is ready",
 			serviceReplicaStatus: &lwsReplicaStatus,
+			gpuShape:             gpuShapeStatus,
 		}, nil
 	}
 
@@ -427,10 +455,20 @@ func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(
 		reason:               "LeaderWorkerSetNotReady",
 		message:              "LeaderWorkerSet is not ready",
 		serviceReplicaStatus: &lwsReplicaStatus,
+		gpuShape:             gpuShapeStatus,
 	}, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplicaStatus(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment, componentReconcileResult ComponentReconcileResult) error {
+	if componentReconcileResult.serviceReplicaStatus != nil {
+		componentReconcileResult.serviceReplicaStatus.GPUsPerEngine = nil
+		componentReconcileResult.serviceReplicaStatus.GPUsPerReplica = nil
+		if componentReconcileResult.gpuShape != nil {
+			componentReconcileResult.serviceReplicaStatus.GPUsPerEngine = ptr.To(componentReconcileResult.gpuShape.GPUsPerEngine)
+			componentReconcileResult.serviceReplicaStatus.GPUsPerReplica = ptr.To(componentReconcileResult.gpuShape.GPUsPerReplica)
+		}
+	}
+
 	availableCondition := metav1.Condition{
 		Type:    nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
 		Status:  componentReconcileResult.status,
@@ -464,6 +502,21 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 		return fmt.Errorf("failed to update DynamoComponentDeployment status: %w", err)
 	}
 	return nil
+}
+
+func (r *DynamoComponentDeploymentReconciler) clearDCDGPUShape(ctx context.Context, req ctrl.Request) error {
+	dcd := &nvidiacomv1beta1.DynamoComponentDeployment{}
+	if err := r.Get(ctx, req.NamespacedName, dcd); err != nil {
+		return err
+	}
+	if dcd.Status.Component == nil ||
+		(dcd.Status.Component.GPUsPerEngine == nil && dcd.Status.Component.GPUsPerReplica == nil) {
+		return nil
+	}
+	original := dcd.DeepCopy()
+	dcd.Status.Component.GPUsPerEngine = nil
+	dcd.Status.Component.GPUsPerReplica = nil
+	return r.Status().Patch(ctx, dcd, client.MergeFrom(original))
 }
 
 func getLeaderWorkerSetReplicasStatus(leaderWorkerSet *leaderworkersetv1.LeaderWorkerSet) nvidiacomv1beta1.ComponentReplicaStatus {
@@ -900,6 +953,18 @@ func hasLegacyWorkerSelector(labels map[string]string, componentType string) boo
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Index native PodSnapshot references so dependency events can find affected DCDs.
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		if err := mgr.GetFieldIndexer().IndexField(
+			context.Background(),
+			&nvidiacomv1beta1.DynamoComponentDeployment{},
+			dcdPodSnapshotRefIndex,
+			dcdPodSnapshotRefIndexValues,
+		); err != nil {
+			return fmt.Errorf("register DCD PodSnapshot reference index: %w", err)
+		}
+	}
+
 	m := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(generationOrDeletionChangedPredicate())).
 		Named(commonconsts.ResourceTypeDynamoComponentDeployment).
@@ -913,6 +978,15 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		WithEventFilter(deploymentEventFilter(r.Config, r.RuntimeConfig))
+
+	// Watch PodSnapshot changes that can unblock native DCD restore reconciliation.
+	if r.RuntimeConfig.Gate.Enabled(features.Checkpoint) {
+		m = m.Watches(
+			&snapshotv1alpha1.PodSnapshot{},
+			handler.EnqueueRequestsFromMapFunc(r.mapPodSnapshotToDCDRequests),
+			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{}),
+		)
+	}
 
 	if r.RuntimeConfig.Gate.Enabled(features.DRA) {
 		m = m.Watches(
