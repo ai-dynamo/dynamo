@@ -37,15 +37,12 @@ use dynamo_protocols::types::{ChatCompletionMessageContent, FinishReason};
 
 use super::ResponseParams;
 use crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse;
-use crate::protocols::unified::ResponsesContext;
 
 /// State machine that converts a chat completion stream into Responses API events.
 pub struct ResponseStreamConverter {
     response_id: String,
     model: String,
     params: ResponseParams,
-    /// Preserved Responses API-specific request context for faithful response reconstruction.
-    api_context: Option<ResponsesContext>,
     created_at: u64,
     sequence_number: u64,
     // Text message tracking
@@ -100,7 +97,6 @@ impl ResponseStreamConverter {
             response_id: format!("resp_{}", Uuid::new_v4().simple()),
             model,
             params,
-            api_context: None,
             created_at,
             sequence_number: 0,
             message_item_id: format!("msg_{}", Uuid::new_v4().simple()),
@@ -119,12 +115,6 @@ impl ResponseStreamConverter {
             usage: None,
             output_limit_reached: false,
         }
-    }
-
-    pub fn with_context(model: String, params: ResponseParams, context: ResponsesContext) -> Self {
-        let mut converter = Self::new(model, params);
-        converter.api_context = Some(context);
-        converter
     }
 
     fn next_seq(&mut self) -> u64 {
@@ -185,10 +175,7 @@ impl ResponseStreamConverter {
             }),
             instructions: self.params.instructions.clone().map(Instructions::Text),
             max_output_tokens: self.params.max_output_tokens,
-            previous_response_id: self
-                .api_context
-                .as_ref()
-                .and_then(|ctx| ctx.previous_response_id.clone()),
+            previous_response_id: None,
             prompt: None,
             prompt_cache_key: self.params.prompt_cache_key.clone(),
             prompt_cache_retention: self.params.prompt_cache_retention,
@@ -1145,7 +1132,6 @@ fn get_event_type(event: &ResponseStreamEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocols::unified::ResponsesContext;
     use dynamo_protocols::types::{
         ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCallChunk,
         ChatCompletionStreamResponseDelta, FunctionCallStream, FunctionType,
@@ -2214,31 +2200,7 @@ mod tests {
         assert!(matches!(output[1], OutputItem::Message(_)));
     }
 
-    /// Verify that `with_context` populates `previous_response_id`
-    /// in the generated Response objects.
-    #[test]
-    fn test_with_context_enriches_response() {
-        let ctx = ResponsesContext {
-            previous_response_id: Some("resp_prev_123".to_string()),
-            store: true,
-            ..Default::default()
-        };
-        let params = ResponseParams::default();
-        let mut conv = ResponseStreamConverter::with_context("test-model".into(), params, ctx);
-
-        // Process one text chunk so there's output
-        let _ = conv.emit_start_events();
-        let _ = conv.process_chunk(&text_chunk("Hello"));
-        let _end_events = conv.emit_end_events();
-
-        let response = conv.make_response(Status::Completed, vec![]);
-        assert_eq!(
-            response.previous_response_id.as_deref(),
-            Some("resp_prev_123")
-        );
-    }
-
-    /// Without context, previous_response_id is None.
+    /// Unsupported conversation continuation remains unset.
     #[test]
     fn test_without_context_defaults() {
         let params = ResponseParams::default();

@@ -726,9 +726,7 @@ fn ends_on_a_finished_value(trimmed: &str) -> bool {
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
     model: &str,
-    api_context: Option<&crate::protocols::unified::AnthropicContext>,
 ) -> AnthropicMessageResponse {
-    let _ = api_context; // Available for future enrichment (service_tier, etc.)
     let msg_id = format!("msg_{}", Uuid::new_v4().simple());
 
     let choice = chat_resp.inner.choices.into_iter().next();
@@ -1283,7 +1281,7 @@ mod tests {
             nvext: None,
         };
 
-        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model");
         assert!(response.id.starts_with("msg_"));
         assert_eq!(response.object_type, "message");
         assert_eq!(response.role, "assistant");
@@ -1344,7 +1342,7 @@ mod tests {
             nvext: None,
         };
 
-        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model");
         assert_eq!(response.usage.input_tokens, 1);
         assert_eq!(response.usage.cache_read_input_tokens, Some(11));
         assert_eq!(response.usage.cache_creation_input_tokens, Some(0));
@@ -1408,7 +1406,7 @@ mod tests {
             nvext: None,
         };
 
-        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model");
         assert_eq!(response.usage.cache_creation_input_tokens, Some(0));
 
         let serialized = serde_json::to_value(&response.usage).expect("usage serializes");
@@ -1449,7 +1447,7 @@ mod tests {
             })),
         };
 
-        let response = chat_completion_to_anthropic_response(chat_resp, "test-model", None);
+        let response = chat_completion_to_anthropic_response(chat_resp, "test-model");
         let value = serde_json::to_value(response).unwrap();
         assert!(value.get("nvext").is_none(), "got: {value}");
     }
@@ -2598,7 +2596,7 @@ mod truncated_tool_call_tests {
             nvext: None,
         };
 
-        chat_completion_to_anthropic_response(chat_resp, "test-model", None)
+        chat_completion_to_anthropic_response(chat_resp, "test-model")
     }
 
     /// Pins the WIRING, not the helper. The eight helper tests below all call

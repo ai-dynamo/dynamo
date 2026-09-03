@@ -1125,7 +1125,6 @@ fn make_function_call(name: String, arguments: String, namespace: Option<String>
 pub fn chat_completion_to_response(
     nv_resp: NvCreateChatCompletionResponse,
     params: &ResponseParams,
-    api_context: Option<&crate::protocols::unified::ResponsesContext>,
 ) -> Result<NvResponse, anyhow::Error> {
     let nvext = nv_resp.nvext.clone();
     let chat_resp = nv_resp.inner;
@@ -1301,7 +1300,7 @@ pub fn chat_completion_to_response(
         }),
         instructions: params.instructions.clone().map(Instructions::Text),
         max_output_tokens: params.max_output_tokens,
-        previous_response_id: api_context.and_then(|ctx| ctx.previous_response_id.clone()),
+        previous_response_id: None,
         prompt: None,
         prompt_cache_key: params.prompt_cache_key.clone(),
         prompt_cache_retention: params.prompt_cache_retention,
@@ -2765,8 +2764,7 @@ mod tests {
             nvext: None,
         };
 
-        let wrapped =
-            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        let wrapped = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
 
         assert_eq!(wrapped.inner.model, "llama-3.1-8b-instruct");
         assert_eq!(wrapped.inner.status, Status::Completed);
@@ -2825,8 +2823,7 @@ mod tests {
             nvext: None,
         };
 
-        let wrapped =
-            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        let wrapped = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
         assert_eq!(wrapped.inner.output.len(), 1);
         match &wrapped.inner.output[0] {
             OutputItem::FunctionCall(fc) => {
@@ -2886,7 +2883,7 @@ mod tests {
             ..Default::default()
         };
 
-        let response = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let response = chat_completion_to_response(chat_resp, &params).unwrap();
         let OutputItem::FunctionCall(call) = &response.inner.output[0] else {
             panic!("expected function call");
         };
@@ -3087,7 +3084,7 @@ thinking
             nvext: None,
         };
 
-        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
         let reasoning = resp.inner.reasoning.unwrap();
         assert_eq!(
             serde_json::to_value(reasoning.effort).unwrap(),
@@ -3123,7 +3120,7 @@ thinking
             nvext: None,
         };
 
-        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
         let text = resp.inner.text.unwrap();
         assert_eq!(text.format, TextResponseFormatConfiguration::JsonObject);
     }
@@ -3151,7 +3148,7 @@ thinking
             nvext: None,
         };
 
-        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
         assert_eq!(resp.inner.service_tier, Some(ServiceTier::Flex));
     }
 
@@ -3176,7 +3173,7 @@ thinking
             nvext: None,
         };
 
-        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
         assert_eq!(resp.inner.parallel_tool_calls, Some(false));
     }
 
@@ -3389,7 +3386,6 @@ thinking
         let unrequested = chat_completion_to_response(
             make_chat_resp_with_reasoning("private reasoning"),
             &ResponseParams::default(),
-            None,
         )
         .unwrap();
         assert!(
@@ -3408,8 +3404,7 @@ thinking
             ..Default::default()
         };
         let requested =
-            chat_completion_to_response(make_chat_resp_with_reasoning("summary"), &params, None)
-                .unwrap();
+            chat_completion_to_response(make_chat_resp_with_reasoning("summary"), &params).unwrap();
         let reasoning = requested
             .inner
             .output
@@ -3453,7 +3448,7 @@ thinking
             ..Default::default()
         };
 
-        let response = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let response = chat_completion_to_response(chat_resp, &params).unwrap();
         assert!(matches!(
             response.inner.output.as_slice(),
             [OutputItem::Reasoning(_), OutputItem::FunctionCall(_)]
@@ -3467,7 +3462,7 @@ thinking
         // rather than null.
         let chat_resp = make_chat_resp_with_text("hello");
         let params = ResponseParams::default();
-        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
 
         for item in &resp.inner.output {
             if let OutputItem::Message(msg) = item {
@@ -3493,7 +3488,7 @@ thinking
             include: Some(vec![IncludeEnum::MessageOutputTextLogprobs]),
             ..Default::default()
         };
-        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
 
         let mut found_text = false;
         for item in &resp.inner.output {
@@ -3521,7 +3516,7 @@ thinking
             truncation: Some(Truncation::Auto),
             ..Default::default()
         };
-        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
         assert_eq!(resp.inner.truncation, Some(Truncation::Auto));
     }
 
@@ -3529,7 +3524,7 @@ thinking
     fn test_truncation_defaults_to_disabled() {
         let chat_resp = make_chat_resp_with_text("hello");
         let params = ResponseParams::default();
-        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
         assert_eq!(resp.inner.truncation, Some(Truncation::Disabled));
     }
 
@@ -3539,8 +3534,7 @@ thinking
         chat_resp.inner.choices[0].finish_reason =
             Some(dynamo_protocols::types::FinishReason::Length);
 
-        let resp =
-            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
 
         assert_eq!(resp.inner.status, Status::Incomplete);
         assert_eq!(resp.inner.completed_at, None);
@@ -3564,8 +3558,7 @@ thinking
             r#"{"location":"SF"}"#,
         );
 
-        let response =
-            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        let response = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
 
         assert_eq!(response.inner.status, Status::Completed);
         assert!(response.inner.incomplete_details.is_none());
@@ -3582,8 +3575,7 @@ thinking
             r#"{"location":"SF"#,
         );
 
-        let response =
-            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        let response = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
 
         assert_eq!(response.inner.status, Status::Incomplete);
         assert_eq!(
@@ -3609,8 +3601,7 @@ thinking
             &[r#"{"location":"SF"}"#, r#"{"location":"NY"#],
         );
 
-        let response =
-            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+        let response = chat_completion_to_response(chat_resp, &ResponseParams::default()).unwrap();
 
         assert_eq!(response.inner.status, Status::Incomplete);
         let statuses: Vec<_> = response
@@ -3647,7 +3638,7 @@ thinking
             ..Default::default()
         };
 
-        let response = chat_completion_to_response(chat_resp, &params, None)
+        let response = chat_completion_to_response(chat_resp, &params)
             .unwrap()
             .inner;
         assert_eq!(response.status, Status::Incomplete);
@@ -3677,7 +3668,7 @@ thinking
             ..Default::default()
         };
 
-        let response = chat_completion_to_response(chat_resp, &params, None)
+        let response = chat_completion_to_response(chat_resp, &params)
             .unwrap()
             .inner;
         assert_eq!(response.status, Status::Incomplete);
@@ -3701,7 +3692,7 @@ thinking
             safety_identifier: Some("user-abc".into()),
             ..Default::default()
         };
-        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
         assert_eq!(
             resp.inner.prompt_cache_key.as_deref(),
             Some("cache-key-codex-1")
@@ -3720,7 +3711,7 @@ thinking
     fn test_response_wire_format_shape() {
         let chat_resp = make_chat_resp_with_text("hello");
         let params = ResponseParams::default();
-        let resp = chat_completion_to_response(chat_resp, &params, None).unwrap();
+        let resp = chat_completion_to_response(chat_resp, &params).unwrap();
         let json = serde_json::to_value(&resp).unwrap();
 
         // Required scalars the spec mandates on every response. Upstream

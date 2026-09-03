@@ -18,7 +18,6 @@ pub mod openai;
 pub mod sglang;
 pub mod switchyard;
 pub mod tensor;
-pub(crate) mod unified;
 
 /// The token ID type
 pub type TokenIdType = u32;

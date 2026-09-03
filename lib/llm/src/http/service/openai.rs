@@ -82,7 +82,6 @@ use crate::protocols::openai::{
     },
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
-use crate::protocols::unified::UnifiedRequest;
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 use dynamo_protocols::types::ChatCompletionMessageContent;
@@ -3453,21 +3452,17 @@ async fn responses(
     let request_id = request.id().to_string();
     let (orig_request, context) = request.into_parts();
 
-    let unified_request: UnifiedRequest = orig_request.try_into().map_err(|e: anyhow::Error| {
-        tracing::error!(
-            request_id,
-            error = %e,
-            "Failed to convert NvCreateResponse to UnifiedRequest",
-        );
-        let err_response = responses_conversion_error_response(e);
-        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-        err_response
-    })?;
-    // Extract the API context before consuming the UnifiedRequest — this
-    // carries Responses-specific fields (previous_response_id, store, etc.)
-    // that the stream converter needs for faithful response reconstruction.
-    let responses_ctx = unified_request.responses_context().cloned();
-    let mut chat_request = unified_request.into_inner();
+    let mut chat_request: NvCreateChatCompletionRequest =
+        orig_request.try_into().map_err(|e: anyhow::Error| {
+            tracing::error!(
+                request_id,
+                error = %e,
+                "Failed to convert NvCreateResponse to NvCreateChatCompletionRequest",
+            );
+            let err_response = responses_conversion_error_response(e);
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
     if let Err(err_response) = normalize_chat_reasoning_template_args(&mut chat_request) {
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
@@ -3593,10 +3588,7 @@ async fn responses(
         // inner stream response data and convert it to Responses API events.
         use crate::protocols::openai::responses::stream_converter::ResponseStreamConverter;
 
-        let mut converter = match responses_ctx {
-            Some(ctx) => ResponseStreamConverter::with_context(model.clone(), response_params, ctx),
-            None => ResponseStreamConverter::new(model.clone(), response_params),
-        };
+        let mut converter = ResponseStreamConverter::new(model.clone(), response_params);
 
         let mut http_queue_guard = Some(http_queue_guard);
         let error_signal = StreamErrorSignal::default();
@@ -3712,19 +3704,18 @@ async fn responses(
                 })?;
 
         // Convert NvCreateChatCompletionResponse --> NvResponse
-        let response: NvResponse =
-            chat_completion_to_response(response, &response_params, responses_ctx.as_ref())
-                .map_err(|e| {
-                    tracing::error!(
-                        request_id,
-                        "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
-                        e
-                    );
-                    let err_response =
-                        ErrorMessage::internal_server_error("Failed to convert internal response");
-                    inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                    err_response
-                })?;
+        let response: NvResponse = chat_completion_to_response(response, &response_params)
+            .map_err(|e| {
+                tracing::error!(
+                    request_id,
+                    "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
+                    e
+                );
+                let err_response =
+                    ErrorMessage::internal_server_error("Failed to convert internal response");
+                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+                err_response
+            })?;
 
         inflight_guard.mark_ok();
         // If the engine context was killed (client disconnect), the response was
@@ -5491,8 +5482,7 @@ mod tests {
         let mut response_request = make_base_request();
         response_request.inner.max_output_tokens = Some(256);
 
-        let unified_request: UnifiedRequest = response_request.try_into().unwrap();
-        let chat_request = unified_request.into_inner();
+        let chat_request: NvCreateChatCompletionRequest = response_request.try_into().unwrap();
         let stop_conditions = chat_request.extract_stop_conditions().unwrap();
 
         assert_eq!(chat_request.inner.max_completion_tokens, Some(256));
