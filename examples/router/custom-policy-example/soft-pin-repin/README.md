@@ -59,7 +59,7 @@ python -m dynamo.frontend \
 ### 2. Start Two Mocker Workers
 
 ```bash
-python -m dynamo.mocker._worker \
+python3 -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --decode-speedup-ratio 0.1 \
