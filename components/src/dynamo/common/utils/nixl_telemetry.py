@@ -129,6 +129,18 @@ def derive_nixl_prometheus_port(
             f"{NIXL_TELEMETRY_PROMETHEUS_PORT_ENV}."
         )
 
+    # Compare the whole reserved range against each listener, not just this
+    # rank's port. A base one below another listener leaves rank 0 clear and
+    # collides from rank 1 on, so checking a single port lets the pod start one
+    # scheduler and then fail every later one.
+    for env_name, start, end in reserved_port_ranges(env, width=max_ranks):
+        if base_port <= end and start <= last_port:
+            raise ValueError(
+                f"the NIXL exporter range {base_port}-{last_port} overlaps "
+                f"{env_name}, which reserves {start}-{end}. Configure "
+                f"non-overlapping ports."
+            )
+
     if local_rank < 0 or local_rank >= max_ranks:
         raise ValueError(
             f"node-local rank {local_rank} is outside the reserved NIXL exporter "
@@ -137,12 +149,4 @@ def derive_nixl_prometheus_port(
             f"declared container port and would not be scraped."
         )
 
-    port = base_port + local_rank
-    for env_name, start, end in reserved_port_ranges(env, width=max_ranks):
-        if start <= port <= end:
-            raise ValueError(
-                f"NIXL exporter port {port} for node-local rank {local_rank} "
-                f"collides with {env_name}, which reserves {start}-{end}. "
-                f"Configure non-overlapping ports."
-            )
-    return port
+    return base_port + local_rank

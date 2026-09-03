@@ -669,16 +669,11 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 		ports              []corev1.ContainerPort
 		telemetryEnable    string
 		telemetryValueFrom *corev1.EnvVarSource
+		telemetryPort      string
 		containerGPUs      int64
 		expectedPorts      map[string]int32
+		expectedError      string
 	}{
-		{
-			name:            "no GPUs declares only the base port",
-			ports:           workerPorts,
-			telemetryEnable: "y",
-			containerGPUs:   0,
-			expectedPorts:   map[string]int32{"nixl": 19090},
-		},
 		{
 			name:            "one rank needs no extra port",
 			ports:           workerPorts,
@@ -726,18 +721,40 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			containerGPUs: 8,
 			expectedPorts: allEightPorts,
 		},
+		{
+			name:            "an overridden base moves every declared port with it",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			telemetryPort:   "30500",
+			containerGPUs:   4,
+			expectedPorts: map[string]int32{
+				"nixl": 30500, "nixl-1": 30501, "nixl-2": 30502, "nixl-3": 30503,
+			},
+		},
+		{
+			name:            "a base with no room for the range is rejected",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			telemetryPort:   strconv.Itoa(maxTCPPort),
+			containerGPUs:   4,
+			expectedError:   "exceeds the maximum port",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Log("Render the container the way the component defaults do")
+			telemetryPort := tt.telemetryPort
+			if telemetryPort == "" {
+				telemetryPort = strconv.Itoa(commonconsts.DynamoNixlPort)
+			}
 			container := &corev1.Container{
 				Ports: slices.Clone(tt.ports),
 				Env: []corev1.EnvVar{
 					{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(commonconsts.DynamoSystemPort)},
 					{Name: "NIXL_TELEMETRY_ENABLE", Value: tt.telemetryEnable, ValueFrom: tt.telemetryValueFrom},
 					{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
-					{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: strconv.Itoa(commonconsts.DynamoNixlPort)},
+					{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: telemetryPort},
 				},
 			}
 
@@ -749,7 +766,13 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 				}
 			}
 
-			require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, containerGPUCount))
+			err := backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, containerGPUCount)
+			if tt.expectedError != "" {
+				t.Log("A range that cannot be declared is reported, not silently truncated")
+				require.ErrorContains(t, err, tt.expectedError)
+				return
+			}
+			require.NoError(t, err)
 
 			t.Log("Every co-located rank has a port of its own, and no rank shares one")
 			nixlPorts := map[string]int32{}
@@ -766,8 +789,15 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			}
 			require.Equal(t, tt.expectedPorts, nixlPorts)
 
-			t.Log("The ports the container already declared are untouched")
-			require.Subset(t, container.Ports, tt.ports)
+			t.Log("Every port declared for something other than NIXL keeps its number")
+			// The NIXL ports move with an overridden base, so expectedPorts above is
+			// what pins them; here only the ports the reservation must not touch.
+			for _, port := range tt.ports {
+				if strings.HasPrefix(port.Name, commonconsts.DynamoNixlPortName) {
+					continue
+				}
+				require.Contains(t, container.Ports, port)
+			}
 			require.NotContains(t, seen, int32(commonconsts.DynamoSystemPort))
 		})
 	}

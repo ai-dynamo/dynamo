@@ -14,6 +14,7 @@ the same port, which is the deployment that reported this.
 from __future__ import annotations
 
 import os
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,7 @@ from dynamo.common.utils.nixl_telemetry import NIXL_TELEMETRY_PROMETHEUS_PORT_EN
 from dynamo.sglang.nixl_telemetry import (
     _assign_nixl_prometheus_port,
     install_per_rank_nixl_prometheus_ports,
+    run_scheduler_process_with_nixl_port,
 )
 
 pytestmark = [
@@ -54,34 +56,36 @@ def _run_scheduler_process(
     """
 
 
-def _scheduler_gpu_id(server_args, tp_rank: int, dp_group_offset: int = 0) -> int:
-    """The gpu_id SGLang computes for a scheduler, single pipeline stage.
+def _scheduler_gpu_id(
+    server_args, tp_rank: int, dp_group_offset: int = 0, pp_rank: int = 0
+) -> int:
+    """The gpu_id SGLang computes for one scheduler on a single node.
 
     Mirrors ``Engine._launch_scheduler_processes`` and the data-parallel
-    controller's ``launch_tensor_parallel_group``.
+    controller's ``launch_tensor_parallel_group``. A pipeline stage shifts the
+    device by a whole tensor-parallel group and that shift is deliberately not
+    multiplied by ``gpu_id_step``, so a stepped pipeline's devices are dense
+    while a stepped tensor-parallel group's are not.
     """
     tp_size_per_node = min(server_args.tp_size, GPUS_PER_NODE)
     return (
         server_args.base_gpu_id
         + dp_group_offset
+        + pp_rank * tp_size_per_node
         + (tp_rank % tp_size_per_node) * server_args.gpu_id_step
     )
 
 
-def _port_for_scheduler(monkeypatch, server_args, gpu_id, tp_rank, dp_rank) -> int:
+def _port_for_scheduler(
+    monkeypatch, server_args, gpu_id, tp_rank, dp_rank, pp_rank: int = 0
+) -> int:
     """The exporter port the wrapper installs in one scheduler's process.
 
     SGLang calls the scheduler entry point entirely positionally, so this passes
     positionally too rather than by keyword.
     """
     monkeypatch.setenv(NIXL_TELEMETRY_PROMETHEUS_PORT_ENV, "19090")
-    port_args, attn_cp_rank, moe_dp_rank, moe_ep_rank, pp_rank = (
-        SimpleNamespace(),
-        0,
-        0,
-        0,
-        0,
-    )
+    port_args, attn_cp_rank, moe_dp_rank, moe_ep_rank = SimpleNamespace(), 0, 0, 0
     _assign_nixl_prometheus_port(
         _run_scheduler_process,
         (
@@ -156,6 +160,28 @@ class TestPerRankPortAssignment:
         ]
         assert ports == [19090, 19091, 19092, 19093]
 
+    def test_stepped_pipeline_stages_get_distinct_ports(self, telemetry_env):
+        """A pipeline shift is not scaled by ``gpu_id_step``, so it is already dense.
+
+        These two schedulers hold devices 0 and 1, and dividing either by the
+        step would put both on the base port and back on one bind.
+        """
+        server_args = SimpleNamespace(
+            tp_size=1, pp_size=2, base_gpu_id=0, gpu_id_step=2
+        )
+        ports = {
+            _port_for_scheduler(
+                telemetry_env,
+                server_args,
+                _scheduler_gpu_id(server_args, tp_rank=0, pp_rank=pp_rank),
+                tp_rank=0,
+                dp_rank=None,
+                pp_rank=pp_rank,
+            )
+            for pp_rank in range(2)
+        }
+        assert ports == {19090, 19091}
+
     def test_hidden_device_index_is_rejected(self, telemetry_env):
         """With devices reindexed per process every gpu_id is 0; refuse to collide."""
         telemetry_env.setenv("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", "1")
@@ -181,3 +207,17 @@ class TestInstall:
         """No SGLang import, so a non-telemetry deployment cannot regress on it."""
         telemetry_env.setenv("NIXL_TELEMETRY_ENABLE", "n")
         install_per_rank_nixl_prometheus_ports()
+
+    def test_install_points_sglang_at_the_wrapper(self, telemetry_env):
+        engine = type("Engine", (), {"run_scheduler_process_func": None})
+        telemetry_env.setitem(sys.modules, "sglang", SimpleNamespace(Engine=engine))
+        install_per_rank_nixl_prometheus_ports()
+        assert engine.run_scheduler_process_func is run_scheduler_process_with_nixl_port
+
+    def test_missing_override_point_is_rejected(self, telemetry_env):
+        """Serving on would leave every rank one port and all but one rank dead."""
+        telemetry_env.setitem(
+            sys.modules, "sglang", SimpleNamespace(Engine=type("Engine", (), {}))
+        )
+        with pytest.raises(RuntimeError, match="run_scheduler_process_func"):
+            install_per_rank_nixl_prometheus_ports()

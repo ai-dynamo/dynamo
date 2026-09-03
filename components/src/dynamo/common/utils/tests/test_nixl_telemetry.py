@@ -28,11 +28,6 @@ OPERATOR_ENV = {
 }
 
 
-def _reserved(env_name: str) -> set[int]:
-    base = int(OPERATOR_ENV[env_name])
-    return set(range(base, base + MAX_COLOCATED_NIXL_EXPORTERS))
-
-
 class TestDeriveNixlPrometheusPort:
     def test_colocated_ranks_never_share_an_exporter_port(self):
         base = int(OPERATOR_ENV["NIXL_TELEMETRY_PROMETHEUS_PORT"])
@@ -52,28 +47,25 @@ class TestDeriveNixlPrometheusPort:
         assert min(ports) >= base
         assert max(ports) <= base + MAX_COLOCATED_NIXL_EXPORTERS - 1
 
-    @pytest.mark.parametrize(
-        "env_name", ["DYN_SYSTEM_PORT", "DYN_FORWARDPASS_METRIC_PORT"]
-    )
-    def test_derived_ports_avoid_the_other_listeners_in_the_container(self, env_name):
-        base = int(OPERATOR_ENV["NIXL_TELEMETRY_PROMETHEUS_PORT"])
-        ports = {
-            derive_nixl_prometheus_port(base, rank, env=OPERATOR_ENV)
-            for rank in range(MAX_COLOCATED_NIXL_EXPORTERS)
-        }
-        assert not ports & _reserved(env_name)
-
     def test_rank_beyond_the_reserved_range_is_rejected(self):
         with pytest.raises(ValueError, match="outside the reserved"):
             derive_nixl_prometheus_port(
                 19090, MAX_COLOCATED_NIXL_EXPORTERS, env=OPERATOR_ENV
             )
 
-    def test_base_that_would_overlap_another_listener_is_rejected(self):
-        """A misconfigured base must fail loudly, not steal the system port."""
-        overlapping_base = int(OPERATOR_ENV["DYN_SYSTEM_PORT"]) - 1
-        with pytest.raises(ValueError, match="DYN_SYSTEM_PORT"):
-            derive_nixl_prometheus_port(overlapping_base, 1, env=OPERATOR_ENV)
+    @pytest.mark.parametrize(
+        "env_name", ["DYN_SYSTEM_PORT", "DYN_FORWARDPASS_METRIC_PORT"]
+    )
+    @pytest.mark.parametrize("local_rank", [0, 1])
+    def test_base_that_would_overlap_another_listener_is_rejected(
+        self, env_name, local_rank
+    ):
+        # One below the listener's own base: rank 0 lands just clear of it and
+        # only later ranks collide, so rejecting rank 0 is what stops the pod
+        # from starting one scheduler and failing the rest.
+        overlapping_base = int(OPERATOR_ENV[env_name]) - 1
+        with pytest.raises(ValueError, match=env_name):
+            derive_nixl_prometheus_port(overlapping_base, local_rank, env=OPERATOR_ENV)
 
     @pytest.mark.parametrize("local_rank", [0, 1])
     def test_base_too_high_for_the_reserved_range_is_rejected(self, local_rank):

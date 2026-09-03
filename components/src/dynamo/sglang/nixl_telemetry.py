@@ -24,6 +24,7 @@ import os
 from typing import Any
 
 from dynamo.common.utils.nixl_telemetry import (
+    NIXL_TELEMETRY_ENABLE_ENV,
     NIXL_TELEMETRY_PROMETHEUS_PORT_ENV,
     derive_nixl_prometheus_port,
     nixl_prometheus_base_port,
@@ -46,12 +47,21 @@ def _node_local_rank(server_args: Any, gpu_id: int) -> int:
     data-parallel group, and pipeline ranks repeat across tensor-parallel
     groups, so neither is unique on its own; SGLang folds all of them into
     ``gpu_id`` precisely because it must name a distinct device per scheduler.
-    Undoing ``base_gpu_id`` and ``gpu_id_step`` turns that device number back
-    into a dense 0-based index.
+
+    Turning that device number back into a dense index depends on how SGLang
+    spaced it. Without a pipeline the devices are ``base_gpu_id + i *
+    gpu_id_step``, so dividing by the step is what makes them dense. A pipeline
+    stage instead shifts ``gpu_id`` by a whole tensor-parallel group and that
+    shift is not multiplied by the step, so with ``pp_size=2, tp_size=1,
+    gpu_id_step=2`` the two schedulers hold devices 0 and 1 and dividing either
+    by the step would map both onto rank 0 and one shared port. The device
+    numbers are already dense in that case, so leave them alone.
     """
     base_gpu_id = getattr(server_args, "base_gpu_id", 0) or 0
     gpu_id_step = getattr(server_args, "gpu_id_step", 1) or 1
-    return (gpu_id - base_gpu_id) // gpu_id_step
+    pp_size = getattr(server_args, "pp_size", 1) or 1
+    offset = gpu_id - base_gpu_id
+    return offset if pp_size > 1 else offset // gpu_id_step
 
 
 def _assign_nixl_prometheus_port(target: Any, args: tuple, kwargs: dict) -> None:
@@ -100,7 +110,8 @@ def install_per_rank_nixl_prometheus_ports() -> None:
     """Point SGLang's scheduler launches at the wrapper, when telemetry is on.
 
     A no-op when NIXL Prometheus telemetry is disabled, so a deployment that
-    does not scrape NIXL keeps SGLang's own entry point.
+    does not scrape NIXL keeps SGLang's own entry point. Raises ``RuntimeError``
+    when telemetry is on but this SGLang offers no override point.
     """
     if nixl_prometheus_base_port() is None:
         return
@@ -108,15 +119,19 @@ def install_per_rank_nixl_prometheus_ports() -> None:
     import sglang as sgl
 
     if not hasattr(sgl.Engine, "run_scheduler_process_func"):
-        # Log rather than raise: without the override the deployment behaves as it
-        # did before, and a metrics feature should not become a startup failure.
-        logger.error(
-            "sglang.Engine has no run_scheduler_process_func override point, so "
-            "co-located ranks keep one shared %s and all but one will fail to "
-            "bind their NIXL Prometheus exporter.",
-            NIXL_TELEMETRY_PROMETHEUS_PORT_ENV,
+        # Fail here rather than let the schedulers start. Without the override
+        # every co-located rank keeps the same port, all but one dies on the
+        # bind, and the pod never reaches Ready -- the exact failure this module
+        # exists to prevent, but reported as an address-in-use error from inside
+        # a scheduler process instead of as a configuration problem.
+        raise RuntimeError(
+            f"this SGLang has no Engine.run_scheduler_process_func override "
+            f"point, so co-located ranks cannot be given distinct "
+            f"{NIXL_TELEMETRY_PROMETHEUS_PORT_ENV} values and all but one would "
+            f"fail to bind their NIXL Prometheus exporter. Run a supported "
+            f"SGLang version, or set {NIXL_TELEMETRY_ENABLE_ENV}=n to serve "
+            f"without NIXL telemetry."
         )
-        return
 
     sgl.Engine.run_scheduler_process_func = staticmethod(
         run_scheduler_process_with_nixl_port

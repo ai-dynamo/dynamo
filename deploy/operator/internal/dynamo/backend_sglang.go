@@ -3,6 +3,7 @@ package dynamo
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -13,6 +14,8 @@ import (
 
 const (
 	SglangPort = "29500"
+
+	maxTCPPort = 65535
 )
 
 type SGLangBackend struct{}
@@ -70,7 +73,8 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 // reserveNixlExporterPorts declares one NIXL exporter port per node-local rank.
 // Skips containers without a nixl port or with NIXL_TELEMETRY_ENABLE set off.
 func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount ContainerGPUCount) error {
-	if findContainerPort(container, commonconsts.DynamoNixlPortName) == nil {
+	basePort := findContainerPort(container, commonconsts.DynamoNixlPortName)
+	if basePort == nil {
 		return nil
 	}
 
@@ -91,7 +95,21 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 		return fmt.Errorf("failed to resolve container GPUs: %w", err)
 	}
 
+	// Rank i binds NIXL_TELEMETRY_PROMETHEUS_PORT+i, so an overridden literal
+	// moves the whole range and the declarations have to follow it. Realigning
+	// the base port too keeps `nixl` pointing at rank 0: leaving it on the
+	// default would advertise a port no scheduler binds.
+	if override, ok := literalPort(findEnvVar(container.Env, "NIXL_TELEMETRY_PROMETHEUS_PORT")); ok {
+		basePort.ContainerPort = override
+	}
+
 	colocatedRanks := min(containerGPUs, int64(commonconsts.DynamoMaxNixlPorts))
+	if last := int64(basePort.ContainerPort) + colocatedRanks - 1; last > maxTCPPort {
+		return fmt.Errorf(
+			"NIXL_TELEMETRY_PROMETHEUS_PORT=%d with %d co-located ranks needs ports %d-%d, which exceeds the maximum port %d",
+			basePort.ContainerPort, colocatedRanks, basePort.ContainerPort, last, maxTCPPort)
+	}
+
 	for rank := int64(1); rank < colocatedRanks; rank++ {
 		name := fmt.Sprintf("%s-%d", commonconsts.DynamoNixlPortName, rank)
 		if findContainerPort(container, name) != nil {
@@ -100,11 +118,27 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 		container.Ports = append(container.Ports, corev1.ContainerPort{
 			Protocol:      corev1.ProtocolTCP,
 			Name:          name,
-			ContainerPort: int32(commonconsts.DynamoNixlPort + rank),
+			ContainerPort: basePort.ContainerPort + int32(rank),
 		})
 	}
 
 	return nil
+}
+
+// literalPort reads a TCP port written inline on an environment variable. A
+// value taken from valueFrom is resolved in the container at startup and is
+// reported as absent here, as is a value that is not a usable port: neither can
+// be turned into a container port declaration.
+func literalPort(env *corev1.EnvVar) (int32, bool) {
+	if env == nil || env.ValueFrom != nil {
+		return 0, false
+	}
+
+	port, err := strconv.Atoi(strings.TrimSpace(env.Value))
+	if err != nil || port < 1 || port > 65535 {
+		return 0, false
+	}
+	return int32(port), true
 }
 
 func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
