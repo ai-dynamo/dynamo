@@ -319,6 +319,11 @@ impl SelectionService {
         self.core.upsert_worker(req).await
     }
 
+    /// The core this service wraps, for hosts that drive its catalog directly.
+    pub fn core(&self) -> &Arc<SelectionCore> {
+        &self.core
+    }
+
     /// Scheduler and indexer handle for `key`, once a worker has been upserted
     /// into that partition. Embedding hosts that keep their own index drive
     /// the partition scheduler through this handle.

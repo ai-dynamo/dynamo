@@ -10,6 +10,7 @@ mod catalog;
 mod core;
 mod error;
 mod input;
+mod membership;
 mod pending;
 mod policy_registry;
 mod server;
@@ -31,6 +32,7 @@ pub use core::{
 };
 pub use error::SelectionError;
 pub use input::PromptRequest;
+pub use membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
 pub use pending::SelectionCacheConfig;
 pub use policy_registry::{
     DYN_ROUTER_DECODE_POLICY, DYN_ROUTER_PREFILL_POLICY, DYN_ROUTER_WORKER_SELECTION_POLICY,
