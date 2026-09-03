@@ -21,7 +21,6 @@ dynamo-kv-router = { workspace = true, features = [
     "runtime-protocols",
     "standalone-selection",
 ] }
-dynamo-protocols = { workspace = true }
 dynamo-runtime = { workspace = true }
 
 anyhow = { workspace = true }

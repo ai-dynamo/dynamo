@@ -1,11 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Standalone EPP mode configuration.
-//!
-//! `DYN_EPP_MODE=dynamo` (default) uses the Dynamo runtime. `standalone` parses
-//! the selector-only config used when the EPP fronts raw OpenAI-compatible
-//! workers without a Dynamo runtime.
+//! EPP configuration for the in-process KV-aware selector.
 //!
 //! [`EppStandaloneConfig::from_env`] reads envs, applies defaults, and calls
 //! [`EppStandaloneConfig::validate_config`] for field and cross-field checks.
@@ -26,46 +22,12 @@ const DEFAULT_TOKENIZER_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// TCP-connection cap does not bound requests, so this is the actual guardrail.
 const DEFAULT_MAX_INFLIGHT_REQUESTS: usize = 1024;
 
-/// Environment variable that selects the EPP operating mode.
-pub const DYN_EPP_MODE: &str = "DYN_EPP_MODE";
-/// `DYN_EPP_MODE` value selecting standalone mode.
-pub const STANDALONE_MODE: &str = "standalone";
-/// `DYN_EPP_MODE` value selecting the Dynamo runtime.
-pub const DYNAMO_RUNTIME_MODE: &str = "dynamo";
-
 /// Mirrors `DYN_KUBE_DISCOVERY_MODE` in `dynamo_runtime::discovery`; read
-/// directly here because standalone mode has no Dynamo runtime to read it for.
+/// directly here so the EPP does not depend on the Dynamo runtime.
 const DYN_KUBE_DISCOVERY_MODE: &str = "DYN_KUBE_DISCOVERY_MODE";
 
 /// Reads an environment variable, matching the injectable getter used in tests.
 type EnvGet<'a> = dyn Fn(&str) -> Option<String> + 'a;
-
-/// Top-level EPP operating mode from `DYN_EPP_MODE`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EppMode {
-    // Connects to the Dynamo runtime and constructs a KvRouter. Requires Dynamo workers
-    // to be connected to the runtime. (default)
-    DynamoRuntime,
-    // No runtime connection. Constructs a ServiceSelector for tracking workers, kv state and selecting best worker.
-    Standalone,
-}
-
-impl EppMode {
-    pub fn from_env() -> anyhow::Result<Self> {
-        Self::parse(&|k| std::env::var(k).ok())
-    }
-
-    fn parse(get: &EnvGet) -> anyhow::Result<Self> {
-        match trimmed(get(DYN_EPP_MODE)).as_deref() {
-            None | Some(DYNAMO_RUNTIME_MODE) => Ok(Self::DynamoRuntime),
-            Some(STANDALONE_MODE) => Ok(Self::Standalone),
-            Some(other) => anyhow::bail!(
-                "{DYN_EPP_MODE} has invalid value {other:?}; \
-                 expected {STANDALONE_MODE:?} or {DYNAMO_RUNTIME_MODE:?}"
-            ),
-        }
-    }
-}
 
 /// Wire protocol exposed by the configured tokenizer service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,7 +144,7 @@ impl EppStandaloneConfig {
             .map(|service_name| -> anyhow::Result<_> {
                 let pod_ip = pod_ip.ok_or_else(|| {
                     anyhow::anyhow!(
-                        "invalid {STANDALONE_MODE} EPP config: DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; \
+                        "invalid EPP config: DYN_EPP_PEER_SERVICE is set but POD_IP is unavailable; \
                          inject POD_IP via the downward API (fieldRef status.podIP)"
                     )
                 })?;
@@ -225,18 +187,15 @@ impl EppStandaloneConfig {
     /// Enforce the `validator` constraints, mapping the failure to `anyhow`.
     pub fn validate_config(&self) -> anyhow::Result<()> {
         self.validate()
-            .map_err(|e| anyhow::anyhow!("invalid {STANDALONE_MODE} EPP config: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("invalid EPP config: {e}"))?;
         Ok(())
     }
 }
 
-/// Reject `DYN_KUBE_DISCOVERY_MODE=container` (e.g. intra-pod GMS failover)
-/// in standalone mode. Deferred, not a permanent restriction — see
+/// Reject `DYN_KUBE_DISCOVERY_MODE=container` (e.g. intra-pod GMS failover).
+/// Deferred, not a permanent restriction — see
 /// TODO(epp-standalone-container-discovery) below for what unblocks it.
 ///
-/// Unlike `DYN_EPP_MODE=dynamo` (which already resolves per-container worker
-/// identities; see `hash_container_name` / `pod_worker_ids` in `epp.rs`),
-/// standalone has no Dynamo runtime worker registration to fall back on:
 /// `pod_discovery.rs` selects workers purely from the K8s Pod's own aggregate
 /// `Ready` condition. An intra-pod failover pod never satisfies that
 /// condition in steady state — each engine container gets its own readiness
@@ -247,17 +206,15 @@ impl EppStandaloneConfig {
 ///
 /// TODO(epp-standalone-container-discovery): replace `pod_discovery.rs`'s
 /// pod-aggregate `pod_is_ready()` gate with a per-named-container readiness
-/// check (mirroring dynamo mode's `pod_worker_ids`) so a `WorkerIndex` entry
-/// is keyed on an individual container's own `Ready` status, not the pod's.
-/// Once that lands, lift this rejection.
+/// check so a `WorkerIndex` entry is keyed on an individual container's own
+/// `Ready` status, not the pod's. Once that lands, lift this rejection.
 fn reject_unsupported_container_discovery(get: &EnvGet) -> anyhow::Result<()> {
     match trimmed(get(DYN_KUBE_DISCOVERY_MODE)).as_deref() {
         Some("container") => anyhow::bail!(
-            "standalone EPP ({STANDALONE_MODE} mode) does not yet support \
-             {DYN_KUBE_DISCOVERY_MODE}=container (e.g. intra-pod GMS failover): pod discovery \
-             selects workers from the Pod's aggregate Ready condition, which a pod with an \
-             intentionally-standby engine container never satisfies; use \
-             {DYN_EPP_MODE}={DYNAMO_RUNTIME_MODE} instead, or disable intra-pod failover for this worker"
+            "EPP does not yet support {DYN_KUBE_DISCOVERY_MODE}=container \
+             (e.g. intra-pod GMS failover): pod discovery selects workers from the Pod's \
+             aggregate Ready condition, which a pod with an intentionally-standby engine \
+             container never satisfies; disable intra-pod failover for this worker"
         ),
         _ => Ok(()),
     }
@@ -319,38 +276,11 @@ mod tests {
         move |k| map.get(k).cloned()
     }
 
-    fn parse_mode(pairs: &[(&str, &str)]) -> anyhow::Result<EppMode> {
-        EppMode::parse(&getter(pairs))
-    }
-
     /// Mirror `from_env`: resolve (parse) then validate.
     fn parse_cfg(pairs: &[(&str, &str)]) -> anyhow::Result<EppStandaloneConfig> {
         let cfg = EppStandaloneConfig::parse(&getter(pairs))?;
         cfg.validate_config()?;
         Ok(cfg)
-    }
-
-    #[test]
-    fn mode_defaults_to_dynamo_when_unset() {
-        assert_eq!(parse_mode(&[]).unwrap(), EppMode::DynamoRuntime);
-    }
-
-    #[test]
-    fn mode_parses_known_values() {
-        assert_eq!(
-            parse_mode(&[("DYN_EPP_MODE", "standalone")]).unwrap(),
-            EppMode::Standalone
-        );
-        assert_eq!(
-            parse_mode(&[(DYN_EPP_MODE, DYNAMO_RUNTIME_MODE)]).unwrap(),
-            EppMode::DynamoRuntime
-        );
-    }
-
-    #[test]
-    fn mode_rejects_unknown_value() {
-        // An unknown value must fail fast, not silently boot full-dynamo mode.
-        assert!(parse_mode(&[("DYN_EPP_MODE", "nonsense-mode")]).is_err());
     }
 
     #[test]

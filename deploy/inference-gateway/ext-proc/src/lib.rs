@@ -5,14 +5,13 @@
 //!
 //! - `StreamingServer` handles the ext-proc bidirectional streaming protocol
 //! - `EndpointPicker` trait abstracts endpoint selection
-//! - The Dynamo `epp::Router` implements `EndpointPicker` using the KV-aware router
+//! - `EppRouter` implements `EndpointPicker` using the in-process KV-aware selector
 //!
 //! ```text
-//! Envoy ──ext-proc──▶ ExtProcServer<epp::Router> ──EndpointPicker──▶ Dynamo KV Router
+//! Envoy ──ext-proc──▶ ExtProcServer<EppRouter> ──EndpointPicker──▶ KV SelectionService
 //! ```
 
 pub mod envoy_helpers;
-pub mod epp;
 pub mod epp_router;
 pub mod epp_standalone_config;
 pub mod inference_pool;
@@ -27,11 +26,8 @@ pub mod server;
 pub mod topology_adapter;
 pub mod vllm_render_client;
 
-pub use epp::Router;
 pub use epp_router::EppRouter;
-pub use epp_standalone_config::{
-    EppMode, EppStandaloneConfig, PeerReplicationConfig, TokenizerProtocol,
-};
+pub use epp_standalone_config::{EppStandaloneConfig, PeerReplicationConfig, TokenizerProtocol};
 pub use inference_pool::PoolState;
 pub use picker::{Endpoint, EndpointPicker, PickResult, RequestInfo, ResponseUsage};
 pub use pod_discovery::{PodDiscovery, RawWorker};

@@ -4,7 +4,7 @@
 //! Standard Rust EPP process bootstrap.
 //!
 //! A native Rust binary implementing the Envoy ext_proc gRPC service, using
-//! Dynamo's KV-aware router for endpoint selection.
+//! the in-process KV-aware selector for endpoint selection.
 //!
 //! The ext-proc port (9002) serves TLS (self-signed cert). The health port
 //! (9003) is plaintext (K8s probes don't need TLS).
@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
-use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, metrics};
+use crate::{EppStandaloneConfig, ExtProcServer, metrics};
 
 const GRPC_PORT: u16 = 9002;
 const HEALTH_PORT: u16 = 9003;
@@ -40,41 +40,6 @@ const GRACEFUL_SHUTDOWN_PROPAGATION_ENV: &str = "DYN_EPP_GRACEFUL_SHUTDOWN_PROPA
 /// traffic (slowloris-style). Only the handshake is bounded — established
 /// connections may stay open for the lifetime of their bidi stream.
 const TLS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-struct Config {
-    namespace: String,
-    component: String,
-}
-
-impl Config {
-    fn from_env() -> Self {
-        let namespace = env_or("DYN_NAMESPACE_PREFIX", "")
-            .or_else(|| env_or("DYN_NAMESPACE", ""))
-            .unwrap_or_else(|| "vllm-agg".to_string());
-
-        if parse_env("DYN_ENFORCE_DISAGG", false) {
-            tracing::warn!(
-                "DYN_ENFORCE_DISAGG is deprecated and ignored; routing topology and readiness are determined from registered worker types"
-            );
-        }
-
-        Self {
-            namespace,
-            component: env_or("DYN_COMPONENT_NAME", "").unwrap_or_else(|| "backend".to_string()),
-        }
-    }
-}
-
-fn env_or(key: &str, empty_means_unset: &str) -> Option<String> {
-    std::env::var(key).ok().and_then(|v| {
-        let trimmed = v.trim();
-        if trimmed.is_empty() || trimmed == empty_means_unset {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
 
 fn parse_env<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
@@ -126,15 +91,7 @@ fn create_tls_acceptor() -> Result<TlsAcceptor> {
 /// Run EPP until it exits.
 pub async fn run(policy_registry: Option<WorkerSelectionPolicyRegistry>) -> Result<()> {
     init_tracing();
-    let mode = EppMode::from_env()?;
-    if !matches!(mode, EppMode::Standalone)
-        && policy_registry
-            .as_ref()
-            .is_some_and(|registry| !registry.is_empty())
-    {
-        anyhow::bail!("linked worker-selection policies require DYN_EPP_MODE=standalone")
-    }
-    run_inner(mode, policy_registry.unwrap_or_default()).await
+    run_inner(policy_registry.unwrap_or_default()).await
 }
 
 fn init_tracing() {
@@ -192,17 +149,10 @@ impl BackgroundTasks {
     }
 }
 
-async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry) -> Result<()> {
-    let standalone = matches!(mode, EppMode::Standalone);
-
-    let config = Config::from_env();
-
+async fn run_inner(policy_registry: WorkerSelectionPolicyRegistry) -> Result<()> {
     tracing::info!(
         port = GRPC_PORT,
         health_port = HEALTH_PORT,
-        namespace = %config.namespace,
-        component = %config.component,
-        standalone,
         "Starting Dynamo Rust EPP"
     );
 
@@ -276,59 +226,34 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
     };
 
     let result = async {
-        if standalone {
-            let selector_cfg = EppStandaloneConfig::from_env()?;
-            tracing::info!(
-                inference_pool_name = %selector_cfg.inference_pool_name,
-                model_name = %selector_cfg.model_name,
-                block_size = selector_cfg.block_size,
-                "Initializing standalone selector mode (no Dynamo runtime)..."
-            );
-            metrics::set_served_model(&selector_cfg.model_name);
-            let router = tokio::select! {
-                _ = draining.cancelled() => {
-                    tracing::info!("Shutdown received during standalone EPP initialization");
-                    return Ok(());
-                }
-                router = crate::EppRouter::from_selector(selector_cfg, policy_registry) => Arc::new(router?),
-            };
-            if draining.is_cancelled() {
-                tracing::info!("Shutdown received before standalone EPP serving started");
+        let selector_cfg = EppStandaloneConfig::from_env()?;
+        tracing::info!(
+            inference_pool_name = %selector_cfg.inference_pool_name,
+            model_name = %selector_cfg.model_name,
+            block_size = selector_cfg.block_size,
+            "Initializing EPP selector..."
+        );
+        metrics::set_served_model(&selector_cfg.model_name);
+        let router = tokio::select! {
+            _ = draining.cancelled() => {
+                tracing::info!("Shutdown received during EPP initialization");
                 return Ok(());
             }
-            let ready_router = router.clone();
-            serve(
-                router,
-                move || ready_router.is_ready(),
-                health_reporter,
-                draining,
-                shutdown,
-            )
-            .await
-        } else {
-            tracing::info!("Initializing KV-aware router from discovery...");
-            let router = tokio::select! {
-                _ = draining.cancelled() => {
-                    tracing::info!("Shutdown received during Dynamo discovery initialization");
-                    return Ok(());
-                }
-                router = Router::from_discovery(&config.namespace, &config.component) => router?,
-            };
-            if draining.is_cancelled() {
-                tracing::info!("Shutdown received before Dynamo discovery serving started");
-                return Ok(());
-            }
-            metrics::set_served_model(router.served_model());
-            let ready = router.pod_store_ready();
-            serve(
-                Arc::new(router),
-                move || ready.load(std::sync::atomic::Ordering::Acquire),
-                health_reporter,
-                draining,
-                shutdown,
-            )
-            .await
+            router = crate::EppRouter::from_selector(selector_cfg, policy_registry) => Arc::new(router?),
+        };
+        if draining.is_cancelled() {
+            tracing::info!("Shutdown received before EPP serving started");
+            return Ok(());
         }
+        let ready_router = router.clone();
+        serve(
+            router,
+            move || ready_router.is_ready(),
+            health_reporter,
+            draining,
+            shutdown,
+        )
+        .await
     }
     .await;
     background_tasks.shutdown().await;
@@ -491,48 +416,3 @@ async fn serve<P: crate::EndpointPicker>(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use dynamo_kv_router::WorkerSelectionPolicyFactory;
-    use dynamo_kv_router::services::selection::WorkerSelectionPolicyProviderError;
-    use tokio::sync::Mutex;
-
-    use super::*;
-    use crate::epp_standalone_config::{DYN_EPP_MODE, DYNAMO_RUNTIME_MODE};
-
-    static EPP_MODE_ENV_LOCK: Mutex<()> = Mutex::const_new(());
-
-    #[tokio::test]
-    async fn linked_policy_registry_requires_standalone_mode() {
-        let mut registry = WorkerSelectionPolicyRegistry::default();
-        registry
-            .register(
-                "test",
-                Arc::new(
-                    |_| -> std::result::Result<
-                        WorkerSelectionPolicyFactory,
-                        WorkerSelectionPolicyProviderError,
-                    > {
-                        Err(WorkerSelectionPolicyProviderError::new("not invoked"))
-                    },
-                ),
-            )
-            .unwrap();
-
-        let _lock = EPP_MODE_ENV_LOCK.lock().await;
-        let previous = std::env::var_os(DYN_EPP_MODE);
-        unsafe { std::env::set_var(DYN_EPP_MODE, DYNAMO_RUNTIME_MODE) };
-        let result = run(Some(registry)).await;
-        match previous {
-            Some(value) => unsafe { std::env::set_var(DYN_EPP_MODE, value) },
-            None => unsafe { std::env::remove_var(DYN_EPP_MODE) },
-        }
-
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "linked worker-selection policies require DYN_EPP_MODE=standalone"
-        );
-    }
-}
