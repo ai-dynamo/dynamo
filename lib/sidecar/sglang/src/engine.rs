@@ -280,7 +280,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
-        let prefill_handoff = if self.disaggregation_mode.is_prefill() {
+        let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
                 .as_ref()
@@ -295,6 +295,20 @@ impl LLMEngine for SglangSidecarEngine {
             if ctx.is_stopped() || cancel.is_cancelled() {
                 yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
                 return;
+            }
+            if is_prefill {
+                let Some(handoff) = prefill_handoff.take() else {
+                    yield Err(client::protocol_error(
+                        "SGLang gRPC prefill request is missing disaggregated params",
+                    ));
+                    return;
+                };
+                // Match the Python worker contract and let decode rendezvous
+                // while SGLang performs the prefill in this drained stream.
+                yield Ok(LLMEngineOutput {
+                    disaggregated_params: Some(handoff),
+                    ..Default::default()
+                });
             }
 
             tracing::debug!(request_id = %ctx.id(), "sending request to SGLang gRPC");
@@ -367,7 +381,7 @@ impl LLMEngine for SglangSidecarEngine {
 
                         if is_prefill {
                             if response.finished {
-                                let mut terminal = match terminal_from_meta(
+                                let terminal = match terminal_from_meta(
                                     &response.meta_info,
                                     observed_prompt_tokens,
                                     0,
@@ -378,7 +392,6 @@ impl LLMEngine for SglangSidecarEngine {
                                         break;
                                     }
                                 };
-                                terminal.disaggregated_params = prefill_handoff.clone();
                                 yield Ok(terminal);
                                 break;
                             }
