@@ -13,7 +13,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, anyhow};
 
 use dynamo_kv_router::WorkerType;
-use dynamo_kv_router::config::{KvRouterConfig, try_kv_router_config_from_dynamo_env};
+use dynamo_kv_router::config::{
+    KvRouterConfig, RouterConfigOverride, try_kv_router_config_from_dynamo_env,
+};
 use dynamo_kv_router::protocols::RoutingConstraints;
 use dynamo_kv_router::services::selection::{
     PromptRequest, SelectAndReserveRequest as CoreSelectAndReserveRequest, SelectionError,
@@ -25,6 +27,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::epp_standalone_config::EppStandaloneConfig;
+use crate::role_config::router_config_override_for_role;
 use crate::worker_role::WorkerRole;
 
 const DEFAULT_ROUTING_GROUP: &str = "default";
@@ -83,6 +86,9 @@ pub struct Selector {
     /// `Drop` tears down its core + replica-sync tasks.
     cancel: CancellationToken,
     reconcile_state: Mutex<ReconcileState>,
+    /// Per-request selection semantics for this selector's role, supplied on
+    /// every selection and booking; `None` for prefill and aggregated.
+    router_config_override: Option<RouterConfigOverride>,
 }
 
 /// Local bookkeeping for desired-state reconciliation.
@@ -147,9 +153,8 @@ impl Selector {
             .await?;
         }
 
-        // The decode selector's index is never fed — it consumes no KV events,
-        // and this crate's selection service has no approximate fallback that
-        // would populate it — so extra indexer threads there would only idle.
+        // Decode runs with KV events off, so its index is never fed and extra
+        // indexer threads would only idle.
         let indexer_threads = match role {
             WorkerRole::Decode => 1,
             _ => cfg.selector_threads,
@@ -191,6 +196,7 @@ impl Selector {
             service,
             cancel,
             reconcile_state: Mutex::new(ReconcileState::default()),
+            router_config_override: router_config_override_for_role(role),
         })
     }
 
@@ -315,7 +321,7 @@ impl Selector {
                 token_ids: Some(req.token_ids),
                 ..Default::default()
             },
-            router_config_override: None,
+            router_config_override: self.router_config_override.clone(),
             expected_output_tokens: None,
             session_id: None,
             priority_jump: req.priority_jump,
@@ -961,5 +967,43 @@ worker_selection:
             .expect_err("duplicate IDs must be rejected");
         assert!(error.to_string().contains("duplicate worker_id 1"));
         assert!(selector.service.list_workers(None, None).is_empty());
+    }
+
+    /// The role's override reaches the core's booking path: decode carries
+    /// `track_prefill_tokens: Some(false)`, so the same 16-token prompt books
+    /// no prefill load there and all 16 tokens on prefill.
+    #[tokio::test]
+    async fn decode_selector_books_no_prefill_load_and_prefill_selector_books_it() {
+        use crate::role_config::kv_router_config_for_role;
+
+        let base = KvRouterConfig::default();
+        for (role, expected) in [(WorkerRole::Prefill, 16usize), (WorkerRole::Decode, 0usize)] {
+            let selector = Selector::new_with_kv_router_config(
+                &test_config(),
+                role,
+                kv_router_config_for_role(&base, role),
+                WorkerSelectionPolicyRegistry::default(),
+            )
+            .await
+            .expect("role selector should build");
+            selector
+                .reconcile(&[schedulable_registration(1)])
+                .await
+                .expect("reconcile");
+            selector
+                .select_and_reserve(select_request("res"))
+                .await
+                .expect("reserve");
+
+            let booked = selector
+                .service
+                .loads(Some("test-model"), Some(DEFAULT_ROUTING_GROUP))
+                .iter()
+                .flat_map(|model| model.loads.iter())
+                .find(|load| load.worker_id == 1)
+                .expect("worker load")
+                .potential_prefill_tokens;
+            assert_eq!(booked, expected, "{role}");
+        }
     }
 }

@@ -84,9 +84,9 @@ impl EppRouter {
 
     /// One selector per role in play.
     ///
-    /// Disaggregated needs two `SelectionService` instances rather than one with
-    /// two partitions because the knobs that distinguish the roles live on
-    /// `KvRouterConfig`, which a service takes once at construction.
+    /// Disaggregated builds two `SelectionService`s: `use_kv_events` is fixed at
+    /// construction and differs per role, and the catalogs must be disjoint so a
+    /// decode pick can never see a prefill worker.
     async fn build_selectors(
         cfg: &EppStandaloneConfig,
         policy_registry: WorkerSelectionPolicyRegistry,
