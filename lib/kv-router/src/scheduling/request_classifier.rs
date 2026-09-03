@@ -130,14 +130,14 @@ impl ClassifyRequest {
         self.session_context.as_ref()
     }
 
-    pub(crate) fn into_queue_inputs(
-        self,
-    ) -> (Option<String>, Option<Instant>, Option<usize>, usize) {
+    /// Only the explicit overrides feed the queue: cache eligibility is
+    /// recomputed from the current workers at enqueue, because worker state
+    /// may have changed while the classification was pending.
+    pub(crate) fn into_queue_inputs(self) -> (Option<String>, Option<Instant>, Option<usize>) {
         (
             self.overrides.policy_class,
             self.overrides.due_at,
             self.overrides.scheduling_cost_tokens,
-            self.initial_cached_tokens,
         )
     }
 }
@@ -758,7 +758,7 @@ mod tests {
         assert_eq!(result.request_id(), Some("request-1"));
         assert_eq!(result.policy_class(), Some("latency"));
         assert_eq!(result.scheduling_cost_tokens(), 96);
-        assert_eq!(result.into_queue_inputs(), (None, None, None, 32));
+        assert_eq!(result.into_queue_inputs(), (None, None, None));
     }
 
     struct EventReleasedClassifier {
@@ -945,7 +945,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(calls.load(Ordering::Relaxed), 0);
-        assert_eq!(result.into_queue_inputs(), (None, None, None, 0));
+        assert_eq!(result.into_queue_inputs(), (None, None, None));
     }
 
     struct GatedClassifier {
