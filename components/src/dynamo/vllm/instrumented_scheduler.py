@@ -186,19 +186,10 @@ def validate_benchmark_data_parallelism(
 ) -> None:
     """Reject the attention-DP self-benchmark on a dense (non-MoE) model.
 
-    vLLM keeps data-parallel ranks in one coordinated group only for MoE
-    models (``vllm/v1/engine/core.py``: ``if data_parallel and
-    vllm_config.model_config.is_moe``). Every dense DP child takes the other
-    branch, which rewrites ``data_parallel_size`` to ``1`` and leaves the true
-    rank in ``data_parallel_index``. The benchmark then builds no cross-rank
-    synchronizer, so rank 0 expects results from ``[0]`` while rank 1 reports
-    ``[1]`` and dies partway through the sweep with
-    "attention-DP benchmark result ranks do not match".
-
-    This must run in the parent process, against the requested
-    ``--data-parallel-size`` and before the engine is constructed: by the time
-    a dense DP child is alive the model is loaded and the size it would read
-    has already been rewritten to ``1``.
+    Call this in the parent process and before the engine is constructed. A
+    dense DP child is not part of a coordinated group and rewrites its local
+    ``data_parallel_size`` to ``1``, so by the time one is alive the requested
+    size is no longer readable and the model is already loaded.
     """
     if benchmark_mode is None:
         return
