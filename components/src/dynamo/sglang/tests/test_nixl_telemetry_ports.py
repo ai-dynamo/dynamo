@@ -105,6 +105,18 @@ def _port_for_scheduler(
     return int(os.environ[NIXL_TELEMETRY_PROMETHEUS_PORT_ENV])
 
 
+class _LazyProxyModule:
+    """Stands in for ``sglang``, whose ``Engine`` is a lazy import proxy.
+
+    A proxy makes the read look harmless -- it succeeds -- and then absorbs the
+    write that follows instead of passing it to the class. Raising on any
+    attribute turns that silent no-op back into a test failure.
+    """
+
+    def __getattr__(self, name: str):
+        raise AssertionError(f"install must not reach sglang.{name}")
+
+
 @pytest.fixture
 def telemetry_env(monkeypatch):
     monkeypatch.setenv("NIXL_TELEMETRY_ENABLE", "y")
@@ -209,15 +221,23 @@ class TestInstall:
         install_per_rank_nixl_prometheus_ports()
 
     def test_install_points_sglang_at_the_wrapper(self, telemetry_env):
+        """The override has to land on the class, not on the ``sglang`` proxy."""
         engine = type("Engine", (), {"run_scheduler_process_func": None})
-        telemetry_env.setitem(sys.modules, "sglang", SimpleNamespace(Engine=engine))
+        telemetry_env.setitem(sys.modules, "sglang", _LazyProxyModule())
+        telemetry_env.setitem(
+            sys.modules,
+            "sglang.srt.entrypoints.engine",
+            SimpleNamespace(Engine=engine),
+        )
         install_per_rank_nixl_prometheus_ports()
         assert engine.run_scheduler_process_func is run_scheduler_process_with_nixl_port
 
     def test_missing_override_point_is_rejected(self, telemetry_env):
         """Serving on would leave every rank one port and all but one rank dead."""
         telemetry_env.setitem(
-            sys.modules, "sglang", SimpleNamespace(Engine=type("Engine", (), {}))
+            sys.modules,
+            "sglang.srt.entrypoints.engine",
+            SimpleNamespace(Engine=type("Engine", (), {})),
         )
         with pytest.raises(RuntimeError, match="run_scheduler_process_func"):
             install_per_rank_nixl_prometheus_ports()

@@ -42,20 +42,11 @@ _TRUTHY = frozenset({"1", "true", "yes", "y", "on"})
 def _node_local_rank(server_args: Any, gpu_id: int) -> int:
     """Return the scheduler's index among the ranks sharing this node.
 
-    ``gpu_id`` is the only argument that is unique per co-located scheduler in
-    every SGLang parallelism mode. Tensor-parallel ranks restart from 0 in each
-    data-parallel group, and pipeline ranks repeat across tensor-parallel
-    groups, so neither is unique on its own; SGLang folds all of them into
-    ``gpu_id`` precisely because it must name a distinct device per scheduler.
-
-    Turning that device number back into a dense index depends on how SGLang
-    spaced it. Without a pipeline the devices are ``base_gpu_id + i *
-    gpu_id_step``, so dividing by the step is what makes them dense. A pipeline
-    stage instead shifts ``gpu_id`` by a whole tensor-parallel group and that
-    shift is not multiplied by the step, so with ``pp_size=2, tp_size=1,
-    gpu_id_step=2`` the two schedulers hold devices 0 and 1 and dividing either
-    by the step would map both onto rank 0 and one shared port. The device
-    numbers are already dense in that case, so leave them alone.
+    ``gpu_id`` is the argument that stays distinct per co-located scheduler in
+    every parallelism mode, which is what keeps two ranks off one port;
+    ``tp_rank`` restarts at 0 in each data-parallel group. Pipeline stages are
+    already numbered densely, because SGLang does not scale a stage's device
+    shift by ``gpu_id_step``, so only the other modes divide the step out.
     """
     base_gpu_id = getattr(server_args, "base_gpu_id", 0) or 0
     gpu_id_step = getattr(server_args, "gpu_id_step", 1) or 1
@@ -116,14 +107,12 @@ def install_per_rank_nixl_prometheus_ports() -> None:
     if nixl_prometheus_base_port() is None:
         return
 
-    import sglang as sgl
+    # Take the class from the module that defines it: ``sglang.Engine`` is a
+    # lazy proxy, so an assignment through it would land on the proxy object and
+    # leave every scheduler on SGLang's own entry point.
+    from sglang.srt.entrypoints.engine import Engine
 
-    if not hasattr(sgl.Engine, "run_scheduler_process_func"):
-        # Fail here rather than let the schedulers start. Without the override
-        # every co-located rank keeps the same port, all but one dies on the
-        # bind, and the pod never reaches Ready -- the exact failure this module
-        # exists to prevent, but reported as an address-in-use error from inside
-        # a scheduler process instead of as a configuration problem.
+    if not hasattr(Engine, "run_scheduler_process_func"):
         raise RuntimeError(
             f"this SGLang has no Engine.run_scheduler_process_func override "
             f"point, so co-located ranks cannot be given distinct "
@@ -133,6 +122,6 @@ def install_per_rank_nixl_prometheus_ports() -> None:
             f"without NIXL telemetry."
         )
 
-    sgl.Engine.run_scheduler_process_func = staticmethod(
+    Engine.run_scheduler_process_func = staticmethod(
         run_scheduler_process_with_nixl_port
     )

@@ -82,10 +82,9 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 	if enabled == nil {
 		return nil
 	}
-	// A value taken from valueFrom is resolved in the container at startup and
-	// is not readable here, so reserve the range rather than assume telemetry is
-	// off: a declared port nothing listens on is harmless, while an undeclared
-	// one leaves the PodMonitor unable to scrape any rank past the base port.
+	// The operator cannot resolve valueFrom, so reserve the range rather than
+	// assume telemetry is off: an unused declaration is harmless, a missing one
+	// leaves every rank past the base unscrapeable.
 	if enabled.ValueFrom == nil && !strings.EqualFold(strings.TrimSpace(enabled.Value), "y") {
 		return nil
 	}
@@ -95,10 +94,9 @@ func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount Con
 		return fmt.Errorf("failed to resolve container GPUs: %w", err)
 	}
 
-	// Rank i binds NIXL_TELEMETRY_PROMETHEUS_PORT+i, so an overridden literal
-	// moves the whole range and the declarations have to follow it. Realigning
-	// the base port too keeps `nixl` pointing at rank 0: leaving it on the
-	// default would advertise a port no scheduler binds.
+	// Rank i binds NIXL_TELEMETRY_PROMETHEUS_PORT+i, so a literal override moves
+	// the whole range: realign `nixl` with it or it advertises a port rank 0
+	// never binds.
 	if override, ok := literalPort(findEnvVar(container.Env, "NIXL_TELEMETRY_PROMETHEUS_PORT")); ok {
 		basePort.ContainerPort = override
 	}
