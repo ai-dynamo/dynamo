@@ -12,11 +12,18 @@ from typing import Optional, Tuple
 from .messages import Message, decode_message, encode_message
 
 HEADER_SIZE = 4  # 4-byte big-endian length prefix
+# Same bound the V1 protocol applies (v1/protocol.py MAX_FRAME). The length
+# prefix is 4 bytes, so without a cap a desynchronized or buggy peer can ask the
+# reader for up to 4 GiB and the receive loop below will keep extending its
+# buffer until it gets there.
+MAX_FRAME = 1 << 20
 
 
 def _frame_message(msg: Message) -> bytes:
     """Encode and frame a message with length prefix."""
     data = encode_message(msg)
+    if len(data) > MAX_FRAME:
+        raise RuntimeError("GMS RPC frame is too large")
     return struct.pack("!I", len(data)) + data
 
 
@@ -31,6 +38,8 @@ def _try_extract_message(
         return None, recv_buffer, HEADER_SIZE - len(recv_buffer)
 
     length = struct.unpack("!I", bytes(recv_buffer[:HEADER_SIZE]))[0]
+    if length > MAX_FRAME:
+        raise RuntimeError("GMS RPC frame is too large")
     total_needed = HEADER_SIZE + length
 
     if len(recv_buffer) < total_needed:
