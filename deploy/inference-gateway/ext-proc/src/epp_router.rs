@@ -70,11 +70,16 @@ impl EppRouter {
         policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
         let selectors = Self::build_selectors(&cfg, policy_registry).await?;
-        let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
+        let renderer = VllmRenderClient::new(
+            &cfg.tokenizer_service_url,
+            Duration::from_millis(cfg.tokenization_timeout_ms),
+            cfg.tokenizer_max_response_bytes,
+        )?;
+        let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         Ok(Self::from_selector_parts(
             cfg,
             renderer,
-            reflector,
+            Arc::new(reflector),
             reflector_ready,
             selectors,
         ))
@@ -120,18 +125,6 @@ impl EppRouter {
             prefill: Arc::new(prefill),
             decode: Arc::new(decode),
         })
-    }
-
-    async fn dependencies(
-        cfg: &EppStandaloneConfig,
-    ) -> Result<(VllmRenderClient, Arc<PodDiscovery>, Arc<AtomicBool>)> {
-        let renderer = VllmRenderClient::new(
-            &cfg.tokenizer_service_url,
-            Duration::from_millis(cfg.tokenization_timeout_ms),
-            cfg.tokenizer_max_response_bytes,
-        )?;
-        let (reflector, reflector_ready) = PodDiscovery::spawn(cfg).await?;
-        Ok((renderer, Arc::new(reflector), reflector_ready))
     }
 
     fn from_selector_parts(
@@ -669,7 +662,7 @@ mod tests {
         }
     }
 
-    /// Assemble a router over a fixed catalog, bypassing `dependencies` — the
+    /// Assemble a router over a fixed catalog, bypassing `PodDiscovery::spawn` — the
     /// only thing in the constructor that needs a cluster.
     async fn router_over(cfg: EppStandaloneConfig, workers: Vec<RawWorker>) -> EppRouter {
         let selectors = RoleSelectors::Aggregated(Arc::new(
