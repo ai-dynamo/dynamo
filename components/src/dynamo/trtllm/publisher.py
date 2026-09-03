@@ -524,7 +524,6 @@ class Publisher:
         metrics_collector: Any = None,
         kv_state_endpoint: Optional[str] = None,
         image_token_id: Optional[int] = None,
-        publish_kv_events: bool = True,
         publish_metrics: bool = True,
         kv_event_publication_mode: KvEventPublicationMode = KvEventPublicationMode.DISABLED,
         streaming_kv_events_config: Optional[dict[str, Any]] = None,
@@ -544,7 +543,6 @@ class Publisher:
         self.metrics_collector = metrics_collector
         self.kv_state_endpoint = kv_state_endpoint
         self.image_token_id = image_token_id
-        self.publish_kv_events = publish_kv_events
         self.publish_metrics = publish_metrics
         self.kv_event_publication_mode = kv_event_publication_mode
         self.streaming_kv_events_config = streaming_kv_events_config
@@ -582,8 +580,11 @@ class Publisher:
         # independent rank-local sequences before gathering them on rank 0.
         self._last_engine_event_id_by_rank: dict[int, int] = {}
 
-        # Initialize ZMQ publisher if endpoint is provided (consolidator enabled)
-        if zmq_endpoint and self.publish_kv_events:
+        # The consolidator is part of the polling path only.
+        if (
+            zmq_endpoint
+            and self.kv_event_publication_mode is KvEventPublicationMode.POLLING
+        ):
             logging.info(
                 f"TensorRT-LLM: Initializing ZMQ KV event publisher with endpoint={zmq_endpoint}"
             )
@@ -1319,7 +1320,6 @@ async def get_publisher(
     metrics_collector: Any = None,
     kv_state_endpoint: Optional[str] = None,
     image_token_id: Optional[int] = None,
-    publish_kv_events: bool = True,
     publish_metrics: bool = True,
     kv_event_publication_mode: KvEventPublicationMode = KvEventPublicationMode.DISABLED,
     streaming_kv_events_config: Optional[dict[str, Any]] = None,
@@ -1339,7 +1339,6 @@ async def get_publisher(
         metrics_collector=metrics_collector,
         kv_state_endpoint=kv_state_endpoint,
         image_token_id=image_token_id,
-        publish_kv_events=publish_kv_events,
         publish_metrics=publish_metrics,
         kv_event_publication_mode=kv_event_publication_mode,
         streaming_kv_events_config=streaming_kv_events_config,

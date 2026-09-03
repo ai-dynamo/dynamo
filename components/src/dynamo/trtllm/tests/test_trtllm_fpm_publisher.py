@@ -296,8 +296,8 @@ def _build_publisher_stub(
     *,
     attention_dp_size: int,
     fpm_enabled: bool,
-    publish_kv_events: bool = True,
     publish_metrics: bool = True,
+    kv_event_publication_mode: publisher_mod.KvEventPublicationMode = publisher_mod.KvEventPublicationMode.POLLING,
 ):
     """Bypass Publisher.__init__ (heavy deps) and seed only the attributes
     initialize() reads or writes. All side-effecty subsystems are stubbed
@@ -319,9 +319,8 @@ def _build_publisher_stub(
     pub.metrics_collector = None
     pub.kv_state_endpoint = None
     pub.image_token_id = None
-    pub.publish_kv_events = publish_kv_events
     pub.publish_metrics = publish_metrics
-    pub.kv_event_publication_mode = publisher_mod.KvEventPublicationMode.POLLING
+    pub.kv_event_publication_mode = kv_event_publication_mode
     pub.streaming_kv_events_config = None
     pub.streaming_kv_events_gpus_per_node = None
     pub.attention_dp_size = attention_dp_size
@@ -374,7 +373,6 @@ def test_streaming_kv_events_create_direct_subscribers_without_engine_polling(
         monkeypatch,
         attention_dp_size=2,
         fpm_enabled=True,
-        publish_kv_events=True,
     )
     pub.kv_event_publication_mode = publisher_mod.KvEventPublicationMode.STREAMING
     pub.streaming_kv_events_config = {
@@ -439,8 +437,8 @@ def test_publisher_initialize_metrics_only_does_not_start_kv_events(monkeypatch)
         monkeypatch,
         attention_dp_size=1,
         fpm_enabled=True,
-        publish_kv_events=False,
         publish_metrics=True,
+        kv_event_publication_mode=publisher_mod.KvEventPublicationMode.DISABLED,
     )
     pub.initialize()
 
@@ -454,7 +452,6 @@ def test_publisher_initialize_kv_events_only_does_not_start_metrics(monkeypatch)
         monkeypatch,
         attention_dp_size=1,
         fpm_enabled=True,
-        publish_kv_events=True,
         publish_metrics=False,
     )
     pub.initialize()

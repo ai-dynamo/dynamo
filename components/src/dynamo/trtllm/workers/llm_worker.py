@@ -1040,7 +1040,6 @@ async def init_llm_worker(
                 metrics_collector=metrics_collector,
                 kv_state_endpoint=config.kv_state_endpoint,
                 image_token_id=image_token_id,
-                publish_kv_events=config.publish_kv_events,
                 publish_metrics=config.publish_metrics,
                 kv_event_publication_mode=kv_event_publication_mode,
                 streaming_kv_events_config=streaming_kv_events_config,
