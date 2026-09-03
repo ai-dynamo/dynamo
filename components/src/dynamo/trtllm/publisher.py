@@ -644,6 +644,12 @@ class Publisher:
         if self.kv_event_publication_mode is KvEventPublicationMode.STREAMING:
             # TensorRT-LLM's streaming event manager publishes ZMQ batches itself;
             # Dynamo subscribes directly and does not poll the engine or use a consolidator.
+            #
+            # NOTE: This is currently a live, best-effort subscription. The Dynamo
+            # ZMQ relay forwards every batch it receives, but does not yet detect
+            # source-sequence gaps or recover them through TRT-LLM's optional
+            # replay_endpoint. A missed batch can therefore leave routing KV state
+            # temporarily stale.
             if self.streaming_kv_events_config is None:
                 raise ValueError(
                     "Streaming KV event publication requires its configuration"
