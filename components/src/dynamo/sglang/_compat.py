@@ -38,16 +38,22 @@ except ModuleNotFoundError as exc:
     from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 try:
-    from sglang.srt.arg_groups.model_override_base import (
-        model_config_of as _sglang_model_config_of,
-    )
-    from sglang.srt.arg_groups.model_override_base import (
-        use_mla_backend as _sglang_use_mla_backend,
+    from sglang.srt.arg_groups.overrides import (
+        model_config_of as sglang_model_config_of,
     )
 except ImportError:
-    # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is 0.5.19+.
-    _sglang_model_config_of = None
-    _sglang_use_mla_backend = None
+    # Fallback for sglang <= 0.5.18, which exposes ServerArgs.get_model_config().
+    # Remove when min supported version has the accessor move (sgl #36972).
+    sglang_model_config_of = None
+
+try:
+    from sglang.srt.arg_groups.overrides import (
+        use_mla_backend as sglang_use_mla_backend,
+    )
+except ImportError:
+    # Fallback for sglang <= 0.5.18, which exposes ServerArgs.use_mla_backend().
+    # Remove when min supported version has the accessor move (sgl #36972).
+    sglang_use_mla_backend = None
 
 try:
     from sglang.srt.runtime_context import publish as _sglang_publish
@@ -57,24 +63,34 @@ except ImportError:
     _sglang_publish = None
 
 
-def model_config_of(server_args: Any) -> Any:
-    """Return the cached SGLang model config across 0.5.18 and 0.5.19."""
-    legacy_get_model_config = getattr(server_args, "get_model_config", None)
-    if callable(legacy_get_model_config):
-        return legacy_get_model_config()
-    if _sglang_model_config_of is None:
-        raise AttributeError("SGLang does not expose a model-config accessor")
-    return _sglang_model_config_of(server_args)
+def get_sglang_model_config(server_args: Any) -> Any:
+    """Return the resolved model config across SGLang ServerArgs APIs.
+
+    SGLang #36972 moved ``ServerArgs.get_model_config()`` to the module-level
+    ``model_config_of()``. Remove the legacy branch when the minimum supported
+    SGLang release contains that move.
+    """
+    legacy_getter = getattr(server_args, "get_model_config", None)
+    if legacy_getter is not None:
+        return legacy_getter()
+    if sglang_model_config_of is None:
+        raise AttributeError("SGLang does not expose a model config accessor")
+    return sglang_model_config_of(server_args)
 
 
 def sglang_uses_mla_backend(server_args: Any) -> bool:
-    """Return whether SGLang selected an MLA attention backend across versions."""
-    legacy_use_mla_backend = getattr(server_args, "use_mla_backend", None)
-    if callable(legacy_use_mla_backend):
-        return bool(legacy_use_mla_backend())
-    if _sglang_use_mla_backend is None:
-        raise AttributeError("SGLang does not expose an MLA-backend accessor")
-    return bool(_sglang_use_mla_backend(server_args))
+    """Return whether this configuration selects SGLang's MLA attention backend.
+
+    SGLang #36972 moved ``ServerArgs.use_mla_backend()`` to the module-level
+    ``use_mla_backend()``. Remove the legacy branch when the minimum supported
+    SGLang release contains that move.
+    """
+    legacy_getter = getattr(server_args, "use_mla_backend", None)
+    if legacy_getter is not None:
+        return bool(legacy_getter())
+    if sglang_use_mla_backend is None:
+        raise AttributeError("SGLang does not expose an MLA backend accessor")
+    return bool(sglang_use_mla_backend(server_args))
 
 
 def publish_server_args(server_args: Any, *, role: str) -> None:
@@ -338,8 +354,8 @@ __all__ = [
     "filter_supported_async_generate_kwargs",
     "get_encoder_preprocessor_modules",
     "get_mm_encoder_class",
+    "get_sglang_model_config",
     "mm_encode",
-    "model_config_of",
     "override_server_args",
     "publish_server_args",
     "require_reasoning_kwargs",

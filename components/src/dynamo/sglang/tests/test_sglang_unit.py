@@ -23,7 +23,7 @@ from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
     filter_supported_async_generate_kwargs,
-    model_config_of,
+    get_sglang_model_config,
     override_server_args,
     publish_server_args,
     require_reasoning_kwargs,
@@ -170,11 +170,11 @@ def test_compat_uses_current_sglang_model_config_accessor(monkeypatch):
     server_args = SimpleNamespace()
     monkeypatch.setattr(
         sglang_compat,
-        "_sglang_model_config_of",
+        "sglang_model_config_of",
         lambda value: expected if value is server_args else None,
     )
 
-    assert model_config_of(server_args) is expected
+    assert get_sglang_model_config(server_args) is expected
 
 
 def test_compat_uses_legacy_sglang_model_config_accessor(monkeypatch):
@@ -182,18 +182,18 @@ def test_compat_uses_legacy_sglang_model_config_accessor(monkeypatch):
     server_args = SimpleNamespace(get_model_config=lambda: expected)
     monkeypatch.setattr(
         sglang_compat,
-        "_sglang_model_config_of",
+        "sglang_model_config_of",
         lambda _: pytest.fail("current accessor should not run for legacy ServerArgs"),
     )
 
-    assert model_config_of(server_args) is expected
+    assert get_sglang_model_config(server_args) is expected
 
 
 def test_compat_uses_current_sglang_mla_accessor(monkeypatch):
     server_args = SimpleNamespace()
     monkeypatch.setattr(
         sglang_compat,
-        "_sglang_use_mla_backend",
+        "sglang_use_mla_backend",
         lambda value: value is server_args,
     )
 
@@ -204,7 +204,7 @@ def test_compat_uses_legacy_sglang_mla_accessor(monkeypatch):
     server_args = SimpleNamespace(use_mla_backend=lambda: True)
     monkeypatch.setattr(
         sglang_compat,
-        "_sglang_use_mla_backend",
+        "sglang_use_mla_backend",
         lambda _: pytest.fail("current accessor should not run for legacy ServerArgs"),
     )
 
