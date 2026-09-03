@@ -1309,8 +1309,11 @@ spec:
                         type: array
                       eppConfig:
                         description: |-
-                          EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.
+                          EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.
                           Only applicable when ComponentType is "epp".
+
+                          Deprecated: omit this field for the native Rust EPP. Presence of eppConfig
+                          keeps the Go EPP Pod contract until migration clears it.
                         properties:
                           config:
                             description: |-
@@ -11979,6 +11982,8 @@ spec:
                         rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable is immutable after creation
                         rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
+                      - message: componentType is immutable after it is set
+                        rule: '!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)'
                   description: Services are the services to deploy as part of this deployment.
                   maxProperties: 25
                   type: object
@@ -12203,6 +12208,26 @@ spec:
                         items:
                           type: string
                         type: array
+                      gpusPerEngine:
+                        description: |-
+                          GPUsPerEngine is the number of GPUs assigned to one inference engine in a
+                          service replica, across all of its nodes. Independent auxiliary GPU
+                          allocations are excluded. A present zero means the engine itself has no
+                          GPUs; consult GPUsPerReplica for auxiliary allocations.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      gpusPerReplica:
+                        description: |-
+                          GPUsPerReplica is the unique GPU allocation added when this service scales
+                          by one replica, across all nodes, application and initialization phases,
+                          and provider-owned Pods. Scalar GPUs use the Kubernetes effective Pod
+                          scheduling footprint; shared DRA claims are counted once. A present zero
+                          records a successful non-GPU resolution; omission means no current shape
+                          is available.
+                        format: int64
+                        minimum: 0
+                        type: integer
                       readyReplicas:
                         description: |-
                           ReadyReplicas is the number of ready replicas.
@@ -12370,8 +12395,13 @@ spec:
                         type: object
                       eppConfig:
                         description: |-
-                          eppConfig holds EPP-specific configuration for Endpoint Picker Plugin
+                          eppConfig holds legacy Go-EPP configuration for Endpoint Picker Plugin
                           components. Only meaningful when `type` is `epp`.
+
+                          Deprecated: omit this field for the native Rust EPP. Presence of
+                          `eppConfig` selects the legacy Go EPP Pod contract (CLI flags + config
+                          mount) so existing DGDs keep running across operator upgrades until
+                          migration is started by clearing this field.
                         properties:
                           config:
                             description: |-
@@ -21196,6 +21226,8 @@ spec:
                         rule: '!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)'
                       - message: minAvailable is immutable after creation
                         rule: '!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)'
+                      - message: type is immutable after it is set
+                        rule: '!has(oldSelf.type) || (has(self.type) && self.type == oldSelf.type)'
                   maxItems: 25
                   type: array
                   x-kubernetes-list-map-keys:
@@ -21584,6 +21616,26 @@ spec:
                         items:
                           type: string
                         type: array
+                      gpusPerEngine:
+                        description: |-
+                          gpusPerEngine is the number of GPUs assigned to one inference engine in a
+                          component replica, across all of its nodes. Independent auxiliary GPU
+                          allocations are excluded. A present zero means the engine itself has no
+                          GPUs; consult gpusPerReplica for auxiliary allocations.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                      gpusPerReplica:
+                        description: |-
+                          gpusPerReplica is the unique GPU allocation added when this component
+                          scales by one replica, across all nodes, application and initialization
+                          phases, and provider-owned Pods. Scalar GPUs use the Kubernetes effective
+                          Pod scheduling footprint; shared DRA claims are counted once. A present
+                          zero records a successful non-GPU resolution; omission means no current
+                          shape is available.
+                        format: int64
+                        minimum: 0
+                        type: integer
                       readyReplicas:
                         description: |-
                           readyReplicas is the number of ready replicas. Populated for

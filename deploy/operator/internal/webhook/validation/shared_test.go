@@ -270,8 +270,9 @@ func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
 		},
 	}
 	validation := &sharedValidation{
-		ctx:                  context.Background(),
-		runtimeVersionSource: runtimeVersionSourceDisabled,
+		ctx:                   context.Background(),
+		runtimeVersionSource:  runtimeVersionSourceV1Beta1,
+		ratchetRuntimeVersion: true,
 	}
 
 	t.Log("Validate the standalone component as defense in depth behind OpenAPI pruning")

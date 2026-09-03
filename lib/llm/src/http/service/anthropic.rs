@@ -144,6 +144,7 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
 enum AnthropicRequestValidationError {
     InvalidArgument(String),
     NotImplemented(String),
+    UnsupportedContent(String),
 }
 
 impl AnthropicRequestValidationError {
@@ -151,13 +152,16 @@ impl AnthropicRequestValidationError {
         match self {
             Self::InvalidArgument(_) => StatusCode::BAD_REQUEST,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            Self::UnsupportedContent(_) => StatusCode::BAD_REQUEST,
         }
     }
 
+    // 400 from status(). Dashboard should seperate unsupported content from not implemented.
     fn metric_error_type(&self) -> ErrorType {
         match self {
             Self::InvalidArgument(_) => ErrorType::Validation,
             Self::NotImplemented(_) => ErrorType::NotImplemented,
+            Self::UnsupportedContent(_) => ErrorType::NotImplemented,
         }
     }
 
@@ -165,12 +169,15 @@ impl AnthropicRequestValidationError {
         match self {
             Self::InvalidArgument(_) => "invalid_request_error",
             Self::NotImplemented(_) => "api_error",
+            Self::UnsupportedContent(_) => "invalid_request_error",
         }
     }
 
     fn message(&self) -> &str {
         match self {
-            Self::InvalidArgument(message) | Self::NotImplemented(message) => message,
+            Self::InvalidArgument(message)
+            | Self::NotImplemented(message)
+            | Self::UnsupportedContent(message) => message,
         }
     }
 }
@@ -209,9 +216,11 @@ fn validate_anthropic_messages(
                         "messages[{message_index}].content[{block_index}].type: must be a non-empty string"
                     )));
                 };
-                return Err(AnthropicRequestValidationError::NotImplemented(format!(
-                    "messages[{message_index}].content[{block_index}]: content block type \"{block_type}\" is not supported"
-                )));
+                return Err(AnthropicRequestValidationError::UnsupportedContent(
+                    format!(
+                        "messages[{message_index}].content[{block_index}]: content block type \"{block_type}\" is not supported"
+                    ),
+                ));
             }
         }
     }

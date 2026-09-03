@@ -53,13 +53,15 @@ _V1_THROUGHPUT_STATES = [
     "scale",
 ]
 
-# Plugin-era additions — appended in this order.
-_PLUGIN_LOAD_ADDITIONS = [
+# Post-v1 additions — appended in this order.
+_LOAD_ADDITIONS = [
     "override_by_user_plugin",
     "reconcile_clamped_to_floor",
     "reconcile_clamped_to_ceiling",
     "held_over",
     "rejected_by_plugin",
+    "gpu_budget_guard_hold",
+    "gpu_budget_reconcile",
 ]
 
 _PLUGIN_THROUGHPUT_ADDITIONS = [
@@ -82,7 +84,7 @@ def test_v1_throughput_states_preserved_in_original_order():
 
 
 def test_load_additions_appended_in_order():
-    assert LOAD_DECISION_STATES[len(_V1_LOAD_STATES) :] == _PLUGIN_LOAD_ADDITIONS
+    assert LOAD_DECISION_STATES[len(_V1_LOAD_STATES) :] == _LOAD_ADDITIONS
 
 
 def test_throughput_additions_appended_in_order():
@@ -92,7 +94,7 @@ def test_throughput_additions_appended_in_order():
     )
 
 
-@pytest.mark.parametrize("state", _PLUGIN_LOAD_ADDITIONS)
+@pytest.mark.parametrize("state", _LOAD_ADDITIONS)
 def test_new_load_state_is_settable_on_enum(state):
     """Construct an Enum with our extended states list and verify the
     new state can be set without raising. Uses an isolated registry so

@@ -132,3 +132,7 @@ harness = false
 [[bench]]
 name = "tcp_codec_perf"
 harness = false
+
+[[bench]]
+name = "ingress_response_encode"
+harness = false
