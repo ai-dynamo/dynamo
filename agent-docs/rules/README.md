@@ -41,8 +41,10 @@ define shared contracts.
 
 ## Reporting defects in these documents
 
-If any rule, guide, or skill in this pack contradicts another, points at something that does not exist, cannot be
-executed as written, or makes a claim your environment demonstrably falsifies, do not silently route around it:
-invoke the `report-skillpack-issue` skill (`.agents/skills/report-skillpack-issue/`) to draft a sanitized GitHub
-issue for operator approval. Defect reports from running agents are the primary telemetry that keeps this pack
-correct.
+If any rule, guide, or skill in this pack contradicts another (`contradiction`), points at something that does
+not exist (`dead-reference`), cannot be executed as written (`unexecutable`), makes a claim about a tool or flag
+that verification falsifies (`factual-error`), assumes something your environment class does not satisfy
+(`environment-mismatch`), or gives no guidance for a component or situation it plainly should cover
+(`missing-coverage`), do not silently route around it: invoke the `report-skillpack-issue` skill
+(`.agents/skills/report-skillpack-issue/`) to draft a sanitized GitHub issue for operator approval. Defect
+reports from running agents are the primary telemetry that keeps this pack correct.
