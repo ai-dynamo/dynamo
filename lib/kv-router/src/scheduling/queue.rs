@@ -3177,10 +3177,8 @@ policy_classes:
         queued_second_rx.await.unwrap().unwrap();
     }
 
-    // Pins the cross-class consequence of routing every admission through the
-    // policy queue: an arrival's same-turn drain hands freed capacity to
-    // another class's queued head instead of letting the arrival bypass it,
-    // per DEP #13891's no-bypass ordering.
+    // No-bypass ordering per DEP #13891: freed capacity goes to the queued
+    // head, never to the arriving request.
     #[tokio::test]
     async fn arrival_drains_other_class_backlog_instead_of_bypassing() {
         let profile = policy_profile(
