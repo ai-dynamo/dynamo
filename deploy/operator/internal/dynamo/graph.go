@@ -1707,7 +1707,6 @@ func GenerateBasePodSpec(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
-	checkpointInfo *checkpoint.CheckpointInfo, // Optional resolved checkpoint info.
 	deployerOverride MultinodeDeployer, // Optional: overrides factory-created deployer when non-nil
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
@@ -2143,14 +2142,13 @@ func GeneratePodSpecForComponent(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
-	checkpointInfo *checkpoint.CheckpointInfo,
 	deployerOverride MultinodeDeployer,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
 	return generatePodSpecForComponent(
 		component, backendFramework, secretsRetriever, dynamoDeployment,
 		role, numberOfNodes, operatorConfig, multinodeDeploymentType,
-		serviceName, checkpointInfo, deployerOverride, nil, containerGPUs,
+		serviceName, deployerOverride, nil, containerGPUs,
 	)
 }
 
@@ -2164,7 +2162,6 @@ func generatePodSpecForComponent(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
-	checkpointInfo *checkpoint.CheckpointInfo,
 	deployerOverride MultinodeDeployer,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
 	containerGPUs ContainerGPUCount,
@@ -2181,7 +2178,7 @@ func generatePodSpecForComponent(
 		operatorConfig = &configv1alpha1.OperatorConfiguration{}
 	}
 
-	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, checkpointInfo, deployerOverride, containerGPUs)
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, operatorConfig, multinodeDeploymentType, serviceName, deployerOverride, containerGPUs)
 	if err != nil {
 		return nil, err
 	}
@@ -2425,7 +2422,7 @@ type cliqueParams struct {
 func buildCliqueForRole(p cliqueParams) (*grovev1alpha1.PodCliqueTemplateSpec, error) {
 	podSpec, err := generatePodSpecForRole(
 		p.r, p.component, p.backendFramework, p.secretsRetriever,
-		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.componentName, p.checkpointInfo,
+		p.dynamoDeployment, p.numberOfNodes, p.operatorConfig, p.componentName,
 		p.groveClusterTopologyDomains, p.containerGPUs,
 	)
 	if err != nil {
@@ -2851,7 +2848,6 @@ func generatePodSpecForRole(
 	numberOfNodes int32,
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	serviceName string,
-	checkpointInfo *checkpoint.CheckpointInfo,
 	groveClusterTopologyDomains []v1beta1.TopologyDomain,
 	containerGPUs ContainerGPUCount,
 ) (*corev1.PodSpec, error) {
@@ -2862,7 +2858,7 @@ func generatePodSpecForRole(
 		basePodSpec, err := generatePodSpecForComponent(
 			component, backendFramework, secretsRetriever, dynamoDeployment,
 			RoleMain, 1, operatorConfig,
-			commonconsts.MultinodeDeploymentTypeGrove, serviceName, checkpointInfo, nil,
+			commonconsts.MultinodeDeploymentTypeGrove, serviceName, nil,
 			groveClusterTopologyDomains, containerGPUs,
 		)
 		if err != nil {
@@ -2884,7 +2880,7 @@ func generatePodSpecForRole(
 	podSpec, err := generatePodSpecForComponent(
 		component, backendFramework, secretsRetriever, dynamoDeployment,
 		r.Role, numberOfNodes, operatorConfig,
-		commonconsts.MultinodeDeploymentTypeGrove, serviceName, checkpointInfo, deployer,
+		commonconsts.MultinodeDeploymentTypeGrove, serviceName, deployer,
 		groveClusterTopologyDomains, containerGPUs,
 	)
 	if err != nil {
@@ -3199,7 +3195,6 @@ func GenerateBasePodSpecForController(
 	operatorConfig *configv1alpha1.OperatorConfiguration,
 	role Role,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
-	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by caller)
 	containerGPUs ContainerGPUCount,
 	options GenerateBasePodSpecForControllerOptions,
 ) (*corev1.PodSpec, error) {
@@ -3238,7 +3233,6 @@ func GenerateBasePodSpecForController(
 		operatorConfig,
 		multinodeDeploymentType,
 		componentName,
-		checkpointInfo,
 		nil, // use default deployer
 		containerGPUs,
 	)

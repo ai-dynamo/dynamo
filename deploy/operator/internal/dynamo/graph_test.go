@@ -4848,7 +4848,6 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
-				nil,                        // No checkpoint info in tests
 				nil,                        // Use default deployer
 				staticContainerGPUCount(0), // SGLang does not use the resolved GPU count
 			)
@@ -5009,7 +5008,6 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
-				nil, // No checkpoint info in tests
 				nil, // Use default deployer
 				staticContainerGPUCount(resolveTestContainerGPUs(t, component)),
 			)
@@ -5098,7 +5096,6 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
-				nil, // No checkpoint info in tests
 				nil, // Use default deployer
 				staticContainerGPUCount(0),
 			)
@@ -6111,7 +6108,6 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,                        // No checkpoint info in tests
 				nil,                        // Use default deployer
 				staticContainerGPUCount(0), // No GPUs needed by this test
 			)
@@ -6187,7 +6183,6 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,                        // No checkpoint info in tests
 				nil,                        // Use default deployer
 				staticContainerGPUCount(0), // No GPUs needed by this test
 			)
@@ -6312,7 +6307,6 @@ func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,                        // No checkpoint info in tests
 				nil,                        // Use default deployer
 				staticContainerGPUCount(0), // No GPUs needed by this test
 			)
@@ -6420,7 +6414,6 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				tt.controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,                        // No checkpoint info in tests
 				nil,                        // Use default deployer
 				staticContainerGPUCount(0), // No GPUs needed by this test
 			)
@@ -6594,7 +6587,6 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,                        // No checkpoint info in tests
 				nil,                        // Use default deployer
 				staticContainerGPUCount(0), // No GPUs needed by this test
 			)
@@ -6646,7 +6638,6 @@ func TestGenerateBasePodSpec_WorkerPreservesHealthCheckOverride(t *testing.T) {
 				&configv1alpha1.OperatorConfiguration{},
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,
 				nil,
 				staticContainerGPUCount(0),
 			)
@@ -6701,7 +6692,6 @@ func TestGenerateBasePodSpec_GPUMemoryServiceExtraClientContainers(t *testing.T)
 		&configv1alpha1.OperatorConfiguration{},
 		commonconsts.MultinodeDeploymentTypeGrove,
 		"worker",
-		nil,
 		nil,
 		staticContainerGPUCount(0),
 	)
@@ -6761,7 +6751,7 @@ func TestGenerateBasePodSpec_SnapshotUsesGMSV1(t *testing.T) {
 		"test-deployment", "default", RoleMain, 1,
 		&configv1alpha1.OperatorConfiguration{},
 		commonconsts.MultinodeDeploymentTypeGrove, "worker",
-		nil, nil, staticContainerGPUCount(1),
+		nil, staticContainerGPUCount(1),
 	)
 	require.NoError(t, err)
 
@@ -6805,7 +6795,6 @@ func TestGenerateBasePodSpec_GPUMemoryServiceRejectsMissingExtraClientContainers
 		&configv1alpha1.OperatorConfiguration{},
 		commonconsts.MultinodeDeploymentTypeGrove,
 		"worker",
-		nil,
 		nil,
 		staticContainerGPUCount(0),
 	)
@@ -6977,7 +6966,6 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,                        // No checkpoint info in tests
 				nil,                        // Use default deployer
 				staticContainerGPUCount(0), // No GPUs needed by this test
 			)
@@ -7065,7 +7053,6 @@ func TestGenerateBasePodSpec_TRTLLMSSHMountUsesSecretVolume(t *testing.T) {
 		},
 		commonconsts.MultinodeDeploymentTypeGrove,
 		"worker",
-		nil,
 		nil,
 		staticContainerGPUCount(0),
 	)
@@ -7264,7 +7251,6 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,                        // No checkpoint info in tests
 				nil,                        // Use default deployer
 				staticContainerGPUCount(0), // No GPUs needed by this test
 			)
@@ -7478,7 +7464,6 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,                        // No checkpoint info in tests
 				nil,                        // Use default deployer
 				staticContainerGPUCount(0), // No GPUs needed by this test
 			)
@@ -7562,7 +7547,6 @@ func TestGenerateBasePodSpec_ConvertedCompilationCacheMountIsNotDuplicated(t *te
 				deploymentType,
 				"test-service",
 				nil,
-				nil,
 				staticContainerGPUCount(0),
 			)
 			require.NoError(t, err)
@@ -7602,7 +7586,6 @@ func TestGenerateBasePodSpec_ConvertedCompilationCacheUsesDefaultMount(t *testin
 		&configv1alpha1.OperatorConfiguration{},
 		commonconsts.MultinodeDeploymentTypeGrove,
 		"test-service",
-		nil,
 		nil,
 		staticContainerGPUCount(0),
 	)
@@ -7964,7 +7947,6 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,                        // No checkpoint info in tests
 				nil,                        // Use default deployer
 				staticContainerGPUCount(0), // No GPUs needed by this test
 			)
@@ -9821,7 +9803,6 @@ func TestGenerateBasePodSpec_FrontendSidecar(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
-				nil,                        // checkpointInfo
 				nil,                        // deployerOverride
 				staticContainerGPUCount(0), // containerGPUs
 			)
@@ -10853,7 +10834,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
-			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil, staticContainerGPUCount(0),
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0),
 		)
 		require.NoError(t, err)
 		require.Len(t, podSpec.Containers, 1)
@@ -10887,7 +10868,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
-			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil, staticContainerGPUCount(0),
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0),
 		)
 		require.NoError(t, err)
 
@@ -10940,7 +10921,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
-			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil, staticContainerGPUCount(0),
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0),
 		)
 		require.NoError(t, err)
 
@@ -10974,7 +10955,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
-			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, nil, staticContainerGPUCount(0),
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, staticContainerGPUCount(0),
 		)
 		require.NoError(t, err)
 
@@ -11000,7 +10981,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
-			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil, staticContainerGPUCount(0),
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0),
 		)
 		require.NoError(t, err)
 
@@ -11027,7 +11008,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
-			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil, staticContainerGPUCount(0),
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0),
 		)
 		require.NoError(t, err)
 
@@ -11060,7 +11041,7 @@ func TestGeneratePodSpecForComponent_KvTransferPolicyEnvVars(t *testing.T) {
 		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
-			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil, staticContainerGPUCount(0),
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0),
 		)
 		require.NoError(t, err)
 
@@ -11134,7 +11115,7 @@ func TestGeneratePodSpecForComponent_WorkerTopologyEnvVars(t *testing.T) {
 		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
-			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil, staticContainerGPUCount(0),
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0),
 		)
 		require.NoError(t, err)
 
@@ -11191,7 +11172,7 @@ func TestGeneratePodSpecForComponent_WorkerTopologyEnvVars(t *testing.T) {
 		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkSGLang, secretsRetriever, dgd, RoleMain, 1,
-			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, nil, staticContainerGPUCount(0),
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "frontend", nil, staticContainerGPUCount(0),
 		)
 		require.NoError(t, err)
 
@@ -11214,7 +11195,7 @@ func TestGeneratePodSpecForComponent_WorkerTopologyEnvVars(t *testing.T) {
 		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
-			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil, staticContainerGPUCount(0),
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0),
 		)
 		require.NoError(t, err)
 
@@ -11238,7 +11219,7 @@ func TestGeneratePodSpecForComponent_WorkerTopologyEnvVars(t *testing.T) {
 		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
-			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil, staticContainerGPUCount(0),
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0),
 		)
 		require.NoError(t, err)
 
@@ -11267,7 +11248,7 @@ func TestGeneratePodSpecForComponent_WorkerTopologyEnvVars(t *testing.T) {
 		component := dgd.Spec.Components[0].DeepCopy()
 		podSpec, err := GeneratePodSpecForComponent(
 			component, BackendFrameworkVLLM, secretsRetriever, dgd, RoleMain, 1,
-			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, nil, staticContainerGPUCount(0),
+			controllerConfig, commonconsts.MultinodeDeploymentTypeGrove, "worker", nil, staticContainerGPUCount(0),
 		)
 		require.NoError(t, err)
 

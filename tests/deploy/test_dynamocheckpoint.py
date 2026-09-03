@@ -694,9 +694,7 @@ async def test_dgd_checkpoint_restore_deploy(
         if old_pod_names is not None:
             logger.info("Scaling Immediate decode worker down after capture")
             await _scale_decode_component(deployment, backend, replicas=0)
-            await _wait_for_decode_runtime_pod_count(
-                deployment, backend, expected=0
-            )
+            await _wait_for_decode_runtime_pod_count(deployment, backend, expected=0)
             logger.info("Scaling Immediate decode worker up to trigger restore")
             await _scale_decode_component(deployment, backend, replicas=1)
 

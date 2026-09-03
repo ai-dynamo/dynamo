@@ -211,7 +211,6 @@ func (r *dcdWorkloadRenderer) generatePodTemplateSpec(
 		r.config,
 		role,
 		commonconsts.MultinodeDeploymentTypeLWS,
-		checkpointInfo,
 		containerGPUs,
 		dynamo.GenerateBasePodSpecForControllerOptions{
 			WorkloadComponentType: nvidiacomv1beta1.ComponentType(componentType),
