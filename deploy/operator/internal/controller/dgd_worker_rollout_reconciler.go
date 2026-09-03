@@ -467,13 +467,13 @@ func selectManagedWorkerTargetDCDSuffix(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	desiredV2Hash string,
 	targetsByComponent map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
-	observedByName map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+	nonTerminatingByName map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 ) string {
-	if hasManagedWorkerTarget(targetsByComponent, observedByName, dgd, desiredV2Hash) {
+	if hasManagedWorkerTarget(targetsByComponent, nonTerminatingByName, dgd, desiredV2Hash) {
 		return desiredV2Hash
 	}
 	bridgeHash := managedWorkerBridgeHash(dgd, desiredV2Hash)
-	if bridgeHash != "" && hasManagedWorkerTarget(targetsByComponent, observedByName, dgd, bridgeHash) {
+	if bridgeHash != "" && hasManagedWorkerTarget(targetsByComponent, nonTerminatingByName, dgd, bridgeHash) {
 		return bridgeHash
 	}
 	return desiredV2Hash
@@ -481,12 +481,12 @@ func selectManagedWorkerTargetDCDSuffix(
 
 func hasManagedWorkerTarget(
 	targetsByComponent map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
-	observedByName map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+	nonTerminatingByName map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	hash string,
 ) bool {
 	for componentName := range targetsByComponent {
-		if _, ok := observedByName[dynamo.GetDCDResourceName(dgd, componentName, hash)]; ok {
+		if _, ok := nonTerminatingByName[dynamo.GetDCDResourceName(dgd, componentName, hash)]; ok {
 			return true
 		}
 	}
@@ -791,25 +791,11 @@ func (r *dgdWorkerRolloutReconciler) clearProjectedWorkerHashes(
 	return nil
 }
 
-// getCurrentWorkerHash returns the v1 worker generation stored on the DGD.
-// It is empty after the DGD has converged to a v2-only generation.
-func (r *dgdWorkerRolloutReconciler) getCurrentWorkerHash(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) string {
-	return currentWorkerHash(dgd)
-}
-
 func currentWorkerHash(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
 	if dgd.Annotations == nil {
 		return ""
 	}
 	return dgd.Annotations[consts.AnnotationCurrentWorkerHash]
-}
-
-func (r *dgdWorkerRolloutReconciler) getCurrentWorkerHashV2(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) string {
-	return currentWorkerHashV2(dgd)
 }
 
 func currentWorkerHashV2(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
