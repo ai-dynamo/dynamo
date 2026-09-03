@@ -111,6 +111,9 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 		return validator.ValidateTerminatingUpdate(ctx, oldObj, newObj, terminatingUserInfo, h.operatorPrincipal)
 	}
 
+	// Run the stateless traversal against the new object, passing the stored
+	// object so comparative component rules and net-new rules that ratchet an
+	// unchanged pre-existing violation can both reach it.
 	warnings, err := validator.validate(ctx, newObj, oldObj, runtimeVersionSource, true)
 	if err != nil {
 		return warnings, err
