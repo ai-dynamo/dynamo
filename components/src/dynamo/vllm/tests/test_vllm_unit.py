@@ -1264,10 +1264,8 @@ class TestBenchmarkDataParallelismRejection:
         assert "--benchmark-mode" in message
         assert "--data-parallel-size" in message
         assert "MoE" in message
-        # The load-bearing assertion: the rejection has to land before
-        # AsyncLLM.from_vllm_config, which is where weights start loading.
-        # Rejecting after it would still raise ValueError and still leave a
-        # dead rank behind, so the message alone proves nothing.
+        # Load-bearing: a guard running after AsyncLLM.from_vllm_config would
+        # still raise, so the message alone proves nothing about ordering.
         assert engines_built == []
 
     def test_moe_dp_benchmark_still_builds_an_engine(self, monkeypatch):

@@ -676,10 +676,8 @@ def setup_vllm_engine(
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
-    # Must stay ahead of engine construction: this is the first point where
-    # ``model_config.is_moe`` is resolved and the last point before weights
-    # load, and it is the only process that still sees the requested
-    # --data-parallel-size (a dense DP child reads it back as 1).
+    # Must run before engine construction: weights load past this point, and a
+    # dense DP child reads --data-parallel-size back as 1.
     validate_benchmark_data_parallelism(vllm_config, config.benchmark_mode)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
