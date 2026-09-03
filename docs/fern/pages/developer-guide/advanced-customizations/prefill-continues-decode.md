@@ -59,10 +59,32 @@ Do not guess. Measure, with two arms that differ in this value alone.
 
 Both arms pay the same probe cost, so they differ in one number.
 
-**The value is not portable across deployment shapes.** More prefill workers feed the same decode
-worker harder, so decode occupancy rises with prefill count. One measured deployment saw occupancy
-reach 0.55 with one prefill worker, and 0.73 and above with two. A threshold that fires on one shape
-fires on every request on another.
+### It is not portable across shapes
+
+More prefill workers feed the same decode worker harder, so decode occupancy rises with prefill
+count. One deployment measured two shapes at the same concurrency, on the same trace, both cold.
+Share of reads at or below each line:
+
+| `le` | 1 prefill worker | 2 prefill workers |
+|---|---|---|
+| 0.25 | 60 % | 5 % |
+| 0.30 | 76 % | 7 % |
+| 0.55 | **100 %** | 12 % |
+| 0.70 | 100 % | 18 % |
+| 0.85 | 100 % | 62 % |
+| 0.95 | 100 % | 95 % |
+
+The medians are 0.22 and 0.82. Adding one prefill worker moved the whole distribution by about 0.6.
+
+| threshold | fires on 1 prefill worker | fires on 2 |
+|---|---|---|
+| 0.30 | 24 % | 93 % |
+| 0.55 | 0 % | 88 % |
+| 0.70 | 0 % | 82 % |
+
+**Measure your own shape.** A value that fires usefully on one fires on nearly every request of the
+other. Changing the prefill worker count is enough to invalidate a threshold, so treat it as a
+per-deployment setting and re-measure when the shape changes.
 
 ## `prefill_busy_threshold`
 
