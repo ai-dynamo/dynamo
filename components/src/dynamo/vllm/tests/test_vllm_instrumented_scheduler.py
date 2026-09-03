@@ -24,6 +24,15 @@ import pytest
 from vllm.config import CUDAGraphMode  # noqa: E402
 from vllm.v1.request import RequestStatus  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def _isolate_synthetic_content_env(monkeypatch):
+    """Synthetic-prompt content selection reads the process environment;
+    tests that want a non-default path set it explicitly."""
+    monkeypatch.delenv("DYN_BENCH_PREFILL_CONTENT", raising=False)
+    monkeypatch.delenv("DYN_BENCH_POOL_TAG", raising=False)
+
+
 # Module-level import: triggers real site-packages ``vllm`` to load before
 # pytest's rootpath insertion adds ``components/src/dynamo`` to ``sys.path``
 # (which shadows the real ``vllm`` with the ``dynamo.vllm`` submodule for any
