@@ -97,6 +97,9 @@ class CheckpointBackendConfig:
 
 
 CHECKPOINT_BACKENDS = {
+    # Exercise the default Immediate policy end to end. The stable automatic
+    # restore-candidate metadata prevents capture readiness from rolling the
+    # initial worker.
     "vllm": CheckpointBackendConfig(
         name="vllm",
         manifest=("examples", "backends", "vllm", "deploy", "agg.yaml"),
@@ -112,11 +115,6 @@ CHECKPOINT_BACKENDS = {
             "--gpu-memory-utilization",
             "0.30",
         ),
-        # Avoid cold-worker/restore rollout overlap during initial DGD startup:
-        # without this the automatic capture completes while the cold worker is
-        # still coming up, and the resulting template change rolls the worker
-        # mid-startup. Matches TensorRT-LLM.
-        checkpoint_startup_policy="WaitForCheckpoint",
     ),
     "sglang": CheckpointBackendConfig(
         name="sglang",
@@ -143,6 +141,9 @@ CHECKPOINT_BACKENDS = {
             "--trust-remote-code",
             "--skip-tokenizer-init",
         ),
+        # Keep SGLang capture and restore sequential on one GPU. vLLM exercises
+        # the Immediate policy in this shared test.
+        checkpoint_startup_policy="WaitForCheckpoint",
     ),
     "trtllm": CheckpointBackendConfig(
         name="trtllm",
@@ -615,7 +616,7 @@ def _assert_inference(base_url: str, endpoint: str, model: str) -> None:
     _assert_chat_response(response, expected_model=model)
 
 
-# The SGLang Immediate case runs a worker while its capture Job holds one GPU.
+# The vLLM Immediate case runs a worker while its capture Job holds one GPU.
 @pytest.mark.snapshot_restore
 @pytest.mark.k8s
 @pytest.mark.deploy
