@@ -461,14 +461,10 @@ where
         let measured = if self.prefill_continue_policy.needs_decode_load() {
             self.peek_decode_headroom(request, request_id).await
         } else {
-            PrefillContinueDecisionInput::new(None, None, 0)
+            PrefillContinueDecisionInput::new(None)
         };
         let input = measured
             .with_prefill_worker_busy(self.peek_prefill_busy(request, binding, request_id).await)
-            .with_continuation_pressure(
-                self.peek_continuation_pressure(request, binding, request_id)
-                    .await,
-            )
             .with_remaining_budget_tokens(budget)
             .with_active_continuations(active)
             .with_sequences(sequences);
@@ -504,35 +500,40 @@ where
         request: &SingleIn<PreprocessedRequest>,
         request_id: &str,
     ) -> PrefillContinueDecisionInput {
-        let unknown = PrefillContinueDecisionInput::new(None, None, 0);
+        let unknown = PrefillContinueDecisionInput::new(None);
         let Some(decode_host) = self.decode_routing_host.get() else {
             return unknown;
         };
         // Ask the host, not the mode flag: `kv_router()` panics on a host with
         // no KV plane, and the two could otherwise disagree.
-        let Some(kv_router) = decode_host.kv_router_if_enabled() else {
+        if decode_host.kv_router_if_enabled().is_none() {
             return unknown;
-        };
-        let block_size = kv_router.block_size() as usize;
+        }
         match decode_host
             .preview_kv_route(request, RequestPhase::Decode)
             .await
         {
             Ok(preview) => {
                 let signals = preview.signals();
-                // Use the worker's own occupancy. The router's
-                // `potential_decode_blocks` is a unique LOGICAL footprint after
-                // shared-prefix accounting; on this trace it read 0.112 while
-                // the worker reported 0.398, so a threshold tuned on it fires
-                // by luck. Fail closed when the worker has not reported --
-                // falling back to the logical estimate would restore the bug
-                // silently, which is how it survived until now.
-                match signals.authoritative_kv {
-                    Some((used, total)) => PrefillContinueDecisionInput::new(
-                        Some(used as usize),
-                        Some(total as usize),
-                        block_size,
-                    ),
+                // The same accessor the sibling bypass gate reads, so the two
+                // cannot classify one snapshot differently.
+                match signals.decode_occupancy() {
+                    Some(occupancy) => {
+                        // The raw pair is logged, not decided on: the shadow
+                        // counters need the distribution, and the gate needs
+                        // one number.
+                        let (used, total) = signals.authoritative_kv.unwrap_or_default();
+                        tracing::debug!(
+                            request_id,
+                            worker_id = signals.worker.worker_id,
+                            dp_rank = signals.worker.dp_rank,
+                            used,
+                            total,
+                            occupancy,
+                            "Decode occupancy read from the worker"
+                        );
+                        PrefillContinueDecisionInput::new(Some(occupancy))
+                    }
                     None => {
                         tracing::debug!(
                             request_id,
@@ -540,7 +541,7 @@ where
                             dp_rank = signals.worker.dp_rank,
                             "No worker-reported KV occupancy; treating decode load as unavailable"
                         );
-                        PrefillContinueDecisionInput::new(None, None, block_size)
+                        unknown
                     }
                 }
             }
@@ -550,7 +551,7 @@ where
                     %error,
                     "Decode headroom probe failed; treating decode load as unavailable"
                 );
-                PrefillContinueDecisionInput::new(None, None, block_size)
+                unknown
             }
         }
     }
@@ -579,49 +580,6 @@ where
                     request_id,
                     %error,
                     "Prefill-load probe failed; treating prefill load as unavailable"
-                );
-                None
-            }
-        }
-    }
-
-    /// KV the continuations on the chosen prefill worker hold, as a fraction of
-    /// its pool.
-    ///
-    /// Read from the census, not a route preview. The prefill binding sets
-    /// `router_track_active_blocks = false`, so a preview there reports no
-    /// active footprint however many continuations are running.
-    async fn peek_continuation_pressure(
-        &self,
-        request: &SingleIn<PreprocessedRequest>,
-        binding: &PrefillBinding<Sel>,
-        request_id: &str,
-    ) -> Option<f64> {
-        if !self.prefill_continue_policy.needs_decode_load() {
-            return None;
-        }
-        match binding
-            .router
-            .preview_kv_route(request, RequestPhase::Prefill)
-            .await
-        {
-            Ok(preview) => {
-                let signals = preview.signals();
-                signals
-                    .total_kv_blocks
-                    .filter(|&total| total > 0)
-                    .map(|total| {
-                        self.continuations
-                            .blocks_in_flight(signals.worker.worker_id)
-                            as f64
-                            / total as f64
-                    })
-            }
-            Err(error) => {
-                tracing::debug!(
-                    request_id,
-                    %error,
-                    "Continuation-pressure probe failed; treating it as unavailable"
                 );
                 None
             }

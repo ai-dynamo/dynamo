@@ -32,9 +32,6 @@ pub enum PrefillContinueSkip {
     DecodeLoadUnknown,
     /// The prefill worker is over its own busy line, so it has nothing to donate.
     PrefillBusy,
-    /// Decode is busy, but the prefill worker's continuations are just as
-    /// heavy, so continuing would relieve nothing.
-    NoRelief,
     /// Prefill load could not be read. An unchecked safety check is not a pass.
     PrefillLoadUnknown,
     /// The request may generate more than the continuation cap allows.
@@ -73,7 +70,6 @@ impl PrefillContinueSkip {
         Self::DecodeHasRoom,
         Self::DecodeLoadUnknown,
         Self::PrefillBusy,
-        Self::NoRelief,
         Self::PrefillLoadUnknown,
         Self::BudgetAboveCap,
         Self::BudgetUnbounded,
@@ -94,7 +90,6 @@ impl PrefillContinueSkip {
             Self::DecodeHasRoom => "decode_has_room",
             Self::DecodeLoadUnknown => "decode_load_unknown",
             Self::PrefillBusy => "prefill_busy",
-            Self::NoRelief => "no_relief",
             Self::PrefillLoadUnknown => "prefill_load_unknown",
             Self::BudgetAboveCap => "budget_above_cap",
             Self::BudgetUnbounded => "budget_unbounded",
@@ -134,25 +129,24 @@ impl PrefillContinueDecision {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct PrefillContinueDecisionInput {
-    /// Decode blocks the chosen decode worker would hold after admitting this
-    /// request. `None` means the signal was unavailable.
-    pub potential_decode_blocks: Option<usize>,
-
-    /// Total decode KV blocks on that worker. `None` means unavailable.
-    pub total_kv_blocks: Option<usize>,
+    /// What the chosen decode worker reports it is holding, as a fraction of
+    /// what it can hold.
+    ///
+    /// This is the worker's own number, not a router estimate, and it is a
+    /// snapshot taken before this request is admitted. It therefore contains
+    /// neither this prompt nor its future output. `None` means the worker has
+    /// not reported, which the policy refuses on: the router's logical
+    /// footprint is a different quantity, so substituting it would answer a
+    /// different question under the same name.
+    ///
+    /// One accessor produces this, and the sibling bypass gate reads the same
+    /// one. See `RoutePlanSignals::decode_occupancy`.
+    pub decode_occupancy: Option<f64>,
 
     /// Whether the prefill worker holding this request is over its busy line.
     /// `None` means the signal was unavailable. Measures ordinary prefill work,
     /// which the census below cannot see.
     pub prefill_worker_busy: Option<bool>,
-
-    /// KV the continuations already on that prefill worker hold, as a fraction
-    /// of its pool. `None` means unavailable.
-    ///
-    /// The same unit as the decode side, so the two compare. It comes from the
-    /// census: the prefill binding sets `router_track_active_blocks = false`,
-    /// so a route preview there sees no continuation at all.
-    pub continuation_pressure: Option<f64>,
 
     /// The request's remaining token budget. `None` means unbounded.
     pub remaining_budget_tokens: Option<u32>,
@@ -165,9 +159,6 @@ pub struct PrefillContinueDecisionInput {
     /// `best_of`, because `best_of` generates sequences that `n` does not
     /// return. `None` means one.
     pub sequences: Option<u8>,
-
-    /// KV block size in tokens, used to convert the output reserve into blocks.
-    pub block_size: usize,
 }
 
 /// Decides whether a request keeps generating on its prefill worker.
@@ -177,7 +168,6 @@ pub struct PrefillContinuePolicy {
     force: bool,
     decode_busy_threshold: Option<f64>,
     prefill_busy_threshold: Option<f64>,
-    output_reserve_tokens: usize,
     max_budget_tokens: Option<u32>,
     max_concurrent: Option<usize>,
 }
@@ -187,30 +177,18 @@ impl PrefillContinueDecisionInput {
     ///
     /// `#[non_exhaustive]` forbids struct-expression syntax outside this crate,
     /// so the caller in `dynamo-llm` builds through these rather than a literal.
-    pub fn new(
-        potential_decode_blocks: Option<usize>,
-        total_kv_blocks: Option<usize>,
-        block_size: usize,
-    ) -> Self {
+    pub fn new(decode_occupancy: Option<f64>) -> Self {
         Self {
-            potential_decode_blocks,
-            total_kv_blocks,
+            decode_occupancy,
             prefill_worker_busy: None,
-            continuation_pressure: None,
             remaining_budget_tokens: None,
             active_continuations: None,
             sequences: None,
-            block_size,
         }
     }
 
     pub fn with_prefill_worker_busy(mut self, busy: Option<bool>) -> Self {
         self.prefill_worker_busy = busy;
-        self
-    }
-
-    pub fn with_continuation_pressure(mut self, pressure: Option<f64>) -> Self {
-        self.continuation_pressure = pressure;
         self
     }
 
@@ -241,7 +219,6 @@ impl PrefillContinuePolicy {
             prefill_busy_threshold: config
                 .prefill_continue_prefill_busy_threshold
                 .or(config.router_queue_threshold),
-            output_reserve_tokens: config.prefill_continue_output_reserve_tokens,
             max_budget_tokens: config.prefill_continue_max_budget_tokens,
             max_concurrent: config.prefill_continue_max_concurrent,
         }
@@ -253,7 +230,6 @@ impl PrefillContinuePolicy {
             force: false,
             decode_busy_threshold: None,
             prefill_busy_threshold: None,
-            output_reserve_tokens: 0,
             max_budget_tokens: None,
             max_concurrent: None,
         }
@@ -369,22 +345,6 @@ impl PrefillContinuePolicy {
             return PrefillContinueDecision::Skip(skip);
         }
 
-        // Decode pressure is computed first because the interlock compares
-        // against it. Admission reserves the prompt only and nothing reserves
-        // what the request will generate, so a request that exactly fits is
-        // admitted and then runs out of room while decoding. Round up: a
-        // partial block still occupies a block.
-        let decode_pressure = match (input.potential_decode_blocks, input.total_kv_blocks) {
-            (Some(potential), Some(total)) if total > 0 => {
-                let reserve = match input.block_size {
-                    0 => 0,
-                    block_size => self.output_reserve_tokens.div_ceil(block_size),
-                };
-                Some(potential.saturating_add(reserve) as f64 / total as f64)
-            }
-            _ => None,
-        };
-
         // The interlock: the feature spends prefill capacity to relieve decode,
         // so a loaded prefill worker has nothing to give. Its threshold is a
         // multiple of one batch's token budget, so it must be raised as
@@ -409,22 +369,14 @@ impl PrefillContinuePolicy {
             return PrefillContinueDecision::Skip(Skip::NoTrigger);
         };
 
-        let Some(decode_pressure) = decode_pressure else {
+        // Nothing is projected onto this reading. A projection needs the
+        // physical cost of this prompt on that engine, and no worker reports
+        // that, so adding a router estimate would mix two units.
+        let Some(decode_occupancy) = input.decode_occupancy else {
             return PrefillContinueDecision::Skip(Skip::DecodeLoadUnknown);
         };
-        if decode_pressure <= threshold {
+        if decode_occupancy <= threshold {
             return PrefillContinueDecision::Skip(Skip::DecodeHasRoom);
-        }
-
-        // Decode is genuinely busy. Would moving this request to prefill relieve
-        // anything? Both sides are now the same fraction of their own KV pool,
-        // so this comparison is scale-free where the interlock above is not.
-        // Equal pressure buys nothing and still costs a transfer.
-        if input
-            .continuation_pressure
-            .is_some_and(|prefill| prefill >= decode_pressure)
-        {
-            return PrefillContinueDecision::Skip(Skip::NoRelief);
         }
 
         PrefillContinueDecision::Continue
@@ -448,21 +400,19 @@ mod tests {
             force: false,
             decode_busy_threshold: Some(threshold),
             prefill_busy_threshold: None,
-            output_reserve_tokens: 0,
             max_budget_tokens: None,
             max_concurrent: None,
         }
     }
 
-    /// Decode load as blocks-out-of-total, with everything else unset.
+    /// Decode occupancy as blocks-out-of-total, with everything else unset.
     /// A request that is admissible on every axis except the one under test.
     ///
     /// Carries a budget, because an absent one is now a refusal in its own
     /// right and would mask whichever gate the test is actually about.
-    fn decode_load(potential: usize, total: usize) -> PrefillContinueDecisionInput {
+    fn decode_load(used: usize, total: usize) -> PrefillContinueDecisionInput {
         PrefillContinueDecisionInput {
-            potential_decode_blocks: Some(potential),
-            total_kv_blocks: Some(total),
+            decode_occupancy: (total > 0).then(|| used as f64 / total as f64),
             remaining_budget_tokens: Some(256),
             ..Default::default()
         }
@@ -513,11 +463,7 @@ mod tests {
 
         for input in [
             PrefillContinueDecisionInput {
-                potential_decode_blocks: None,
-                ..decode_load(99, 100)
-            },
-            PrefillContinueDecisionInput {
-                total_kv_blocks: None,
+                decode_occupancy: None,
                 ..decode_load(99, 100)
             },
             // A zero-capacity worker is not a full worker; it is an unreadable one.
@@ -531,46 +477,34 @@ mod tests {
     }
 
     #[test]
-    fn output_reserve_pushes_a_request_over_the_line() {
-        let mut policy = policy(0.9);
-        policy.output_reserve_tokens = 2048;
+    fn the_gate_reads_occupancy_and_projects_nothing_onto_it() {
+        let policy = policy(0.9);
 
-        // 89 of 100 blocks is under the line on the prompt alone.
-        let bare = decode_load(89, 100);
+        // 89 of 100 blocks is under the line, and it stays under it however
+        // much this request will go on to generate. A projection would need
+        // the physical cost of the prompt on that engine, which no worker
+        // reports, so the gate does not attempt one.
+        let input = PrefillContinueDecisionInput {
+            remaining_budget_tokens: Some(64_000),
+            ..decode_load(89, 100)
+        };
         assert_eq!(
-            skip(policy.decide(bare)),
+            skip(policy.decide(input)),
             PrefillContinueSkip::DecodeHasRoom
         );
-
-        // The same request, once its own output is reserved, is over it.
-        // 2048 tokens at 512 per block is 4 blocks: 89 + 4 = 93 > 90.
-        let with_block_size = PrefillContinueDecisionInput {
-            block_size: 512,
-            ..bare
-        };
-        assert!(policy.decide(with_block_size).should_continue());
     }
 
+    /// The 2P1D against 3P2D regression. One worker at 40 % and each of two
+    /// workers at 40 % must decide alike: the gate reads a fraction of the
+    /// selected rank, so pool size cannot move it.
     #[test]
-    fn output_reserve_rounds_a_partial_block_up() {
-        let mut policy = policy(0.9);
-        policy.output_reserve_tokens = 1;
-        // One token still occupies a whole block.
-        let input = PrefillContinueDecisionInput {
-            block_size: 512,
-            ..decode_load(90, 100)
-        };
-        assert!(policy.decide(input).should_continue());
-    }
+    fn the_decision_follows_the_fraction_not_the_block_count() {
+        let policy = policy(0.2);
 
-    #[test]
-    fn output_reserve_is_ignored_without_a_block_size() {
-        let mut policy = policy(0.9);
-        policy.output_reserve_tokens = 4096;
-        // A zero block size cannot convert the reserve. It must not be guessed
-        // at, so the decision falls back to the prompt projection.
+        assert!(policy.decide(decode_load(1_659, 4_168)).should_continue());
+        assert!(policy.decide(decode_load(40, 100)).should_continue());
         assert_eq!(
-            skip(policy.decide(decode_load(89, 100))),
+            skip(policy.decide(decode_load(400, 4_168))),
             PrefillContinueSkip::DecodeHasRoom
         );
     }
@@ -594,15 +528,11 @@ mod tests {
         let mut policy = policy(0.9);
         policy.prefill_busy_threshold = Some(0.8);
 
-        // Ordinary prefill work is light, but this worker is already carrying
-        // as much continuation KV as decode holds, so moving another request
-        // there buys nothing and still costs a transfer.
         let input = PrefillContinueDecisionInput {
-            prefill_worker_busy: Some(false),
-            continuation_pressure: Some(0.99),
+            prefill_worker_busy: Some(true),
             ..decode_load(99, 100)
         };
-        assert_eq!(skip(policy.decide(input)), PrefillContinueSkip::NoRelief);
+        assert_eq!(skip(policy.decide(input)), PrefillContinueSkip::PrefillBusy);
     }
 
     #[test]
@@ -612,21 +542,6 @@ mod tests {
 
         // The regime the feature exists for: decode nearly full, prefill
         // carrying almost no continuation load.
-        let input = PrefillContinueDecisionInput {
-            prefill_worker_busy: Some(false),
-            continuation_pressure: Some(0.05),
-            ..decode_load(99, 100)
-        };
-        assert_eq!(policy.decide(input), PrefillContinueDecision::Continue);
-    }
-
-    #[test]
-    fn unknown_continuation_pressure_does_not_block_the_decision() {
-        let mut policy = policy(0.9);
-        policy.prefill_busy_threshold = Some(0.8);
-
-        // The interlock above is the fail-closed gate. This comparison is
-        // advisory: with no reading it simply does not fire.
         let input = PrefillContinueDecisionInput {
             prefill_worker_busy: Some(false),
             ..decode_load(99, 100)
@@ -651,7 +566,6 @@ mod tests {
         let policy = policy(0.9); // no interlock threshold configured
         let input = PrefillContinueDecisionInput {
             prefill_worker_busy: None,
-            continuation_pressure: None,
             ..decode_load(99, 100)
         };
         assert!(policy.decide(input).should_continue());
@@ -781,8 +695,7 @@ mod tests {
         assert!(policy.decide(decode_load(1, 100)).should_continue());
         // It also does not need decode load to be readable at all.
         let unreadable = PrefillContinueDecisionInput {
-            potential_decode_blocks: None,
-            total_kv_blocks: None,
+            decode_occupancy: None,
             ..decode_load(0, 0)
         };
         assert!(policy.decide(unreadable).should_continue());
@@ -837,7 +750,6 @@ mod tests {
             prefill_continue_force: true,
             prefill_continue_decode_busy_threshold: Some(0.85),
             prefill_continue_prefill_busy_threshold: Some(0.4),
-            prefill_continue_output_reserve_tokens: 4096,
             prefill_continue_max_budget_tokens: Some(2048),
             prefill_continue_max_concurrent: Some(8),
             ..Default::default()
@@ -847,7 +759,6 @@ mod tests {
         assert!(policy.is_enabled());
         assert!(policy.needs_prefill_worker_busy());
         assert_eq!(policy.decode_busy_threshold, Some(0.85));
-        assert_eq!(policy.output_reserve_tokens, 4096);
         assert_eq!(policy.max_budget_tokens, Some(2048));
         assert_eq!(policy.max_concurrent, Some(8));
         assert!(policy.force);
@@ -917,7 +828,6 @@ mod tests {
                 "decode_load_unknown",
             ),
             (PrefillContinueSkip::PrefillBusy, "prefill_busy"),
-            (PrefillContinueSkip::NoRelief, "no_relief"),
             (
                 PrefillContinueSkip::PrefillLoadUnknown,
                 "prefill_load_unknown",
@@ -960,7 +870,6 @@ mod tests {
                 | PrefillContinueSkip::DecodeHasRoom
                 | PrefillContinueSkip::DecodeLoadUnknown
                 | PrefillContinueSkip::PrefillBusy
-                | PrefillContinueSkip::NoRelief
                 | PrefillContinueSkip::PrefillLoadUnknown
                 | PrefillContinueSkip::BudgetAboveCap
                 | PrefillContinueSkip::BudgetUnbounded
@@ -969,7 +878,7 @@ mod tests {
                 | PrefillContinueSkip::ConcurrencyUnknown => {}
             }
         }
-        assert_eq!(PrefillContinueSkip::ALL.len(), 12);
+        assert_eq!(PrefillContinueSkip::ALL.len(), 11);
     }
 
     #[test]
@@ -984,7 +893,7 @@ mod tests {
         for budget in [None, Some(64), Some(4096)] {
             for active in [None, Some(0), Some(2), Some(9)] {
                 for sequences in [None, Some(1), Some(2)] {
-                    let input = PrefillContinueDecisionInput::new(Some(0), Some(100), 16)
+                    let input = PrefillContinueDecisionInput::new(Some(0.0))
                         .with_remaining_budget_tokens(budget)
                         .with_active_continuations(active)
                         .with_sequences(sequences);

@@ -67,7 +67,6 @@ _KV_ROUTER_FIELDS: tuple[str, ...] = (
     "conditional_disagg_decode_busy_threshold",
     "prefill_continue_enabled",
     "prefill_continue_decode_busy_threshold",
-    "prefill_continue_output_reserve_tokens",
     "prefill_continue_prefill_busy_threshold",
     "prefill_continue_max_budget_tokens",
     "prefill_continue_max_concurrent",
@@ -94,7 +93,6 @@ _CONDITIONAL_DISAGG_CONFIG_FIELDS: dict[str, str] = {
 
 _PREFILL_CONTINUE_CONFIG_FIELDS: dict[str, str] = {
     "decode_busy_threshold": "prefill_continue_decode_busy_threshold",
-    "output_reserve_tokens": "prefill_continue_output_reserve_tokens",
     "prefill_busy_threshold": "prefill_continue_prefill_busy_threshold",
     "max_budget_tokens": "prefill_continue_max_budget_tokens",
     "max_concurrent": "prefill_continue_max_concurrent",
@@ -214,7 +212,7 @@ def _parse_prefill_continue_config(value: str) -> dict[str, Any]:
             raise ValueError(f"{flag} {field} must be a number")
         if parsed[field] < 0:
             raise ValueError(f"{flag} {field} must not be negative")
-    for field in ("output_reserve_tokens", "max_budget_tokens", "max_concurrent"):
+    for field in ("max_budget_tokens", "max_concurrent"):
         if parsed.get(field) is None:
             continue
         if not isinstance(parsed[field], int) or isinstance(parsed[field], bool):
@@ -286,7 +284,6 @@ class KvRouterConfigBase(ConfigBase):
     prefill_continue_enabled: bool = False
     prefill_continue_config: Optional[dict[str, Any]] = None
     prefill_continue_decode_busy_threshold: Optional[float] = None
-    prefill_continue_output_reserve_tokens: int = 0
     prefill_continue_prefill_busy_threshold: Optional[float] = None
     prefill_continue_max_budget_tokens: Optional[int] = None
     prefill_continue_max_concurrent: Optional[int] = None
@@ -695,7 +692,7 @@ class KvRouterArgGroup(ArgGroup):
             help=(
                 "[EXPERIMENTAL] KV Router: JSON object for prefill-continues-decode "
                 "settings. Supported fields: decode_busy_threshold, "
-                "output_reserve_tokens, prefill_busy_threshold, max_budget_tokens, "
+                "prefill_busy_threshold, max_budget_tokens, "
                 "max_concurrent, force. max_concurrent is required whenever the "
                 "feature is enabled: it is the only bound that can see a "
                 "continuation that is already running."

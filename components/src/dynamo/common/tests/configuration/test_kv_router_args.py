@@ -462,7 +462,7 @@ def test_prefill_continue_config_cli_lowers_to_router_kwargs() -> None:
                 "kv",
                 "--router-prefill-continue",
                 "--router-prefill-continue-config",
-                '{"decode_busy_threshold":0.9,"output_reserve_tokens":4096,'
+                '{"decode_busy_threshold":0.9,'
                 '"prefill_busy_threshold":0.4,"max_budget_tokens":2048,'
                 '"max_concurrent":2}',
             ]
@@ -473,7 +473,6 @@ def test_prefill_continue_config_cli_lowers_to_router_kwargs() -> None:
 
     assert kwargs["prefill_continue_enabled"] is True
     assert kwargs["prefill_continue_decode_busy_threshold"] == 0.9
-    assert kwargs["prefill_continue_output_reserve_tokens"] == 4096
     assert kwargs["prefill_continue_prefill_busy_threshold"] == 0.4
     assert kwargs["prefill_continue_max_budget_tokens"] == 2048
     assert kwargs["prefill_continue_max_concurrent"] == 2

@@ -241,9 +241,26 @@ impl RoutePreview {
 }
 
 impl RoutePlanSignals {
+    /// What the selected worker and rank reports it is holding, as a fraction
+    /// of what it can hold.
+    ///
+    /// This is the one source every decode-load gate reads. `None` means the
+    /// worker has not reported, and every consumer must refuse on it.
+    /// `potential_decode_blocks` is not a substitute: it is the router's unique
+    /// LOGICAL footprint after shared-prefix accounting, and on our trace it
+    /// read 0.112 where the worker reported 0.398. A threshold tuned on one is
+    /// meaningless against the other, so a silent fallback would restore that
+    /// bug under a name that claims to have fixed it.
+    ///
+    /// A worker with no capacity is unreadable, not empty, so it reports `None`
+    /// as well.
+    pub(crate) fn decode_occupancy(self) -> Option<f64> {
+        let (used, total) = self.authoritative_kv?;
+        (total > 0).then(|| used as f64 / total as f64)
+    }
+
     pub(crate) fn decode_load_exceeds(self, threshold: f64) -> Option<bool> {
-        let total_kv_blocks = self.total_kv_blocks?;
-        Some(self.potential_decode_blocks as f64 > threshold * total_kv_blocks as f64)
+        Some(self.decode_occupancy()? > threshold)
     }
 }
 
