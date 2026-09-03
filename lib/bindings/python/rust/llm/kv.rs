@@ -28,7 +28,7 @@ use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
 use dynamo_kv_router::config::{KvRouterConfig, RouterConfigOverride};
 use dynamo_kv_router::protocols::compute_block_hash_for_seq;
 use dynamo_kv_router::protocols::*;
-use dynamo_kv_router::scheduling::AdmissionAttempt;
+use dynamo_kv_router::scheduling::{AdmissionAttempt, RequestClassifierFactory};
 #[cfg(feature = "kv-indexer")]
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
@@ -57,6 +57,12 @@ type RsRoutingHost = RoutingHost<WorkerSelectionPolicy>;
 type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter;
 #[cfg(feature = "custom-policy")]
 type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter<WorkerSelectionPolicy>;
+
+struct RouterPluginFactories {
+    worker_selection: Option<WorkerSelectionPolicyFactory>,
+    request_classifier: Option<RequestClassifierFactory>,
+}
+
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
@@ -1767,7 +1773,10 @@ mod metric_worker_type_tests {
             Some(config),
             load_threshold_config,
             None,
-            None,
+            RouterPluginFactories {
+                worker_selection: None,
+                request_classifier: None,
+            },
         )
         .await
         .unwrap();
@@ -1881,7 +1890,7 @@ async fn create_kv_router_from_endpoint(
     kv_router_config: Option<KvRouterConfig>,
     load_threshold_config: RsLoadThresholdConfig,
     prefill_load_estimator: Option<Arc<dyn dynamo_kv_router::PrefillLoadEstimator>>,
-    worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    router_plugins: RouterPluginFactories,
 ) -> anyhow::Result<RsManagedKvRouter> {
     // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
@@ -1905,7 +1914,7 @@ async fn create_kv_router_from_endpoint(
         .as_ref()
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
-    let needs_policy_role = worker_selection_policy_factory.is_some();
+    let needs_policy_role = router_plugins.worker_selection.is_some();
     let (model_name, policy_model_name, enable_eagle, worker_role, policy_worker_role, load_source) = {
         let maybe_card = if needs_model_name || needs_policy_role {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
@@ -2026,7 +2035,7 @@ async fn create_kv_router_from_endpoint(
     #[cfg(feature = "custom-policy")]
     let kv_router = {
         let effective_config = kv_router_config.clone().unwrap_or_default();
-        let selector = worker_selection_policy_factory.map_or_else(
+        let selector = router_plugins.worker_selection.map_or_else(
             || WorkerSelectionPolicy::default(effective_config.clone(), metric_worker_type),
             |factory| {
                 let policy_worker_role = policy_worker_role.expect(
@@ -2058,6 +2067,11 @@ async fn create_kv_router_from_endpoint(
             )
             .await?
     };
+
+    if let Some(factory) = router_plugins.request_classifier {
+        let context = kv_router.request_classifier_context();
+        kv_router.install_request_classifier_boxed(factory(context))?;
+    }
 
     Ok(llm_rs::kv_router::ManagedKvRouter::new(
         load_context,
@@ -2228,6 +2242,8 @@ impl KvRouter {
             .unwrap_or_default();
         let worker_selection_policy_factory =
             crate::worker_selection_policy_factory(&kv_router_config).map_err(to_pyerr)?;
+        let request_classifier_factory =
+            crate::request_classifier_factory(&kv_router_config).map_err(to_pyerr)?;
         let prefill_load_estimator = aic_perf_config
             .map(|config| {
                 Python::with_gil(|py| {
@@ -2269,7 +2285,10 @@ impl KvRouter {
                     Some(kv_router_config),
                     load_threshold_config,
                     prefill_load_estimator,
-                    worker_selection_policy_factory,
+                    RouterPluginFactories {
+                        worker_selection: worker_selection_policy_factory,
+                        request_classifier: request_classifier_factory,
+                    },
                 )
                 .await
                 .map_err(to_pyerr)?;

@@ -22,7 +22,7 @@ use super::policy_config::{PolicyClassConfig, PolicyProfile};
 use super::policy_queue::{PolicyQueue, QueueMetadata, QueueSnapshot};
 use super::prefill_load::{PrefillLoadEstimator, effective_prefill_tokens};
 use super::queue_admission::WorkerPlacement;
-use super::request_classifier::ClassifyRequest;
+use super::request_classifier::{ClassificationQueueInputs, ClassifyRequest};
 use super::selector::{DefaultWorkerSelector, WorkerSelectionInput, WorkerSelector};
 use super::types::{
     AdvisorySchedulingResponse, AdvisoryWorkerLoad, AttemptId, KvSchedulerError,
@@ -774,7 +774,7 @@ impl<
         }
 
         let queue_metadata = match classified_request {
-            Some(classified) => self.validate_classification(&request, classified, ingress_at),
+            Some(classified) => self.validate_classification(&mut request, classified, ingress_at),
             None => Ok(self.default_queue_metadata(&request, ingress_at)),
         };
         let queue_metadata = match queue_metadata {
@@ -900,11 +900,16 @@ impl<
 
     fn validate_classification(
         &self,
-        request: &SchedulingRequest,
+        request: &mut SchedulingRequest,
         classified_request: ClassifyRequest,
         ingress_at: Instant,
     ) -> Result<QueueMetadata, KvSchedulerError> {
-        let (policy_class, due_at, scheduling_cost_tokens) = classified_request.into_queue_inputs();
+        let ClassificationQueueInputs {
+            policy_class,
+            due_at,
+            scheduling_cost_tokens,
+            worker_selection_target,
+        } = classified_request.into_queue_inputs();
 
         if scheduling_cost_tokens == Some(0) {
             return Err(KvSchedulerError::InvalidClassificationMetadata(
@@ -930,6 +935,9 @@ impl<
         }
         if let Some(cost) = scheduling_cost_tokens {
             metadata.snapshot.scheduling_cost_tokens = cost;
+        }
+        if let Some(target) = worker_selection_target {
+            request.affinity_target = target;
         }
         metadata.due_at = due_at;
         Ok(metadata)
@@ -2560,9 +2568,11 @@ policy_classes:
         classified.set_policy_class("bulk");
         classified.set_due_at(due_at);
         classified.set_scheduling_cost_tokens(7);
+        let target = WorkerWithDpRank::new(7, 2);
+        classified.set_worker_selection_target(target);
 
         let metadata = queue
-            .validate_classification(&request, classified, ingress_at)
+            .validate_classification(&mut request, classified, ingress_at)
             .unwrap();
         assert_eq!(
             queue.profile.class(metadata.class_index).name,
@@ -2570,25 +2580,33 @@ policy_classes:
         );
         assert_eq!(metadata.snapshot.scheduling_cost_tokens, 7);
         assert_eq!(metadata.due_at, Some(due_at));
+        assert_eq!(request.affinity_target, Some(target.into()));
+
+        let mut cleared = queue.build_classify_request(&request, ingress_at);
+        cleared.clear_worker_selection_target();
+        queue
+            .validate_classification(&mut request, cleared, ingress_at)
+            .unwrap();
+        assert_eq!(request.affinity_target, None);
 
         let mut invalid = queue.build_classify_request(&request, ingress_at);
         invalid.set_policy_class("missing");
         assert!(matches!(
-            queue.validate_classification(&request, invalid, ingress_at),
+            queue.validate_classification(&mut request, invalid, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
 
         let mut physical = queue.build_classify_request(&request, ingress_at);
         physical.set_policy_class("latency_cached");
         assert!(matches!(
-            queue.validate_classification(&request, physical, ingress_at),
+            queue.validate_classification(&mut request, physical, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
 
         let mut zero_cost = queue.build_classify_request(&request, ingress_at);
         zero_cost.set_scheduling_cost_tokens(0);
         assert!(matches!(
-            queue.validate_classification(&request, zero_cost, ingress_at),
+            queue.validate_classification(&mut request, zero_cost, ingress_at),
             Err(KvSchedulerError::InvalidClassificationMetadata(_))
         ));
     }
@@ -2629,7 +2647,7 @@ policy_classes:
         // uncached — exactly as an unclassified request admitted now would.
         cfg_tx.send(HashMap::new()).unwrap();
         let metadata = queue
-            .validate_classification(&request, classified, ingress_at)
+            .validate_classification(&mut request, classified, ingress_at)
             .unwrap();
         assert_eq!(
             queue.profile.class(metadata.class_index).name,

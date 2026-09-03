@@ -10,6 +10,7 @@ use tokio::sync::{Notify, mpsc::Sender};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
+use dynamo_kv_router::scheduling::RequestClassifierFactory;
 use dynamo_kv_router::{
     DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, RoutingPartitionRef,
     selector::{DefaultWorkerSelector, WorkerSelector},
@@ -211,6 +212,7 @@ where
     /// Keep raw pipelines out of default-off and backend-mismatched paths.
     generate_engine_capabilities: Vec<&'static str>,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    request_classifier_factory: Option<RequestClassifierFactory>,
     /// Custom selector dispatch cannot infer whether an untyped legacy card is decode or aggregated.
     require_typed_worker_role: bool,
 }
@@ -318,6 +320,7 @@ impl ModelWatcher<DefaultWorkerSelector> {
                     worker_type.default_selector_label(),
                 )
             }),
+            None,
         )
     }
 }
@@ -338,6 +341,7 @@ where
         metrics: Arc<Metrics>,
         require_typed_worker_role: bool,
         worker_selector_factory: WorkerSelectorFactory<Sel>,
+        request_classifier_factory: Option<RequestClassifierFactory>,
     ) -> Self {
         Self {
             manager: model_manager,
@@ -356,6 +360,7 @@ where
             tokenizer_fallback_enabled: None,
             generate_engine_capabilities: Vec::new(),
             worker_selector_factory,
+            request_classifier_factory,
             require_typed_worker_role,
         }
     }
@@ -624,6 +629,10 @@ where
                                 .cancellation_token(),
                         )
                         .await?;
+                    if let Some(factory) = self.request_classifier_factory.as_ref() {
+                        let context = chooser.request_classifier_context();
+                        chooser.install_request_classifier_boxed(factory(context))?;
+                    }
                     Arc::get_mut(&mut chooser)
                         .expect("new KV chooser must have one owner")
                         .set_teardown_task_guard(allocator_trim.clone());
