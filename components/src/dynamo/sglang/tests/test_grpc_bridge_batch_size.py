@@ -176,19 +176,62 @@ def test_shim_leaves_an_already_normalized_request_alone():
     assert obj.text == ["hello", "hello"]
 
 
-def test_failed_normalization_never_reaches_the_bridge():
-    """A request SGLang rejects must fail before its partial state is reused.
+class RejectedGenerateReqInput(FakeGenerateReqInput):
+    """A request SGLang validates and rejects, after normalization mutated it."""
 
-    Normalization assigns ``batch_size`` and expands parallel-sampling inputs
-    before the validation that rejects the request, so a failed pass still
-    mutates the object. Letting it through would leave SGLang to normalize that
-    already-expanded input a second time.
+    def normalize_batch_and_arguments(self) -> None:
+        super().normalize_batch_and_arguments()
+        raise ValueError("the rids length mismatches the batch size")
+
+
+def test_a_rejected_request_is_reported_not_left_to_time_out():
+    """A rejected request must come back as an error rather than a hang.
+
+    The bridge normally answers one from inside ``_run_generate``'s own handler,
+    via ``_send_native_error``. Normalizing early moves the failure outside that
+    handler, where an escaping exception would only reach the scheduler's
+    logger and the client would wait out its deadline.
     """
 
-    class RejectedGenerateReqInput(FakeGenerateReqInput):
-        def normalize_batch_and_arguments(self) -> None:
-            super().normalize_batch_and_arguments()
-            raise ValueError("the rids length mismatches the batch size")
+    class Bridge(FakeRuntimeHandle):
+        def __init__(self) -> None:
+            self.reached_generate = 0
+
+        async def generate_request(self, obj):
+            self.reached_generate += 1
+            async for chunk in super().generate_request(obj):
+                yield chunk
+
+        def _send_native_error(self, chunk_callback, message: str) -> None:
+            # Upstream shape: an empty payload, marked finished, carrying the error.
+            chunk_callback({}, finished=True, error=message)
+
+    ensure_sglang_grpc_bridge_batch_size(Bridge)
+
+    bridge = Bridge()
+    obj = RejectedGenerateReqInput("hello", n=2)
+    sent: list[tuple] = []
+
+    asyncio.run(
+        bridge._run_generate(
+            obj, lambda payload, **kw: sent.append((payload, kw)), True
+        )
+    )
+
+    assert sent == [
+        ({}, {"finished": True, "error": "the rids length mismatches the batch size"})
+    ]
+    assert bridge.reached_generate == 0, "the rejected request still ran"
+    assert obj.normalize_calls == 1, "SGLang re-normalized a half-expanded request"
+    assert obj.text == ["hello", "hello"]
+
+
+def test_a_rejected_request_raises_when_there_is_no_error_callback():
+    """Without a native error callback, the failure must at least escape.
+
+    Staying silent would lose it entirely; raising leaves it for the scheduler
+    to log. Either way the half-expanded request never reaches the bridge.
+    """
 
     class Bridge(FakeRuntimeHandle):
         pass

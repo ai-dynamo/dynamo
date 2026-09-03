@@ -176,19 +176,29 @@ def _normalize_generate_request_once(obj: Any) -> None:
     if normalize is None:
         return
 
-    try:
-        normalize()
-    except Exception:
-        # A rejected request keeps whatever the failed pass already changed:
-        # normalization assigns batch_size and expands parallel-sampling inputs
-        # before the validation that rejects it. Handing that partial state to
-        # the bridge would let SGLang normalize the same object again and
-        # re-derive the batch size from the expanded list -- the n * n expansion
-        # this shim exists to prevent -- so surface the error here instead.
-        logger.debug("Early SGLang request normalization failed", exc_info=True)
-        raise
+    # A failed pass has already mutated the request, so let the error propagate
+    # rather than leave SGLang to normalize that partial state a second time.
+    normalize()
 
     obj.normalize_batch_and_arguments = _already_normalized
+
+
+def _report_rejected_request(
+    bridge: Any, exc: Exception, args: Any, kwargs: Any
+) -> bool:
+    """Answer a rejected request through the bridge's native error callback.
+
+    Reports ``False`` when the release exposes no way to do so, leaving the
+    caller to raise: worse for the client, which then waits out its deadline,
+    but the only remaining way to make the failure visible at all.
+    """
+    send_native_error = getattr(bridge, "_send_native_error", None)
+    chunk_callback = args[0] if args else kwargs.get("chunk_callback")
+    if send_native_error is None or chunk_callback is None:
+        return False
+
+    send_native_error(chunk_callback, str(exc))
+    return True
 
 
 _GRPC_BRIDGE_MODULE = "sglang.srt.entrypoints.grpc_bridge"
@@ -256,7 +266,22 @@ def ensure_sglang_grpc_bridge_batch_size(bridge_class: Any = None) -> None:
 
     @wraps(original)
     async def _run_generate(self: Any, obj: Any, *args: Any, **kwargs: Any) -> Any:
-        _normalize_generate_request_once(obj)
+        try:
+            _normalize_generate_request_once(obj)
+        except Exception as exc:
+            # A rejected request is normally answered from inside _run_generate's
+            # own handler. Normalizing early moves that failure outside it, and an
+            # exception escaping this coroutine would only reach the scheduler's
+            # logger -- leaving the client to wait out its deadline instead of
+            # receiving the error. Report it the same way, and do not run the
+            # request: the failed pass has already half-expanded it.
+            if not _report_rejected_request(self, exc, args, kwargs):
+                raise
+            logger.error(
+                "gRPC generate error for rid=%s: %s", getattr(obj, "rid", None), exc
+            )
+            return None
+
         return await original(self, obj, *args, **kwargs)
 
     _run_generate._dynamo_grpc_bridge_batch_size_support = True  # type: ignore[attr-defined]
