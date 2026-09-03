@@ -95,6 +95,14 @@ const fn default_decode_active_request_weight() -> f64 {
 // Default-valued post-v1.3 fields are omitted so v1.3 frontends can read v1.4 MDCs during
 // rolling upgrades. Non-default values still serialize and fail closed on the older frontend.
 // TODO(v1.5): Remove these compatibility skips when v1.3 falls outside the N-1 window.
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     value == &T::default()
 }
@@ -669,7 +677,7 @@ struct KvRouterConfigSerde {
     router_track_output_blocks: bool,
     router_assume_kv_reuse: bool,
     router_track_prefill_tokens: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     router_embedded_selection: bool,
     router_tracking_hash: TrackingHashAlgorithm,
     router_tracking_key_file: Option<PathBuf>,
@@ -804,9 +812,10 @@ pub struct KvRouterConfig {
     pub router_track_prefill_tokens: bool,
 
     /// Run the frontend router's scheduling and active-sequence accounting on
-    /// an embedded selection-service partition instead of the runtime-bound
-    /// scheduler (default: false). Frontend-local; workers ignore it.
-    #[serde(default, skip_serializing_if = "is_default")]
+    /// an embedded selection-service partition (default: true). `false`
+    /// selects the deprecated runtime-bound scheduler, kept for one release as
+    /// a rollback. Frontend-local; workers ignore it.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub router_embedded_selection: bool,
 
     /// Hash algorithm used for router-derived active-sequence identities.
@@ -971,7 +980,7 @@ impl Default for KvRouterConfig {
             router_track_output_blocks: false,
             router_assume_kv_reuse: true,
             router_track_prefill_tokens: default_track_prefill_tokens(),
-            router_embedded_selection: false,
+            router_embedded_selection: true,
             router_tracking_hash: TrackingHashAlgorithm::default(),
             router_tracking_key_file: None,
             router_tracking_key_id: None,

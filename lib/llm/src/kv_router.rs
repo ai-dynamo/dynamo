@@ -807,7 +807,18 @@ where
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
-        let scheduler = if kv_router_config.router_embedded_selection {
+        // The embedded partition builds its own selection policy (the default
+        // scorer/picker or a registry-resolved policy); a caller-injected custom
+        // `WorkerSelector` type can only run on the runtime scheduler.
+        let custom_selector = std::any::TypeId::of::<Sel>()
+            != std::any::TypeId::of::<dynamo_kv_router::selector::DefaultWorkerSelector>();
+        if kv_router_config.router_embedded_selection && custom_selector {
+            tracing::warn!(
+                selector = std::any::type_name::<Sel>(),
+                "custom WorkerSelector is not supported on the embedded selection partition; using the runtime scheduler"
+            );
+        }
+        let scheduler = if kv_router_config.router_embedded_selection && !custom_selector {
             // The router keeps its indexer and transport; scheduling and
             // active-sequence accounting run on a selection-service partition.
             let overlap_refresh: Option<Arc<dyn dynamo_kv_router::indexer::TieredMatchProvider>> =
@@ -836,6 +847,11 @@ where
                 .await?,
             )
         } else {
+            tracing::warn!(
+                "the runtime-bound KV router scheduler (--no-router-embedded-selection) is \
+                 deprecated and kept for one release as a rollback; the embedded selection \
+                 partition is the default"
+            );
             RouterScheduler::Runtime(
                 KvScheduler::start_with_shared_request_leases(
                     endpoint.clone(),

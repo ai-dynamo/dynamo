@@ -213,11 +213,12 @@ router. See [Router Guide](../../developer-guide/knowledge-base/modular-componen
   Environment variable: `DYN_ROUTER_REPLICA_SYNC`
 </ParamField>
 
-<ParamField path="--router-embedded-selection / --no-router-embedded-selection" type="boolean" default="false">
-  **Experimental.** Run the router's scheduling and active-sequence accounting on an embedded
-  selection-service partition (the same core as the standalone selection service) instead of the
-  runtime-bound scheduler. The KV indexer, request transport, and worker discovery are unchanged;
-  `--router-replica-sync` is not applied to the embedded partition.
+<ParamField path="--router-embedded-selection / --no-router-embedded-selection" type="boolean" default="true">
+  Run the router's scheduling and active-sequence accounting on an embedded selection-service
+  partition (the same core as the standalone selection service). The KV indexer, request
+  transport, and worker discovery are unchanged; `--router-replica-sync` is not applied to the
+  embedded partition. `--no-router-embedded-selection` selects the runtime-bound scheduler, which
+  is deprecated and kept for one release as a rollback; it logs a warning at startup.
 
   Environment variable: `DYN_ROUTER_EMBEDDED_SELECTION`
 </ParamField>
