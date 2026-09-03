@@ -61,10 +61,17 @@ logger = logging.getLogger(__name__)
 try:
     from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
 except ModuleNotFoundError as exc:
-    if exc.name != "sglang.srt.utils.server_args_config_parser":
+    if exc.name == "sglang.srt.utils.server_args_config_parser":
+        # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
+        from sglang.srt.server_args_config_parser import ConfigArgumentMerger
+    elif exc.name == "sglang" or (exc.name or "").startswith("sglang."):
+        # SGLang is not installed at all. Every other SGLang import in this
+        # module already degrades to None, so match that instead of making the
+        # whole module unimportable: ensure_sglang_grpc_bridge_batch_size() has
+        # a SGLang-free code path that callers and tests exercise directly.
+        ConfigArgumentMerger = None  # type: ignore[assignment,misc]
+    else:
         raise
-    # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
-    from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 
 def get_sglang_model_config(server_args: Any) -> Any:
@@ -147,6 +154,90 @@ def ensure_sglang_tensor_image_size() -> None:
 
     resolve_image_token_counts._dynamo_tensor_image_size_support = True  # type: ignore[attr-defined]
     BaseMultimodalProcessor.resolve_image_token_counts = resolve_image_token_counts
+
+
+def _already_normalized() -> None:
+    """Stand in for a request's normalizer once the shim has already run it."""
+
+
+def _normalize_generate_request_once(obj: Any) -> None:
+    """Run SGLang's request normalization exactly once for this request object.
+
+    ``TokenizerManager.generate_request`` calls ``normalize_batch_and_arguments()``
+    unconditionally, and that call is not idempotent: for parallel sampling a
+    second pass re-derives the batch size from the already-expanded input list
+    and expands it again, turning ``n`` sequences into ``n * n``. Normalizing
+    early is therefore only safe if SGLang's own later call is neutralized.
+    """
+    if hasattr(obj, "batch_size"):
+        # Either SGLang normalized already or this release assigns batch_size
+        # itself. Nothing to do, and re-normalizing here would be the very
+        # double expansion described above.
+        return
+
+    normalize = getattr(obj, "normalize_batch_and_arguments", None)
+    if normalize is None:
+        return
+
+    try:
+        normalize()
+    except Exception:
+        # Leave the failure to SGLang. generate_request() normalizes again
+        # inside the generator body, where the bridge's own exception handler
+        # turns the error into a client-visible message. Do not neutralize.
+        logger.debug("Early SGLang request normalization failed", exc_info=True)
+        return
+
+    obj.normalize_batch_and_arguments = _already_normalized
+
+
+def ensure_sglang_grpc_bridge_batch_size(bridge_class: Any = None) -> None:
+    """Normalize gRPC generate requests before SGLang reads their batch size.
+
+    SGLang 0.5.17 and 0.5.18 read ``obj.batch_size`` in the streaming branch of
+    the native gRPC bridge's ``_run_generate``, one statement after calling
+    ``TokenizerManager.generate_request``. That call only builds an async
+    generator, so its body -- and with it the ``normalize_batch_and_arguments()``
+    call that assigns ``batch_size`` -- has not run yet. Every streaming request
+    over the native gRPC server therefore fails with ``'GenerateReqInput' object
+    has no attribute 'batch_size'``, which the sidecar surfaces as HTTP 500.
+    Normalizing first restores the ordering the upstream code assumes.
+
+    This only affects engines launched through ``dynamo.sglang.launch_server``.
+    A stock engine that does not need the shim must still start, so an absent
+    or already-fixed bridge is logged at debug level and left alone.
+
+    ``bridge_class`` patches an explicit class instead of importing SGLang's;
+    tests use it to exercise the wrapper without SGLang installed.
+
+    Remove this override once the minimum supported SGLang release normalizes
+    before reading ``batch_size`` -- that is, once both 0.5.17 and 0.5.18 fall
+    outside the support window.
+    """
+    if bridge_class is None:
+        try:
+            from sglang.srt.entrypoints.grpc_bridge import RuntimeHandle
+        except ImportError:
+            logger.debug(
+                "SGLang does not expose a native gRPC bridge; "
+                "skipping the batch_size normalization override"
+            )
+            return
+        bridge_class = RuntimeHandle
+
+    original = getattr(bridge_class, "_run_generate", None)
+    if original is None or getattr(
+        original, "_dynamo_grpc_bridge_batch_size_support", False
+    ):
+        return
+
+    @wraps(original)
+    async def _run_generate(self: Any, obj: Any, *args: Any, **kwargs: Any) -> Any:
+        _normalize_generate_request_once(obj)
+        return await original(self, obj, *args, **kwargs)
+
+    _run_generate._dynamo_grpc_bridge_batch_size_support = True  # type: ignore[attr-defined]
+    bridge_class._run_generate = _run_generate
 
 
 def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
@@ -267,6 +358,7 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
 
 __all__ = [
     "ConfigArgumentMerger",
+    "ensure_sglang_grpc_bridge_batch_size",
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
     "get_sglang_model_config",
