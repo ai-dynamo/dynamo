@@ -728,7 +728,9 @@ pub static PREFILL_CONTINUE_METRICS: LazyLock<PrefillContinueMetrics> = LazyLock
             )
             // Occupancy is a fraction, so the range is fixed and even steps
             // read directly as a threshold sweep.
-            .buckets((0..=20).map(|step| f64::from(step) * 0.05).collect()),
+            // Divide rather than multiply: `3.0 * 0.05` is 0.15000000000000002,
+            // which reads badly as a `le` label on a threshold sweep.
+            .buckets((0..=20).map(|step| f64::from(step) / 20.0).collect()),
         )
         .expect("Failed to create prefill_continue_decode_occupancy histogram"),
         decode_occupancy_reads_total: IntCounterVec::new(

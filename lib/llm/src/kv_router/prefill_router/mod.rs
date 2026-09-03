@@ -550,20 +550,30 @@ where
                     }
                     None => {
                         record(prefill_continue_occupancy_read::UNREPORTED);
-                        // Say this loudly once. A scheduler-only plane
-                        // publishes no occupancy at all, so every request
-                        // refuses and the feature is a silent no-op that looks
-                        // exactly like an idle one.
+                        // Say this loudly once, but not on a healthy cold
+                        // start: capacity is seeded at discovery while usage
+                        // waits for the worker's first `ActiveLoad`, so a
+                        // working worker reads unknown for its first few
+                        // requests. A plane that never publishes clears this
+                        // immediately. Per-worker coverage lives in
+                        // `decode_occupancy_reads_total`, not here.
+                        const SETTLING_READS: u64 = 100;
                         static WARNED: std::sync::Once = std::sync::Once::new();
-                        WARNED.call_once(|| {
-                            tracing::warn!(
-                                worker_id = signals.worker.worker_id,
-                                dp_rank = signals.worker.dp_rank,
-                                "Prefill continuation is enabled but this decode worker \
+                        let unreported = PREFILL_CONTINUE_METRICS
+                            .decode_occupancy_reads_total
+                            .with_label_values(&[prefill_continue_occupancy_read::UNREPORTED])
+                            .get();
+                        if unreported >= SETTLING_READS {
+                            WARNED.call_once(|| {
+                                tracing::warn!(
+                                    worker_id = signals.worker.worker_id,
+                                    dp_rank = signals.worker.dp_rank,
+                                    "Prefill continuation is enabled but this decode worker \
                                  reports no KV occupancy, so every request will hand off. \
                                  The worker must publish ActiveLoad with kv_used_blocks"
-                            );
-                        });
+                                );
+                            });
+                        }
                         tracing::debug!(
                             request_id,
                             worker_id = signals.worker.worker_id,

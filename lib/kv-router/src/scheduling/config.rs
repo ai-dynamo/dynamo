@@ -341,6 +341,17 @@ fn kv_router_config_from_lookup(
     ) {
         config.prefill_continue_decode_busy_threshold = Some(value);
     }
+    // The gate no longer projects the request's output onto the reading, so
+    // this setting is gone. Say so: the JSON form rejects the key outright, but
+    // an old script that exports the variable would otherwise get a different
+    // policy with no signal at all.
+    if get_env("DYN_ROUTER_PREFILL_CONTINUE_OUTPUT_RESERVE_TOKENS").is_some() {
+        tracing::warn!(
+            "DYN_ROUTER_PREFILL_CONTINUE_OUTPUT_RESERVE_TOKENS is set and is ignored. The \
+             decode gate now reads what the worker reports it is holding, with nothing \
+             projected onto it, so there is no reserve to set"
+        );
+    }
     if let Some(value) = parse_f64(
         &get_env,
         "DYN_ROUTER_PREFILL_CONTINUE_PREFILL_BUSY_THRESHOLD",
