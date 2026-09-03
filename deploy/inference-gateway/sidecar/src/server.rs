@@ -47,6 +47,7 @@ pub struct SidecarState {
     client: Client,
     decode_engine_url: Url,
     adapter: Arc<dyn PdAdapter>,
+    draining: CancellationToken,
     force_shutdown: CancellationToken,
 }
 
@@ -56,6 +57,7 @@ impl SidecarState {
         connect_timeout: Duration,
         read_timeout: Duration,
         adapter: Arc<dyn PdAdapter>,
+        draining: CancellationToken,
         force_shutdown: CancellationToken,
     ) -> Result<Self, reqwest::Error> {
         Ok(Self {
@@ -66,6 +68,7 @@ impl SidecarState {
                 .build()?,
             decode_engine_url,
             adapter,
+            draining,
             force_shutdown,
         })
     }
@@ -83,8 +86,12 @@ async fn health() -> StatusCode {
     StatusCode::OK
 }
 
-async fn ready() -> StatusCode {
-    StatusCode::OK
+async fn ready(State(state): State<SidecarState>) -> StatusCode {
+    if state.draining.is_cancelled() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    }
 }
 
 async fn handle(
@@ -217,12 +224,18 @@ mod tests {
     }
 
     fn test_state(adapter: Arc<dyn PdAdapter>, decode_engine_url: reqwest::Url) -> SidecarState {
-        test_state_with_shutdown(adapter, decode_engine_url, CancellationToken::new())
+        test_state_with_tokens(
+            adapter,
+            decode_engine_url,
+            CancellationToken::new(),
+            CancellationToken::new(),
+        )
     }
 
-    fn test_state_with_shutdown(
+    fn test_state_with_tokens(
         adapter: Arc<dyn PdAdapter>,
         decode_engine_url: reqwest::Url,
+        draining: CancellationToken,
         force_shutdown: CancellationToken,
     ) -> SidecarState {
         SidecarState::new(
@@ -230,6 +243,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(300),
             adapter,
+            draining,
             force_shutdown,
         )
         .unwrap()
@@ -286,6 +300,42 @@ mod tests {
             StatusCode::METHOD_NOT_ALLOWED
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn readiness_reports_draining_state() {
+        let draining = CancellationToken::new();
+        let app = router(test_state_with_tokens(
+            Arc::new(UnavailablePdAdapter),
+            reqwest::Url::parse("http://localhost:8001").unwrap(),
+            draining.clone(),
+            CancellationToken::new(),
+        ));
+
+        let ready = Request::builder()
+            .uri("/ready")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(ready).await.unwrap().status(),
+            StatusCode::OK
+        );
+
+        draining.cancel();
+
+        let ready = Request::builder()
+            .uri("/ready")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(ready).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let health = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.oneshot(health).await.unwrap().status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -456,9 +506,10 @@ mod tests {
             pending_stream: true,
         });
         let force_shutdown = CancellationToken::new();
-        let app = router(test_state_with_shutdown(
+        let app = router(test_state_with_tokens(
             adapter,
             reqwest::Url::parse("http://localhost:8001").unwrap(),
+            CancellationToken::new(),
             force_shutdown.clone(),
         ));
         let request = Request::builder()

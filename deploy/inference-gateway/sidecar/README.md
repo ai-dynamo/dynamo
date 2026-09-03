@@ -27,6 +27,10 @@ these values in milliseconds with `DYN_SIDECAR_CONNECT_TIMEOUT_MS` and
 shutdown before their streams are forced closed. Configure this deadline with
 `DYN_SIDECAR_DRAIN_TIMEOUT_MS`.
 
+`GET /health` remains live while requests drain. `GET /ready` returns `200 OK`
+while the sidecar accepts requests and `503 Service Unavailable` once draining
+starts. Readiness does not indicate that EPP endpoint propagation is complete.
+
 Backend-specific P/D execution is implemented separately. Until an adapter is
 linked, requests containing a valid prefill endpoint return `501 Not
 Implemented`; decode-only passthrough remains available.

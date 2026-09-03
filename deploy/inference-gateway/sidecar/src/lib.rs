@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 pub async fn run(config: Config, adapter: Arc<dyn PdAdapter>) -> Result<()> {
     let listener = TcpListener::bind(config.listen_addr).await?;
     tracing::info!(listen_addr = %config.listen_addr, "Starting EPP decode sidecar");
+    let draining = CancellationToken::new();
     let graceful_shutdown = CancellationToken::new();
     let force_shutdown = CancellationToken::new();
     let drain_timeout = config.drain_timeout;
@@ -32,6 +33,7 @@ pub async fn run(config: Config, adapter: Arc<dyn PdAdapter>) -> Result<()> {
             config.connect_timeout,
             config.read_timeout,
             adapter,
+            draining.clone(),
             force_shutdown.clone(),
         )?),
     )
@@ -43,6 +45,7 @@ pub async fn run(config: Config, adapter: Arc<dyn PdAdapter>) -> Result<()> {
         result = &mut server => result?,
         () = shutdown_signal() => {
             tracing::info!(?drain_timeout, "Shutdown signal received; draining requests");
+            draining.cancel();
             graceful_shutdown.cancel();
             match tokio::time::timeout(drain_timeout, &mut server).await {
                 Ok(result) => result?,
