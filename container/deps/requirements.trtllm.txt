@@ -48,6 +48,15 @@ pillow>=12.3.0
 # /opt/dynamo/venv copy; trtllm_runtime.Dockerfile raises the system one to the
 # same floor. Keep the two specifiers in step.
 PyNvVideoCodec>=2.2.0
+# Python stubs for TensorRT-LLM's native gRPC service (tensorrt_llm.grpc), which
+# the trtllm sidecar talks to. Stands in for the tensorrt_llm[grpc-smg] extra:
+# 1.3.0rc25 moved this package behind that extra, so the base image stopped
+# bundling it and `tensorrt_llm.commands.serve <model> --grpc` now fails its
+# find_spec("smg_grpc_proto") guard. Naming the one package the extra pulls in,
+# rather than requesting the extra, keeps a resolver from reinstalling the
+# multi-gigabyte tensorrt_llm wheel over the base image's own build. Floor
+# matches the protocol revision vendored under lib/sidecar/trtllm/proto/.
+smg-grpc-proto>=0.4.14
 soupsieve>=2.8.4  # JupyterLab stack; see note above jupyter-server
 tornado>=6.5.6  # JupyterLab stack; see note above jupyter-server
 # Required by ai_dynamo_runtime (companion to msgspec above).

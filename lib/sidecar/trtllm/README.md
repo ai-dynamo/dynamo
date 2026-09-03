@@ -34,7 +34,10 @@ carries no context-phase handoff.
 
 ## Run
 
-Start TensorRT-LLM with its native gRPC listener (TRT-LLM `1.3.0rc21`; rc22 has a broken `--grpc`):
+The engine image has to meet the requirements noted under
+[Deploy on Kubernetes](#deploy-on-kubernetes-quick-start) below: `--grpc` needs
+`smg-grpc-proto` installed and matched to the image's `protobuf` runtime. Start
+TensorRT-LLM with its native gRPC listener:
 
 ```bash
 python -m tensorrt_llm.commands.serve <model> --grpc --host 0.0.0.0 --port 50051
@@ -72,6 +75,17 @@ There is no published sidecar image yet (see [Packaging](#packaging)), so build
 and push the image from `lib/sidecar/Dockerfile`. It contains all three
 engine-specific sidecar executables; this manifest runs `dynamo-trtllm-sidecar`
 as the container command.
+
+> [!NOTE]
+> The engine image must carry `smg-grpc-proto`, the package the
+> `tensorrt_llm[grpc-smg]` extra installs. TensorRT-LLM `1.3.0rc25` moved it
+> behind that extra, and without it `serve --grpc` exits with a `ValueError`
+> naming the extra. Releases through `1.3.0rc24` — including the
+> `nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc21` image this example runs —
+> bundle it already. The installed `smg-grpc-proto` must also match the image's
+> `protobuf` runtime, or loading `trtllm_service.proto` fails with a
+> gencode/runtime `VersionError`; that mismatch is what breaks `--grpc` on
+> `1.3.0rc22`.
 
 ### Prerequisites
 
