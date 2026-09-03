@@ -360,6 +360,7 @@ def test_failed_grow_restarts_the_worker(stub_ray):
     assert engine.calls == [3]
 
 
+@pytest.mark.timeout(15)
 def test_hung_grow_times_out_and_restarts(stub_ray, short_deadline):
     # A scale that hangs past the deadline is a wedged engine: fail fast and
     # restart, rather than leave the endpoint's in-progress flag stuck forever.
@@ -440,6 +441,7 @@ def test_fail_fast_exits_even_if_shutdown_raises(monkeypatch):
     assert exits == [1]
 
 
+@pytest.mark.timeout(15)
 def test_cancelled_scale_latches_the_endpoint_closed(stub_ray, short_deadline):
     """An externally-cancelled scale must not restart the worker, but vLLM's grow
     is not cancelled with us -- so the next scale must be refused rather than
