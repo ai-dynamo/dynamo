@@ -9,11 +9,22 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
+use dynamo_protocols::types::{
+    ChatCompletionRequestMessage, ChatCompletionRequestToolMessageContent,
+    ChatCompletionRequestToolMessageContentPart, ChatCompletionRequestUserMessageContent,
+    ChatCompletionRequestUserMessageContentPart,
+};
 use dynamo_renderer::{OAIChatLikeRequest, TextInput};
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use minijinja::value::Value as TemplateValue;
 use serde_json::{Map, Value, json};
-use switchyard_protocol::llm::{ContentBlock, LlmRequest, Message, Role, ToolChoice, ToolResult};
+use switchyard_protocol::llm::{
+    ContentBlock, ImageSource, LlmRequest, MediaSource, Message, Role, ToolChoice, ToolResult,
+};
+use switchyard_translation::{
+    LossyConversionPolicy, PreservationPolicy, TranslationEngine, TranslationPolicy,
+    UnknownFieldPolicy, WireFormat,
+};
 
 use crate::preprocessor::prompt::MediaRequestExt;
 use crate::protocols::common::{
@@ -21,11 +32,181 @@ use crate::protocols::common::{
     SamplingOptionsProvider, StopConditions, StopConditionsProvider,
     extensions::{NvExt, NvExtProvider},
 };
+use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use crate::protocols::openai::common_ext::{CommonExt, CommonExtProvider};
 use crate::protocols::openai::validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
     TEMPERATURE_RANGE, validate_range, validate_top_p,
 };
+
+/// Pipeline context key for a provider-neutral request that replaces Chat as
+/// the prompt/preprocessing IR.
+pub const LLM_REQUEST_CONTEXT_KEY: &str = "dynamo.llm_request";
+
+/// Provider-neutral semantic request plus Dynamo execution controls.
+#[derive(Debug, Clone)]
+pub struct DynamoLlmRequest {
+    pub request: LlmRequest,
+    pub execution: DynamoExecutionOptions,
+}
+
+/// Decode one supported public wire shape into the request IR used by Dynamo
+/// preprocessing. Full-body preservation is disabled on the serving path.
+pub fn decode_wire_request(
+    format: WireFormat,
+    mut body: Value,
+    execution: DynamoExecutionOptions,
+) -> Result<DynamoLlmRequest> {
+    normalize_wire_request(format, &mut body);
+    let policy = TranslationPolicy {
+        // Dynamo extensions are extracted into `DynamoExecutionOptions`; keep
+        // accepting them without retaining a second copy in the semantic IR.
+        unknown_field_policy: UnknownFieldPolicy::Preserve,
+        lossy_conversion_policy: LossyConversionPolicy::Reject,
+        preservation: PreservationPolicy::Disabled,
+        ..TranslationPolicy::default()
+    };
+    let decoded = TranslationEngine::default()
+        .decode_request(format, &body, &policy)
+        .with_context(|| format!("failed to decode {format} request into LlmRequest"))?;
+    if !decoded.diagnostics.is_empty() {
+        bail!(
+            "{format} request produced lossy Switchyard diagnostics: {:?}",
+            decoded.diagnostics
+        );
+    }
+    let mut request = decoded.request;
+    normalize_dynamo_media_blocks(&mut request)?;
+    Ok(DynamoLlmRequest { request, execution })
+}
+
+fn normalize_wire_request(format: WireFormat, body: &mut Value) {
+    if format != WireFormat::OpenAiResponses {
+        return;
+    }
+    let Some(items) = body.get_mut("input").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for item in items {
+        let Some(item) = item.as_object_mut() else {
+            continue;
+        };
+        if !item.contains_key("type") && item.contains_key("role") && item.contains_key("content") {
+            item.insert("type".to_string(), Value::String("message".to_string()));
+        }
+    }
+}
+
+/// Capture Dynamo execution controls from a Chat request without using Chat as
+/// the prompt IR. This is also the compatibility source for fields Switchyard
+/// 0.2 does not model yet.
+pub fn execution_from_chat(
+    request: &NvCreateChatCompletionRequest,
+) -> Result<DynamoExecutionOptions> {
+    Ok(DynamoExecutionOptions {
+        stop_conditions: request.extract_stop_conditions()?,
+        sampling_options: request.extract_sampling_options()?,
+        output_options: request.extract_output_options()?,
+        nvext: request.nvext.clone(),
+        annotations: request.annotations().unwrap_or_default(),
+        common: request.common.clone(),
+        chat_template_args: request.chat_template_args.clone(),
+        mm_processor_kwargs: request.inner.mm_processor_kwargs.clone(),
+        media_io_kwargs: request.media_io_kwargs.clone(),
+        image_uuids: chat_image_uuids(&request.inner.messages),
+        raw_prompt: request.raw_prompt(),
+        unsupported_fields: request.unsupported_fields.clone(),
+    })
+}
+
+fn chat_image_uuids(messages: &[ChatCompletionRequestMessage]) -> Vec<Option<String>> {
+    let mut uuids = Vec::new();
+    for message in messages {
+        match message {
+            ChatCompletionRequestMessage::User(user) => {
+                if let ChatCompletionRequestUserMessageContent::Array(parts) = &user.content {
+                    uuids.extend(parts.iter().filter_map(|part| match part {
+                        ChatCompletionRequestUserMessageContentPart::ImageUrl(image) => {
+                            Some(image.uuid.clone())
+                        }
+                        _ => None,
+                    }));
+                }
+            }
+            ChatCompletionRequestMessage::Tool(tool) => {
+                if let ChatCompletionRequestToolMessageContent::Array(parts) = &tool.content {
+                    uuids.extend(parts.iter().filter_map(|part| match part {
+                        ChatCompletionRequestToolMessageContentPart::ImageUrl(image) => {
+                            Some(image.uuid.clone())
+                        }
+                        _ => None,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+    uuids
+}
+
+fn normalize_dynamo_media_blocks(request: &mut LlmRequest) -> Result<()> {
+    for instruction in &mut request.instructions {
+        normalize_media_blocks(&mut instruction.content)?;
+    }
+    for message in &mut request.messages {
+        normalize_media_blocks(&mut message.content)?;
+        for block in &mut message.content {
+            if let ContentBlock::ToolResult(result) = block {
+                normalize_media_blocks(&mut result.content)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize_media_blocks(blocks: &mut [ContentBlock]) -> Result<()> {
+    for block in blocks {
+        let ContentBlock::Unknown { raw, .. } = block else {
+            continue;
+        };
+        let Some(object) = raw.as_object() else {
+            continue;
+        };
+        let Some(kind) = object.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        let (block_kind, field) = match kind {
+            "video_url" => ("video", "video_url"),
+            "audio_url" => ("audio", "audio_url"),
+            _ => continue,
+        };
+        let payload = object
+            .get(field)
+            .with_context(|| format!("{kind} content block is missing `{field}`"))?;
+        let (url, media_type) = match payload {
+            Value::String(url) => (url.clone(), None),
+            Value::Object(payload) => (
+                payload
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .with_context(|| format!("{kind}.{field} is missing `url`"))?
+                    .to_string(),
+                payload
+                    .get("media_type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            ),
+            _ => bail!("{kind}.{field} must be a URL string or object"),
+        };
+        let source = MediaSource::Url { url, media_type };
+        *block = match block_kind {
+            "video" => ContentBlock::Video { source },
+            "audio" => ContentBlock::Audio { source },
+            _ => unreachable!(),
+        };
+    }
+    Ok(())
+}
 
 /// Dynamo-only controls that do not belong in Switchyard's semantic prompt IR.
 ///
@@ -42,7 +223,12 @@ pub struct DynamoExecutionOptions {
     pub chat_template_args: Option<HashMap<String, Value>>,
     pub mm_processor_kwargs: Option<Value>,
     pub media_io_kwargs: Option<Value>,
+    /// vLLM image-cache identities in image-block traversal order.
+    /// Switchyard 0.2 does not yet model these provider extensions.
+    pub image_uuids: Vec<Option<String>>,
     pub raw_prompt: Option<String>,
+    /// Accepted backend passthrough controls not modeled by the provider-neutral IR.
+    pub unsupported_fields: HashMap<String, Value>,
 }
 
 /// Borrowed renderer and preprocessor view over [`LlmRequest`].
@@ -53,6 +239,7 @@ pub(crate) struct LlmRequestView<'a> {
     request: &'a LlmRequest,
     execution: &'a DynamoExecutionOptions,
     messages: Vec<Value>,
+    media_parts: Vec<ChatCompletionRequestUserMessageContentPart>,
     tools: Option<Value>,
     tool_choice: Option<Value>,
 }
@@ -68,10 +255,12 @@ impl<'a> LlmRequestView<'a> {
             .filter(|model| !model.is_empty())
             .context("Switchyard LlmRequest.model is required")?;
 
+        let (messages, media_parts) = render_messages(request, execution)?;
         Ok(Self {
             request,
             execution,
-            messages: render_messages(request)?,
+            messages,
+            media_parts,
             tools: render_tools(request),
             tool_choice: request.tool_choice.as_ref().map(render_tool_choice),
         })
@@ -132,6 +321,10 @@ impl OAIChatLikeRequest for LlmRequestView<'_> {
 impl MediaRequestExt for LlmRequestView<'_> {
     fn media_io_kwargs(&self) -> Option<&Value> {
         self.execution.media_io_kwargs.as_ref()
+    }
+
+    fn canonical_media_parts(&self) -> Option<&[ChatCompletionRequestUserMessageContentPart]> {
+        Some(&self.media_parts)
     }
 }
 
@@ -300,6 +493,10 @@ impl NvExtProvider for LlmRequestView<'_> {
     fn raw_prompt(&self) -> Option<String> {
         self.execution.raw_prompt.clone()
     }
+
+    fn unsupported_fields(&self) -> Option<&HashMap<String, Value>> {
+        Some(&self.execution.unsupported_fields)
+    }
 }
 
 impl CommonExtProvider for LlmRequestView<'_> {
@@ -377,8 +574,13 @@ fn guided_json_from_response_format(format: Option<&Value>) -> Option<Value> {
     }
 }
 
-fn render_messages(request: &LlmRequest) -> Result<Vec<Value>> {
+fn render_messages(
+    request: &LlmRequest,
+    execution: &DynamoExecutionOptions,
+) -> Result<(Vec<Value>, Vec<ChatCompletionRequestUserMessageContentPart>)> {
     let mut rendered = Vec::with_capacity(request.instructions.len() + request.messages.len());
+    let mut media_parts = Vec::new();
+    let mut image_uuid_index = 0;
 
     for instruction in &request.instructions {
         rendered.push(json!({
@@ -387,44 +589,111 @@ fn render_messages(request: &LlmRequest) -> Result<Vec<Value>> {
         }));
     }
     for message in &request.messages {
-        render_message(message, &mut rendered)?;
+        render_message(
+            message,
+            &mut rendered,
+            &mut media_parts,
+            &execution.image_uuids,
+            &mut image_uuid_index,
+        )?;
+    }
+    if image_uuid_index < execution.image_uuids.len() {
+        bail!(
+            "received {} image UUIDs for {image_uuid_index} Switchyard image blocks",
+            execution.image_uuids.len()
+        );
     }
 
-    Ok(rendered)
+    Ok((rendered, media_parts))
 }
 
-fn render_message(message: &Message, rendered: &mut Vec<Value>) -> Result<()> {
+fn render_message(
+    message: &Message,
+    rendered: &mut Vec<Value>,
+    media_parts: &mut Vec<ChatCompletionRequestUserMessageContentPart>,
+    image_uuids: &[Option<String>],
+    image_uuid_index: &mut usize,
+) -> Result<()> {
     if message.role == Role::Assistant {
         rendered.push(render_assistant_message(message)?);
         return Ok(());
     }
 
-    let tool_results = message
+    if message
         .content
         .iter()
-        .filter_map(|block| match block {
-            ContentBlock::ToolResult(result) => Some(result),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if !tool_results.is_empty() {
-        if tool_results.len() != message.content.len() {
-            bail!("a Switchyard message cannot mix tool results with other content in this POC");
+        .any(|block| matches!(block, ContentBlock::ToolResult(_)))
+    {
+        let mut segment_start = 0;
+        for (index, block) in message.content.iter().enumerate() {
+            let ContentBlock::ToolResult(result) = block else {
+                continue;
+            };
+            if segment_start < index {
+                render_non_assistant_message(
+                    message.role,
+                    &message.content[segment_start..index],
+                    rendered,
+                    media_parts,
+                    image_uuids,
+                    image_uuid_index,
+                )?;
+            }
+            rendered.push(render_tool_result(
+                result,
+                media_parts,
+                image_uuids,
+                image_uuid_index,
+            )?);
+            segment_start = index + 1;
         }
-        for result in tool_results {
-            rendered.push(render_tool_result(result)?);
+        if segment_start < message.content.len() {
+            render_non_assistant_message(
+                message.role,
+                &message.content[segment_start..],
+                rendered,
+                media_parts,
+                image_uuids,
+                image_uuid_index,
+            )?;
         }
         return Ok(());
     }
 
-    if message.role == Role::Tool {
+    render_non_assistant_message(
+        message.role,
+        &message.content,
+        rendered,
+        media_parts,
+        image_uuids,
+        image_uuid_index,
+    )
+}
+
+fn render_non_assistant_message(
+    role: Role,
+    content_blocks: &[ContentBlock],
+    rendered: &mut Vec<Value>,
+    media_parts: &mut Vec<ChatCompletionRequestUserMessageContentPart>,
+    image_uuids: &[Option<String>],
+    image_uuid_index: &mut usize,
+) -> Result<()> {
+    if role == Role::Tool {
         bail!("a Switchyard tool message must contain a ToolResult block");
     }
 
-    rendered.push(json!({
-        "role": role_name(message.role),
-        "content": plain_text(&message.content, "message")?,
-    }));
+    let content = if role == Role::User {
+        render_content(
+            content_blocks,
+            "message",
+            media_parts,
+            image_uuids,
+            image_uuid_index,
+        )?
+    } else {
+        Value::String(plain_text(content_blocks, "message")?)
+    };
+    rendered.push(json!({ "role": role_name(role), "content": content }));
     Ok(())
 }
 
@@ -465,7 +734,7 @@ fn render_assistant_message(message: &Message) -> Result<Value> {
             | ContentBlock::Audio { .. }
             | ContentBlock::Video { .. }
             | ContentBlock::File { .. } => {
-                bail!("multimodal Switchyard lowering is not implemented in this POC");
+                bail!("assistant multimodal content is not supported by Dynamo preprocessing");
             }
             ContentBlock::Unknown { provider, .. } => {
                 bail!("cannot render an unknown {provider} content block");
@@ -505,12 +774,159 @@ fn render_assistant_message(message: &Message) -> Result<Value> {
     Ok(Value::Object(output))
 }
 
-fn render_tool_result(result: &ToolResult) -> Result<Value> {
+fn render_tool_result(
+    result: &ToolResult,
+    media_parts: &mut Vec<ChatCompletionRequestUserMessageContentPart>,
+    image_uuids: &[Option<String>],
+    image_uuid_index: &mut usize,
+) -> Result<Value> {
     Ok(json!({
         "role": "tool",
         "tool_call_id": result.tool_call_id,
-        "content": plain_text(&result.content, "tool result")?,
+        "content": render_content(
+            &result.content,
+            "tool result",
+            media_parts,
+            image_uuids,
+            image_uuid_index,
+        )?,
     }))
+}
+
+fn render_content(
+    blocks: &[ContentBlock],
+    context: &str,
+    media_parts: &mut Vec<ChatCompletionRequestUserMessageContentPart>,
+    image_uuids: &[Option<String>],
+    image_uuid_index: &mut usize,
+) -> Result<Value> {
+    let has_media = blocks.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::Image { .. } | ContentBlock::Audio { .. } | ContentBlock::Video { .. }
+        )
+    });
+    if !has_media {
+        return Ok(Value::String(plain_text(blocks, context)?));
+    }
+
+    let mut rendered = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let part = match block {
+            ContentBlock::Text { text } | ContentBlock::Refusal { text } => {
+                json!({ "type": "text", "text": text })
+            }
+            ContentBlock::Image { source } => {
+                let uuid = image_uuids.get(*image_uuid_index).cloned().unwrap_or(None);
+                *image_uuid_index += 1;
+                render_image_part(source, uuid)?
+            }
+            ContentBlock::Audio { source } => render_media_part("audio_url", source)?,
+            ContentBlock::Video { source } => render_media_part("video_url", source)?,
+            ContentBlock::File { .. } => {
+                bail!("file content is not supported by Dynamo preprocessing in {context}")
+            }
+            ContentBlock::Unknown { provider, .. } => {
+                bail!("cannot render an unknown {provider} block in {context}")
+            }
+            ContentBlock::Reasoning { .. }
+            | ContentBlock::ToolCall(_)
+            | ContentBlock::ToolResult(_) => {
+                bail!("unsupported Switchyard block in {context}: {block:?}")
+            }
+        };
+        if !matches!(
+            block,
+            ContentBlock::Text { .. } | ContentBlock::Refusal { .. }
+        ) {
+            media_parts.push(serde_json::from_value(part.clone()).with_context(|| {
+                format!("invalid canonical multimodal content part in {context}")
+            })?);
+        }
+        rendered.push(part);
+    }
+    Ok(Value::Array(rendered))
+}
+
+fn render_image_part(source: &ImageSource, uuid: Option<String>) -> Result<Value> {
+    let (url, detail) = image_url(source)?;
+    let mut part = json!({
+        "type": "image_url",
+        "image_url": { "url": url, "detail": detail },
+    });
+    if let Some(uuid) = uuid {
+        part["uuid"] = Value::String(uuid);
+    }
+    Ok(part)
+}
+
+fn render_media_part(kind: &'static str, source: &MediaSource) -> Result<Value> {
+    let url = media_url(source, kind)?;
+    let mut part = Map::new();
+    part.insert("type".to_string(), Value::String(kind.to_string()));
+    let payload = if kind == "video_url" {
+        // Match Dynamo's typed Chat-compatible template projection. Detail is
+        // optional on the wire but serializes as null in the existing ABI.
+        json!({ "url": url, "detail": null })
+    } else {
+        json!({ "url": url })
+    };
+    part.insert(kind.to_string(), payload);
+    Ok(Value::Object(part))
+}
+
+fn image_url(source: &ImageSource) -> Result<(String, Option<String>)> {
+    match source {
+        ImageSource::Url { url, detail } => Ok((url.clone(), detail.clone())),
+        ImageSource::Base64 { media_type, data } => {
+            Ok((inline_data_url(media_type.as_deref(), data, "image")?, None))
+        }
+        ImageSource::Raw(raw) => {
+            let raw = raw
+                .as_object()
+                .context("raw Switchyard image source must be an object")?;
+            match raw.get("type").and_then(Value::as_str) {
+                Some("base64") => Ok((
+                    inline_data_url(
+                        raw.get("media_type").and_then(Value::as_str),
+                        raw.get("data").and_then(Value::as_str).unwrap_or_default(),
+                        "image",
+                    )?,
+                    None,
+                )),
+                Some("url") => Ok((
+                    raw.get("url")
+                        .and_then(Value::as_str)
+                        .context("raw Switchyard image URL is missing `url`")?
+                        .to_string(),
+                    raw.get("detail")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                )),
+                other => bail!("unsupported raw Switchyard image source type {other:?}"),
+            }
+        }
+    }
+}
+
+fn media_url(source: &MediaSource, kind: &str) -> Result<String> {
+    match source {
+        MediaSource::Url { url, .. } => Ok(url.clone()),
+        MediaSource::Base64 { media_type, data } => {
+            inline_data_url(media_type.as_deref(), data, kind)
+        }
+        MediaSource::Raw(_) => bail!("unsupported raw Switchyard {kind} source"),
+    }
+}
+
+fn inline_data_url(media_type: Option<&str>, data: &str, kind: &str) -> Result<String> {
+    let media_type = media_type.context(format!(
+        "base64 Switchyard {kind} content requires a MIME type"
+    ))?;
+    if data.is_empty() {
+        bail!("base64 Switchyard {kind} content requires non-empty data");
+    }
+    Ok(format!("data:{media_type};base64,{data}"))
 }
 
 fn plain_text(blocks: &[ContentBlock], context: &str) -> Result<String> {
@@ -525,7 +941,7 @@ fn plain_text(blocks: &[ContentBlock], context: &str) -> Result<String> {
             | ContentBlock::Audio { .. }
             | ContentBlock::Video { .. }
             | ContentBlock::File { .. } => {
-                bail!("multimodal Switchyard lowering is not implemented in this POC");
+                bail!("multimodal content is not supported for {context}");
             }
             ContentBlock::Reasoning { .. }
             | ContentBlock::ToolCall(_)
@@ -591,14 +1007,19 @@ mod tests {
     use super::*;
 
     use crate::model_card::ModelDeploymentCard;
-    use crate::preprocessor::OpenAIPreprocessor;
+    use crate::preprocessor::{BackendOutput, OpenAIPreprocessor, PreprocessedRequest};
+    use crate::protocols::Annotated;
     use crate::protocols::anthropic::AnthropicCreateMessageRequest;
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::responses::NvCreateResponse;
-    use switchyard_protocol::llm::{ReasoningParams, ToolCall};
-    use switchyard_translation::{
-        PreservationPolicy, TranslationEngine, TranslationPolicy, WireFormat,
+    use dynamo_runtime::pipeline::{
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, Operator, ResponseStream,
+        SingleIn, async_trait,
     };
+    use futures::stream;
+    use std::sync::{Arc, Mutex};
+    use switchyard_protocol::llm::{ReasoningParams, ToolCall};
+    use switchyard_translation::WireFormat;
 
     const MODEL_PATH: &str = "tests/data/sample-models/mock-llama-3.1-8b-instruct";
 
@@ -609,20 +1030,9 @@ mod tests {
     }
 
     fn decode_request(format: WireFormat, body: &Value) -> LlmRequest {
-        let policy = TranslationPolicy {
-            preservation: PreservationPolicy::Disabled,
-            ..TranslationPolicy::default()
-        };
-        let decoded = TranslationEngine::default()
-            .decode_request(format, body, &policy)
-            .unwrap();
-        assert!(
-            decoded.diagnostics.is_empty(),
-            "unexpected {format} diagnostics: {:?}",
-            decoded.diagnostics
-        );
-        assert!(decoded.request.preservation.requests.is_empty());
-        decoded.request
+        decode_wire_request(format, body.clone(), DynamoExecutionOptions::default())
+            .unwrap()
+            .request
     }
 
     fn legacy_chat_request(format: WireFormat, body: Value) -> NvCreateChatCompletionRequest {
@@ -636,6 +1046,95 @@ mod tests {
                 let request: NvCreateResponse = serde_json::from_value(body).unwrap();
                 request.try_into().unwrap()
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_multimodal_lowering_matches_chat_compatibility_path() {
+        let cases = [
+            (
+                WireFormat::OpenAiChat,
+                json!({
+                    "model": "test-model",
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": "inspect" },
+                            {
+                                "type": "image_url",
+                                "image_url": { "url": "https://example.com/image.png", "detail": "high" },
+                                "uuid": "image-cache-key"
+                            },
+                            { "type": "video_url", "video_url": { "url": "https://example.com/video.mp4" } },
+                            { "type": "audio_url", "audio_url": { "url": "https://example.com/audio.wav" } }
+                        ]
+                    }],
+                    "max_completion_tokens": 17
+                }),
+            ),
+            (
+                WireFormat::OpenAiResponses,
+                json!({
+                    "model": "test-model",
+                    "input": [{
+                        "role": "user",
+                        "content": [
+                            { "type": "input_text", "text": "inspect" },
+                            { "type": "input_image", "image_url": "https://example.com/image.png", "detail": "high" }
+                        ]
+                    }],
+                    "max_output_tokens": 17
+                }),
+            ),
+            (
+                WireFormat::AnthropicMessages,
+                json!({
+                    "model": "test-model",
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": "inspect" },
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": "aGVsbG8="
+                                }
+                            }
+                        ]
+                    }],
+                    "max_tokens": 17
+                }),
+            ),
+        ];
+        let preprocessor = preprocessor();
+
+        for (format, body) in cases {
+            let legacy_request = legacy_chat_request(format, body.clone());
+            let canonical = decode_wire_request(
+                format,
+                body.clone(),
+                execution_from_chat(&legacy_request).unwrap(),
+            )
+            .unwrap();
+
+            let legacy = preprocessor
+                .preprocess_request(&legacy_request, None)
+                .await
+                .unwrap()
+                .0;
+            let direct = preprocessor
+                .preprocess_llm_request(&canonical.request, &canonical.execution, None)
+                .await
+                .unwrap()
+                .0;
+
+            assert_eq!(
+                serde_json::to_value(direct).unwrap(),
+                serde_json::to_value(legacy).unwrap(),
+                "direct multimodal preprocessing diverged for {format}"
+            );
         }
     }
 
@@ -702,6 +1201,69 @@ mod tests {
                 "direct preprocessing diverged for {format}"
             );
         }
+    }
+
+    struct CaptureBackend {
+        request: Arc<Mutex<Option<PreprocessedRequest>>>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
+        for CaptureBackend
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
+            let (request, context) = request.transfer(());
+            *self.request.lock().unwrap() = Some(request);
+            Ok(ResponseStream::new(
+                Box::pin(stream::empty()),
+                context.context(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_operator_preprocesses_the_attached_llm_request() {
+        let chat_request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{ "role": "user", "content": "legacy chat prompt" }],
+            "max_completion_tokens": 17
+        }))
+        .unwrap();
+        let canonical = decode_wire_request(
+            WireFormat::OpenAiResponses,
+            json!({
+                "model": "test-model",
+                "input": "canonical responses prompt",
+                "max_output_tokens": 17
+            }),
+            execution_from_chat(&chat_request).unwrap(),
+        )
+        .unwrap();
+        let expected = preprocessor()
+            .preprocess_llm_request(&canonical.request, &canonical.execution, None)
+            .await
+            .unwrap()
+            .0;
+
+        let captured = Arc::new(Mutex::new(None));
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(CaptureBackend {
+            request: captured.clone(),
+        });
+        let mut request = SingleIn::new(chat_request);
+        request.insert(LLM_REQUEST_CONTEXT_KEY, canonical);
+
+        let _stream = Operator::generate(preprocessor().as_ref(), request, next)
+            .await
+            .unwrap();
+        let actual = captured.lock().unwrap().take().unwrap();
+
+        assert_eq!(actual.token_ids, expected.token_ids);
+        assert_eq!(actual.extra_args, expected.extra_args);
     }
 
     #[tokio::test]
@@ -792,29 +1354,72 @@ mod tests {
     }
 
     #[test]
-    fn rejects_multimodal_content_instead_of_silently_dropping_it() {
+    fn projects_multimodal_content_without_a_chat_request() {
         let request = LlmRequest {
             model: Some("test-model".to_string()),
             messages: vec![Message {
                 role: Role::User,
-                content: vec![ContentBlock::Image {
-                    source: switchyard_protocol::llm::ImageSource::Url {
-                        url: "https://example.com/image.png".to_string(),
-                        detail: None,
+                content: vec![
+                    ContentBlock::Text {
+                        text: "inspect".to_string(),
                     },
-                }],
+                    ContentBlock::Image {
+                        source: ImageSource::Url {
+                            url: "https://example.com/image.png".to_string(),
+                            detail: Some("high".to_string()),
+                        },
+                    },
+                    ContentBlock::Video {
+                        source: MediaSource::Url {
+                            url: "https://example.com/video.mp4".to_string(),
+                            media_type: Some("video/mp4".to_string()),
+                        },
+                    },
+                    ContentBlock::Audio {
+                        source: MediaSource::Base64 {
+                            media_type: Some("audio/wav".to_string()),
+                            data: "AAAA".to_string(),
+                        },
+                    },
+                ],
             }],
             ..LlmRequest::default()
         };
-        let execution = DynamoExecutionOptions::default();
+        let execution = DynamoExecutionOptions {
+            image_uuids: vec![Some("image-cache-key".to_string())],
+            ..Default::default()
+        };
 
-        let error = LlmRequestView::try_new(&request, &execution)
-            .err()
-            .expect("multimodal input must fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("multimodal Switchyard lowering is not implemented")
+        let view = LlmRequestView::try_new(&request, &execution).unwrap();
+
+        assert_eq!(
+            view.messages[0]["content"][1],
+            json!({
+                "type": "image_url",
+                "image_url": {
+                    "url": "https://example.com/image.png",
+                    "detail": "high"
+                },
+                "uuid": "image-cache-key"
+            })
+        );
+        assert_eq!(view.media_parts.len(), 3);
+        assert_eq!(
+            serde_json::to_value(&view.media_parts[1]).unwrap(),
+            json!({
+                "type": "video_url",
+                "video_url": {
+                    "url": "https://example.com/video.mp4",
+                    "detail": null
+                }
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&view.media_parts[2]).unwrap(),
+            json!({
+                "type": "audio_url",
+                "audio_url": { "url": "data:audio/wav;base64,AAAA" }
+            })
         );
     }
 }

@@ -11,6 +11,7 @@ use dynamo_llm::protocols::{
     openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
+    switchyard::{DynamoLlmRequest, LLM_REQUEST_CONTEXT_KEY},
 };
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::pipeline::{
@@ -48,6 +49,7 @@ impl ScriptGate {
 pub struct ScriptedChatEngine {
     scripts: Mutex<VecDeque<QueuedScript>>,
     requests: Mutex<Vec<NvCreateChatCompletionRequest>>,
+    canonical_requests: Mutex<Vec<Option<DynamoLlmRequest>>>,
 }
 
 impl ScriptedChatEngine {
@@ -55,6 +57,7 @@ impl ScriptedChatEngine {
         Self {
             scripts: Mutex::new(scripts.into_iter().map(QueuedScript::Immediate).collect()),
             requests: Mutex::new(Vec::new()),
+            canonical_requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -72,6 +75,7 @@ impl ScriptedChatEngine {
                     release: release.clone(),
                 }])),
                 requests: Mutex::new(Vec::new()),
+                canonical_requests: Mutex::new(Vec::new()),
             },
             ScriptGate { release },
         )
@@ -85,12 +89,18 @@ impl ScriptedChatEngine {
                 error,
             }])),
             requests: Mutex::new(Vec::new()),
+            canonical_requests: Mutex::new(Vec::new()),
         }
     }
 
     /// Remove and return all requests observed so far, in arrival order.
     pub async fn take_requests(&self) -> Vec<NvCreateChatCompletionRequest> {
         std::mem::take(&mut *self.requests.lock().await)
+    }
+
+    /// Remove and return the provider-neutral requests attached by HTTP handlers.
+    pub async fn take_canonical_requests(&self) -> Vec<Option<DynamoLlmRequest>> {
+        std::mem::take(&mut *self.canonical_requests.lock().await)
     }
 
     pub async fn remaining_scripts(&self) -> usize {
@@ -110,10 +120,15 @@ impl
         &self,
         request: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let canonical_request = request
+            .get_optional::<DynamoLlmRequest>(LLM_REQUEST_CONTEXT_KEY)
+            .map_err(anyhow::Error::msg)?
+            .map(|request| request.as_ref().clone());
         let (request, context) = request.transfer(());
         let ctx = context.context();
 
         self.requests.lock().await.push(request);
+        self.canonical_requests.lock().await.push(canonical_request);
         let script = self
             .scripts
             .lock()

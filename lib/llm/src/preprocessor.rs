@@ -97,7 +97,9 @@ use crate::protocols::{
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     },
-    switchyard::{DynamoExecutionOptions, LlmRequestView},
+    switchyard::{
+        DynamoExecutionOptions, DynamoLlmRequest, LLM_REQUEST_CONTEXT_KEY, LlmRequestView,
+    },
 };
 use crate::tokenizers::traits::Tokenizer;
 use switchyard_protocol::llm::LlmRequest;
@@ -3232,76 +3234,80 @@ impl OpenAIPreprocessor {
         #[cfg(feature = "mm-routing")]
         let mut url_passthrough_images: Vec<(u64, String)> = Vec::new();
 
-        let Some(messages) = request.typed_messages() else {
+        let content_parts = if let Some(parts) = request.canonical_media_parts() {
+            Either::Left(parts.iter().map(MultimodalContentPart::User))
+        } else if let Some(messages) = request.typed_messages() {
+            Either::Right(
+                messages
+                    .iter()
+                    .filter_map(multimodal_content_parts)
+                    .flatten(),
+            )
+        } else {
             return Ok((Vec::new(), None));
         };
         let has_media_loader = self.media_loader.is_some();
 
-        for message in messages.iter() {
-            let Some(content_parts) = multimodal_content_parts(message) else {
+        for content_part in content_parts {
+            let Some((type_str, url, uuid)) = content_part.media_info() else {
                 continue;
             };
-            for content_part in content_parts {
-                let Some((type_str, url, uuid)) = content_part.media_info() else {
-                    continue;
-                };
 
-                if type_str != "image_url" && uuid.is_some() {
-                    return Err(invalid_argument_error(
-                        "multimodal cache UUIDs are supported only for image_url parts with vLLM",
-                    ));
-                }
+            if type_str != "image_url" && uuid.is_some() {
+                return Err(invalid_argument_error(
+                    "multimodal cache UUIDs are supported only for image_url parts with vLLM",
+                ));
+            }
 
-                #[cfg(feature = "mm-routing")]
-                if type_str == "image_url" {
-                    total_image_count += 1;
-                }
-                #[cfg(feature = "mm-routing")]
-                if !exact_mm_routing_supports_modality(type_str, has_media_loader) {
-                    exact_mm_routing_eligible = false;
-                }
+            #[cfg(feature = "mm-routing")]
+            if type_str == "image_url" {
+                total_image_count += 1;
+            }
+            #[cfg(feature = "mm-routing")]
+            if !exact_mm_routing_supports_modality(type_str, has_media_loader) {
+                exact_mm_routing_eligible = false;
+            }
 
-                if uuid.as_deref().is_some_and(str::is_empty) {
-                    return Err(invalid_argument_error(format!(
-                        "{type_str} uuid must be a non-empty string"
-                    )));
-                }
+            if uuid.as_deref().is_some_and(str::is_empty) {
+                return Err(invalid_argument_error(format!(
+                    "{type_str} uuid must be a non-empty string"
+                )));
+            }
 
-                let slots = media_map.entry(type_str.to_string()).or_default();
-                let slot_idx = slots.len();
-                has_user_uuid |= uuid.is_some();
-                if type_str == "image_url" {
-                    uuid_map
-                        .entry(type_str.to_string())
-                        .or_default()
-                        .push(uuid.clone());
-                }
+            let slots = media_map.entry(type_str.to_string()).or_default();
+            let slot_idx = slots.len();
+            has_user_uuid |= uuid.is_some();
+            if type_str == "image_url" {
+                uuid_map
+                    .entry(type_str.to_string())
+                    .or_default()
+                    .push(uuid.clone());
+            }
 
-                match (url, uuid) {
-                    (Some(url), _) => {
-                        if has_media_loader {
-                            fetch_tasks.push(MediaFetchTask {
-                                modality: type_str,
-                                slot_idx,
-                                content_part: content_part.as_user(),
-                            });
-                        } else {
-                            #[cfg(feature = "mm-routing")]
-                            if type_str == "image_url" {
-                                let mm_hash = Self::hash_image_url(url.as_str());
-                                url_passthrough_images.push((mm_hash, url.as_str().to_string()));
-                            }
+            match (url, uuid) {
+                (Some(url), _) => {
+                    if has_media_loader {
+                        fetch_tasks.push(MediaFetchTask {
+                            modality: type_str,
+                            slot_idx,
+                            content_part: content_part.as_user(),
+                        });
+                    } else {
+                        #[cfg(feature = "mm-routing")]
+                        if type_str == "image_url" {
+                            let mm_hash = Self::hash_image_url(url.as_str());
+                            url_passthrough_images.push((mm_hash, url.as_str().to_string()));
                         }
-                        slots.push(MultimodalData::Url(url));
                     }
-                    (None, Some(uuid)) => {
-                        slots.push(MultimodalData::UuidOnly(uuid));
-                    }
-                    (None, None) => {
-                        return Err(invalid_argument_error(format!(
-                            "{type_str} part has neither `url` nor `uuid`; at least one is required"
-                        )));
-                    }
+                    slots.push(MultimodalData::Url(url));
+                }
+                (None, Some(uuid)) => {
+                    slots.push(MultimodalData::UuidOnly(uuid));
+                }
+                (None, None) => {
+                    return Err(invalid_argument_error(format!(
+                        "{type_str} part has neither `url` nor `uuid`; at least one is required"
+                    )));
                 }
             }
         }
@@ -6973,18 +6979,38 @@ impl
         };
 
         // convert the chat completion request to a common completion request
-        let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) = self
-            .preprocess_request_with_options(
-                &request,
-                tracker.as_deref(),
-                preprocess_options,
-                context
-                    .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
-                    .ok()
-                    .flatten()
-                    .map(|name| name.as_ref().clone()),
-            )
-            .await?;
+        let lora_name = context
+            .get_optional::<String>(LORA_NAME_CONTEXT_KEY)
+            .ok()
+            .flatten()
+            .map(|name| name.as_ref().clone());
+        let canonical_request = context
+            .get_optional::<DynamoLlmRequest>(LLM_REQUEST_CONTEXT_KEY)
+            .map_err(anyhow::Error::msg)?;
+        let (mut common_request, annotations, prompt_injected_reasoning, image_tokens) =
+            if let Some(canonical_request) = canonical_request.as_deref() {
+                let mut execution = canonical_request.execution.clone();
+                // Model-specific thinking defaults are normalized immediately
+                // above. Apply those runtime decisions to the canonical view
+                // without rebuilding its semantic content through Chat.
+                execution.chat_template_args = request.chat_template_args.clone();
+                let view = LlmRequestView::try_new(&canonical_request.request, &execution)?;
+                self.preprocess_request_with_options(
+                    &view,
+                    tracker.as_deref(),
+                    preprocess_options,
+                    lora_name,
+                )
+                .await?
+            } else {
+                self.preprocess_request_with_options(
+                    &request,
+                    tracker.as_deref(),
+                    preprocess_options,
+                    lora_name,
+                )
+                .await?
+            };
         attach_agent_context_from_context(&mut common_request, &context);
 
         let guided_tool_constraint = self.apply_tool_choice_guided_decoding(
@@ -7103,6 +7129,7 @@ impl
         let final_stream = speculative_prefill::maybe_wrap_stream(
             final_stream,
             &request,
+            canonical_request.as_deref(),
             &next,
             &self.formatter,
             &self.tokenizer,

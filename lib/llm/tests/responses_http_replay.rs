@@ -16,6 +16,7 @@ use dynamo_runtime::error::{BackendError, DynamoError, ErrorType as DynamoErrorT
 use futures::StreamExt;
 use serde_json::{Value, json};
 use serial_test::serial;
+use switchyard_protocol::llm::{ContentBlock, Role};
 
 #[path = "common/http_harness.rs"]
 mod http_harness;
@@ -89,6 +90,13 @@ async fn unary_text_baseline() {
             )),
             other => panic!("unexpected translated request: {other:#?}"),
         }
+        let canonical = svc.engine.take_canonical_requests().await;
+        let canonical = canonical[0].as_ref().expect("missing LlmRequest");
+        assert_eq!(canonical.request.messages[0].role, Role::User);
+        assert!(matches!(
+            &canonical.request.messages[0].content[..],
+            [ContentBlock::Text { text }] if text == "ping"
+        ));
         assert_eq!(svc.engine.remaining_scripts().await, 0);
         svc.shutdown().await;
     })

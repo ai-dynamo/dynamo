@@ -29,8 +29,10 @@ use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
 use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
 };
+use crate::protocols::switchyard::{DynamoLlmRequest, LlmRequestView};
 use crate::tokenizers::traits::Tokenizer;
 use dynamo_renderer::{OAIChatLikeRequest, OAIPromptFormatter};
+use switchyard_protocol::llm::{ContentBlock, Message, Role};
 
 /// A minimal `OAIChatLikeRequest` for speculative next-turn prefill.
 /// Holds the full conversation (including a new assistant message) and
@@ -75,6 +77,7 @@ impl OAIChatLikeRequest for SpeculativePrefillRequest {
 pub fn maybe_wrap_stream(
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
     request: &NvCreateChatCompletionRequest,
+    canonical_request: Option<&DynamoLlmRequest>,
     next: &Arc<
         dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
     >,
@@ -97,12 +100,16 @@ pub fn maybe_wrap_stream(
     let next = next.clone();
     let formatter = formatter.clone();
     let tokenizer = tokenizer.clone();
-    let messages = request.inner.messages.clone();
+    let prompt = canonical_request
+        .cloned()
+        .map(Box::new)
+        .map(SpeculativePrompt::Canonical)
+        .unwrap_or_else(|| SpeculativePrompt::Chat(request.inner.messages.clone()));
     tokio::spawn(async move {
         let Ok(response_text) = rx.await else {
             return;
         };
-        if let Err(e) = prefill_task(next, formatter, tokenizer, messages, response_text).await {
+        if let Err(e) = prefill_task(next, formatter, tokenizer, prompt, response_text).await {
             tracing::warn!(error = %e, "Speculative prefill failed");
         }
     });
@@ -129,6 +136,11 @@ pub fn maybe_wrap_stream(
     }))
 }
 
+enum SpeculativePrompt {
+    Canonical(Box<DynamoLlmRequest>),
+    Chat(Vec<ChatCompletionRequestMessage>),
+}
+
 /// Fire-and-forget task that renders the next-turn prefix and sends it
 /// through the pipeline as a `max_tokens=1` request to warm the KV cache.
 async fn prefill_task(
@@ -137,22 +149,36 @@ async fn prefill_task(
     >,
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
-    original_messages: Vec<ChatCompletionRequestMessage>,
+    original_prompt: SpeculativePrompt,
     response_text: String,
 ) -> Result<()> {
-    let assistant_msg =
-        ChatCompletionRequestMessage::Assistant(ChatCompletionRequestAssistantMessage {
-            content: Some(ChatCompletionRequestAssistantMessageContent::Text(
-                response_text,
-            )),
-            ..Default::default()
-        });
-
-    let mut messages = original_messages;
-    messages.push(assistant_msg);
-
-    let prefill_request = SpeculativePrefillRequest::new(messages);
-    let formatted_prompt = formatter.render(&prefill_request)?;
+    let formatted_prompt = match original_prompt {
+        SpeculativePrompt::Canonical(mut canonical) => {
+            canonical.request.messages.push(Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text {
+                    text: response_text,
+                }],
+            });
+            canonical.execution.common.add_generation_prompt = Some(false);
+            canonical.execution.common.continue_final_message = Some(false);
+            formatter.render(&LlmRequestView::try_new(
+                &canonical.request,
+                &canonical.execution,
+            )?)?
+        }
+        SpeculativePrompt::Chat(mut messages) => {
+            messages.push(ChatCompletionRequestMessage::Assistant(
+                ChatCompletionRequestAssistantMessage {
+                    content: Some(ChatCompletionRequestAssistantMessageContent::Text(
+                        response_text,
+                    )),
+                    ..Default::default()
+                },
+            ));
+            formatter.render(&SpeculativePrefillRequest::new(messages))?
+        }
+    };
     let encoding = tokenizer.encode(&formatted_prompt)?;
     let token_ids = encoding.token_ids().to_vec();
 

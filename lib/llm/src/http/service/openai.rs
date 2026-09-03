@@ -82,6 +82,9 @@ use crate::protocols::openai::{
     },
     videos::{NvCreateVideoRequest, NvVideosResponse},
 };
+use crate::protocols::switchyard::{
+    LLM_REQUEST_CONTEXT_KEY, decode_wire_request, execution_from_chat,
+};
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 use dynamo_protocols::types::ChatCompletionMessageContent;
@@ -92,6 +95,7 @@ use dynamo_protocols::types::responses::{
     CountInputTokensRequest, CountInputTokensResponse, ErrorObject,
 };
 use dynamo_runtime::logging::get_distributed_tracing_context;
+use switchyard_translation::WireFormat;
 use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
@@ -2859,6 +2863,19 @@ async fn chat_completions(
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
     }
 
+    let canonical_request = serde_json::to_value(request.content())
+        .map_err(anyhow::Error::from)
+        .and_then(|body| {
+            decode_wire_request(WireFormat::OpenAiChat, body, execution_from_chat(&request)?)
+        })
+        .map_err(|e| {
+            let err_response =
+                ErrorMessage::from_anyhow(e, "Failed to lower chat request into LlmRequest");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
+    request.insert(LLM_REQUEST_CONTEXT_KEY, canonical_request);
+
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let (engine, parsing_options) = state
@@ -3450,6 +3467,11 @@ async fn responses(
         safety_identifier: request.inner.safety_identifier.clone(),
     };
     let request_id = request.id().to_string();
+    let canonical_body = serde_json::to_value(request.content()).map_err(|e| {
+        let err_response = responses_conversion_error_response(e.into());
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
     let (orig_request, context) = request.into_parts();
 
     let mut chat_request: NvCreateChatCompletionRequest =
@@ -3485,7 +3507,25 @@ async fn responses(
             continuous_usage_stats: false,
         });
 
-    let mut request = context.map(|mut _req| chat_request);
+    let canonical_request = decode_wire_request(
+        WireFormat::OpenAiResponses,
+        canonical_body,
+        execution_from_chat(&chat_request).map_err(|e| {
+            let err_response = responses_conversion_error_response(e);
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?,
+    )
+    .map_err(|e| {
+        let err_response = responses_conversion_error_response(e);
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
+
+    // The Chat value now carries only response/parser compatibility state. The
+    // Rust preprocessor reads semantic input from `DynamoLlmRequest` below.
+    let mut request = context.map(|_req| chat_request);
+    request.insert(LLM_REQUEST_CONTEXT_KEY, canonical_request);
     if response_params.max_output_tokens.is_none() {
         request.insert(PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY, true);
     }
@@ -3501,8 +3541,9 @@ async fn responses(
             err_response
         })?;
 
-    // The Responses API is converted to the same chat request contract. Narrow
-    // the model parser before unary aggregation just as the streaming path does.
+    // The response/parser compatibility envelope uses the same controls as
+    // Chat Completions. Narrow the model parser before unary aggregation just
+    // as the streaming path does.
     let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
         .map_err(|e| {
             let err_response = ErrorMessage::from_anyhow(e.into(), "Invalid tool_choice");

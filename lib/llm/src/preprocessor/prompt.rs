@@ -36,6 +36,17 @@ use crate::protocols::openai::{
 /// belonging to the worker pass through untouched.
 pub trait MediaRequestExt {
     fn media_io_kwargs(&self) -> Option<&serde_json::Value>;
+
+    /// Canonical media parts when the request is not backed by OpenAI Chat DTOs.
+    ///
+    /// The default keeps the existing typed-message path. Provider-neutral
+    /// request views override this so media reaches preprocessing without first
+    /// constructing a Chat request.
+    fn canonical_media_parts(
+        &self,
+    ) -> Option<&[dynamo_protocols::types::ChatCompletionRequestUserMessageContentPart]> {
+        None
+    }
 }
 
 /// Parse a JSON object string into a serde_json Map, preserving the exact

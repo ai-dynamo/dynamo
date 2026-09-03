@@ -3,9 +3,9 @@
 
 //! HTTP handler for the Anthropic Messages API (`/v1/messages`).
 //!
-//! This is a translation layer: incoming Anthropic requests are converted to
-//! chat completions, processed by the existing engine, and responses/streams
-//! are converted back to Anthropic format.
+//! Incoming Anthropic requests are decoded to the provider-neutral `LlmRequest`
+//! used for preprocessing. Response framing still reuses the existing Chat
+//! stream ABI before responses are encoded back to Anthropic format.
 
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -56,8 +56,12 @@ use crate::protocols::openai::chat_completions::{
     NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
     NvCreateChatCompletionStreamResponse, aggregator::ChatCompletionAggregator,
 };
+use crate::protocols::switchyard::{
+    LLM_REQUEST_CONTEXT_KEY, decode_wire_request, execution_from_chat,
+};
 use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
+use switchyard_translation::WireFormat;
 
 // Re-use helpers from the openai module (sibling under service/)
 use super::error::{SanitizedError, invalid_argument};
@@ -439,6 +443,14 @@ async fn anthropic_messages(
 
     let (orig_request, context) = request.into_parts();
     let model_for_resp = orig_request.model.clone();
+    let canonical_body = serde_json::to_value(&orig_request).map_err(|e| {
+        inflight_guard.mark_error(ErrorType::Validation);
+        anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &format!("Failed to serialize request for LlmRequest lowering: {e}"),
+        )
+    })?;
 
     // Anthropic exposes input usage in `message_start`, before the backend's
     // authoritative count is available. Seed the stream with the same
@@ -456,8 +468,8 @@ async fn anthropic_messages(
         .as_ref()
         .is_some_and(|t| t.thinking_type == "disabled");
 
-    // Convert Anthropic request to the Chat Completion request currently used
-    // by the engine boundary.
+    // Build the legacy response/parser envelope. Semantic prompt processing
+    // uses the provider-neutral LlmRequest attached below.
     let mut chat_request: NvCreateChatCompletionRequest =
         orig_request.try_into().map_err(|e: anyhow::Error| {
             inflight_guard.mark_error(ErrorType::Validation);
@@ -495,10 +507,9 @@ async fn anthropic_messages(
     //      reasoning mode with stripped_think_start=true, which is critical for
     //      correct `</think>` boundary detection in the streaming path.
     //
-    // The OpenAI path handles this in the preprocessor: it renders the template,
-    // inspects the formatted prompt for a trailing `<think>`, and sets
-    // prompt_injected_reasoning accordingly. The Anthropic path bypasses the
-    // preprocessor, so we infer prompt injection from the reasoning parser config.
+    // Prompt preprocessing will inspect the rendered prompt for a trailing
+    // `<think>`. Response parsing must be configured before that result is
+    // available here, so infer the same state from the parser configuration.
     let prompt_injected_reasoning =
         parsing_options.reasoning_parser.is_some() && !thinking_explicitly_disabled;
 
@@ -517,11 +528,33 @@ async fn anthropic_messages(
             .or_insert(serde_json::Value::Bool(false));
     }
 
-    let request = context.map(|_req| chat_request);
+    let canonical_request = decode_wire_request(
+        WireFormat::AnthropicMessages,
+        canonical_body,
+        execution_from_chat(&chat_request).map_err(|e| {
+            inflight_guard.mark_error(ErrorType::Validation);
+            anthropic_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                &format!("Failed to extract Dynamo execution options: {e}"),
+            )
+        })?,
+    )
+    .map_err(|e| {
+        inflight_guard.mark_error(ErrorType::Validation);
+        anthropic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            &format!("Failed to lower Anthropic request into LlmRequest: {e}"),
+        )
+    })?;
 
-    // Anthropic requests are converted to the same chat request contract. Keep
-    // parser activation identical to the OpenAI Chat Completions and Responses
-    // entry points so content-only turns cannot be reclassified as tool calls.
+    let mut request = context.map(|_req| chat_request);
+    request.insert(LLM_REQUEST_CONTEXT_KEY, canonical_request);
+
+    // The response/parser envelope uses the same controls as Chat Completions.
+    // Keep parser activation identical across entry points so content-only
+    // turns cannot be reclassified as tool calls.
     let parsing_options = apply_request_tool_call_parsing_options(parsing_options, &request)
         .map_err(|e| {
             inflight_guard.mark_error(ErrorType::Validation);
