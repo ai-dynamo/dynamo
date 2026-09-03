@@ -1283,48 +1283,6 @@
         }
       ]
     },
-    "nvidia.com.v1alpha1.PodSnapshot": {
-      "properties": {
-        "apiVersion": {
-          "type": "string"
-        },
-        "kind": {
-          "type": "string"
-        },
-        "metadata": {
-          "type": "object"
-        }
-      },
-      "type": "object",
-      "x-kubernetes-group-version-kind": [
-        {
-          "group": "nvidia.com",
-          "kind": "PodSnapshot",
-          "version": "v1alpha1"
-        }
-      ]
-    },
-    "nvidia.com.v1alpha1.PodSnapshotContent": {
-      "properties": {
-        "apiVersion": {
-          "type": "string"
-        },
-        "kind": {
-          "type": "string"
-        },
-        "metadata": {
-          "type": "object"
-        }
-      },
-      "type": "object",
-      "x-kubernetes-group-version-kind": [
-        {
-          "group": "nvidia.com",
-          "kind": "PodSnapshotContent",
-          "version": "v1alpha1"
-        }
-      ]
-    },
     "nvidia.com.v1beta1.DynamoComponentDeployment": {
       "properties": {
         "apiVersion": {

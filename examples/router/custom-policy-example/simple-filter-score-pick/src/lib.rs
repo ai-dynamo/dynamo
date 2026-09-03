@@ -53,7 +53,7 @@ fn provider(
             })];
             WorkerSelectionPolicy::new_with_filters(
                 config.clone(),
-                worker_type,
+                worker_type.as_str(),
                 filters,
                 vec![Box::new(ActiveRequestsScorer)],
                 Box::new(RequestAwarePicker),
@@ -62,6 +62,7 @@ fn provider(
     ))
 }
 
+/// Register the `simple-filter-score-pick` policy type.
 pub fn register(
     registry: &mut WorkerSelectionPolicyRegistry,
 ) -> Result<(), WorkerSelectionPolicyRegistryError> {

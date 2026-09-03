@@ -27,6 +27,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
@@ -34,7 +35,6 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -372,7 +372,11 @@ func TestDGDCheckpointsReconciler_CreatePreservesGMSSaverClient(t *testing.T) {
 	require.NotNil(t, main)
 	assert.Contains(t, main.Resources.Claims, corev1.ResourceClaim{Name: dra.ClaimName})
 	assert.Contains(t, saver.VolumeMounts, corev1.VolumeMount{Name: gms.SharedVolumeName, MountPath: gms.SharedMountPath})
-	assert.NotNil(t, findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.InitContainers, gms.ServerContainerName))
+	server := findContainer(ckpt.Spec.Job.PodTemplateSpec.Spec.InitContainers, gms.ServerContainerName)
+	require.NotNil(t, server)
+	assert.Empty(t, server.Args)
+	assert.Contains(t, server.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
+	assert.Contains(t, main.Env, corev1.EnvVar{Name: gms.EnvUseV1, Value: "true"})
 	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
 	require.NoError(t, err)
 	checkpointID := checkpoint.DGDCheckpointID(
@@ -1507,7 +1511,7 @@ func TestCheckpointWorkerHashForComponentUsesActiveGeneration(t *testing.T) {
 			},
 		},
 	})
-	rollout.setCurrentWorkerHashes(dgd, workerGenerationHashes{v1: "oldhash"})
+	rollout.setCurrentWorkerHashes(dgd, workerGenerationHashes{v2: "oldhash"})
 
 	t.Log("Compute the desired and checkpoint worker hashes")
 	desired, err := desiredWorkerHashes(dgd)

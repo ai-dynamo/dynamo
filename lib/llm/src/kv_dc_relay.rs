@@ -1,17 +1,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! DC-scoped KV-cache Relay and endpoint-independent CKF identity boundary.
+//! DC-scoped KV-cache Relay with endpoint-local CKF pools.
 
 mod actor;
 mod discovery;
 mod host;
 mod identity;
+mod load;
 mod pool_registry;
+mod publication;
 mod resolution;
+mod topology;
 
+pub use discovery::KvDcRelayDiscoveryConfig;
 pub use host::{
     DEFAULT_EXPECTED_UNIQUE_BLOCKS, KvDcRelay, KvDcRelayConfig, KvDcRelayError, KvDcRelayHealth,
+    KvDcRelayProducerConfig,
 };
 #[cfg(feature = "ckf-diagnostics")]
 pub use host::{
@@ -22,6 +27,14 @@ pub use host::{
 };
 pub use identity::{
     CanonicalModelId, CanonicalModelIdError, CanonicalModelRegistration, DcPoolCatalog,
-    DcPoolDescriptor, DcRelayIdentity, ModelAlias, ModelAliasError, ModelTarget,
-    PoolIdentitySources,
+    DcPoolDescriptor, DcRelayIdentity, KvQueryHashFormat, KvQuerySemantics, KvQuerySemanticsError,
+    ModelAlias, ModelAliasError, ModelTarget, PoolIdentitySources, WorkerRole,
+};
+pub use load::PoolLoadSnapshot;
+pub use publication::{
+    PoolPublicationStream, PublicationError, PublicationErrorKind, PublicationFrame,
+    PublicationFrameKind, RelayPublicationSource,
+};
+pub use topology::{
+    AdapterReadiness, TopologyEntry, TopologyMember, TopologyReadinessState, TopologySnapshot,
 };

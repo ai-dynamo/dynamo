@@ -27,7 +27,7 @@
   This release must use dynamo-operator.upgradeCRD=false and use CRDs managed
   by the cluster-wide operator. Use cluster-wide mode for production deployments.
 
-  See: https://docs.nvidia.com/dynamo/latest/kubernetes-deployment/start-here/installation-guide
+  See: https://docs.nvidia.com/dynamo/latest/kubernetes/installation/install-dynamo
 ================================================================================
 
 {{- end }}

@@ -23,6 +23,39 @@ COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 
 ENV PATH=/usr/local/bin/etcd:$PATH
 
+{% if device == "cuda" %}
+# Install the TurboJPEG runtime used by frontend JPEG decoding and bring
+# base-image OS packages up to the current patch releases. --only-upgrade skips
+# anything not already installed while keeping both operations in one layer.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libturbojpeg && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --only-upgrade \
+        dirmngr \
+        gnupg \
+        gnupg-utils \
+        gnupg2 \
+        gpg \
+        gpg-agent \
+        gpgconf \
+        gpgsm \
+        gpgv \
+        keyboxd \
+        libssl3t64 \
+        openssl && \
+    rm -rf /var/lib/apt/lists/* && \
+    ldconfig && \
+    ldconfig -p | grep -q 'libturbojpeg.so.0'
+{% else %}
+# Install the TurboJPEG runtime used by frontend JPEG decoding.
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libturbojpeg && \
+    rm -rf /var/lib/apt/lists/* && \
+    ldconfig && \
+    ldconfig -p | grep -q 'libturbojpeg.so.0'
+{% endif %}
+
 # Create dynamo user with group 0 for OpenShift compatibility
 RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     && useradd -m -s /bin/bash -g 0 dynamo \
@@ -78,6 +111,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 RUN pip install --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/aisimulate*.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         "distro==1.9.0"
 {% else %}
@@ -85,7 +119,8 @@ RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
     pip install --break-system-packages --no-deps \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-        /opt/dynamo/wheelhouse/ai_dynamo*any.whl
+        /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/aisimulate*.whl
 
 # Install accelerate for diffusion/video worker pipelines (diffusers requires it
 # for enable_model_cpu_offload but the upstream SGLang runtime image omits it)
@@ -206,6 +241,18 @@ RUN set -eux; \
     ldconfig
 {% endif %}
 
+# Drop the Nsight efa_metrics plugin the CUDA floor carries: a Go NIC sampler
+# nothing in the serving path loads. On this image it arrives under Nsight
+# Compute rather than Nsight Systems, and both roots move with every base bump,
+# so the paths are globbed and the removal is asserted rather than pinned. This
+# stage has no overlay rebase -- `runtime` is FROM pre_runtime -- so one
+# deletion here ships.
+RUN rm -rf \
+        /usr/local/cuda-*/NsightSystems-cli-*/target-linux-*/plugins/efa_metrics \
+        /opt/nvidia/nsight-systems-cli/*/target-linux-*/plugins/efa_metrics \
+        /opt/nvidia/nsight-compute/*/host/target-linux-*/plugins/efa_metrics && \
+    [ -z "$(find /usr/local /opt -xdev -type d -name efa_metrics 2>/dev/null)" ]
+
 {% if device == "cuda" %}
 # Copy the in-tree VP9 ffmpeg from wheel_builder: versioned shared libs
 # (libav*.so*, libsw*.so*) + libvpx + the in-tree CLI binary that imageio targets
@@ -247,11 +294,14 @@ ENV IMAGEIO_FFMPEG_EXE=
 # module lookup. The wheel's auditwheel dependency directory is deliberately
 # placed first for every process; it contains only hash-mangled dependencies
 # plus the two generic UCX aliases. No existing wheel file or ELF metadata is
-# modified.
+# modified. The same script publishes NIXL's C API directory at the second path
+# below and registers it with the runtime linker, so the bare dlopen of
+# libnixl_capi.so in nixl-sys resolves. Both paths are passed explicitly because
+# the ENV on the next line has to name the same two directories.
 RUN --mount=type=bind,source=./container/deps/sglang/install_nixl_ucx_compat.sh,target=/tmp/install_nixl_ucx_compat.sh,readonly \
     --mount=type=bind,source=./container/deps/sglang/discover_nixl_ucx_layout.py,target=/tmp/discover_nixl_ucx_layout.py,readonly \
-    bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat
-ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+    bash /tmp/install_nixl_ucx_compat.sh /opt/dynamo/nixl-ucx-compat /opt/dynamo/nixl-capi
+ENV LD_LIBRARY_PATH=/opt/dynamo/nixl-ucx-compat:/opt/dynamo/nixl-capi${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 {% endif %}
 
 # Copy tests, deploy and components for CI with correct ownership

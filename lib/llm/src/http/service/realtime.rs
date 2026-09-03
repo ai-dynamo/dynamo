@@ -16,10 +16,10 @@
 //! - The handler sends a `session.created` server event before any
 //!   engine events flow.
 //! - The handler loops over inbound client frames in
-//!   [`select_engine`] until a `session.update` arrives with a usable model
+//!   `select_engine` until a `session.update` arrives with a usable model
 //!   (`session.model` for realtime sessions or
 //!   `session.audio.input.transcription.model` for transcription sessions)
-//!   and [`ModelManager::get_realtime_engine`] returns Ok.
+//!   and `ModelManager::get_realtime_engine` returns Ok.
 //! - Non-conforming frames (wrong event type, missing model, unknown / unavailable
 //!   model, malformed JSON, binary frames) emit a spec-shaped
 //!   `RealtimeServerEvent::Error` while the loop continues so a well-behaved client

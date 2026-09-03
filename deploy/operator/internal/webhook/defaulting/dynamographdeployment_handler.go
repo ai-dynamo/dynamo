@@ -25,6 +25,7 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/provideroverride"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -55,9 +56,10 @@ func NewDGDDefaulter(operatorVersion string) *DGDDefaulter {
 
 // Default implements admission.CustomDefaulter.
 // On every operation: defaults nil Replicas to 1 for all components.
-// On every Grove-pathway operation: defaults nil MinAvailable to 1. Scaling to
-// replicas=0 does not rewrite MinAvailable; it remains the component's
-// configured minimum viable unit.
+// On CREATE: sets the controller-owned workload provider from routing intent before provider-specific defaults.
+// Existing unannotated DGDs remain unselected for controller-side workload adoption.
+// On the Grove pathway: defaults nil MinAvailable to 1. Scaling to replicas=0
+// does not rewrite MinAvailable; it remains the component's configured minimum viable unit.
 // On CREATE: stamps nvidia.com/dynamo-operator-origin-version with the operator version.
 // On UPDATE/DELETE: the origin version annotation is immutable once set.
 func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
@@ -78,26 +80,62 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		return nil
 	}
 
-	// Default nil replicas to 1 for all components. The Replicas field is
-	// *int32 with omitempty, so users can legally omit it. Without this
-	// default the controller panics on a nil pointer dereference in
-	// expandRolesForComponent(). Apply on every operation so that components
-	// added via UPDATE also get the default.
-	grovePathway := d.isGrovePathway(ctx, dgd)
+	// Resolve the authoritative or creation-time provider before applying component defaults.
+	provider, providerSelected := defaultWorkloadProvider(ctx, dgd, req.Operation)
+
+	// Persist the root target only when this provider context resolves unambiguously.
+	if dgd.Spec.ProviderOverride != nil {
+		provideroverride.DefaultTarget(dgd.Spec.ProviderOverride, provider, provideroverride.ScopeRoot, nil)
+	}
+
+	// Default nil replicas on every operation so newly added components remain safe to expand.
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
+
+		// Default omitted replica counts before the controller expands component roles.
 		if component.Replicas == nil {
 			component.Replicas = ptr.To(int32(1))
 		}
-		if grovePathway && component.MinAvailable == nil {
+
+		// Default Grove's minimum available replicas only for Grove-selected DGDs.
+		if providerSelected && provider == consts.WorkloadProviderGrove && component.MinAvailable == nil {
 			component.MinAvailable = ptr.To(int32(1))
+		}
+
+		// Persist the component target only when this provider context resolves unambiguously.
+		if component.ProviderOverride != nil {
+			provideroverride.DefaultTarget(
+				component.ProviderOverride,
+				provider,
+				provideroverride.ScopeComponent,
+				component,
+			)
+		}
+
+		// Default the explicit leader and worker provider contexts for multinode components.
+		if component.Multinode != nil {
+			if component.Multinode.Leader != nil && component.Multinode.Leader.ProviderOverride != nil {
+				provideroverride.DefaultTarget(
+					component.Multinode.Leader.ProviderOverride,
+					provider,
+					provideroverride.ScopeMultinodeLeader,
+					component,
+				)
+			}
+
+			if component.Multinode.Worker != nil && component.Multinode.Worker.ProviderOverride != nil {
+				provideroverride.DefaultTarget(
+					component.Multinode.Worker.ProviderOverride,
+					provider,
+					provideroverride.ScopeMultinodeWorker,
+					component,
+				)
+			}
 		}
 	}
 
+	// Stamp creation provenance independently from level-based provider defaulting.
 	if req.Operation == admissionv1.Create {
-		if dgd.Annotations == nil {
-			dgd.Annotations = make(map[string]string)
-		}
 		// Stamp operator version on creation (don't overwrite if already set)
 		if _, exists := dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; !exists {
 			dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
@@ -111,9 +149,34 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	return nil
 }
 
-func (d *DGDDefaulter) isGrovePathway(ctx context.Context, dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
-	return features.MustGateFrom(ctx).Enabled(features.Grove) && (dgd.Annotations == nil ||
-		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse)
+func defaultWorkloadProvider(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	operation admissionv1.Operation,
+) (string, bool) {
+	// Keep existing selections authoritative and leave legacy updates for controller adoption.
+	if operation != admissionv1.Create {
+		if provider, exists := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]; exists {
+			return provider, true
+		}
+		return "", false
+	}
+
+	// Derive every new DGD from user-facing routing intent, ignoring the controller-owned annotation.
+	provider := consts.WorkloadProviderComponent
+
+	// Select Grove when it is enabled and the DGD has not opted out.
+	if features.MustGateFrom(ctx).Enabled(features.Grove) &&
+		strings.ToLower(dgd.Annotations[consts.KubeAnnotationEnableGrove]) != consts.KubeLabelValueFalse {
+		provider = consts.WorkloadProviderGrove
+	}
+
+	// Allocate annotation storage before materializing the selected provider.
+	if dgd.Annotations == nil {
+		dgd.Annotations = make(map[string]string)
+	}
+	dgd.Annotations[consts.KubeAnnotationWorkloadProvider] = provider
+	return provider, true
 }
 
 // RegisterWithManager registers the defaulting webhook with the manager.

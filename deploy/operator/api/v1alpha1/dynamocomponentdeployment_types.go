@@ -50,9 +50,18 @@ type DynamoComponentDeploymentSpec struct {
 
 // +kubebuilder:validation:XValidation:rule="!has(self.minAvailable) || (has(self.replicas) && self.replicas == 0) || self.minAvailable <= (has(self.replicas) ? self.replicas : 1)",message="minAvailable must be less than or equal to replicas unless replicas is 0"
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.minAvailable) || (has(self.minAvailable) && self.minAvailable == oldSelf.minAvailable)",message="minAvailable is immutable after creation"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.componentType) || (has(self.componentType) && self.componentType == oldSelf.componentType)",message="componentType is immutable after it is set"
 type DynamoComponentDeploymentSharedSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+
+	// ProviderOverride configures the primary Grove unit representing this DGD
+	// component. With apiVersion `grove.io/v1alpha1`, target is
+	// `PodCliqueTemplateSpec` for a single-node component or
+	// `PodCliqueScalingGroupConfig` for a PCSG-backed component; value may set
+	// only `topologyConstraint`. Standalone DCD OpenAPI omits this field.
+	// +optional
+	ProviderOverride *ProviderOverride `json:"providerOverride,omitempty"`
 
 	// Annotations to add to generated Kubernetes resources for this component
 	// (such as Pod, Service, and Ingress when applicable).
@@ -73,7 +82,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// main image. DGD admission requires it when spec.extraPodSpec.mainContainer.image has no parseable
 	// semantic-version tag; controller-generated DCDs may omit it. Set it also when the parsed tag is
 	// not the Dynamo runtime version. Use the canonical MAJOR.MINOR.PATCH value, for example "1.4.0".
-	// It does not change the image or rendered Pod, and changing only this field does not trigger a rollout.
+	// It does not change the image. Setting or changing an override that resolves to version 1.5.0 or
+	// later may trigger a rollout. Keep it consistent with the image's runtime version.
 	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
 	// +optional
 	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
@@ -160,8 +170,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
 
-	// EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.
+	// EPPConfig defines legacy Go-EPP configuration for Endpoint Picker Plugin components.
 	// Only applicable when ComponentType is "epp".
+	//
+	// Deprecated: omit this field for the native Rust EPP. Presence of eppConfig
+	// keeps the Go EPP Pod contract until migration clears it.
 	// +optional
 	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 
@@ -203,6 +216,14 @@ type MultinodeSpec struct {
 	// Must be greater than 1.
 	// +kubebuilder:validation:Minimum=2
 	NodeCount int32 `json:"nodeCount"`
+
+	// Leader configures the generated multinode leader unit.
+	// +optional
+	Leader *MultinodeRoleSpec `json:"leader,omitempty"`
+
+	// Worker configures the generated multinode worker unit.
+	// +optional
+	Worker *MultinodeRoleSpec `json:"worker,omitempty"`
 }
 
 type IngressTLSSpec struct {
@@ -472,6 +493,28 @@ type ModelReference struct {
 	Revision string `json:"revision,omitempty"`
 }
 
+// EPPConfig contains configuration for the legacy Go EPP (Endpoint Picker Plugin).
+//
+// Deprecated: Go EPP is deprecated. New EPP components should omit eppConfig and
+// use the native Rust EPP. Kept for round-trip and upgrade compatibility.
+type EPPConfig struct {
+	// ConfigMapRef references a user-provided ConfigMap containing EPP configuration.
+	// The ConfigMap should contain EndpointPickerConfig YAML.
+	// Mutually exclusive with Config.
+	// +optional
+	ConfigMapRef *corev1.ConfigMapKeySelector `json:"configMapRef,omitempty"`
+
+	// Config allows specifying EPP EndpointPickerConfig directly as a structured object.
+	// The operator will marshal this to YAML and create a ConfigMap automatically.
+	// Mutually exclusive with ConfigMapRef.
+	// One of ConfigMapRef or Config must be specified (no default configuration).
+	// Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
+	// +optional
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
+}
+
 // FrontendSidecarSpec configures the auto-generated frontend sidecar container.
 // The operator uses these fields together with built-in frontend defaults (command, probes, ports,
 // and Dynamo env vars) to produce a fully configured sidecar container.
@@ -495,24 +538,4 @@ type FrontendSidecarSpec struct {
 	// These are merged with (and can override) the auto-generated Dynamo env vars.
 	// +optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
-}
-
-// EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
-// EPP is responsible for intelligent endpoint selection and KV-aware routing.
-type EPPConfig struct {
-	// ConfigMapRef references a user-provided ConfigMap containing EPP configuration.
-	// The ConfigMap should contain EndpointPickerConfig YAML.
-	// Mutually exclusive with Config.
-	// +optional
-	ConfigMapRef *corev1.ConfigMapKeySelector `json:"configMapRef,omitempty"`
-
-	// Config allows specifying EPP EndpointPickerConfig directly as a structured object.
-	// The operator will marshal this to YAML and create a ConfigMap automatically.
-	// Mutually exclusive with ConfigMapRef.
-	// One of ConfigMapRef or Config must be specified (no default configuration).
-	// Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
-	// +optional
-	// +kubebuilder:validation:Type=object
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
 }

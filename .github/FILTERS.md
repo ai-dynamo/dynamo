@@ -11,21 +11,23 @@ When you open a PR, CI checks which files changed and runs only relevant jobs:
 | `core` | Main test suite (vLLM, SGLang, TRT-LLM containers) |
 | `dev_images` | dev / local-dev image builds only (no runtime or GPU jobs) |
 | `operator` | Kubernetes operator tests |
-| `snapshot` | Snapshot Agent + all-framework DynamoCheckpoint deploy tests |
+| `snapshot` | Checkpoint-placeholder image + all-framework DynamoCheckpoint deploy tests (github.com/ai-dynamo/snapshot is external; this covers Dynamo's own integration surface) |
 | `snapshot_vllm` / `snapshot_sglang` / `snapshot_trtllm` | That framework's DynamoCheckpoint deploy suite |
 | `deploy` | Deploy-specific tests |
 | `vllm` / `sglang` / `trtllm` | Backend-specific tests |
-| `sidecar` | Nothing directly; sidecar source and proto files also match `rust` |
+| `sidecar` | Unified multi-architecture sidecar image build, publish, and compliance checks for changes under `lib/sidecar/**` (docs excluded), its shared workflow, and shared compliance inputs |
 | `benchmarks` | Dynamo runtime pipeline (runs `tests/benchmarks/**` pytest suite) |
 | `sample` | Sample-backend unified test (piggybacks on vllm image) |
 | `efa` | EFA runtime image builds for vLLM, SGLang, TRT-LLM (`container/templates/aws.Dockerfile` change) |
-| `docs` | Nothing (classification only) |
+| `docs` | Docs Lint, Fern Configuration, Docs Website Composition, and Fern Broken Links checks; Fern preview or publish workflow |
 | `fern_components` | Parse custom MDX components (a step inside Fern Configuration Check) |
-| `examples` | Recipe Kustomize generation and unit checks |
+| `examples` | Recipe Kustomize generation and docs-artifact unit checks |
 | `ignore` | Nothing (classification only) |
 | `rust` | Rust pre merge checks |
 
-> **Note:** `docs`, `ignore`, and `sidecar` don't directly trigger CI jobs. They exist to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, which runs the workspace Rust checks.
+> **Note:** `ignore` doesn't directly trigger CI jobs. It exists to satisfy coverage requirements - every file must match at least one filter. Sidecar source and proto files also match `rust`, so the existing workspace Rust checks cover sidecar tests before the image is built and published. `docs` gates the Docs Lint, Fern Configuration Check, Docs Website Composition Check, and Fern Broken Links Check jobs in `pre-merge.yml`. `examples` gates Recipe Check.
+
+> **TODO:** The sidecar image also consumes root Cargo files, shared libraries, and composite actions. Expanding the filter to cover every remaining build input is deferred until the additional PR CI fan-out is evaluated and agreed.
 
 ## Fixing "Uncovered Files" Errors
 
@@ -38,8 +40,11 @@ Add patterns to `filters.yaml`:
 
 1. **New source files** → Add to `core` or relevant backend filter
 2. **New examples, recipes, and recipe validation helpers** → Add to `examples`
-3. **Documentation** → Add to `docs`
-4. **Config files that don't need CI** → Add to `ignore`
+3. **Fern docs-site content** (anything under `docs/fern/`) → Add to `docs`
+4. **Markdown elsewhere in the repo** (a `lib/` or `container/` README) → Add to `ignore`.
+   It is documentation, but the Fern site does not read it, and `docs` gates four jobs
+   including the composition check.
+5. **Config files that don't need CI** → Add to `ignore`
 
 ## Testing Locally
 
