@@ -16,7 +16,9 @@ use crate::services::common::replica_sync::{
 use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::TrackingHashContext;
 
-use super::core::{SelectionCore, SelectionHost, SelectionPartition, SelectionServiceConfig};
+use super::core::{
+    KvIndexSource, SelectionCore, SelectionHost, SelectionPartition, SelectionServiceConfig,
+};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::policy_registry::WorkerSelectionPolicyRegistry;
@@ -37,9 +39,7 @@ pub struct SelectionServiceBuilder {
     worker_type: WorkerType,
     worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
     host: SelectionHost,
-    remote_indexer_url: Option<String>,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
-    external_kv_events: bool,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -78,9 +78,7 @@ impl SelectionServiceBuilder {
             worker_type,
             worker_selection_policy_registry,
             host: SelectionHost::default(),
-            remote_indexer_url: None,
             worker_selection_policy_factory: None,
-            external_kv_events: false,
         }
     }
 
@@ -94,18 +92,10 @@ impl SelectionServiceBuilder {
         self
     }
 
-    /// The embedding host feeds KV state itself: workers become schedulable
-    /// without `kv_events_endpoint(s)` and no ZMQ listener is started here.
-    pub fn external_kv_events(mut self) -> Self {
-        self.external_kv_events = true;
-        self
-    }
-
-    /// Serve the primary KV index from a standalone indexer at `base_url`
-    /// instead of subscribing to worker KV events in this process. Requires
-    /// `use_kv_events=true`; `indexer_peers` recovery is skipped.
-    pub fn remote_indexer(mut self, base_url: impl Into<String>) -> Self {
-        self.remote_indexer_url = Some(base_url.into());
+    /// Where each partition's KV index comes from (see [`KvIndexSource`]).
+    /// Shorthand for setting `host.cache.index`.
+    pub fn kv_index(mut self, source: KvIndexSource) -> Self {
+        self.host.cache.index = source;
         self
     }
 
@@ -148,7 +138,7 @@ impl SelectionServiceBuilder {
         };
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
         let mut indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
-        if let Some(base_url) = &self.remote_indexer_url {
+        if let KvIndexSource::Remote(base_url) = &self.host.cache.index {
             indexer_policy = indexer_policy.with_remote_indexer(base_url.clone())?;
             if !self.indexer_peers.is_empty() {
                 tracing::warn!(
@@ -186,7 +176,6 @@ impl SelectionServiceBuilder {
             self.selection_cache,
             tracking_hash,
             indexer_policy,
-            self.external_kv_events,
         ));
 
         if recover_from_peers {
@@ -248,7 +237,7 @@ impl SelectionServiceConfig {
             builder = builder.replica_sync(port, self.replica_sync_peers.clone());
         }
         if let Some(url) = &self.remote_indexer_url {
-            builder = builder.remote_indexer(url.clone());
+            builder = builder.kv_index(KvIndexSource::Remote(url.clone()));
         }
         builder
     }

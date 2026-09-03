@@ -31,10 +31,10 @@ use dynamo_kv_router::scheduling::AdmissionAttempt;
 use dynamo_kv_router::services::indexer::{self, IndexerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::services::selection::{
-    self, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest, SelectAndReserveRequest,
-    SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig, SelectionError,
-    SelectionService as RustSelectionService, SelectionServiceBuilder, SelectionServiceConfig,
-    WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyRegistry,
+    self, KvIndexSource, OverlapScoresRequest, PotentialLoadsRequest, ReservationRequest,
+    SelectAndReserveRequest, SelectRequest, SelectionCacheConfig as RsSelectionCacheConfig,
+    SelectionError, SelectionService as RustSelectionService, SelectionServiceBuilder,
+    SelectionServiceConfig, WorkerPatchRequest, WorkerRequest, WorkerSelectionPolicyRegistry,
     warn_for_unserved_worker_selection_policies,
 };
 #[cfg(feature = "slot-tracker")]
@@ -673,7 +673,7 @@ impl SelectionService {
             builder = builder.replica_sync(port, replica_sync_peers);
         }
         if let Some(url) = remote_indexer_url {
-            builder = builder.remote_indexer(url);
+            builder = builder.kv_index(KvIndexSource::Remote(url));
         }
         let inner = py
             .allow_threads(|| pyo3_async_runtimes::tokio::get_runtime().block_on(builder.build()))

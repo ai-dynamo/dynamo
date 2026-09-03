@@ -26,7 +26,7 @@ pub use crate::services::common::replica_sync::{
     ScopedSequencePublisher,
 };
 pub use core::{
-    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, OverlapRefreshSource,
+    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, KvIndexSource,
     RefreshProvider, SelectionCore, SelectionHost, SelectionPartition, SelectionScheduler,
     SelectionServiceConfig,
 };

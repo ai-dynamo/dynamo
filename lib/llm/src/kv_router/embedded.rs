@@ -29,7 +29,7 @@ use dynamo_kv_router::scheduling::{
 use dynamo_kv_router::sequences::{SequenceError, SequenceRequest};
 use dynamo_kv_router::services::selection::{
     CatalogObserver, CatalogReconciler, HostCache, HostEligibility, HostLoad, HostReplication,
-    HostTelemetry, OverlapRefreshSource, SelectionHost, SelectionPartition, SelectionService,
+    HostTelemetry, KvIndexSource, SelectionHost, SelectionPartition, SelectionService,
     SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource, WorkerRequest,
     WorkerSelectionPolicyRegistry,
 };
@@ -148,7 +148,6 @@ impl EmbeddedSelection {
         )
         .worker_selection_policy_factory(args.policy_factory)
         .indexer_threads(1)
-        .external_kv_events()
         .host(SelectionHost {
             load: HostLoad {
                 prefill_estimator: args.prefill_load_estimator,
@@ -157,9 +156,8 @@ impl EmbeddedSelection {
             },
             cache: HostCache {
                 shared: None,
-                overlap_refresh: match args.overlap_refresh {
-                    Some(provider) => OverlapRefreshSource::External(provider),
-                    None => OverlapRefreshSource::Disabled,
+                index: KvIndexSource::External {
+                    refresh: args.overlap_refresh,
                 },
             },
             eligibility: HostEligibility::default(),

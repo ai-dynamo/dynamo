@@ -206,16 +206,44 @@ pub struct HostLoad {
     pub available_workers: Option<WorkerAvailabilityProvider>,
 }
 
-/// KV-cache knowledge outside the partition's own index.
+/// Where a partition's KV knowledge comes from.
 #[derive(Clone, Default)]
 pub struct HostCache {
     /// Queried alongside the indexer for prompts that carry `token_ids`; a
     /// failed lookup is logged and selection proceeds without shared hits.
     pub shared: Option<Arc<dyn SharedKvCache>>,
-    /// Where dequeue-time overlap refresh reads from. A host that keeps its
-    /// own index points this at that index so queued requests are re-scored
-    /// against the index that scored them.
-    pub overlap_refresh: OverlapRefreshSource,
+    pub index: KvIndexSource,
+}
+
+/// Where a partition's KV index lives and who feeds it.
+#[derive(Clone, Default)]
+pub enum KvIndexSource {
+    /// The core owns the index and subscribes to each worker rank's KV events
+    /// over ZMQ; workers need KV-event endpoints to be schedulable.
+    #[default]
+    Owned,
+    /// The host owns and feeds the index. Workers need no KV-event metadata.
+    /// `refresh` lets the core re-score queued requests against that index at
+    /// dequeue; `None` keeps their admission-time scores.
+    External {
+        refresh: Option<Arc<dyn TieredMatchProvider>>,
+    },
+    /// A standalone indexer at this base URL serves the primary index; this
+    /// core does not subscribe to worker KV events.
+    Remote(String),
+}
+
+impl std::fmt::Debug for KvIndexSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Owned => formatter.write_str("Owned"),
+            Self::External { refresh } => formatter
+                .debug_struct("External")
+                .field("refresh", &refresh.is_some())
+                .finish(),
+            Self::Remote(url) => formatter.debug_tuple("Remote").field(url).finish(),
+        }
+    }
 }
 
 /// Host-owned narrowing of the candidate set.
@@ -241,28 +269,6 @@ pub struct HostReplication {
     pub channels: Option<HostReplicaSyncFactory>,
 }
 
-/// Source of dequeue-time overlap refreshes for partition schedulers.
-#[derive(Clone, Default)]
-pub enum OverlapRefreshSource {
-    /// The partition's own indexer (standalone service default).
-    #[default]
-    PartitionIndexer,
-    /// A host-owned index.
-    External(Arc<dyn TieredMatchProvider>),
-    /// No refresh: queued requests keep their admission-time scores.
-    Disabled,
-}
-
-impl std::fmt::Debug for OverlapRefreshSource {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::PartitionIndexer => "PartitionIndexer",
-            Self::External(_) => "External",
-            Self::Disabled => "Disabled",
-        })
-    }
-}
-
 impl std::fmt::Debug for SelectionHost {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -274,7 +280,7 @@ impl std::fmt::Debug for SelectionHost {
             )
             .field("available_workers", &self.load.available_workers.is_some())
             .field("shared_cache", &self.cache.shared.is_some())
-            .field("overlap_refresh", &self.cache.overlap_refresh)
+            .field("index", &self.cache.index)
             .field(
                 "lora_worker_filter",
                 &self.eligibility.lora_worker_filter.is_some(),
@@ -376,7 +382,6 @@ impl SelectionCore {
             cache_config,
             tracking_hash,
             indexer_policy,
-            false,
         ))
     }
 
@@ -399,15 +404,15 @@ impl SelectionCore {
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
         indexer_policy: IndexerPolicy,
-        external_kv_events: bool,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
         let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token(
             indexer_threads,
             cancel_token.clone(),
         ));
-        let listens_for_kv_events =
-            kv_router_config.use_kv_events && !indexer_policy.is_remote() && !external_kv_events;
+        let listens_for_kv_events = kv_router_config.use_kv_events
+            && !indexer_policy.is_remote()
+            && !matches!(host.cache.index, KvIndexSource::External { .. });
         indexer_registry.set_indexer_policy(indexer_policy);
         if signal_indexer_ready {
             indexer_registry.signal_ready();
@@ -728,14 +733,13 @@ impl SelectionCore {
                 let indexer = self
                     .indexer_registry
                     .get_or_create_indexer(key.clone(), block_size);
-                let refresh_provider = match &self.host.cache.overlap_refresh {
-                    OverlapRefreshSource::PartitionIndexer => {
+                let refresh_provider = match &self.host.cache.index {
+                    KvIndexSource::Owned | KvIndexSource::Remote(_) => {
                         Some(RefreshProvider::Local(Arc::new(indexer.clone())))
                     }
-                    OverlapRefreshSource::External(provider) => {
-                        Some(RefreshProvider::External(Arc::clone(provider)))
-                    }
-                    OverlapRefreshSource::Disabled => None,
+                    KvIndexSource::External { refresh } => refresh
+                        .as_ref()
+                        .map(|p| RefreshProvider::External(Arc::clone(p))),
                 };
                 let overlap_refresh = refresh_provider.map(|provider| {
                     Arc::new(TieredOverlapRefresher::new(
@@ -2012,7 +2016,6 @@ mod tests {
                 SelectionCacheConfig::default(),
                 tracking_hash,
                 IndexerPolicy::from_router_config(&test_config(false)).expect("indexer policy"),
-                false,
             );
 
             core.upsert_worker(worker(1)).await.expect("worker upsert");
@@ -2052,7 +2055,6 @@ mod tests {
             SelectionCacheConfig::default(),
             tracking_hash,
             indexer_policy,
-            false,
         )
     }
 
@@ -2213,7 +2215,6 @@ mod tests {
             SelectionCacheConfig::default(),
             tracking_hash,
             indexer_policy,
-            false,
         );
         assert!(!core.listens_for_kv_events);
         for worker_id in [1, 2] {
