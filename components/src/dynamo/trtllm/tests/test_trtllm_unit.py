@@ -22,11 +22,13 @@ if not torch.cuda.is_available():
 
 from dynamo.trtllm.args import Config, parse_args
 from dynamo.trtllm.constants import DisaggregationMode, Modality
+from dynamo.trtllm.engine import Backend
 from dynamo.trtllm.tests.conftest import make_cli_args_fixture
 from dynamo.trtllm.utils.trtllm_utils import deep_update, warn_override_collisions
 from dynamo.trtllm.workers.llm_worker import (
     _populate_kv_cache_capacity,
     _strip_postprocess_workers,
+    _warn_extra_engine_args_collisions,
     init_llm_worker,
 )
 
@@ -180,8 +182,11 @@ def test_deprecated_publish_events_flag_alias_maps_to_both_controls(
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
-    with caplog.at_level("WARNING"), pytest.warns(
-        DeprecationWarning, match="--publish-events-and-metrics is deprecated"
+    with (
+        caplog.at_level("WARNING"),
+        pytest.warns(
+            DeprecationWarning, match="--publish-events-and-metrics is deprecated"
+        ),
     ):
         config = parse_args(["--publish-events-and-metrics"])
     assert config.publish_kv_events is True
@@ -204,8 +209,12 @@ def test_deprecated_publish_events_env_alias_maps_to_both_controls(monkeypatch, 
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
     monkeypatch.setenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", "true")
-    with caplog.at_level("WARNING"), pytest.warns(
-        DeprecationWarning, match="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated"
+    with (
+        caplog.at_level("WARNING"),
+        pytest.warns(
+            DeprecationWarning,
+            match="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated",
+        ),
     ):
         config = parse_args([])
     assert config.publish_kv_events is True
@@ -707,4 +716,165 @@ async def test_init_llm_worker_strips_num_postprocess_workers_from_extra_engine_
 
     engine_args = exc_info.value.engine_args
     assert "num_postprocess_workers" not in engine_args
+
+
+# ---- Tests for backend validation on Python 3.10/3.11 (issue found by Devin
+# Review on PR #9819) and the extra_engine_args collision-warning gap
+# (found by @tanmayv25 on the same PR) ----
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_unsupported_backend_exits_cleanly(monkeypatch):
+    """An unsupported backend override fails with a clear error, not a TypeError.
+
+    Value-membership on an Enum class (``value in SomeEnum``) is only supported
+    on Python 3.12+, while this project supports >=3.10. Validating a raw
+    string with ``not in Backend`` therefore raised ``TypeError`` on 3.10/3.11
+    instead of the intended error message followed by ``sys.exit(1)``.
+    """
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS", raising=False)
+
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-events",
+            "--override-engine-args",
+            '{"backend": "not-a-real-backend"}',
+        ]
+    )
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    assert exc_info.value.code == 1
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_valid_backend_string_override_is_not_rejected(monkeypatch):
+    """A valid backend string override still normalizes to the Backend enum."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS", raising=False)
+
+    config = parse_args(
+        [
+            "--model",
+            "fake-model",
+            "--publish-events",
+            "--override-engine-args",
+            '{"backend": "pytorch"}',
+        ]
+    )
+
+    with (
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    assert exc_info.value.engine_args["backend"] == Backend.PYTORCH
+
+
+@pytest.mark.core
+def test_warn_extra_engine_args_collisions_logs_replaced_scalar(caplog):
+    """A scalar changed by extra_engine_args merging emits a warning."""
+    before = {"max_seq_len": 1024}
+    after = {"max_seq_len": 2048}
+    with caplog.at_level("WARNING"):
+        _warn_extra_engine_args_collisions(before, after)
+    assert any(
+        "max_seq_len" in r.message and "1024" in r.message and "2048" in r.message
+        for r in caplog.records
+    )
+
+
+@pytest.mark.core
+def test_warn_extra_engine_args_collisions_recurses_into_nested_dicts(caplog):
+    """Nested-dict changes report the full dotted path."""
+    before = {"kv_cache_config": {"max_tokens": 1000, "free_gpu_memory_fraction": 0.85}}
+    after = {"kv_cache_config": {"max_tokens": 2592, "free_gpu_memory_fraction": 0.85}}
+    with caplog.at_level("WARNING"):
+        _warn_extra_engine_args_collisions(before, after)
+    assert any("kv_cache_config.max_tokens" in r.message for r in caplog.records)
+    assert not any("free_gpu_memory_fraction" in r.message for r in caplog.records)
+
+
+@pytest.mark.core
+def test_warn_extra_engine_args_collisions_skips_new_and_identical_keys(caplog):
+    """New keys and unchanged keys are not collisions — no warning."""
+    before = {"max_seq_len": 1024}
+    after = {"max_seq_len": 1024, "max_batch_size": 32}
+    with caplog.at_level("WARNING"):
+        _warn_extra_engine_args_collisions(before, after)
+    assert caplog.records == []
+
+
+@pytest.mark.core
+@pytest.mark.asyncio
+async def test_extra_engine_args_overwrite_is_warned(tmp_path, monkeypatch, caplog):
+    """extra_engine_args silently replacing an existing arg_map value now warns.
+
+    --override-engine-args has warned about this since _warn_override_collisions
+    was introduced; --extra-engine-args went through TRT-LLM's
+    update_llm_args_with_extra_options with no equivalent warning.
+    """
+    monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_MAX_SEQ_LEN", raising=False)
+
+    yaml_file = tmp_path / "engine_config.yaml"
+    yaml_file.write_text("max_batch_size: 999\n")
+
+    config = parse_args(
+        ["--model", "fake-model", "--extra-engine-args", str(yaml_file)]
+    )
+
+    with (
+        caplog.at_level("WARNING"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.nixl_connect.Connector"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.dump_config"),
+        mock.patch("dynamo.trtllm.workers.llm_worker.LLMBackendMetrics"),
+        mock.patch(
+            "dynamo.trtllm.workers.llm_worker.get_llm_engine",
+            side_effect=_mock_get_llm_engine,
+        ),
+    ):
+        with pytest.raises(EngineArgsCaptured) as exc_info:
+            await init_llm_worker(
+                runtime=mock.MagicMock(),
+                config=config,
+                shutdown_event=asyncio.Event(),
+            )
+
+    assert exc_info.value.engine_args["max_batch_size"] == 999
+    assert any(
+        "max_batch_size" in r.message and "999" in r.message for r in caplog.records
+    )
     assert any("num_postprocess_workers=4" in r.message for r in caplog.records)
