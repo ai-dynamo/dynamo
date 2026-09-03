@@ -20,6 +20,8 @@ policy crate -> catalog crate -> router-policy YAML -> frontend or EPP binary
 
 Dynamo owns discovery, eligibility, queueing, validation, reservations, accounting, and metrics. A policy sees only eligible workers and returns one candidate row.
 
+Preferred routing taints are optional candidate metadata. A filter, scorer, or picker must request `WorkerInputs::PREFERRED_TAINT` before reading `preferred_taint_multiplier()` from a candidate; otherwise, Dynamo does not materialize the multiplier. Exact hard-pinned requests also do not materialize it. Required routing taints remain Dynamo eligibility rules.
+
 ## Pick a Starting Point
 
 | Crate | Use it for |
@@ -68,7 +70,7 @@ Each policy stage has one job:
 
 Each example keeps its implemented stages in these matching files. `lib.rs` parses parameters, composes the stages, and registers the policy. The stacked example keeps each scorer implementation in a separate file under [`scorer/`](simple-stacked-score-pick/src/scorer/).
 
-Read the [custom worker-selection guide](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) for input groups, method contracts, and error handling.
+Read the [custom worker-selection guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx) for input groups, method contracts, and error handling.
 
 ## 3. Parse Parameters and Build the Factory
 
@@ -236,7 +238,7 @@ The example EPP links the example catalog and registers it before the standard r
 ```rust
 let mut registry = WorkerSelectionPolicyRegistry::default();
 dynamo_custom_policy_example_catalog::register(&mut registry)?;
-run_with_worker_selection_policy_registry(registry).await
+run(Some(registry)).await
 ```
 
 Run the binary in standalone mode:
@@ -261,7 +263,7 @@ Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-r
 - Prove that filter failures, all-filtered candidate sets, scorer failures, and invalid picker rows do not reserve a worker.
 - Benchmark stateful or input-heavy policies at the expected worker count.
 
-The [custom routing API reference](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) lists the available context and worker signals.
+The [custom routing API reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx) lists the available context and worker signals.
 
 ## Try the Policies End to End With Mocker
 
@@ -287,7 +289,7 @@ python -m dynamo.frontend \
 In the second terminal, start two aggregated Mocker workers:
 
 ```bash
-python -m dynamo.mocker \
+python3 -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --num-workers 2
@@ -339,7 +341,7 @@ The two flags override `worker_selection.prefill` and `worker_selection.decode`.
 In the second terminal, start two prefill Mocker workers:
 
 ```bash
-python -m dynamo.mocker \
+python3 -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --disaggregation-mode prefill \
@@ -352,7 +354,7 @@ python -m dynamo.mocker \
 In the third terminal, start two decode Mocker workers:
 
 ```bash
-python -m dynamo.mocker \
+python3 -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --disaggregation-mode decode \

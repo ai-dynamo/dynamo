@@ -293,7 +293,12 @@ func (r *dgdCheckpointsReconciler) createCheckpointCR(
 		); err != nil {
 			return nil, err
 		}
-		if err := prepareCheckpointGMSPodTemplate(&podTemplate, targetContainerName, checkpointID, gmsSpec); err != nil {
+		if err := prepareCheckpointGMSPodTemplate(
+			&podTemplate,
+			targetContainerName,
+			checkpointID,
+			gmsSpec,
+		); err != nil {
 			return nil, err
 		}
 	}
@@ -420,6 +425,7 @@ func prepareCheckpointGMSPodTemplate(
 		&podTemplate.Spec,
 		[]*corev1.Container{targetContainer},
 		gmsSpec.ExtraClientContainers,
+		true,
 	)
 	return nil
 }

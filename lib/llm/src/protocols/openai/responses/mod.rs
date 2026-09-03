@@ -51,6 +51,19 @@ pub struct NvCreateResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
     pub nvext: Option<NvExt>,
+
+    /// Chat-template arguments, forwarded to the converted chat request.
+    ///
+    /// Mirrors the Chat Completions field, including the `chat_template_kwargs`
+    /// alias, so a Responses client controls template-driven behaviour such as
+    /// reasoning and tool formatting the same way a chat client does.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "chat_template_kwargs"
+    )]
+    #[schema(value_type = Object)]
+    pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 #[derive(ToSchema, Deserialize, Validate, Debug, Clone)]
@@ -229,7 +242,7 @@ pub(crate) enum ResponsesConversionError {
     #[error("{0}")]
     InvalidArgument(String),
     #[error("{0}")]
-    NotImplemented(String),
+    UnsupportedContent(String),
 }
 
 /// Convert a Responses API ImageDetail to the Chat Completions ImageDetail.
@@ -286,7 +299,7 @@ fn convert_input_content_to_user_content(
                         .into());
                     }
                     (Some(_), None) => {
-                        return Err(ResponsesConversionError::NotImplemented(
+                        return Err(ResponsesConversionError::UnsupportedContent(
                             "Image input by file_id is not yet supported".to_string(),
                         )
                         .into());
@@ -337,7 +350,7 @@ fn convert_input_content_to_user_content(
                     })?;
                 }
 
-                return Err(ResponsesConversionError::NotImplemented(
+                return Err(ResponsesConversionError::UnsupportedContent(
                     "File input content is not yet supported".to_string(),
                 )
                 .into());
@@ -891,7 +904,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
             },
             common: Default::default(),
             nvext: resp.nvext,
-            chat_template_args: None,
+            chat_template_args: resp.chat_template_args,
             thinking: None,
             media_io_kwargs: None,
             return_tokens_as_token_ids: None,
@@ -1225,14 +1238,20 @@ pub fn chat_completion_to_response(
         // Unary responses do not expose explicit phase boundaries. A message
         // or function call proves reasoning finished before the terminal item
         // exhausted the output budget.
-        let reasoning_completed = output
+        // The budget runs out once, inside the item the model was still writing.
+        // Every earlier item finished, so only the terminal one is incomplete.
+        let terminal = output
             .iter()
-            .any(|item| matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_)));
-        for item in &mut output {
+            .rposition(|item| matches!(item, OutputItem::Message(_) | OutputItem::FunctionCall(_)));
+        for (index, item) in output.iter_mut().enumerate() {
             match item {
-                OutputItem::Message(message) => message.status = OutputStatus::Incomplete,
-                OutputItem::FunctionCall(call) => call.status = Some(OutputStatus::Incomplete),
-                OutputItem::Reasoning(reasoning) if !reasoning_completed => {
+                OutputItem::Message(message) if Some(index) == terminal => {
+                    message.status = OutputStatus::Incomplete
+                }
+                OutputItem::FunctionCall(call) if Some(index) == terminal => {
+                    call.status = Some(OutputStatus::Incomplete)
+                }
+                OutputItem::Reasoning(reasoning) if terminal.is_none() => {
                     reasoning.status = Some(OutputStatus::Incomplete)
                 }
                 _ => {}
@@ -1348,6 +1367,7 @@ mod tests {
                 annotations: Some(vec!["debug".into(), "trace".into()]),
                 ..Default::default()
             }),
+            chat_template_args: None,
         }
     }
 
@@ -1374,6 +1394,58 @@ mod tests {
             },
             _ => panic!("expected user message"),
         }
+    }
+
+    #[test]
+    fn chat_template_args_survive_the_conversion() {
+        // The repro from the issue: a Responses request carrying template args
+        // must not lose them on the way to the chat request, or template-driven
+        // behaviour like reasoning and tool formatting cannot be controlled
+        // from /v1/responses at all.
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "dummy-model",
+            "input": "hello",
+            "chat_template_args": {"enable_thinking": true},
+        }))
+        .expect("responses request with chat_template_args should deserialize");
+
+        let nv_req: NvCreateChatCompletionRequest = request.try_into().unwrap();
+
+        let args = nv_req
+            .chat_template_args
+            .expect("chat_template_args should reach the chat request");
+        assert_eq!(
+            args.get("enable_thinking"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn chat_template_kwargs_alias_is_accepted() {
+        // Chat Completions accepts either spelling, so Responses has to as
+        // well or the same client payload behaves differently per endpoint.
+        let request: NvCreateResponse = serde_json::from_value(serde_json::json!({
+            "model": "dummy-model",
+            "input": "hello",
+            "chat_template_kwargs": {"enable_thinking": true},
+        }))
+        .expect("chat_template_kwargs alias should deserialize");
+
+        let nv_req: NvCreateChatCompletionRequest = request.try_into().unwrap();
+
+        assert!(nv_req.chat_template_args.is_some_and(
+            |args| args.get("enable_thinking") == Some(&serde_json::Value::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn absent_chat_template_args_stay_absent() {
+        // The overwhelmingly common request has none; it must not gain an
+        // empty map, which would change downstream template rendering.
+        let nv_req: NvCreateChatCompletionRequest =
+            make_response_with_input("hi there").try_into().unwrap();
+
+        assert!(nv_req.chat_template_args.is_none());
     }
 
     #[test]
@@ -1405,6 +1477,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1449,6 +1522,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1528,6 +1602,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1569,6 +1644,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1612,6 +1688,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1660,6 +1737,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1699,6 +1777,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1733,6 +1812,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1775,6 +1855,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1836,6 +1917,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1908,6 +1990,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -1965,6 +2048,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2020,6 +2104,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2067,6 +2152,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2132,6 +2218,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2211,6 +2298,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
 
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
@@ -2284,6 +2372,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2353,6 +2442,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2419,6 +2509,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -2476,6 +2567,7 @@ mod tests {
                 ..Default::default()
             },
             nvext: None,
+            chat_template_args: None,
         };
         let chat_req: NvCreateChatCompletionRequest = req.try_into().unwrap();
         let messages = &chat_req.inner.messages;
@@ -3261,18 +3353,32 @@ thinking
         finish_reason: dynamo_protocols::types::FinishReason,
         arguments: &str,
     ) -> NvCreateChatCompletionResponse {
+        make_chat_resp_with_tool_calls(finish_reason, &[arguments])
+    }
+
+    /// One tool call per entry in `arguments`, for a choice that carries parallel calls.
+    fn make_chat_resp_with_tool_calls(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &[&str],
+    ) -> NvCreateChatCompletionResponse {
         let mut response = make_chat_resp_with_text("");
         let choice = &mut response.inner.choices[0];
         choice.finish_reason = Some(finish_reason);
         choice.message.content = None;
-        choice.message.tool_calls = Some(vec![ChatCompletionMessageToolCall {
-            id: "call_abc".into(),
-            r#type: FunctionType::Function,
-            function: dynamo_protocols::types::FunctionCall {
-                name: "get_weather".into(),
-                arguments: arguments.into(),
-            },
-        }]);
+        choice.message.tool_calls = Some(
+            arguments
+                .iter()
+                .enumerate()
+                .map(|(index, args)| ChatCompletionMessageToolCall {
+                    id: format!("call_abc{index}"),
+                    r#type: FunctionType::Function,
+                    function: dynamo_protocols::types::FunctionCall {
+                        name: "get_weather".into(),
+                        arguments: (*args).into(),
+                    },
+                })
+                .collect(),
+        );
         response
     }
 
@@ -3492,6 +3598,38 @@ thinking
             panic!("expected function call output");
         };
         assert_eq!(call.status, Some(OutputStatus::Incomplete));
+    }
+
+    /// The output budget runs out once, inside the call the model was writing. Every
+    /// earlier call finished, so only the terminal item is incomplete.
+    #[test]
+    fn test_length_marks_only_the_terminal_tool_call_incomplete() {
+        let chat_resp = make_chat_resp_with_tool_calls(
+            dynamo_protocols::types::FinishReason::Length,
+            &[r#"{"location":"SF"}"#, r#"{"location":"NY"#],
+        );
+
+        let response =
+            chat_completion_to_response(chat_resp, &ResponseParams::default(), None).unwrap();
+
+        assert_eq!(response.inner.status, Status::Incomplete);
+        let statuses: Vec<_> = response
+            .inner
+            .output
+            .iter()
+            .filter_map(|item| match item {
+                OutputItem::FunctionCall(call) => Some(call.status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                Some(OutputStatus::Completed),
+                Some(OutputStatus::Incomplete)
+            ],
+            "a call the model finished must not be reported as incomplete"
+        );
     }
 
     #[test]

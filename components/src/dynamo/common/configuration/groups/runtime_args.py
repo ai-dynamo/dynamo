@@ -39,8 +39,8 @@ class DynamoRuntimeConfig(ConfigBase):
     dyn_reasoning_parser: Optional[str] = None
     dyn_default_thinking_mode: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
-    dyn_enable_structural_tag: bool = False
-    dyn_structural_tag_scope: str = "auto"
+    dyn_enable_structural_tag: bool = True
+    dyn_structural_tag_scope: str = "always"
     dyn_structural_tag_schema: str = "auto"
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
@@ -64,8 +64,13 @@ class DynamoRuntimeConfig(ConfigBase):
     tcp_tls_insecure: bool = False
     tcp_tls_server_name: Optional[str] = None
     tcp_tls_handshake_timeout_secs: Optional[int] = None
+    tcp_tls_client_cert_path: Optional[str] = None
+    tcp_tls_client_key_path: Optional[str] = None
+    tcp_tls_client_ca_cert_path: Optional[str] = None
     nats_tls_ca_cert_path: Optional[str] = None
     nats_tls_insecure: bool = False
+    nats_tls_client_cert_path: Optional[str] = None
+    nats_tls_client_key_path: Optional[str] = None
 
     def validate(self) -> None:
         self.namespace = get_worker_namespace(self.namespace)
@@ -121,6 +126,16 @@ class DynamoRuntimeConfig(ConfigBase):
             os.environ["DYN_TCP_TLS_HANDSHAKE_TIMEOUT_SECS"] = str(
                 self.tcp_tls_handshake_timeout_secs
             )
+        # TCP mTLS: client identity presented to the server, and the CA the
+        # server uses to verify client certificates.
+        if self.tcp_tls_client_cert_path:
+            os.environ["DYN_TCP_TLS_CLIENT_CERT_PATH"] = self.tcp_tls_client_cert_path
+        if self.tcp_tls_client_key_path:
+            os.environ["DYN_TCP_TLS_CLIENT_KEY_PATH"] = self.tcp_tls_client_key_path
+        if self.tcp_tls_client_ca_cert_path:
+            os.environ[
+                "DYN_TCP_TLS_CLIENT_CA_CERT_PATH"
+            ] = self.tcp_tls_client_ca_cert_path
 
         # Propagate NATS TLS CLI flags.
         if self.nats_tls_ca_cert_path:
@@ -129,6 +144,11 @@ class DynamoRuntimeConfig(ConfigBase):
             os.environ["NATS_TLS_INSECURE"] = "1"
         else:
             os.environ.pop("NATS_TLS_INSECURE", None)
+        # NATS mTLS: client identity presented to the NATS server.
+        if self.nats_tls_client_cert_path:
+            os.environ["NATS_TLS_CLIENT_CERT_PATH"] = self.nats_tls_client_cert_path
+        if self.nats_tls_client_key_path:
+            os.environ["NATS_TLS_CLIENT_KEY_PATH"] = self.nats_tls_client_key_path
 
     def _validate_output_modalities(self) -> None:
         """Validate --output-modalities values."""
@@ -262,16 +282,16 @@ class DynamoRuntimeArgGroup(ArgGroup):
             g,
             flag_name="--dyn-enable-structural-tag",
             env_var="DYN_ENABLE_STRUCTURAL_TAG",
-            default=False,
-            help="Enable structural tag guided decoding for tool calls. "
-            "Named Kimi K3 tool_choice requests always activate their required "
-            "XTML structural tag even when this flag is off.",
+            default=True,
+            help="Enable structural tag guided decoding for tool calls when the configured "
+            "parser and backend support it. On the Rust frontend preprocessing path, "
+            "explicitly disabling this flag is authoritative.",
         )
         add_argument(
             g,
             flag_name="--dyn-structural-tag-scope",
             env_var="DYN_STRUCTURAL_TAG_SCOPE",
-            default="auto",
+            default="always",
             choices=["auto", "always"],
             help="Controls when structural tags are activated. "
             "'auto': for required/named tool_choice, and if any tool has strict=true "
@@ -441,6 +461,31 @@ class DynamoRuntimeArgGroup(ArgGroup):
 
         add_argument(
             g,
+            flag_name="--tcp-tls-client-cert-path",
+            env_var="DYN_TCP_TLS_CLIENT_CERT_PATH",
+            default=None,
+            help="Path to PEM client certificate presented to the TCP server for mTLS.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-key-path",
+            env_var="DYN_TCP_TLS_CLIENT_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the TCP client certificate (mTLS).",
+        )
+
+        add_argument(
+            g,
+            flag_name="--tcp-tls-client-ca-cert-path",
+            env_var="DYN_TCP_TLS_CLIENT_CA_CERT_PATH",
+            default=None,
+            help="Path to PEM CA certificate the TCP server uses to verify client "
+            "certificates. When set, clients must present a trusted certificate (mTLS enforced).",
+        )
+
+        add_argument(
+            g,
             flag_name="--nats-tls-ca-cert-path",
             env_var="NATS_TLS_CA_CERT_PATH",
             default=None,
@@ -453,4 +498,20 @@ class DynamoRuntimeArgGroup(ArgGroup):
             env_var="NATS_TLS_INSECURE",
             default=False,
             help="Disable NATS TLS certificate verification. For local development only.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-client-cert-path",
+            env_var="NATS_TLS_CLIENT_CERT_PATH",
+            default=None,
+            help="Path to PEM client certificate presented to the NATS server for mTLS.",
+        )
+
+        add_argument(
+            g,
+            flag_name="--nats-tls-client-key-path",
+            env_var="NATS_TLS_CLIENT_KEY_PATH",
+            default=None,
+            help="Path to PEM private key for the NATS client certificate (mTLS).",
         )

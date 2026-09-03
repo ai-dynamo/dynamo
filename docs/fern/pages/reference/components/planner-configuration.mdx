@@ -118,7 +118,7 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
 </ParamField>
 
 <ParamField path="aic_perf_model" type="AICPerfModelSpec" default="null">
-  Native AIConfigurator forward-pass model identity passed directly to the `aiconfigurator-core` wheel, enabling real-time AIC estimates with online correction. Unsupported native configs fall back to FPM regression. Does not trigger an AIC interpolation sweep.
+  Native AIConfigurator forward-pass model identity passed to the compatibility `aiconfigurator_core` namespace in the `aisimulate` wheel, enabling real-time AIC estimates with online correction. Unsupported native configs fall back to FPM regression. Does not trigger an AIC interpolation sweep.
 </ParamField>
 
 <Indent>
@@ -183,7 +183,7 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
   Minimum decode endpoints in `disagg` and `decode` modes. When set, replaces the decode value supplied by `min_endpoint`. Must be at least `1`.
 </ParamField>
 
-The Planner does not have per-component maximum endpoint fields. `max_gpu_budget`, the power budget when enabled, Global Planner allocation, and cluster capacity continue to bound scale-up. At startup and for runtime updates, the Planner rejects minimum endpoint combinations that cannot fit the configured GPU or power budget.
+The Planner does not have per-component maximum endpoint fields. `max_gpu_budget`, the power budget when enabled, Global Planner allocation, and cluster capacity continue to bound scale-up. At startup and for runtime updates, the Planner rejects minimum endpoint combinations that cannot fit the configured GPU or power budget. Send `min_gpu_budget` and `max_gpu_budget` with the endpoint fields to `PATCH /v1/min-endpoints` to update them atomically at runtime. Set either budget to `-1` to disable that bound. When both budgets are enabled, `min_gpu_budget` must not exceed `max_gpu_budget`. The response from `GET` or `PATCH` includes both budgets.
 
 <ParamField path="decode_engine_num_gpu" type="integer" default="null">
   GPUs per decode engine replica. Auto-detected from the deployment when unset.
@@ -309,6 +309,10 @@ These fields default from environment variables and are excluded from serialized
 
 <ParamField path="metric_pulling_prometheus_ca_bundle" type="string" default="env PROMETHEUS_CA_BUNDLE">
   Path to a CA bundle for verifying the upstream Prometheus TLS certificate. When set, the bundle is used for verification regardless of `metric_pulling_prometheus_ssl_verify`. Must point to an existing file.
+</ParamField>
+
+<ParamField path="metric_pulling_prometheus_request_timeout_seconds" type="number" default="10.0">
+  Connection and read inactivity timeout in seconds for each Prometheus API request. Defaults from `DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS` and must be greater than `0`. This is not a total wall-clock deadline: a response that continues delivering data can run longer. The Planner does not retry failed requests within the same collection cycle.
 </ParamField>
 
 <ParamField path="metric_reporting_prometheus_port" type="integer" default="0">
@@ -623,6 +627,7 @@ The Planner reads these environment variables. The Prometheus and namespace vari
 | `PROMETHEUS_SSL_VERIFY` | Default for `metric_pulling_prometheus_ssl_verify` (`1`/`true`/`yes`). | `false` |
 | `PROMETHEUS_EXTRA_QUERY_PARAMS` | Default for `metric_pulling_prometheus_extra_query_params` (URL query string). | unset |
 | `PROMETHEUS_CA_BUNDLE` | Default for `metric_pulling_prometheus_ca_bundle`. | unset |
+| `DYN_PLANNER_PROMETHEUS_REQUEST_TIMEOUT_SECONDS` | Default for `metric_pulling_prometheus_request_timeout_seconds`. | `10.0` |
 | `PLANNER_PROMETHEUS_PORT` | Default for `metric_reporting_prometheus_port`. | `0` |
 | `DYN_PARENT_DGD_K8S_NAME` | Parent DGD name for the GlobalPlanner connector (`environment: global-planner`). | required |
 | `POD_NAMESPACE` | Kubernetes namespace for the GlobalPlanner connector. | required |

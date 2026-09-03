@@ -178,10 +178,10 @@ class ImageLoader:
         """Read decoded image via NIXL and convert numpy array to PIL Image."""
         assert self._nixl_connector is not None
         arr = await read_decoded_media_via_nixl(self._nixl_connector, metadata)
-        # TRT-LLM's input processor requires PIL Images (accesses .height/.width
-        # for token count calculation). fromarray() is near-zero-cost: it wraps
-        # the existing numpy buffer without copying pixel data.
-        return Image.fromarray(arr)
+        if arr.ndim == 3 and arr.shape[-1] == 1:
+            arr = arr.squeeze(axis=-1)
+        image = Image.fromarray(arr)
+        return image if image.mode == "RGB" else image.convert("RGB")
 
     @_nvtx.annotate("mm:img:load_image", color="lime")
     async def load_image(self, image_url: str) -> Image.Image:

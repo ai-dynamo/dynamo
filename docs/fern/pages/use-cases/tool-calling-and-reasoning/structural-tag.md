@@ -25,13 +25,14 @@ Benefits:
 
 ## Prerequisites
 
-- A backend engine with xgrammar support.
+- A backend engine and transport with structural-tag/xgrammar support.
 - A Dynamo tool call parser that provides a structural tag config (see
   [Supported Parsers](#supported-parsers) below).
 
 ## Quick Start
 
-Enable structural tags on the **worker** with `--dyn-enable-structural-tag`, alongside the tool-call parser. The Frontend needs no extra flags:
+Structural tags are enabled by default. Configure the tool-call parser on the
+**worker**; the Frontend needs no extra flags:
 
 ```yaml
 apiVersion: nvidia.com/v1beta1
@@ -70,7 +71,6 @@ spec:
           - Qwen/Qwen3.5-4B
           - --dyn-tool-call-parser
           - qwen3_coder
-          - --dyn-enable-structural-tag
 ```
 
 Eligible tool-calling requests will now use xgrammar structural tags for guided
@@ -80,14 +80,14 @@ decoding. See [Activation Scope](#activation-scope) for the exact policy.
 
 | Flag | Values | Default | Description |
 |---|---|---|---|
-| `--dyn-enable-structural-tag` | bool | `false` | Master switch. When disabled, tool calling works the same as without structural tags. |
-| `--dyn-structural-tag-scope` | `auto`, `always` | `auto` | Controls when structural tags are activated (see [Activation Scope](#activation-scope)). |
+| `--dyn-enable-structural-tag` | bool | `true` | Master switch. On the Rust frontend preprocessing path, explicitly disabling it prevents all structural-tag injection. |
+| `--dyn-structural-tag-scope` | `auto`, `always` | `always` | Controls when structural tags are activated (see [Activation Scope](#activation-scope)). |
 | `--dyn-structural-tag-schema` | `auto`, `strict` | `auto` | Controls parameter schema strictness inside structural tags (see [Schema Modes](#schema-modes)). |
 
 ## Supported Parsers
 
 Not all parsers support structural tags. Parsers without a structural tag
-config fall back to standard behaviour (a warning is logged if structural
+config fall back to standard behaviour (a diagnostic is logged if structural
 tags are enabled but the parser does not support them).
 
 Currently tested and supported:
@@ -95,23 +95,27 @@ Currently tested and supported:
 - `qwen3_coder`, `nemotron_nano`
 - `hermes`, `qwen25`
 - `deepseek_v3_2`, `deepseek_v4`
+- `kimi_k2`, `kimi_k3`, `kimi-k3`
+- `inkling`
 
 Contributions adding structural tag support for new parsers are welcome.
+
+Parser support and backend support are separate. If the parser has no builder,
+or the backend transport reports that it cannot carry structural tags, Dynamo
+uses the existing best-effort tool-calling path instead of rejecting the
+request.
+
+> [!NOTE]
+> The activation and fallback policy on this page describes Dynamo's Rust
+> frontend preprocessing path. Legacy inline Python preprocessing paths retain
+> their existing engine-specific constraint behavior.
 
 ## Activation Scope
 
 The `--dyn-structural-tag-scope` flag controls when structural tags are used
 based on the request's `tool_choice`:
 
-### `auto` (default)
-
-| `tool_choice` | Structural tag? |
-|---|---|
-| `required` / `named` | Always |
-| `auto` | Only when any tool has `strict: true` or `parallel_tool_calls` is `false` |
-| `none` | Exclusion tag only (bans tool call tokens, see [below](#tool_choicenone-and-token-banning)) |
-
-### `always`
+### `always` (default)
 
 | `tool_choice` | Structural tag? |
 |---|---|
@@ -119,6 +123,13 @@ based on the request's `tool_choice`:
 | `auto` | Always |
 | `none` | Exclusion tag only |
 
+### `auto` (legacy conditional activation)
+
+| `tool_choice` | Structural tag? |
+|---|---|
+| `required` / `named` | Always |
+| `auto` | Only when any tool has `strict: true` or `parallel_tool_calls` is `false` |
+| `none` | Exclusion tag only (bans tool call tokens, see [below](#tool_choicenone-and-token-banning)) |
 
 ## Schema Modes
 
@@ -127,14 +138,19 @@ tool arguments inside the structural tag:
 
 ### `auto` (default)
 
-- Tools with `strict: true` — their actual parameter schema is used.
-- Tools without `strict` — an unconstrained schema is used, allowing
-  the model to generate any valid content in the parser's native format.
+- Tools with omitted `strict` or `strict: true` — their declared parameter
+  schema is used.
+- Tools with `strict: false` — the native tool envelope remains constrained,
+  but argument content is schema-relaxed.
 
 ### `strict`
 
 - All tools use their actual parameter schema regardless of the `strict`
   flag.
+
+If a model-native builder cannot safely represent part of a schema, it keeps
+the strongest safe tool envelope and relaxes that argument section. Dynamo logs
+the compatibility fallback rather than introducing a new request error.
 
 ## `tool_choice="none"` and Token Banning
 

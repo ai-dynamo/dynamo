@@ -31,6 +31,25 @@ def _parse_runtime_args(argv: list[str]) -> tuple[DynamoRuntimeConfig, str]:
     return config, parser.format_help()
 
 
+def test_structural_tags_default_on_for_supported_parsers(monkeypatch):
+    monkeypatch.delenv("DYN_ENABLE_STRUCTURAL_TAG", raising=False)
+    monkeypatch.delenv("DYN_STRUCTURAL_TAG_SCOPE", raising=False)
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.dyn_enable_structural_tag is True
+    assert config.dyn_structural_tag_scope == "always"
+    assert config.dyn_structural_tag_schema == "auto"
+
+
+def test_structural_tag_global_opt_out(monkeypatch):
+    monkeypatch.setenv("DYN_ENABLE_STRUCTURAL_TAG", "false")
+
+    config, _ = _parse_runtime_args([])
+
+    assert config.dyn_enable_structural_tag is False
+
+
 def test_fpm_trace_defaults_disabled(monkeypatch):
     monkeypatch.delenv("DYN_FPM_TRACE", raising=False)
 

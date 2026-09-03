@@ -1241,7 +1241,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										},
 									},
 									MainContainer: &corev1.Container{
-										Image: "test-image:latest",
+										Image: "test-image:1.5.0",
 										Command: []string{
 											"some",
 											"dynamo",
@@ -1333,14 +1333,14 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									},
 									{
 										Name:    commonconsts.MainContainerName,
-										Image:   "test-image:latest",
+										Image:   "test-image:1.5.0",
 										Command: []string{"/bin/sh", "-c"},
 										Args:    []string{"ray start --head --port=6379 && some dynamo command --tensor-parallel-size 4 --pipeline-parallel-size 1 --distributed-executor-backend ray"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 											{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
-											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
+											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
@@ -1474,14 +1474,14 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									},
 									{
 										Name:    commonconsts.MainContainerName,
-										Image:   "test-image:latest",
+										Image:   "test-image:1.5.0",
 										Command: []string{"/bin/sh", "-c"},
 										Args:    []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
 										Env: []corev1.EnvVar{
 											{Name: commonconsts.DynamoComponentEnvVar, Value: commonconsts.ComponentTypeWorker},
 											{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 											{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
-											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
+											{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "true"},
 											{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-lws-deploy"},
 											{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
@@ -2707,6 +2707,10 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+			tt.wantComponentReconcileResult.gpuShape = &dynamo.GPUShape{
+				GPUsPerEngine:  2,
+				GPUsPerReplica: 2,
+			}
 
 			// Assert the ComponentReconcileResult
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
@@ -3018,6 +3022,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 
 			// Assert the ComponentReconcileResult
 			tt.wantComponentReconcileResult.serviceReplicaStatus.RuntimeNamespace = dynamo.GetDCDRuntimeNamespace(dcd)
+			tt.wantComponentReconcileResult.gpuShape = &dynamo.GPUShape{}
 
 			g.Expect(result).To(gomega.Equal(tt.wantComponentReconcileResult))
 		})
@@ -3114,6 +3119,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 			ReadyReplicas:     ptr.To(int32(0)),
 			AvailableReplicas: ptr.To(int32(0)),
 		},
+		gpuShape: &dynamo.GPUShape{},
 	}))
 
 }
@@ -3349,6 +3355,63 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			g.Expect(updatedDCD.Status.ObservedGeneration).To(gomega.Equal(generation))
 		})
 	}
+}
+
+func TestSetStatusConditionAndServiceReplicaStatusPublishesGPUShape(t *testing.T) {
+	t.Log("Build a component and a provider-resolved GPU shape")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "dra-worker",
+			Namespace:  "default",
+			Generation: 1,
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{},
+	}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(dcd).
+		WithStatusSubresource(dcd).
+		Build()
+	reconciler := &DynamoComponentDeploymentReconciler{Client: kubeClient}
+	componentStatus := &v1beta1.ComponentReplicaStatus{
+		ComponentKind: v1beta1.ComponentKindDeployment,
+	}
+	reconcileResult := ComponentReconcileResult{
+		status:               metav1.ConditionTrue,
+		reason:               "DeploymentReady",
+		message:              "Deployment is ready",
+		serviceReplicaStatus: componentStatus,
+		gpuShape: &dynamo.GPUShape{
+			GPUsPerEngine:  2,
+			GPUsPerReplica: 3,
+		},
+	}
+
+	t.Log("Publish the renderer-provided shape in DCD status")
+	require.NoError(t, reconciler.setStatusConditionAndServiceReplicaStatus(t.Context(), dcd, reconcileResult))
+	updated := &v1beta1.DynamoComponentDeployment{}
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), updated))
+	require.NotNil(t, updated.Status.Component.GPUsPerEngine)
+	require.NotNil(t, updated.Status.Component.GPUsPerReplica)
+	assert.Equal(t, int64(2), *updated.Status.Component.GPUsPerEngine)
+	assert.Equal(t, int64(3), *updated.Status.Component.GPUsPerReplica)
+
+	t.Log("Publish an explicit zero after a successful non-GPU observation")
+	reconcileResult.gpuShape = &dynamo.GPUShape{}
+	require.NoError(t, reconciler.setStatusConditionAndServiceReplicaStatus(t.Context(), dcd, reconcileResult))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), updated))
+	require.NotNil(t, updated.Status.Component.GPUsPerEngine)
+	require.NotNil(t, updated.Status.Component.GPUsPerReplica)
+	assert.Equal(t, int64(0), *updated.Status.Component.GPUsPerEngine)
+	assert.Equal(t, int64(0), *updated.Status.Component.GPUsPerReplica)
+
+	t.Log("Clear both fields before reporting a later provider failure")
+	require.NoError(t, reconciler.clearDCDGPUShape(t.Context(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dcd),
+	}))
+	require.NoError(t, kubeClient.Get(t.Context(), client.ObjectKeyFromObject(dcd), updated))
+	assert.Nil(t, updated.Status.Component.GPUsPerEngine)
+	assert.Nil(t, updated.Status.Component.GPUsPerReplica)
 }
 
 func Test_generateDeployment_Strategy(t *testing.T) {
