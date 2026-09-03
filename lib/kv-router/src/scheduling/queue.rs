@@ -1544,6 +1544,11 @@ impl<
                 decay_now,
             )
             .await;
+            // Deadlines can pass while the refresh is awaited and the actor
+            // timer cannot fire mid-command. Sweep the still-queued entries so
+            // a stalled refresh delays their rejection by at most one refresh,
+            // and an expired entry is never popped into a refresh of its own.
+            self.reject_expired(Instant::now());
             if queued.due_at.is_some_and(|due_at| due_at <= Instant::now()) {
                 // The pop already charged this entry's scheduling cost against
                 // the class deficit; the credit is intentionally not refunded,
@@ -2722,6 +2727,79 @@ policy_classes:
             Err(KvSchedulerError::DeadlineExceeded)
         ));
         assert_eq!(queue.pending_count(), 0);
+        slots.assert_completely_drained(decay_now());
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn stalled_refresh_sweeps_expired_entries_without_refreshing_them() {
+        let block_size = 16;
+        let isl = 64;
+        let refresher = Arc::new(BlockingRefresher::new(RefreshedOverlap::default()));
+        let (queue, slots) = make_queue_with_blocking_refresher(
+            1,
+            block_size,
+            isl,
+            Some(0.0),
+            Arc::clone(&refresher),
+            ADMISSION_CHANNEL_CAPACITY,
+        );
+
+        let (active, active_rx) = make_request("active", isl);
+        queue.enqueue(active).await;
+        active_rx.await.unwrap().unwrap();
+
+        // Two deadline-bearing entries with the same due time: FCFS pops the
+        // first into a refresh that stalls past both deadlines.
+        let ingress_at = Instant::now();
+        let due_at = ingress_at + Duration::from_secs(12);
+        let mut receivers = Vec::new();
+        for (name, hash) in [("stalled", 41), ("swept", 42)] {
+            let (queued, queued_rx) = make_request(name, isl);
+            let mut classified = queue.build_classify_request(&queued, ingress_at);
+            classified.set_due_at(due_at);
+            queue
+                .enqueue_admitted_with_block_hashes_and_lease(
+                    queued,
+                    Some(vec![LocalBlockHash(hash)]),
+                    None,
+                    None,
+                    Some(classified),
+                    ingress_at,
+                )
+                .await;
+            receivers.push(queued_rx);
+        }
+        assert_eq!(queue.pending_count(), 2);
+
+        slots
+            .mark_prefill_completed(&"active".to_string(), decay_now())
+            .unwrap();
+        slots.free(&"active".to_string(), decay_now()).unwrap();
+        tokio::time::advance(Duration::from_secs(11)).await;
+
+        let update = {
+            let queue = Arc::clone(&queue);
+            tokio::spawn(async move { queue.update().await })
+        };
+        refresher.wait_for_calls(1).await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        refresher.release_one();
+        // Pre-arm a second release so a regression (popping the expired entry
+        // into its own refresh) fails the call-count assertion below instead
+        // of hanging the test.
+        refresher.release_one();
+        update.await.unwrap();
+
+        for queued_rx in receivers {
+            assert!(matches!(
+                queued_rx.await.unwrap(),
+                Err(KvSchedulerError::DeadlineExceeded)
+            ));
+        }
+        assert_eq!(queue.pending_count(), 0);
+        // The swept entry must be rejected by the post-refresh sweep, not
+        // popped into a stalled refresh of its own.
+        assert_eq!(refresher.calls.load(Ordering::Relaxed), 1);
         slots.assert_completely_drained(decay_now());
     }
 
