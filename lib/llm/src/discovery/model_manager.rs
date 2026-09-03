@@ -17,6 +17,7 @@ use dynamo_kv_router::{
     protocols::{KvTransferEnforcement, RoutingConstraints, WorkerId, WorkerWithDpRank},
     selector::{WorkerInputs, WorkerSelector},
 };
+use tokio_util::sync::CancellationToken;
 
 use super::worker_monitor::LoadThresholdConfig;
 use super::{
@@ -1030,6 +1031,22 @@ impl ModelManager {
             .is_some_and(|m| m.is_ready_to_serve())
     }
 
+    /// Snapshot the serving readiness of every registered model.
+    ///
+    /// Each value is derived from [`Model::is_ready_to_serve`], the same
+    /// selection gate used by request routing and KServe model readiness.
+    /// Results are sorted by model name so scrape output is deterministic.
+    pub(crate) fn registered_model_readiness(&self) -> Vec<(String, bool)> {
+        let catalog = self.catalog.load();
+        let mut readiness = catalog
+            .models
+            .iter()
+            .map(|(name, model)| (name.clone(), model.is_ready_to_serve()))
+            .collect::<Vec<_>>();
+        readiness.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        readiness
+    }
+
     /// Whether any registered model can serve at least one inference request
     /// right now. See [`Model::is_ready_to_serve`].
     pub fn has_any_ready_model(&self) -> bool {
@@ -1913,9 +1930,68 @@ impl ModelManager {
         Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
     {
         let client = endpoint.client().await?;
+        let source = crate::kv_router::RouterLoadSource::from_worker_role_or_metric(
+            worker_role,
+            metric_worker_type,
+        );
+        let parent_token = endpoint.component().drt().child_token();
+        let scheduler_load =
+            crate::kv_router::SchedulerLoadSender::disabled(source, parent_token.child_token());
         self.kv_chooser_for_with_selector_and_client(
-            endpoint,
             client,
+            kv_cache_block_size,
+            selector,
+            kv_router_config,
+            prefill_load_estimator,
+            worker_role,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+            scheduler_load,
+            parent_token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn managed_kv_router_for(
+        &self,
+        endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<crate::kv_router::ManagedKvRouter> {
+        self.managed_kv_router_for_with_worker_role(
+            endpoint,
+            kv_cache_block_size,
+            kv_router_config,
+            prefill_load_estimator,
+            None,
+            metric_worker_type,
+            model_name,
+            is_eagle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn managed_kv_router_for_with_worker_role(
+        &self,
+        endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<crate::kv_router::ManagedKvRouter> {
+        let selector = DefaultWorkerSelector::new(kv_router_config.clone(), metric_worker_type);
+        self.managed_kv_router_for_with_selector(
+            endpoint,
             kv_cache_block_size,
             selector,
             kv_router_config,
@@ -1928,10 +2004,57 @@ impl ModelManager {
         .await
     }
 
+    /// Construct a managed KV router with a selector resolved by the routing host at startup.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn kv_chooser_for_with_selector_and_client<Sel>(
+    pub async fn managed_kv_router_for_with_selector<Sel>(
         &self,
         endpoint: &Endpoint,
+        kv_cache_block_size: u32,
+        selector: Sel,
+        kv_router_config: Option<KvRouterConfig>,
+        prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+        worker_role: Option<WorkerType>,
+        metric_worker_type: &'static str,
+        model_name: Option<String>,
+        is_eagle: bool,
+    ) -> anyhow::Result<crate::kv_router::ManagedKvRouter<Sel>>
+    where
+        Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+    {
+        let client = endpoint.client().await?;
+        let source = crate::kv_router::RouterLoadSource::from_worker_role_or_metric(
+            worker_role,
+            metric_worker_type,
+        );
+        let load_context = crate::kv_router::RoutingLoadContext::start(
+            client.clone(),
+            source,
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            &endpoint.component().drt().child_token(),
+            None,
+        )
+        .await?;
+        let router = self
+            .kv_chooser_for_with_selector_and_client(
+                client,
+                kv_cache_block_size,
+                selector,
+                kv_router_config,
+                prefill_load_estimator,
+                worker_role,
+                metric_worker_type,
+                model_name,
+                is_eagle,
+                load_context.scheduler_load_sender(),
+                load_context.cancellation_token(),
+            )
+            .await?;
+        Ok(crate::kv_router::ManagedKvRouter::new(load_context, router))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn kv_chooser_for_with_selector_and_client<Sel>(
+        &self,
         client: Client,
         kv_cache_block_size: u32,
         selector: Sel,
@@ -1941,10 +2064,13 @@ impl ModelManager {
         metric_worker_type: &'static str,
         model_name: Option<String>,
         is_eagle: bool,
+        scheduler_load: crate::kv_router::SchedulerLoadSender,
+        cancellation_token: CancellationToken,
     ) -> anyhow::Result<Arc<KvRouter<Sel>>>
     where
         Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
     {
+        let endpoint = client.endpoint.clone();
         let lora_domain = self.lora_domain(&endpoint.id());
 
         // Register router via discovery mechanism.
@@ -1955,7 +2081,7 @@ impl ModelManager {
         // Use the worker's component name so each target pool gets its own router discovery group
         let router_endpoint_id =
             router_endpoint_id(endpoint.id().namespace, endpoint.id().component);
-        let transport = build_transport_type(endpoint, &router_endpoint_id, instance_id).await?;
+        let transport = build_transport_type(&endpoint, &router_endpoint_id, instance_id).await?;
 
         let discovery_spec = DiscoverySpec::Endpoint {
             namespace: router_endpoint_id.namespace.clone(),
@@ -1969,7 +2095,7 @@ impl ModelManager {
         let registration = drt.register_endpoint_lease(discovery_spec).await?;
 
         // Get of create runtime config watcher for this endpoint
-        let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
+        let workers_with_configs = self.get_or_create_runtime_config_watcher(&endpoint).await?;
 
         // A selector that does not consume cache input must not create a shared-cache client or
         // subscribe to its updates.
@@ -1990,7 +2116,7 @@ impl ModelManager {
                         "Using HiCache shared KV cache"
                     );
                     Some(Box::new(
-                        self.hicache_cache_for(endpoint, workers_with_configs.clone()),
+                        self.hicache_cache_for(&endpoint, workers_with_configs.clone()),
                     ))
                 }
             }
@@ -2014,14 +2140,14 @@ impl ModelManager {
             && kv_event_source_requirement.should_subscribe(&effective_kv_router_config)
         {
             Some(
-                self.get_or_create_kv_source_membership_watch(endpoint)
+                self.get_or_create_kv_source_membership_watch(&endpoint)
                     .await?,
             )
         } else {
             None
         };
 
-        let mut chooser = KvRouter::new_with_worker_role(
+        let mut chooser = KvRouter::new_with_worker_role_and_scheduler_load(
             endpoint.clone(),
             client,
             workers_with_configs,
@@ -2036,6 +2162,8 @@ impl ModelManager {
             is_eagle,
             shared_cache,
             self.lora_enabled.then(|| lora_domain.filter.clone()),
+            scheduler_load,
+            cancellation_token,
         )
         .await?;
         chooser.set_endpoint_registration(registration);
@@ -3317,10 +3445,11 @@ mod tests {
             None,
             None,
             None,
-            None,
+            crate::session_affinity::SessionAffinityMode::Hard,
             "topology-model".to_string(),
             worker_set.namespace().to_string(),
-            None,
+            crate::discovery::LoadThresholdHandle::new(Default::default()),
+            CancellationToken::new(),
         );
         let encoder = crate::kv_router::EncoderRouter::new(
             "topology-model".to_string(),

@@ -91,6 +91,11 @@ pub enum WorkerSelectionPolicyRegistryError {
 }
 
 impl WorkerSelectionPolicyRegistry {
+    /// Whether this image has no linked custom worker-selection policy types.
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+    }
+
     /// Register a policy type supplied by a linked policy crate.
     pub fn register(
         &mut self,

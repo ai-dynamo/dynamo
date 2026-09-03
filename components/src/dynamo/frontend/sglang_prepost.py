@@ -28,6 +28,9 @@ from sglang.srt.parser.jinja_template_utils import (
 )
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
+from dynamo.common.utils.engine_response import trailing_stop_prefix_len
+from dynamo.common.utils.guided_json import admits_only_empty_object
+
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import PreprocessError, random_call_id
 
@@ -50,6 +53,7 @@ class SglangPreprocessResult:
     guided_decoding: dict[str, Any] | None
     request: dict[str, Any]
     force_reasoning: bool = False
+    named_zero_arg_tool: str | None = None
 
 
 # --- force_reasoning detection (mirrors sglang's template_manager) -------
@@ -328,6 +332,20 @@ def _is_named_tool_choice(tool_choice: Any) -> bool:
     )
 
 
+def named_closed_zero_arg_tool(request: dict[str, Any]) -> str | None:
+    """Return the named tool when its only valid argument value is ``{}``."""
+    tool_choice = request.get("tool_choice", "auto")
+    if not _is_named_tool_choice(tool_choice):
+        return None
+    chosen_name = tool_choice["function"]["name"]
+    for tool in convert_tools(request.get("tools")) or []:
+        if tool.function.name == chosen_name and admits_only_empty_object(
+            tool.function.parameters
+        ):
+            return chosen_name
+    return None
+
+
 def _guided_tool_choice_requires_reasoning(
     request: dict[str, Any], force_reasoning: bool
 ) -> bool:
@@ -561,6 +579,9 @@ def build_tool_call_guided_decoding(
     constraint: Any = None
 
     if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+        if named_closed_zero_arg_tool(request) is not None:
+            return {"regex": r"\{\}"}
+
         # get_json_schema_constraint branches on isinstance(tool_choice,
         # ToolChoice) for the named-function case — passing our raw dict
         # would silently fall through and return None, disabling guided
@@ -842,6 +863,11 @@ def preprocess_chat_request(
         guided_decoding=guided_decoding,
         request=request,
         force_reasoning=force_reasoning,
+        named_zero_arg_tool=(
+            named_closed_zero_arg_tool(request)
+            if guided_decoding == {"regex": r"\{\}"}
+            else None
+        ),
     )
 
 
@@ -956,8 +982,10 @@ class SglangStreamingPostProcessor:
         history_tool_calls_count: int = 0,
         sglang_tools: list[SglangTool] | None = None,
         tool_call_parser_name: str | None = None,
+        named_zero_arg_tool: str | None = None,
         eos_token_ids: list[int] | None = None,
         prompt_token_ids: list[int] | None = None,
+        stop_strings: set[str] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -967,6 +995,7 @@ class SglangStreamingPostProcessor:
         self._tool_call_parser_name = _normalize_sglang_parser_name(
             tool_call_parser_name
         )
+        self._named_zero_arg_tool = named_zero_arg_tool
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a parser is active so tool-call and
         # reasoning delimiters remain visible during incremental decoding.
@@ -979,6 +1008,10 @@ class SglangStreamingPostProcessor:
             [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
         self._eos_token_ids = set(eos_token_ids or [])
+        self._stop_strings = stop_strings or set()
+        self._pending_stop_text = ""
+        self._locally_finished = False
+        self._local_stop_reason: str | None = None
 
         # Keep a small, known-complete prompt suffix as decode context. Generated
         # tokens are promoted to context only after they decode without a
@@ -1148,12 +1181,120 @@ class SglangStreamingPostProcessor:
 
         return ""
 
+    def _trailing_logprobs_count(self, text: str) -> int:
+        if not text:
+            return 0
+        decoded = ""
+        count = 0
+        for entry in reversed(self._pending_logprobs_content):
+            token = entry.get("token")
+            if not isinstance(token, str):
+                return 0
+            decoded = token + decoded
+            count += 1
+            if len(decoded) >= len(text):
+                if not decoded.endswith(text):
+                    return 0
+                while (
+                    count < len(self._pending_logprobs_content)
+                    and self._pending_logprobs_content[-count - 1].get("token") == ""
+                ):
+                    count += 1
+                return count
+        return 0
+
     def _take_pending_logprobs(self) -> dict[str, Any] | None:
         if not self._pending_logprobs_content:
             return None
-        content = self._pending_logprobs_content
-        self._pending_logprobs_content = []
+
+        pending_count = self._trailing_logprobs_count(self._pending_stop_text)
+        if pending_count:
+            content = self._pending_logprobs_content[:-pending_count]
+            self._pending_logprobs_content = self._pending_logprobs_content[
+                -pending_count:
+            ]
+        else:
+            content = self._pending_logprobs_content
+            self._pending_logprobs_content = []
+        if not content:
+            return None
         return {"content": content, "refusal": None}
+
+    @property
+    def locally_finished(self) -> bool:
+        return self._locally_finished
+
+    @property
+    def local_stop_reason(self) -> str | None:
+        return self._local_stop_reason
+
+    @property
+    def has_pending_stop_text(self) -> bool:
+        return bool(self._pending_stop_text)
+
+    def _matched_stop_string(self, stop_reason: Any) -> str | None:
+        if isinstance(stop_reason, str):
+            return stop_reason if stop_reason in self._stop_strings else None
+
+        if isinstance(stop_reason, int) and not isinstance(stop_reason, bool):
+            matched_ids = [stop_reason]
+        elif (
+            isinstance(stop_reason, list)
+            and stop_reason
+            and all(
+                isinstance(token_id, int) and not isinstance(token_id, bool)
+                for token_id in stop_reason
+            )
+        ):
+            matched_ids = stop_reason
+        else:
+            return None
+
+        matched = self.tokenizer.decode(matched_ids, skip_special_tokens=False)
+        return matched if matched in self._stop_strings else None
+
+    def _find_stop_string(self, text: str, stop_reason: Any) -> tuple[int, str] | None:
+        matched = self._matched_stop_string(stop_reason)
+        candidates = self._stop_strings
+        if matched is not None:
+            candidates = {matched, *candidates}
+
+        matches = (
+            (index, stop != matched, -len(stop), stop)
+            for stop in candidates
+            if (index := text.find(stop)) >= 0
+        )
+        first = min(matches, default=None)
+        return (first[0], first[3]) if first is not None else None
+
+    def _filter_stop_string_delta(
+        self,
+        text: str,
+        finish_reason: str | None,
+        stop_reason: Any,
+    ) -> tuple[str, bool]:
+        text = self._pending_stop_text + text
+        self._pending_stop_text = ""
+
+        match = self._find_stop_string(text, stop_reason)
+        if match is not None:
+            match_index, matched_stop_string = match
+            suppressed_text = text[match_index:]
+            suppressed_count = self._trailing_logprobs_count(suppressed_text)
+            if suppressed_count:
+                del self._pending_logprobs_content[-suppressed_count:]
+            self._locally_finished = True
+            self._local_stop_reason = matched_stop_string
+            return text[:match_index], True
+
+        if finish_reason or not text or not self._stop_strings:
+            return text, False
+
+        pending_len = trailing_stop_prefix_len(text, self._stop_strings)
+        if pending_len:
+            self._pending_stop_text = text[-pending_len:]
+            return text[:-pending_len], False
+        return text, False
 
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
@@ -1214,9 +1355,13 @@ class SglangStreamingPostProcessor:
         Returns:
             OpenAI choice dict or ``None`` if nothing to emit yet.
         """
+        if self._locally_finished:
+            return None
+
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
         finish_reason = engine_response.get("finish_reason")
+        stop_reason = engine_response.get("stop_reason")
         log_probs = engine_response.get("log_probs")
         top_logprobs = engine_response.get("top_logprobs")
         if finish_reason is not None:
@@ -1241,6 +1386,11 @@ class SglangStreamingPostProcessor:
             if openai_logprobs is not None:
                 self._pending_logprobs_content.extend(openai_logprobs["content"])
         self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
+        delta_text, locally_finished = self._filter_stop_string_delta(
+            delta_text, finish_reason, stop_reason
+        )
+        if locally_finished:
+            finish_reason = "stop"
 
         if self._fast_plain_text:
             if delta_text:
@@ -1285,6 +1435,9 @@ class SglangStreamingPostProcessor:
                     normal_text
                 )
             content_text = parsed_text
+            if self._named_zero_arg_tool is not None:
+                # The exact regex emits the argument object, not user-visible text.
+                content_text = ""
 
             for tc in tool_calls:
                 idx = tc.tool_index
@@ -1329,9 +1482,13 @@ class SglangStreamingPostProcessor:
             # can misidentify words in the prompt (e.g. a person's name)
             # as function names.
             known_names = (
-                {t.function.name for t in self._sglang_tools}
-                if self._sglang_tools
-                else set()
+                {self._named_zero_arg_tool}
+                if self._named_zero_arg_tool is not None
+                else (
+                    {t.function.name for t in self._sglang_tools}
+                    if self._sglang_tools
+                    else set()
+                )
             )
             if known_names:
                 for idx in list(self._tool_call_names):
@@ -1369,7 +1526,19 @@ class SglangStreamingPostProcessor:
 
             if should_reparse:
                 if self._is_json_array_parser:
-                    final_calls = _parse_json_array_buffer(full_text)
+                    if (
+                        self._named_zero_arg_tool is not None
+                        and full_text.strip() == "{}"
+                    ):
+                        final_calls = [
+                            ToolCallItem(
+                                tool_index=0,
+                                name=self._named_zero_arg_tool,
+                                parameters="{}",
+                            )
+                        ]
+                    else:
+                        final_calls = _parse_json_array_buffer(full_text)
                     # Secondary fallback: when guided decoding did not
                     # constrain the output (e.g. the backend doesn't
                     # support it), the model may have produced tool calls
@@ -1443,6 +1612,15 @@ class SglangStreamingPostProcessor:
                     "Dropping incomplete SGLang tool calls with no valid arguments: %s",
                     dropped_names,
                 )
+
+            if self._named_zero_arg_tool is not None and not self._tool_call_names:
+                # A backend that cannot enforce the regex may return ordinary text.
+                # It was held back to avoid leaking the exact `{}` argument payload,
+                # so restore it when no zero-argument tool call was recovered.
+                fallback_content = "".join(self._tool_text_parts)
+                if fallback_content.strip() != "{}":
+                    delta["content"] = fallback_content
+                    has_content = True
 
         if finish_reason and self._tool_call_names:
             tool_calls_out: list[dict[str, Any]] = []

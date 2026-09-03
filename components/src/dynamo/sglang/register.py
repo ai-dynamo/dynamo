@@ -15,7 +15,10 @@ from dynamo._core import Endpoint
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.native_offloading import NATIVE_OFFLOADING_CAPACITY_RUNTIME_KEY
 from dynamo.common.token_budget import TokenBudget, publish_token_budget
-from dynamo.common.utils.media_decoder import enable_frontend_video_decoding
+from dynamo.common.utils.media_decoder import (
+    build_frontend_image_decoder_options,
+    enable_frontend_video_decoding,
+)
 from dynamo.common.utils.output_modalities import get_output_modalities
 from dynamo.common.utils.topology import apply_topology_config
 from dynamo.llm import (
@@ -27,6 +30,7 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
+from dynamo.sglang._compat import sglang_uses_mla_backend
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
@@ -98,7 +102,7 @@ def _build_media_decoder_and_fetcher():
     Mirrors the vLLM backend pattern (components/src/dynamo/vllm/main.py).
     """
     media_decoder = MediaDecoder()
-    media_decoder.enable_image({"limits": {"max_alloc": 128 * 1024 * 1024}})
+    media_decoder.enable_image(build_frontend_image_decoder_options())
     enable_frontend_video_decoding(media_decoder)
 
     media_fetcher = MediaFetcher()
@@ -288,7 +292,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
 
     try:
-        is_mla_model = bool(server_args.use_mla_backend())
+        is_mla_model = sglang_uses_mla_backend(server_args)
     except Exception as e:
         logging.warning(f"Failed to determine whether model uses MLA backend: {e}")
         is_mla_model = False
