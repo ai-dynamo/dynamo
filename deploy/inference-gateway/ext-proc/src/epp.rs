@@ -462,6 +462,7 @@ impl Router {
     /// tier. `routing_constraints` carries the request's required/preferred
     /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
     /// mismatch excludes a worker from selection.
+    #[expect(clippy::too_many_arguments)]
     pub async fn route_prefill(
         &self,
         reservation_id: &str,
