@@ -726,9 +726,10 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             try:
                 await self._pause_controller.resume(tags)
 
-                if self.generate_endpoint is not None:
-                    await self.generate_endpoint.register_endpoint_instance()
-                self._pause_controller.mark_resumed()
+                if not self._pause_controller.is_paused:
+                    if self.generate_endpoint is not None:
+                        await self.generate_endpoint.register_endpoint_instance()
+                    self._pause_controller.mark_resumed()
 
                 return {
                     "status": "ok",

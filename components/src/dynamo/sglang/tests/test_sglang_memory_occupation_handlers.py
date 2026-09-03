@@ -142,6 +142,29 @@ async def test_memory_occupation_handlers_forward_tags_exactly(handler):
 
 
 @pytest.mark.asyncio
+async def test_partial_resume_waits_for_all_memory_tags(handler):
+    await handler.release_memory_occupation({})
+
+    first_resume = await handler.resume_memory_occupation({"tags": ["weights"]})
+
+    assert first_resume["status"] == "ok"
+    assert handler._pause_controller.is_paused is True
+    handler.engine.tokenizer_manager.continue_generation.assert_not_awaited()
+    handler.generate_endpoint.register_endpoint_instance.assert_not_awaited()
+
+    second_resume = await handler.resume_memory_occupation({"tags": ["kv_cache"]})
+
+    assert second_resume["status"] == "ok"
+    assert handler._pause_controller.is_paused is False
+    handler.engine.tokenizer_manager.continue_generation.assert_awaited_once()
+    handler.generate_endpoint.register_endpoint_instance.assert_awaited_once()
+    assert [
+        call.args[0].tags
+        for call in handler.engine.tokenizer_manager.resume_memory_occupation.await_args_list
+    ] == [["weights"], ["kv_cache"]]
+
+
+@pytest.mark.asyncio
 async def test_resume_recovers_generation_pause_after_failed_release_rollback(handler):
     manager = handler.engine.tokenizer_manager
     manager.release_memory_occupation = AsyncMock(
