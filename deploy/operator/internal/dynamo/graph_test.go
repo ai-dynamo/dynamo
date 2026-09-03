@@ -6536,6 +6536,11 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				ComponentType:   commonconsts.ComponentTypeWorker,
 				DynamoNamespace: ptr.To("default-test-deployment"), // Namespace set by caller
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					// An exact GPU product selector must survive the merge untouched:
+					// DGD power admission validates the authored cap against it.
+					PodSpec: &corev1.PodSpec{
+						NodeSelector: map[string]string{"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3"},
+					},
 					MainContainer: &corev1.Container{
 						Image:   "test-image:1.5.0",
 						Command: []string{"python3"},
@@ -6638,6 +6643,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 						},
 					},
 				},
+				NodeSelector:                  map[string]string{"nvidia.com/gpu.product": "NVIDIA-H100-80GB-HBM3"},
 				RestartPolicy:                 corev1.RestartPolicyAlways,
 				TerminationGracePeriodSeconds: ptr.To(int64(60)),
 				SecurityContext: &corev1.PodSecurityContext{

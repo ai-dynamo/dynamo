@@ -101,7 +101,9 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(
 	// Create validator with manager for API group detection and perform validation.
 	validator := NewDynamoGraphDeploymentValidator(h.mgr)
 	runtimeVersionSource := runtimeVersionValidationSourceForRequest(ctx, nvidiacomv1beta1.DynamoGraphDeploymentGVK)
-	warnings, err := validator.validate(ctx, newObj, runtimeVersionSource, true)
+	// Run the stateless traversal against the new object, passing the stored
+	// object so net-new rules can ratchet an unchanged pre-existing violation.
+	warnings, err := validator.validate(ctx, newObj, oldObj, runtimeVersionSource, true)
 	if err != nil {
 		return warnings, err
 	}

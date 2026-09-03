@@ -1059,8 +1059,12 @@ func TestDGD_RoundTrip_PodTemplateProbesAndEnvFrom(t *testing.T) {
 }
 
 // TestDGD_RoundTrip_PodSpecExtras covers the non-main-container PodSpec fields
-// that flow through ExtraPodSpec.PodSpec: NodeSelector, Tolerations,
-// ServiceAccountName, ImagePullSecrets, Volumes.
+// that flow through ExtraPodSpec.PodSpec: NodeSelector, NodeName, Affinity,
+// Tolerations, ServiceAccountName, ImagePullSecrets, Volumes.
+//
+// NodeSelector, NodeName, and Affinity are the placement inputs the DGD power
+// admission ratchet compares, so their fidelity is what lets those rules be
+// validated once in the storage-version recursion.
 func TestDGD_RoundTrip_PodSpecExtras(t *testing.T) {
 	src := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "extras", Namespace: "ns"},
@@ -1071,7 +1075,21 @@ func TestDGD_RoundTrip_PodSpecExtras(t *testing.T) {
 					ComponentType: v1beta1.ComponentTypeWorker,
 					PodTemplate: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
-							NodeSelector:       map[string]string{"node-pool": "gpu"},
+							NodeSelector: map[string]string{"node-pool": "gpu"},
+							NodeName:     "gpu-node-0",
+							Affinity: &corev1.Affinity{
+								NodeAffinity: &corev1.NodeAffinity{
+									RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+										NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+											MatchExpressions: []corev1.NodeSelectorRequirement{{
+												Key:      "nvidia.com/gpu.product",
+												Operator: corev1.NodeSelectorOpIn,
+												Values:   []string{"NVIDIA-H100-80GB-HBM3"},
+											}},
+										}},
+									},
+								},
+							},
 							ServiceAccountName: "dynamo-sa",
 							ImagePullSecrets:   []corev1.LocalObjectReference{{Name: "ghcr-creds"}},
 							Tolerations: []corev1.Toleration{

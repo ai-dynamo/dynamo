@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Reviewed source data for the DGD admission GPU-product power catalog
+# (powerRanges in dynamographdeployment_helpers.go, DEP #13715). This file is
+# provenance for that reviewed Go map, not a runtime input: nothing in the
+# operator loads it, and the shipped map is a filtered, whole-watt-rounded
+# derivation of it, not a straight copy. See dynamographdeployment_helpers.go
+# and TestGPUProductPowerRanges in dynamographdeployment_unit_test.go for the
+# derivation and its rounding/exclusion rules.
+#
+# gpu_product is the exact nvidia.com/gpu.product GFD label as reported by
+# reviewed hardware; the four *-bring-up-board rows and the bare B300 row are
+# retained here as audit record even though they are excluded from the map
+# (internal names / not an exact public GFD label). Min_W and Max_W are the
+# verified settable Total Graphics Power bounds and are the only columns that
+# feed the map. Default_W and Curr_W are audit context only and do not affect
+# admission.
+gpu_product,Min_W,Default_W,Max_W,Curr_W
+B300,200,1100,1100,1100
+NVIDIA-A10,100,150,150,150
+NVIDIA-A100-80GB-PCIe,150,300,300,300
+NVIDIA-A100-PCIE-40GB,150,250,250,250
+NVIDIA-A100-SXM4-40GB,100,400,400,400
+NVIDIA-A100-SXM4-80GB,100,400,400,400
+NVIDIA-A16,48.75,62.5,62.5,62.5
+NVIDIA-A2,35,60,60,60
+NVIDIA-A30,100,165,165,165
+NVIDIA-A40,100,300,300,300
+NVIDIA-AX800,250,350,350,350
+NVIDIA-B200,200,1000,1000,1000
+NVIDIA-GH200-120GB,100,900,900,900
+NVIDIA-GH200-480GB,100,900,900,900
+NVIDIA-GeForce-RTX-2070-SUPER,125,215,260,260
+NVIDIA-GeForce-RTX-3070,100,220,240,240
+NVIDIA-GeForce-RTX-3070-Ti,100,290,320,320
+NVIDIA-GeForce-RTX-3080,100,320,370,370
+NVIDIA-GeForce-RTX-3090,100,350,400,400
+NVIDIA-GeForce-RTX-4090,10,450,600,600
+NVIDIA-GeForce-RTX-5080,250,360,360,360
+NVIDIA-GeForce-RTX-5090,400,575,600,600
+NVIDIA-H100,200,650,700,700
+NVIDIA-H100-80GB-HBM3,200,700,700,700
+NVIDIA-H100-NVL,200,310,400,400
+NVIDIA-H100-PCIe,200,310,350,350
+NVIDIA-H20,200,500,500,500
+NVIDIA-H20-3e,200,500,500,500
+NVIDIA-H200,200,700,700,700
+NVIDIA-H200-NVL,200,600,600,600
+NVIDIA-H800-NVL,200,310,400,400
+NVIDIA-L2,40,72,72,72
+NVIDIA-L20,150,350,350,350
+NVIDIA-L4,40,72,72,72
+NVIDIA-L40,100,300,300,300
+NVIDIA-L40G,100,300,300,300
+NVIDIA-L40S,100,350,350,350
+NVIDIA-RTX-4500-Ada-Generation,100,210,210,210
+NVIDIA-RTX-5000-Ada-Generation,100,250,250,250
+NVIDIA-RTX-6000-Ada-Generation,100,300,300,300
+NVIDIA-RTX-A4000,100,140,140,140
+NVIDIA-RTX-A5000,100,230,230,230
+NVIDIA-RTX-A6000,100,300,300,300
+NVIDIA-RTX-PRO-2000-Blackwell,56,70,70,70
+NVIDIA-RTX-PRO-4500-Blackwell-Server-Edition,100,165,165,165
+NVIDIA-RTX-PRO-6000-Blackwell-Server-Edition,300,600,600,600
+NVIDIA-RTX-PRO-6000-Blackwell-Workstation-Edition,150,600,600,600
+Quadro-GP100,117.5,235,235,235
+Quadro-RTX-6000,100,260,260,260
+Quadro-RTX-8000,100,260,260,260
+Tesla-P100-PCIE-16GB,125,250,250,250
+Tesla-T4,60,70,70,70
+Tesla-V100-PCIE-32GB,100,250,250,250
+Tesla-V100-SXM2-16GB,100,300,300,300
+Tesla-V100-SXM3-32GB,100,350,350,350
+gb100-bring-up-board,100,600,600,600
+gb110-bring-up-board,100,600,600,600
+gr100-bring-up-board,100,2300,2300,2300
+gr102-bring-up-board,200,1500,2500,1500

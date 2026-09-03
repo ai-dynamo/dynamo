@@ -32,6 +32,7 @@ import (
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	authenticationv1 "k8s.io/api/authentication/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -71,6 +72,10 @@ type dynamoGraphDeploymentSpecValidationOptions struct {
 	workloadProvider        string
 	grovePathway            bool
 	grovePathwayRequirement string
+	// oldComponents is nil on create. On update it carries the stored components
+	// by name so the net-new GPU-product power rules can ratchet an unchanged
+	// pre-existing violation.
+	oldComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
 }
 
 // Validate performs stateless validation on the v1beta1 DynamoGraphDeployment.
@@ -80,12 +85,16 @@ func (v *DynamoGraphDeploymentValidator) Validate(
 	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
-	return v.validate(ctx, deployment, runtimeVersionSource, false)
+	return v.validate(ctx, deployment, nil, runtimeVersionSource, false)
 }
 
+// validate performs the stateless traversal. deployment must not be nil.
+// oldDeployment is the stored object on update and nil on create; it is used
+// only to ratchet net-new rules against an unchanged pre-existing violation.
 func (v *DynamoGraphDeploymentValidator) validate(
 	ctx context.Context,
 	deployment *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldDeployment *nvidiacomv1beta1.DynamoGraphDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 	ratchetRuntimeVersion bool,
 ) (admission.Warnings, error) {
@@ -98,7 +107,7 @@ func (v *DynamoGraphDeploymentValidator) validate(
 		},
 	}
 
-	allErrs := validation.validateDynamoGraphDeployment(deployment)
+	allErrs := validation.validateDynamoGraphDeployment(deployment, oldDeployment)
 	alpha, err := alphaDynamoGraphDeploymentForValidation(deployment)
 	if err != nil {
 		return nil, fmt.Errorf("cannot validate preserved v1alpha1 DynamoGraphDeployment fields: %w", err)
@@ -150,8 +159,10 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(
 }
 
 // validateDynamoGraphDeployment validates dgd. dgd must not be nil.
+// oldDGD is the stored object on update and nil on create.
 func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldDGD *nvidiacomv1beta1.DynamoGraphDeployment,
 ) field.ErrorList {
 	allErrs := field.ErrorList{}
 	allErrs = append(allErrs, v.validateObjectMeta(
@@ -163,12 +174,21 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeployment(
 	groveEnabled := features.MustGateFrom(v.ctx).Enabled(features.Grove)
 	grovePathway, grovePathwayRequirement := grovePathwayForDynamoGraphDeployment(groveEnabled, dgd)
 	workloadProvider := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]
+
+	// Match stored components by name, as the update loop does, so the net-new
+	// GPU-product power rules can ratchet an unchanged pre-existing violation.
+	var oldComponents map[string]*nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+	if oldDGD != nil {
+		oldComponents = componentsByName(oldDGD.Spec.Components)
+	}
+
 	specOpts := dynamoGraphDeploymentSpecValidationOptions{
 		dgdName:                 dgd.Name,
 		generation:              dgd.Generation,
 		workloadProvider:        workloadProvider,
 		grovePathway:            grovePathway,
 		grovePathwayRequirement: grovePathwayRequirement,
+		oldComponents:           oldComponents,
 	}
 	allErrs = append(allErrs, v.validateDynamoGraphDeploymentSpec(&dgd.Spec, field.NewPath("spec"), specOpts)...)
 
@@ -313,8 +333,13 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 			}
 		}
 
-		// Phase-1 power accounting reads scalar GPU resources and cannot account for DRA devices.
-		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(component, componentPath)...)
+		// Phase-1 power accounting reads scalar GPU resources, so it cannot account
+		// for DRA devices, and it needs the exact GPU product to range-check the cap.
+		allErrs = append(allErrs, v.validateDGDComponentPowerAnnotation(
+			component,
+			opts.oldComponents[component.ComponentName],
+			componentPath,
+		)...)
 
 		allErrs = append(allErrs, validateElasticEPRequiresCommand(spec.BackendFramework, component, componentPath)...)
 
@@ -724,7 +749,10 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpecUpdat
 	}
 
 	canModifyReplicas := v.userInfo != nil && internalwebhook.CanModifyDGDReplicas(v.operatorPrincipal, *v.userInfo)
-	const validateGPUMemoryServiceNewState = true // DGD updates do not run the stateless new-state traversal.
+	// The DGD handler runs the stateless new-state traversal before this validator,
+	// so the GMS new-state rules are redundant on the production admission path.
+	// They stay enabled because the exported ValidateUpdate is reachable on its own.
+	const validateGPUMemoryServiceNewState = true
 	componentsPath := fldPath.Child("components")
 	for i := range newSpec.Components {
 		newComponent := &newSpec.Components[i]
@@ -824,6 +852,25 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSharedSpe
 				apivalidation.FieldImmutableErrorMsg,
 			))
 		}
+
+		// Keep the exact GPU product the power range was validated against stable.
+		// The create rules already reject a non-empty nodeName and a missing or
+		// unknown product on any request they are not ratcheted for, and the ratchet
+		// requires an identical placement contract, so no additional nodeName rule
+		// is reachable here.
+		newGPUProduct := dgdGPUProductSelector(newComponent)
+		if newGPUProduct != dgdGPUProductSelector(oldComponent) {
+			var invalidValue any
+			if newGPUProduct != "" {
+				invalidValue = newGPUProduct
+			}
+			allErrs = append(allErrs, field.Invalid(
+				fldPath.Child("podTemplate", "spec", "nodeSelector").Key(gpuProductNodeSelectorLabel),
+				invalidValue,
+				apivalidation.FieldImmutableErrorMsg,
+			))
+		}
+
 		if newComponent.GetNumberOfNodes() != oldComponent.GetNumberOfNodes() {
 			allErrs = append(allErrs, field.Invalid(
 				fldPath.Child("multinode", "nodeCount"),
@@ -893,11 +940,21 @@ func (v *dynamoGraphDeploymentValidation) validateKvTransferPolicyUpdate(
 	)}
 }
 
-// validateDGDComponentPowerAnnotation validates the power-limit annotation value and
-// its incompatibility with DRA-backed GPU allocation on a single component.
-// component and componentPath must not be nil.
+// validateDGDComponentPowerAnnotation validates the power-limit annotation value,
+// its incompatibility with DRA-backed GPU allocation, and the GPU product the
+// annotated component selects. component and componentPath must not be nil.
+//
+// oldComponent is the stored component of the same name on update and nil on
+// create. It exists only to ratchet the net-new GPU-product rules: a
+// power-annotated component created before those rules shipped has no product
+// selector and would otherwise fail every subsequent write, including the
+// Planner's own replica updates. Suppression is total for those rules and never
+// introduces an error, so it cannot reach a component without the annotation,
+// and it never reaches the positive-integer or DRA rules, which keep firing
+// unconditionally.
 func (v *dynamoGraphDeploymentValidation) validateDGDComponentPowerAnnotation(
 	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	componentPath *field.Path,
 ) field.ErrorList {
 	powerLimitValue, hasPowerLimit := dgdPowerLimit(component)
@@ -906,15 +963,93 @@ func (v *dynamoGraphDeploymentValidation) validateDGDComponentPowerAnnotation(
 	}
 	var allErrs field.ErrorList
 	powerLimitPath := componentPath.Child("podTemplate", "metadata", "annotations").Key(consts.KubeAnnotationGPUPowerLimit)
-	if err := validateDGDPowerLimitValue(powerLimitValue, powerLimitPath); err != nil {
-		allErrs = append(allErrs, err)
-	}
+	powerLimit, valueErrs := validateDGDPowerLimitValue(powerLimitValue, powerLimitPath)
+	allErrs = append(allErrs, valueErrs...)
+
 	if draPath := dgdDRAPath(component, componentPath); draPath != nil {
 		allErrs = append(allErrs, field.Forbidden(
 			draPath,
 			fmt.Sprintf(
 				"cannot be combined with annotation %q: power-aware planning does not support DRA-backed device allocation",
 				consts.KubeAnnotationGPUPowerLimit,
+			),
+		))
+	}
+
+	// Ratchet the net-new GPU-product rules for an unchanged pre-existing violation.
+	if oldComponent != nil && equality.Semantic.DeepEqual(
+		dgdPowerProductContract(oldComponent),
+		dgdPowerProductContract(component),
+	) {
+		return allErrs
+	}
+	return append(allErrs, validateDGDComponentGPUProduct(component, componentPath, powerLimit, powerLimitPath)...)
+}
+
+// validateDGDComponentGPUProduct validates the GPU product a power-annotated
+// component selects, and the requested cap against that product's reviewed
+// settable TGP range. component, componentPath, and powerLimitPath must not be
+// nil. powerLimit carries its own presence boolean; an unparseable annotation is
+// already reported by validateDGDPowerLimitValue and skips the range comparison.
+//
+// component.PodTemplate is non-nil for every caller. That is domain semantics
+// rather than a defensive guard: this rule is reached only for a component
+// carrying the power annotation, and the annotation lives on
+// podTemplate.metadata, so a component without a pod template cannot carry it.
+func validateDGDComponentGPUProduct(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	componentPath *field.Path,
+	powerLimit dgdPowerLimitWatts,
+	powerLimitPath *field.Path,
+) field.ErrorList {
+	var allErrs field.ErrorList
+	podSpecPath := componentPath.Child("podTemplate", "spec")
+	selectorPath := podSpecPath.Child("nodeSelector").Key(gpuProductNodeSelectorLabel)
+	product := dgdGPUProductSelector(component)
+
+	// Resolve the selected product, then range-check the cap against it. Report
+	// an unknown product as Invalid rather than NotSupported: NotSupported would
+	// render the whole catalog into the error and publish it as an apparent
+	// hardware support matrix.
+	productRange, known := powerRanges[product]
+	switch {
+	case product == "":
+		allErrs = append(allErrs, field.Required(
+			selectorPath,
+			fmt.Sprintf(
+				"is required when annotation %q is set, so the requested power limit can be validated against the selected GPU product",
+				consts.KubeAnnotationGPUPowerLimit,
+			),
+		))
+	case !known:
+		allErrs = append(allErrs, field.Invalid(
+			selectorPath,
+			product,
+			fmt.Sprintf(
+				"has no reviewed GPU power range in this operator release; select a GPU product with a reviewed range or remove annotation %q",
+				consts.KubeAnnotationGPUPowerLimit,
+			),
+		))
+	case powerLimit.parsed && (powerLimit.watts < productRange.Min || powerLimit.watts > productRange.Max):
+		allErrs = append(allErrs, field.Invalid(
+			powerLimitPath,
+			powerLimit.value,
+			fmt.Sprintf(
+				"must be between %d and %d watts inclusive for GPU product %q",
+				productRange.Min,
+				productRange.Max,
+				product,
+			),
+		))
+	}
+
+	if component.PodTemplate.Spec.NodeName != "" {
+		allErrs = append(allErrs, field.Forbidden(
+			podSpecPath.Child("nodeName"),
+			fmt.Sprintf(
+				"cannot be combined with annotation %q: bypassing the scheduler invalidates the GPU product selected by %q",
+				consts.KubeAnnotationGPUPowerLimit,
+				gpuProductNodeSelectorLabel,
 			),
 		))
 	}

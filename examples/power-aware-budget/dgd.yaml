@@ -12,9 +12,10 @@
 # to project a power budget and clamp scale-up. The Planner never patches Pods.
 #
 # The annotation, effective main-container nvidia.com/gpu count (limit first,
-# request fallback), and multinode.nodeCount are immutable for an annotated
-# component. Delete and recreate the DGD to change that tuple. Restart the
-# Planner process after changing total_gpu_power_limit.
+# request fallback), multinode.nodeCount, and the exact nvidia.com/gpu.product
+# node selector are immutable for an annotated component. Delete and recreate the
+# DGD to change that tuple. Restart the Planner process after changing
+# total_gpu_power_limit.
 apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
@@ -44,6 +45,11 @@ spec:
             # 2 GPUs/replica × 350 W = 700 W per prefill replica.
             dynamo.nvidia.com/gpu-power-limit: "350"
         spec:
+          # Admission validates 350 W against this GPU product's settable TGP
+          # range. An exact `nvidia.com/gpu.product` selector is required on every
+          # power-annotated component, and it is immutable for the life of the DGD.
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
           containers:
             - name: main
               resources:
@@ -59,6 +65,8 @@ spec:
             # 4 GPUs/replica × 300 W = 1200 W per decode replica.
             dynamo.nvidia.com/gpu-power-limit: "300"
         spec:
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
           containers:
             - name: main
               resources:
