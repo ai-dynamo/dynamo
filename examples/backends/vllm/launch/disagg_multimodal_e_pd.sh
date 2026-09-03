@@ -14,6 +14,7 @@ export DYN_REQUEST_PLANE=tcp
 # Default values
 MODEL_NAME="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8"
 SINGLE_GPU=false
+FRONTEND_DECODING=false
 
 # Parse command line arguments
 # All extra arguments are passed through to the PD worker's dynamo.vllm
@@ -29,6 +30,10 @@ while [[ $# -gt 0 ]]; do
             SINGLE_GPU=true
             shift
             ;;
+        --frontend-decoding)
+            FRONTEND_DECODING=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS] [EXTRA_ARGS...]"
             echo ""
@@ -38,6 +43,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --model <model_name>          Specify the VLM model to use (default: $MODEL_NAME)"
             echo "                                LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates"
             echo "  --single-gpu                  Run encode and PD workers on the same GPU (for small models, e.g. 2B)"
+            echo "  --frontend-decoding           Decode images in the Rust frontend and transfer pixels to the encode worker via NIXL"
             echo "  -h, --help                    Show this help message"
             echo ""
             echo "All additional arguments are passed through to the PD worker's dynamo.vllm."
@@ -83,6 +89,14 @@ unset DYN_SYSTEM_PORT
 EXTRA_ARGS=""
 PD_GPU_MEM_ARGS=""
 
+# --frontend-decoding must reach BOTH workers: the PD worker's model card
+# advertises the media decoder (so the frontend decodes), and the encode
+# worker needs the flag to read decoded pixels via NIXL.
+FD_ARGS=""
+if [[ "$FRONTEND_DECODING" == "true" ]]; then
+    FD_ARGS="--frontend-decoding"
+fi
+
 # GPU assignments (override via environment variables)
 # In single-GPU mode both workers share the same GPU.
 if [[ "$SINGLE_GPU" == "true" ]]; then
@@ -92,8 +106,9 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.7}
     EXTRA_ARGS="--enforce-eager --max-model-len $PD_MAX_MODEL_LEN"
 else
-    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-1}
-    DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-2}
+    # Two workers, two GPUs: 0 and 1.
+    DYN_ENCODE_WORKER_GPU=${DYN_ENCODE_WORKER_GPU:-0}
+    DYN_PD_WORKER_GPU=${DYN_PD_WORKER_GPU:-1}
     DYN_ENCODE_GPU_MEM=${DYN_ENCODE_GPU_MEM:-0.9}
     DYN_PD_GPU_MEM=${DYN_PD_GPU_MEM:-0.9}
 fi
@@ -124,14 +139,25 @@ fi
 # GPU0 peak ~13.5 GB at DYN_ENCODE_GPU_MEM=0.05, 0.5, 0.9 (identical within jitter).
 # The static peak is bounded by the model's fp16 weights (~14 GB), independent
 # of GPU size. So sizing for this script: encoder needs ~14 GB free per worker GPU.
+#
+# VLLM_USE_V2_MODEL_RUNNER=0 forces vLLM's V1 model runner for the encode worker.
+# vLLM 0.25.x's V2 model runner has a broken encoder-only init for dense VLMs:
+# the mm_encoder_only load runs a memory profile_run that executes the language
+# model on Meta tensors, hitting the `_C::rms_norm` custom op (no fake/Meta
+# kernel) and crashing at startup with NotImplementedError even under
+# --enforce-eager. The V1 runner keeps vLLM's encoder-only vision tower (no full
+# model load). Short-term workaround; drop it (set VLLM_USE_V2_MODEL_RUNNER=1)
+# once the V2 encoder-only path is fixed upstream. MoE VLMs are unaffected.
 echo "Starting encode worker on GPU $DYN_ENCODE_WORKER_GPU (--gpu-memory-utilization $DYN_ENCODE_GPU_MEM)..."
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
+VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER:-0} \
 CUDA_VISIBLE_DEVICES=$DYN_ENCODE_WORKER_GPU \
 python -m dynamo.vllm \
   --enable-multimodal \
   --disaggregation-mode encode \
   --model "$MODEL_NAME" \
   --gpu-memory-utilization "$DYN_ENCODE_GPU_MEM" \
+  $FD_ARGS \
   $EXTRA_ARGS &
 
 # Start PD worker (aggregated prefill+decode, routes to encoder for embeddings)
@@ -145,6 +171,7 @@ python -m dynamo.vllm \
   --enable-mm-embeds \
   --model "$MODEL_NAME" \
   $PD_GPU_MEM_ARGS \
+  $FD_ARGS \
   $EXTRA_ARGS \
   "${EXTRA_PD_ARGS[@]}" &
 

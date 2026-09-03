@@ -106,8 +106,9 @@ impl HttpService {
                 )
             })?;
 
-        // Hold shutdown Phase 2 until the HTTP server finishes draining, so
-        // discovery/backend connections stay alive for in-flight requests.
+        // Hold Phase 2 of Runtime::shutdown until axum finishes draining
+        // in-flight requests, so discovery watches are not torn down while
+        // multi-minute streams are still draining.
         let guard = runtime.inner().register_graceful_task();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -141,8 +142,9 @@ impl HttpService {
                 ))
             })?;
 
-        self.inner.enable_model_endpoint(endpoint_type, enabled);
-        Ok(())
+        self.inner
+            .enable_model_endpoint(endpoint_type, enabled)
+            .map_err(to_pyerr)
     }
 }
 

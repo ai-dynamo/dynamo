@@ -17,6 +17,7 @@ import time
 
 import pytest
 import requests
+from opentelemetry.proto.trace.v1 import trace_pb2
 
 from tests.frontend.conftest import (
     SampleUnifiedWorkerProcess,
@@ -25,7 +26,11 @@ from tests.frontend.conftest import (
 from tests.frontend.test_request_tracing_logs import _send_chat_completions
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import DynamoFrontendProcess
-from tests.utils.otel import wait_for_engine_generate_count
+from tests.utils.otel import (
+    get_engine_generate_roles,
+    get_span_attribute,
+    wait_for_engine_generate_count,
+)
 
 pytest_plugins = ("tests.utils.otel_plugin",)
 
@@ -41,38 +46,26 @@ pytestmark = [
 ]
 
 
-def _get_attr(span, key):
-    """Return the attribute value as a string, or None if absent.
-    Int/double values are stringified via `str()`."""
-    for attr in span.attributes:
-        if attr.key == key:
-            v = attr.value
-            if v.HasField("string_value"):
-                return v.string_value
-            if v.HasField("int_value"):
-                return str(v.int_value)
-            if v.HasField("double_value"):
-                return str(v.double_value)
-    return None
-
-
 def _send_chat_completions_with_headers(
     port: int,
     *,
     headers: dict[str, str],
     model: str = TEST_MODEL,
     max_tokens: int = 5,
+    stream: bool = False,
 ) -> requests.Response:
     request_headers = {"Content-Type": "application/json", **headers}
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": "Hello"}],
         "max_tokens": max_tokens,
+        "stream": stream,
     }
     return requests.post(
         f"http://localhost:{port}/v1/chat/completions",
         headers=request_headers,
         json=payload,
+        stream=stream,
         timeout=60,
     )
 
@@ -97,6 +90,7 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
     otel_env = {
         "OTEL_EXPORT_ENABLED": "1",
         "DYN_LOGGING_JSONL": "1",
+        "DYN_LOG": "warn",
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"http://127.0.0.1:{otlp_port}",
         "OTEL_SERVICE_NAME": "dynamo-unified-worker-test",
     }
@@ -130,10 +124,14 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
                 resp.status_code == 200
             ), f"curl failed: {resp.status_code} {resp.text!r}"
 
-            # Poll until the batch exporter flushes (~5s default delay).
+            # Poll until both worker and full-lifetime route spans flush
+            # (~5s default batch delay).
             deadline = time.monotonic() + 15.0
             while time.monotonic() < deadline:
-                if collector.engine_generate_spans():
+                spans = collector.snapshot()
+                if any(s.name == "engine.generate" for s in spans) and any(
+                    s.name == "router.route_request" for s in spans
+                ):
                     break
                 time.sleep(0.5)
 
@@ -147,12 +145,137 @@ def test_unified_worker_exports_engine_generate_span_over_otlp(
     # Verify auto-span attributes round-tripped through OTLP.
     span = eg_spans[0]
     assert (
-        _get_attr(span, "disagg_role") == "agg"
-    ), f"expected disagg_role=agg, got {_get_attr(span, 'disagg_role')!r}"
-    assert _get_attr(span, "model") is not None, "missing `model` attribute"
+        get_span_attribute(span, "disagg_role") == "agg"
+    ), f"expected disagg_role=agg, got {get_span_attribute(span, 'disagg_role')!r}"
+    assert get_span_attribute(span, "model") is not None, "missing `model` attribute"
     assert (
-        _get_attr(span, "input_tokens") is not None
+        get_span_attribute(span, "input_tokens") is not None
     ), "missing `input_tokens` attribute"
+
+    same_trace = [s for s in collector.snapshot() if s.trace_id == span.trace_id]
+    route_spans = [s for s in same_trace if s.name == "router.route_request"]
+    assert route_spans, "missing frontend `router.route_request` span"
+    route_span = route_spans[0]
+    assert route_span.kind == trace_pb2.Span.SPAN_KIND_CLIENT
+    assert get_span_attribute(route_span, "request.attempt") == "0"
+    assert get_span_attribute(route_span, "migration.is_retry") == "false"
+    assert get_span_attribute(route_span, "request.outcome") == "success"
+
+    worker_spans = [
+        s
+        for s in same_trace
+        if s.name == "handle_payload" and s.parent_span_id == route_span.span_id
+    ]
+    assert (
+        worker_spans
+    ), "worker `handle_payload` must be a remote child of the frontend route span"
+    worker_span = worker_spans[0]
+    assert worker_span.kind == trace_pb2.Span.SPAN_KIND_SERVER
+    assert span.parent_span_id == worker_span.span_id
+    assert (
+        route_span.end_time_unix_nano >= worker_span.end_time_unix_nano
+    ), "route span ended before worker request handling completed"
+    assert (
+        route_span.end_time_unix_nano >= span.end_time_unix_nano
+    ), "route span ended before worker generation completed"
+
+
+def test_client_cancellation_keeps_request_spans_unset(
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_tokenizers,
+    otlp_collector,
+):
+    collector, otlp_port = otlp_collector
+    trace_id = "33333333333333333333333333333333"
+    traceparent = f"00-{trace_id}-4444444444444444-01"
+
+    otel_env = {
+        "OTEL_EXPORT_ENABLED": "1",
+        "DYN_LOGGING_JSONL": "1",
+        "DYN_LOG": "warn",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": f"http://127.0.0.1:{otlp_port}",
+        "OTEL_BSP_SCHEDULE_DELAY": "100",
+        "OTEL_SERVICE_NAME": "dynamo-unified-worker-cancellation-test",
+    }
+
+    ports = dynamo_dynamic_ports
+    frontend_port = ports.frontend_port
+    system_port = ports.system_ports[0]
+
+    with DynamoFrontendProcess(
+        request,
+        frontend_port=frontend_port,
+        extra_env=otel_env,
+        terminate_all_matching_process_names=False,
+    ):
+        with SampleUnifiedWorkerProcess(
+            request,
+            frontend_port=frontend_port,
+            system_port=system_port,
+            model_name=TEST_MODEL,
+            component="sample",
+            disaggregation_mode="agg",
+            extra_args=["--max-tokens", "1000", "--delay", "0.05"],
+            extra_env=otel_env,
+            worker_id="sample-agg-otlp-cancellation",
+        ):
+            wait_for_http_completions_ready(
+                frontend_port=frontend_port, model=TEST_MODEL
+            )
+            collector.clear()
+
+            response = _send_chat_completions_with_headers(
+                frontend_port,
+                headers={
+                    "traceparent": traceparent,
+                    "x-request-id": "otlp-client-cancellation",
+                },
+                model=TEST_MODEL,
+                max_tokens=1000,
+                stream=True,
+            )
+            assert response.status_code == 200
+            first_data_line = next(
+                (line for line in response.iter_lines() if line.startswith(b"data:")),
+                None,
+            )
+            assert (
+                first_data_line is not None
+            ), "stream produced no data before cancellation"
+            response.close()
+
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                spans = collector.spans_for_trace_id(trace_id)
+                names = {span.name for span in spans}
+                if {"http-request", "router.route_request", "handle_payload"} <= names:
+                    break
+                time.sleep(0.2)
+
+    spans = collector.spans_for_trace_id(trace_id)
+    roots = [span for span in spans if span.name == "http-request"]
+    routes = [span for span in spans if span.name == "router.route_request"]
+    workers = [span for span in spans if span.name == "handle_payload"]
+
+    assert len(roots) == 1, f"expected one root span, got {len(roots)}"
+    assert len(routes) == 1, f"expected one route span, got {len(routes)}"
+    assert len(workers) == 1, f"expected one worker span, got {len(workers)}"
+
+    root = roots[0]
+    route = routes[0]
+    worker = workers[0]
+    assert root.status.code == trace_pb2.Status.STATUS_CODE_UNSET
+    assert route.status.code == trace_pb2.Status.STATUS_CODE_UNSET
+    assert worker.status.code == trace_pb2.Status.STATUS_CODE_UNSET
+    assert get_span_attribute(root, "request.outcome") == "cancelled"
+    assert get_span_attribute(route, "request.outcome") == "cancelled"
+    assert route.parent_span_id == root.span_id
+    assert worker.parent_span_id == route.span_id
+    assert any(
+        event.name == "request cancellation received" for event in worker.events
+    ), "worker span is missing its upstream cancellation event"
 
 
 def test_unsampled_traceparent_does_not_export_spans_over_otlp(
@@ -368,10 +491,7 @@ def test_disagg_decode_span_links_to_prefill_span(
                 # separate batch and can lag the parent.
                 deadline = time.monotonic() + 30.0
                 while time.monotonic() < deadline:
-                    roles = {
-                        _get_attr(s, "disagg_role")
-                        for s in collector.engine_generate_spans()
-                    }
+                    roles = get_engine_generate_roles(collector)
                     if {"prefill", "decode"}.issubset(roles) and collector.has_span(
                         "sample.tokens"
                     ):
@@ -381,7 +501,7 @@ def test_disagg_decode_span_links_to_prefill_span(
     eg_spans = collector.engine_generate_spans()
     # Single curl ⇒ at most one span per role; if there were retries the
     # last would win, which is fine for this regression test.
-    by_role = {_get_attr(s, "disagg_role"): s for s in eg_spans}
+    by_role = {get_span_attribute(s, "disagg_role"): s for s in eg_spans}
     assert (
         "prefill" in by_role
     ), f"no prefill engine.generate span; got roles {set(by_role)}"

@@ -171,12 +171,6 @@ struct Args {
     #[clap(long)]
     approx: bool,
 
-    /// Output path for the shard-size CSV produced when `shard-metrics` feature
-    /// is enabled.  Rows: `elapsed_ms,shard_idx,worker_count,block_count,node_count`.
-    /// Omit or leave empty to disable shard-size sampling.
-    #[clap(long, default_value = "")]
-    shard_metrics_csv: String,
-
     /// Number of independent benchmark trials to run over the same generated
     /// benchmark input. Each trial builds a fresh indexer.
     #[clap(long, default_value = "1")]
@@ -220,9 +214,6 @@ fn validate_args(args: &Args) -> anyhow::Result<()> {
     }
     if args.find_matches_concurrency != 0 {
         anyhow::bail!("corrected Mooncake replay does not support --find-matches-concurrency");
-    }
-    if !args.shard_metrics_csv.is_empty() {
-        anyhow::bail!("corrected Mooncake replay does not support shard sampling");
     }
     if !args.common.sweep && args.benchmark_runs != 1 {
         anyhow::bail!("repetitions must use fresh processes; invoke one trial per process");

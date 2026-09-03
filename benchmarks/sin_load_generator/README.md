@@ -9,6 +9,12 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Usage
 
+Install the local data-generator package from the Dynamo repository root:
+
+```bash
+uv pip install -e ./benchmarks
+```
+
 ```bash
 cd benchmarks/sin_load_generator
 python sin_synth.py [OPTIONS]

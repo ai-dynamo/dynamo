@@ -178,6 +178,14 @@ class TensorRTLLMEngine:
         tensor_parallel_size = getattr(self.llm.args, "tensor_parallel_size", 1)
         return tensor_parallel_size if enable_attention_dp else 1
 
+    def get_kv_cache_capacity(self) -> dict[str, int]:
+        """Return the initialized engine's primary GPU KV-cache capacity."""
+        try:
+            get_capacity = self.llm.get_kv_cache_capacity
+        except AttributeError:
+            return {}
+        return get_capacity()
+
     @staticmethod
     def _prune_engine_args_for_autodeploy(engine_args) -> None:
         """Remove entries from `self.engine_args` that the autodeploy backend does not support."""

@@ -1,0 +1,645 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+EFA verification deploy test.
+
+Verifies that an EFA-tagged image built from the commit under test can run
+Dynamo with Elastic Fabric Adapter (EFA) fully enabled: a disaggregated vLLM
+stack deploys on an EFA-capable cluster, serves a chat completion, and the
+prefill->decode KV-cache transfer rides NIXL -> LIBFABRIC -> EFA.
+
+This test is NOT part of the auto-discovered deploy-test matrix. It uses an
+explicit manifest (tests/deploy/efa/disagg-efa.yaml) and the
+``framework_with_efa`` marker, and only makes sense on a cluster with p5/EFA
+nodes (the standard CI vCluster lacks RDMA/EFA, which is why the matrix test
+skips vLLM disagg). Run it explicitly, e.g.:
+
+    pytest tests/deploy/test_deploy_efa.py -m framework_with_efa \
+        --image=<efa-vllm-runtime-image> --namespace=<ns> -v -s
+
+The deployment name is fixed, so the namespace must be clear of a previous
+run before starting a new one -- back-to-back manual runs collide with the
+prior teardown. CI is unaffected: every nightly gets a fresh vCluster.
+
+Runs nightly, against the nightly -efa image, rather than per-commit: EFA
+changes are sparse and this needs a real EFA cluster, two GPUs and roughly three
+minutes, which is far more than the per-commit risk warrants.
+"""
+
+import json
+import logging
+import shlex
+from pathlib import Path
+
+import pytest
+
+# The request defaults, prompt and response validation are shared with
+# tests/deploy/test_dgd.py via dgd_utils, a non-test module -- so this test
+# asserts the same response contract as every other deploy test, and a fix to
+# that contract cannot land in one copy only.
+from tests.deploy.dgd_utils import (
+    DEFAULT_REQUEST_TIMEOUT,
+    DEFAULT_TEMPERATURE,
+    TEST_PROMPT,
+    DeploymentSpec,
+    ManagedDeployment,
+    validate_chat_response,
+)
+from tests.utils.client import send_request, wait_for_model_availability
+
+logger = logging.getLogger(__name__)
+
+EFA_MODEL_NAME = "Qwen/Qwen3-0.6B"
+PREFILL_SERVICE = "VllmPrefillWorker"
+DECODE_SERVICE = "VllmDecodeWorker"
+
+# Comfortably under the test's own pytest timeout below, so a deployment that
+# never becomes ready loses the race to _wait_for_condition, which raises with
+# pod statuses, conditions and warning events appended. Left at the 1800s default
+# it would be pytest-timeout that fires, killing the test mid-wait with a
+# traceback that says nothing about why the pods were not ready. Observed
+# readiness on aws-dev-02 is ~90-150s, so this is not a tight budget.
+EFA_READINESS_TIMEOUT = 900
+
+
+# Generate enough tokens to clear MIN_RESPONSE_CONTENT_LENGTH with margin.
+# The shared DEFAULT_MAX_TOKENS=30 leaves a thin cushion above the 100-char
+# minimum (a short, deterministic Qwen3-0.6B reply can land near the floor),
+# so request a larger budget here to keep this single-completion test robust.
+EFA_MAX_TOKENS = 64
+
+# NIXL states which backend it instantiated, per worker. Both strings were
+# observed directly: a deployment with backends:["LIBFABRIC"] removed logs
+# "Backend UCX was instantiated" (plus nixl_agent.cpp warning that EFA NICs were
+# detected but UCX was configured), and a correctly pinned one logs LIBFABRIC.
+# This is a positive statement of backend selection rather than an inference.
+NIXL_BACKEND_LIBFABRIC = "Backend LIBFABRIC was instantiated"
+NIXL_BACKEND_UCX = "Backend UCX was instantiated"
+
+# libfabric's own memory-registration lines (FI_LOG_LEVEL>=info). These pin the
+# transfer to the *efa* provider specifically -- choosing the LIBFABRIC backend
+# alone would not rule out libfabric selecting shm or tcp underneath.
+LIBFABRIC_EFA_MARKERS = ("efa:mr:", "efa_mr_reg")
+
+# NIXL Prometheus telemetry (enabled via NIXL_TELEMETRY_ENABLE=y in the manifest)
+# is exposed on this port inside each worker pod. We scrape it with
+# pod.exec(python3 ...) — python3 is the container entrypoint, so it is always
+# present — which avoids depending on a named container port or port-forward.
+NIXL_TELEMETRY_PORT = 19090
+# With NIXL READ semantics (vLLM _read_blocks) the decode worker pulls KV from
+# prefill, so transferred bytes register as rx on the decode side (prefill tx
+# stays ~0). agent_rx_bytes is therefore the authoritative "bytes moved over the
+# NIXL/EFA agent" counter. Metric name per the test_efa_on_aws skill; TP=1 here,
+# so the rank-0-only telemetry limitation does not apply.
+NIXL_RX_BYTES_METRIC = "agent_rx_bytes"
+
+# The efa-node-exporter DaemonSet (monitoring namespace, hostNetwork, :9102)
+# publishes per-NIC Amazon EFA counters. Unlike agent_rx_bytes -- which is a
+# NIXL agent-level counter and increments identically whichever backend moved
+# the bytes -- these are read from the adapter, so a delta here is direct
+# evidence that traffic crossed EFA. Measured idle noise on an assigned NIC is
+# zero, and the delta matches agent_rx_bytes byte-for-byte.
+EFA_EXPORTER_PORT = 9102
+# decode issues RDMA READs; prefill serves them. Assert on the side that proves
+# each worker actually moved bytes over its own adapter.
+EFA_COUNTER_BY_ROLE = {
+    DECODE_SERVICE: "node_amazonefa_rdma_read_bytes",
+    PREFILL_SERVICE: "node_amazonefa_rdma_read_resp_bytes",
+}
+
+
+def _read_pod_logs(pod, tail_lines: int = 20000) -> str:
+    """Return this pod's logs, including the previous container instance.
+
+    ``previous`` matters both ways: a worker that restarted during startup keeps
+    its EFA registration lines in the prior instance (gate would false-fail on a
+    healthy deployment), and a fallback that happened before a restart would
+    otherwise be invisible. ``tail_lines`` bounds memory -- FI_LOG_LEVEL=info is
+    extremely chatty and both workers' logs are held at once.
+    """
+    chunks = []
+    spec = pod.raw.get("spec", {}) if hasattr(pod, "raw") else {}
+    containers = [c["name"] for c in (spec.get("containers") or []) if c.get("name")]
+    for container in containers or [""]:
+        for previous in (True, False):
+            kwargs = {"tail_lines": tail_lines, "previous": previous}
+            if container:
+                kwargs["container"] = container
+            try:
+                chunks.append("\n".join(pod.logs(**kwargs)))
+            except Exception as e:  # noqa: BLE001 - no previous instance is normal
+                logger.debug(
+                    "logs(previous=%s) unavailable for %s/%s: %s",
+                    previous,
+                    pod.name,
+                    container or "<default>",
+                    e,
+                )
+    return "\n".join(chunks)
+
+
+def log_nixl_layout(pod) -> None:
+    """Record where NIXL actually lives in the worker image. Diagnostic only.
+
+    Deliberately not asserted on. The layout moves between framework images and
+    between releases -- vLLM and TRT-LLM expose the canonical
+    /opt/nvidia/nvda_nixl tree via NIXL_PLUGIN_DIR, while the CUDA SGLang image
+    gets NIXL from the pip wheel and exports no NIXL_* variables at all -- so a
+    test that pins the layout breaks on the next repackaging without any EFA
+    regression having occurred. Logging it keeps a failed run diagnosable
+    ("NIXL was over here, and these plugins were present") while the assertions
+    below stay on the observable outcome: bytes moved over LIBFABRIC/EFA.
+    """
+    snippet = (
+        "import os;"
+        "d=os.environ.get('NIXL_PLUGIN_DIR','');"
+        "print('NIXL_PLUGIN_DIR=', d or '<unset>');"
+        "print('NIXL_LIB_DIR=', os.environ.get('NIXL_LIB_DIR','') or '<unset>');"
+        "print('LD_PRELOAD=', os.environ.get('LD_PRELOAD','') or '<unset>');"
+        "print('EFA_VERSION=', os.environ.get('EFA_VERSION','') or '<unset>');"
+        "print('plugins=', sorted(os.listdir(d)) if d and os.path.isdir(d) else '<no plugin dir>')"
+    )
+    try:
+        result = pod.exec(["python3", "-c", snippet])
+        logger.info("NIXL layout in %s:\n%s", pod.name, result.stdout.decode())
+    except Exception as e:  # noqa: BLE001 - diagnostics only, never fail the test
+        logger.warning("Could not read NIXL layout from %s: %s", pod.name, e)
+
+
+def assert_nixl_used_libfabric(worker_pods: dict) -> None:
+    """Every worker must have instantiated the LIBFABRIC backend, and no UCX.
+
+    Evaluated per pod on purpose. Concatenating both workers' logs and asking
+    ``any()`` passes when only one side used EFA -- and one-sided fallback (say
+    decode landing without a usable EFA device) is exactly the regression this
+    test exists to catch.
+    """
+    verdicts = {}
+    for role, pods in worker_pods.items():
+        for pod in pods:
+            logs = _read_pod_logs(pod)
+            verdicts[f"{role}/{pod.name}"] = {
+                "libfabric_backend": NIXL_BACKEND_LIBFABRIC in logs,
+                "ucx_backend": NIXL_BACKEND_UCX in logs,
+                "efa_provider": any(m in logs for m in LIBFABRIC_EFA_MARKERS),
+            }
+
+    assert verdicts, "No prefill/decode worker pods found to verify EFA usage"
+    for name, v in verdicts.items():
+        logger.info("NIXL backend verdict %s: %s", name, v)
+
+    no_libfabric = sorted(n for n, v in verdicts.items() if not v["libfabric_backend"])
+    assert not no_libfabric, (
+        f"EFA NOT confirmed: {len(no_libfabric)} of {len(verdicts)} workers never logged "
+        f"{NIXL_BACKEND_LIBFABRIC!r}: {no_libfabric}. Check that --kv-transfer-config "
+        "still pins kv_connector_extra_config.backends=['LIBFABRIC']."
+    )
+
+    on_ucx = sorted(n for n, v in verdicts.items() if v["ucx_backend"])
+    assert not on_ucx, (
+        f"EFA NOT confirmed: {len(on_ucx)} worker(s) instantiated the UCX backend "
+        f"({NIXL_BACKEND_UCX!r}): {on_ucx}. Even alongside LIBFABRIC this makes the "
+        "agent byte counter ambiguous about which transport moved the KV."
+    )
+
+    no_provider = sorted(n for n, v in verdicts.items() if not v["efa_provider"])
+    assert not no_provider, (
+        f"EFA NOT confirmed: {len(no_provider)} worker(s) show no libfabric EFA "
+        f"memory-registration lines {LIBFABRIC_EFA_MARKERS}: {no_provider}. The "
+        "LIBFABRIC backend was selected but libfabric may not have used the efa "
+        "provider (shm/tcp). Check FI_PROVIDER=efa and FI_LOG_LEVEL>=info."
+    )
+    logger.info(
+        "EFA path confirmed on all %d workers: LIBFABRIC backend, no UCX, efa provider",
+        len(verdicts),
+    )
+
+
+def _read_nixl_rx_bytes(pod) -> tuple[str, float | None]:
+    """Return the summed NIXL ``agent_rx_bytes`` counter from a worker pod.
+
+    Scrapes the in-pod NIXL Prometheus endpoint via ``pod.exec`` and sums every
+    ``agent_rx_bytes`` sample (one per NIXL agent/label set). Returns the total
+    bytes NIXL has received (KV pulled from prefill), or ``None`` if telemetry is
+    not reachable or the metric is absent.
+    """
+    snippet = (
+        "import urllib.request;"
+        "print(urllib.request.urlopen("
+        f"'http://localhost:{NIXL_TELEMETRY_PORT}/metrics', timeout=5).read().decode())"
+    )
+    try:
+        result = pod.exec(["python3", "-c", snippet])
+        text = result.stdout.decode()
+    except Exception as e:  # noqa: BLE001 - classified as a scrape failure below
+        logger.warning("Could not scrape NIXL telemetry from %s: %s", pod.name, e)
+        return ("scrape_failed", None)
+
+    total = 0.0
+    found = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Samples look like: agent_rx_bytes{agent="..."} 1234 (also matches a
+        # possible _total suffix). The value is the final whitespace field.
+        if line.startswith(NIXL_RX_BYTES_METRIC):
+            try:
+                total += float(line.rsplit(maxsplit=1)[1])
+                found = True
+            except (IndexError, ValueError):
+                continue
+    return ("ok", total) if found else ("absent", None)
+
+
+def _parse_prometheus_labels(label_block: str) -> dict:
+    """Parse a Prometheus label block into a dict.
+
+    Naive on commas inside label values, which node_amazonefa_* never has --
+    device names are PCI-derived (rdmap<bus>s<slot>) and port is numeric.
+    """
+    out = {}
+    for part in label_block.split(","):
+        key, sep, value = part.partition("=")
+        if sep:
+            out[key.strip()] = value.strip().strip('"')
+    return out
+
+
+def parse_efa_device_metrics(metrics_lines, dev: str) -> dict:
+    """Return ``{metric_name: value}`` for exactly the device ``dev``.
+
+    Matches the ``device`` label by equality rather than by substring. A node
+    publishes one series per metric per NIC, and the result here is keyed only by
+    metric name, so a loose match would let a second NIC's sample overwrite the
+    assigned one -- attributing another adapter's traffic to this worker and
+    passing the load-bearing gate in assert_efa_device_traffic on evidence from
+    the wrong NIC. Device names can nest (rdmap16s2 is a prefix of rdmap16s27),
+    so substring matching is not safe even though the current p5 fleet happens
+    to name every EFA device rdmap<bus>s0.
+    """
+    out = {}
+    for line in metrics_lines:
+        line = line.strip()
+        if not line.startswith("node_amazonefa_"):
+            continue
+        name, sep, rest = line.partition("{")
+        if not sep:
+            # No label block at all, so the sample cannot be attributed to a NIC.
+            continue
+        label_block, sep, value = rest.rpartition("}")
+        if not sep:
+            continue
+        if _parse_prometheus_labels(label_block).get("device") != dev:
+            continue
+        try:
+            out[name] = float(value.split()[0])
+        except (ValueError, IndexError):
+            continue
+    return out
+
+
+def read_efa_device_counters(pod) -> dict:
+    """Read this pod's OWN EFA NIC counters from the node exporter.
+
+    Resolves the assigned device (the pod sees all 32 NICs in sysfs but is given
+    exactly one ``/dev/infiniband/uverbs*``) and maps it to its ibdev name. The
+    in-pod snippet only fetches and coarse-filters to node_amazonefa_* lines;
+    device attribution happens in parse_efa_device_metrics above, so the part
+    that has to be exact is ordinary local code with unit tests rather than a
+    string executed over kubectl exec.
+    """
+    snippet = (
+        "import glob,os,json,urllib.request\n"
+        "u=[os.path.basename(p) for p in glob.glob('/dev/infiniband/uverbs*')]\n"
+        "if not u: print('{}'); raise SystemExit\n"
+        "dev=open('/sys/class/infiniband_verbs/%s/ibdev'%u[0]).read().strip()\n"
+        "ip=os.environ.get('EFA_EXPORTER_HOST','')\n"
+        f"t=urllib.request.urlopen('http://%s:{EFA_EXPORTER_PORT}/metrics'%ip,timeout=10).read().decode()\n"
+        "lines=[l for l in t.splitlines() if l.startswith('node_amazonefa_')]\n"
+        "print(json.dumps({'_ibdev':dev,'_lines':lines}))"
+    )
+    try:
+        host = pod.raw["status"]["hostIP"]
+        result = pod.exec(
+            ["sh", "-c", f"EFA_EXPORTER_HOST={host} python3 -c {shlex.quote(snippet)}"]
+        )
+        for line in result.stdout.decode().splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            payload = json.loads(line)
+            dev = payload.get("_ibdev")
+            if not dev:
+                break
+            parsed = parse_efa_device_metrics(payload.get("_lines", []), dev)
+            parsed["_ibdev"] = dev
+            parsed["_status"] = "ok"
+            return parsed
+    except Exception as e:  # noqa: BLE001 - classified as a scrape failure below
+        logger.warning("EFA device counters unavailable for %s: %s", pod.name, e)
+        return {"_status": "scrape_failed"}
+    return {"_status": "empty"}
+
+
+def assert_efa_device_traffic(before: dict, after: dict, min_bytes: int) -> None:
+    """Assert each worker's own EFA adapter moved at least ``min_bytes``.
+
+    This is the only backend-independent proof in the test: it is read from the
+    adapter, not from NIXL, so it cannot be satisfied by a transfer that took a
+    different transport. Measured idle noise on an assigned NIC is zero.
+    """
+    # Fails closed. This guards the only backend-independent proof in the test, so
+    # an unreachable exporter or a renamed counter must not quietly turn it into a
+    # no-op. The efa-node-exporter DaemonSet runs on both aws-dev-02 (8 nodes) and
+    # aws-dev-01 (13 nodes), so there is no lane where leniency here is justified.
+    failed = sorted(
+        role
+        for snap in (before, after)
+        for role, c in snap.items()
+        if c.get("_status") != "ok"
+    )
+    assert not failed, (
+        f"EFA traffic NOT confirmed: could not read EFA device counters for {failed}. "
+        f"The efa-node-exporter DaemonSet publishes them on :{EFA_EXPORTER_PORT} of each "
+        "node; an unreachable exporter is an infrastructure failure, not a platform "
+        "without EFA telemetry."
+    )
+
+    for role, counter in EFA_COUNTER_BY_ROLE.items():
+        b, a = before.get(role, {}), after.get(role, {})
+        assert counter in b and counter in a, (
+            f"EFA traffic NOT confirmed: counter {counter} missing for {role} "
+            f"(device {a.get('_ibdev') or b.get('_ibdev')}). Skipping it would leave "
+            "the adapter-level proof unasserted."
+        )
+        delta = a[counter] - b[counter]
+        assert delta >= min_bytes, (
+            f"EFA traffic NOT confirmed on {role} ({a.get('_ibdev')}): {counter} rose "
+            f"{delta:,.0f} bytes across the completion, expected at least "
+            f"{min_bytes:,}. The KV transfer did not cross this worker's EFA adapter."
+        )
+        logger.info(
+            "EFA adapter traffic confirmed on %s (%s): %s +%s bytes",
+            role,
+            a.get("_ibdev"),
+            counter,
+            f"{delta:,.0f}",
+        )
+
+
+def assert_efa_rdma_traffic(
+    before: tuple[str, float | None], after: tuple[str, float | None]
+) -> None:
+    """Assert the decode worker's NIXL rx-bytes counter grew across the request.
+
+    Combined with assert_nixl_used_libfabric (which proves the *backend* is
+    LIBFABRIC/EFA), a strictly increasing ``agent_rx_bytes`` proves KV bytes
+    physically moved through the NIXL/EFA agent for this inference -- not merely
+    that the path was configured.
+
+    Fails closed. This lane is pinned to aws-dev-02/H100, where the exporter is
+    known to work, so a scrape that errors is an infrastructure failure and must
+    not silently delete the only direct proof that bytes moved. Only a
+    *successful* scrape that genuinely lacks the metric is treated as a platform
+    without NIXL telemetry -- and even that is reported loudly, since on this
+    lane it is not expected either. A GB200 lane can add an explicit capability
+    gate when it exists.
+    """
+    before_status, rx_before = before
+    after_status, rx_after = after
+
+    # No silent-pass path. If either sample is anything other than a reading of
+    # the counter, we cannot say the KV moved through the NIXL agent -- and with
+    # that unknown we cannot claim the transfer used EFA RDMA at all. An exporter
+    # that is up but omits its principal counter is broken, not a platform
+    # without telemetry, so both cases fail here rather than being tolerated.
+    not_ok = {
+        k: v
+        for k, v in (("before", before_status), ("after", after_status))
+        if v != "ok"
+    }
+    assert not not_ok, (
+        f"EFA RDMA traffic NOT confirmed: NIXL {NIXL_RX_BYTES_METRIC} unreadable "
+        f"({not_ok}). 'scrape_failed' means the exporter on :{NIXL_TELEMETRY_PORT} "
+        "was unreachable; 'absent' means it responded without the counter, which "
+        "indicates NIXL_TELEMETRY_ENABLE did not take effect or the metric was "
+        "renamed. Either way there is no evidence KV moved."
+    )
+
+    assert rx_after > rx_before, (
+        f"EFA RDMA traffic NOT confirmed: NIXL {NIXL_RX_BYTES_METRIC} did not "
+        f"increase across the completion (before={rx_before}, after={rx_after}). "
+        "A disagg request must pull KV from prefill to decode; a flat counter means "
+        "no KV moved through the NIXL/EFA agent."
+    )
+    logger.info(
+        "EFA RDMA traffic confirmed: NIXL %s rose %s -> %s bytes across the request",
+        NIXL_RX_BYTES_METRIC,
+        rx_before,
+        rx_after,
+    )
+
+
+@pytest.mark.framework_with_efa
+@pytest.mark.k8s
+@pytest.mark.deploy
+@pytest.mark.nightly
+@pytest.mark.e2e
+# Two GPUs total: one prefill, one decode. No framework marker -- the nightly job
+# selects with -m framework_with_efa, and carrying @pytest.mark.vllm would both
+# require an exemption in tests/conftest.py's framework auto-skip and make this
+# test collectable by the multi-GPU jobs, whose selectors are
+# "vllm and (gpu_2 or gpu_4)" with no lifecycle filter.
+@pytest.mark.gpu_2
+@pytest.mark.core
+@pytest.mark.timeout(1200)
+async def test_efa_deployment(
+    image: str,
+    namespace: str,
+    skip_service_restart: bool,
+    request,
+) -> None:
+    """Deploy a disaggregated vLLM stack with EFA enabled and verify it serves.
+
+    This test:
+    1. Deploys tests/deploy/efa/disagg-efa.yaml with the EFA image under test
+    2. Waits for the frontend and BOTH prefill and decode workers to be ready
+    3. Port-forwards to the frontend and waits for the model to be available
+    4. Baselines the decode worker's NIXL agent_rx_bytes telemetry counter
+    5. Sends a chat completion (which requires prefill->decode KV transfer)
+    6. Validates the response
+    7. Asserts the worker logs prove NIXL used the LIBFABRIC/EFA backend, AND
+       that agent_rx_bytes grew across the request — i.e. KV bytes physically
+       moved over EFA RDMA, not just that the LIBFABRIC path was configured.
+    """
+    assert image, "--image is required for the EFA deploy test"
+    assert namespace, "--namespace is required for the EFA deploy test"
+
+    # Resolved from this file rather than the workspace root, so the test does
+    # not depend on a private helper or on where pytest was invoked from.
+    manifest_path = Path(__file__).parent / "efa" / "disagg-efa.yaml"
+
+    deployment_spec = DeploymentSpec(manifest_path)
+    deployment_spec.namespace = namespace
+    # Single EFA-tagged image for every service (the vllm-runtime image also
+    # provides the frontend entrypoint).
+    deployment_spec.set_image(image)
+
+    logger.info(
+        f"Starting EFA deploy test (image: {image}, model: {EFA_MODEL_NAME}, "
+        f"namespace: {namespace})"
+    )
+
+    async with ManagedDeployment(
+        log_dir=request.node.name,
+        deployment_spec=deployment_spec,
+        namespace=namespace,
+        skip_service_restart=skip_service_restart,
+        readiness_timeout=EFA_READINESS_TIMEOUT,
+    ) as deployment:
+        # Both workers must be present — disaggregation is the whole point.
+        worker_pods = deployment.get_pods([PREFILL_SERVICE, DECODE_SERVICE])
+        for svc in (PREFILL_SERVICE, DECODE_SERVICE):
+            assert worker_pods.get(svc), f"No pods found for worker service {svc}"
+        # Decode worker is the NIXL READ sink — its agent_rx_bytes counter is what
+        # we baseline and re-read to prove KV bytes actually moved over EFA.
+        decode_pod = worker_pods[DECODE_SERVICE][0]
+
+        frontend_pods = deployment.get_pods([deployment.frontend_service_name])
+        frontend_pod_list = frontend_pods.get(deployment.frontend_service_name, [])
+        assert frontend_pod_list, "No frontend pods found for EFA deployment"
+        frontend_pod = frontend_pod_list[0]
+        logger.info("Found frontend pod: %s", frontend_pod.name)
+
+        port = deployment_spec.port
+        port_forward = deployment.port_forward(frontend_pod, port)
+        assert (
+            port_forward is not None
+        ), f"Failed to establish port forward to {frontend_pod.name}:{port}"
+        base_url = f"http://localhost:{port_forward.local_port}"
+        logger.info("Port forwarding established: %s", base_url)
+
+        endpoint = deployment_spec.endpoint
+        model_ready = wait_for_model_availability(
+            url=base_url,
+            endpoint=endpoint,
+            model=EFA_MODEL_NAME,
+            logger=logger,
+            max_attempts=30,
+        )
+        assert (
+            model_ready
+        ), f"Model '{EFA_MODEL_NAME}' did not become available within the timeout"
+
+        # Baseline the decode worker's NIXL rx-bytes counter before the request,
+        # so we can prove the completion below makes it grow (KV pulled over EFA).
+        rx_before = _read_nixl_rx_bytes(decode_pod)
+        logger.info("NIXL %s before request: %s", NIXL_RX_BYTES_METRIC, rx_before)
+        efa_before = {
+            role: read_efa_device_counters(pods[0])
+            for role, pods in worker_pods.items()
+            if pods
+        }
+        for role, c in efa_before.items():
+            logger.info(
+                "EFA counters before (%s, %s): %s",
+                role,
+                c.get("_ibdev"),
+                {k: v for k, v in c.items() if k.endswith("_bytes")},
+            )
+
+        url = f"{base_url}{endpoint}"
+        payload = {
+            "model": EFA_MODEL_NAME,
+            "messages": [{"role": "user", "content": TEST_PROMPT}],
+            "max_tokens": EFA_MAX_TOKENS,
+            "temperature": DEFAULT_TEMPERATURE,
+            "stream": False,
+        }
+        response = send_request(
+            url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST"
+        )
+        validate_chat_response(response=response, expected_model=EFA_MODEL_NAME)
+
+        rx_after = _read_nixl_rx_bytes(decode_pod)
+        logger.info("NIXL %s after request: %s", NIXL_RX_BYTES_METRIC, rx_after)
+        efa_after = {
+            role: read_efa_device_counters(pods[0])
+            for role, pods in worker_pods.items()
+            if pods
+        }
+
+        # A successful disagg completion means KV moved prefill->decode. Prove it
+        # (1) rode the LIBFABRIC/EFA backend rather than falling back to UCX, and
+        # (2) physically moved bytes over EFA RDMA (the rx-bytes counter grew).
+        log_nixl_layout(decode_pod)
+        assert_nixl_used_libfabric(worker_pods)
+        assert_efa_rdma_traffic(rx_before, rx_after)
+        # Backend-independent proof, read from the adapter rather than from NIXL.
+        # 1 MiB floor: the observed KV volume for this prompt is ~12.8 MB, so this
+        # catches "nothing moved" without being brittle about the exact figure.
+        assert_efa_device_traffic(efa_before, efa_after, min_bytes=1 << 20)
+
+        logger.info(
+            "EFA deployment test PASSED (image: %s, model: %s, namespace: %s)",
+            image,
+            EFA_MODEL_NAME,
+            namespace,
+        )
+
+
+# Real exporter output, trimmed. Device names are nested on purpose: rdmap16s2
+# is a prefix of rdmap16s27, and rdmap16s27 of rdmap16s270. A substring match on
+# the device name -- which is what this parser used to do -- attributes the wrong
+# NIC's counters to the worker, and because the result is keyed only by metric
+# name the last match silently wins.
+_COLLIDING_METRICS = """\
+# HELP node_amazonefa_rdma_read_bytes The number of bytes read with RDMA
+# TYPE node_amazonefa_rdma_read_bytes gauge
+node_amazonefa_rdma_read_bytes{device="rdmap16s2",port="1"} 100
+node_amazonefa_rdma_read_bytes{device="rdmap16s27",port="1"} 200
+node_amazonefa_rdma_read_bytes{device="rdmap16s270",port="1"} 300
+node_amazonefa_rdma_read_resp_bytes{device="rdmap16s27",port="1"} 400
+node_amazonefa_tx_bytes{device="rdmap16s270",port="1"} 500
+node_cpu_seconds_total{cpu="0",mode="idle"} 999
+""".splitlines()
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_parse_efa_device_metrics_matches_device_exactly() -> None:
+    """Each device gets only its own samples, never a longer name's."""
+    assert parse_efa_device_metrics(_COLLIDING_METRICS, "rdmap16s2") == {
+        "node_amazonefa_rdma_read_bytes": 100.0
+    }
+    assert parse_efa_device_metrics(_COLLIDING_METRICS, "rdmap16s27") == {
+        "node_amazonefa_rdma_read_bytes": 200.0,
+        "node_amazonefa_rdma_read_resp_bytes": 400.0,
+    }
+    assert parse_efa_device_metrics(_COLLIDING_METRICS, "rdmap16s270") == {
+        "node_amazonefa_rdma_read_bytes": 300.0,
+        "node_amazonefa_tx_bytes": 500.0,
+    }
+    # An absent device yields nothing rather than borrowing a neighbour's series,
+    # so assert_efa_device_traffic fails closed on its "counter missing" branch.
+    assert parse_efa_device_metrics(_COLLIDING_METRICS, "rdmap99s0") == {}
+
+
+@pytest.mark.pre_merge
+@pytest.mark.unit
+@pytest.mark.gpu_0
+def test_parse_efa_device_metrics_ignores_unattributable_samples() -> None:
+    """Non-EFA series, unlabelled samples and junk values are skipped."""
+    lines = [
+        'node_cpu_seconds_total{cpu="0"} 1',  # not an EFA metric
+        "node_amazonefa_rdma_read_bytes 7",  # no label block -> no device
+        'node_amazonefa_rdma_read_bytes{port="1"} 8',  # labelled, but no device
+        'node_amazonefa_tx_bytes{device="rdmap0s0",port="1"} not_a_number',
+        'node_amazonefa_rx_bytes{device="rdmap0s0",port="1"} 9',
+    ]
+    assert parse_efa_device_metrics(lines, "rdmap0s0") == {
+        "node_amazonefa_rx_bytes": 9.0
+    }

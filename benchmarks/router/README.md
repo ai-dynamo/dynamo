@@ -111,13 +111,13 @@ NAMESPACE="test-disagg"
 MODEL="Qwen/Qwen3-0.6B"
 
 # Terminal 1: Decode mockers (2 workers)
-python -m dynamo.mocker --model-path "$MODEL" \
+python3 -m dynamo.mocker --model-path "$MODEL" \
     --endpoint "dyn://${NAMESPACE}.backend.generate" \
     --disaggregation-mode decode --num-workers 2 \
     --speedup-ratio 10 --block-size 16
 
 # Terminal 2: Prefill mockers (2 workers)
-python -m dynamo.mocker --model-path "$MODEL" \
+python3 -m dynamo.mocker --model-path "$MODEL" \
     --endpoint "dyn://${NAMESPACE}.prefill.generate" \
     --disaggregation-mode prefill --num-workers 2 \
     --speedup-ratio 10 --block-size 16
@@ -162,7 +162,7 @@ To see all available router arguments, run:
 python -m dynamo.frontend --help
 ```
 
-For detailed explanations of router arguments (especially KV cache routing parameters), see the [Router Guide](../../docs/components/router/router-guide.md).
+For detailed explanations of router arguments (especially KV cache routing parameters), see the [Router Guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/router-guide.md).
 
 > [!Note]
 > If you're unsure whether your backend engines correctly emit KV events for certain models (e.g., hybrid models like gpt-oss or nemotron nano 2), use the `--no-router-kv-events` flag to disable KV event tracking and use approximate KV indexing instead:
@@ -181,7 +181,7 @@ When you launch prefill workers using `run_engines.sh --prefill`, the frontend a
 - Uses the same routing mode as the frontend's `--router-mode` setting
 - Seamlessly integrates with your decode workers for token generation
 
-No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [Router Guide](../../docs/components/router/router-guide.md#disaggregated-serving) for more details.
+No additional configuration is needed - simply launch both decode and prefill workers, and the system handles the rest. See the [Router Guide](../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/router-guide.md#disaggregated-serving) for more details.
 
 > [!Note]
 > The unified frontend with automatic prefill routing is currently enabled for vLLM and TensorRT-LLM backends. For SGLang (work in progress), you need to launch a separate standalone router as the prefill router targeting the prefill endpoints. See example script: [`examples/backends/sglang/launch/disagg_router.sh`](../../examples/backends/sglang/launch/disagg_router.sh)

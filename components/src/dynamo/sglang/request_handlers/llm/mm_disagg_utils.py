@@ -9,6 +9,8 @@ token layout the transferred KV depends on.
 import logging
 from typing import Any, Dict, Optional
 
+from dynamo.common.multimodal.cache_uuid import reject_unsupported_multimodal_uuids
+
 logger = logging.getLogger(__name__)
 
 IMAGE_URL_KEY = "image_url"
@@ -52,8 +54,9 @@ def _raw_multimodal_content_types(request: Dict[str, Any]) -> set[str]:
 
 
 def raise_if_unextracted_multimodal(request: Dict[str, Any]) -> None:
-    """Reject raw multimodal messages that were not extracted by the frontend."""
+    """Reject unsupported UUIDs or media not extracted by the frontend."""
 
+    reject_unsupported_multimodal_uuids(request.get("multi_modal_uuids"))
     mm_data = _multi_modal_data(request)
     raw_types = _raw_multimodal_content_types(request)
     if not (mm_data or raw_types):
@@ -87,12 +90,14 @@ def extract_media_urls(
         return None
 
     items = mm_data.get(media_key)
-    if not items:
+    if items is None:
         return None
     if not isinstance(items, list):
         raise ValueError(
             f"{media_key} must be a list of URL items, got {type(items).__name__}"
         )
+    if not items:
+        return None
 
     urls: list[str] = []
     for item in items:
@@ -100,11 +105,13 @@ def extract_media_urls(
             urls.append(item)
             continue
         if isinstance(item, dict):
-            url = item.get("Url")
-            if isinstance(url, str):
-                urls.append(url)
+            variants = [key for key in ("Url", "Decoded") if key in item]
+            if len(variants) != 1:
+                raise ValueError(f"Unsupported {media_key} item: {item!r}")
+            if variants[0] == "Url" and isinstance(item["Url"], str):
+                urls.append(item["Url"])
                 continue
-            if "Decoded" in item:
+            if variants[0] == "Decoded":
                 raise ValueError(
                     f"Frontend-decoded media is not supported for disaggregated "
                     f"{media_key}; use URL-based inputs."

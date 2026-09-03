@@ -28,6 +28,10 @@ from sglang.srt.parser.jinja_template_utils import (
 )
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 
+from dynamo.common.utils.engine_response import trailing_stop_prefix_len
+from dynamo.common.utils.guided_json import admits_only_empty_object
+
+from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import PreprocessError, random_call_id
 
 logger = logging.getLogger(__name__)
@@ -49,6 +53,7 @@ class SglangPreprocessResult:
     guided_decoding: dict[str, Any] | None
     request: dict[str, Any]
     force_reasoning: bool = False
+    named_zero_arg_tool: str | None = None
 
 
 # --- force_reasoning detection (mirrors sglang's template_manager) -------
@@ -98,6 +103,7 @@ _THINKING_BY_DEFAULT = {
     "nemotron_3",
     "interns1",
     "kimi_k2",
+    "kimi_k3",
 }
 _THINKING_OPT_IN = {"deepseek-v3", "deepseek-v4", "gemma4"}
 
@@ -107,6 +113,8 @@ _SGLANG_PARSER_NAME_ALIASES = {
     "minimax_m3": "minimax-m3",
     "minimax_m3_nom": "minimax-m3",
     "minimax-m3-nom": "minimax-m3",
+    "kimi-k3": "kimi_k3",
+    "gemma-4": "gemma4",
 }
 
 
@@ -126,9 +134,9 @@ def resolve_request_force_reasoning(
     Mirrors sglang.srt.entrypoints.openai.serving_chat._get_reasoning_from_request
     combined with template_manager.force_reasoning:
 
-      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/...): on by
+      * opt-out families (``glm45``/``qwen3``/``kimi_k2``/``kimi_k3``/...): on by
         default, ``chat_template_kwargs.enable_thinking=False`` (or
-        ``thinking=False`` for ``kimi_k2``) disables it.
+        ``thinking=False`` for Kimi) disables it.
       * MiniMax-M3 defaults to adaptive, but SGLang still enables the
         reasoning parser unless ``chat_template_kwargs.thinking_mode`` is
         explicitly ``"disabled"``.
@@ -157,7 +165,9 @@ def resolve_request_force_reasoning(
 
     if reasoning_parser_name in _THINKING_BY_DEFAULT:
         flag_key = (
-            "thinking" if reasoning_parser_name == "kimi_k2" else "enable_thinking"
+            "thinking"
+            if reasoning_parser_name in {"kimi_k2", "kimi_k3"}
+            else "enable_thinking"
         )
         return kwargs.get(flag_key) is not False
 
@@ -322,6 +332,20 @@ def _is_named_tool_choice(tool_choice: Any) -> bool:
     )
 
 
+def named_closed_zero_arg_tool(request: dict[str, Any]) -> str | None:
+    """Return the named tool when its only valid argument value is ``{}``."""
+    tool_choice = request.get("tool_choice", "auto")
+    if not _is_named_tool_choice(tool_choice):
+        return None
+    chosen_name = tool_choice["function"]["name"]
+    for tool in convert_tools(request.get("tools")) or []:
+        if tool.function.name == chosen_name and admits_only_empty_object(
+            tool.function.parameters
+        ):
+            return chosen_name
+    return None
+
+
 def _guided_tool_choice_requires_reasoning(
     request: dict[str, Any], force_reasoning: bool
 ) -> bool:
@@ -408,34 +432,27 @@ def _flatten_message_content(content: Any) -> Any:
     return " ".join(text_parts)
 
 
-def _normalize_openai_thinking_template_kwargs(
+def _with_thinking_template_kwargs(
     request: dict[str, Any],
+    default_thinking_mode: str | None = None,
 ) -> dict[str, Any]:
     request = copy.copy(request)
     chat_template_kwargs = dict(
         request.get("chat_template_kwargs") or request.get("chat_template_args") or {}
     )
 
-    def setdefault_reasoning(enabled: bool) -> None:
-        # Different SGLang model families consult different template toggles.
-        chat_template_kwargs.setdefault("thinking", enabled)
-        chat_template_kwargs.setdefault("enable_thinking", enabled)
-        chat_template_kwargs.setdefault(
-            "thinking_mode", "enabled" if enabled else "disabled"
-        )
+    # Rust normalization already resolved every thinking control into these
+    # kwargs, so nothing here decides one; the deployment default below only
+    # applies when the request set none.
+    reasoning_effort = request.get("reasoning_effort")
+    if reasoning_effort is not None:
+        chat_template_kwargs["reasoning_effort"] = reasoning_effort
 
-    thinking = request.get("thinking")
-    if isinstance(thinking, bool):
-        setdefault_reasoning(thinking)
-    elif isinstance(thinking, dict):
-        thinking_type = thinking.get("type")
-        if thinking_type == "enabled":
-            setdefault_reasoning(True)
-        elif thinking_type == "disabled":
-            setdefault_reasoning(False)
-
-    if request.get("reasoning_effort") == "none":
-        setdefault_reasoning(False)
+    chat_template_kwargs = apply_default_thinking_mode_to_template_kwargs(
+        chat_template_kwargs,
+        default_thinking_mode,
+        request_has_root_thinking=request.get("thinking") is not None,
+    )
 
     if chat_template_kwargs:
         request["chat_template_kwargs"] = chat_template_kwargs
@@ -562,6 +579,9 @@ def build_tool_call_guided_decoding(
     constraint: Any = None
 
     if tool_choice == "required" or _is_named_tool_choice(tool_choice):
+        if named_closed_zero_arg_tool(request) is not None:
+            return {"regex": r"\{\}"}
+
         # get_json_schema_constraint branches on isinstance(tool_choice,
         # ToolChoice) for the named-function case — passing our raw dict
         # would silently fall through and return None, disabling guided
@@ -583,6 +603,17 @@ def build_tool_call_guided_decoding(
                 parallel_tool_calls=parallel_tool_calls,
             ),
         )
+    # TODO: this applies a structural-tag constraint for tool_choice="auto"
+    # whenever a tool-call parser is configured, and reads NONE of
+    # structural_tag_mode / structural_tag_scope / structural_tag_schema. Those
+    # knobs are accepted on the CLI and published into the model card by
+    # sglang/register.py, so an operator setting the mode to "off" still gets a
+    # constraint on this path. prepost.py requires structural_tag_mode == "on"
+    # (_should_build_tool_call_guidance) and preprocessor/structural_tag.rs
+    # requires StructuralTagMode != Off, so at the default mode ("off") the same
+    # request is unconstrained on both of those paths and constrained here.
+    # Also unlike them, "auto" is never gated on scope/strict, so this behaves as
+    # scope="always" with no way to narrow it.
     elif tool_call_parser_name:
         tool_call_parser_name = _normalize_sglang_parser_name(tool_call_parser_name)
         parser = FunctionCallParser(
@@ -703,6 +734,7 @@ def preprocess_chat_request(
     reasoning_parser_name: str | None,
     exclude_tools_when_tool_choice_none: bool = True,
     template_force_reasoning: bool = False,
+    default_thinking_mode: str | None = None,
 ) -> SglangPreprocessResult:
     """Preprocess a chat request using SGLang tokenizer and parser APIs.
 
@@ -713,7 +745,7 @@ def preprocess_chat_request(
 
     Synchronous -- suitable for both main-process and worker-process execution.
     """
-    request = _normalize_openai_thinking_template_kwargs(request)
+    request = _with_thinking_template_kwargs(request, default_thinking_mode)
     messages = _materialize_messages(request.get("messages", []))
 
     # Generation mode is independent of whether the client wants reasoning
@@ -803,6 +835,18 @@ def preprocess_chat_request(
         tool_call_parser_name=tool_call_parser_name,
         sglang_tools=sglang_tools,
     )
+    # TODO: response_format wins here even when tool_choice is "required" or names
+    # a function, so a request that demanded a tool call can come back with none
+    # -- the tool constraint is dropped and only logged. The other two paths do
+    # the opposite: preprocessor/tool_choice.rs clears the response_format JSON
+    # and keeps the tool constraint, and prepost.py does the same after narrowing
+    # its conflict check. response_format is scoped by the OpenAI spec to the
+    # message the model returns to the user, not to tool calls, so the tool
+    # constraint is the one that must survive.
+    #
+    # This path also never reads the legacy guided_json / guided_regex /
+    # guided_grammar / guided_choice fields at all, so those are dropped silently
+    # while both other paths honor them (and reject them against a forced choice).
     if (
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None
@@ -819,6 +863,11 @@ def preprocess_chat_request(
         guided_decoding=guided_decoding,
         request=request,
         force_reasoning=force_reasoning,
+        named_zero_arg_tool=(
+            named_closed_zero_arg_tool(request)
+            if guided_decoding == {"regex": r"\{\}"}
+            else None
+        ),
     )
 
 
@@ -919,16 +968,10 @@ class SglangStreamingPostProcessor:
     """Streaming post-processor using SGLang parsers and HF tokenizer detokenization.
 
     Handles:
-    - Incremental detokenization via sliding-window decode (6-token lookback)
+    - Incremental detokenization across tokenizer-safe boundaries
     - Reasoning content extraction via SGLang ReasoningParser
     - Tool call parsing via SGLang FunctionCallParser or JsonArrayParser
     """
-
-    # Lookback window size for incremental detokenization.  UTF-8 characters
-    # can span up to 4 bytes, each potentially its own token.  A lookback of
-    # 6 covers the worst case (4-token char) plus margin for BPE merges that
-    # cross the old/new boundary.
-    LOOKBACK = 6
 
     def __init__(
         self,
@@ -939,7 +982,10 @@ class SglangStreamingPostProcessor:
         history_tool_calls_count: int = 0,
         sglang_tools: list[SglangTool] | None = None,
         tool_call_parser_name: str | None = None,
+        named_zero_arg_tool: str | None = None,
         eos_token_ids: list[int] | None = None,
+        prompt_token_ids: list[int] | None = None,
+        stop_strings: set[str] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -949,6 +995,7 @@ class SglangStreamingPostProcessor:
         self._tool_call_parser_name = _normalize_sglang_parser_name(
             tool_call_parser_name
         )
+        self._named_zero_arg_tool = named_zero_arg_tool
         self._fast_plain_text = tool_call_parser is None and reasoning_parser is None
         # Preserve special tokens when a parser is active so tool-call and
         # reasoning delimiters remain visible during incremental decoding.
@@ -961,8 +1008,20 @@ class SglangStreamingPostProcessor:
             [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
         self._eos_token_ids = set(eos_token_ids or [])
+        self._stop_strings = stop_strings or set()
+        self._pending_stop_text = ""
+        self._locally_finished = False
+        self._local_stop_reason: str | None = None
 
-        self._all_token_ids: list[int] = []
+        # Keep a small, known-complete prompt suffix as decode context. Generated
+        # tokens are promoted to context only after they decode without a
+        # trailing replacement character, so the boundary never moves into an
+        # incomplete byte-fallback sequence.
+        self._decode_context_ids = list((prompt_token_ids or [])[-5:])
+        self._pending_decode_ids: list[int] = []
+        self._logprob_context_ids: list[int] = []
+        self._pending_logprobs_content: list[dict[str, Any]] = []
+        self._has_emitted_role: bool = False
         # Tool call accumulation.  SGLang's streaming parser returns
         # deltas (name in one chunk, argument fragments across subsequent
         # chunks).  However, the base detector processes at most one event
@@ -992,43 +1051,250 @@ class SglangStreamingPostProcessor:
             self.history_tool_calls_count,
         )
 
-    def _incremental_decode(self, new_token_ids: list[int]) -> str:
-        """Decode new tokens with lookback window for multi-byte char boundaries.
+    def _decode_ids(self, token_ids: list[int]) -> str:
+        if not token_ids:
+            return ""
+        return self.tokenizer.decode(
+            token_ids,
+            skip_special_tokens=self._skip_special_tokens,
+        )
 
-        Re-decodes a small window of previous tokens alongside new tokens so that
-        multi-byte characters spanning token boundaries are correctly resolved.
-        Only retains the last LOOKBACK tokens to bound memory usage.
-        """
-        prev_count = len(self._all_token_ids)
-        self._all_token_ids.extend(new_token_ids)
+    def _with_initial_role(self, delta: dict[str, Any]) -> dict[str, Any]:
+        if not self._has_emitted_role:
+            delta["role"] = "assistant"
+            self._has_emitted_role = True
+        return delta
 
-        start = max(0, prev_count - self.LOOKBACK)
+    def _incremental_decode(
+        self, new_token_ids: list[int], *, flush: bool = False
+    ) -> str:
+        """Decode generated tokens without splitting a byte-fallback sequence."""
+        self._pending_decode_ids.extend(new_token_ids)
+        if not self._pending_decode_ids:
+            return ""
 
-        # Trim to avoid unbounded growth -- only the tail matters for decoding
-        if len(self._all_token_ids) > self.LOOKBACK * 16:
-            self._all_token_ids = self._all_token_ids[
-                -(self.LOOKBACK + len(new_token_ids)) :
-            ]
-            prev_count = len(self._all_token_ids) - len(new_token_ids)
-            start = max(0, prev_count - self.LOOKBACK)
+        context_text = self._decode_ids(self._decode_context_ids)
+        decoded_text = self._decode_ids(
+            self._decode_context_ids + self._pending_decode_ids
+        )
+        delta_text = decoded_text[len(context_text) :]
 
-        # Decode lookback-only prefix (before new tokens)
-        prefix_tokens = self._all_token_ids[start:prev_count]
-        prefix_text = (
-            self.tokenizer.decode(
-                prefix_tokens, skip_special_tokens=self._skip_special_tokens
+        if not flush and (not delta_text or delta_text.endswith("\ufffd")):
+            return ""
+
+        self._decode_context_ids = self._pending_decode_ids
+        self._pending_decode_ids = []
+        return delta_text
+
+    def _build_openai_logprobs(
+        self,
+        log_probs: list[float],
+        top_logprobs: list[list[dict[str, Any]]] | None,
+        token_ids: list[int],
+    ) -> dict[str, Any] | None:
+        if len(log_probs) != len(token_ids):
+            return None
+
+        content: list[dict[str, Any]] = []
+        for index, (token_id, logprob) in enumerate(zip(token_ids, log_probs)):
+            context_token_ids = (self._logprob_context_ids + token_ids[:index])[-4:]
+            token = self._decode_logprob_token(token_id, None, context_token_ids)
+            candidates = top_logprobs[index] if top_logprobs else []
+            openai_top_logprobs = []
+            for candidate in candidates:
+                candidate_token = self._decode_logprob_token(
+                    candidate.get("token_id"),
+                    candidate.get("token"),
+                    context_token_ids,
+                )
+                candidate_bytes = candidate.get("bytes")
+                if candidate_bytes is None:
+                    candidate_bytes = (
+                        list(candidate_token.encode("utf-8"))
+                        if candidate_token
+                        else None
+                    )
+                openai_top_logprobs.append(
+                    {
+                        "token": candidate_token,
+                        "logprob": float(candidate["logprob"]),
+                        "bytes": candidate_bytes,
+                    }
+                )
+            content.append(
+                {
+                    "token": token,
+                    "logprob": float(logprob),
+                    "bytes": list(token.encode("utf-8")) if token else None,
+                    "top_logprobs": openai_top_logprobs,
+                }
             )
-            if prefix_tokens
-            else ""
-        )
 
-        # Decode lookback + new tokens together
-        window_tokens = self._all_token_ids[start:]
-        window_text = self.tokenizer.decode(
-            window_tokens, skip_special_tokens=self._skip_special_tokens
-        )
+        return {"content": content, "refusal": None} if content else None
 
-        return window_text[len(prefix_text) :]
+    def _decode_logprob_token(
+        self,
+        token_id: int | None,
+        token: str | None,
+        context_token_ids: list[int],
+    ) -> str:
+        if token is None:
+            if token_id is None:
+                return ""
+            token = self.tokenizer.decode([token_id], skip_special_tokens=False)
+
+        if not token.endswith("\ufffd") or token_id is None:
+            return token
+
+        for context_size in range(1, min(len(context_token_ids), 4) + 1):
+            context = context_token_ids[-context_size:]
+            decoded = self.tokenizer.decode(
+                context + [token_id], skip_special_tokens=False
+            )
+            if decoded.endswith("\ufffd"):
+                continue
+
+            clean_end = len(context)
+            for context_index in range(len(context) - 1, -1, -1):
+                context_token = self.tokenizer.decode(
+                    [context[context_index]], skip_special_tokens=False
+                )
+                if context_token.endswith("\ufffd"):
+                    clean_end = context_index
+                else:
+                    break
+
+            clean_prefix = (
+                self.tokenizer.decode(context[:clean_end], skip_special_tokens=False)
+                if clean_end
+                else ""
+            )
+            if decoded.startswith(clean_prefix):
+                return decoded[len(clean_prefix) :]
+
+            common_prefix_length = 0
+            for prefix_char, decoded_char in zip(clean_prefix, decoded):
+                if prefix_char != decoded_char:
+                    break
+                common_prefix_length += 1
+            return decoded[common_prefix_length:]
+
+        return ""
+
+    def _trailing_logprobs_count(self, text: str) -> int:
+        if not text:
+            return 0
+        decoded = ""
+        count = 0
+        for entry in reversed(self._pending_logprobs_content):
+            token = entry.get("token")
+            if not isinstance(token, str):
+                return 0
+            decoded = token + decoded
+            count += 1
+            if len(decoded) >= len(text):
+                if not decoded.endswith(text):
+                    return 0
+                while (
+                    count < len(self._pending_logprobs_content)
+                    and self._pending_logprobs_content[-count - 1].get("token") == ""
+                ):
+                    count += 1
+                return count
+        return 0
+
+    def _take_pending_logprobs(self) -> dict[str, Any] | None:
+        if not self._pending_logprobs_content:
+            return None
+
+        pending_count = self._trailing_logprobs_count(self._pending_stop_text)
+        if pending_count:
+            content = self._pending_logprobs_content[:-pending_count]
+            self._pending_logprobs_content = self._pending_logprobs_content[
+                -pending_count:
+            ]
+        else:
+            content = self._pending_logprobs_content
+            self._pending_logprobs_content = []
+        if not content:
+            return None
+        return {"content": content, "refusal": None}
+
+    @property
+    def locally_finished(self) -> bool:
+        return self._locally_finished
+
+    @property
+    def local_stop_reason(self) -> str | None:
+        return self._local_stop_reason
+
+    @property
+    def has_pending_stop_text(self) -> bool:
+        return bool(self._pending_stop_text)
+
+    def _matched_stop_string(self, stop_reason: Any) -> str | None:
+        if isinstance(stop_reason, str):
+            return stop_reason if stop_reason in self._stop_strings else None
+
+        if isinstance(stop_reason, int) and not isinstance(stop_reason, bool):
+            matched_ids = [stop_reason]
+        elif (
+            isinstance(stop_reason, list)
+            and stop_reason
+            and all(
+                isinstance(token_id, int) and not isinstance(token_id, bool)
+                for token_id in stop_reason
+            )
+        ):
+            matched_ids = stop_reason
+        else:
+            return None
+
+        matched = self.tokenizer.decode(matched_ids, skip_special_tokens=False)
+        return matched if matched in self._stop_strings else None
+
+    def _find_stop_string(self, text: str, stop_reason: Any) -> tuple[int, str] | None:
+        matched = self._matched_stop_string(stop_reason)
+        candidates = self._stop_strings
+        if matched is not None:
+            candidates = {matched, *candidates}
+
+        matches = (
+            (index, stop != matched, -len(stop), stop)
+            for stop in candidates
+            if (index := text.find(stop)) >= 0
+        )
+        first = min(matches, default=None)
+        return (first[0], first[3]) if first is not None else None
+
+    def _filter_stop_string_delta(
+        self,
+        text: str,
+        finish_reason: str | None,
+        stop_reason: Any,
+    ) -> tuple[str, bool]:
+        text = self._pending_stop_text + text
+        self._pending_stop_text = ""
+
+        match = self._find_stop_string(text, stop_reason)
+        if match is not None:
+            match_index, matched_stop_string = match
+            suppressed_text = text[match_index:]
+            suppressed_count = self._trailing_logprobs_count(suppressed_text)
+            if suppressed_count:
+                del self._pending_logprobs_content[-suppressed_count:]
+            self._locally_finished = True
+            self._local_stop_reason = matched_stop_string
+            return text[:match_index], True
+
+        if finish_reason or not text or not self._stop_strings:
+            return text, False
+
+        pending_len = trailing_stop_prefix_len(text, self._stop_strings)
+        if pending_len:
+            self._pending_stop_text = text[-pending_len:]
+            return text[:-pending_len], False
+        return text, False
 
     def _parse_reasoning_delta(
         self, delta_text: str, finish_reason: str | None
@@ -1089,28 +1355,57 @@ class SglangStreamingPostProcessor:
         Returns:
             OpenAI choice dict or ``None`` if nothing to emit yet.
         """
+        if self._locally_finished:
+            return None
+
         raw_ids = engine_response.get("token_ids")
         token_ids = raw_ids if isinstance(raw_ids, list) else list(raw_ids or [])
         finish_reason = engine_response.get("finish_reason")
-        if finish_reason:
+        stop_reason = engine_response.get("stop_reason")
+        log_probs = engine_response.get("log_probs")
+        top_logprobs = engine_response.get("top_logprobs")
+        if finish_reason is not None:
+            raw_token_count = len(token_ids)
             token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
+            retained_token_count = len(token_ids)
+            if log_probs is not None and len(log_probs) == raw_token_count:
+                log_probs = log_probs[:retained_token_count]
+            if top_logprobs is not None and len(top_logprobs) == raw_token_count:
+                top_logprobs = top_logprobs[:retained_token_count]
 
-        delta_text = self._incremental_decode(token_ids) if token_ids else ""
+        delta_text = (
+            self._incremental_decode(token_ids, flush=finish_reason is not None)
+            if token_ids or finish_reason is not None
+            else ""
+        )
+        openai_logprobs = None
+        if log_probs is not None:
+            openai_logprobs = self._build_openai_logprobs(
+                log_probs, top_logprobs, token_ids
+            )
+            if openai_logprobs is not None:
+                self._pending_logprobs_content.extend(openai_logprobs["content"])
+        self._logprob_context_ids = (self._logprob_context_ids + token_ids)[-4:]
+        delta_text, locally_finished = self._filter_stop_string_delta(
+            delta_text, finish_reason, stop_reason
+        )
+        if locally_finished:
+            finish_reason = "stop"
 
         if self._fast_plain_text:
             if delta_text:
                 return {
                     "index": 0,
-                    "delta": {"role": "assistant", "content": delta_text},
+                    "delta": self._with_initial_role({"content": delta_text}),
                     "finish_reason": finish_reason,
-                    "logprobs": None,
+                    "logprobs": self._take_pending_logprobs(),
                 }
             elif finish_reason:
                 return {
                     "index": 0,
-                    "delta": {},
+                    "delta": self._with_initial_role({}),
                     "finish_reason": finish_reason,
-                    "logprobs": None,
+                    "logprobs": self._take_pending_logprobs(),
                 }
             return None
 
@@ -1140,6 +1435,9 @@ class SglangStreamingPostProcessor:
                     normal_text
                 )
             content_text = parsed_text
+            if self._named_zero_arg_tool is not None:
+                # The exact regex emits the argument object, not user-visible text.
+                content_text = ""
 
             for tc in tool_calls:
                 idx = tc.tool_index
@@ -1151,7 +1449,7 @@ class SglangStreamingPostProcessor:
                     self._tool_call_args.setdefault(idx, []).append(tc.parameters)
 
         # -- Assemble delta --
-        delta: dict[str, Any] = {"role": "assistant"}
+        delta: dict[str, Any] = {}
         has_content = False
 
         if content_text:
@@ -1184,9 +1482,13 @@ class SglangStreamingPostProcessor:
             # can misidentify words in the prompt (e.g. a person's name)
             # as function names.
             known_names = (
-                {t.function.name for t in self._sglang_tools}
-                if self._sglang_tools
-                else set()
+                {self._named_zero_arg_tool}
+                if self._named_zero_arg_tool is not None
+                else (
+                    {t.function.name for t in self._sglang_tools}
+                    if self._sglang_tools
+                    else set()
+                )
             )
             if known_names:
                 for idx in list(self._tool_call_names):
@@ -1224,7 +1526,19 @@ class SglangStreamingPostProcessor:
 
             if should_reparse:
                 if self._is_json_array_parser:
-                    final_calls = _parse_json_array_buffer(full_text)
+                    if (
+                        self._named_zero_arg_tool is not None
+                        and full_text.strip() == "{}"
+                    ):
+                        final_calls = [
+                            ToolCallItem(
+                                tool_index=0,
+                                name=self._named_zero_arg_tool,
+                                parameters="{}",
+                            )
+                        ]
+                    else:
+                        final_calls = _parse_json_array_buffer(full_text)
                     # Secondary fallback: when guided decoding did not
                     # constrain the output (e.g. the backend doesn't
                     # support it), the model may have produced tool calls
@@ -1299,6 +1613,15 @@ class SglangStreamingPostProcessor:
                     dropped_names,
                 )
 
+            if self._named_zero_arg_tool is not None and not self._tool_call_names:
+                # A backend that cannot enforce the regex may return ordinary text.
+                # It was held back to avoid leaking the exact `{}` argument payload,
+                # so restore it when no zero-argument tool call was recovered.
+                fallback_content = "".join(self._tool_text_parts)
+                if fallback_content.strip() != "{}":
+                    delta["content"] = fallback_content
+                    has_content = True
+
         if finish_reason and self._tool_call_names:
             tool_calls_out: list[dict[str, Any]] = []
             for idx in sorted(self._tool_call_names):
@@ -1325,9 +1648,9 @@ class SglangStreamingPostProcessor:
         if has_content or effective_finish:
             return {
                 "index": 0,
-                "delta": delta if has_content else {},
+                "delta": self._with_initial_role(delta),
                 "finish_reason": effective_finish,
-                "logprobs": None,
+                "logprobs": self._take_pending_logprobs(),
             }
 
         return None

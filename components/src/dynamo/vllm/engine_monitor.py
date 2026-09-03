@@ -116,6 +116,14 @@ class VllmEngineMonitor:
                     await asyncio.sleep(self.health_config.interval)
 
             except (EngineDeadError, asyncio.TimeoutError) as e:
+                if self.shutdown_event and self.shutdown_event.is_set():
+                    logger.warning(
+                        "%s: %s while worker shutdown is in progress; "
+                        "stopping health monitoring.",
+                        self.__class__.__name__,
+                        type(e).__name__,
+                    )
+                    break
                 logger.error(f"Traceback: {traceback.format_exc()}")
                 logger.error(f"vLLM AsyncLLM health check failed: {e}")
                 logger.warning("Initiating Dynamo Runtime shutdown.")

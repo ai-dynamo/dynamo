@@ -11,32 +11,36 @@ import math
 import os
 import time as _time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Optional
 
 from vllm.config import VllmConfig
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
+from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
     register_embedding_cache_metrics,
 )
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
-from dynamo.runtime import DistributedRuntime
+from dynamo.runtime import DistributedRuntime, Endpoint
 
 from .args import Config
 from .cache_info import configure_kv_event_block_size
 from .capacity import per_rank_kv_blocks
 from .constants import DisaggregationMode
+from .dp_topology import get_dp_range_for_worker
 from .handlers import (
     BaseWorkerHandler,
     DecodeWorkerHandler,
     EmbeddingWorkerHandler,
     PrefillWorkerHandler,
-    get_dp_range_for_worker,
 )
 from .health_check import (
     VllmEmbeddingHealthCheckPayload,
@@ -45,7 +49,10 @@ from .health_check import (
 )
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .multimodal_handlers import EncodeWorkerHandler
+from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
+from .realtime import RealtimeHandler, RealtimeTranscriptionHandler
+from .state_agent import StateAgentLifecycle, state_agent_settings
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +62,7 @@ logger = logging.getLogger(__name__)
 # and scheduler-loop slack before failing closed.
 BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 
-# (engine_client, vllm_config, default_sampling_params, prometheus_temp_dir, component_gauges)
+# (engine_client, vllm_config, default_sampling_params, cleanup_resource, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
 # LLMBackendMetrics registration there.
@@ -531,9 +538,48 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
 
 SetupVllmEngineFn = Callable[..., EngineSetupResult]
 SetupKvEventPublisherFn = Callable[..., Optional[Any]]
+SetupKvStateAttachmentOwnerFn = Callable[..., Awaitable[Optional[Any]]]
 RegisterVllmModelFn = Callable[..., Awaitable[None]]
 SetupFpmRelayFn = Callable[..., Optional[list]]
 SetupMetricsCollectionFn = Callable[..., None]
+
+
+@dataclass
+class _DecodeWorkerLifecycle:
+    engine_client: Optional[AsyncLLM] = None
+    vllm_config: Optional[VllmConfig] = None
+    handler: Optional[BaseWorkerHandler] = None
+    shutdown_event: asyncio.Event | None = None
+
+    def __enter__(self) -> "_DecodeWorkerLifecycle":
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        original_error: BaseException | None,
+        _traceback: TracebackType | None,
+    ) -> None:
+        try:
+            self.cleanup()
+        except Exception:
+            if original_error is None:
+                raise
+            logger.exception(
+                "Failed to clean up decode worker after an earlier failure"
+            )
+
+    def cleanup(self) -> None:
+        """Release resources in reverse construction order."""
+        logger.debug("Cleaning up decode worker")
+        if self.shutdown_event is not None:
+            self.shutdown_event.set()
+        try:
+            if self.handler is not None:
+                self.handler.cleanup()
+        finally:
+            if self.engine_client is not None and self.vllm_config is not None:
+                self.engine_client.shutdown(timeout=self.vllm_config.shutdown_timeout)
 
 
 class WorkerFactory:
@@ -546,12 +592,51 @@ class WorkerFactory:
         register_vllm_model_fn: RegisterVllmModelFn,
         setup_fpm_relay_fn: SetupFpmRelayFn,
         setup_metrics_collection_fn: SetupMetricsCollectionFn,
+        setup_kv_state_attachment_owner_fn: SetupKvStateAttachmentOwnerFn | None = None,
+        state_agent_lifecycle: StateAgentLifecycle | None = None,
     ):
         self.setup_vllm_engine = setup_vllm_engine_fn
         self.setup_kv_event_publisher = setup_kv_event_publisher_fn
+        self.setup_kv_state_attachment_owner = setup_kv_state_attachment_owner_fn
         self.register_vllm_model = register_vllm_model_fn
         self.setup_fpm_relay = setup_fpm_relay_fn
         self.setup_metrics_collection = setup_metrics_collection_fn
+        self.state_agent_lifecycle = state_agent_lifecycle or StateAgentLifecycle()
+
+    async def _setup_kv_routing(
+        self,
+        config: Config,
+        generate_endpoint: Endpoint,
+        vllm_config: VllmConfig,
+        *,
+        consolidator_enabled: bool,
+        consolidator_port: int | None,
+    ) -> Optional[Any]:
+        if state_agent_settings(config) is None:
+            return self.setup_kv_event_publisher(
+                config,
+                generate_endpoint,
+                vllm_config,
+                consolidator_enabled=consolidator_enabled,
+                consolidator_port=consolidator_port,
+            )
+
+        # NOTE: Source mode is immutable for one worker lifecycle. An opted-in
+        # worker never falls back to, or concurrently starts, the ordinary KV
+        # publisher; setup failure disables KV routing while serving continues.
+        try:
+            if self.setup_kv_state_attachment_owner is None:
+                raise RuntimeError("KV state-agent attachment setup is unavailable")
+            owner = await self.setup_kv_state_attachment_owner(
+                config, generate_endpoint, vllm_config
+            )
+            if owner is not None:
+                await self.state_agent_lifecycle.install(owner)
+        except Exception:
+            logger.exception(
+                "KV state-agent attachment setup failed; KV routing remains disabled"
+            )
+        return None
 
     async def create(
         self,
@@ -563,12 +648,28 @@ class WorkerFactory:
     ) -> None:
         """Create the appropriate multimodal worker based on config flags."""
 
+        if config.realtime:
+            await self._create_realtime_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine=snapshot_engine,
+            )
+            return
+
         # Embedding worker is selected first because it crosses worker shapes
         # (pooling AsyncLLM, ModelType.Embedding) rather than being a variant
         # of decode. Aggregated-only — exclusivity with disagg modes is
         # enforced earlier in DynamoVllmConfig._validate_embedding_worker_exclusivity.
         if config.embedding_worker:
             await self._create_embedding_worker(
+                runtime, config, shutdown_event, shutdown_endpoints
+            )
+            return
+
+        if config.classify_worker:
+            await self._create_classify_worker(
                 runtime, config, shutdown_event, shutdown_endpoints
             )
             return
@@ -599,6 +700,103 @@ class WorkerFactory:
             )
         return
 
+    async def _create_realtime_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
+        snapshot_engine: Optional[EngineSetupResult] = None,
+    ) -> None:
+        """Initialize an aggregated vLLM realtime worker."""
+        del shutdown_event  # Connection cancellation is carried by Dynamo Context.
+
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        if snapshot_engine is not None:
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                prometheus_temp_dir,
+                component_gauges,
+            ) = snapshot_engine
+            os.environ[ENV_FPM_WORKER_ID] = fpm_worker_id
+            factory = StatLoggerFactory(
+                endpoint=generate_endpoint,
+                component_gauges=component_gauges,
+            )
+        else:
+            factory = StatLoggerFactory(endpoint=generate_endpoint)
+            (
+                engine_client,
+                vllm_config,
+                _default_sampling_params,
+                prometheus_temp_dir,
+                component_gauges,
+            ) = self.setup_vllm_engine(
+                config,
+                factory,
+                fpm_worker_id=fpm_worker_id,
+            )
+        await configure_kv_event_block_size(engine_client, vllm_config)
+        _, dp_size = get_dp_range_for_worker(vllm_config)
+        num_gpu_blocks = per_rank_kv_blocks(
+            vllm_config.cache_config.num_gpu_blocks,
+            dp_size,
+        )
+        factory.set_num_gpu_blocks_all(num_gpu_blocks or 0)
+        factory.init_publish()
+
+        model_name = config.served_model_name or config.model
+        handler = RealtimeHandler(
+            {
+                "transcription": RealtimeTranscriptionHandler.from_engine(
+                    engine_client=engine_client,
+                    model_name=model_name,
+                    model_path=config.model,
+                )
+            }
+        )
+        self.setup_metrics_collection(config, generate_endpoint, logger)
+
+        await self.register_vllm_model(
+            ModelInput.Text,
+            ModelType.Realtime,
+            generate_endpoint,
+            config,
+            engine_client,
+            vllm_config,
+            worker_type=WorkerType.Aggregated,
+            needs=[],
+        )
+        register_model_taint_route(runtime, generate_endpoint)
+
+        metrics_labels = [
+            (prometheus_names.labels.MODEL, model_name),
+            (prometheus_names.labels.MODEL_NAME, model_name),
+        ]
+        logger.info(
+            "Starting realtime worker endpoint for model: %s",
+            model_name,
+        )
+        try:
+            await generate_endpoint.serve_bidirectional_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+            )
+        except Exception as exc:
+            logger.error("Realtime worker failed: %s", exc)
+            raise
+        finally:
+            if prometheus_temp_dir is not None:
+                prometheus_temp_dir.cleanup()
+
     async def _create_multimodal_encode_worker(
         self,
         runtime: DistributedRuntime,
@@ -615,6 +813,7 @@ class WorkerFactory:
         handler = EncodeWorkerHandler(
             config.engine_args,
             config.embedding_transfer_mode,  # type: ignore[arg-type]
+            enable_frontend_decoding=config.frontend_decoding,
         )
         await handler.async_init(runtime)
 
@@ -635,6 +834,7 @@ class WorkerFactory:
                 [WorkerType.Aggregated],
             ],
         )
+        register_model_taint_route(runtime, generate_endpoint)
         logger.info("Starting to serve the encode worker endpoint...")
 
         try:
@@ -712,7 +912,7 @@ class WorkerFactory:
             engine_client,
             vllm_config,
             _default_sampling_params,
-            _prometheus_temp_dir,
+            engine_cleanup_resource,
             _component_gauges,
         ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
 
@@ -727,6 +927,7 @@ class WorkerFactory:
             model_name=config.served_model_name or config.model
         ).to_dict()
 
+        register_model_taint_route(runtime, generate_endpoint)
         logger.info("Starting to serve the embedding worker endpoint...")
         try:
             await asyncio.gather(
@@ -736,7 +937,11 @@ class WorkerFactory:
                     health_check_payload=embedding_health_check_payload,
                 ),
                 self.register_vllm_model(
-                    ModelInput.Text,
+                    (
+                        ModelInput.Tokens
+                        if config.embedding_frontend_tokenization
+                        else ModelInput.Text
+                    ),
                     ModelType.Embedding,
                     generate_endpoint,
                     config,
@@ -754,36 +959,137 @@ class WorkerFactory:
             raise
         finally:
             handler.cleanup()
+            # Attached multi-client AsyncLLMs do not own EngineCore. Close all
+            # clients first, then let the parent cleanup resource terminate
+            # child endpoints and finally the shared EngineCore.
+            try:
+                engine_client.shutdown()
+            except Exception:
+                logger.exception("Failed to shut down embedding AsyncLLM client")
+            if engine_cleanup_resource is not None:
+                try:
+                    engine_cleanup_resource.cleanup()
+                except Exception:
+                    logger.exception("Failed to clean up embedding engine resources")
+
+    async def _create_classify_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+    ) -> None:
+        """Initialize an aggregated sequence-classification worker.
+
+        Like the embeddings worker, this uses a pooling ``AsyncLLM`` and skips
+        the generation-only KV-cache and scheduler machinery. The combined
+        model type advertises both pooling-family endpoints.
+        """
+        generate_endpoint = runtime.endpoint(
+            f"{config.namespace}.{config.component}.{config.endpoint}"
+        )
+        shutdown_endpoints[:] = [generate_endpoint]
+
+        fpm_worker_id = str(generate_endpoint.connection_id())
+        factory = StatLoggerFactory(
+            endpoint=generate_endpoint,
+            embedding_worker=True,
+        )
+        (
+            engine_client,
+            vllm_config,
+            _default_sampling_params,
+            _prometheus_temp_dir,
+            _component_gauges,
+        ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+
+        handler = ClassifyWorkerHandler(
+            runtime=runtime,
+            engine=engine_client,
+            config=config,
+            model_config=getattr(vllm_config, "model_config", None),
+            shutdown_event=shutdown_event,
+        )
+
+        classify_health_check_payload = VllmEmbeddingHealthCheckPayload(
+            model_name=config.served_model_name or config.model
+        ).to_dict()
+
+        logger.info("Starting to serve the classify worker endpoint...")
+        try:
+            await asyncio.gather(
+                generate_endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=[("model", config.model)],
+                    health_check_payload=classify_health_check_payload,
+                ),
+                self.register_vllm_model(
+                    ModelInput.Text,
+                    ModelType.Classify | ModelType.Pooling,
+                    generate_endpoint,
+                    config,
+                    engine_client,
+                    vllm_config,
+                    worker_type=WorkerType.Aggregated,
+                    needs=[],
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Failed to serve classify worker endpoint: {e}")
+            raise
+        finally:
+            handler.cleanup()
+
+    def _maybe_create_failover_metrics(self, config: Config, generate_endpoint):
+        """Create + register per-engine failover metrics (shadow mode only).
+
+        Called before the model loads so ``init`` spans the load and a restarted
+        engine re-exposes its persisted switch counters within seconds. Uses a
+        dedicated registry surfaced on ``generate_endpoint``'s system /metrics.
+        """
+        if config.gms_shadow_mode is not True:
+            return None
+        from gpu_memory_service.failover_lock.failover_metrics import (
+            create_failover_metrics,
+        )
+
+        persist_dir = os.path.dirname(
+            os.path.abspath(
+                os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+            )
+        )
+        failover_metrics = create_failover_metrics(
+            endpoint=generate_endpoint,
+            engine_id=os.environ.get("ENGINE_ID", "0"),
+            model_name=config.served_model_name or config.model,
+            component_name=config.component,
+            persist_dir=persist_dir,
+        )
+        failover_metrics.set_state("init")
+        return failover_metrics
 
     async def _maybe_wait_for_failover_lock(
         self,
         handler,
         runtime: DistributedRuntime,
         config: Config,
-    ) -> None:
-        # Shadow mode: lock-driven activation.
-        # Flow: sleep → startup probe passes → block on lock → wake → register.
-        if not config.gms_shadow_mode:
-            return
+        failover_metrics=None,
+    ) -> bool:
+        # Shadow mode: sleep → probe → block on lock → wake. True only for a real
+        # (contended) failover, not the initial bootup. The election itself is
+        # shared with the snapshot restore path, which arrives already paused;
+        # a cold-start engine is awake, so it sleeps here first.
+        if config.gms_shadow_mode is not True:
+            return False
 
         await handler._pause_controller.pause(1)
-
-        runtime.set_health_status(True)
-        logger.info(
-            "[Shadow] Engine sleeping, startup probe now passing, waiting for lock"
+        lock = await elect_and_wake(
+            handler._pause_controller,
+            runtime,
+            lock_path=os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock"),
+            failover_metrics=failover_metrics,
         )
-
-        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
-
-        lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
-        engine_id = os.environ.get("ENGINE_ID", "0")
-        lock = FlockFailoverLock(lock_path)
-        await lock.acquire(engine_id=f"engine-{engine_id}")
-        logger.info("[Shadow] Lock acquired, waking engine")
-
-        await handler._pause_controller.resume()
-        handler._pause_controller.mark_resumed()
-        logger.info("[Shadow] Engine awake, registering with discovery")
+        return lock is not None and lock.was_contended
 
     async def _create_decode_worker(
         self,
@@ -796,6 +1102,29 @@ class WorkerFactory:
         """
         Instantiate and serve
         """
+        with _DecodeWorkerLifecycle(shutdown_event=shutdown_event) as lifecycle:
+            try:
+                await self._run_decode_worker(
+                    runtime,
+                    config,
+                    shutdown_event,
+                    shutdown_endpoints,
+                    snapshot_engine=snapshot_engine,
+                    lifecycle=lifecycle,
+                )
+            finally:
+                await self.state_agent_lifecycle.close()
+
+    async def _run_decode_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,  # mutated in place
+        snapshot_engine: Optional[EngineSetupResult],
+        lifecycle: _DecodeWorkerLifecycle,
+    ) -> None:
+        """Initialize and serve a decode worker."""
 
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -836,6 +1165,11 @@ class WorkerFactory:
                 ]
             )
 
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
+        failover_metrics = self._maybe_create_failover_metrics(
+            config, generate_endpoint
+        )
+
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
         if snapshot_engine is not None:
@@ -866,6 +1200,8 @@ class WorkerFactory:
                 prometheus_temp_dir,
                 component_gauges,
             ) = self.setup_vllm_engine(config, factory, fpm_worker_id=fpm_worker_id)
+        lifecycle.engine_client = engine_client
+        lifecycle.vllm_config = vllm_config
         await configure_kv_event_block_size(engine_client, vllm_config)
 
         # TODO Hack to get data, move this to registering in TBD
@@ -898,6 +1234,7 @@ class WorkerFactory:
             enable_frontend_decoding=config.frontend_decoding,
             encode_worker_client=encode_worker_client,
         )
+        lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
@@ -914,7 +1251,7 @@ class WorkerFactory:
 
         # Set up KV event publisher for prefix caching if enabled
         # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
-        kv_publishers = self.setup_kv_event_publisher(
+        kv_publishers = await self._setup_kv_routing(
             config,
             generate_endpoint,
             vllm_config,
@@ -943,7 +1280,12 @@ class WorkerFactory:
             )
 
         # Register engine routes
-        self.register_engine_routes(runtime, handler, lora_enabled=lora_enabled)
+        self.register_engine_routes(
+            runtime,
+            generate_endpoint,
+            handler,
+            lora_enabled=lora_enabled,
+        )
 
         # Parse endpoint types from --endpoint-types flag
         model_type = parse_endpoint_types(config.endpoint_types)
@@ -960,7 +1302,11 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
-        await self._maybe_wait_for_failover_lock(handler, runtime, config)
+        was_failover = False
+        if snapshot_engine is None:
+            was_failover = await self._maybe_wait_for_failover_lock(
+                handler, runtime, config, failover_metrics
+            )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -985,6 +1331,10 @@ class WorkerFactory:
             needs_set.append(WorkerType.Encode)
         needs: list[list[WorkerType]] = [needs_set] if needs_set else []
 
+        handler._first_token_source = await generate_endpoint.first_token_source(
+            worker_type
+        )
+
         await self.register_vllm_model(
             model_input,
             model_type,
@@ -995,6 +1345,12 @@ class WorkerFactory:
             worker_type=worker_type,
             needs=needs,
         )
+        # Serving now: a failover that got here succeeded. Gated on was_failover
+        # (same as the attempt) so bootup isn't counted and success pairs with attempt.
+        if failover_metrics is not None:
+            failover_metrics.set_state("active")
+            if was_failover:
+                failover_metrics.record_switch_success()
 
         health_check_payload = VllmHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer
@@ -1069,12 +1425,28 @@ class WorkerFactory:
         except Exception as e:
             logger.error(f"Failed to serve endpoints: {e}")
             raise
-        finally:
-            logger.debug("Cleaning up decode worker")
-            # Cleanup background tasks
-            handler.cleanup()
 
     async def _create_prefill_worker(
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        shutdown_event: asyncio.Event,
+        shutdown_endpoints: list,
+        snapshot_engine: Optional[EngineSetupResult] = None,
+    ) -> None:
+        try:
+            await self._run_prefill_worker(
+                runtime,
+                config,
+                shutdown_event,
+                shutdown_endpoints,
+                snapshot_engine,
+            )
+        except BaseException:
+            await self.state_agent_lifecycle.close()
+            raise
+
+    async def _run_prefill_worker(
         self,
         runtime: DistributedRuntime,
         config: Config,
@@ -1107,6 +1479,11 @@ class WorkerFactory:
             list_loras_endpoint = runtime.endpoint(
                 f"{config.namespace}.{config.component}.list_loras"
             )
+
+        # Shadow mode: create metrics + enter 'init' before load, so 'init' spans it.
+        failover_metrics = self._maybe_create_failover_metrics(
+            config, generate_endpoint
+        )
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
@@ -1167,7 +1544,7 @@ class WorkerFactory:
 
         # Set up KV event publishers for prefix caching if enabled (one per dp_rank)
         # If kv event consolidator is enabled, publisher will subscribe to kv event consolidator's output
-        kv_publishers = self.setup_kv_event_publisher(
+        kv_publishers = await self._setup_kv_routing(
             config,
             generate_endpoint,
             vllm_config,
@@ -1197,10 +1574,17 @@ class WorkerFactory:
 
         # Register engine routes
         self.register_engine_routes(
-            runtime, handler, lora_enabled=config.engine_args.enable_lora
+            runtime,
+            generate_endpoint,
+            handler,
+            lora_enabled=config.engine_args.enable_lora,
         )
 
-        await self._maybe_wait_for_failover_lock(handler, runtime, config)
+        was_failover = False
+        if snapshot_engine is None:
+            was_failover = await self._maybe_wait_for_failover_lock(
+                handler, runtime, config, failover_metrics
+            )
 
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
@@ -1245,6 +1629,12 @@ class WorkerFactory:
             worker_type=WorkerType.Prefill,
             needs=[prefill_needs_set],
         )
+        # Serving now: a failover that got here succeeded. Gated on was_failover
+        # (same as the attempt) so bootup isn't counted and success pairs with attempt.
+        if failover_metrics is not None:
+            failover_metrics.set_state("active")
+            if was_failover:
+                failover_metrics.record_switch_success()
 
         health_check_payload = VllmPrefillHealthCheckPayload(
             engine_client, use_text_input=config.use_vllm_tokenizer
@@ -1310,6 +1700,7 @@ class WorkerFactory:
             raise
         finally:
             logger.debug("Cleaning up prefill worker")
+            await self.state_agent_lifecycle.close()
             handler.cleanup()
 
     async def _maybe_get_encode_worker_client(
@@ -1330,6 +1721,7 @@ class WorkerFactory:
     def register_engine_routes(
         self,
         runtime: DistributedRuntime,
+        generate_endpoint: Endpoint,
         handler: BaseWorkerHandler,
         lora_enabled: bool = False,
     ) -> None:
@@ -1337,7 +1729,9 @@ class WorkerFactory:
 
         Args:
             runtime: The DistributedRuntime instance to register routes on.
+            generate_endpoint: Worker endpoint whose model taints can be updated.
         """
+        register_model_taint_route(runtime, generate_endpoint)
         runtime.register_engine_route("control/start_profile", handler.start_profile)
         runtime.register_engine_route("control/stop_profile", handler.stop_profile)
         runtime.register_engine_route("control/sleep", handler.sleep)
@@ -1345,6 +1739,7 @@ class WorkerFactory:
         runtime.register_engine_route(
             "control/scale_elastic_ep", handler.scale_elastic_ep
         )
+        runtime.register_engine_route("control/ep_capacity", handler.get_ep_capacity)
 
         rl_routes: dict = {
             "liveness_probe": handler.liveness_probe,
@@ -1380,7 +1775,8 @@ class WorkerFactory:
 
         logger.info(
             "Registered engine routes: control/sleep, control/wake_up, "
-            "control/scale_elastic_ep, control/start_profile, control/stop_profile, "
+            "control/scale_elastic_ep, control/ep_capacity, "
+            "control/start_profile, control/stop_profile, "
             "and RL admin routes: %s%s",
             ", ".join(sorted(rl_routes)),
             " (LoRA routes: load_lora, unload_lora)" if lora_enabled else "",

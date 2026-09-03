@@ -32,6 +32,7 @@ from dynamo.profiler.utils.replay_optimize import (
     optimize_dense_agg_with_replay,
     optimize_dense_disagg_with_replay,
 )
+from dynamo.replay import ReplayReport
 
 pytestmark = [
     pytest.mark.unit,
@@ -195,7 +196,12 @@ def test_run_replay_for_state_passes_applied_compute_agentic_trace_knobs(
     def fake_run_trace_replay(trace_file, **kwargs):
         captured["trace_file"] = trace_file
         captured["kwargs"] = kwargs
-        return {"output_throughput_tok_s": 1.0}
+        return ReplayReport(
+            summary={"output_throughput_tok_s": 1.0},
+            per_request=None,
+            coverage={},
+            planner=None,
+        )
 
     monkeypatch.setattr(
         "dynamo.profiler.utils.replay_optimize.evaluate.run_trace_replay",
@@ -215,6 +221,51 @@ def test_run_replay_for_state_passes_applied_compute_agentic_trace_knobs(
     assert captured["kwargs"]["trace_format"] == "applied_compute_agentic"
     assert captured["kwargs"]["trace_shared_prefix_ratio"] == 0.5
     assert captured["kwargs"]["trace_num_prefix_groups"] == 1
+    assert captured["kwargs"]["capture_per_request"] is False
+    assert captured["kwargs"]["capture_planner_details"] is False
+
+
+def test_run_replay_for_state_uses_request_rate_as_poisson_open_loop(
+    monkeypatch,
+) -> None:
+    workload = WorkloadSpec(
+        isl=64,
+        osl=8,
+        requestCount=10,
+        requestRate=6.5,
+        arrivalSeed=17,
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_run_synthetic_trace_replay(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return ReplayReport(
+            summary={"output_throughput_tok_s": 1.0},
+            per_request=None,
+            coverage={},
+            planner=None,
+        )
+
+    monkeypatch.setattr(
+        "dynamo.profiler.utils.replay_optimize.evaluate.run_synthetic_trace_replay",
+        fake_run_synthetic_trace_replay,
+    )
+
+    replay_optimize.evaluate._run_replay_for_state(
+        state=DenseReplayState(1, 1, 1, 1, 0.5),
+        workload=workload,
+        prefill_engine_args=MockEngineArgs.from_json(json.dumps(_base_prefill_args())),
+        decode_engine_args=MockEngineArgs.from_json(json.dumps(_base_decode_args())),
+        router_config=KvRouterConfig(),
+    )
+
+    assert captured["kwargs"]["replay_concurrency"] is None
+    assert captured["kwargs"]["request_rate"] == 6.5
+    assert captured["kwargs"]["arrival_interval_ms"] is None
+    assert captured["kwargs"]["arrival_seed"] == 17
+    assert captured["kwargs"]["capture_per_request"] is False
+    assert captured["kwargs"]["capture_planner_details"] is False
 
 
 def _disagg_spec(
@@ -307,11 +358,12 @@ def test_enumerate_dense_tp_candidates_filters_to_tp_only(monkeypatch) -> None:
     )
     utils = SimpleNamespace(
         enumerate_parallel_config=lambda **_: [
-            [1, 1, 1, 1, 1],
-            [2, 1, 1, 1, 1],
-            [2, 2, 1, 1, 1],
-            [4, 1, 2, 1, 1],
-            [4, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1],
+            [2, 1, 1, 1, 1, 1],
+            [2, 2, 1, 1, 1, 1],
+            [4, 1, 2, 1, 1, 1],
+            [4, 1, 1, 1, 1, 1],
+            [8, 1, 1, 1, 1, 2],
         ]
     )
     monkeypatch.setattr(
@@ -707,6 +759,70 @@ def test_optimizer_supports_round_robin_router_mode(monkeypatch) -> None:
     # Guardrail #5: round_robin auto-collapses router tuning to a single no-op state.
     assert set(seen_credits) == {0.0}
     assert set(seen_prefill_scales) == {1.0}
+
+
+@pytest.mark.parametrize("topology", ["aggregated", "disaggregated"])
+def test_optimizer_starts_with_requested_kv_router_mode(
+    monkeypatch, topology: str
+) -> None:
+    seen_router_modes: list[str] = []
+    seen_credits: list[float] = []
+    seen_prefill_scales: list[float] = []
+
+    def fake_run(**kwargs):
+        state = kwargs["state"]
+        seen_router_modes.append(state.router_mode)
+        seen_credits.append(state.overlap_score_credit)
+        seen_prefill_scales.append(state.prefill_load_scale)
+        return {
+            "output_throughput_tok_s": 1000.0,
+            "mean_ttft_ms": 100.0,
+            "p95_ttft_ms": 120.0,
+            "mean_tpot_ms": 10.0,
+            "p95_tpot_ms": 12.0,
+            "mean_e2e_latency_ms": 200.0,
+            "p95_e2e_latency_ms": 220.0,
+        }
+
+    monkeypatch.setattr(
+        replay_optimize.aic,
+        "_enumerate_dense_tp_candidates",
+        lambda backend, system: ([1, 2], [1, 2]),
+    )
+    if topology == "aggregated":
+        monkeypatch.setattr(
+            replay_optimize.evaluate, "_run_agg_replay_for_state", fake_run
+        )
+        optimize_dense_agg_with_replay(
+            _agg_spec(overlap_credits=[0.5], prefill_load_scales=[2.0])
+        )
+    else:
+        monkeypatch.setattr(replay_optimize.evaluate, "_run_replay_for_state", fake_run)
+        optimize_dense_disagg_with_replay(
+            _disagg_spec(overlap_credits=[0.5], prefill_load_scales=[2.0])
+        )
+
+    assert set(seen_router_modes) == {"kv_router"}
+    assert set(seen_credits) == {0.5}
+    assert set(seen_prefill_scales) == {2.0}
+
+
+def test_agg_optimizer_rejects_single_worker_kv_state_before_replay(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        replay_optimize.aic,
+        "_enumerate_dense_tp_candidates",
+        lambda backend, system: ([4], [4]),
+    )
+    monkeypatch.setattr(
+        replay_optimize.evaluate,
+        "_run_agg_replay_for_state",
+        lambda **kwargs: pytest.fail("unsupported state reached replay"),
+    )
+
+    with pytest.raises(ValueError, match="no TP candidates fit"):
+        optimize_dense_agg_with_replay(_agg_spec(total_gpus=4))
 
 
 def test_disagg_optimizer_supports_latency_objective(monkeypatch) -> None:
@@ -1159,9 +1275,7 @@ def test_kv_router_config_with_overrides_deprecated_zero_wins() -> None:
 
 @pytest.mark.timeout(30)
 def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
-    pytest.importorskip("aiconfigurator")
-    # Rust AIC callback also requires the Phase 1.5 Python engine API.
-    pytest.importorskip("aiconfigurator.sdk.engine")
+    pytest.importorskip("aiconfigurator_core.sdk.engine")
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",
@@ -1188,9 +1302,7 @@ def test_agg_optimizer_synthetic_replay_smoke(monkeypatch) -> None:
 
 @pytest.mark.timeout(30)
 def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
-    pytest.importorskip("aiconfigurator")
-    # Rust AIC callback also requires the Phase 1.5 Python engine API.
-    pytest.importorskip("aiconfigurator.sdk.engine")
+    pytest.importorskip("aiconfigurator_core.sdk.engine")
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",
@@ -1217,9 +1329,7 @@ def test_agg_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
 
 @pytest.mark.timeout(30)
 def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
-    pytest.importorskip("aiconfigurator")
-    # Rust AIC callback also requires the Phase 1.5 Python engine API.
-    pytest.importorskip("aiconfigurator.sdk.engine")
+    pytest.importorskip("aiconfigurator_core.sdk.engine")
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",
@@ -1245,9 +1355,7 @@ def test_optimizer_synthetic_replay_smoke(tmp_path, monkeypatch) -> None:
 
 @pytest.mark.timeout(30)
 def test_optimizer_timed_trace_smoke(tmp_path, monkeypatch) -> None:
-    pytest.importorskip("aiconfigurator")
-    # Rust AIC callback also requires the Phase 1.5 Python engine API.
-    pytest.importorskip("aiconfigurator.sdk.engine")
+    pytest.importorskip("aiconfigurator_core.sdk.engine")
     monkeypatch.setattr(
         replay_optimize.aic,
         "_enumerate_dense_tp_candidates",

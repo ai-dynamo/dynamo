@@ -8,21 +8,29 @@ import json
 import logging
 import os
 import sys
+import warnings
 from typing import Any, Dict, Optional, Sequence
 
 from dynamo.common.config_dump import register_encoder
+from dynamo.common.configuration.groups.router_args import (
+    WorkerRouterConfig,
+    parse_worker_router_config,
+    register_worker_router_help,
+)
 from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeArgGroup,
     DynamoRuntimeConfig,
 )
 from dynamo.common.utils.runtime import parse_endpoint
-from dynamo.trtllm.backend_args import (
-    DynamoTrtllmArgGroup,
-    DynamoTrtllmConfig,
-    _warn_deprecated,
-)
+from dynamo.trtllm.backend_args import DynamoTrtllmArgGroup, DynamoTrtllmConfig
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.dynamic_flags import parse_dynamic_flags
+
+
+def _warn_deprecated(message: str) -> None:
+    logging.warning(message)
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
+
 
 DEFAULT_ENDPOINT_COMPONENT = "backend"
 DEFAULT_PREFILL_COMPONENT = "prefill"
@@ -34,14 +42,19 @@ VALID_TRTLLM_CONNECTORS = {"none", "kvbm"}
 
 class Config(DynamoRuntimeConfig, DynamoTrtllmConfig):
     component: str
+    # Whether this worker publishes KV events. Distinct from the router-side
+    # `use_kv_events` on `router_advertisement`, which means the router
+    # subscribes to them -- the reason the two live on separate objects.
     use_kv_events: bool
+    # Routing this worker set advertises in its model card; None inherits the
+    # frontend's configuration.
+    router_advertisement: Optional[WorkerRouterConfig] = None
     connector: list[str]  # Redeclare for mypy (inherited from DynamoRuntimeConfig)
 
     def validate(self) -> None:
         DynamoRuntimeConfig.validate(self)
         DynamoTrtllmConfig.validate(self)
-        # Derive use_kv_events from publish_events_and_metrics
-        self.use_kv_events = self.publish_events_and_metrics
+        self.use_kv_events = self.publish_kv_events
 
         # fix the connector as trtllm accepts only one connector and it should be in VALID_TRTLLM_CONNECTORS
         # while the runtime args accepts a list of connectors
@@ -85,29 +98,36 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
     """
     cli_args = list(argv) if argv is not None else sys.argv[1:]
 
-    # Deprecated alias: --publish-events-and-metrics maps to --publish-kv-events.
-    # Same for the legacy env var. Both are removed in the next release.
-    if any(
-        a.split("=", 1)[0]
-        in ("--publish-events-and-metrics", "--no-publish-events-and-metrics")
-        for a in cli_args
-    ):
+    # The deprecated combined spelling maps to both independent controls.
+    expanded_cli_args = []
+    legacy_cli_seen = False
+    for arg in cli_args:
+        flag = arg.split("=", 1)[0]
+        if flag == "--publish-events-and-metrics":
+            legacy_cli_seen = True
+            expanded_cli_args.extend(["--publish-kv-events", "--publish-metrics"])
+        elif flag == "--no-publish-events-and-metrics":
+            legacy_cli_seen = True
+            expanded_cli_args.extend(["--no-publish-kv-events", "--no-publish-metrics"])
+        else:
+            expanded_cli_args.append(arg)
+    cli_args = expanded_cli_args
+
+    if legacy_cli_seen:
         _warn_deprecated(
-            "--publish-events-and-metrics is deprecated; use --publish-kv-events. "
-            "The old flag stays as an alias for one release."
+            "--publish-events-and-metrics is deprecated; use both "
+            "--publish-kv-events and --publish-metrics. The old flag remains "
+            "an alias for both controls for one release."
         )
-    if (
-        "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS" in os.environ
-        and "DYN_TRTLLM_PUBLISH_KV_EVENTS" not in os.environ
-    ):
+    if "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS" in os.environ:
         _warn_deprecated(
             "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated; use "
-            "DYN_TRTLLM_PUBLISH_KV_EVENTS. The old env var stays as an "
-            "alias for one release."
+            "DYN_TRTLLM_PUBLISH_KV_EVENTS and DYN_TRTLLM_PUBLISH_METRICS. "
+            "The old env var remains an alias for both controls for one release."
         )
-        os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] = os.environ[
-            "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS"
-        ]
+        legacy_value = os.environ["DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS"]
+        os.environ.setdefault("DYN_TRTLLM_PUBLISH_KV_EVENTS", legacy_value)
+        os.environ.setdefault("DYN_TRTLLM_PUBLISH_METRICS", legacy_value)
 
     parser = argparse.ArgumentParser(
         description="Dynamo TensorRT-LLM worker configuration\n\n"
@@ -122,8 +142,17 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> Config:
     DynamoRuntimeArgGroup().add_arguments(parser)
     DynamoTrtllmArgGroup().add_arguments(parser)
 
+    # Router advertisement flags are parsed into their own config object rather
+    # than flattened onto Config: the router's --router-kv-events lands on
+    # `use_kv_events`, which Config already uses for "this worker publishes KV
+    # events". Registered here for --help only; parsed below.
+    register_worker_router_help(parser)
+
     parsed_args, remaining = parser.parse_known_args(cli_args)
     config = Config.from_cli_args(parsed_args)
+
+    # Consume the router flags before the dynamic --trtllm.* scan sees them.
+    config.router_advertisement, remaining = parse_worker_router_config(remaining)
 
     # Parse dynamic --trtllm.* flags from the remaining args
     dynamic_overrides = parse_dynamic_flags(remaining)

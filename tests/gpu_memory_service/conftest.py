@@ -11,6 +11,7 @@ a clear message instead of leaving it as a mystery OOM downstream.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 
 import pytest
@@ -25,6 +26,11 @@ _LEAK_THRESHOLD_MIB = 100
 @pytest.fixture(scope="module", autouse=True)
 def _assert_no_gpu_memory_leak():
     yield
+    # The restored-engine probe attaches to a GMS server owned by the external
+    # CUDA/CRIU controller. That server intentionally remains alive until the
+    # probe exits and the controller can finish its own validation and cleanup.
+    if os.environ.get("DYN_GMS_EXTERNAL_SERVER") == "1":
+        return
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],

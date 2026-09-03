@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: inkling
+title: Inkling NVFP4
+page: pages/recipes/model-recipes/inkling-nvfp4.mdx
+provider: thinkingmachines
+model:
+  name: Inkling
+  hf_id: thinkingmachines/Inkling-NVFP4
+  precision: NVFP4
+status: experimental
+artifacts:
+  recipe_specific_images:
+  - nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
+  - nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-inkling-dev.1
+  recipe_specific_image_periods:
+  - image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1
+    source_revision: 73aa2073d12c8cbd5c955f618aed251be920b8cd
+    source_kind: github-release
+    release_tag: v1.4.0-inkling-dev.1
+    release_state: prerelease
+  - image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-inkling-dev.1
+    source_revision: 5e75161371dbca94ad878b7fee2904c0715d308b
+    source_kind: deploy-asset
+targets:
+- id: agg-gb300-agentic
+  recommended: true
+  hardware:
+    gpu: GB300
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: aggregated
+  techniques:
+  - tp4
+  - mtp-spec-dec
+  - kv-aware-routing
+  - prefix-caching
+  - 1m-context
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 20
+    sla: user_tps P50 >= 50 and TTFT P50 <= 5000 ms
+  deploy:
+    asset: recipes/inkling/vllm/agg-gb300-agentic/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/inkling/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 192.41 tok/s/GPU, 84.87 user tok/s P50 at concurrency 20 over 2 TP4 replicas (3,541-request agentic trace)
+- id: disagg-gb300-agentic
+  recommended: false
+  hardware:
+    gpu: GB300
+    count: 8
+  runtime:
+    framework: vLLM
+  topology: disaggregated
+  techniques:
+  - 1p1d
+  - tp4-per-role
+  - mtp-spec-dec
+  - kv-aware-routing
+  - prefix-caching
+  - 1m-context
+  - pd-kv-transfer
+  - mnnvl-compute-domain
+  workload:
+    type: agentic-trace-replay
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 16
+    sla: user_tps P50 >= 50 and TTFT P50 <= 5000 ms
+  deploy:
+    asset: recipes/inkling/vllm/disagg-gb300-agentic/deploy-generic.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/inkling/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 144.01 tok/s/GPU, 77.94 user tok/s P50, TTFT P50 1305 ms at concurrency 16 over 4P + 4D (3,541-request agentic trace), measured on the aws-roce fabric variant
+- id: agg-b200
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 8
+  runtime:
+    framework: SGLang
+  topology: aggregated
+  techniques:
+  - tp8
+  - eagle-spec-dec
+  - fa4-attention
+  - mamba-radix-cache
+  - multimodal
+  workload:
+    type: multimodal
+    traffic: Day-0 deployment; no published benchmark traffic yet
+  deploy:
+    asset: recipes/inkling/sglang/agg-b200/deploy.yaml
+  expected_performance:
+    available: false
+related_benchmarks: []
+maintainer: null
+gaps:
+- no related Feature Benchmark page exists for this model
+- SGLang runtime is a Day-0 dev image (sglang-runtime:1.4.0-inkling-dev.1, custom SGLang
+  build) pending upstream merge; no expected-performance numbers published for it
+- AAC/.m4a audio decode absent from the SGLang runtime image (royalty-bearing codec
+  removal); noted on page
+- provider logo sourced from thinkingmachines.ai site icon; formal brand-asset provenance
+  pass pending (same debt as the other provider logos)
+- maintainer unknown

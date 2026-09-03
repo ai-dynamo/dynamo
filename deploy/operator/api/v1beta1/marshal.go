@@ -61,10 +61,13 @@
 // The normalizer below walks the serialized JSON in lockstep with the Go
 // type tree via reflection and strips a map entry iff (a) its JSON value
 // is an empty object AND (b) the corresponding Go field is a non-pointer
-// struct type. Pointer-typed empty objects are preserved as sentinels.
+// struct type. Pointer-typed empty objects are preserved as sentinels, and
+// the top-level metadata object of a Kubernetes runtime.Object is preserved
+// because conversion webhook responses require that object envelope even
+// when Server-Side Apply sends a partial object whose metadata has no fields.
 // Adding a new API field with a value-typed sub-struct automatically
-// participates in the normalization without further code changes, and
-// adding a new pointer-typed sentinel struct is automatically preserved.
+// participates in the normalization without further code changes, and adding
+// a new pointer-typed sentinel struct is automatically preserved.
 //
 // # Scope
 //
@@ -96,6 +99,8 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 )
 
 // normalizeV1Beta1JSON strips Go-encoder empty-struct artefacts from the
@@ -111,7 +116,28 @@ func normalizeV1Beta1JSON(raw []byte, rootType reflect.Type) ([]byte, error) {
 		return nil, err
 	}
 	stripEmptyValueStructs(rootType, v)
+	ensureRuntimeObjectMetadata(rootType, v)
 	return json.Marshal(v)
+}
+
+var runtimeObjectType = reflect.TypeOf((*k8sruntime.Object)(nil)).Elem()
+
+// ensureRuntimeObjectMetadata restores the top-level metadata envelope after
+// empty-struct normalization. Kubernetes API objects must return metadata from
+// conversion webhooks even when Server-Side Apply supplies a partial object
+// with no metadata fields.
+func ensureRuntimeObjectMetadata(goType reflect.Type, jsonVal any) {
+	goType = derefToConcrete(goType)
+	if goType == nil || goType.Kind() != reflect.Struct || !reflect.PointerTo(goType).Implements(runtimeObjectType) {
+		return
+	}
+	root, ok := jsonVal.(map[string]any)
+	if !ok {
+		return
+	}
+	if metadata, found := root["metadata"]; !found || metadata == nil {
+		root["metadata"] = map[string]any{}
+	}
 }
 
 // stripEmptyValueStructs walks `jsonVal` in lockstep with `goType`, deleting

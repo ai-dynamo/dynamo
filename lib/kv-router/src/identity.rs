@@ -1,13 +1,14 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compact identities for logical KV indexers and DC-local producer pools.
+//! Shared identities for routing partitions, logical KV indexers, and DC-local producer pools.
 //!
-//! Identity material is resolved on control paths. Mutation and query paths carry only these
-//! fixed-size values or physical lane indices.
+//! Hashed indexer identity material is resolved on control paths. Mutation and query paths carry
+//! only those fixed-size values or physical lane indices.
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::str::FromStr;
 
 use serde::de::{Error as _, MapAccess, Visitor};
 use serde::ser::SerializeMap;
@@ -17,10 +18,91 @@ pub const MAX_EXPLICIT_IDENTITY_ENTRIES: usize = 32;
 pub const MAX_EXPLICIT_IDENTITY_KEY_BYTES: usize = 128;
 pub const MAX_EXPLICIT_IDENTITY_VALUE_BYTES: usize = 1024;
 
+/// Routing group used when a request does not specify one.
+pub const DEFAULT_ROUTING_GROUP: &str = "default";
+
 const CACHE_SEMANTICS_DEFAULT_V1: &[u8] = b"dynamo/indexer-cache-semantics/default/v1";
 const CACHE_SEMANTICS_EXPLICIT_V1: &[u8] = b"dynamo/indexer-cache-semantics/explicit/v1";
 const ROUTING_SCOPE_DEFAULT_V1: &[u8] = b"dynamo/indexer-routing-scope/default/v1";
 const ROUTING_SCOPE_EXPLICIT_V1: &[u8] = b"dynamo/indexer-routing-scope/explicit/v1";
+const STABLE_DP_SLOT_EXPLICIT_V1: &[u8] = b"dynamo/stable-dp-slot/explicit/v1";
+
+#[cfg(any(
+    feature = "standalone-indexer",
+    feature = "standalone-selection",
+    feature = "standalone-slot-tracker"
+))]
+pub(crate) fn default_routing_group() -> String {
+    DEFAULT_ROUTING_GROUP.to_string()
+}
+
+/// Logical routing partition shared by selection, indexing, and active-sequence tracking.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingPartitionId {
+    pub model_name: String,
+    pub routing_group: String,
+}
+
+impl RoutingPartitionId {
+    pub fn new(model_name: impl Into<String>, routing_group: impl Into<String>) -> Self {
+        Self {
+            model_name: model_name.into(),
+            routing_group: routing_group.into(),
+        }
+    }
+
+    pub fn as_ref(&self) -> RoutingPartitionRef<'_> {
+        RoutingPartitionRef::new(&self.model_name, &self.routing_group)
+    }
+}
+
+impl fmt::Display for RoutingPartitionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_ref().fmt(formatter)
+    }
+}
+
+/// Borrowed view of a [`RoutingPartitionId`].
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct RoutingPartitionRef<'a> {
+    pub model_name: &'a str,
+    pub routing_group: &'a str,
+}
+
+impl<'a> RoutingPartitionRef<'a> {
+    pub const fn new(model_name: &'a str, routing_group: &'a str) -> Self {
+        Self {
+            model_name,
+            routing_group,
+        }
+    }
+
+    pub fn into_owned(self) -> RoutingPartitionId {
+        RoutingPartitionId::new(self.model_name, self.routing_group)
+    }
+}
+
+impl fmt::Display for RoutingPartitionRef<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "model={} routing_group={}",
+            self.model_name, self.routing_group
+        )
+    }
+}
+
+impl<'a> From<&'a RoutingPartitionId> for RoutingPartitionRef<'a> {
+    fn from(partition: &'a RoutingPartitionId) -> Self {
+        partition.as_ref()
+    }
+}
+
+impl From<RoutingPartitionRef<'_>> for RoutingPartitionId {
+    fn from(partition: RoutingPartitionRef<'_>) -> Self {
+        partition.into_owned()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,11 +148,23 @@ macro_rules! digest_identity {
                     .finish()
             }
         }
+
+        impl FromStr for $name {
+            type Err = IdentityParseError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Ok(Self::new(
+                    parse_fixed_hex::<16>(value)?,
+                    IdentitySource::Explicit,
+                ))
+            }
+        }
     };
 }
 
 digest_identity!(CacheSemanticsId);
 digest_identity!(RoutingScopeId);
+digest_identity!(StableDpSlotId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct IndexerDomainId {
@@ -108,6 +202,20 @@ impl fmt::Display for IndexerDomainId {
     }
 }
 
+impl FromStr for IndexerDomainId {
+    type Err = IdentityParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (cache_semantics, routing_scope) = value
+            .split_once(':')
+            .ok_or(IdentityParseError::InvalidIndexerDomain)?;
+        if routing_scope.contains(':') {
+            return Err(IdentityParseError::InvalidIndexerDomain);
+        }
+        Ok(Self::new(cache_semantics.parse()?, routing_scope.parse()?))
+    }
+}
+
 /// Control-plane-stable identity for one logical DC inside a routing federation.
 ///
 /// NOTE: This value survives process restarts, scaling, endpoint replacement, and producer
@@ -129,6 +237,14 @@ impl DcId {
 impl fmt::Display for DcId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{:016x}", self.0)
+    }
+}
+
+impl FromStr for DcId {
+    type Err = IdentityParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(Self::new(u64::from_be_bytes(parse_fixed_hex::<8>(value)?)))
     }
 }
 
@@ -163,6 +279,76 @@ impl fmt::Display for PoolId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}/{}", self.indexer_domain, self.dc_id)
     }
+}
+
+impl FromStr for PoolId {
+    type Err = IdentityParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (indexer_domain, dc_id) = value
+            .split_once('/')
+            .ok_or(IdentityParseError::InvalidPool)?;
+        if dc_id.contains('/') {
+            return Err(IdentityParseError::InvalidPool);
+        }
+        Ok(Self::new(indexer_domain.parse()?, dc_id.parse()?))
+    }
+}
+
+/// Stable identity for one durable data-parallel slot inside a cache pool.
+///
+/// The digest is resolved from explicit configuration. It must not be derived
+/// from a worker ID, DRT connection ID, rank ordering, or a transport endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CacheOwnerId {
+    pool: PoolId,
+    slot: StableDpSlotId,
+}
+
+impl CacheOwnerId {
+    pub const fn new(pool: PoolId, slot: StableDpSlotId) -> Self {
+        Self { pool, slot }
+    }
+
+    pub const fn pool(self) -> PoolId {
+        self.pool
+    }
+
+    pub const fn slot(self) -> StableDpSlotId {
+        self.slot
+    }
+}
+
+impl fmt::Display for CacheOwnerId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.pool, self.slot)
+    }
+}
+
+impl FromStr for CacheOwnerId {
+    type Err = IdentityParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (pool, slot) = value
+            .rsplit_once('/')
+            .ok_or(IdentityParseError::InvalidCacheOwner)?;
+        if slot.contains('/') {
+            return Err(IdentityParseError::InvalidCacheOwner);
+        }
+        Ok(Self::new(pool.parse()?, slot.parse()?))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum IdentityParseError {
+    #[error("identity must use lowercase hexadecimal with the exact encoded width")]
+    InvalidHex,
+    #[error("indexer domain must be `<cache-semantics-id>:<routing-scope-id>`")]
+    InvalidIndexerDomain,
+    #[error("pool ID must be `<indexer-domain-id>/<dc-id>`")]
+    InvalidPool,
+    #[error("cache owner ID must be `<pool-id>/<stable-dp-slot-id>`")]
+    InvalidCacheOwner,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -315,6 +501,20 @@ impl CanonicalIdentityMaterial {
         Self { source, bytes }
     }
 
+    /// Canonical material for a stable DP slot.
+    ///
+    /// Unlike indexer-domain identities, a durable slot has no derived
+    /// fallback. Callers must supply explicit, deployment-stable material.
+    pub fn stable_dp_slot(explicit: &ExplicitIdentityMap) -> Self {
+        let mut bytes = Vec::new();
+        append_framed(&mut bytes, STABLE_DP_SLOT_EXPLICIT_V1);
+        append_selected_material(&mut bytes, &[], Some(explicit));
+        Self {
+            source: IdentitySource::Explicit,
+            bytes,
+        }
+    }
+
     pub const fn source(&self) -> IdentitySource {
         self.source
     }
@@ -381,6 +581,32 @@ fn validate_entries(entries: &BTreeMap<String, String>) -> Result<(), IdentitySp
     Ok(())
 }
 
+fn parse_fixed_hex<const N: usize>(value: &str) -> Result<[u8; N], IdentityParseError> {
+    if value.len() != N * 2
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(IdentityParseError::InvalidHex);
+    }
+
+    let mut result = [0; N];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_nibble(pair[0]);
+        let low = hex_nibble(pair[1]);
+        result[index] = high << 4 | low;
+    }
+    Ok(result)
+}
+
+fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        _ => unreachable!("parse_fixed_hex validates every nibble"),
+    }
+}
+
 fn write_digest(formatter: &mut fmt::Formatter<'_>, digest: &[u8; 16]) -> fmt::Result {
     for byte in digest {
         write!(formatter, "{byte:02x}")?;
@@ -390,7 +616,28 @@ fn write_digest(formatter: &mut fmt::Formatter<'_>, digest: &[u8; 16]) -> fmt::R
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
+
+    #[test]
+    fn routing_partition_identity_matches_registry_key_semantics() {
+        let partition = RoutingPartitionId::new("model-a", "group-a");
+        let equivalent = RoutingPartitionId::new("model-a", "group-a");
+        let other_group = RoutingPartitionId::new("model-a", "group-b");
+        let other_model = RoutingPartitionId::new("model-b", "group-a");
+        let mut registry_keys = HashSet::new();
+
+        assert!(registry_keys.insert(partition.clone()));
+        assert!(!registry_keys.insert(equivalent));
+        assert!(registry_keys.insert(other_group));
+        assert!(registry_keys.insert(other_model));
+        assert_eq!(registry_keys.len(), 3);
+
+        let borrowed = partition.as_ref();
+        assert_eq!(borrowed, RoutingPartitionRef::new("model-a", "group-a"));
+        assert_eq!(borrowed.into_owned(), partition);
+    }
 
     #[test]
     fn explicit_identity_map_rejects_duplicate_json_keys() {
@@ -466,5 +713,21 @@ mod tests {
         assert_eq!(semantics.to_string(), "abababababababababababababababab");
         assert_eq!(routing.to_string(), "01010101010101010101010101010101");
         assert_eq!(DcId::new(1).to_string(), "0000000000000001");
+    }
+
+    #[test]
+    fn cache_owner_canonical_string_round_trips_at_configuration_boundary() {
+        let owner = CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([0xab; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([0xcd; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(7),
+            ),
+            StableDpSlotId::new([0xef; 16], IdentitySource::Explicit),
+        );
+        assert_eq!(owner.to_string().parse::<CacheOwnerId>().unwrap(), owner);
+        assert!("ab/7/ef".parse::<CacheOwnerId>().is_err());
     }
 }

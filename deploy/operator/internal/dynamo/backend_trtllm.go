@@ -20,7 +20,7 @@ type TRTLLMBackend struct {
 // For single-node deployments it is a no-op. For multinode, it mounts the SSH
 // keypair secret and injects the appropriate SSH setup and launch commands for
 // leader (mpirun) and worker (sshd) roles.
-func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer) {
+func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1beta1.DynamoComponentDeploymentSharedSpec, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUCount ContainerGPUCount) error {
 	if component.CompilationCache != nil {
 		logger := log.Log.WithName("trtllm-backend")
 		logger.Info("Compilation cache configured for TensorRT-LLM but not yet fully supported",
@@ -32,7 +32,7 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 
 	// For single node, nothing to do
 	if numberOfNodes <= 1 {
-		return
+		return nil
 	}
 
 	// Configure probes for multinode deployments
@@ -67,10 +67,16 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	// Update container command based on role
 	switch role {
 	case RoleLeader:
-		b.setupLeaderContainer(container, numberOfNodes, serviceName, component, multinodeDeployer)
+		containerGPUs, err := containerGPUCount()
+		if err != nil {
+			return fmt.Errorf("failed to resolve container GPUs: %w", err)
+		}
+		b.setupLeaderContainer(container, numberOfNodes, serviceName, multinodeDeployer, containerGPUs)
 	case RoleWorker:
 		b.setupWorkerContainer(container)
 	}
+
+	return nil
 }
 
 // UpdatePodSpec injects the SSH keypair volume into the pod spec for TRT-LLM
@@ -102,7 +108,7 @@ func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
 }
 
 // setupLeaderContainer configures the leader node with SSH setup and mpirun command
-func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, component *v1beta1.DynamoComponentDeploymentSharedSpec, multinodeDeployer MultinodeDeployer) {
+func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, numberOfNodes int32, serviceName string, multinodeDeployer MultinodeDeployer, containerGPUs int64) {
 	// Generate the list of all hostnames
 	hostNamesList := b.hostNamesList(numberOfNodes, serviceName, multinodeDeployer)
 	allHostnames := strings.Join(hostNamesList, ",")
@@ -144,13 +150,8 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 		fmt.Sprintf("printf 'Host *\\nIdentityFile '$HOME'/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > $HOME/.ssh/config", commonconsts.MpiRunSshPort),
 	}
 
-	// Calculate total number of GPUs across all nodes. In the normal pod
-	// generation path container.Resources has already been merged from the
-	// component podTemplate; keep the component fallback for direct backend
-	// callers and focused unit tests.
-	resources := resourceRequirementsWithFallback(container.Resources, GetMainContainerResources(component))
-	gpusPerNode := getGPUsPerNode(&resources)
-	totalGPUs := numberOfNodes * gpusPerNode
+	// Calculate total GPUs from the scalar or DRA-resolved main-container count.
+	totalGPUs := int64(numberOfNodes) * containerGPUs
 
 	// Build mpirun command with explicit SSH configuration and environment variables
 	// Wrap the entire command (trtllm-llmapi-launch + original command) in bash -c for proper shell interpretation
@@ -231,21 +232,13 @@ func (b *TRTLLMBackend) hostNamesList(numberOfNodes int32, serviceName string, m
 	return multinodeDeployer.GetHostNames(serviceName, numberOfNodes)
 }
 
-// getGPUsPerNode extracts the number of GPUs per node from resources
-func getGPUsPerNode(resources *corev1.ResourceRequirements) int32 {
-	if resources == nil {
-		return 0
-	}
-	return int32(getGPUQuantity(resources))
-}
-
 // getCommonTRTLLMEnvVars returns a map of common environment variables for TRTLLM deployments
 func getCommonTRTLLMEnvVars() map[string]bool {
 	return map[string]bool{
-		"CUDA_VISIBLE_DEVICES": true, "MODEL_PATH": true, "HF_TOKEN": true, "HUGGING_FACE_HUB_TOKEN": true, "HF_ENDPOINT": true,
+		"CPATH": true, "CUDA_VISIBLE_DEVICES": true, "MODEL_PATH": true, "HF_TOKEN": true, "HUGGING_FACE_HUB_TOKEN": true, "HF_ENDPOINT": true,
 		"TOKENIZERS_PARALLELISM": true, "NCCL_DEBUG": true, "NCCL_IB_DISABLE": true, "NCCL_P2P_DISABLE": true,
 		"TENSORRT_LLM_CACHE_DIR": true, "HF_HOME": true, "TRANSFORMERS_CACHE": true, "HF_DATASETS_CACHE": true,
-		"PATH": true, "LD_LIBRARY_PATH": true, "PYTHONPATH": true, "HOME": true, "USER": true, "TRTLLM_USE_UCX_KVCACHE": true,
+		"PATH": true, "LD_LIBRARY_PATH": true, "PYTHONPATH": true, "HOME": true, "USER": true, "TRITON_PTXAS_PATH": true, "TRTLLM_USE_UCX_KVCACHE": true,
 	}
 }
 

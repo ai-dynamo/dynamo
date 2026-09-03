@@ -19,6 +19,8 @@ import logging
 
 from PIL import Image
 
+from dynamo.common.http import HttpStatusError
+from dynamo.common.http.url_validator import UrlValidationError
 from dynamo.common.multimodal.image_loader import ImageLoader
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,10 @@ try:
             """Async image fetch via dynamo's ImageLoader with LRU cache."""
             try:
                 img = await self._image_loader.load_image(image_url)
+            except (UrlValidationError, HttpStatusError):
+                # These are deliberate client-error verdicts, not signals that
+                # another loader should retry the same rejected URL.
+                raise
             except (ValueError, FileNotFoundError, OSError) as exc:
                 # Fall back to parent for unsupported URL schemes or local
                 # file paths that ImageLoader doesn't handle.

@@ -24,7 +24,6 @@ import (
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -57,7 +56,7 @@ func NewDynamoComponentDeploymentHandler() *DynamoComponentDeploymentHandler {
 }
 
 // ValidateCreate validates a DynamoComponentDeployment create request.
-func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoComponentDeploymentHandler) ValidateCreate(ctx context.Context, obj *nvidiacomv1beta1.DynamoComponentDeployment) (admission.Warnings, error) {
 	return h.validateCreate(ctx, obj, nvidiacomv1beta1.DynamoComponentDeploymentGVK)
 }
 
@@ -80,11 +79,14 @@ func (h *DynamoComponentDeploymentHandler) validateCreate(
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
 	validator := NewDynamoComponentDeploymentValidator()
-	return validator.Validate(ctx, deployment)
+	return validator.validate(ctx, deployment, runtimeVersionValidationSourceForRequest(ctx, expectedGVK))
 }
 
 // ValidateUpdate validates a DynamoComponentDeployment update request.
-func (h *DynamoComponentDeploymentHandler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoComponentDeploymentHandler) ValidateUpdate(
+	ctx context.Context,
+	oldObj, newObj *nvidiacomv1beta1.DynamoComponentDeployment,
+) (admission.Warnings, error) {
 	return h.validateUpdate(ctx, oldObj, newObj, nvidiacomv1beta1.DynamoComponentDeploymentGVK)
 }
 
@@ -118,11 +120,11 @@ func (h *DynamoComponentDeploymentHandler) validateUpdate(
 	}
 
 	validator := NewDynamoComponentDeploymentValidator()
-	return validator.ValidateUpdate(ctx, oldDeployment, newDeployment)
+	return validator.ValidateUpdate(ctx, oldDeployment, newDeployment, runtimeVersionValidationSourceForRequest(ctx, expectedGVK))
 }
 
 // ValidateDelete validates a DynamoComponentDeployment delete request.
-func (h *DynamoComponentDeploymentHandler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *DynamoComponentDeploymentHandler) ValidateDelete(ctx context.Context, obj *nvidiacomv1beta1.DynamoComponentDeployment) (admission.Warnings, error) {
 	return h.validateDelete(ctx, obj, nvidiacomv1beta1.DynamoComponentDeploymentGVK)
 }
 
@@ -150,51 +152,44 @@ func (h *DynamoComponentDeploymentHandler) validateDelete(
 // The handler is automatically wrapped with LeaseAwareValidator to add namespace exclusion logic
 // and ObservedValidator to add metrics collection.
 func (h *DynamoComponentDeploymentHandler) RegisterWithManager(mgr manager.Manager, gate features.Gate) error {
-	h.registerWithManager(
+	registerValidationWebhook(
 		mgr,
-		&nvidiacomv1beta1.DynamoComponentDeployment{},
 		dynamoComponentDeploymentV1Beta1WebhookPath,
 		h,
+		consts.ResourceTypeDynamoComponentDeployment,
 		gate,
 	)
 
 	// TODO(1.5): Remove the v1alpha1 endpoint and handler after 1.3 is no longer
 	// a supported upgrade or rollback target.
 	alphaHandler := &dynamoComponentDeploymentV1Alpha1Handler{handler: h}
-	h.registerWithManager(
+	registerValidationWebhook(
 		mgr,
-		&nvidiacomv1alpha1.DynamoComponentDeployment{},
 		dynamoComponentDeploymentV1Alpha1WebhookPath,
 		alphaHandler,
+		consts.ResourceTypeDynamoComponentDeployment,
 		gate,
 	)
 	return nil
 }
 
-func (h *DynamoComponentDeploymentHandler) registerWithManager(
-	mgr manager.Manager,
-	object runtime.Object,
-	path string,
-	validator admission.CustomValidator,
-	gate features.Gate,
-) {
-	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(validator, internalwebhook.GetExcludedNamespaces())
-	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoComponentDeployment)
-
-	webhook := internalwebhook.WithGate(admission.
-		WithCustomValidator(mgr.GetScheme(), object, observedValidator).
-		WithRecoverPanic(true), gate)
-	mgr.GetWebhookServer().Register(path, webhook)
-}
-
-func (h *dynamoComponentDeploymentV1Alpha1Handler) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *dynamoComponentDeploymentV1Alpha1Handler) ValidateCreate(
+	ctx context.Context,
+	obj *nvidiacomv1alpha1.DynamoComponentDeployment,
+) (admission.Warnings, error) {
 	return h.handler.validateCreate(ctx, obj, nvidiacomv1alpha1.DynamoComponentDeploymentGVK)
 }
 
-func (h *dynamoComponentDeploymentV1Alpha1Handler) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+func (h *dynamoComponentDeploymentV1Alpha1Handler) ValidateUpdate(
+	ctx context.Context,
+	oldObj, newObj *nvidiacomv1alpha1.DynamoComponentDeployment,
+) (admission.Warnings, error) {
 	return h.handler.validateUpdate(ctx, oldObj, newObj, nvidiacomv1alpha1.DynamoComponentDeploymentGVK)
 }
 
-func (h *dynamoComponentDeploymentV1Alpha1Handler) ValidateDelete(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
+func (h *dynamoComponentDeploymentV1Alpha1Handler) ValidateDelete(
+	ctx context.Context,
+	obj *nvidiacomv1alpha1.DynamoComponentDeployment,
+) (admission.Warnings, error) {
 	return h.handler.validateDelete(ctx, obj, nvidiacomv1alpha1.DynamoComponentDeploymentGVK)
 }

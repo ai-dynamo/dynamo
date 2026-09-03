@@ -4,7 +4,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::types::KvSchedulerError;
-use crate::protocols::{DpRank, RoutingConstraints, WorkerConfigLike, WorkerId, WorkerWithDpRank};
+use crate::protocols::{
+    DpRank, RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkerEligibilityError {
@@ -25,6 +27,9 @@ pub enum WorkerEligibilityError {
     #[error("worker {worker_id} is overloaded")]
     WorkerOverloaded { worker_id: WorkerId },
 
+    #[error("worker {worker_id} is not routable")]
+    WorkerNotRoutable { worker_id: WorkerId },
+
     #[error("worker {worker_id} does not satisfy routing constraints")]
     RoutingConstraintsUnsatisfied { worker_id: WorkerId },
 }
@@ -33,7 +38,9 @@ pub enum WorkerEligibilityError {
 pub struct RoutingEligibility<'a> {
     allowed_worker_ids: Option<&'a HashSet<WorkerId>>,
     overloaded_worker_ids: Option<&'a HashSet<WorkerId>>,
+    available_worker_ids: Option<&'a HashSet<WorkerId>>,
     pinned_worker: Option<WorkerWithDpRank>,
+    affinity_target: Option<WorkerAffinityTarget>,
     routing_constraints: &'a RoutingConstraints,
 }
 
@@ -48,9 +55,34 @@ impl<'a> RoutingEligibility<'a> {
         Self {
             allowed_worker_ids,
             overloaded_worker_ids,
+            available_worker_ids: None,
             pinned_worker,
+            affinity_target: None,
             routing_constraints,
         }
+    }
+
+    #[inline]
+    pub(crate) fn with_affinity_target(mut self, target: WorkerAffinityTarget) -> Self {
+        self.affinity_target = Some(target);
+        self
+    }
+
+    /// Attach hard availability. Unlike transient overload, unavailability is
+    /// enforced on every path, including affinity-derived pins.
+    #[inline]
+    pub fn with_available_workers(
+        mut self,
+        available_worker_ids: Option<&'a HashSet<WorkerId>>,
+    ) -> Self {
+        self.available_worker_ids = available_worker_ids;
+        self
+    }
+
+    #[inline]
+    pub fn is_worker_available(&self, worker_id: WorkerId) -> bool {
+        self.available_worker_ids
+            .is_none_or(|worker_ids| worker_ids.contains(&worker_id))
     }
 
     #[inline]
@@ -65,6 +97,17 @@ impl<'a> RoutingEligibility<'a> {
     }
 
     #[inline]
+    fn matches_affinity_target(&self, worker_id: WorkerId) -> bool {
+        self.affinity_target
+            .is_none_or(|target| target.worker_id == worker_id)
+    }
+
+    #[inline]
+    fn matches_worker_id_constraints(&self, worker_id: WorkerId) -> bool {
+        self.caller_allows_worker_id(worker_id) && self.matches_affinity_target(worker_id)
+    }
+
+    #[inline]
     pub fn is_worker_overloaded(&self, worker_id: WorkerId) -> bool {
         self.overloaded_worker_ids
             .is_some_and(|worker_ids| worker_ids.contains(&worker_id))
@@ -72,7 +115,9 @@ impl<'a> RoutingEligibility<'a> {
 
     #[inline]
     pub fn allows_worker_id(&self, worker_id: WorkerId) -> bool {
-        self.caller_allows_worker_id(worker_id) && !self.is_worker_overloaded(worker_id)
+        self.matches_worker_id_constraints(worker_id)
+            && self.is_worker_available(worker_id)
+            && !self.is_worker_overloaded(worker_id)
     }
 
     #[inline]
@@ -81,7 +126,8 @@ impl<'a> RoutingEligibility<'a> {
         worker_id: WorkerId,
         config: &C,
     ) -> bool {
-        self.caller_allows_worker_id(worker_id)
+        self.matches_worker_id_constraints(worker_id)
+            && self.is_worker_available(worker_id)
             && self
                 .routing_constraints
                 .is_compatible_with_worker_taints(config.taints())
@@ -140,6 +186,22 @@ impl<'a> RoutingEligibility<'a> {
                 worker_id: worker.worker_id,
             });
         }
+        if !self.matches_affinity_target(worker.worker_id)
+            || self
+                .affinity_target
+                .and_then(|target| target.dp_rank)
+                .is_some_and(|rank| rank != worker.dp_rank)
+        {
+            return Err(WorkerEligibilityError::WorkerNotAllowed {
+                worker_id: worker.worker_id,
+            });
+        }
+
+        if !self.is_worker_available(worker.worker_id) {
+            return Err(WorkerEligibilityError::WorkerNotRoutable {
+                worker_id: worker.worker_id,
+            });
+        }
 
         let config = worker_config_for_rank(workers, worker)?;
         if !self
@@ -176,6 +238,28 @@ impl<'a> RoutingEligibility<'a> {
             return predicate(worker, config);
         }
 
+        if let Some(target) = self.affinity_target {
+            let Some(config) = workers.get(&target.worker_id) else {
+                return false;
+            };
+            if !self.allows_worker(target.worker_id, config) {
+                return false;
+            }
+
+            let dp_start = config.data_parallel_start_rank();
+            let dp_end = dp_start + config.data_parallel_size();
+            if let Some(dp_rank) = target.dp_rank {
+                return (dp_start..dp_end).contains(&dp_rank)
+                    && predicate(WorkerWithDpRank::new(target.worker_id, dp_rank), config);
+            }
+            for dp_rank in dp_start..dp_end {
+                if predicate(WorkerWithDpRank::new(target.worker_id, dp_rank), config) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         for (&worker_id, config) in workers {
             if !self.allows_worker(worker_id, config) {
                 continue;
@@ -191,6 +275,24 @@ impl<'a> RoutingEligibility<'a> {
         }
 
         false
+    }
+
+    pub(crate) fn affinity_target_is_eligible<C: WorkerConfigLike>(
+        &self,
+        workers: &HashMap<WorkerId, C>,
+        target: WorkerAffinityTarget,
+    ) -> bool {
+        let Some(config) = workers.get(&target.worker_id) else {
+            return false;
+        };
+        if !self.allows_worker(target.worker_id, config) {
+            return false;
+        }
+        let ranks = config.data_parallel_start_rank()
+            ..config.data_parallel_start_rank() + config.data_parallel_size();
+        target
+            .dp_rank
+            .map_or(!ranks.is_empty(), |rank| ranks.contains(&rank))
     }
 
     pub fn for_each_eligible_worker_rank<C, F>(&self, workers: &HashMap<WorkerId, C>, mut visit: F)
@@ -210,7 +312,7 @@ impl<'a> RoutingEligibility<'a> {
             return Ok(());
         };
 
-        if self.caller_allows_worker_id(pinned_worker.worker_id) {
+        if self.matches_worker_id_constraints(pinned_worker.worker_id) {
             return Ok(());
         }
 
@@ -340,6 +442,33 @@ mod tests {
             result.err(),
             Some(WorkerEligibilityError::WorkerOverloaded { worker_id: 7 })
         );
+    }
+
+    #[test]
+    fn hard_availability_overrides_affinity_overload_bypass() {
+        let workers = workers();
+        let config = workers.get(&7).unwrap();
+        let overloaded = HashSet::from([7]);
+        let available = HashSet::from([8]);
+        let constraints = RoutingConstraints::default();
+        let worker = WorkerWithDpRank::new(7, 3);
+        let eligibility =
+            RoutingEligibility::new(None, Some(&overloaded), Some(worker), &constraints)
+                .with_available_workers(Some(&available));
+
+        assert!(!eligibility.allows_worker_ignoring_overload(7, config));
+        assert_eq!(
+            eligibility.validate_worker_rank(&workers, worker).err(),
+            Some(WorkerEligibilityError::WorkerNotRoutable { worker_id: 7 })
+        );
+
+        let empty = HashSet::new();
+        let authoritative_empty = RoutingEligibility::new(None, None, None, &constraints)
+            .with_available_workers(Some(&empty));
+        assert!(!authoritative_empty.allows_worker(7, config));
+
+        let no_provider = RoutingEligibility::new(None, Some(&overloaded), None, &constraints);
+        assert!(no_provider.allows_worker_ignoring_overload(7, config));
     }
 
     #[test]
@@ -501,6 +630,39 @@ mod tests {
 
         eligibility.for_each_eligible_worker_rank(&workers, |worker, _| ranks.push(worker));
         ranks.sort_by_key(|worker| (worker.worker_id, worker.dp_rank));
+
+        assert_eq!(
+            ranks,
+            vec![WorkerWithDpRank::new(8, 4), WorkerWithDpRank::new(8, 5)]
+        );
+    }
+
+    #[test]
+    fn routing_eligibility_expands_only_the_affinity_target() {
+        let workers = HashMap::from([
+            (
+                7,
+                TestWorkerConfig {
+                    dp_start: 2,
+                    dp_size: 2,
+                    ..Default::default()
+                },
+            ),
+            (
+                8,
+                TestWorkerConfig {
+                    dp_start: 4,
+                    dp_size: 2,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let constraints = RoutingConstraints::default();
+        let eligibility = RoutingEligibility::new(None, None, None, &constraints)
+            .with_affinity_target(WorkerAffinityTarget::new(8, None));
+        let mut ranks = Vec::new();
+
+        eligibility.for_each_eligible_worker_rank(&workers, |worker, _| ranks.push(worker));
 
         assert_eq!(
             ranks,

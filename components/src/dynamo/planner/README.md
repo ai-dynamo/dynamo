@@ -25,23 +25,33 @@ The SLA Planner supports two scaling modes that can be used independently or tog
 
 ### Throughput-Based Scaling
 
-Uses pre-deployment profiling data and traffic prediction to compute the number of prefill/decode replicas needed to meet TTFT and ITL SLA targets. Requires profiling data from the Dynamo profiler.
+Uses traffic prediction and the engine performance model to compute the number
+of replicas needed to meet TTFT and ITL SLA targets. The model can bootstrap
+from worker self-benchmarks, native AI Configurator estimates, profiler output,
+or live FPM regression.
 
 ### Load-Based Scaling
 
-Uses ForwardPassMetrics (FPM) from the Dynamo event plane to make SLA-aware scaling decisions via online linear regression. Does not require profiling data or the KV Router. Responds quickly to traffic bursts. Currently only supported with vLLM (FPM only available in vllm).
+Uses ForwardPassMetrics (FPM) from the Dynamo event plane for reactive scaling.
+With `optimization_target: sla`, the Planner uses online regression to target
+TTFT and ITL. Other optimization targets use static or user-defined queue and
+KV-utilization thresholds. Load-based scaling does not require profiling data
+or the KV Router and supports vLLM, SGLang, and TensorRT-LLM deployments that
+emit the required FPM signals, including per-rank signals for attention-DP.
 
-When both modes are enabled, throughput-based scaling provides a lower bound on replicas while load-based scaling handles real-time adjustments.
+With `optimization_target: sla` and both modes enabled, throughput-based
+scaling provides a lower bound on replicas while load-based scaling handles
+real-time adjustments.
 
 ### Support Matrix
 
 | Deployment Type | Throughput-Based | Load-Based |
 |-----------------|:----------------:|:-------------------------:|
 | Disaggregated   | Supported        | Supported                 |
-| Aggregated      | Unsupported      | Supported                 |
+| Aggregated      | Supported        | Supported                 |
 
 ## Documentation
 
-- **User docs**: [Planner Guide](../../../../docs/components/planner/planner-guide.md) (deployment, configuration, examples)
-- **Design docs**: [Planner Design](../../../../docs/design-docs/planner-design.md) (architecture, algorithms)
+- **User docs**: [Planner Guide](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md) (deployment, configuration, examples)
+- **Design docs**: [Planner Design](../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-design.md) (architecture, algorithms)
 - **Manual workflows**: [tests/manual/README.md](tests/manual/README.md) (dry run helpers, perf configs, and manual scaling scripts)

@@ -34,6 +34,7 @@ use dynamo_llm::local_model::runtime_config::{
 use dynamo_llm::model_type::ModelInput as RsModelInput;
 use dynamo_runtime as rs;
 use dynamo_runtime::logging::{DistributedTraceContext, get_distributed_tracing_context};
+use dynamo_sidecar_common::SidecarStartupError;
 use futures::stream::{BoxStream, StreamExt};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
@@ -47,11 +48,25 @@ use crate::llm::kv::KvEventPublisher as PyKvEventPublisher;
 use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 use crate::to_pyerr;
 
+fn sidecar_startup_to_pyerr(error: SidecarStartupError) -> PyErr {
+    match error {
+        SidecarStartupError::Cli(error) => {
+            let _ = error.print();
+            pyo3::exceptions::PySystemExit::new_err(error.exit_code())
+        }
+        SidecarStartupError::Dynamo(error) => {
+            pyo3::exceptions::PyValueError::new_err(error.to_string())
+        }
+    }
+}
+
 /// Register `dynamo._core.backend` and its classes on the parent `_core` module.
 pub fn add_to_module(parent: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = parent.py();
     let m = PyModule::new(py, "backend")?;
     m.add_function(wrap_pyfunction!(_run_sglang_sidecar, &m)?)?;
+    m.add_function(wrap_pyfunction!(_run_trtllm_sidecar, &m)?)?;
+    m.add_function(wrap_pyfunction!(_run_vllm_sidecar, &m)?)?;
     m.add_class::<DisaggregationMode>()?;
     m.add_class::<EngineConfig>()?;
     m.add_class::<LlmRegistration>()?;
@@ -87,10 +102,60 @@ fn sglang_sidecar_argv(argv: Vec<String>) -> Vec<String> {
 fn _run_sglang_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
     let cli_argv = sglang_sidecar_argv(argv.unwrap_or_default());
     let (engine, config) = py
-        .allow_threads(move || {
-            dynamo_sglang_sidecar::SglangSidecarEngine::from_args(Some(cli_argv))
-        })
-        .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))?;
+        .allow_threads(move || dynamo_sglang_sidecar::SglangSidecarEngine::try_from_args(cli_argv))
+        .map_err(sidecar_startup_to_pyerr)?;
+
+    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+}
+
+const VLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-vllm-sidecar";
+
+fn vllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
+    let mut cli_argv = Vec::with_capacity(argv.len() + 1);
+    cli_argv.push(VLLM_SIDECAR_PROGRAM_NAME.to_string());
+    cli_argv.extend(argv);
+    cli_argv
+}
+
+/// Run the native vLLM sidecar in the current process.
+///
+/// Python's module launcher passes only option arguments, while clap's
+/// `try_parse_from` expects the program name at index zero. Add that stable
+/// name here so Python callers use ordinary `sys.argv[1:]` semantics.
+#[pyfunction]
+#[pyo3(signature = (argv=None))]
+fn _run_vllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let cli_argv = vllm_sidecar_argv(argv.unwrap_or_default());
+    let (engine, config) = py
+        .allow_threads(move || dynamo_vllm_sidecar::VllmSidecarEngine::try_from_args(cli_argv))
+        .map_err(sidecar_startup_to_pyerr)?;
+
+    py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+}
+
+const TRTLLM_SIDECAR_PROGRAM_NAME: &str = "dynamo-trtllm-sidecar";
+
+fn trtllm_sidecar_argv(argv: Vec<String>) -> Vec<String> {
+    let mut cli_argv = Vec::with_capacity(argv.len() + 1);
+    cli_argv.push(TRTLLM_SIDECAR_PROGRAM_NAME.to_string());
+    cli_argv.extend(argv);
+    cli_argv
+}
+
+/// Run the native TensorRT-LLM sidecar in the current process.
+///
+/// Python's module launcher passes only option arguments, while clap's
+/// `try_parse_from` expects the program name at index zero. Add that stable
+/// name here so Python callers use ordinary `sys.argv[1:]` semantics.
+#[pyfunction]
+#[pyo3(signature = (argv=None))]
+fn _run_trtllm_sidecar(py: Python<'_>, argv: Option<Vec<String>>) -> PyResult<()> {
+    let cli_argv = trtllm_sidecar_argv(argv.unwrap_or_default());
+    let (engine, config) = py
+        .allow_threads(move || dynamo_trtllm_sidecar::TrtllmSidecarEngine::try_from_args(cli_argv))
+        .map_err(sidecar_startup_to_pyerr)?;
 
     py.allow_threads(move || dynamo_backend_common::run(Arc::new(engine), config))
         .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
@@ -134,7 +199,7 @@ impl From<DisaggregationMode> for RsDisaggregationMode {
 // EngineConfig — mirror of `dynamo_backend_common::EngineConfig`.
 //
 // Engines may return either this pyclass or any object with the canonical
-// attributes `model` / `served_model_name` / `runtime_data` / `llm`; the
+// attributes `model` / `served_model_name` / `model_aliases` / `runtime_data` / `llm`; the
 // bridge's `start()` extraction accepts both. Note `llm` is a nested record
 // (LlmRegistration), NOT flat fields — an object exposing flat `context_length`
 // etc. (the pre-split shape) registers with `llm=None`, i.e. no KV/DP/bootstrap
@@ -236,12 +301,13 @@ pub struct EngineConfig {
 #[pymethods]
 impl EngineConfig {
     #[new]
-    #[pyo3(signature = (model, served_model_name = None, runtime_data = None, llm = None))]
+    #[pyo3(signature = (model, served_model_name = None, runtime_data = None, llm = None, model_aliases = None))]
     fn new(
         model: String,
         served_model_name: Option<String>,
         runtime_data: Option<&Bound<'_, PyDict>>,
         llm: Option<LlmRegistration>,
+        model_aliases: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let runtime_data = runtime_data
             .map(|dict| depythonize::<HashMap<String, serde_json::Value>>(dict))
@@ -253,6 +319,7 @@ impl EngineConfig {
             inner: RsEngineConfig {
                 model,
                 served_model_name,
+                model_aliases: model_aliases.unwrap_or_default(),
                 runtime_data,
                 llm: llm.map(|l| l.inner),
             },
@@ -266,6 +333,10 @@ impl EngineConfig {
     #[getter]
     fn served_model_name(&self) -> Option<&str> {
         self.inner.served_model_name.as_deref()
+    }
+    #[getter]
+    fn model_aliases(&self) -> &[String] {
+        &self.inner.model_aliases
     }
     #[getter]
     fn llm(&self) -> Option<LlmRegistration> {
@@ -349,6 +420,7 @@ impl WorkerConfig {
         media_decoder = None,
         media_fetcher = None,
         kv_state_endpoint = None,
+        default_thinking_mode = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -377,6 +449,7 @@ impl WorkerConfig {
         media_decoder: Option<MediaDecoder>,
         media_fetcher: Option<MediaFetcher>,
         kv_state_endpoint: Option<String>,
+        default_thinking_mode: Option<String>,
     ) -> PyResult<Self> {
         // Delegating to the same conversion used by `register_model`.
         let model_input_rs = match model_input {
@@ -446,6 +519,7 @@ impl WorkerConfig {
                 custom_jinja_template: custom_jinja_template.map(PathBuf::from),
                 tool_call_parser,
                 reasoning_parser,
+                default_thinking_mode,
                 exclude_tools_when_tool_choice_none,
                 enable_local_indexer,
                 enable_kv_routing,
@@ -457,6 +531,10 @@ impl WorkerConfig {
                 structural_tag_schema: st_schema,
                 runtime: runtime.map(|r| r.inner).unwrap_or_default(),
                 route_to_encoder,
+                // Python vLLM owns and serves its existing `.rl` endpoint.
+                // The shared Rust endpoint is opt-in for Rust sidecars only.
+                enable_rl: false,
+                rl_metadata: None,
                 media_decoder: media_decoder.map(|decoder| decoder.inner),
                 media_fetcher: media_fetcher.map(|fetcher| fetcher.inner),
             },
@@ -481,8 +559,8 @@ pub struct Worker {
     /// Single-shot guard — flipped to `true` on the first `run()` call.
     /// The Rust `Worker` underneath consumes `self`; calling `run()`
     /// twice from Python would build a second `RsWorker` and call
-    /// `engine.start()` again, which most engines (vLLM, sglang, trtllm)
-    /// don't tolerate. We surface a clear `RuntimeError` instead.
+    /// `engine.start()` again, which engine implementations generally do not
+    /// tolerate. We surface a clear `RuntimeError` instead.
     consumed: AtomicBool,
     /// `true` when `engine` is a `DiffusionEngine` (raw media pipeline).
     /// Set by the Python `Worker` shim via `isinstance`. Selects the raw
@@ -568,12 +646,10 @@ impl Worker {
         let raw = self.raw;
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let runtime = rs::Worker::runtime_from_existing()
-                .or_else(|_| {
-                    let worker = rs::Worker::from_settings()?;
-                    Ok::<_, anyhow::Error>(worker.runtime().clone())
-                })
-                .map_err(to_pyerr)?;
+            // No fallback: `runtime_from_existing` creates the process runtime when there isn't
+            // one, so it only fails when the settings themselves are bad. Retrying through
+            // `Worker::from_settings` would read those same settings and fail the same way.
+            let runtime = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
 
             // Initialize logging now that tokio context is available. Mirrors
             // the DistributedRuntime init path — required so workers using
@@ -722,7 +798,7 @@ impl PyEngineCore {
             request_metadata: self.request_metadata.clone(),
         };
 
-        let first_token = ctx.first_token_sender().cloned();
+        let first_token = ctx.first_token_notifier().cloned();
         let inner_ctx = ctx.inner_arc();
         // **Invariant**: `tracing::Span::current()` here MUST be the
         // `engine.generate` span opened by the adapter. The capture must
@@ -859,6 +935,7 @@ impl PyEngineCore {
             Ok(RsEngineConfig {
                 model: bound.getattr("model")?.extract()?,
                 served_model_name: opt_attr::<String>(bound, "served_model_name")?,
+                model_aliases: opt_attr::<Vec<String>>(bound, "model_aliases")?.unwrap_or_default(),
                 runtime_data: match bound.getattr("runtime_data") {
                     Ok(value) if !value.is_none() => depythonize(&value).map_err(to_pyerr)?,
                     Ok(_) => HashMap::new(),

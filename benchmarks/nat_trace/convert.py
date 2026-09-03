@@ -18,9 +18,9 @@ import os
 import re
 from collections import defaultdict
 
-from aiperf.common.tokenizer import Tokenizer
 from common import DEFAULT_BLOCK_SIZE, DEFAULT_TOKENIZER, texts_to_hashes_and_lengths
 from tqdm import tqdm
+from transformers import AutoTokenizer
 
 
 def parse_args():
@@ -268,7 +268,7 @@ def convert_to_mooncake(
     all_texts = [entry[2] for entry in all_entries]
     print(f"Tokenizing and hashing {len(all_texts)} texts...")
 
-    tokenizer = Tokenizer.from_pretrained(tokenizer_name)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
     all_hash_ids, all_input_lengths = texts_to_hashes_and_lengths(
         tokenizer, all_texts, block_size
     )

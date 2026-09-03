@@ -12,3 +12,13 @@
 --no-binary imageio-ffmpeg
 
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
+# The upstream vllm-openai image bundles pillow at an older patch release;
+# floor it so the --no-deps install moves it to the current patch line.
+pillow>=12.3.0
+# NVDEC hardware decode for H.264/H.265 video input (common/multimodal/
+# nvdec_decoder). Pin >=2.2.0 and force-reinstall (see the vllm_runtime.Dockerfile
+# install): the vllm-openai base ships PyNvVideoCodec 2.0.4, which bundles a full
+# FFmpeg (libavcodec + libavdevice/libavfilter/libsw*) that the codec gate
+# rejects; 2.2.0 bundles only libavutil + libavformat (container demux, no codec).
+# Requires NVIDIA_DRIVER_CAPABILITIES to include "video" or it cannot import.
+PyNvVideoCodec>=2.2.0

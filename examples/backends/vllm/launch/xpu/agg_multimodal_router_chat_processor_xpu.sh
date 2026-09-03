@@ -69,7 +69,7 @@ export DYN_MM_IMAGE_CACHE_SIZE="${DYN_MM_IMAGE_CACHE_SIZE:-32}"
 #   nixl  — NIXL RDMA transfer. Required for cross-node deployments.
 # Set DYNAMO_DISABLE_NIXL_MM=1 to disable the transfer channel entirely; the
 # backend then re-downloads + reprocesses the image from the original URL.
-# See docs/features/multimodal/multimodal-kv-routing.md for details.
+# See docs/fern/pages/use-cases/multimodal-serving/multimodal-kv-routing.md for details.
 export DYNAMO_MM_TRANSFER="${DYNAMO_MM_TRANSFER:-shm}"
 
 # Extra args (word-splitting is intentional for shell-style overrides)
@@ -90,7 +90,7 @@ while [[ $# -gt 0 ]]; do
             cat <<EOF
 Usage: $0 [--model NAME] [--num-workers N] [--single-gpu] [EXTRA_VLLM_ARGS...]
 
-See docs/features/multimodal/multimodal-kv-routing.md for env vars.
+See docs/fern/pages/use-cases/multimodal-serving/multimodal-kv-routing.md for env vars.
 EOF
             exit 0
             ;;

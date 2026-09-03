@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::env;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -10,6 +9,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 
 use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, ResponseStream};
+use dynamo_runtime::error::{DynamoError, ErrorType};
 #[cfg(test)]
 use dynamo_runtime::pipeline::RequestStream;
 use dynamo_runtime::pipeline::{Error, ManyIn, ManyOut, SingleIn};
@@ -58,18 +58,15 @@ impl Default for MultiNodeConfig {
 // Example echo engines
 //
 
+const DEFAULT_TOKEN_ECHO_DELAY_MS: u64 = 10;
+
 /// How long to sleep between echoed tokens.
-/// Default is 10ms which gives us 100 tok/s.
-/// Can be configured via the DYN_TOKEN_ECHO_DELAY_MS environment variable.
+/// The default is 10ms, which gives us 100 tok/s.
 pub static TOKEN_ECHO_DELAY: LazyLock<Duration> = LazyLock::new(|| {
-    const DEFAULT_DELAY_MS: u64 = 10;
-
-    let delay_ms = env::var("DYN_TOKEN_ECHO_DELAY_MS")
-        .ok()
-        .and_then(|val| val.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_DELAY_MS);
-
-    Duration::from_millis(delay_ms)
+    Duration::from_millis(dynamo_runtime::config::env_config::parse_or_default(
+        dynamo_runtime::config::environment_names::llm::DYN_TOKEN_ECHO_DELAY_MS,
+        DEFAULT_TOKEN_ECHO_DELAY_MS,
+    ))
 });
 
 /// Engine that accepts un-preprocessed requests and echos the prompt back as the response
@@ -433,7 +430,11 @@ where
 
         // Validate the request first
         if let Err(validation_error) = request.validate() {
-            return Err(anyhow::anyhow!("Validation failed: {}", validation_error));
+            return Err(DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(format!("Validation failed: {validation_error}"))
+                .build()
+                .into());
         }
 
         // Forward to inner engine if validation passes
@@ -560,8 +561,29 @@ impl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::error::{ErrorType, match_error_chain};
     use dynamo_runtime::pipeline::Context;
     use futures::stream;
+
+    struct RejectingRequest;
+
+    impl ValidateRequest for RejectingRequest {
+        fn validate(&self) -> Result<(), anyhow::Error> {
+            anyhow::bail!("bad request")
+        }
+    }
+
+    struct NeverCalledEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<RejectingRequest>, ManyOut<Annotated<()>>, Error> for NeverCalledEngine {
+        async fn generate(
+            &self,
+            _request: SingleIn<RejectingRequest>,
+        ) -> Result<ManyOut<Annotated<()>>, Error> {
+            panic!("invalid requests must not reach the inner engine")
+        }
+    }
 
     fn make_input(events: Vec<RealtimeClientEvent>) -> ManyIn<RealtimeClientEvent> {
         Context::new(RequestStream::new(Box::pin(stream::iter(events))))
@@ -597,5 +619,19 @@ mod tests {
             }
             other => panic!("expected error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn validate_engine_classifies_request_errors_as_invalid_argument() {
+        let error = ValidateEngine::new(NeverCalledEngine)
+            .generate(Context::new(RejectingRequest))
+            .await
+            .expect_err("invalid request must fail validation");
+
+        assert!(match_error_chain(
+            error.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
     }
 }

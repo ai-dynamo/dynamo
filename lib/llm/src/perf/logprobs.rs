@@ -119,7 +119,7 @@ impl TokenLogProbs {
 /// Trait for extracting logprob information from various response types
 pub trait LogprobExtractor {
     /// Extract logprobs organized by choice index
-    /// Returns: HashMap<choice_index, Vec<TokenLogProbs>>
+    /// Returns: `HashMap<choice_index, Vec<TokenLogProbs>>`
     fn extract_logprobs_by_choice(&self) -> HashMap<u32, Vec<TokenLogProbs>>;
 }
 
@@ -876,6 +876,7 @@ mod tests {
         let token_logprobs = vec![ChatCompletionTokenLogprob {
             token: "unlikely_selection".to_string(),
             logprob: (0.15_f32).ln(), // Selected but not optimal: 15%
+            token_id: None,
             bytes: None,
             top_logprobs: vec![
                 TopLogprobs {
@@ -932,6 +933,7 @@ mod tests {
         ChatCompletionTokenLogprob {
             token: token.to_string(),
             logprob: prob.ln(),
+            token_id: None,
             bytes: None,
             top_logprobs: top_probs
                 .into_iter()

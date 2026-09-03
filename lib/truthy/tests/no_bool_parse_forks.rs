@@ -20,7 +20,12 @@ use std::path::{Path, PathBuf};
 
 /// Known non-fork matches, as (path suffix, line substring) pairs. A multiline
 /// (file-level) match is allowed when any entry's path suffix matches the file.
-const ALLOWED: &[(&str, &str)] = &[];
+const ALLOWED: &[(&str, &str)] = &[(
+    "deploy/inference-gateway/ext-proc/src/pod_discovery.rs",
+    // Kubernetes condition statuses are stringly typed API enum values, not
+    // user-provided configuration booleans.
+    r#"c.status == "True""#,
+)];
 
 /// Substring patterns that indicate a hand-rolled bool parser. Matched against
 /// lowercased text, so `"TRUE"` / `"False"` variants are caught too.

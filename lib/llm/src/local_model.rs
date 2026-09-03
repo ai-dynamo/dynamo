@@ -7,8 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use dynamo_runtime::component::Endpoint;
-use dynamo_runtime::discovery::DiscoveryInstance;
-use dynamo_runtime::discovery::DiscoverySpec;
+use dynamo_runtime::discovery::{DiscoveryInstance, DiscoverySpec, ModelCardInstanceId};
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
@@ -20,6 +19,7 @@ use crate::frontend_config::{FrontendApiConfig, MetricsConfig};
 use crate::model_card::{ModelDeploymentCard, is_weight_file};
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
+use crate::reasoning_field::ReasoningField;
 use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
@@ -37,7 +37,8 @@ const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 /// 'pub' because the bindings use it for consistency.
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
 
-/// Default for `LocalModelBuilder::self_host_metadata`. Truthy values opt in.
+/// Default for `LocalModelBuilder::self_host_metadata`. On by default;
+/// set to an explicitly falsy value (`0`/`false`/`no`/`off`) to opt out.
 pub const ENV_SELF_HOST_METADATA: &str = "DYN_SELF_HOST_METADATA";
 
 fn env_self_host_metadata_default() -> bool {
@@ -46,7 +47,10 @@ fn env_self_host_metadata_default() -> bool {
 }
 
 fn self_host_metadata_default(value: Option<&str>) -> bool {
-    value.is_some_and(dynamo_runtime::config::is_truthy)
+    // Unset, empty, and unrecognized values keep the default-on behavior.
+    value
+        .and_then(dynamo_runtime::config::parse_bool_opt)
+        .unwrap_or(true)
 }
 
 pub struct LocalModelBuilder {
@@ -207,8 +211,13 @@ impl LocalModelBuilder {
         self
     }
 
-    /// Opt in or out of self-hosting MDC artifacts. Default `false`.
-    /// Set this at runtime with environment variable DYN_SELF_HOST_METADATA.
+    pub fn reasoning_field(&mut self, reasoning_field: ReasoningField) -> &mut Self {
+        self.frontend_api_config
+            .set_reasoning_field(reasoning_field);
+        self
+    }
+
+    /// Opt in or out of self-hosting MDC artifacts. Default `true`.
     pub fn self_host_metadata(&mut self, enabled: bool) -> &mut Self {
         self.self_host_metadata = enabled;
         self
@@ -445,6 +454,56 @@ pub struct LocalModel {
     self_host_metadata: bool,
 }
 
+/// Register a Model Deployment Card via the discovery system.
+/// Derives the LoRA suffix from card.lora and constructs the DiscoverySpec.
+/// Derive LoRA suffix from an optional adapter name.
+/// Returns None if lora_name is None, otherwise returns a slugified version of the name.
+pub fn derive_lora_suffix(lora_name: Option<&str>) -> Option<String> {
+    lora_name.map(|name| Slug::slugify(name).to_string())
+}
+
+pub async fn register_model_card(
+    endpoint: &Endpoint,
+    card: &ModelDeploymentCard,
+) -> anyhow::Result<()> {
+    let lora_name = card.lora.as_ref().map(|info| info.name.as_str());
+    let model_suffix = derive_lora_suffix(lora_name);
+
+    let discovery = endpoint.drt().discovery();
+    let wire_card = card.for_mdc_wire();
+    let spec = DiscoverySpec::from_model_with_suffix(
+        endpoint.component().namespace().name().to_string(),
+        endpoint.component().name().to_string(),
+        endpoint.name().to_string(),
+        &wire_card,
+        model_suffix,
+    )?;
+    let _instance = discovery.register(spec).await?;
+    Ok(())
+}
+
+/// Replace the caller-managed taints on this worker's existing model card.
+pub async fn update_model_taints(
+    endpoint: &Endpoint,
+    taints: HashSet<String>,
+) -> anyhow::Result<()> {
+    let endpoint_id = endpoint.id();
+    let instance_id = endpoint.drt().connection_id();
+    let discovery = endpoint.drt().discovery();
+    discovery
+        .update_model_taints(
+            ModelCardInstanceId {
+                namespace: endpoint_id.namespace,
+                component: endpoint_id.component,
+                endpoint: endpoint_id.name,
+                instance_id,
+                model_suffix: None,
+            },
+            taints,
+        )
+        .await
+}
+
 impl LocalModel {
     /// Ensure a model is accessible locally, returning it's path.
     /// Downloads the model from Hugging Face if necessary.
@@ -522,6 +581,10 @@ impl LocalModel {
             .reasoning_dispatch()
     }
 
+    pub fn reasoning_field(&self) -> ReasoningField {
+        self.frontend_api_config.reasoning_field()
+    }
+
     pub fn tls_cert_path(&self) -> Option<&Path> {
         self.tls_cert_path.as_deref()
     }
@@ -589,10 +652,8 @@ impl LocalModel {
         self.card.needs = needs;
         self.card.lora = lora_info.clone();
 
-        // Compute model_suffix from lora_name if present
-        let model_suffix = lora_info
-            .as_ref()
-            .map(|info| Slug::slugify(&info.name).to_string());
+        let lora_name = self.card.lora.as_ref().map(|info| info.name.as_str());
+        let model_suffix = derive_lora_suffix(lora_name);
 
         let suffix_for_log = model_suffix
             .as_ref()
@@ -630,16 +691,7 @@ impl LocalModel {
         }
 
         // Register the Model Deployment Card via discovery interface
-        // The model_suffix (for LoRA) will be appended AFTER the instance_id
-        let discovery = endpoint.drt().discovery();
-        let spec = DiscoverySpec::from_model_with_suffix(
-            endpoint.component().namespace().name().to_string(),
-            endpoint.component().name().to_string(),
-            endpoint.name().to_string(),
-            &self.card,
-            model_suffix,
-        )?;
-        let _instance = discovery.register(spec).await?;
+        register_model_card(endpoint, &self.card).await?;
 
         Ok(())
     }
@@ -659,12 +711,15 @@ impl LocalModel {
         let component = endpoint.component().name().to_string();
         let endpoint_name = endpoint.name().to_string();
         let Some(base_url) = self_host_base_url(drt)? else {
-            tracing::warn!(
-                model_slug = %self.card.slug(),
-                "self_host_metadata enabled but system_status_server is not \
-                 running (DYN_SYSTEM_PORT unset); skipping http rewrites — \
-                 set DYN_SYSTEM_PORT to enable",
-            );
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "self_host_metadata is ON but DYN_SYSTEM_PORT is unset; \
+                     falling back to shared-storage MDC. Set DYN_SYSTEM_PORT \
+                     (e.g. 9090) to enable self-hosting, or set \
+                     DYN_SELF_HOST_METADATA=0 to silence this warning.",
+                );
+            });
             return Ok(());
         };
         let model_slug = self.card.slug().to_string();
@@ -761,7 +816,7 @@ impl LocalModel {
         let instance_id = drt.connection_id();
         let endpoint_id = endpoint.id();
 
-        let model_suffix = lora_name.map(|name| Slug::slugify(name).to_string());
+        let model_suffix = derive_lora_suffix(lora_name);
         let registry_owner = (instance_id, model_suffix.clone());
 
         let instance = DiscoveryInstance::Model {
@@ -860,24 +915,18 @@ fn harvest_extra_files(
 }
 
 #[cfg(test)]
-mod env_self_host_metadata_tests {
+mod self_host_metadata_default_tests {
     use super::*;
 
+    // parse_bool_opt owns the falsy/truthy vocabulary (tested in the `truthy`
+    // crate); here we only lock the default-on inversion this flag introduced:
+    // anything that isn't an explicit falsy token stays ON.
     #[test]
-    fn env_default_parsing() {
-        assert!(!self_host_metadata_default(None), "unset → default OFF");
-
-        for v in [
-            "0", "false", "FALSE", "no", "NO", "off", "OFF", "", "garbage",
-        ] {
-            assert!(
-                !self_host_metadata_default(Some(v)),
-                "expected OFF for {v:?}"
-            );
-        }
-        for v in ["1", "true", "TRUE", "yes", "Yes", "on", "ON"] {
-            assert!(self_host_metadata_default(Some(v)), "expected ON for {v:?}");
-        }
+    fn defaults_on_unless_explicitly_falsy() {
+        assert!(self_host_metadata_default(None)); // unset
+        assert!(self_host_metadata_default(Some(""))); // empty
+        assert!(self_host_metadata_default(Some("garbage"))); // unrecognized
+        assert!(!self_host_metadata_default(Some("false"))); // explicit opt-out
     }
 }
 

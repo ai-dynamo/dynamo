@@ -24,6 +24,7 @@ from dynamo.common.configuration.groups.runtime_args import (
     DynamoRuntimeConfig,
 )
 from dynamo.common.configuration.utils import add_argument, add_negatable_bool_argument
+from dynamo.common.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +63,10 @@ class OmniParallelKwargs:
 
     ulysses_degree: int = 1
     ring_degree: int = 1
+    allgather_degree: int = 1
     cfg_parallel_size: int = 1
     vae_patch_parallel_size: int = 1
+    text_encoder_tp_size: int = 1
     vae_parallel_mode: str = "tile"
     use_hsdp: bool = False
     hsdp_shard_size: int = -1
@@ -254,6 +257,14 @@ class OmniArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--allgather-degree",
+            env_var="DYN_OMNI_ALLGATHER_DEGREE",
+            default=1,
+            arg_type=int,
+            help="Number of GPUs used for AllGather-KV sequence parallelism in diffusion.",
+        )
+        add_argument(
+            g,
             flag_name="--cfg-parallel-size",
             env_var="DYN_OMNI_CFG_PARALLEL_SIZE",
             default=1,
@@ -268,6 +279,17 @@ class OmniArgGroup(ArgGroup):
             default=1,
             arg_type=int,
             help="Number of ranks used for VAE patch/tile parallelism during decode/encode.",
+        )
+        add_argument(
+            g,
+            flag_name="--text-encoder-tp-size",
+            env_var="DYN_OMNI_TEXT_ENCODER_TP_SIZE",
+            default=1,
+            arg_type=int,
+            help=(
+                "Number of ranks used to tensor-parallel shard the diffusion "
+                "text encoder."
+            ),
         )
         add_argument(
             g,
@@ -373,6 +395,12 @@ class OmniConfig(DynamoRuntimeConfig):
     # Realtime (bidirectional) serving mode
     realtime: bool = False
 
+    # Reserved compatibility fields for shared/base LoRA registration paths.
+    # Omni currently overrides LoRA discovery registration, but these fields
+    # keep OmniConfig shape-compatible with shared handler expectations.
+    disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED
+    route_to_encoder: bool = False
+
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace) -> "OmniConfig":
         config = super().from_cli_args(args)
@@ -402,6 +430,10 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError("--ulysses-degree must be > 0")
         if self.parallel.ring_degree <= 0:
             raise ValueError("--ring-degree must be > 0")
+        if self.parallel.allgather_degree <= 0:
+            raise ValueError("--allgather-degree must be > 0")
+        if self.parallel.text_encoder_tp_size <= 0:
+            raise ValueError("--text-encoder-tp-size must be > 0")
         if not (0 < self.diffusion.boundary_ratio <= 1):
             raise ValueError("--boundary-ratio must be in (0, 1]")
         if self.stage_configs_path is None:

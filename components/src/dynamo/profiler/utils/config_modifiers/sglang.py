@@ -6,27 +6,25 @@ import re
 from typing import Tuple
 from uuid import uuid4
 
-import yaml
-
 from dynamo.planner.config.defaults import SubComponentType
 from dynamo.profiler.utils.config import (
     Config,
     append_argument,
     break_arguments,
-    get_service_name_by_type,
-    get_worker_service_from_config,
+    find_main_container,
+    get_component_by_name,
+    get_component_name_by_type,
+    get_main_container,
+    get_worker_component_from_config,
     remove_valued_arguments,
     set_argument_value,
-    setup_worker_service_resources,
+    setup_worker_component_resources,
     update_image,
     validate_and_get_worker_args,
 )
 from dynamo.profiler.utils.config_modifiers.protocol import BaseConfigModifier
-from dynamo.profiler.utils.defaults import (
-    DYNAMO_RUN_DEFAULT_PORT,
-    EngineType,
-    resolve_deploy_path,
-)
+from dynamo.profiler.utils.defaults import DYNAMO_RUN_DEFAULT_PORT, EngineType
+from dynamo.profiler.utils.dgd_template import load_dgd_template
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -37,13 +35,6 @@ formatter = logging.Formatter(
 )
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
-
-DEFAULT_SGLANG_DISAGG_CONFIG_PATH = resolve_deploy_path(
-    "examples/backends/sglang/deploy/disagg.yaml"
-)
-DEFAULT_SGLANG_AGG_CONFIG_PATH = resolve_deploy_path(
-    "examples/backends/sglang/deploy/agg.yaml"
-)
 
 
 def _arg_value_any(args: list[str], keys: tuple[str, ...]) -> str | None:
@@ -102,17 +93,11 @@ class SGLangConfigModifier(BaseConfigModifier):
 
     @classmethod
     def load_default_config(cls, mode: str = "disagg") -> dict:
-        path = (
-            DEFAULT_SGLANG_AGG_CONFIG_PATH
-            if mode == "agg"
-            else DEFAULT_SGLANG_DISAGG_CONFIG_PATH
-        )
-        with open(path, "r") as f:
-            return yaml.safe_load(f)
+        return load_dgd_template(cls.BACKEND, mode)
 
     @classmethod
     def update_image(cls, config, image: str) -> dict:
-        """Update container image for all DGD services (frontend, planner, workers)."""
+        """Update container image for all DGD components."""
         return update_image(config, image)
 
     @classmethod
@@ -151,29 +136,35 @@ class SGLangConfigModifier(BaseConfigModifier):
         # set metadata name
         cfg.metadata.name = f"sglang-agg-{uuid4().hex[:8]}"
 
-        # disable planner
-        if "Planner" in cfg.spec.services:
-            del cfg.spec.services["Planner"]
+        cfg.spec.components = [
+            component
+            for component in cfg.spec.components
+            if component.component_type != "planner"
+        ]
 
         if target == EngineType.PREFILL:
-            # Get service names by inferring from subComponentType first
-            prefill_service_name = get_service_name_by_type(
+            prefill_component_name = get_component_name_by_type(
                 cfg, "sglang", SubComponentType.PREFILL
             )
-            decode_service_name = get_service_name_by_type(
+            decode_component_name = get_component_name_by_type(
                 cfg, "sglang", SubComponentType.DECODE
             )
 
-            # convert prefill worker into decode worker
-            cfg.spec.services[decode_service_name] = cfg.spec.services[
-                prefill_service_name
-            ]
-            del cfg.spec.services[prefill_service_name]
+            prefill_component = get_component_by_name(cfg, prefill_component_name)
+            if prefill_component is None:
+                raise ValueError(
+                    f"Missing prefill component {prefill_component_name!r}"
+                )
+            if prefill_component_name != decode_component_name:
+                cfg.spec.components = [
+                    component
+                    for component in cfg.spec.components
+                    if component.name != decode_component_name
+                ]
+            prefill_component.name = decode_component_name
+            prefill_component.component_type = "decode"
 
-            # Set subComponentType for aggregated mode (using decode worker for prefill-only)
-            cfg.spec.services[decode_service_name].subComponentType = "decode"
-
-            worker_service = get_worker_service_from_config(
+            worker_service = get_worker_component_from_config(
                 cfg,
                 backend="sglang",
                 sub_component_type=SubComponentType.DECODE,
@@ -190,24 +181,28 @@ class SGLangConfigModifier(BaseConfigModifier):
             if "--disable-radix-cache" not in args:
                 args = append_argument(args, "--disable-radix-cache")
 
-            worker_service.extraPodSpec.mainContainer.args = args
+            get_main_container(worker_service).args = args
 
         elif target == EngineType.DECODE:
-            # Get service names by inferring from subComponentType first
-            prefill_service_name = get_service_name_by_type(
+            prefill_component_name = get_component_name_by_type(
                 cfg, "sglang", SubComponentType.PREFILL
             )
-            decode_service_name = get_service_name_by_type(
+            decode_component_name = get_component_name_by_type(
                 cfg, "sglang", SubComponentType.DECODE
             )
 
-            # delete prefill worker
-            del cfg.spec.services[prefill_service_name]
+            if prefill_component_name != decode_component_name:
+                cfg.spec.components = [
+                    component
+                    for component in cfg.spec.components
+                    if component.name != prefill_component_name
+                ]
+            decode_component = get_component_by_name(cfg, decode_component_name)
+            if decode_component is None:
+                raise ValueError(f"Missing decode component {decode_component_name!r}")
+            decode_component.component_type = "decode"
 
-            # Set subComponentType for aggregated decode-only mode
-            cfg.spec.services[decode_service_name].subComponentType = "decode"
-
-            worker_service = get_worker_service_from_config(
+            worker_service = get_worker_component_from_config(
                 cfg,
                 backend="sglang",
                 sub_component_type=SubComponentType.DECODE,
@@ -234,15 +229,19 @@ class SGLangConfigModifier(BaseConfigModifier):
                         args, ["--load-balance-method", "round_robin"]
                     )
 
-            worker_service.extraPodSpec.mainContainer.args = args
+            get_main_container(worker_service).args = args
 
         # set num workers to 1
         # Use the inferred decode service name
-        final_decode_service_name = get_service_name_by_type(
+        final_decode_component_name = get_component_name_by_type(
             cfg, "sglang", SubComponentType.DECODE
         )
-        decode_worker_config = cfg.spec.services[final_decode_service_name]
-        decode_worker_config.replicas = 1
+        decode_component = get_component_by_name(cfg, final_decode_component_name)
+        if decode_component is None:
+            raise ValueError(
+                f"Missing decode component {final_decode_component_name!r}"
+            )
+        decode_component.replicas = 1
 
         return cfg.model_dump()
 
@@ -254,12 +253,12 @@ class SGLangConfigModifier(BaseConfigModifier):
         component_type: SubComponentType = SubComponentType.DECODE,
     ) -> dict:
         cfg = Config.model_validate(config)
-        worker_service = get_worker_service_from_config(
+        worker_service = get_worker_component_from_config(
             cfg, backend="sglang", sub_component_type=component_type
         )
 
         # Set up resources
-        setup_worker_service_resources(worker_service, tp_size)
+        setup_worker_component_resources(worker_service, tp_size)
 
         # Get and validate args
         args = validate_and_get_worker_args(worker_service, backend="sglang")
@@ -279,7 +278,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         args = remove_valued_arguments(args, "--dp-size")
         args = remove_valued_arguments(args, "--data-parallel-size")
 
-        worker_service.extraPodSpec.mainContainer.args = args
+        get_main_container(worker_service).args = args
         return cfg.model_dump()
 
     @classmethod
@@ -291,12 +290,12 @@ class SGLangConfigModifier(BaseConfigModifier):
         component_type: SubComponentType = SubComponentType.DECODE,
     ) -> dict:
         cfg = Config.model_validate(config)
-        worker_service = get_worker_service_from_config(
+        worker_service = get_worker_component_from_config(
             cfg, backend="sglang", sub_component_type=component_type
         )
 
         # Set up resources with multinode configuration
-        setup_worker_service_resources(worker_service, tep_size, num_gpus_per_node)
+        setup_worker_component_resources(worker_service, tep_size, num_gpus_per_node)
 
         # Get and validate args
         args = validate_and_get_worker_args(worker_service, backend="sglang")
@@ -320,7 +319,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         if "--enable-dp-attention" in args:
             args.remove("--enable-dp-attention")
 
-        worker_service.extraPodSpec.mainContainer.args = args
+        get_main_container(worker_service).args = args
         return cfg.model_dump()
 
     @classmethod
@@ -332,12 +331,12 @@ class SGLangConfigModifier(BaseConfigModifier):
         component_type: SubComponentType = SubComponentType.DECODE,
     ) -> dict:
         cfg = Config.model_validate(config)
-        worker_service = get_worker_service_from_config(
+        worker_service = get_worker_component_from_config(
             cfg, backend="sglang", sub_component_type=component_type
         )
 
         # Set up resources with multinode configuration
-        setup_worker_service_resources(worker_service, dep_size, num_gpus_per_node)
+        setup_worker_component_resources(worker_service, dep_size, num_gpus_per_node)
 
         # Get and validate args
         args = validate_and_get_worker_args(worker_service, backend="sglang")
@@ -361,13 +360,13 @@ class SGLangConfigModifier(BaseConfigModifier):
         args = remove_valued_arguments(args, "--ep-size")
         args = remove_valued_arguments(args, "--expert-parallel-size")
 
-        worker_service.extraPodSpec.mainContainer.args = args
+        get_main_container(worker_service).args = args
         return cfg.model_dump()
 
     @classmethod
     def get_model_name(cls, config: dict) -> Tuple[str, str]:
         cfg = Config.model_validate(config)
-        worker_service = get_worker_service_from_config(cfg, backend="sglang")
+        worker_service = get_worker_component_from_config(cfg, backend="sglang")
         args = validate_and_get_worker_args(worker_service, backend="sglang")
         args = break_arguments(args)
         return cls._get_model_name_and_path_from_args(args)
@@ -375,21 +374,27 @@ class SGLangConfigModifier(BaseConfigModifier):
     @classmethod
     def get_port(cls, config: dict) -> int:
         cfg = Config.model_validate(config)
-        frontend_service = cfg.spec.services.get("Frontend")
-        if (
-            not frontend_service
-            or not frontend_service.extraPodSpec
-            or not frontend_service.extraPodSpec.mainContainer
-        ):
+        frontend_component = get_component_by_name(cfg, "Frontend")
+        if frontend_component is None:
             logger.warning(
-                f"Frontend service or container not found, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+                "Frontend component not found, using default port: %s",
+                DYNAMO_RUN_DEFAULT_PORT,
             )
             return DYNAMO_RUN_DEFAULT_PORT
 
-        args = frontend_service.extraPodSpec.mainContainer.args
+        main_container = find_main_container(frontend_component)
+        if main_container is None:
+            logger.warning(
+                "Frontend main container not found, using default port: %s",
+                DYNAMO_RUN_DEFAULT_PORT,
+            )
+            return DYNAMO_RUN_DEFAULT_PORT
+
+        args = main_container.args
         if not args:
             logger.warning(
-                f"No args found in Frontend configuration, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+                "No args found in Frontend configuration, using default port: %s",
+                DYNAMO_RUN_DEFAULT_PORT,
             )
             return DYNAMO_RUN_DEFAULT_PORT
 
@@ -399,7 +404,8 @@ class SGLangConfigModifier(BaseConfigModifier):
             return int(args[idx + 1])
         except (ValueError, IndexError):
             logger.warning(
-                f"Port not found in configuration args, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+                "Port not found in configuration args, using default port: %s",
+                DYNAMO_RUN_DEFAULT_PORT,
             )
             return DYNAMO_RUN_DEFAULT_PORT
 
@@ -433,7 +439,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         - Max tokens is applied as a total token cap to avoid chunked prefill.
         """
         cfg = Config.model_validate(config)
-        worker_service = get_worker_service_from_config(
+        worker_service = get_worker_component_from_config(
             cfg, backend="sglang", sub_component_type=component_type
         )
         args = validate_and_get_worker_args(worker_service, backend="sglang")
@@ -448,5 +454,5 @@ class SGLangConfigModifier(BaseConfigModifier):
 
         args = append_argument(args, "--enable-dp-lm-head")
 
-        worker_service.extraPodSpec.mainContainer.args = args
+        get_main_container(worker_service).args = args
         return cfg.model_dump()

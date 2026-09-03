@@ -3,6 +3,7 @@
 
 import os
 import sys
+from collections.abc import Mapping
 
 from tests.utils.managed_process import ManagedProcess
 
@@ -57,6 +58,7 @@ class FrontendRouterProcess(ManagedProcess):
         use_remote_indexer: bool = False,
         event_plane: str | None = None,
         session_affinity_ttl_secs: int | None = None,
+        extra_env: Mapping[str, str | None] | None = None,
     ):
         command = [
             sys.executable,
@@ -132,6 +134,11 @@ class FrontendRouterProcess(ManagedProcess):
             env.pop("NATS_SERVER", None)
         if min_initial_workers is not None:
             env["DYN_ROUTER_MIN_INITIAL_WORKERS"] = str(min_initial_workers)
+        for name, value in (extra_env or {}).items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
 
         super().__init__(
             command=command,

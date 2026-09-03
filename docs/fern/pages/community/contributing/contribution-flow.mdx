@@ -1,0 +1,127 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Contribution Flow
+subtitle: Take a change from proposal through pull request review
+---
+
+This guide describes the normal contribution path after your local environment is ready. If you
+have not prepared a fork or configured commit sign-off, begin with
+[Getting Started](getting-started.mdx).
+
+## Decide Whether to Open an Issue
+
+Small, focused changes can usually go directly to a pull request. Examples include typo fixes,
+documentation corrections, small bug fixes, and narrow configuration changes.
+
+Open a [Contribution Request](https://github.com/ai-dynamo/dynamo/issues/new?template=contribution_request.yml)
+before implementation when a change is large, introduces a feature, spans multiple components, or
+would benefit from agreement on the approach. Wait for maintainer approval before investing in a
+substantial implementation.
+
+Changes that modify public APIs, communication-plane architecture, backend integration contracts,
+or multiple major components require a
+[Dynamo Enhancement Proposal (DEP)](https://github.com/ai-dynamo/enhancements).
+
+## Submit and Refine the Change
+
+<Steps toc={true}>
+  <Step title="Create a focused branch">
+    Update your local `main` branch and create a descriptive branch:
+
+    ```bash
+    git fetch upstream
+    git switch main
+    git rebase upstream/main
+    git switch -c yourname/fix-router-timeout
+    ```
+
+    Keep one concern per branch and pull request.
+  </Step>
+
+  <Step title="Implement and validate">
+    Make the smallest complete change that solves the problem. Add or update tests when behavior
+    changes, and run the relevant checks from [Code Quality](code-quality.md).
+
+    Commit each logical change with DCO sign-off:
+
+    ```bash
+    git commit -s -m "fix(router): handle streaming timeout"
+    ```
+  </Step>
+
+  <Step title="Open the pull request">
+    Push your branch to your fork:
+
+    ```bash
+    git push -u origin yourname/fix-router-timeout
+    ```
+
+    [Open a pull request](https://github.com/ai-dynamo/dynamo/compare) against `main`. Link the
+    approved issue when one exists. Use a Conventional Commit title, such as
+    `fix(router): handle streaming timeout`, and include **Summary** and **Validation** sections in
+    the pull request description.
+  </Step>
+
+  <Step title="Complete automated review and CI">
+    Respond to actionable automated review comments and fix failing checks.
+
+    For a fork pull request, automatic trusted-CI approval requires the contributor or latest
+    branch update to meet repository approval criteria and every PR commit to have a cryptographic
+    signature that GitHub reports as `Verified`.
+    `git commit -s` adds a DCO sign-off but does not add a cryptographic signature. Signing does
+    not itself qualify a pull request for automatic approval. When automatic approval is
+    unavailable, a maintainer can review the current head and comment `/ok to test <sha>` to start
+    CI. Wait for that action rather than repeatedly pushing unchanged commits.
+
+    <Info>
+    You are responsible for understanding and validating all submitted code, including code
+    produced with AI assistance.
+    </Info>
+  </Step>
+
+  <Step title="Request and address review">
+    Request review from the maintainer who approved the issue when applicable. The teams that own
+    the areas your pull request touches are auto-requested when it opens; preview them with
+    `python .github/codeowners/who_owns.py --codeowners CODEOWNERS --changed`. Any one owner per
+    matched rule satisfies the gate.
+
+    If the `codeowners` check fails because your pull request adds a directory no area claims, add a
+    one-line claim under the owning area in
+    [`areas.yaml`](https://github.com/ai-dynamo/dynamo/blob/main/.github/codeowners/areas.yaml),
+    regenerate, and commit both files together — see the
+    [CODEOWNERS README](https://github.com/ai-dynamo/dynamo/blob/main/.github/codeowners/README.md).
+
+    Respond to review comments, push follow-up commits with DCO sign-off, and re-request review when
+    the change is ready.
+  </Step>
+
+  <Step title="Keep the branch current">
+    If the target branch advances or the pull request develops conflicts, rebase on the current
+    upstream branch:
+
+    ```bash
+    git fetch upstream
+    git rebase upstream/main
+    git push --force-with-lease
+    ```
+
+    Recheck DCO trailers after rewriting commits. See
+    [DCO and Licensing](dco-and-licensing.md#verify-every-commit) for a branch-wide check.
+  </Step>
+</Steps>
+
+## Issue and Review States
+
+Common issue labels communicate the next action:
+
+| Label | Meaning |
+| --- | --- |
+| `needs-triage` | Maintainers have not completed initial review |
+| `needs-info` | The issue needs more information from its author |
+| `approved-for-pr` | The proposed implementation can proceed |
+| `in-progress` | A contributor is working on the issue |
+| `blocked` | Progress depends on another change or decision |
+
+Review timing depends on the size, risk, and maintainer availability. If a pull request has had no
+activity for a week, leave a concise follow-up comment or contact the approving maintainer.

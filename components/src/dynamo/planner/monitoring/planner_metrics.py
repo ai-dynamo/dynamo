@@ -26,6 +26,8 @@ LOAD_DECISION_STATES = [
     "reconcile_clamped_to_ceiling",
     "held_over",
     "rejected_by_plugin",
+    "gpu_budget_guard_hold",
+    "gpu_budget_reconcile",
 ]
 
 THROUGHPUT_DECISION_STATES = [
@@ -177,6 +179,21 @@ class PlannerPrometheusMetrics:
             f"{PREFIX}_engine_inflight_decode_kv_tokens",
             "Inflight (scheduled) decode KV tokens per engine (from FPM)",
             labelnames=_engine_labels,
+        )
+
+        # -- Power-aware budget (DGD-owned caps; read-only) ---------------
+        self.power_budget_total_watts = Gauge(
+            f"{PREFIX}_power_budget_total_watts",
+            "Configured total GPU power budget for this DGD (watts).",
+        )
+        self.power_projected_watts = Gauge(
+            f"{PREFIX}_power_projected_watts",
+            "Projected GPU power draw at current replica counts and "
+            "DGD-resolved per-GPU caps (watts).",
+        )
+        self.power_budget_utilization = Gauge(
+            f"{PREFIX}_power_budget_utilization",
+            "Ratio of projected power to total budget (0.0–1.0+).",
         )
 
 

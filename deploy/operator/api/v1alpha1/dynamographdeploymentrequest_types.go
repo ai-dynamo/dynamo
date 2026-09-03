@@ -64,7 +64,7 @@ type ProfilingConfigSpec struct {
 
 	// ProfilerImage specifies the container image to use for profiling jobs.
 	// This image contains the profiler code and dependencies needed for SLA-based profiling.
-	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.2.1"
+	// Example: "nvcr.io/nvidia/ai-dynamo/dynamo-planner:1.4.0"
 	// +kubebuilder:validation:Required
 	ProfilerImage string `json:"profilerImage"`
 
@@ -132,7 +132,7 @@ type DeploymentOverridesSpec struct {
 	// WorkersImage specifies the container image to use for DynamoGraphDeployment worker components.
 	// This image is used for both temporary DGDs created during online profiling and the final DGD.
 	// If omitted, the image from the base config file (e.g., disagg.yaml) is used.
-	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.2.1"
+	// Example: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.0"
 	// +kubebuilder:validation:Optional
 	WorkersImage string `json:"workersImage,omitempty"`
 }
@@ -175,6 +175,14 @@ type DynamoGraphDeploymentRequestSpec struct {
 	// modelName and backend fields and should not be specified in this config.
 	// +kubebuilder:validation:Required
 	ProfilingConfig ProfilingConfigSpec `json:"profilingConfig"`
+
+	// RuntimeVersionOverride explicitly sets the Dynamo runtime version for every
+	// component in the generated DynamoGraphDeployment. Set this when
+	// profilingConfig.profilerImage uses a non-semantic-version tag or digest, or
+	// when its tag does not identify the Dynamo runtime version.
+	// +kubebuilder:validation:Pattern=`^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$`
+	// +optional
+	RuntimeVersionOverride string `json:"runtimeVersionOverride,omitempty"`
 
 	// EnableGPUDiscovery controls whether the operator attempts to discover GPU hardware from cluster nodes.
 	// DEPRECATED: This field is deprecated and will be removed in v1beta1. GPU discovery is now always
@@ -345,8 +353,4 @@ type DynamoGraphDeploymentRequestList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []DynamoGraphDeploymentRequest `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&DynamoGraphDeploymentRequest{}, &DynamoGraphDeploymentRequestList{})
 }

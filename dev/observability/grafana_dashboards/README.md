@@ -10,6 +10,6 @@ This directory contains example Grafana dashboards for Dynamo observability. The
 - `temp-loki.json` - Logging dashboard for Loki integration
 - `dashboard-providers.yml` - Configuration file for dashboard provisioning
 
-For setup instructions and usage, see [Observability Documentation](../../../docs/observability/).
+For setup instructions and usage, see [Observability Documentation](../../../docs/fern/pages/kubernetes/installation/observability.md).
 
 For Kubernetes deployment setup, see [deploy/observability/MONITORING_SETUP.md](../../../deploy/observability/MONITORING_SETUP.md).

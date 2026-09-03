@@ -3,88 +3,22 @@
 
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, bail};
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, WorkerWithDpRank};
+use dynamo_kv_router::indexer::cuckoo::CanonicalSequenceBlockHash;
+use dynamo_kv_router::protocols::{
+    ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData, WorkerWithDpRank,
+};
 use dynamo_mocker::loadgen::{SessionTrace, Trace};
 use dynamo_mocker::replay::ReplayWorkerArtifacts;
 use rustc_hash::{FxHashMap, FxHashSet};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const DEFAULT_CKF_MOONCAKE_BLOCK_SIZE: usize = 512;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DcCkfCorpusSpec {
-    pub trace_path: PathBuf,
-    pub expected_sha256: Option<String>,
-    pub trace_block_size: usize,
-    pub prefix_depth_factor: usize,
-    pub trace_duplication_factor: usize,
-    pub dc_count: usize,
-    pub workers_per_dc: usize,
-    pub endpoint_ordinal: usize,
-    pub default_dp_rank: u32,
-}
-
-impl DcCkfCorpusSpec {
-    pub fn new(trace_path: impl Into<PathBuf>, dc_count: usize, workers_per_dc: usize) -> Self {
-        Self {
-            trace_path: trace_path.into(),
-            expected_sha256: None,
-            trace_block_size: DEFAULT_CKF_MOONCAKE_BLOCK_SIZE,
-            prefix_depth_factor: 1,
-            trace_duplication_factor: 1,
-            dc_count,
-            workers_per_dc,
-            endpoint_ordinal: 0,
-            default_dp_rank: 0,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DcCkfSourceTopology {
-    pub source_index: usize,
-    pub dc_ordinal: usize,
-    pub endpoint_ordinal: usize,
-    pub worker_ordinal: usize,
-    pub member: WorkerWithDpRank,
-    pub session_count: usize,
-    pub turn_count: usize,
-    pub trace_distinct_hash_upper_bound: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DcCkfPoolCorpusMetadata {
-    pub dc_ordinal: usize,
-    pub endpoint_ordinal: usize,
-    pub session_count: usize,
-    pub turn_count: usize,
-    /// Conservative trace-row bound, not a measured live CKF peak.
-    pub trace_distinct_hash_upper_bound: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DcCkfCorpusMetadata {
-    pub trace_path: PathBuf,
-    pub trace_sha256: String,
-    pub trace_block_size: usize,
-    pub prefix_depth_factor: usize,
-    pub trace_duplication_factor: usize,
-    pub original_session_count: usize,
-    pub prepared_session_count: usize,
-    pub turn_count: usize,
-    pub hash_reference_count: usize,
-    /// Conservative trace-row bound, not a measured live CKF peak.
-    pub trace_distinct_hash_upper_bound: usize,
-    pub dc_count: usize,
-    pub workers_per_dc: usize,
-    pub endpoint_ordinal: usize,
-    pub sources: Vec<DcCkfSourceTopology>,
-    pub pools: Vec<DcCkfPoolCorpusMetadata>,
-}
+pub use super::dc_ckf_metadata::{
+    DcCkfCapacityMetadata, DcCkfCorpusMetadata, DcCkfCorpusSpec, DcCkfPoolCapacity,
+    DcCkfPoolCorpusMetadata, DcCkfSourceTopology,
+};
 
 #[derive(Debug, Clone)]
 pub struct PreparedDcCkfCorpus {
@@ -99,22 +33,6 @@ impl PreparedDcCkfCorpus {
     ) -> anyhow::Result<DcCkfCapacityMetadata> {
         measure_dc_ckf_capacity(&self.metadata, artifacts)
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DcCkfPoolCapacity {
-    pub dc_ordinal: usize,
-    pub endpoint_ordinal: usize,
-    pub measured_peak_active_distinct_hashes: usize,
-    pub final_active_distinct_hashes: usize,
-    pub recommended_distinct_hash_capacity: usize,
-    pub event_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DcCkfCapacityMetadata {
-    pub headroom_percent: usize,
-    pub pools: Vec<DcCkfPoolCapacity>,
 }
 
 pub fn prepare_dc_ckf_corpus(spec: &DcCkfCorpusSpec) -> anyhow::Result<PreparedDcCkfCorpus> {
@@ -186,8 +104,6 @@ pub fn prepare_dc_ckf_corpus(spec: &DcCkfCorpusSpec) -> anyhow::Result<PreparedD
             .flat_map(|turn| &turn.hash_ids)
             .copied()
         {
-            let hash = u32::try_from(hash)
-                .context("prepared Mooncake hash unexpectedly exceeds the u32 namespace")?;
             source_hashes.insert(hash);
             pool_hashes[dc_ordinal].insert(hash);
             global_hashes.insert(hash);
@@ -350,7 +266,7 @@ fn checked_expand_and_duplicate(
     prefix_depth_factor: usize,
     copies: usize,
 ) -> anyhow::Result<Trace> {
-    let factor = u64::try_from(prefix_depth_factor).context("prefix depth does not fit in u64")?;
+    let factor = u32::try_from(prefix_depth_factor).context("prefix depth does not fit in u32")?;
     for session in &mut trace.sessions {
         for turn in &mut session.turns {
             turn.input_length = turn
@@ -371,7 +287,6 @@ fn checked_expand_and_duplicate(
                     let expanded_hash = base
                         .checked_add(offset)
                         .context("Mooncake hash prefix expansion overflow")?;
-                    ensure_u32_hash(expanded_hash)?;
                     expanded.push(expanded_hash);
                 }
             }
@@ -396,11 +311,9 @@ fn checked_expand_and_duplicate(
         .checked_mul(copies)
         .context("Mooncake duplicated session count overflow")?;
     let mut sessions = Vec::with_capacity(duplicated_count);
-    let mut narrowed = FxHashMap::<u64, u32>::default();
-    let mut effective_hashes = FxHashSet::default();
 
     for copy_index in 0..copies {
-        let copy_index = u64::try_from(copy_index).context("copy index does not fit in u64")?;
+        let copy_index = u32::try_from(copy_index).context("copy index does not fit in u32")?;
         let offset = offset_base
             .checked_mul(copy_index)
             .context("Mooncake hash duplication offset overflow")?;
@@ -414,21 +327,6 @@ fn checked_expand_and_duplicate(
                     *hash = hash
                         .checked_add(offset)
                         .context("Mooncake duplicated hash overflow")?;
-                    let narrowed_hash = ensure_u32_hash(*hash)?;
-                    match narrowed.entry(*hash) {
-                        std::collections::hash_map::Entry::Occupied(entry) => {
-                            debug_assert_eq!(*entry.get(), narrowed_hash);
-                        }
-                        std::collections::hash_map::Entry::Vacant(entry) => {
-                            if !effective_hashes.insert(narrowed_hash) {
-                                bail!(
-                                    "Mooncake hash duplication aliases after u32 narrowing at {}",
-                                    *hash
-                                );
-                            }
-                            entry.insert(narrowed_hash);
-                        }
-                    }
                 }
             }
             sessions.push(duplicated);
@@ -436,11 +334,6 @@ fn checked_expand_and_duplicate(
     }
     trace.sessions = sessions;
     Ok(trace)
-}
-
-fn ensure_u32_hash(hash: u64) -> anyhow::Result<u32> {
-    u32::try_from(hash)
-        .with_context(|| format!("Mooncake hash {hash} exceeds the effective u32 token namespace"))
 }
 
 fn stable_member(
@@ -504,8 +397,14 @@ fn verify_sha256(expected: &str, actual: &str) -> anyhow::Result<()> {
 
 #[derive(Default)]
 struct PoolCapacityTracker {
-    members: FxHashMap<WorkerWithDpRank, FxHashSet<u64>>,
-    global_degrees: FxHashMap<u64, u32>,
+    /// Per-source engine vocabulary, mirroring the real CKF: capacity is sized by canonical
+    /// hashes, because different sources can assign different external ids to identical
+    /// canonical content and the filter deduplicates on the canonical domain.
+    lineage: FxHashMap<
+        WorkerWithDpRank,
+        FxHashMap<ExternalSequenceBlockHash, CanonicalSequenceBlockHash>,
+    >,
+    global_degrees: FxHashMap<CanonicalSequenceBlockHash, u32>,
     peak_active_distinct: usize,
     event_count: usize,
 }
@@ -513,14 +412,10 @@ struct PoolCapacityTracker {
 impl PoolCapacityTracker {
     fn apply(&mut self, member: WorkerWithDpRank, event: &KvCacheEvent) -> anyhow::Result<()> {
         match &event.data {
-            KvCacheEventData::Stored(stored) => {
-                for block in &stored.blocks {
-                    self.store(member, block.block_hash.0)?;
-                }
-            }
+            KvCacheEventData::Stored(stored) => self.store(member, stored)?,
             KvCacheEventData::Removed(removed) => {
                 for hash in &removed.block_hashes {
-                    self.remove(member, hash.0)?;
+                    self.remove(member, *hash)?;
                 }
             }
             KvCacheEventData::Cleared => self.clear(member)?,
@@ -533,46 +428,69 @@ impl PoolCapacityTracker {
         Ok(())
     }
 
-    fn store(&mut self, member: WorkerWithDpRank, hash: u64) -> anyhow::Result<()> {
-        if !self.members.entry(member).or_default().insert(hash) {
-            return Ok(());
+    fn store(&mut self, member: WorkerWithDpRank, stored: &KvCacheStoreData) -> anyhow::Result<()> {
+        let lineage = self.lineage.entry(member).or_default();
+        let mut previous = match stored.parent_hash {
+            Some(parent) => Some(
+                *lineage
+                    .get(&parent)
+                    .with_context(|| format!("capacity tracker: unknown parent {}", parent.0))?,
+            ),
+            None => None,
+        };
+        for block in &stored.blocks {
+            let canonical = previous.map_or_else(
+                || CanonicalSequenceBlockHash::root(block.tokens_hash),
+                |parent| parent.child(block.tokens_hash),
+            );
+            previous = Some(canonical);
+            if lineage.insert(block.block_hash, canonical).is_some() {
+                continue;
+            }
+            let degree = self.global_degrees.entry(canonical).or_default();
+            *degree = degree
+                .checked_add(1)
+                .context("DC CKF ownership degree overflow while sizing corpus")?;
         }
-        let degree = self.global_degrees.entry(hash).or_default();
-        *degree = degree
-            .checked_add(1)
-            .context("DC CKF ownership degree overflow while sizing corpus")?;
         Ok(())
     }
 
-    fn remove(&mut self, member: WorkerWithDpRank, hash: u64) -> anyhow::Result<()> {
-        let Some(hashes) = self.members.get_mut(&member) else {
+    fn remove(
+        &mut self,
+        member: WorkerWithDpRank,
+        hash: ExternalSequenceBlockHash,
+    ) -> anyhow::Result<()> {
+        let Some(lineage) = self.lineage.get_mut(&member) else {
             return Ok(());
         };
-        if !hashes.remove(&hash) {
+        let Some(canonical) = lineage.remove(&hash) else {
             return Ok(());
+        };
+        if lineage.is_empty() {
+            self.lineage.remove(&member);
         }
-        if hashes.is_empty() {
-            self.members.remove(&member);
-        }
-        self.decrement(hash)
+        self.decrement(canonical)
     }
 
     fn clear(&mut self, member: WorkerWithDpRank) -> anyhow::Result<()> {
-        let Some(hashes) = self.members.remove(&member) else {
+        let Some(lineage) = self.lineage.remove(&member) else {
             return Ok(());
         };
-        for hash in hashes {
-            self.decrement(hash)?;
+        for (_, canonical) in lineage {
+            self.decrement(canonical)?;
         }
         Ok(())
     }
 
-    fn decrement(&mut self, hash: u64) -> anyhow::Result<()> {
-        let Some(degree) = self.global_degrees.get_mut(&hash) else {
-            bail!("capacity tracker lost ownership degree for hash {hash}");
+    fn decrement(&mut self, canonical: CanonicalSequenceBlockHash) -> anyhow::Result<()> {
+        let Some(degree) = self.global_degrees.get_mut(&canonical) else {
+            bail!(
+                "capacity tracker lost ownership degree for canonical hash {}",
+                canonical.as_u64()
+            );
         };
         if *degree == 1 {
-            self.global_degrees.remove(&hash);
+            self.global_degrees.remove(&canonical);
         } else {
             *degree -= 1;
         }
@@ -580,9 +498,10 @@ impl PoolCapacityTracker {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 mod tests {
     use std::io::Write;
+    use std::path::PathBuf;
 
     use dynamo_kv_router::protocols::{
         ExternalSequenceBlockHash, KvCacheRemoveData, KvCacheStoreData, KvCacheStoredBlockData,
@@ -601,7 +520,14 @@ mod tests {
         Ok(file)
     }
 
-    fn stored(event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
+    fn source_external(worker: u64, dp_rank: u32, hash: u64) -> ExternalSequenceBlockHash {
+        // Real engines assign per-process ids, so the fixture derives externals that differ
+        // per worker and per rank; only the canonical domain may deduplicate across sources.
+        const EXTERNAL_MASK: u64 = 0x5A4E_D00D_7711_0202;
+        ExternalSequenceBlockHash(hash ^ EXTERNAL_MASK ^ (worker << 32) ^ ((dp_rank as u64) << 48))
+    }
+
+    fn stored(worker: u64, event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
         KvCacheEvent {
             event_id,
             dp_rank,
@@ -611,7 +537,7 @@ mod tests {
                 blocks: hashes
                     .iter()
                     .map(|hash| KvCacheStoredBlockData {
-                        block_hash: ExternalSequenceBlockHash(*hash),
+                        block_hash: source_external(worker, dp_rank, *hash),
                         tokens_hash: LocalBlockHash(*hash),
                         mm_extra_info: None,
                     })
@@ -620,15 +546,14 @@ mod tests {
         }
     }
 
-    fn removed(event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
+    fn removed(worker: u64, event_id: u64, dp_rank: u32, hashes: &[u64]) -> KvCacheEvent {
         KvCacheEvent {
             event_id,
             dp_rank,
             data: KvCacheEventData::Removed(KvCacheRemoveData {
                 block_hashes: hashes
                     .iter()
-                    .copied()
-                    .map(ExternalSequenceBlockHash)
+                    .map(|hash| source_external(worker, dp_rank, *hash))
                     .collect(),
             }),
         }
@@ -680,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn preparation_rejects_hashes_that_alias_in_effective_u32_namespace() -> anyhow::Result<()> {
+    fn preparation_canonicalizes_raw_hashes_before_duplication() -> anyhow::Result<()> {
         let file = write_trace(&[serde_json::json!({
             "timestamp": 0,
             "input_length": 1,
@@ -690,8 +615,15 @@ mod tests {
         let mut spec = DcCkfCorpusSpec::new(file.path(), 1, 1);
         spec.trace_block_size = 1;
         spec.trace_duplication_factor = 2;
-        let error = prepare_dc_ckf_corpus(&spec).unwrap_err();
-        assert!(error.to_string().contains("effective u32 token namespace"));
+        let prepared = prepare_dc_ckf_corpus(&spec)?;
+        let hashes = prepared.worker_traces[0]
+            .sessions
+            .iter()
+            .flat_map(|session| &session.turns)
+            .flat_map(|turn| &turn.hash_ids)
+            .copied()
+            .collect::<FxHashSet<_>>();
+        assert_eq!(hashes, FxHashSet::from_iter([0, 1]));
         Ok(())
     }
 
@@ -756,17 +688,19 @@ mod tests {
                 trace_distinct_hash_upper_bound: 2,
             }],
         };
+        // Both workers store the same canonical [10, 20] prefix under worker-local external
+        // ids; external counting would report a peak of 5, canonical counting reports 3.
         let artifacts = vec![
             ReplayWorkerArtifacts {
                 kv_events: vec![
-                    timed(1, stored(1, 0, &[10, 20])),
-                    timed(3, removed(2, 0, &[10, 20])),
+                    timed(1, stored(0, 1, 0, &[10, 20])),
+                    timed(3, removed(0, 2, 0, &[10, 20])),
                 ],
                 ..Default::default()
             },
             ReplayWorkerArtifacts {
                 kv_events: vec![
-                    timed(2, stored(1, 0, &[20, 30])),
+                    timed(2, stored(1, 1, 0, &[10, 20, 30])),
                     timed(
                         4,
                         KvCacheEvent {

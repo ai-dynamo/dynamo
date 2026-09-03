@@ -9,6 +9,8 @@ import os
 import uuid
 from typing import Any, Literal
 
+from dynamo.llm.exceptions import HttpError
+
 _MASK_64_BITS = (1 << 64) - 1
 
 
@@ -99,21 +101,23 @@ _MEDIA_CONTENT_TYPES = ("image_url", "audio_url", "video_url")
 
 def extract_mm_urls(
     messages: list[dict[str, Any]],
-) -> dict[str, list[dict[str, str]]] | None:
-    """Extract multimodal URLs from OpenAI chat completion messages.
+) -> tuple[dict[str, list[dict[str, str]]] | None, dict[str, list[str | None]] | None,]:
+    """Extract media and vLLM image processor-cache UUIDs from chat messages.
 
-    Walks user message content arrays and collects ``image_url``, ``audio_url``,
-    and ``video_url`` entries.  Returns them in the format expected by the
-    backend handler's ``_extract_multimodal_data()``::
+    URL-backed parts become ``Url`` variants. Image parts with no URL and an
+    opaque ``uuid`` become ``UuidOnly`` variants for vLLM's multimodal
+    processor cache. Cache UUIDs on audio and video are rejected. Image UUID
+    lists preserve slot order::
 
-        {
-            "image_url": [{"Url": "https://..."}, ...],
-            "audio_url": [{"Url": "data:audio/wav;base64,..."}],
-        }
+        ({"image_url": [{"Url": "https://..."}, {"UuidOnly": "image-1"}]},
+         {"image_url": ["image-1", "image-1"]})
 
-    Returns ``None`` if no multimodal content is found.
+    The UUID map is ``None`` when no user UUID is present. A media content part
+    with neither a URL nor UUID is rejected instead of being silently dropped.
     """
     mm_data: dict[str, list[dict[str, str]]] = {}
+    mm_uuids: dict[str, list[str | None]] = {}
+    has_user_uuid = False
 
     for msg in messages:
         if not isinstance(msg, dict) or msg.get("role") != "user":
@@ -127,14 +131,34 @@ def extract_mm_urls(
             part_type = part.get("type")
             if part_type not in _MEDIA_CONTENT_TYPES:
                 continue
+
             media_value = part.get(part_type)
-            if not isinstance(media_value, dict):
-                continue
-            url = media_value.get("url")
+            uuid_value = part.get("uuid")
+            if uuid_value is not None and (
+                not isinstance(uuid_value, str) or not uuid_value
+            ):
+                raise ValueError(f"{part_type} uuid must be a non-empty string")
+            if uuid_value is not None and part_type != "image_url":
+                raise ValueError(
+                    "multimodal cache UUIDs are supported only for "
+                    "image_url parts with vLLM"
+                )
+
+            url = media_value.get("url") if isinstance(media_value, dict) else None
             if isinstance(url, str) and url:
                 mm_data.setdefault(part_type, []).append({"Url": url})
+            elif isinstance(uuid_value, str):
+                mm_data.setdefault(part_type, []).append({"UuidOnly": uuid_value})
+            else:
+                raise ValueError(
+                    f"{part_type} part must contain a non-empty URL or uuid"
+                )
 
-    return mm_data or None
+            if part_type == "image_url":
+                mm_uuids.setdefault(part_type, []).append(uuid_value)
+                has_user_uuid |= uuid_value is not None
+
+    return mm_data or None, mm_uuids if has_user_uuid else None
 
 
 def make_backend_error(engine_response: dict[str, Any]) -> dict[str, Any]:
@@ -157,6 +181,67 @@ def make_internal_error(request_id: str, detail: str | None = None) -> dict[str,
             "type": "internal_error",
         }
     }
+
+
+def as_error_envelope(error_payload: dict[str, Any]) -> dict[str, Any]:
+    """Tag an error dict so the binding reads it as an error frame.
+
+    Without ``_dynamo_annotated`` the binding reads the dict as a completion
+    chunk and fails with ``missing field `id```. The client then gets a 500 and
+    never sees the message. The HTTP layer reads the text back off ``comment``.
+    See ``depythonize_annotated`` in ``lib/bindings/python/rust/engine.rs``.
+    """
+    message = (error_payload.get("error") or {}).get("message") or "unknown error"
+    return {"_dynamo_annotated": True, "event": "error", "comment": [message]}
+
+
+_SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX = "BackendInvalidArgument: "
+
+
+def backend_invalid_argument_to_http_error(exc: BaseException) -> HttpError | None:
+    """Recover a worker's own HTTP status from a serialized backend error.
+
+    A worker that rejects a request -- an unsupported sampling parameter, an
+    unparseable grammar -- fails it with ``{"message": ..., "code": 4xx}``.
+    Crossing the Rust boundary turns that into a plain Python exception whose
+    text is ``BackendInvalidArgument: {json}``, so a generic ``except
+    Exception`` reports a 500 and discards both the status and the reason.
+
+    Rust's HTTP service already performs this recovery
+    (``extract_backend_error_if_present`` in
+    ``lib/llm/src/http/service/openai.rs``), but the Python chat processors do
+    not go through it, so they need their own. Mirror its status rules: honour
+    an explicit code, and otherwise fall back to 400 -- the prefix itself is
+    the discriminator proving the argument was invalid.
+
+    Returns None when ``exc`` is not that shape, so callers fall through to
+    their existing handling instead of inventing a status.
+    """
+    # Not ``removeprefix``: adapter paths wrap the error in an outer
+    # ``<ErrorType>: `` before it reaches Python, so the discriminator is not
+    # always at position 0.
+    _, prefix, payload = str(exc).partition(_SERIALIZED_BACKEND_INVALID_ARGUMENT_PREFIX)
+    if not prefix:
+        return None
+
+    try:
+        parsed = json.loads(payload)
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        # Prefix but no payload: still an invalid argument, just unstructured.
+        return HttpError(400, payload)
+
+    code = parsed.get("code")
+    if isinstance(code, bool) or not isinstance(code, int):
+        code = 400
+    elif not 100 <= code < 600:
+        # Rust degrades an out-of-range code to a 500, which is exactly what
+        # the caller's existing handler already produces -- defer to it.
+        return None
+
+    message = parsed.get("message")
+    return HttpError(code, message if isinstance(message, str) else payload)
 
 
 def handle_engine_error(

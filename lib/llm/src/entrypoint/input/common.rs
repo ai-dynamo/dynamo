@@ -4,31 +4,27 @@
 use std::pin::Pin;
 use std::time::Duration;
 
+use anyhow::Context as _;
 use dynamo_renderer::PromptFormatter;
 
 use crate::{
     backend::{Backend, ExecutionContext},
-    discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
+    discovery::{ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::EngineConfig,
     http::service::metrics::Metrics,
-    kv_router::indexer::try_build_cache_indexer,
+    kv_router::indexer::{preprocessed_multimodal_cache_keys, try_build_cache_indexer},
     kv_router::{
-        EncoderRouter, KvPushRouter, KvRouter, PrefillRouter, metrics::RouterRequestMetrics,
+        EncoderRouter, KvRouter, PrefillRouter, RoutingHost, RoutingLoadContext,
+        metrics::RouterRequestMetrics,
     },
-    lora::LoraFilteredRouter,
     migration::Migration,
     model_card::ModelDeploymentCard,
     namespace::NamespaceFilter,
     preprocessor::{OpenAIPreprocessor, prompt::prompt_formatter_from_mdc},
-    protocols::common::{
-        llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
-        preprocessor::MultimodalData,
-    },
+    protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
-    session_affinity::{
-        AffinityCoordinator, SessionAffinityPushRouter, create_affinity_coordinator,
-    },
+    session_affinity::{AffinityCoordinator, SessionAffinityMode, create_affinity_coordinator},
     types::{
         Annotated,
         openai::chat_completions::{
@@ -38,7 +34,10 @@ use crate::{
     },
 };
 
-use dynamo_kv_router::config::min_initial_workers_from_env;
+use dynamo_kv_router::{
+    config::min_initial_workers_from_env,
+    selector::{DefaultWorkerSelector, WorkerSelector},
+};
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -50,39 +49,16 @@ use dynamo_runtime::{
 };
 use std::sync::Arc;
 
-fn multimodal_cache_key_from_url(url: &str) -> String {
-    blake3::hash(url.as_bytes()).to_hex().to_string()
-}
-
-fn preprocessed_multimodal_cache_keys(request: &PreprocessedRequest) -> Vec<String> {
-    let Some(items) = request
-        .multi_modal_data
-        .as_ref()
-        .and_then(|media| media.get("image_url"))
-    else {
-        return Vec::new();
-    };
-
-    let mut keys = Vec::with_capacity(items.len());
-    for item in items {
-        match item {
-            MultimodalData::Url(url) => keys.push(multimodal_cache_key_from_url(url.as_str())),
-            MultimodalData::RawUrl(url) => keys.push(multimodal_cache_key_from_url(url)),
-            MultimodalData::Decoded(_) => {}
-        }
-    }
-    keys.sort();
-    keys.dedup();
-    keys
-}
-
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
 #[derive(Clone)]
-pub struct PreprocessedRouting {
+pub struct PreprocessedRouting<Sel = DefaultWorkerSelector>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
     backend_engine:
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
-    prefill_router: Arc<PrefillRouter>,
+    prefill_router: Arc<PrefillRouter<Sel>>,
     encoder_router: Arc<EncoderRouter>,
 }
 
@@ -132,11 +108,14 @@ async fn wait_for_min_initial_workers(
     }
 }
 
-fn router_client(
+fn router_client<Sel>(
     client: &Client,
     router_mode: RouterMode,
-    chooser: Option<&Arc<KvRouter>>,
-) -> anyhow::Result<Client> {
+    chooser: Option<&Arc<KvRouter<Sel>>>,
+) -> anyhow::Result<Client>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
     if router_mode == RouterMode::KV {
         let Some(chooser) = chooser else {
             anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
@@ -180,14 +159,19 @@ fn validate_router_mode_for_lora(
     }
 }
 
-fn preprocessed_backend_engine(
+#[expect(clippy::too_many_arguments)]
+fn preprocessed_backend_engine<Sel>(
     router: LlmPushRouter,
     router_mode: RouterMode,
-    chooser: Option<Arc<KvRouter>>,
+    chooser: Option<Arc<KvRouter<Sel>>>,
     model_manager: &Arc<crate::discovery::ModelManager>,
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
-) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
+    session_affinity_mode: SessionAffinityMode,
+    load_context: Arc<RoutingLoadContext>,
+) -> anyhow::Result<Arc<RoutingHost<Sel>>>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
 {
     // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
     // the fail-fast check in `build_preprocessed_routing`). After this, the Direct and advanced
@@ -198,43 +182,34 @@ fn preprocessed_backend_engine(
         affinity.is_some(),
     )?;
 
-    let engine: ServiceEngine<_, _> = match router_mode {
-        RouterMode::Direct => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-            router, affinity, true,
-        )),
-        RouterMode::Random | RouterMode::RoundRobin => {
-            match model_manager.lora_filter_for(endpoint_id) {
-                Some(lora_filter) => Arc::new(LoraFilteredRouter::new(
-                    router,
-                    lora_filter,
-                    model_manager.lora_load_estimator_for(endpoint_id),
-                    router_mode,
-                )),
-                None => Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-                    router, affinity, false,
-                )),
-            }
-        }
-        RouterMode::PowerOfTwoChoices
-        | RouterMode::LeastLoaded
-        | RouterMode::DeviceAwareWeighted => {
-            Arc::new(SessionAffinityPushRouter::new_with_coordinator(
-                router,
-                affinity,
-                router_mode.is_direct_routing(),
-            ))
-        }
+    let routing_host = match router_mode {
         RouterMode::KV => {
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(KvPushRouter::new_with_coordinator(
-                router, chooser, affinity,
+            Arc::new(RoutingHost::new_with_load_context_and_coordinator(
+                router,
+                chooser,
+                load_context,
+                affinity,
+                session_affinity_mode,
             ))
+        }
+        _ => {
+            let lora = model_manager
+                .lora_filter_for(endpoint_id)
+                .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
+            Arc::new(RoutingHost::<Sel>::new_builtin_with_capabilities(
+                router,
+                load_context,
+                affinity,
+                session_affinity_mode,
+                lora,
+            )?)
         }
     };
 
-    Ok(engine)
+    Ok(routing_host)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -242,13 +217,44 @@ pub async fn build_preprocessed_routing(
     client: &Client,
     model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
-    worker_monitor: Option<KvWorkerMonitor>,
+    load_context: Arc<RoutingLoadContext>,
     chooser: Option<Arc<KvRouter>>,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting> {
+    build_preprocessed_routing_with_selector(
+        client,
+        model_manager,
+        router_mode,
+        load_context,
+        chooser,
+        prefill_chooser,
+        encoder_chooser,
+        enable_multimodal_cache_indexer,
+        session_affinity_ttl_secs,
+        SessionAffinityMode::Hard,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
+    client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
+    router_mode: RouterMode,
+    load_context: Arc<RoutingLoadContext>,
+    chooser: Option<Arc<KvRouter<Sel>>>,
+    prefill_chooser: Option<Arc<PrefillRouter<Sel>>>,
+    encoder_chooser: Option<Arc<EncoderRouter>>,
+    enable_multimodal_cache_indexer: bool,
+    session_affinity_ttl_secs: Option<u64>,
+    session_affinity_mode: SessionAffinityMode,
+) -> anyhow::Result<PreprocessedRouting<Sel>>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
     // (possibly long) DYN_ROUTER_MIN_INITIAL_WORKERS wait.
@@ -281,41 +287,45 @@ pub async fn build_preprocessed_routing(
             as MultimodalCacheKeyExtractor<PreprocessedRequest>
     });
 
-    let monitor_arc =
-        worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
-
     let router = LlmPushRouter::from_client_with_state(
         router_client,
         router_mode,
-        monitor_arc,
+        None,
         embedding_cache_indexer,
         cache_key_extractor,
     )
     .await?;
 
-    // Eagerly register router request metrics so they appear as zeros even in
-    // non-KV modes (Direct, Random, RoundRobin) where KvPushRouter is never created.
-    // In KV mode, KvPushRouter::new() also calls from_component() (idempotent via
-    // OnceLock), which covers the standalone router path as well.
+    // Eagerly register router request metrics so they appear as zeros before
+    // RoutingHost is constructed. The host repeats this idempotently so the
+    // standalone router path is covered as well.
     RouterRequestMetrics::from_component(client.endpoint.component());
 
     let prefill_router = prefill_chooser.unwrap_or_else(|| {
-        PrefillRouter::disabled(
+        PrefillRouter::<Sel>::disabled_with_selector(
             model_manager.clone(),
             router_mode,
             session_affinity_ttl_secs,
+            session_affinity_mode,
         )
     });
     let encoder_router = encoder_chooser.unwrap_or_else(EncoderRouter::disabled);
-
-    let backend_engine = preprocessed_backend_engine(
+    let routing_host = preprocessed_backend_engine(
         router,
         router_mode,
         chooser,
         &model_manager,
         &endpoint_id,
         affinity,
+        session_affinity_mode,
+        load_context,
     )?;
+    if router_mode.is_kv_routing() && prefill_router.conditional_disagg_enabled() {
+        prefill_router
+            .set_decode_routing_host(routing_host.clone())
+            .context("install conditional-disagg decode RoutingHost")?;
+    }
+    let backend_engine: ServiceEngine<_, _> = routing_host;
     Ok(PreprocessedRouting {
         backend_engine,
         prefill_router,
@@ -351,6 +361,9 @@ pub async fn prepare_engine(
                 watcher.set_local_model_path(Some(local_model.path().to_path_buf()));
             }
             watcher.set_tokenizer_backend(local_model.runtime_config().tokenizer_backend);
+            watcher.set_tokenizer_fallback_enabled(
+                local_model.runtime_config().tokenizer_fallback_enabled,
+            );
             let watch_obj = Arc::new(watcher);
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery
@@ -467,10 +480,13 @@ where
         .link(engine)?
         .link(backend.backward_edge())?
         .link(preprocessor.backward_edge())?
-        .link(frontend)?)
+        .link_terminal(frontend)?)
 }
 
-impl PreprocessedRouting {
+impl<Sel> PreprocessedRouting<Sel>
+where
+    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
+{
     /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
     pub fn build_pipeline<Req, Resp>(
         &self,
@@ -512,7 +528,7 @@ impl PreprocessedRouting {
             .link(token_backend.backward_edge())?
             .link(migration.backward_edge())?
             .link(preprocessor_op.backward_edge())?
-            .link(frontend)?;
+            .link_terminal(frontend)?;
 
         Ok(engine)
     }
@@ -546,7 +562,7 @@ impl PreprocessedRouting {
             .link(prefill_op.backward_edge())?
             .link(encoder_op.backward_edge())?
             .link(migration.backward_edge())?
-            .link(frontend)?;
+            .link_terminal(frontend)?;
 
         Ok(engine)
     }

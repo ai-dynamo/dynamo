@@ -25,14 +25,19 @@
 //! cancel the request or not.
 //!
 //! The [`ConnectionHandle`] is also used to signal to the client that the request has been cancelled. This is
-//! done by sending a [`axum::response::sse::Event`] with the event type "error" and the data "[DONE]".
+//! done by sending a [`axum::response::sse::Event`] with the event type "error" and the data "`[DONE]`".
 //!
 
 use axum::response::sse::Event;
 use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
-use std::sync::Arc;
+use std::ops::{Deref, DerefMut};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 use crate::http::service::error::SanitizedError;
 use crate::http::service::metrics::{CancellationLabels, ErrorType, InflightGuard, Metrics};
@@ -64,6 +69,116 @@ pub enum ConnectionStatus {
 pub struct ConnectionHandle {
     sender: Option<tokio::sync::oneshot::Sender<ConnectionStatus>>,
     on_drop: ConnectionStatus,
+}
+
+/// One-shot application error reported by an SSE producer.
+///
+/// The producer records the error when it is detected, then marks the terminal
+/// protocol event immediately before yielding it. The disconnect monitor reads
+/// only when the source stream ends or its guards are dropped, avoiding
+/// synchronization on successful per-token events.
+#[derive(Default)]
+struct StreamErrorState {
+    error_type: OnceLock<ErrorType>,
+    terminal_event_emitted: AtomicBool,
+}
+
+#[derive(Clone, Default)]
+pub(super) struct StreamErrorSignal(Arc<StreamErrorState>);
+
+impl StreamErrorSignal {
+    pub(super) fn set(&self, error_type: ErrorType) {
+        let _ = self.0.error_type.set(error_type);
+    }
+
+    fn get(&self) -> Option<&ErrorType> {
+        self.0.error_type.get()
+    }
+
+    pub(super) fn mark_terminal_event_emitted(&self) {
+        self.0.terminal_event_emitted.store(true, Ordering::Release);
+    }
+
+    fn terminal_event_emitted(&self) -> bool {
+        self.0.terminal_event_emitted.load(Ordering::Acquire)
+    }
+}
+
+struct SignaledInflightGuard {
+    guard: InflightGuard,
+    error_signal: Option<StreamErrorSignal>,
+}
+
+impl SignaledInflightGuard {
+    fn new(guard: InflightGuard, error_signal: Option<StreamErrorSignal>) -> Self {
+        Self {
+            guard,
+            error_signal,
+        }
+    }
+
+    fn signaled_error_type(&self) -> Option<ErrorType> {
+        self.error_signal
+            .as_ref()
+            .and_then(StreamErrorSignal::get)
+            .cloned()
+    }
+}
+
+impl Deref for SignaledInflightGuard {
+    type Target = InflightGuard;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl DerefMut for SignaledInflightGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl Drop for SignaledInflightGuard {
+    fn drop(&mut self) {
+        if self.guard.error_type() == &ErrorType::Cancelled
+            && let Some(error_type) = self.signaled_error_type()
+        {
+            self.guard.mark_error(error_type);
+        }
+    }
+}
+
+/// Disarms a stream handle on drop only after its terminal error event was
+/// handed to the disconnect monitor.
+struct SignaledConnectionHandle {
+    handle: ConnectionHandle,
+    error_signal: Option<StreamErrorSignal>,
+}
+
+impl SignaledConnectionHandle {
+    fn new(handle: ConnectionHandle, error_signal: Option<StreamErrorSignal>) -> Self {
+        Self {
+            handle,
+            error_signal,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.handle.disarm();
+    }
+}
+
+impl Drop for SignaledConnectionHandle {
+    fn drop(&mut self) {
+        if self
+            .error_signal
+            .as_ref()
+            .is_some_and(StreamErrorSignal::terminal_event_emitted)
+        {
+            self.handle.disarm();
+        }
+    }
 }
 
 impl ConnectionHandle {
@@ -183,6 +298,27 @@ async fn connection_monitor(
     }
 }
 
+type StreamErrorFormatter = fn(&(dyn std::error::Error + 'static)) -> (ErrorType, String);
+
+#[derive(Default)]
+struct StreamMonitorOptions {
+    activity_rx: Option<mpsc::UnboundedReceiver<()>>,
+    error_signal: Option<StreamErrorSignal>,
+}
+
+fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType, String) {
+    let error = SanitizedError::Internal;
+    let body = serde_json::json!({
+        "error": {
+            "message": error.to_string(),
+            "type": error.openai_type_slug(),
+            "code": error.status().as_u16(),
+        }
+    })
+    .to_string();
+    (ErrorType::Internal, body)
+}
+
 /// This method will consume a stream of SSE events and monitor for disconnects or context cancellation.
 ///
 /// Uses `tokio::select!` to choose between receiving events from the source stream or detecting when
@@ -199,28 +335,118 @@ pub fn monitor_for_disconnects(
     inflight_guard: InflightGuard,
     stream_handle: ConnectionHandle,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
-    monitor_for_disconnects_with_timeout(
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
         stream,
         context,
         inflight_guard,
         stream_handle,
         backend_stream_timeout(),
+        openai_stream_error,
+        StreamMonitorOptions::default(),
     )
 }
 
+pub(crate) fn monitor_for_disconnects_with_error(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    error_formatter: StreamErrorFormatter,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        error_formatter,
+        StreamMonitorOptions::default(),
+    )
+}
+
+pub(super) fn monitor_for_disconnects_with_error_signal(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    error_signal: StreamErrorSignal,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        openai_stream_error,
+        StreamMonitorOptions {
+            error_signal: Some(error_signal),
+            ..Default::default()
+        },
+    )
+}
+
+pub fn monitor_for_disconnects_with_activity(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    activity_rx: mpsc::UnboundedReceiver<()>,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        openai_stream_error,
+        StreamMonitorOptions {
+            activity_rx: Some(activity_rx),
+            ..Default::default()
+        },
+    )
+}
+
+#[cfg(test)]
 fn monitor_for_disconnects_with_timeout(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    inactivity_timeout: Option<Duration>,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        inactivity_timeout,
+        openai_stream_error,
+        StreamMonitorOptions::default(),
+    )
+}
+
+fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
     context: Arc<dyn AsyncEngineContext>,
     mut inflight_guard: InflightGuard,
     mut stream_handle: ConnectionHandle,
     inactivity_timeout: Option<Duration>,
+    error_formatter: StreamErrorFormatter,
+    options: StreamMonitorOptions,
 ) -> impl Stream<Item = Result<Event, axum::Error>> {
     stream_handle.arm();
+
+    let StreamMonitorOptions {
+        mut activity_rx,
+        error_signal,
+    } = options;
 
     // Default to Cancelled: if the stream is dropped unexpectedly (e.g. client
     // disconnect causing a broken-pipe on the SSE write), the guard will report
     // "cancelled" instead of "internal". The happy path overrides this via mark_ok().
     inflight_guard.mark_error(ErrorType::Cancelled);
+    let mut stream_handle = SignaledConnectionHandle::new(stream_handle, error_signal.clone());
+    let mut inflight_guard = SignaledInflightGuard::new(inflight_guard, error_signal);
 
     async_stream::try_stream! {
         tokio::pin!(stream);
@@ -228,42 +454,43 @@ fn monitor_for_disconnects_with_timeout(
         // Recreating it for every token repeatedly clones a receiver and churns Notify state.
         let stopped = context.stopped();
         tokio::pin!(stopped);
+        let mut inactivity_deadline =
+            inactivity_timeout.map(|timeout| tokio::time::Instant::now() + timeout);
         loop {
             tokio::select! {
+                // Drain any ready SSE event before honoring a cancel or the
+                // inactivity timeout. This preserves already-buffered output on
+                // disconnect and lets a source stream that emits its own
+                // finalizer-on-cancel (e.g. the Anthropic converter) flush those
+                // terminal events before this monitor records the cancellation.
+                biased;
                 event = stream.next() => {
                     match event {
                         Some(Ok(event)) => {
+                            inactivity_deadline = inactivity_timeout
+                                .map(|timeout| tokio::time::Instant::now() + timeout);
                             yield event;
                         }
                         Some(Err(err)) => {
-                            // Mark error as internal since it's a streaming error
-                            inflight_guard.mark_error(ErrorType::Internal);
+                            let (error_type, error_body) = error_formatter(&err);
+                            inflight_guard.mark_error(error_type);
                             // We're terminating the stream intentionally here with a
                             // structured error + [DONE]; disarm so the stream handle
                             // doesn't later record this as ClosedUnexpectedly (which
                             // would mis-attribute the fault as a client disconnect).
                             stream_handle.disarm();
                             tracing::error!("Streaming error: {err}");
-                            // Emit a structured OpenAI-style error frame + `data: [DONE]`
-                            // so naive `data:`-line parsers see both the error and a
-                            // stream terminator. Body derived from SanitizedError so
-                            // the sanitized message + status live in one place.
-                            let sanitized = SanitizedError::Internal;
-                            let err_json = serde_json::json!({
-                                "error": {
-                                    "message": sanitized.to_string(),
-                                    "type": sanitized.openai_type_slug(),
-                                    "code": sanitized.status().as_u16(),
-                                }
-                            });
-                            yield Event::default().data(err_json.to_string());
+                            yield Event::default().data(error_body);
                             yield Event::default().data("[DONE]");
                             // Break to prevent any subsequent mark_ok() from overwriting the error
                             break;
                         }
                         None => {
-                            // Stream ended normally
-                            inflight_guard.mark_ok();
+                            if let Some(error_type) = inflight_guard.signaled_error_type() {
+                                inflight_guard.mark_error(error_type);
+                            } else {
+                                inflight_guard.mark_ok();
+                            }
                             stream_handle.disarm();
 
                             // todo: if we yield a dynamo sentinel event, we need to do it before the done or the
@@ -289,15 +516,27 @@ fn monitor_for_disconnects_with_timeout(
                     );
                     break;
                 }
+                activity = async {
+                    match activity_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending::<Option<()>>().await,
+                    }
+                } => {
+                    if activity.is_some() {
+                        inactivity_deadline = inactivity_timeout
+                            .map(|timeout| tokio::time::Instant::now() + timeout);
+                    } else {
+                        activity_rx = None;
+                    }
+                }
                 // Circuit breaker for zombie backend workers: if the backend holds a live TCP
                 // connection but produces no output for `inactivity_timeout`, kill the engine
                 // context so that InflightGuard::drop() fires and dec() corrects the gauge.
-                // The sleep is re-created each iteration so it acts as an *inactivity* timeout
-                // (resets whenever a token is received), not a hard total-request deadline.
-                // When inactivity_timeout is None the pending() future never resolves.
+                // Only real stream activity resets this deadline. Client heartbeats must not
+                // keep a dead backend alive indefinitely.
                 _ = async {
-                    match inactivity_timeout {
-                        Some(d) => tokio::time::sleep(d).await,
+                    match inactivity_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
                         None => std::future::pending::<()>().await,
                     }
                 } => {
@@ -450,6 +689,114 @@ mod tests {
             1,
             "the same stopped future should remain pending across all response events"
         );
+    }
+
+    #[tokio::test]
+    async fn signaled_error_drop_after_terminal_event_is_not_a_cancellation() {
+        let model = "drop-after-response-failed";
+        let metrics = Arc::new(Metrics::new());
+        let guard = metrics.clone().create_inflight_guard(
+            model,
+            Endpoint::Responses,
+            true,
+            "req-drop-after-response-failed",
+        );
+        let context = Arc::new(MockContext::with_kill_tracking());
+        let engine_context: Arc<dyn AsyncEngineContext> = context.clone();
+        let (connection_tx, connection_rx) = tokio::sync::oneshot::channel();
+        let (stream_tx, stream_rx) = tokio::sync::oneshot::channel();
+        let cancellation_labels = CancellationLabels {
+            model: model.to_string(),
+            endpoint: Endpoint::Responses.to_string(),
+            request_type: RequestType::Stream.to_string(),
+        };
+        let connection_monitor = tokio::spawn(connection_monitor(
+            engine_context.clone(),
+            connection_rx,
+            stream_rx,
+            Some(metrics.clone()),
+            cancellation_labels,
+        ));
+        let mut connection_handle = ConnectionHandle::create_armed(connection_tx);
+        let stream_handle = ConnectionHandle::create_disabled(stream_tx);
+        connection_handle.disarm();
+        drop(connection_handle);
+        let error_signal = StreamErrorSignal::default();
+        let producer_error_signal = error_signal.clone();
+        let stream = futures::stream::once(async move {
+            producer_error_signal.set(ErrorType::Internal);
+            producer_error_signal.mark_terminal_event_emitted();
+            Ok::<_, axum::Error>(
+                Event::default()
+                    .event("response.failed")
+                    .data(r#"{"type":"response.failed"}"#),
+            )
+        })
+        .chain(futures::stream::pending());
+
+        let mut monitored = Box::pin(monitor_for_disconnects_with_timeout_error_and_keep_alive(
+            stream,
+            engine_context,
+            guard,
+            stream_handle,
+            None,
+            openai_stream_error,
+            StreamMonitorOptions {
+                error_signal: Some(error_signal),
+                ..Default::default()
+            },
+        ));
+        assert!(monitored.next().await.is_some());
+        drop(monitored);
+        tokio::time::timeout(Duration::from_secs(5), connection_monitor)
+            .await
+            .expect("connection monitor did not finish")
+            .expect("connection monitor task failed");
+
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::Responses,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Internal,
+            ),
+            1
+        );
+        assert_eq!(
+            metrics.get_request_counter(
+                model,
+                &Endpoint::Responses,
+                &RequestType::Stream,
+                &Status::Error,
+                &ErrorType::Cancelled,
+            ),
+            0
+        );
+        let cancellation_labels = CancellationLabels {
+            model: model.to_string(),
+            endpoint: Endpoint::Responses.to_string(),
+            request_type: RequestType::Stream.to_string(),
+        };
+        assert_eq!(metrics.get_cancellation_count(&cancellation_labels), 0);
+        assert_eq!(metrics.get_client_disconnect_count(), 0);
+        assert!(!context.is_killed());
+    }
+
+    #[tokio::test]
+    async fn signaled_error_before_terminal_event_keeps_disconnect_handle_armed() {
+        let error_signal = StreamErrorSignal::default();
+        error_signal.set(ErrorType::Internal);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let handle =
+            SignaledConnectionHandle::new(ConnectionHandle::create_armed(tx), Some(error_signal));
+
+        drop(handle);
+
+        assert!(matches!(
+            rx.await.expect("stream handle did not report its status"),
+            ConnectionStatus::ClosedUnexpectedly
+        ));
     }
 
     fn generate_cancellation_labels() -> CancellationLabels {
@@ -628,6 +975,43 @@ mod tests {
             0,
             "inflight gauge leaked in phase 2"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_activity_signal_resets_inactivity_timeout() {
+        let model = "keep-alive-model";
+        let (metrics, guard, _context, handle) = setup_test(model, "req-keep-alive");
+        let tracked_context = Arc::new(MockContext::with_kill_tracking());
+        let engine_context: Arc<dyn AsyncEngineContext> = tracked_context.clone();
+        let (activity_tx, activity_rx) = mpsc::unbounded_channel();
+
+        let monitored = monitor_for_disconnects_with_timeout_error_and_keep_alive(
+            hanging_stream(),
+            engine_context,
+            guard,
+            handle,
+            Some(Duration::from_secs(10)),
+            openai_stream_error,
+            StreamMonitorOptions {
+                activity_rx: Some(activity_rx),
+                ..Default::default()
+            },
+        );
+        tokio::pin!(monitored);
+
+        let next = monitored.next();
+        tokio::pin!(next);
+
+        tokio::time::advance(Duration::from_secs(9)).await;
+        activity_tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(!tracked_context.is_killed());
+
+        tokio::time::advance(Duration::from_secs(8)).await;
+        assert!(next.await.is_none());
+        assert!(tracked_context.is_killed());
+        assert_eq!(metrics.get_inflight_count(model), 0);
     }
 
     // ─────────────────────────────────────────────────────────────────────────────

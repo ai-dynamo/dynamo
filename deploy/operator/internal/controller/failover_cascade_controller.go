@@ -9,15 +9,17 @@ import (
 	"context"
 	"fmt"
 
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/client-go/tools/record"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
@@ -32,36 +34,16 @@ const (
 	groveLabelPodIndex         = "grove.io/podclique-pod-index"
 )
 
-// FailoverCascadeReconciler watches GMS failover pods (restartPolicy: Never)
+// failoverCascadeReconciler watches GMS failover pods (restartPolicy: Never)
 // and cascade-deletes all pods in the same engine group when any member
 // reaches a terminal phase (Failed or Succeeded). This ensures broken
 // distributed inference groups are restarted cleanly by Grove.
 //
-// Background: GMS (GPU Memory Service) pods run with restartPolicy: Never so
-// that Kubernetes does not attempt to restart them in-place — a partial
-// restart would leave the distributed inference group in an inconsistent
-// state. Instead, this controller detects the terminal pod and deletes the
-// entire group.  Grove then sees the missing pods and recreates the whole
-// group from scratch.
-//
-// An engine group is identified by three Grove labels:
-//   - grove.io/podcliquescalinggroup              (PCSG name)
-//   - grove.io/podcliquescalinggroup-replica-index (PCSG replica — which copy of the group)
-//   - grove.io/podclique-pod-index                (pod index within the clique)
-//
-// Only pods carrying the dynamo failover engine-group-member label are
-// considered; see failoverCascadePredicate().
-type FailoverCascadeReconciler struct {
+// Only pods carrying the Dynamo failover engine-group-member label are
+// considered; see failoverCascadePredicate.
+type failoverCascadeReconciler struct {
 	client.Client
-	Recorder record.EventRecorder
-}
-
-// NewFailoverCascadeReconciler creates a new reconciler.
-func NewFailoverCascadeReconciler(c client.Client, recorder record.EventRecorder) *FailoverCascadeReconciler {
-	return &FailoverCascadeReconciler{
-		Client:   c,
-		Recorder: recorder,
-	}
+	recorder events.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;delete;deletecollection
@@ -72,15 +54,22 @@ func NewFailoverCascadeReconciler(c client.Client, recorder record.EventRecorder
 // DeleteAllOf is idempotent, so concurrent reconciles for multiple pods in the
 // same engine group are harmless — the first deletes the group and subsequent
 // calls are no-ops.
-func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *failoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	var pod corev1.Pod
 	if err := r.Get(ctx, req.NamespacedName, &pod); err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// Snapshot+GMS restore targets currently use IntraPod recovery. InterPod
+	// Snapshot+failover is follow-on work, so fail closed rather than cascade-
+	// deleting a cohort when the unsupported labels overlap.
+	if pod.Labels[snapshotprotocol.RestoreTargetLabel] == commonconsts.KubeLabelValueTrue {
+		return ctrl.Result{}, nil
 	}
 
 	if !isTerminalPhase(pod.Status.Phase) {
@@ -122,6 +111,15 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		groveLabelPCSGReplicaIndex: pcsgReplica,
 		groveLabelPodIndex:         podIndex,
 	}
+	restoreTargetRequirement, err := labels.NewRequirement(
+		snapshotprotocol.RestoreTargetLabel,
+		selection.NotEquals,
+		[]string{commonconsts.KubeLabelValueTrue},
+	)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to build restore-target selector: %w", err)
+	}
+	groupSelector := labels.SelectorFromSet(labels.Set(groupLabels)).Add(*restoreTargetRequirement)
 
 	// Force delete (grace=0) intentionally: the distributed inference group is
 	// already broken when we get here, so giving the surviving engines a SIGTERM
@@ -129,7 +127,8 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// half-torn-down NCCL/CUDA IPC state and stale UDS sockets on the shared
 	// hostPath. We deliberately skip preStop hooks and the graceful shutdown
 	// window; do NOT soften this to a positive grace period.
-	if err := r.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(pod.Namespace), groupLabels, client.GracePeriodSeconds(0)); err != nil {
+	if err := r.DeleteAllOf(ctx, &corev1.Pod{}, client.InNamespace(pod.Namespace),
+		client.MatchingLabelsSelector{Selector: groupSelector}, client.GracePeriodSeconds(0)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to cascade-delete engine group: %w", err)
 	}
 
@@ -139,7 +138,7 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		"pcsgReplica", pcsgReplica,
 		"podIndex", podIndex,
 	)
-	r.Recorder.Eventf(&pod, corev1.EventTypeWarning, "FailoverCascade",
+	r.recorder.Eventf(&pod, nil, corev1.EventTypeWarning, "FailoverCascade", "Delete",
 		"Pod %s terminated (phase=%s); cascade-deleted engine group (pcsg=%s, replica=%s, index=%s)",
 		pod.Name, pod.Status.Phase, pcsg, pcsgReplica, podIndex,
 	)
@@ -147,16 +146,10 @@ func (r *FailoverCascadeReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager registers a controller that watches all Pods (not just
-// owned ones) and uses failoverCascadePredicate to filter down to only the
-// failover-eligible phase transitions.  EnqueueRequestForObject means the
-// reconcile key is the pod itself (namespace/name), not a parent resource.
-func (r *FailoverCascadeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *failoverCascadeReconciler) setupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("gms-failover-cascade").
-		Watches(&corev1.Pod{}, &handler.EnqueueRequestForObject{},
-			builder.WithPredicates(failoverCascadePredicate()),
-		).
+		For(&corev1.Pod{}, builder.WithPredicates(failoverCascadePredicate())).
 		Complete(r)
 }
 
@@ -165,32 +158,23 @@ func isTerminalPhase(phase corev1.PodPhase) bool {
 }
 
 // failoverCascadePredicate keeps the reconcile queue minimal by filtering
-// events at the informer level, before they ever reach Reconcile().
+// events at the informer level, before they ever reach Reconcile.
 //
-// It accepts only pods carrying the dynamo failover engine-group-member label
+// It accepts only pods carrying the Dynamo failover engine-group-member label
 // and only when they reach a terminal phase:
 //
-//   - CreateFunc: handles the edge case where the informer's initial list-watch
-//     delivers a pod that is already Failed/Succeeded (e.g. the informer cache
-//     started after the pod transitioned, so no Update event was observed).
-//     Without this, such pods would be silently ignored and their engine group
-//     would never be cascade-deleted.
-//
-//   - UpdateFunc: the primary path — fires when a Running/Pending pod
-//     transitions to Failed/Succeeded.  Pods that already have a
-//     deletionTimestamp are filtered out to avoid acting on pods that are
-//     being terminated by an ongoing cascade or DGD deletion.
-//
-//   - DeleteFunc / GenericFunc: always suppressed — pod deletions are the
-//     *result* of our cascade, not triggers for one.
+//   - CreateFunc handles an informer observing an already-terminal pod.
+//   - UpdateFunc handles a transition into a terminal phase.
+//   - DeleteFunc and GenericFunc suppress events that cannot initiate failover.
 func failoverCascadePredicate() predicate.Predicate {
-	hasLabel := func(labels map[string]string) bool {
-		return labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] == commonconsts.KubeLabelValueTrue
+	isEligible := func(labels map[string]string) bool {
+		return labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] == commonconsts.KubeLabelValueTrue &&
+			labels[snapshotprotocol.RestoreTargetLabel] != commonconsts.KubeLabelValueTrue
 	}
 
 	return predicate.Funcs{
 		CreateFunc: func(e event.CreateEvent) bool {
-			if !hasLabel(e.Object.GetLabels()) {
+			if !isEligible(e.Object.GetLabels()) {
 				return false
 			}
 			pod, ok := e.Object.(*corev1.Pod)
@@ -199,20 +183,14 @@ func failoverCascadePredicate() predicate.Predicate {
 			}
 			return isTerminalPhase(pod.Status.Phase)
 		},
-		DeleteFunc: func(e event.DeleteEvent) bool {
+		DeleteFunc: func(event.DeleteEvent) bool {
 			return false
 		},
-		GenericFunc: func(e event.GenericEvent) bool {
+		GenericFunc: func(event.GenericEvent) bool {
 			return false
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			if !hasLabel(e.ObjectNew.GetLabels()) {
-				return false
-			}
-			// Ignore pods already being deleted — this avoids reacting to
-			// our own cascade-delete (which sets deletionTimestamp before
-			// the pod actually disappears from the cache).
-			if e.ObjectNew.GetDeletionTimestamp() != nil {
+			if !isEligible(e.ObjectNew.GetLabels()) || e.ObjectNew.GetDeletionTimestamp() != nil {
 				return false
 			}
 			newPod, ok := e.ObjectNew.(*corev1.Pod)
@@ -223,8 +201,6 @@ func failoverCascadePredicate() predicate.Predicate {
 			if !ok {
 				return false
 			}
-			// Only trigger on actual phase transitions to avoid processing
-			// the same pod twice (e.g. a metadata update on an already-Failed pod).
 			return !isTerminalPhase(oldPod.Status.Phase) && isTerminalPhase(newPod.Status.Phase)
 		},
 	}

@@ -5,40 +5,51 @@ use std::sync::Weak;
 
 use anyhow::{Context, Result};
 use dynamo_runtime::{
-    component::Client,
+    component::{Client, Instance},
+    discovery::EventTransportKind,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::{EventPublisher, EventSubscriber},
+    transports::event_plane::{
+        Codec, EventPublisher, EventSubscriber, ValidatedEnvelope, uses_direct_zmq,
+    },
 };
 use serde::{Deserialize, Serialize};
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 
-use super::coordinator::{AffinityCoordinatorInner, AffinityTarget};
+use super::coordinator::{AffinityCoordinatorInner, AffinityTarget, AffinityVersion};
+use crate::direct_zmq_fan_in::{
+    ContinuityMode, FanInEvent, FanInObservation, start_direct_zmq_fan_in,
+};
 
 pub(super) const SESSION_AFFINITY_SUBJECT: &str = "session_affinity_events";
 const OUTBOUND_CHANNEL_CAPACITY: usize = 4_096;
+const DIRECT_ZMQ_RCVHWM: i32 = 1_024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct SessionAffinityUpdate {
     pub session_id: String,
     pub worker_id: u64,
     pub dp_rank: Option<u32>,
-    pub router_id: u64,
+    pub sequence: u64,
+    pub writer_id: u64,
 }
 
 #[derive(Clone)]
 struct ReplicaUpdateSender {
-    router_id: u64,
     tx: mpsc::Sender<SessionAffinityUpdate>,
 }
 
 impl ReplicaUpdateSender {
-    fn publish(&self, session_id: &str, target: AffinityTarget) {
+    fn publish(&self, session_id: &str, target: AffinityTarget, version: AffinityVersion) {
         let update = SessionAffinityUpdate {
             session_id: session_id.to_string(),
             worker_id: target.worker_id,
             dp_rank: target.dp_rank,
-            router_id: self.router_id,
+            sequence: version.sequence,
+            writer_id: version.writer_id,
         };
         if let Err(error) = self.tx.try_send(update) {
             tracing::trace!(
@@ -48,6 +59,54 @@ impl ReplicaUpdateSender {
                 "dropping best-effort session affinity update"
             );
         }
+    }
+}
+
+#[derive(Clone)]
+struct ReplicaUpdateApplier {
+    local_publisher_id: u64,
+    discovered_instances: watch::Receiver<Vec<Instance>>,
+    coordinator: Weak<AffinityCoordinatorInner>,
+}
+
+impl ReplicaUpdateApplier {
+    fn apply(&self, source_publisher_id: u64, update: SessionAffinityUpdate) -> bool {
+        if source_publisher_id == self.local_publisher_id {
+            return true;
+        }
+
+        let Some(coordinator) = self.coordinator.upgrade() else {
+            return false;
+        };
+        coordinator.observe_replica_sequence(update.sequence);
+        if !self
+            .discovered_instances
+            .borrow()
+            .iter()
+            .any(|instance| instance.id() == update.worker_id)
+        {
+            return true;
+        }
+        let target = AffinityTarget {
+            worker_id: update.worker_id,
+            dp_rank: update.dp_rank,
+        };
+        let outcome = coordinator.apply_replica_update(
+            update.session_id,
+            target,
+            AffinityVersion {
+                sequence: update.sequence,
+                writer_id: update.writer_id,
+            },
+        );
+        drop(coordinator);
+        tracing::trace!(
+            worker_id = target.worker_id,
+            dp_rank = ?target.dp_rank,
+            ?outcome,
+            "processed best-effort session affinity update"
+        );
+        true
     }
 }
 
@@ -66,18 +125,103 @@ impl ReplicaSyncRuntime {
     ) -> Result<Self> {
         let endpoint = &client.endpoint;
         let router_id = endpoint.drt().discovery().instance_id();
-        let publisher = EventPublisher::for_endpoint(endpoint, SESSION_AFFINITY_SUBJECT)
-            .await
-            .context("create session affinity event publisher")?;
-        let mut subscriber = EventSubscriber::for_endpoint(endpoint, SESSION_AFFINITY_SUBJECT)
-            .await
-            .context("create session affinity event subscriber")?
-            .typed::<SessionAffinityUpdate>();
-        let local_worker_ids = client.instance_avail_watcher();
+        let transport_kind = endpoint.drt().default_event_transport_kind();
+        let publisher = EventPublisher::for_endpoint_with_transport(
+            endpoint,
+            SESSION_AFFINITY_SUBJECT,
+            transport_kind,
+        )
+        .await
+        .context("create session affinity event publisher")?;
+        let publisher_id = publisher.publisher_id();
+        if let Some(inner) = coordinator.upgrade() {
+            inner
+                .writer_id
+                .store(router_id, std::sync::atomic::Ordering::Relaxed);
+        }
+        let applier = ReplicaUpdateApplier {
+            local_publisher_id: publisher_id,
+            discovered_instances: client.instance_source.as_ref().clone(),
+            coordinator,
+        };
 
         let cancel = parent_cancel.child_token();
+        let subscriber_task =
+            if should_use_direct_sync(transport_kind, uses_direct_zmq(transport_kind)) {
+                let codec = Codec::default();
+                let handler_applier = applier.clone();
+                let handler = move |envelope: ValidatedEnvelope| {
+                    let source_publisher_id = envelope.publisher_id;
+                    let update = codec
+                        .decode_payload::<SessionAffinityUpdate>(&envelope.payload)
+                        .context("decode session affinity update")?;
+                    handler_applier.apply(source_publisher_id, update);
+                    Ok(())
+                };
+                let observer = |observation: FanInObservation| match observation.event {
+                    FanInEvent::SequenceGap { missing } => tracing::warn!(
+                        publisher_id = observation.publisher_id,
+                        generation = observation.generation,
+                        missing,
+                        "session affinity direct-ZMQ source skipped envelopes"
+                    ),
+                    FanInEvent::OutOfOrder => tracing::warn!(
+                        publisher_id = observation.publisher_id,
+                        generation = observation.generation,
+                        "session affinity direct-ZMQ source received a non-increasing sequence"
+                    ),
+                    _ => {}
+                };
+                start_direct_zmq_fan_in(
+                    endpoint.clone(),
+                    SESSION_AFFINITY_SUBJECT,
+                    DIRECT_ZMQ_RCVHWM,
+                    Some(publisher_id),
+                    ContinuityMode::TrackFromZero,
+                    cancel.clone(),
+                    handler,
+                    observer,
+                )
+                .await
+                .context("start direct-ZMQ session affinity subscriber")?
+            } else {
+                let mut subscriber = EventSubscriber::for_endpoint_with_transport(
+                    endpoint,
+                    SESSION_AFFINITY_SUBJECT,
+                    transport_kind,
+                )
+                .await
+                .context("create session affinity event subscriber")?
+                .typed::<SessionAffinityUpdate>();
+                let subscriber_cancel = cancel.clone();
+                tokio::spawn(async move {
+                    loop {
+                        let event = tokio::select! {
+                            _ = subscriber_cancel.cancelled() => return,
+                            event = subscriber.next() => event,
+                        };
+                        let Some(event) = event else {
+                            return;
+                        };
+                        let (source_publisher_id, update) = match event {
+                            Ok((envelope, update)) => (envelope.publisher_id, update),
+                            Err(error) => {
+                                tracing::trace!(
+                                    %error,
+                                    "failed to receive best-effort session affinity update"
+                                );
+                                continue;
+                            }
+                        };
+                        if !applier.apply(source_publisher_id, update) {
+                            return;
+                        }
+                    }
+                })
+            };
+
         let (tx, mut rx) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
-        let sender = ReplicaUpdateSender { router_id, tx };
+        let sender = ReplicaUpdateSender { tx };
 
         let publisher_cancel = cancel.clone();
         let publisher_task = tokio::spawn(async move {
@@ -100,52 +244,6 @@ impl ReplicaSyncRuntime {
             }
         });
 
-        let subscriber_cancel = cancel.clone();
-        let subscriber_task = tokio::spawn(async move {
-            loop {
-                let event = tokio::select! {
-                    _ = subscriber_cancel.cancelled() => return,
-                    event = subscriber.next() => event,
-                };
-                let Some(event) = event else {
-                    return;
-                };
-                let update = match event {
-                    Ok((_envelope, update)) => update,
-                    Err(error) => {
-                        tracing::trace!(
-                            %error,
-                            "failed to receive best-effort session affinity update"
-                        );
-                        continue;
-                    }
-                };
-                if update.router_id == router_id {
-                    continue;
-                }
-                let worker_ids = local_worker_ids.borrow();
-                if !should_apply_update(router_id, worker_ids.as_slice(), &update) {
-                    continue;
-                }
-                drop(worker_ids);
-                let Some(coordinator) = coordinator.upgrade() else {
-                    return;
-                };
-                let target = AffinityTarget {
-                    worker_id: update.worker_id,
-                    dp_rank: update.dp_rank,
-                };
-                let outcome = coordinator.apply_replica_update(update.session_id, target);
-                drop(coordinator);
-                tracing::trace!(
-                    worker_id = target.worker_id,
-                    dp_rank = ?target.dp_rank,
-                    ?outcome,
-                    "processed best-effort session affinity update"
-                );
-            }
-        });
-
         Ok(Self {
             sender,
             cancel,
@@ -154,8 +252,13 @@ impl ReplicaSyncRuntime {
         })
     }
 
-    pub(super) fn publish(&self, session_id: &str, target: AffinityTarget) {
-        self.sender.publish(session_id, target);
+    pub(super) fn publish(
+        &self,
+        session_id: &str,
+        target: AffinityTarget,
+        version: AffinityVersion,
+    ) {
+        self.sender.publish(session_id, target, version);
     }
 
     pub(super) fn shutdown_now(&mut self) {
@@ -163,20 +266,15 @@ impl ReplicaSyncRuntime {
         if let Some(task) = self.publisher_task.take() {
             task.abort();
         }
-        if let Some(task) = self.subscriber_task.take() {
-            task.abort();
-        }
+        drop(self.subscriber_task.take());
     }
 
     #[cfg(test)]
-    pub(super) fn for_test(
-        router_id: u64,
-        capacity: usize,
-    ) -> (Self, mpsc::Receiver<SessionAffinityUpdate>) {
+    pub(super) fn for_test(capacity: usize) -> (Self, mpsc::Receiver<SessionAffinityUpdate>) {
         let (tx, rx) = mpsc::channel(capacity);
         (
             Self {
-                sender: ReplicaUpdateSender { router_id, tx },
+                sender: ReplicaUpdateSender { tx },
                 cancel: CancellationToken::new(),
                 publisher_task: None,
                 subscriber_task: None,
@@ -192,12 +290,8 @@ impl Drop for ReplicaSyncRuntime {
     }
 }
 
-fn should_apply_update(
-    local_router_id: u64,
-    local_worker_ids: &[u64],
-    update: &SessionAffinityUpdate,
-) -> bool {
-    update.router_id != local_router_id && local_worker_ids.contains(&update.worker_id)
+fn should_use_direct_sync(transport_kind: EventTransportKind, direct_zmq_topology: bool) -> bool {
+    transport_kind == EventTransportKind::Zmq && direct_zmq_topology
 }
 
 #[cfg(test)]
@@ -211,30 +305,25 @@ mod tests {
     };
     use std::time::Duration;
 
-    fn update(router_id: u64, worker_id: u64) -> SessionAffinityUpdate {
-        SessionAffinityUpdate {
-            session_id: "session".to_string(),
-            worker_id,
-            dp_rank: Some(0),
-            router_id,
-        }
-    }
-
     #[test]
-    fn replica_update_filter_rejects_self_and_unknown_workers() {
-        assert!(!should_apply_update(7, &[10, 11], &update(7, 10)));
-        assert!(!should_apply_update(7, &[10, 11], &update(8, 12)));
-        assert!(should_apply_update(7, &[10, 11], &update(8, 10)));
+    fn direct_sync_is_selected_only_for_unbrokered_zmq() {
+        assert!(should_use_direct_sync(EventTransportKind::Zmq, true));
+        assert!(!should_use_direct_sync(EventTransportKind::Zmq, false));
+        assert!(!should_use_direct_sync(EventTransportKind::Nats, false));
     }
 
     #[tokio::test]
     async fn replica_update_backpressure_is_nonfatal() {
-        let (runtime, mut rx) = ReplicaSyncRuntime::for_test(7, 1);
+        let (runtime, mut rx) = ReplicaSyncRuntime::for_test(1);
         runtime.publish(
             "first",
             AffinityTarget {
                 worker_id: 10,
                 dp_rank: Some(0),
+            },
+            AffinityVersion {
+                sequence: 1,
+                writer_id: 7,
             },
         );
         runtime.publish(
@@ -243,10 +332,45 @@ mod tests {
                 worker_id: 11,
                 dp_rank: Some(0),
             },
+            AffinityVersion {
+                sequence: 2,
+                writer_id: 7,
+            },
         );
 
-        assert_eq!(rx.recv().await.unwrap().session_id, "first");
+        let update = rx.recv().await.unwrap();
+        assert_eq!(update.session_id, "first");
+        assert_eq!(update.writer_id, 7);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn rejected_worker_update_still_advances_replica_clock() {
+        let coordinator = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
+        let baseline = coordinator.next_version_for_test();
+        let sequence = baseline.sequence.saturating_add(10);
+        let (_tx, discovered_instances) = watch::channel(Vec::new());
+        let applier = ReplicaUpdateApplier {
+            local_publisher_id: 7,
+            discovered_instances,
+            coordinator: coordinator.downgrade_for_test(),
+        };
+
+        assert!(applier.apply(
+            8,
+            SessionAffinityUpdate {
+                session_id: "unknown-worker".to_string(),
+                worker_id: 10,
+                dp_rank: Some(0),
+                sequence,
+                writer_id: 9,
+            }
+        ));
+
+        assert_eq!(
+            coordinator.next_version_for_test().sequence,
+            sequence.saturating_add(1)
+        );
     }
 
     #[tokio::test]

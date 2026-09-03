@@ -25,8 +25,8 @@ global:
     # -- Whether this chart should install the bundled NATS subchart.
     # When true, deploys NATS and auto-configures the operator with its address.
     # When false, NATS is not deployed. Use dynamo-operator.natsAddr to point at an external instance if you are bringing your own NATS.
-    # Defaults to true (since release 1.1.0) because the Dynamo runtime's event plane (DYN_EVENT_PLANE) defaults to NATS for distributed backends (etcd/kubernetes).
-    install: true
+    # NATS is optional because the default request and event planes use TCP and ZMQ, respectively.
+    install: false
 
   kai-scheduler:
     # -- Whether this chart should install the bundled kai-scheduler subchart.
@@ -57,6 +57,12 @@ global:
     # create PodCliqueSets for multinode deployments.
     enabled: false
 
+  snapshot:
+    # -- Whether this chart should install the bundled Snapshot subchart
+    # (github.com/ai-dynamo/snapshot): its operator, node agent, and CRDs.
+    # NOTE: For production environments, it is recommended to install Snapshot separately.
+    install: false
+
 # Subcharts configuration
 
 # Dynamo operator configuration
@@ -73,7 +79,7 @@ dynamo-operator:
   # Environment variables to pass to operator Deployment.
   env: []
 
-  # -- NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: `nats://hostname:4222`
+  # -- NATS server address for operator communication. When empty, the operator uses bundled NATS only if global.nats.install=true; otherwise NATS is not configured. Format: `nats://hostname:4222`
   natsAddr: ""
 
   # -- etcd server address for an external etcd instance. Only needed when using external etcd without the bundled subchart. Format: `http://hostname:2379` or `https://hostname:2379`
@@ -229,7 +235,7 @@ dynamo-operator:
     # -- CA bundle (base64 encoded) for webhook validation. Only used when certificateSecret.external=true. For automatic certificate generation or cert-manager integration, leave this empty as it will be injected automatically.
     caBundle: ""
 
-    # -- Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. 'Fail' (recommended for production) rejects requests if the webhook cannot be reached, ensuring strict validation. 'Ignore' allows requests through if the webhook is unavailable, providing availability over validation guarantees.
+    # -- Webhook failure policy controls how Kubernetes handles requests when the webhook is unavailable. Keep 'Fail' in every environment so requests cannot bypass Dynamo validation and defaulting. 'Ignore' is an emergency-only, short-lived bypass: pause Dynamo resource writes, restore 'Fail' immediately after recovery, and audit every resource changed during the bypass window.
     failurePolicy: Fail
 
     # -- Failure policy for the Pod CREATE checkpoint-restore mutating webhook. Defaults to Ignore so a webhook outage falls back to cold-start instead of blocking workload Pods.
@@ -286,6 +292,12 @@ grove:
   tolerations: []
   # -- Affinity for Grove pods
   affinity: {}
+  config:
+    server:
+      healthProbes:
+        # -- Enable Grove's webhook-aware liveness and readiness probes.
+        # The readiness endpoint stays false until certificates and the webhook server are ready.
+        enable: true
 
 # Kai Scheduler component - advanced workload scheduling
 # Installation is controlled by global.kai-scheduler.install above.

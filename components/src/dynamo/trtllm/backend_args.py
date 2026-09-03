@@ -1,13 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# TODO(DIS-2240): Remove deprecated multimodal flags across engine
-
 """Dynamo TRT-LLM backend configuration ArgGroup."""
 
 import argparse
-import logging
-import warnings
 from typing import Optional
 
 # trtllm >= 1.3.0rc21 removed BuildConfig; its fields moved to BaseLlmArgs
@@ -30,13 +26,6 @@ from .constants import DisaggregationMode, Modality
 DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 CANONICAL_AGGREGATED_MODE = "agg"
 PREFILL_DECODE_DISAGGREGATION_MODE = "pd"
-
-logger = logging.getLogger(__name__)
-
-
-def _warn_deprecated(message: str) -> None:
-    logger.warning(message)
-    warnings.warn(message, DeprecationWarning, stacklevel=3)
 
 
 class DynamoTrtllmArgGroup(ArgGroup):
@@ -101,8 +90,20 @@ class DynamoTrtllmArgGroup(ArgGroup):
             flag_name="--conversation-affinity",
             env_var="DYN_ENGINE_CONV_AFFINITY",
             default=False,
-            help="Force engine-owned conversation-affinity ADP routing: the engine picks the "
-            "attention-DP rank from the conversation id, even if the router selects a rank.",
+            help="Force TensorRT-LLM conversation-affinity ADP routing regardless of engine "
+            "config detection. Initial DP-rank placement is controlled by "
+            "--conversation-affinity-dp-rank-source.",
+        )
+        add_argument(
+            g,
+            flag_name="--conversation-affinity-dp-rank-source",
+            env_var="DYN_ENGINE_CONV_AFFINITY_DP_RANK_SOURCE",
+            default="engine",
+            choices=["engine", "dynamo"],
+            help="Select initial attention-DP placement while conversation affinity is enabled. "
+            "'engine' lets TensorRT-LLM load-balance the first request; 'dynamo' forwards the "
+            "Dynamo router's selected rank and requires a TensorRT-LLM build containing "
+            "NVIDIA/TensorRT-LLM#16815 or equivalent.",
         )
         add_argument(
             g,
@@ -181,15 +182,21 @@ class DynamoTrtllmArgGroup(ArgGroup):
             env_var="DYN_TRTLLM_PUBLISH_KV_EVENTS",
             default=False,
             help=(
-                "If set, publish KV cache events to the KV router. The "
-                "`dynamo_component_*` gauges and `trtllm_*` vendor metrics "
-                "emit unconditionally regardless of this flag."
+                "Publish KV cache events to the KV router. This does not enable "
+                "TensorRT-LLM metric reporting; use --publish-metrics for that."
             ),
-            dest="publish_events_and_metrics",
-            # `obsolete_flag` accepts the old `--publish-events-and-metrics`
-            # / `--no-publish-events-and-metrics` aliases automatically.
-            # DeprecationWarning fires in args.py:parse_args.
-            obsolete_flag="--publish-events-and-metrics",
+            dest="publish_kv_events",
+        )
+        add_negatable_bool_argument(
+            g,
+            flag_name="--publish-metrics",
+            env_var="DYN_TRTLLM_PUBLISH_METRICS",
+            default=False,
+            help=(
+                "Publish TensorRT-LLM iteration and Prometheus metrics. This does "
+                "not publish KV cache events; use --publish-kv-events for that."
+            ),
+            dest="publish_metrics",
         )
         add_argument(
             g,
@@ -216,13 +223,16 @@ class DynamoTrtllmArgGroup(ArgGroup):
             choices=[
                 CANONICAL_AGGREGATED_MODE,
                 PREFILL_DECODE_DISAGGREGATION_MODE,
-                *[mode.value for mode in DisaggregationMode],
+                *[
+                    mode.value
+                    for mode in DisaggregationMode
+                    if mode != DisaggregationMode.AGGREGATED
+                ],
             ],
             help=(
                 "Worker disaggregation mode. Use 'agg' for aggregated serving, "
                 "'pd' for a combined prefill+decode worker, 'prefill', "
-                "'decode', or 'encode'. The legacy "
-                "'prefill_and_decode' value remains accepted temporarily."
+                "'decode', or 'encode'."
             ),
         )
         add_negatable_bool_argument(
@@ -485,6 +495,7 @@ class DynamoTrtllmConfig(ConfigBase):
     expert_parallel_size: Optional[int]
     enable_attention_dp: bool
     conversation_affinity: bool
+    conversation_affinity_dp_rank_source: str
     kv_block_size: int
     gpus_per_node: Optional[int] = None
     max_batch_size: int
@@ -494,7 +505,8 @@ class DynamoTrtllmConfig(ConfigBase):
     free_gpu_memory_fraction: float
     extra_engine_args: str
     override_engine_args: str
-    publish_events_and_metrics: bool
+    publish_kv_events: bool
+    publish_metrics: bool
     load_format: str
     model_loader_extra_config: str
     guided_decoding_backend: Optional[str] = None
@@ -532,20 +544,18 @@ class DynamoTrtllmConfig(ConfigBase):
 
     def validate(self) -> None:
         if isinstance(self.disaggregation_mode, str):
+            if self.disaggregation_mode == DisaggregationMode.AGGREGATED.value:
+                raise ValueError(
+                    "--disaggregation-mode=prefill_and_decode is no longer supported; "
+                    "use --disaggregation-mode=agg for aggregated serving or "
+                    "--disaggregation-mode=pd for a combined prefill+decode worker."
+                )
             if self.disaggregation_mode in {
                 CANONICAL_AGGREGATED_MODE,
                 PREFILL_DECODE_DISAGGREGATION_MODE,
             }:
                 self.disaggregation_mode = DisaggregationMode.AGGREGATED
             else:
-                if self.disaggregation_mode == DisaggregationMode.AGGREGATED.value:
-                    _warn_deprecated(
-                        "--disaggregation-mode=prefill_and_decode is deprecated; "
-                        "use --disaggregation-mode=agg for aggregated serving or "
-                        "--disaggregation-mode=pd for a combined prefill+decode "
-                        "worker. This release will map the legacy value to the "
-                        "new argument."
-                    )
                 self.disaggregation_mode = DisaggregationMode(self.disaggregation_mode)
         if isinstance(self.modality, str):
             self.modality = Modality(self.modality)
