@@ -120,8 +120,6 @@ pub enum LifecycleStage {
     RouterSelection,
     WorkerAdmission,
     RequestDispatch,
-    KvTransfer,
-    EngineQueue,
     WorkerOperation,
     WorkerOperationPrefill,
     WorkerOperationDecode,
@@ -146,8 +144,6 @@ impl LifecycleStage {
             | Self::ResponseStreamingPrefill
             | Self::ResponseStreamingDecode
             | Self::ResponseStreamingWorker => "worker",
-            Self::KvTransfer => "kv_transfer",
-            Self::EngineQueue => "engine",
         }
     }
 
@@ -197,8 +193,6 @@ impl LifecycleStage {
             Self::RouterSelection => common_span!("router.selection"),
             Self::WorkerAdmission => common_span!("worker.admission"),
             Self::RequestDispatch => common_span!("request.dispatch"),
-            Self::KvTransfer => common_span!("kv.transfer"),
-            Self::EngineQueue => common_span!("engine.queue"),
             Self::WorkerOperation => common_span!("worker.operation"),
             Self::WorkerOperationPrefill => common_span!("worker.operation.prefill"),
             Self::WorkerOperationDecode => common_span!("worker.operation.decode"),
