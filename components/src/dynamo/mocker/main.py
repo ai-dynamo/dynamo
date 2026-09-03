@@ -60,13 +60,30 @@ async def prefetch_model(model_path: str) -> None:
         )
 
 
-async def worker():
+def load_worker_engine_args(args: argparse.Namespace):
+    engine_args = load_mocker_engine_args(args)
+    logger.info(
+        "Loaded MockEngineArgs from JSON file"
+        if args.extra_engine_args
+        else "Created MockEngineArgs from CLI arguments"
+    )
+
+    # Auto-compute kv_bytes_per_token from model config if not explicitly set
+    if args.kv_bytes_per_token is None and args.model_path:
+        args.kv_bytes_per_token = compute_kv_bytes_per_token(
+            args.model_path, args.kv_cache_dtype
+        )
+    return apply_worker_engine_args_overrides(
+        engine_args, kv_bytes_per_token=args.kv_bytes_per_token
+    )
+
+
+async def worker(args: argparse.Namespace):
     """Main worker function that launches mocker instances.
 
     Each mocker gets its own DistributedRuntime instance for true isolation,
     while still sharing the same event loop and tokio runtime.
     """
-    args = parse_args()
     # Resolve planner-profile-data: convert profile results dir to NPZ if needed
     profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
     args.planner_profile_data = profile_data_result.npz_path
@@ -76,26 +93,46 @@ async def worker():
         if args.num_workers > 1 and args.model_path:
             await prefetch_model(args.model_path)
 
-        engine_args = load_mocker_engine_args(args)
-        logger.info(
-            "Loaded MockEngineArgs from JSON file"
-            if args.extra_engine_args
-            else "Created MockEngineArgs from CLI arguments"
-        )
-
-        # Auto-compute kv_bytes_per_token from model config if not explicitly set
-        if args.kv_bytes_per_token is None and args.model_path:
-            args.kv_bytes_per_token = compute_kv_bytes_per_token(
-                args.model_path, args.kv_cache_dtype
-            )
-        engine_args = apply_worker_engine_args_overrides(
-            engine_args, kv_bytes_per_token=args.kv_bytes_per_token
-        )
+        engine_args = load_worker_engine_args(args)
 
         logger.info(
             f"Launching {args.num_workers} mocker worker(s) with isolated DistributedRuntime instances"
         )
         await launch_workers(args, engine_args)
+    finally:
+        if profile_data_result is not None:
+            del profile_data_result  # Triggers tmpdir cleanup via __del__
+
+
+async def openai_http(args: argparse.Namespace):
+    """Serve one aggregated mocker directly with Dynamo's OpenAI HTTP service."""
+    profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
+    args.planner_profile_data = profile_data_result.npz_path
+
+    try:
+        engine_args = load_worker_engine_args(args)
+        kv_cache_block_size, runtime_config = build_runtime_config(engine_args)
+        runtime, _loop = create_runtime(
+            args.discovery_backend,
+            args.request_plane,
+            args.event_plane,
+        )
+        entrypoint_args = EntrypointArgs(
+            engine_type=EngineType.Mocker,
+            model_path=args.model_path,
+            model_name=args.model_name,
+            endpoint_id=args.endpoint,
+            extra_engine_args=None,
+            mocker_engine_args=engine_args,
+            runtime_config=runtime_config,
+            kv_cache_block_size=kv_cache_block_size,
+            http_host=args.http_host,
+            http_port=args.http_port,
+            http_metrics_port=args.http_metrics_port,
+            mocker_wait_for_endpoint_instance=False,
+        )
+        engine_config = await make_engine(runtime, entrypoint_args)
+        await run_input(runtime, "http", engine_config)
     finally:
         if profile_data_result is not None:
             del profile_data_result  # Triggers tmpdir cleanup via __del__
@@ -262,5 +299,13 @@ async def launch_workers(args: argparse.Namespace, base_engine_args):
             runtime.shutdown()
 
 
+async def async_main():
+    args = parse_args()
+    if args.openai_http:
+        await openai_http(args)
+    else:
+        await worker(args)
+
+
 def main():
-    uvloop.run(worker())
+    uvloop.run(async_main())

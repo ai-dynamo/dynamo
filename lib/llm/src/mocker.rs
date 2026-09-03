@@ -1261,6 +1261,7 @@ pub async fn make_mocker_engine(
     distributed_runtime: DistributedRuntime,
     endpoint_id: dynamo_runtime::protocols::EndpointId,
     args: MockEngineArgs,
+    wait_for_endpoint_instance: bool,
 ) -> Result<ExecutionContext, Error> {
     tracing::info!("Creating mocker engine with config: {args:?}");
     let engine = Arc::new(MockerExecutionContext::new(args));
@@ -1278,11 +1279,15 @@ pub async fn make_mocker_engine(
                 .namespace(&endpoint_id.namespace)
                 .and_then(|namespace| namespace.component(&endpoint_id.component))
                 .ok();
-            if let Some(component) = ready
-                && let Ok(instances) = component.list_instances().await
-                && !instances.is_empty()
-            {
-                break component;
+            if let Some(component) = ready {
+                if !wait_for_endpoint_instance {
+                    break component;
+                }
+                if let Ok(instances) = component.list_instances().await
+                    && !instances.is_empty()
+                {
+                    break component;
+                }
             }
 
             tracing::debug!("Component service not available yet, retrying...");

@@ -612,6 +612,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "auto-detected from --discovery-backend (zmq for file/mem, nats "
         "for etcd/kubernetes).",
     )
+    parser.add_argument(
+        "--openai-http",
+        action="store_true",
+        help="Serve this mocker directly with Dynamo's OpenAI-compatible HTTP API.",
+    )
+    parser.add_argument(
+        "--http-host",
+        type=str,
+        default=os.environ.get("DYN_HTTP_HOST"),
+        help="Host/interface for --openai-http. Defaults to Dynamo's HTTP service default.",
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=int(os.environ.get("DYN_HTTP_PORT", "8000")),
+        help="Port for --openai-http (default: 8000).",
+    )
+    parser.add_argument(
+        "--http-metrics-port",
+        type=int,
+        default=(
+            int(os.environ["DYN_HTTP_METRICS_PORT"])
+            if os.environ.get("DYN_HTTP_METRICS_PORT")
+            else None
+        ),
+        help="Optional separate metrics port for --openai-http.",
+    )
 
     # Same flags the frontend and engine backends expose, so a mocker can stand
     # in for a real worker set when exercising per-role routing.
@@ -626,6 +653,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # Validate num_workers
     if args.num_workers < 1:
         raise ValueError(f"--num-workers must be at least 1, got {args.num_workers}")
+    if args.openai_http and args.num_workers != 1:
+        raise ValueError("--openai-http currently supports exactly one in-process mocker worker")
+    if args.openai_http and (args.is_prefill_worker or args.is_decode_worker):
+        raise ValueError("--openai-http currently supports only aggregated mocker workers")
 
     # Parse and validate bootstrap_ports
     args.bootstrap_ports_list = parse_bootstrap_ports(args.bootstrap_ports)

@@ -3150,6 +3150,7 @@ class EntrypointArgs:
         tls_key_path: Optional[str] = None,
         extra_engine_args: Optional[str] = None,
         mocker_engine_args: Optional[MockEngineArgs] = None,
+        mocker_wait_for_endpoint_instance: bool = True,
         runtime_config: Optional[ModelRuntimeConfig] = None,
         namespace: Optional[str] = None,
         namespace_prefix: Optional[str] = None,
@@ -3186,6 +3187,7 @@ class EntrypointArgs:
             tls_key_path: TLS key path (PEM format)
             extra_engine_args: Optional path to mocker engine arguments JSON
             mocker_engine_args: Typed mocker engine arguments
+            mocker_wait_for_endpoint_instance: Wait for a registered endpoint instance before starting mocker
             runtime_config: Optional runtime configuration for discovery registration
             namespace: Dynamo namespace for model discovery scoping
             namespace_prefix: Optional namespace prefix

@@ -228,6 +228,37 @@ def test_entrypoint_args_accept_typed_mocker_engine_args():
     assert entrypoint_args is not None
 
 
+
+
+def test_mocker_cli_accepts_openai_http_flags():
+    args = CONFIG.parse_args(
+        [
+            "--openai-http",
+            "--http-host",
+            "0.0.0.0",
+            "--http-port",
+            "8001",
+            "--http-metrics-port",
+            "9001",
+        ]
+    )
+
+    assert args.openai_http is True
+    assert args.http_host == "0.0.0.0"
+    assert args.http_port == 8001
+    assert args.http_metrics_port == 9001
+
+
+def test_mocker_openai_http_rejects_multi_worker():
+    with pytest.raises(ValueError, match="exactly one"):
+        CONFIG.parse_args(["--openai-http", "--num-workers", "2"])
+
+
+def test_mocker_openai_http_rejects_disagg_worker():
+    with pytest.raises(ValueError, match="aggregated"):
+        CONFIG.parse_args(["--openai-http", "--disaggregation-mode", "decode"])
+
+
 def test_build_mocker_engine_args_preserves_cli_mapped_fields(tmp_path):
     planner_profile_data = tmp_path / "planner_profile_data.npz"
     np.savez(
