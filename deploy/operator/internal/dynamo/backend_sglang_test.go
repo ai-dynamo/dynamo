@@ -1,10 +1,15 @@
 package dynamo
 
 import (
+	"errors"
 	"reflect"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -640,6 +645,125 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 					t.Errorf("Expected no environment variable changes, but env count changed from %d to %d", originalEnvCount, len(container.Env))
 				}
 			}
+		})
+	}
+}
+
+// TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank covers both
+// halves of the reservation: an SGLang worker that runs one NIXL exporter per
+// co-located rank must declare a port for every one of them, and a container
+// that runs no exporter must be left exactly as it was. The second half is
+// asserted with a GPU-count resolver that fails, because resolving that count
+// can require a Kubernetes API read that some render paths cannot perform - so
+// "reserves nothing" and "does not even ask how many GPUs there are" are one
+// requirement rather than two.
+func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T) {
+	backend := &SGLangBackend{}
+
+	workerPorts := []corev1.ContainerPort{
+		{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoSystemPortName, ContainerPort: int32(commonconsts.DynamoSystemPort)},
+		{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoNixlPortName, ContainerPort: int32(commonconsts.DynamoNixlPort)},
+	}
+	frontendPorts := []corev1.ContainerPort{
+		{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoContainerPortName, ContainerPort: int32(commonconsts.DynamoServicePort)},
+	}
+	allEightPorts := map[string]int32{
+		"nixl": 19090, "nixl-1": 19091, "nixl-2": 19092, "nixl-3": 19093,
+		"nixl-4": 19094, "nixl-5": 19095, "nixl-6": 19096, "nixl-7": 19097,
+	}
+
+	tests := []struct {
+		name            string
+		ports           []corev1.ContainerPort
+		telemetryEnable string
+		containerGPUs   int64
+		expectedPorts   map[string]int32
+	}{
+		{
+			name:            "no GPUs declares only the base port",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			containerGPUs:   0,
+			expectedPorts:   map[string]int32{"nixl": 19090},
+		},
+		{
+			name:            "one rank needs no extra port",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			containerGPUs:   1,
+			expectedPorts:   map[string]int32{"nixl": 19090},
+		},
+		{
+			name:            "eight co-located ranks reserve eight ports",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			containerGPUs:   8,
+			expectedPorts:   allEightPorts,
+		},
+		{
+			name:            "more GPUs than the reserved range stops at the cap",
+			ports:           workerPorts,
+			telemetryEnable: "y",
+			containerGPUs:   16,
+			expectedPorts:   allEightPorts,
+		},
+		{
+			name:            "the operator default of disabled telemetry reserves nothing",
+			ports:           workerPorts,
+			telemetryEnable: "n",
+			containerGPUs:   -1,
+			expectedPorts:   map[string]int32{"nixl": 19090},
+		},
+		{
+			name:            "a frontend shares the backend framework but declares no NIXL port",
+			ports:           frontendPorts,
+			telemetryEnable: "y",
+			containerGPUs:   -1,
+			expectedPorts:   map[string]int32{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("Render the container the way the component defaults do")
+			container := &corev1.Container{
+				Ports: slices.Clone(tt.ports),
+				Env: []corev1.EnvVar{
+					{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(commonconsts.DynamoSystemPort)},
+					{Name: "NIXL_TELEMETRY_ENABLE", Value: tt.telemetryEnable},
+					{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
+					{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: strconv.Itoa(commonconsts.DynamoNixlPort)},
+				},
+			}
+
+			t.Log("A negative GPU count marks the cases that must never resolve one")
+			containerGPUCount := staticContainerGPUCount(tt.containerGPUs)
+			if tt.containerGPUs < 0 {
+				containerGPUCount = func() (int64, error) {
+					return 0, errors.New("resolving the GPU count needs a Kubernetes client")
+				}
+			}
+
+			require.NoError(t, backend.UpdateContainer(container, 1, RoleMain, betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{}), "test-service", &GroveMultinodeDeployer{}, containerGPUCount))
+
+			t.Log("Every co-located rank has a port of its own, and no rank shares one")
+			nixlPorts := map[string]int32{}
+			seen := map[int32]string{}
+			for _, port := range container.Ports {
+				if !strings.HasPrefix(port.Name, commonconsts.DynamoNixlPortName) {
+					continue
+				}
+				nixlPorts[port.Name] = port.ContainerPort
+				if other, duplicate := seen[port.ContainerPort]; duplicate {
+					t.Errorf("ports %q and %q both bind %d", other, port.Name, port.ContainerPort)
+				}
+				seen[port.ContainerPort] = port.Name
+			}
+			require.Equal(t, tt.expectedPorts, nixlPorts)
+
+			t.Log("The ports the container already declared are untouched")
+			require.Subset(t, container.Ports, tt.ports)
+			require.NotContains(t, seen, int32(commonconsts.DynamoSystemPort))
 		})
 	}
 }

@@ -31,6 +31,7 @@ from dynamo.sglang.init_multimodal import (
     init_multimodal_prefill_worker,
     init_multimodal_worker,
 )
+from dynamo.sglang.nixl_telemetry import install_per_rank_nixl_prometheus_ports
 from dynamo.sglang.shutdown import install_graceful_shutdown
 from dynamo.sglang.snapshot import prepare_snapshot_engine
 
@@ -43,6 +44,11 @@ async def worker(argv: list[str] | None = None):
         argv = sys.argv[1:]
     config = await parse_args(argv)
     dump_config(config.dynamo_args.dump_config_to, config)
+
+    # Must run before any sgl.Engine is constructed: it changes how the engine
+    # launches its scheduler processes, and each of those processes needs its
+    # own NIXL exporter port.
+    install_per_rank_nixl_prometheus_ports()
 
     if (
         config.server_args.load_format == "gms"
