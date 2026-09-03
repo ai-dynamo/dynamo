@@ -5,9 +5,16 @@
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
+from collections.abc import Callable
 
 from gpu_memory_service.common.vmm import VMMDevice
+
+logger = logging.getLogger(__name__)
+
+_ALLOCATION_RETRY_INTERVAL = 0.5
 
 
 class GMSAllocationManager:
@@ -23,7 +30,12 @@ class GMSAllocationManager:
         self._allocations: dict[str, int] = {}
         self._lock = threading.Lock()
 
-    def allocate(self, allocation_id: str, aligned_size: int) -> None:
+    def allocate(
+        self,
+        allocation_id: str,
+        aligned_size: int,
+        is_connected: Callable[[], bool] | None = None,
+    ) -> None:
         with self._lock:
             if not allocation_id:
                 raise RuntimeError("allocation ID must not be empty")
@@ -31,11 +43,24 @@ class GMSAllocationManager:
                 raise RuntimeError("allocation size is not aligned for this GPU")
             if allocation_id in self._allocations:
                 raise RuntimeError("allocation ID already exists")
-            allocated, handle = self._vmm.create_tolerate_oom(
-                aligned_size, self._device
-            )
-            if not allocated:
-                raise MemoryError(f"cannot allocate {aligned_size} GPU bytes")
+            while True:
+                if is_connected is not None and not is_connected():
+                    raise ConnectionAbortedError(
+                        "RW client disconnected during allocation retry"
+                    )
+                allocated, handle = self._vmm.create_tolerate_oom(
+                    aligned_size, self._device
+                )
+                if allocated:
+                    break
+                if is_connected is None:
+                    raise MemoryError(f"cannot allocate {aligned_size} GPU bytes")
+                logger.warning(
+                    "cuMemCreate OOM for aligned_size=%d; retrying in %.3fs",
+                    aligned_size,
+                    _ALLOCATION_RETRY_INTERVAL,
+                )
+                time.sleep(_ALLOCATION_RETRY_INTERVAL)
             self._allocations[allocation_id] = int(handle)
 
     def export(self, allocation_id: str) -> int:

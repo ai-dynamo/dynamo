@@ -14,12 +14,35 @@ use super::overlap::{OverlapSignals, SelectedWorkerTierSnapshot};
 use super::prefill_load::effective_prefill_tokens;
 pub use crate::protocols::PotentialLoad;
 use crate::protocols::{
-    LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerConfigLike, WorkerId,
-    WorkerWithDpRank,
+    LocalBlockHash, RoutingConstraints, SharedCacheHits, WorkerAffinityTarget, WorkerConfigLike,
+    WorkerId, WorkerWithDpRank,
 };
 use crate::router_hint::RouterHintRootCandidates;
 use crate::scheduling::policy_queue::QueueRejection;
 use crate::sequences::WorkerLoadProjection;
+
+/// Router-internal identity for one admitted request attempt.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AttemptId(u64);
+
+impl AttemptId {
+    pub(crate) fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[cfg(feature = "bench")]
+    #[doc(hidden)]
+    pub fn for_benchmark(value: u64) -> Self {
+        Self::new(value)
+    }
+}
+
+impl std::fmt::Display for AttemptId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
 
 pub type OverloadedWorkerProvider =
     Arc<dyn Fn() -> Option<HashSet<WorkerId>> + Send + Sync + 'static>;
@@ -62,6 +85,8 @@ pub struct TierOverlapBlocks {
     pub disk: FxHashMap<WorkerWithDpRank, usize>,
 }
 
+/// Downstream matches must include a wildcard arm because this enum is non-exhaustive.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum KvSchedulerError {
     #[error("no endpoints available to route work")]
@@ -72,6 +97,9 @@ pub enum KvSchedulerError {
 
     #[error("all eligible workers are overloaded")]
     AllEligibleWorkersOverloaded,
+
+    #[error("all eligible workers were rejected by policy filters")]
+    AllEligibleWorkersFiltered,
 
     #[error("pinned worker {worker_id} is overloaded")]
     PinnedWorkerOverloaded { worker_id: WorkerId },
@@ -110,6 +138,28 @@ pub struct SchedulingResponse {
     pub target_cached_prefix_blocks: u32,
     pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub potential_decode_blocks: usize,
+}
+
+/// Internal result that pairs a public scheduling response with its attempt identity.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct AdmittedSchedulingResponse {
+    pub response: SchedulingResponse,
+    pub attempt: AdmissionAttempt,
+}
+
+/// Whether an admitted scheduling response owns tracked request state.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionAttempt {
+    Untracked,
+    Tracked(AttemptId),
+}
+
+impl AdmittedSchedulingResponse {
+    pub fn into_response(self) -> SchedulingResponse {
+        self.response
+    }
 }
 
 /// A routing decision that selected less KV overlap than another eligible worker.
@@ -233,6 +283,95 @@ impl ScheduleMode {
     }
 }
 
+/// The event that caused an agent request to enter worker selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkerSelectionInputTrigger {
+    /// A user message started the turn.
+    UserMessage,
+    /// A tool result continued the turn.
+    ToolResult,
+    /// Another event caused the request.
+    Other,
+}
+
+/// KV lifecycle hints supplied with an agent request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkerSelectionKvHints {
+    evict_session: bool,
+}
+
+impl WorkerSelectionKvHints {
+    /// Create the KV hints passed to worker selection.
+    pub fn new(evict_session: bool) -> Self {
+        Self { evict_session }
+    }
+
+    /// Return whether the caller asked consumers to evict the session state.
+    pub fn evict_session(&self) -> bool {
+        self.evict_session
+    }
+}
+
+/// Session metadata supplied to a custom worker-selection policy.
+///
+/// The internal request protocol supplies these values. Optional values remain
+/// absent when the request does not include them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionContext {
+    session_id: String,
+    parent_session_id: Option<String>,
+    session_final: Option<bool>,
+    kv_hints: Option<WorkerSelectionKvHints>,
+    input_trigger: Option<WorkerSelectionInputTrigger>,
+}
+
+impl SessionContext {
+    /// Create the session metadata available to worker selection.
+    pub fn new(
+        session_id: String,
+        parent_session_id: Option<String>,
+        session_final: Option<bool>,
+        kv_hints: Option<WorkerSelectionKvHints>,
+        input_trigger: Option<WorkerSelectionInputTrigger>,
+    ) -> Self {
+        Self {
+            session_id,
+            parent_session_id,
+            session_final,
+            kv_hints,
+            input_trigger,
+        }
+    }
+
+    /// Return the stable reasoning or tool-session identifier.
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Return the parent session identifier for a subagent request.
+    pub fn parent_session_id(&self) -> Option<&str> {
+        self.parent_session_id.as_deref()
+    }
+
+    /// Return the optional terminal marker for this session.
+    ///
+    /// `Some(true)` marks the session as final, `Some(false)` explicitly marks
+    /// it as continuing, and `None` means the caller supplied no marker.
+    pub fn session_final(&self) -> Option<bool> {
+        self.session_final
+    }
+
+    /// Return optional KV lifecycle hints from the request.
+    pub fn kv_hints(&self) -> Option<&WorkerSelectionKvHints> {
+        self.kv_hints.as_ref()
+    }
+
+    /// Return the event that caused this request, when supplied.
+    pub fn input_trigger(&self) -> Option<WorkerSelectionInputTrigger> {
+        self.input_trigger
+    }
+}
+
 /// Validated request accepted by [`LocalScheduler`](super::LocalScheduler).
 pub struct ScheduleRequest {
     pub mode: ScheduleMode,
@@ -241,6 +380,11 @@ pub struct ScheduleRequest {
     pub isl_tokens: usize,
     pub lora_name: Option<String>,
     pub expected_output_tokens: Option<u32>,
+    /// A session-affinity target resolved by the request host.
+    ///
+    /// The default selector treats an eligible target as exclusive. Custom policies receive the
+    /// target as advisory context and may select another eligible worker.
+    pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub routing_constraints: RoutingConstraints,
@@ -248,7 +392,7 @@ pub struct ScheduleRequest {
     pub priority_jump: f64,
     pub strict_priority: u32,
     pub policy_class: Option<String>,
-    pub session_id: Option<String>,
+    pub session_context: Option<SessionContext>,
     pub overlap: OverlapSignals,
     pub router_hint_candidates: Option<RouterHintRootCandidates>,
     pub retain_router_hint_chain: bool,
@@ -269,6 +413,9 @@ pub struct SchedulingRequest {
     pub expected_output_tokens: Option<u32>,
 
     // Routing constraints and request-level config.
+    /// Affinity target with the same default-versus-custom policy semantics as
+    /// [`ScheduleRequest::affinity_target`].
+    pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     pub routing_constraints: RoutingConstraints,
@@ -277,7 +424,7 @@ pub struct SchedulingRequest {
     pub priority_jump: f64,
     pub strict_priority: u32,
     pub policy_class: Option<String>,
-    pub session_id: Option<String>,
+    pub session_context: Option<SessionContext>,
 
     // Overlap and cache signals.
     pub overlap: OverlapSignals,
@@ -441,6 +588,7 @@ mod tests {
             isl_tokens,
             lora_name: None,
             expected_output_tokens: None,
+            affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
@@ -449,7 +597,7 @@ mod tests {
             priority_jump: 0.0,
             strict_priority: 0,
             policy_class: None,
-            session_id: None,
+            session_context: None,
             overlap: OverlapSignals {
                 tier_overlap_blocks: Default::default(),
                 effective_overlap_blocks: HashMap::default(),

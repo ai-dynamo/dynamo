@@ -1,0 +1,283 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Gemma-4-31B"
+subtitle: "Serve Gemma-4-31B with Dynamo and TensorRT-LLM on B200, GB200, or H200 for long-context agentic workloads."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Each target below is a Dynamo + TensorRT-LLM deployment of Gemma-4-31B for multimodal, reasoning, and tool-calling workloads.
+
+B200 and GB200 serve the NVFP4 checkpoint with FP8 KV cache and MTP speculative decoding, while H200 serves the BF16 checkpoint. All targets use KV-aware routing and CPU KV-cache offload.
+
+Pick your GPU architecture; every command on this page updates to match.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">GPU</span>
+<input type="radio" id="recipe-sku-b200" name="recipe-sku" value="b200" defaultChecked />
+<label htmlFor="recipe-sku-b200">B200</label>
+<input type="radio" id="recipe-sku-gb200" name="recipe-sku" value="gb200" />
+<label htmlFor="recipe-sku-gb200">GB200</label>
+<input type="radio" id="recipe-sku-h200" name="recipe-sku" value="h200" />
+<label htmlFor="recipe-sku-h200">H200</label>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="b200">
+<span><b>Checkpoint</b> nvidia/Gemma-4-31B-IT-NVFP4 + google/gemma-4-31B-it-assistant</span>
+<span><b>Precision</b> NVFP4 weights + FP8 KV cache</span>
+<span><b>GPUs</b> 8x B200: 8 TP1 workers</span>
+<span><b>Parallelism</b> TP1 per worker, 8 replicas</span>
+<span><b>Routing</b> KV-aware</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="gb200">
+<span><b>Checkpoint</b> nvidia/Gemma-4-31B-IT-NVFP4 + google/gemma-4-31B-it-assistant</span>
+<span><b>Precision</b> NVFP4 weights + FP8 KV cache</span>
+<span><b>GPUs</b> 8x GB200: 8 TP1 workers</span>
+<span><b>Parallelism</b> TP1 per worker, 8 replicas</span>
+<span><b>Routing</b> KV-aware</span>
+</div>
+<div className="dynamo-target-picker-summary" data-sku="h200">
+<span><b>Checkpoint</b> google/gemma-4-31B-it</span>
+<span><b>Precision</b> BF16 weights + 16-bit KV cache</span>
+<span><b>GPUs</b> 8x H200: 2 TP4 workers</span>
+<span><b>Parallelism</b> TP4 per worker, 2 replicas</span>
+<span><b>Routing</b> KV-aware</span>
+</div>
+</div>
+
+## Prerequisites
+
+- An image-pull secret when required by the cluster. Replace `your-image-pull-secret` in the deployment manifest with the local secret name.
+
+<div data-sku="b200">
+
+- A Kubernetes cluster with the Dynamo platform installed and 8x B200 GPUs available. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A Hugging Face token with access to `nvidia/Gemma-4-31B-IT-NVFP4` and `google/gemma-4-31B-it-assistant` for multi-token prediction (MTP).
+
+</div>
+
+<div data-sku="gb200">
+
+- A Kubernetes cluster with the Dynamo platform installed and 8x GB200 GPUs available. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A Hugging Face token with access to `nvidia/Gemma-4-31B-IT-NVFP4` and `google/gemma-4-31B-it-assistant` for multi-token prediction (MTP).
+
+</div>
+
+<div data-sku="h200">
+
+- A Kubernetes cluster with the Dynamo platform installed and 8x H200 GPUs available. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A Hugging Face token with access to `google/gemma-4-31B-it`.
+
+</div>
+
+## Deploy
+
+### 1. Create namespace and secret
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+### 2. Create storage
+
+<Warning>
+Edit `recipes/gemma4-31b/model-cache/model-cache.yaml` and set `storageClassName` to a ReadWriteMany storage class available on the target cluster.
+</Warning>
+
+If the cluster already provides a shared ReadWriteMany model-cache persistent volume claim (PVC), skip creating `shared-model-cache` and replace `claimName: shared-model-cache` in the download, deploy, and performance manifests with the existing claim name.
+
+```bash
+kubectl apply -f recipes/gemma4-31b/model-cache/model-cache.yaml -n ${NAMESPACE}
+```
+
+### 3. Download the model
+
+Edit `recipes/gemma4-31b/model-cache/model-download.yaml` before creating the Job. The B200 and GB200 downloads are enabled by default. For H200, comment out those commands and uncomment `hf download google/gemma-4-31B-it`. Download every checkpoint referenced by the selected deploy manifest.
+
+```bash
+kubectl apply -f recipes/gemma4-31b/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+```
+
+### 4. Deploy the DGD
+
+<div data-sku="b200" data-usecase="agentic" data-engine="trtllm" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/gemma4-31b/trtllm/agg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb200" data-usecase="agentic" data-engine="trtllm" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/gemma4-31b/trtllm/agg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200" data-usecase="agentic" data-engine="trtllm" data-variant="agg">
+
+```bash
+kubectl apply -f recipes/gemma4-31b/trtllm/agg-h200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+## Smoke Test
+
+Send a test request to verify the deployment serves traffic. First forward the frontend port for your target:
+
+<div data-sku="b200">
+
+```bash
+kubectl port-forward svc/gemma4-31b-agg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="gb200">
+
+```bash
+kubectl port-forward svc/gemma4-31b-agg-gb200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-sku="h200">
+
+```bash
+kubectl port-forward svc/gemma4-31b-agg-h200-agentic-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+Then send a chat completion using the model name for your target:
+
+<div data-sku="b200">
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"nvidia/Gemma-4-31B-IT-NVFP4","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+</div>
+
+<div data-sku="gb200">
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"nvidia/Gemma-4-31B-IT-NVFP4","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+</div>
+
+<div data-sku="h200">
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"google/gemma-4-31B-it","messages":[{"role":"user","content":"Write a one-sentence readiness check."}],"max_tokens":64}'
+```
+
+</div>
+
+## Benchmark
+
+A single AIPerf trace-replay Job, `perf/perf.yaml`, covers all three DGDs. It replays a 3,541-request subset of a Mooncake-format agentic trace with a median 64K input sequence length (ISL), median 400-token output sequence length (OSL), and approximately 90% KV-cache reuse. This long-context workload exercises KV-aware routing and CPU KV-cache offload under repeated prefixes. The benchmark pod is co-located with a DGD frontend through `podAffinity`.
+
+Edit the `env` block in `perf/perf.yaml` to target your deployed DGD. Set `ENDPOINT`, `TARGET_MODEL`, and `CONCURRENCY` from the table below, and set the `podAffinity` value to the matching DGD name. The concurrency values reproduce the [Expected Performance](#expected-performance) numbers.
+
+### Targeting a Variant
+
+| Variant | `ENDPOINT` | `TARGET_MODEL` | `CONCURRENCY` |
+| --- | --- | --- | --- |
+| B200 aggregated agentic | `gemma4-31b-agg-b200-agentic-frontend:8000` | `nvidia/Gemma-4-31B-IT-NVFP4` | `192` |
+| GB200 aggregated agentic | `gemma4-31b-agg-gb200-agentic-frontend:8000` | `nvidia/Gemma-4-31B-IT-NVFP4` | `192` |
+| H200 aggregated agentic | `gemma4-31b-agg-h200-agentic-frontend:8000` | `google/gemma-4-31B-it` | `32` |
+
+All targets use `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` as `TRACE_FILE`.
+
+### Dataset
+
+The Job passes the trace to AIPerf with `--custom-dataset-type mooncake_trace`. All targets use `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl`; its SHA-256 is `f20d3f2bc83dd1306cda659fbe34e7c4d85ca5497626c98bc0b1c4d2211379d0`.
+
+### Run the benchmark
+
+Then run the Job:
+
+```bash
+kubectl delete job gemma4-31b-bench -n ${NAMESPACE} --ignore-not-found
+kubectl create -f recipes/gemma4-31b/perf/perf.yaml -n ${NAMESPACE}
+kubectl logs -n ${NAMESPACE} -l job-name=gemma4-31b-bench -f
+kubectl wait --for=condition=Complete job/gemma4-31b-bench \
+  -n ${NAMESPACE} --timeout=10800s
+```
+
+For trace staging, concurrency sweeps, and fetching artifacts, see the [benchmark README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/perf/README.md).
+
+## Expected Performance
+
+Measured on the 15% agentic trace subset. System throughput is per-GPU output tokens per second; user throughput is the P50 per-request output rate. The row for your selected GPU is highlighted:
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Workload</th><th>Recipe</th><th>GPU</th><th>Concurrency</th><th>System output tok/s/GPU</th><th>User output tok/s (P50)</th><th>TTFT P50 (ms)</th></tr></thead>
+<tbody>
+<tr data-highlight-sku="b200"><td>Agentic (15% subset)</td><td>Aggregated (8 workers)</td><td>B200</td><td>192</td><td>1,096.75</td><td>57.22</td><td>3,052.24</td></tr>
+<tr data-highlight-sku="gb200"><td>Agentic (15% subset)</td><td>Aggregated (8 workers)</td><td>GB200</td><td>192</td><td>1,037.40</td><td>49.98</td><td>2,893.94</td></tr>
+<tr data-highlight-sku="h200"><td>Agentic (15% subset)</td><td>Aggregated (2 TP4 workers)</td><td>H200</td><td>32</td><td>153.020</td><td>63.02</td><td>979.09</td></tr>
+</tbody>
+</table>
+</div>
+
+## Compare All Targets
+
+The B200 and GB200 targets serve the model on TensorRT-LLM with KV-aware routing and EAGLE-style MTP speculative decoding (draft length 3, acceptance length of 2.88). The column for your selected GPU is highlighted:
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th></th><th data-highlight-sku="b200">B200 aggregated agentic</th><th data-highlight-sku="gb200">GB200 aggregated agentic</th><th data-highlight-sku="h200">H200 aggregated agentic</th></tr></thead>
+<tbody>
+<tr><th>GPU per worker</th><td data-highlight-sku="b200">1x B200</td><td data-highlight-sku="gb200">1x GB200</td><td data-highlight-sku="h200">4x H200</td></tr>
+<tr><th>Mode</th><td data-highlight-sku="b200">Aggregated</td><td data-highlight-sku="gb200">Aggregated</td><td data-highlight-sku="h200">Aggregated</td></tr>
+<tr><th>Framework</th><td data-highlight-sku="b200">TensorRT-LLM</td><td data-highlight-sku="gb200">TensorRT-LLM</td><td data-highlight-sku="h200">TensorRT-LLM</td></tr>
+<tr><th>Precision</th><td data-highlight-sku="b200">NVFP4 + FP8 KV</td><td data-highlight-sku="gb200">NVFP4 + FP8 KV</td><td data-highlight-sku="h200">BF16 + 16-bit KV</td></tr>
+<tr><th>Parallelism</th><td data-highlight-sku="b200">TP1</td><td data-highlight-sku="gb200">TP1</td><td data-highlight-sku="h200">TP4</td></tr>
+<tr><th>Routing</th><td data-highlight-sku="b200">KV-aware</td><td data-highlight-sku="gb200">KV-aware</td><td data-highlight-sku="h200">KV-aware</td></tr>
+<tr><th>Speculative decoding</th><td data-highlight-sku="b200">EAGLE-style MTP</td><td data-highlight-sku="gb200">EAGLE-style MTP</td><td data-highlight-sku="h200">Not enabled; not yet verified</td></tr>
+<tr><th>Context length</th><td data-highlight-sku="b200">256K</td><td data-highlight-sku="gb200">256K</td><td data-highlight-sku="h200">256K</td></tr>
+<tr><th>KV cache offloading</th><td data-highlight-sku="b200">TensorRT-LLM managed</td><td data-highlight-sku="gb200">TensorRT-LLM managed</td><td data-highlight-sku="h200">TensorRT-LLM managed</td></tr>
+</tbody>
+</table>
+</div>
+
+## Limitations
+
+- MTP support has not been verified on H200 and is not enabled in the H200 deployment.
+- Audio is not supported by the model.
+- For streaming responses with multimodal inputs, the HTTP status code can be misreported. Newer Dynamo versions fix this by setting `DYN_HTTP_PRE_COMMIT_ERROR_PEEK_MS`, for example to `500`.
+- Some video codecs, including AV1, are not included in the runtime image. Extend the image when those codecs are required.
+- `media_io_kwargs` applies only when frontend decoding is enabled. When frontend decoding is disabled, the frameworks do not receive it correctly.
+- Multimodal items support public URLs only.
+- `reasoning_effort` only enables or disables reasoning because the Gemma-4-31B chat template does not support finer levels.
+- On the MTP-enabled B200 and GB200 variants, one-model speculative decoding does not support `min_p` or `min_tokens`; it rejects `frequency_penalty`, `presence_penalty`, and `repetition_penalty`. Greedy decoding (`temperature=0`) also rejects `n > 1` and `best_of > 1`.
+- This recipe supports only chat-type endpoints: `/v1/chat/completions` and `/v1/responses`.
+
+## Source
+
+- Source READMEs: [Gemma-4-31B recipe](https://github.com/ai-dynamo/dynamo/tree/main/recipes/gemma4-31b/) and [benchmark workflow](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/perf/README.md)
+- Deploy manifests: [B200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/trtllm/agg-b200-agentic/deploy.yaml), [GB200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/trtllm/agg-gb200-agentic/deploy.yaml), and [H200](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/trtllm/agg-h200-agentic/deploy.yaml)
+- Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/perf/perf.yaml)
+- Setup assets: [model-cache.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/model-cache/model-cache.yaml) and [model-download.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/gemma4-31b/model-cache/model-download.yaml)

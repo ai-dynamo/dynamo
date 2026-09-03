@@ -44,7 +44,7 @@ Internal responsibilities
    ``observations.fpm``.
 4. **PipelineOutcome → PlannerEffects projection**:
    Reads the orchestrator's ``final_proposal.targets``, detects "no
-   change" against ``worker_counts``, applies final min_endpoint / GPU
+   change" against ``worker_counts``, applies final component minimum / GPU
    budget invariants, and projects to
    ``PlannerEffects.scale_to`` and fills diagnostics from the shared
    scaling state.
@@ -63,12 +63,15 @@ import logging
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from dynamo.common.forward_pass_metrics import encode as _encode_fpm_record
+from dynamo.planner.config.planner_config import resolve_min_endpoint
 
 if TYPE_CHECKING:
     import grpc.aio
 
 from dynamo.planner.core.budget import (
     apply_power_budget,
+    bounds_for_total,
+    compute_tolerance,
     proportional_clamp_pair,
     proportional_clamp_single,
 )
@@ -928,17 +931,71 @@ class OrchestratorEngineAdapter:
 
         current_p = worker_counts.ready_num_prefill
         current_d = worker_counts.ready_num_decode
+        mode = self._config.mode
+        prefill_min_endpoint = resolve_min_endpoint(self._config, "prefill")
+        decode_min_endpoint = resolve_min_endpoint(self._config, "decode")
 
+        def _role_scaling(
+            current: Optional[int], expected: Optional[int], in_progress: bool
+        ) -> bool:
+            return in_progress or (
+                current is not None and expected is not None and current != expected
+            )
+
+        deployment_scaling = _role_scaling(
+            current_p,
+            worker_counts.expected_num_prefill,
+            worker_counts.prefill_scaling_in_progress,
+        ) or _role_scaling(
+            current_d,
+            worker_counts.expected_num_decode,
+            worker_counts.decode_scaling_in_progress,
+        )
+        gpu_budget_reconcile = (
+            not deployment_scaling and self._gpu_budget_reconcile_needed(worker_counts)
+        )
+        prefill_floor_needed = (
+            mode in ("disagg", "prefill")
+            and not deployment_scaling
+            and current_p is not None
+            and current_p < prefill_min_endpoint
+        )
+        decode_floor_needed = (
+            mode in ("disagg", "decode", "agg")
+            and not deployment_scaling
+            and current_d is not None
+            and current_d < decode_min_endpoint
+        )
+        floor_reconcile = mode == "disagg" and (
+            prefill_floor_needed or decode_floor_needed
+        )
+        if prefill_floor_needed:
+            num_p = max(num_p or 0, prefill_min_endpoint)
+        if decode_floor_needed:
+            num_d = max(num_d or 0, decode_min_endpoint)
+
+        prefill_key = ComponentKey(sub_component_type="prefill")
+        decode_key = ComponentKey(sub_component_type="decode")
+        prefill_proposed = prefill_key in outcome.proposed_components
+        decode_proposed = decode_key in outcome.proposed_components
         if self._config.enable_power_awareness:
             # Restore the explicit PROPOSE-stage mask before the final budget
             # boundary. Omitted roles are still charged via ``current_*`` inside
-            # the clamps, but can never become emitted targets.
-            if ComponentKey(sub_component_type="prefill") not in (
-                outcome.proposed_components
+            # the clamps, but can never become emitted targets. A disaggregated
+            # floor repair temporarily keeps both roles adjustable so the paired
+            # GPU/power clamps can first shrink a peer that occupies the budget.
+            if (
+                not prefill_proposed
+                and not prefill_floor_needed
+                and not floor_reconcile
+                and not gpu_budget_reconcile
             ):
                 num_p = None
-            if ComponentKey(sub_component_type="decode") not in (
-                outcome.proposed_components
+            if (
+                not decode_proposed
+                and not decode_floor_needed
+                and not floor_reconcile
+                and not gpu_budget_reconcile
             ):
                 num_d = None
             if num_p is None and num_d is None:
@@ -946,10 +1003,29 @@ class OrchestratorEngineAdapter:
         else:
             p_unchanged = (num_p is None) or (num_p == current_p)
             d_unchanged = (num_d is None) or (num_d == current_d)
-            if p_unchanged and d_unchanged:
+            if p_unchanged and d_unchanged and not gpu_budget_reconcile:
                 return None
 
         num_p, num_d = self._apply_final_budget(num_p, num_d, worker_counts)
+
+        if floor_reconcile:
+            # Drop unchanged merged-baseline echoes after a paired clamp. A peer
+            # that was actually reduced to make room for the floor remains an
+            # emitted target; an unchanged peer must not cancel its own rollout.
+            if (
+                num_p is not None
+                and num_p == current_p
+                and not prefill_proposed
+                and not prefill_floor_needed
+            ):
+                num_p = None
+            if (
+                num_d is not None
+                and num_d == current_d
+                and not decode_proposed
+                and not decode_floor_needed
+            ):
+                num_d = None
 
         if self._config.enable_power_awareness:
             # Suppress only a proven stable no-op. During a rollout ``expected``
@@ -970,6 +1046,44 @@ class OrchestratorEngineAdapter:
                 return None
 
         return ScalingDecision(num_prefill=num_p, num_decode=num_d)
+
+    def _gpu_budget_reconcile_needed(self, worker_counts: WorkerCounts) -> bool:
+        min_gpus = self._config.min_gpu_budget
+        max_gpus = self._config.max_gpu_budget
+        if min_gpus < 0 and max_gpus < 0:
+            return False
+
+        mode = self._config.mode
+        if mode == "prefill":
+            components = [
+                (worker_counts.ready_num_prefill, self._capabilities.prefill),
+            ]
+        elif mode in ("decode", "agg"):
+            components = [(worker_counts.ready_num_decode, self._capabilities.decode)]
+        elif mode == "disagg":
+            components = [
+                (worker_counts.ready_num_prefill, self._capabilities.prefill),
+                (worker_counts.ready_num_decode, self._capabilities.decode),
+            ]
+        else:
+            return False
+
+        total_gpus = 0
+        gpu_costs: list[int] = []
+        for replicas, capabilities in components:
+            if replicas is None or capabilities is None:
+                return False
+            gpu_cost = capabilities.resolved_gpu_cost_per_replica
+            if gpu_cost is None or gpu_cost <= 0:
+                return False
+            total_gpus += replicas * gpu_cost
+            gpu_costs.append(gpu_cost)
+
+        tolerance = (
+            compute_tolerance(gpu_costs) if min_gpus >= 0 and max_gpus >= 0 else 0
+        )
+        in_bounds, _ = bounds_for_total(total_gpus, min_gpus, max_gpus, tolerance)
+        return not in_bounds
 
     def _apply_final_budget(
         self,
@@ -1097,7 +1211,8 @@ class OrchestratorEngineAdapter:
             p_watts,
             d_watts,
             budget,
-            self._config.min_endpoint,
+            resolve_min_endpoint(self._config, "prefill"),
+            resolve_min_endpoint(self._config, "decode"),
         )
         if reason is not None and (new_p, new_d) != (num_p, num_d):
             gpu_then_power = ""
@@ -1142,7 +1257,8 @@ class OrchestratorEngineAdapter:
         ``max_gpu_budget``. Power-off disagg keeps the historical joint clamp
         and discards the unproposed role's result.
         """
-        min_endpoint = self._config.min_endpoint
+        prefill_min_endpoint = resolve_min_endpoint(self._config, "prefill")
+        decode_min_endpoint = resolve_min_endpoint(self._config, "decode")
         min_gpus = self._config.min_gpu_budget
         max_gpus = self._config.max_gpu_budget
         mode = self._config.mode
@@ -1150,12 +1266,15 @@ class OrchestratorEngineAdapter:
         def clamp_single(component: str, replicas: Optional[int]) -> Optional[int]:
             if replicas is None:
                 return None
+            min_endpoint = (
+                prefill_min_endpoint if component == "prefill" else decode_min_endpoint
+            )
             caps = (
                 self._capabilities.prefill
                 if component == "prefill"
                 else self._capabilities.decode
             )
-            gpu = caps.num_gpu if caps else None
+            gpu = caps.resolved_gpu_cost_per_replica if caps else None
             if gpu is None:
                 return max(replicas, min_endpoint)
             return proportional_clamp_single(
@@ -1184,24 +1303,25 @@ class OrchestratorEngineAdapter:
 
         p_caps = self._capabilities.prefill
         d_caps = self._capabilities.decode
-        p_gpu = p_caps.num_gpu if p_caps else None
-        d_gpu = d_caps.num_gpu if d_caps else None
+        p_gpu = p_caps.resolved_gpu_cost_per_replica if p_caps else None
+        d_gpu = d_caps.resolved_gpu_cost_per_replica if d_caps else None
         if p_gpu is None or d_gpu is None:
             return (
-                max(base_p, min_endpoint) if proposed_p else None,
-                max(base_d, min_endpoint) if proposed_d else None,
+                max(base_p, prefill_min_endpoint) if proposed_p else None,
+                max(base_d, decode_min_endpoint) if proposed_d else None,
             )
 
         # Both roles proposed: joint proportional clamp (unchanged).
         if proposed_p and proposed_d:
             clamped_p, clamped_d = proportional_clamp_pair(
-                max(base_p, min_endpoint),
-                max(base_d, min_endpoint),
+                max(base_p, prefill_min_endpoint),
+                max(base_d, decode_min_endpoint),
                 p_gpu,
                 d_gpu,
                 min_gpus,
                 max_gpus,
-                min_endpoint,
+                prefill_min_endpoint,
+                decode_min_endpoint,
             )
             return clamped_p, clamped_d
 
@@ -1225,11 +1345,11 @@ class OrchestratorEngineAdapter:
                     if min_gpus < 0 or (min_gpus - fixed_gpus) <= 0
                     else (min_gpus - fixed_gpus)
                 )
-                desired_p = max(base_p, min_endpoint)
+                desired_p = max(base_p, prefill_min_endpoint)
                 # When the fixed peer alone meets/exceeds the ceiling,
                 # proportional_clamp_single would return 0 (infeasible). Hold
                 # at ready instead — never emit a spurious scale-to-zero.
-                if residual_max >= 0 and residual_max < min_endpoint * p_gpu:
+                if residual_max >= 0 and residual_max < prefill_min_endpoint * p_gpu:
                     if ready_p is None:
                         return None, None
                     return min(desired_p, ready_p), None
@@ -1239,7 +1359,7 @@ class OrchestratorEngineAdapter:
                         p_gpu,
                         residual_min,
                         residual_max,
-                        min_endpoint,
+                        prefill_min_endpoint,
                     ),
                     None,
                 )
@@ -1251,8 +1371,8 @@ class OrchestratorEngineAdapter:
                 if min_gpus < 0 or (min_gpus - fixed_gpus) <= 0
                 else (min_gpus - fixed_gpus)
             )
-            desired_d = max(base_d, min_endpoint)
-            if residual_max >= 0 and residual_max < min_endpoint * d_gpu:
+            desired_d = max(base_d, decode_min_endpoint)
+            if residual_max >= 0 and residual_max < decode_min_endpoint * d_gpu:
                 if ready_d is None:
                     return None, None
                 return None, min(desired_d, ready_d)
@@ -1263,18 +1383,19 @@ class OrchestratorEngineAdapter:
                     d_gpu,
                     residual_min,
                     residual_max,
-                    min_endpoint,
+                    decode_min_endpoint,
                 ),
             )
 
         # Power off: historical joint clamp, then discard the unproposed role.
         clamped_p, clamped_d = proportional_clamp_pair(
-            max(base_p, min_endpoint),
-            max(base_d, min_endpoint),
+            max(base_p, prefill_min_endpoint),
+            max(base_d, decode_min_endpoint),
             p_gpu,
             d_gpu,
             min_gpus,
             max_gpus,
-            min_endpoint,
+            prefill_min_endpoint,
+            decode_min_endpoint,
         )
         return clamped_p if proposed_p else None, clamped_d if proposed_d else None

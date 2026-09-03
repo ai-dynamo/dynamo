@@ -28,7 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -41,7 +41,7 @@ type dgdScalingAdaptersReconciler struct {
 
 func newDGDScalingAdaptersReconciler(
 	kubeClient client.Client,
-	recorder record.EventRecorder,
+	recorder events.EventRecorder,
 ) *dgdScalingAdaptersReconciler {
 	return &dgdScalingAdaptersReconciler{
 		dgdResourceSyncer: newDGDResourceSyncer(kubeClient, recorder),
@@ -82,8 +82,10 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 			if r.recorder != nil {
 				r.recorder.Eventf(
 					dgd,
+					adapter,
 					corev1.EventTypeNormal,
 					"AdapterDeleted",
+					"Delete",
 					"Deleted scaling adapter %s for component %s",
 					adapterName,
 					componentName,
@@ -123,8 +125,10 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 			if r.recorder != nil {
 				r.recorder.Eventf(
 					dgd,
+					adapter,
 					corev1.EventTypeNormal,
 					"AdapterCreated",
+					"Create",
 					"Created scaling adapter %s for component %s",
 					adapterName,
 					componentName,
@@ -135,8 +139,10 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 			if r.recorder != nil {
 				r.recorder.Eventf(
 					dgd,
+					adapter,
 					corev1.EventTypeNormal,
 					"AdapterUpdated",
+					"Update",
 					"Updated scaling adapter %s for component %s",
 					adapterName,
 					componentName,
@@ -175,8 +181,10 @@ func (r *dgdScalingAdaptersReconciler) Reconcile(
 		if r.recorder != nil {
 			r.recorder.Eventf(
 				dgd,
+				adapter,
 				corev1.EventTypeNormal,
 				"AdapterDeleted",
+				"Delete",
 				"Deleted orphaned scaling adapter %s for removed component %s",
 				adapter.Name,
 				componentName,

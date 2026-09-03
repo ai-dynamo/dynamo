@@ -11,7 +11,7 @@
 #        Tested on 4 of 8 GPUs per B200 node.
 #
 # Weights: served from the `model-cache` PVC populated by
-#          `../../model-cache/model-download.yaml`.
+#          `../../model-cache/model-download-fp8.yaml`.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:

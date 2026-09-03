@@ -11,7 +11,12 @@ spec:
     podTemplate:
       spec:
         containers:
-        - envFrom:
+        - args:
+          - -m
+          - dynamo.frontend
+          command:
+          - python3
+          envFrom:
           - secretRef:
               name: hf-token-secret
           image: my-registry/tensorrtllm-runtime:my-tag
@@ -59,6 +64,7 @@ spec:
           - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
           - --disaggregation-mode
           - prefill
+          - --publish-kv-events
           command:
           - python3
           - -m

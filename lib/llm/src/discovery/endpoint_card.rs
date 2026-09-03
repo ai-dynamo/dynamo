@@ -60,6 +60,7 @@ pub async fn wait_for_endpoint_model_card(
                     };
                     return Some(card);
                 }
+                Ok(DiscoveryEvent::ModelTaintsUpdated(_)) => {}
                 Ok(DiscoveryEvent::Removed(_)) => {}
                 Err(e) => {
                     tracing::debug!(

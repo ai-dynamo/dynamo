@@ -5,11 +5,6 @@ title: Sweeper Tutorial
 subtitle: Configure, execute, and inspect a replay-backed search
 ---
 
-<!--
-Generated from `aisimulate/docs/sweeper/tutorial.md` by `docs/fern/scripts/sync_aisimulate_docs.py`.
-Edit the canonical source instead of this Fern copy.
--->
-
 > [!WARNING]
 > **Experimental.** Sweeper's API and search behavior may change without a standard deprecation
 > period.

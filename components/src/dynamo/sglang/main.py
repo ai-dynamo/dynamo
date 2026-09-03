@@ -3,18 +3,21 @@
 
 import asyncio
 import logging
+import os
 import sys
 
 import uvloop
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
 )
 from dynamo.common.utils.runtime import create_runtime
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sglang._compat import override_server_args
 from dynamo.sglang.args import parse_args
 from dynamo.sglang.init_diffusion import (
     init_image_diffusion,
@@ -41,10 +44,17 @@ async def worker(argv: list[str] | None = None):
     config = await parse_args(argv)
     dump_config(config.dynamo_args.dump_config_to, config)
 
-    if config.server_args.load_format == "gms":
+    if (
+        config.server_args.load_format == "gms"
+        and os.environ.get("DYN_GMS_USE_V1") != "true"
+    ):
         from gpu_memory_service.integrations.sglang import setup_gms
 
-        config.server_args.load_format = setup_gms(config.server_args)
+        override_server_args(
+            config.server_args,
+            "dynamo.gms",
+            load_format=setup_gms(config.server_args),
+        )
 
     # Snapshot mode: engine must be created before runtime so CRIU captures no
     # NATS/etcd connections.
@@ -66,6 +76,12 @@ async def worker(argv: list[str] | None = None):
         request_plane=dynamo_args.request_plane,
         event_plane=dynamo_args.event_plane,
     )
+
+    # Keep the flock alive for process lifetime. Linux releases it on exit.
+    if snapshot_controller is not None:
+        _failover_lock = await elect_and_wake(
+            snapshot_controller.pause_controller, runtime
+        )
 
     run_deferred_handlers = install_graceful_shutdown(
         loop, runtime, shutdown_endpoints, shutdown_event

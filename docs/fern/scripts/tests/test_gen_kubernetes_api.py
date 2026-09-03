@@ -44,8 +44,12 @@ EXPECTED_PACKAGES = (
     "operator.config.dynamo.nvidia.com/v1alpha1",
 )
 EXPECTED_TYPE_COUNTS = {
-    "nvidia.com/v1alpha1": 83,
-    "nvidia.com/v1beta1": 66,
+    # Excludes PodSnapshot, PodSnapshotContent, and their 8 related sub-types
+    # (PodReference, PodSnapshotSource/Spec/Status,
+    # PodSnapshotContentSource/Spec/Status, PodSnapshotReference), which are
+    # owned by github.com/ai-dynamo/snapshot.
+    "nvidia.com/v1alpha1": 75,
+    "nvidia.com/v1beta1": 69,
     "operator.config.dynamo.nvidia.com/v1alpha1": 32,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
@@ -121,9 +125,9 @@ def test_each_package_type_count_matches_the_baseline(
     package_name: str,
     expected: int,
 ) -> None:
-    """The compact index pins the exact per-package type counts (83 / 66 /
-    32). Any drift from the tracked upstream API surface is a scope change
-    and must be reviewed as one."""
+    """The compact index pins the exact per-package type counts in
+    EXPECTED_TYPE_COUNTS. Any drift from the tracked upstream API surface is
+    a scope change and must be reviewed as one."""
     by_name = {pkg.name: pkg for pkg in reference.packages}
     package = by_name[package_name]
     assert (
@@ -373,6 +377,29 @@ def test_generator_writes_the_mdx_page(workspace: Path) -> None:
     assert (
         fern / "pages" / "reference" / "kubernetes-api" / "full-api-reference.mdx"
     ).is_file()
+
+
+def test_raw_reference_omits_dgd_only_fields_from_standalone_dcd_docs(
+    reference: kubernetes_api_discovery.KubernetesReference,
+) -> None:
+    """The generated Markdown must match the post-processed standalone DCD schema."""
+    for package_name in ("nvidia.com/v1alpha1", "nvidia.com/v1beta1"):
+        package = next(p for p in reference.packages if p.name == package_name)
+        by_name = {type_.name: type_ for type_ in package.types}
+        dcd = by_name["DynamoComponentDeploymentSpec"]
+        assert "providerOverride" not in {field.name for field in dcd.fields}
+        dcd_multinode = next(field for field in dcd.fields if field.name == "multinode")
+        assert dcd_multinode.type == "object"
+        assert "`leader` and `worker` are DGD-only" in dcd_multinode.description
+        for type_name in (
+            "DynamoComponentDeploymentSharedSpec",
+            "MultinodeSpec",
+            "MultinodeRoleSpec",
+            "ProviderOverride",
+        ):
+            assert "DynamoComponentDeploymentSpec" not in {
+                ref.name for ref in by_name[type_name].appears_in
+            }
 
 
 def test_check_mode_returns_zero_on_fresh_outputs(workspace: Path) -> None:
