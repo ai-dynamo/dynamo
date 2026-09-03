@@ -3733,13 +3733,11 @@ class InstrumentedScheduler(AsyncScheduler):
             req = self.requests.get(req_id)
             if req:
                 if req_id in kvwarm_borrowed:
-                    # KVWARM shadows borrow chain blocks; a manager free would wrongly
-                    # return the chain's blocks to the pool.
+                    # Shadows are registered with the managers: freeing them
+                    # drops their shared-prefix references (the chain keeps
+                    # its own) and returns only the shadow-owned tail.
                     kvwarm_borrowed.discard(req_id)
-                    self.finished_req_ids.add(req_id)
-                    del self.requests[req_id]
-                    continue
-                self.kv_cache_manager.free(req)
+                self._kvwarm_release_request(req)
                 self.finished_req_ids.add(req_id)
                 del self.requests[req_id]
         running = self.running  # type: ignore[has-type]
@@ -4635,7 +4633,14 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
                 vanished.append(req_id)
                 continue
-            if req.num_computed_tokens >= len(self._kvwarm_chain_prompts[req_id]):
+            if (
+                req.num_computed_tokens >= len(self._kvwarm_chain_prompts[req_id])
+                and getattr(req, "num_output_placeholders", 0) == 0
+            ):
+                # Async scheduling advances num_computed_tokens when a step is
+                # scheduled, not when its output lands; wait for the in-flight
+                # tokens to drain before parking so no shadow reads KV that is
+                # still being written.
                 if any(r.request_id == req_id for r in self.running):
                     self.running = [
                         r for r in self.running if r.request_id != req_id
@@ -4687,7 +4692,7 @@ class InstrumentedScheduler(AsyncScheduler):
         for req_id in getattr(self, "_kvwarm_chain_ids", []):
             req = self.requests.pop(req_id, None)
             if req is not None:
-                self.kv_cache_manager.free(req)
+                self._kvwarm_release_request(req)
                 self.finished_req_ids.add(req_id)
         self.running = [
             r
@@ -4724,27 +4729,89 @@ class InstrumentedScheduler(AsyncScheduler):
             for i, injected in enumerate(injected_lengths)
         )
 
+    def _kvwarm_release_request(self, req) -> None:
+        """Return a benchmark request's blocks through the scheduler's own
+        free path so deferred-free fences (in-flight GPU steps) are honored;
+        older schedulers without the fence free immediately."""
+        free_fenced = getattr(self, "_free_request_blocks", None)
+        if callable(free_fenced):
+            free_fenced(req)
+        else:
+            self.kv_cache_manager.free(req)
+
+    def _kvwarm_register_shadow(
+        self, req_id: str, chain_id: str, ctx_len: int, headroom: int
+    ) -> tuple[tuple[list[int], ...], list[int]]:
+        """Register a measurement shadow with the KV-cache managers.
+
+        The shadow shares the chain's full prefix blocks (reference-counted,
+        never written) and owns private tail blocks for every position it
+        writes (the admission token plus ``headroom`` steady steps). The tail
+        is a copy-on-write fork of the chain's blocks when the manager offers
+        CoW; otherwise it is zero-filled (the few sub-block slots below
+        ``ctx_len`` then read zeros -- measurement-local, timing-neutral).
+        Returns the shadow's block table per group and the block ids to zero.
+
+        Everything here runs in the untimed admission window; the measured
+        steady steps allocate nothing.
+        """
+        manager = self.kv_cache_manager
+        block_pool = manager.block_pool
+        managers = manager.coordinator.single_type_managers
+        table: list[list[int]] = []
+        zero_ids: list[int] = []
+        for mgr in managers:
+            chain_blocks = list(mgr.req_to_blocks[chain_id])
+            bs = int(
+                getattr(mgr, "block_size", getattr(self.cache_config, "block_size", 16))
+            )
+            n_shared = ctx_len // bs
+            n_total = -(-(ctx_len + 1 + headroom) // bs)
+            if n_total > len(chain_blocks):
+                raise RuntimeError(
+                    f"KVWARM: chain {chain_id} too shallow for shadow {req_id}: "
+                    f"needs {n_total} blocks, has {len(chain_blocks)}"
+                )
+            shared = chain_blocks[:n_shared]
+            tail_src = chain_blocks[n_shared:n_total]
+            block_pool.touch(shared)
+            fresh = block_pool.get_new_blocks(len(tail_src))
+            apply_cow = getattr(mgr, "_apply_cow", None)
+            if callable(apply_cow):
+                mgr.req_to_blocks[req_id] = shared + tail_src
+                for offset, (src, dst) in enumerate(zip(tail_src, fresh)):
+                    apply_cow(req_id, n_shared + offset, src, dst)
+            else:
+                mgr.req_to_blocks[req_id] = shared + fresh
+                zero_ids.extend(b.block_id for b in fresh)
+            cached = getattr(mgr, "num_cached_block", None)
+            if isinstance(cached, dict):
+                # The shared prefix is already hashed by the chain; only the
+                # shadow-owned (salted) tail may be cached under its own hash.
+                cached[req_id] = n_shared
+            table.append([b.block_id for b in mgr.req_to_blocks[req_id]])
+        return tuple(table), zero_ids
+
     def _kvwarm_inject_borrowed(self, context_lengths) -> "SchedulerOutput":
         """Real-content counterpart of _bench_inject_fake_decode: the prompt is
-        the chain's real token prefix and the block table is the chain's own
-        physical blocks (full table, read-only borrow, zero allocation, no
-        manager registration)."""
+        the chain's real token prefix; the block table shares the chain's
+        prefix blocks and owns a private tail for the write positions (see
+        ``_kvwarm_register_shadow``). Registration happens here, in the
+        untimed admission window."""
         new_reqs_data: list = []
         num_scheduled_tokens: dict = {}
+        zero_ids: list[int] = []
+        headroom = max(2, self._kvwarm_giant_repeats())
         for index, ctx_len in enumerate(context_lengths):
             chain_id = self._kvwarm_chain_ids[index]
             chain_req = self.requests[chain_id]
             chain_tokens = self._kvwarm_chain_prompts[chain_id]
-            block_ids = self.kv_cache_manager.get_block_ids(chain_id)
-            # Borrow only the prefix blocks covering the write positions:
-            # on deep chains the full block table adds measurable per-step
-            # bookkeeping cost to the measured step.
-            _bs = int(getattr(self.cache_config, "block_size", 16))
-            _need_tokens = ctx_len + 1 + max(2, self._kvwarm_giant_repeats())
-            _need_blocks = -(-_need_tokens // _bs) + 1
-            block_ids = tuple(ids[:_need_blocks] for ids in block_ids)
             req_id = f"__bench_{self._bench_seq}"
             self._bench_seq += 1
+            block_ids, req_zero_ids = self._kvwarm_register_shadow(
+                req_id, chain_id, ctx_len, headroom
+            )
+            zero_ids.extend(req_zero_ids)
             prompt = list(chain_tokens[: ctx_len + 1])
             req = Request(
                 request_id=req_id,
@@ -4787,8 +4854,18 @@ class InstrumentedScheduler(AsyncScheduler):
             num_common_prefix_blocks=([0] * self.kv_cache_manager.num_kv_cache_groups),
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=[],
-            new_block_ids_to_zero=None,
+            new_block_ids_to_zero=zero_ids or None,
         )
+        take_copies = getattr(self.kv_cache_manager, "take_kv_cache_block_copies", None)
+        if callable(take_copies):
+            # CoW forks of the chain tails run with this admission step; their
+            # retention refs are released once the step has been processed.
+            copies, retained = take_copies()
+            if copies:
+                output.kv_cache_block_copies = copies
+                release = getattr(self, "_free_cow_retained_blocks", None)
+                if callable(release):
+                    release(retained, getattr(self, "sched_step_seq", 0) + 1)
         if self.connector is not None:
             output.kv_connector_metadata = self.connector.build_connector_meta(output)
         if self.ec_connector is not None:

@@ -4257,3 +4257,113 @@ def test_kvwarm_step_busy_stops_building_after_soft_timeout():
     assert InstrumentedScheduler._kvwarm_step_busy(stub) is False
     stub._kvwarm_shed_chains.assert_called_once_with()
     stub._kvwarm_start_stage.assert_not_called()
+
+
+class _FakeBlock:
+    def __init__(self, block_id):
+        self.block_id = block_id
+        self.ref_cnt = 1
+        self.is_null = False
+
+
+class _FakePool:
+    def __init__(self, next_id=1000):
+        self.next_id = next_id
+        self.touched = []
+        self.freed = []
+
+    def touch(self, blocks):
+        self.touched.extend(blocks)
+        for b in blocks:
+            b.ref_cnt += 1
+
+    def get_new_blocks(self, n):
+        out = []
+        for _ in range(n):
+            out.append(_FakeBlock(self.next_id))
+            self.next_id += 1
+        return out
+
+
+class _FakeManager:
+    block_size = 16
+
+    def __init__(self, chain_blocks, cow=True):
+        self.req_to_blocks = {"chain": chain_blocks}
+        self.num_cached_block = {}
+        self.cows = []
+        if cow:
+            self._apply_cow = self._cow
+
+    def _cow(self, req_id, idx, src, dst):
+        assert self.req_to_blocks[req_id][idx] is src
+        self.req_to_blocks[req_id][idx] = dst
+        dst.ref_cnt += 1
+        self.cows.append((src.block_id, dst.block_id))
+
+
+def _shadow_stub(cow=True):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    chain = [_FakeBlock(i) for i in range(10)]  # 160 tokens
+    mgr = _FakeManager(chain, cow=cow)
+    pool = _FakePool()
+    stub.kv_cache_manager = SimpleNamespace(
+        block_pool=pool, coordinator=SimpleNamespace(single_type_managers=[mgr])
+    )
+    stub.cache_config = SimpleNamespace(block_size=16)
+    return stub, mgr, pool, chain
+
+
+def test_kvwarm_shadow_registration_shares_prefix_and_forks_tail_with_cow():
+    stub, mgr, pool, chain = _shadow_stub(cow=True)
+    # ctx=40 -> 2 shared full blocks, writes at 40..43 land in block 2 only
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 40, 3
+    )
+    assert [b.block_id for b in pool.touched] == [0, 1]
+    assert all(chain[i].ref_cnt == 2 for i in range(2))
+    assert chain[2].ref_cnt == 1, "CoW source keeps only the chain's ref"
+    assert mgr.cows == [(2, 1000)]
+    assert table == ([0, 1, 1000],)
+    assert zero_ids == []
+    assert mgr.num_cached_block["shadow"] == 2
+
+
+def test_kvwarm_shadow_registration_zero_fills_tail_without_cow():
+    stub, mgr, pool, chain = _shadow_stub(cow=False)
+    # ctx=47 with headroom 3 -> writes 47..50 span blocks 2 and 3
+    table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
+        stub, "shadow", "chain", 47, 3
+    )
+    assert table == ([0, 1, 1000, 1001],)
+    assert zero_ids == [1000, 1001]
+    assert [b.block_id for b in mgr.req_to_blocks["chain"]] == list(range(10))
+
+
+def test_kvwarm_shadow_registration_rejects_too_shallow_chain():
+    stub, mgr, pool, chain = _shadow_stub()
+    with pytest.raises(RuntimeError, match="too shallow"):
+        InstrumentedScheduler._kvwarm_register_shadow(stub, "shadow", "chain", 158, 3)
+
+
+def test_kvwarm_chain_parks_only_after_in_flight_tokens_drain():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    chain = SimpleNamespace(
+        request_id="chain-a", num_computed_tokens=8, num_output_placeholders=1
+    )
+    stub._kvwarm_chain_ids = ["chain-a"]
+    stub._kvwarm_chain_prompts = {"chain-a": [1] * 8}
+    stub.requests = {"chain-a": chain}
+    stub.running = [chain]
+    stub._kvwarm_building = True
+    stub._kvwarm_stage_batch = 1
+    stub._kvwarm_meta_init = lambda: {"stages": []}
+    # In flight: stays pending, still in running.
+    assert InstrumentedScheduler._kvwarm_monitor_build(stub) is True
+    assert stub._kvwarm_building is True
+    assert stub.running == [chain]
+    # Drained: parks (leaves running) and the stage completes.
+    chain.num_output_placeholders = 0
+    assert InstrumentedScheduler._kvwarm_monitor_build(stub) is True
+    assert stub.running == []
+    assert stub._kvwarm_building is False
