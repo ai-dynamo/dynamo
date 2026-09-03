@@ -21,12 +21,19 @@ Flags:
 
 A 10-second cooldown between launches avoids the vLLM profiling race
 (bug #10643). Tests that fail due to profiling race are retried up to 3 times.
+
+Every child also has a hard deadline of ``timeout + DYN_GPU_PARALLEL_KILL_GRACE_S``
+enforced from this process. ``--timeout`` alone is not enough: pytest-timeout is
+signal-based and cannot interrupt a blocking Rust FFI call, so a child stuck in
+one runs forever and starves every queued test behind it. See
+``_deadline_action``.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -109,6 +116,36 @@ class _GpuState:
     running_count: int = 0
 
 
+def _print(msg: str = "") -> None:
+    """Print to stderr so pytest doesn't capture it."""
+    print(msg, file=sys.stderr, flush=True)
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a positive float from the environment, falling back on junk input."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        _print(f"WARNING: ignoring non-numeric {name}={raw!r}, using {default}")
+        return default
+    if value <= 0:
+        _print(f"WARNING: ignoring non-positive {name}={raw!r}, using {default}")
+        return default
+    return value
+
+
+# Headroom past a test's own --timeout before this process kills the child.
+# pytest-timeout should always fire first and produce a real traceback; this
+# grace only has to cover fixture teardown and output flush. It is a backstop
+# for the case where pytest-timeout cannot fire at all.
+_HARD_KILL_GRACE_S = _env_float("DYN_GPU_PARALLEL_KILL_GRACE_S", 120.0)
+# How long a killed child gets to die from SIGTERM before we escalate.
+_SIGKILL_AFTER_SIGTERM_S = _env_float("DYN_GPU_PARALLEL_SIGKILL_AFTER_S", 15.0)
+
+
 @dataclass
 class _RunningTest:
     """State for a test subprocess currently executing on a GPU."""
@@ -118,11 +155,56 @@ class _RunningTest:
     start_time: float
     captured: list[str] = field(default_factory=list)
     reader_thread: threading.Thread | None = None
+    # Hard-kill bookkeeping; both stay None for a child that exits on its own.
+    term_sent_at: float | None = None
+    kill_sent_at: float | None = None
+
+    @property
+    def deadline(self) -> float:
+        """Monotonic time past which this child is killed unconditionally."""
+        return self.start_time + self.test.timeout + _HARD_KILL_GRACE_S
+
+    @property
+    def hard_killed(self) -> bool:
+        return self.term_sent_at is not None
 
 
-def _print(msg: str = "") -> None:
-    """Print to stderr so pytest doesn't capture it."""
-    print(msg, file=sys.stderr, flush=True)
+def _deadline_action(run_info: _RunningTest, now: float) -> str | None:
+    """Decide what signal a still-running child is owed: None, "term" or "kill".
+
+    Split out from the scheduling loop so the escalation state machine is
+    testable without spawning processes.
+    """
+    if run_info.kill_sent_at is not None:
+        return None  # already SIGKILLed; nothing left to escalate to
+    if run_info.term_sent_at is not None:
+        if now - run_info.term_sent_at >= _SIGKILL_AFTER_SIGTERM_S:
+            return "kill"
+        return None
+    if now >= run_info.deadline:
+        return "term"
+    return None
+
+
+def _signal_group(run_info: _RunningTest, sig: int) -> None:
+    """Signal the child's whole process group.
+
+    Children are spawned with ``start_new_session=True``, so each is its own
+    process-group leader and every engine process it starts inherits that
+    group. Signalling the group is what actually frees the GPU -- killing only
+    the pytest child would leave its SGLang/vLLM workers holding VRAM and
+    poison every test scheduled after it.
+    """
+    proc = run_info.proc
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except OSError:
+        # Group already gone, or os.killpg unavailable: fall back to the direct
+        # child so the kill still happens.
+        try:
+            proc.send_signal(sig)
+        except OSError:
+            pass
 
 
 def _fmt_req(test: _TestEntry) -> str:
@@ -162,6 +244,66 @@ def _parse_junit_skipped(junit_path: str) -> str | None:
         if skip_el is not None:
             return skip_el.get("message", "skipped")
     return None
+
+
+def _junit_path_for(test: _TestEntry) -> str:
+    """Per-child JUnit XML path. Must match between launch and completion."""
+    safe_name = test.name.replace("/", "_").replace("::", "__")
+    return os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
+
+
+def _junit_ids(test_id: str) -> tuple[str, str]:
+    """Split a pytest node id into (classname, name) the way pytest's own
+    junitxml plugin does: dotted module path (plus class, if any) and the
+    trailing test name with its parametrization."""
+    path, _, rest = test_id.partition("::")
+    module = path.removesuffix(".py").replace("/", ".").replace("\\", ".")
+    parts = [p for p in rest.split("::") if p]
+    if not parts:
+        return module, path
+    classname = ".".join([module, *parts[:-1]])
+    return classname, parts[-1]
+
+
+def _write_timeout_junit(
+    junit_path: str, test: _TestEntry, duration: float, message: str
+) -> None:
+    """Write a minimal failing JUnit report for a child we had to kill.
+
+    A killed child never reaches pytest's own junitxml writer, so without this
+    the test disappears from the combined XML entirely and the stage fails with
+    no attributable test.
+    """
+    import xml.etree.ElementTree as ET
+
+    classname, name = _junit_ids(test.id)
+    suite = ET.Element(
+        "testsuite",
+        {
+            "name": "pytest",
+            "tests": "1",
+            "errors": "0",
+            "failures": "1",
+            "skipped": "0",
+            "time": f"{duration:.3f}",
+        },
+    )
+    case = ET.SubElement(
+        suite,
+        "testcase",
+        {"classname": classname, "name": name, "time": f"{duration:.3f}"},
+    )
+    failure = ET.SubElement(
+        case, "failure", {"message": message, "type": "OrchestratorTimeout"}
+    )
+    failure.text = message
+    try:
+        os.makedirs(os.path.dirname(junit_path), exist_ok=True)
+        ET.ElementTree(suite).write(
+            junit_path, encoding="unicode", xml_declaration=True
+        )
+    except OSError as exc:
+        _print(f"WARNING: could not write timeout JUnit XML {junit_path}: {exc}")
 
 
 def _aggregate_junit_xml(junit_dir: str) -> str | None:
@@ -715,7 +857,7 @@ def run_parallel(
         parent_cov_file = env.get("COVERAGE_FILE")
         if parent_cov_file:
             env["COVERAGE_FILE"] = f"{parent_cov_file}.w{test.w_id}"
-        junit_path = os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
+        junit_path = _junit_path_for(test)
         has_tb = extra_pytest_args and any(
             a.startswith("--tb") for a in extra_pytest_args
         )
@@ -743,12 +885,18 @@ def run_parallel(
             child_basetemp = os.path.join(parent_basetemp, f"w{test.w_id}-{safe_name}")
             cmd.extend(["--basetemp", child_basetemp])
 
+        # start_new_session puts the child in its own process group so that a
+        # deadline kill can take out the engine processes it spawned too (see
+        # _signal_group). The trade-off is that Ctrl-C no longer propagates to
+        # children automatically -- run_parallel's KeyboardInterrupt handler
+        # signals the groups explicitly instead.
         proc = subprocess.Popen(
             cmd,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
         run_info = _RunningTest(proc=proc, test=test, start_time=time.monotonic())
         w_id = test.w_id
@@ -764,6 +912,39 @@ def run_parallel(
 
     env_base = os.environ.copy()
 
+    def _on_interrupt(signum, _frame):
+        """Forward Ctrl-C / SIGTERM to the detached child process groups.
+
+        start_new_session means children no longer share our process group, so
+        without this an interrupt would leave engine processes holding the GPU.
+        """
+        live = list(running.values())
+        _print(f"\nReceived signal {signum} — terminating {len(live)} running test(s)")
+        for ri in live:
+            _signal_group(ri, signal.SIGTERM)
+        grace_until = time.monotonic() + _SIGKILL_AFTER_SIGTERM_S
+        while time.monotonic() < grace_until:
+            if all(ri.proc.poll() is not None for ri in live):
+                break
+            time.sleep(0.2)
+        for ri in live:
+            if ri.proc.poll() is None:
+                _signal_group(ri, signal.SIGKILL)
+        if signum == signal.SIGINT:
+            # Keep normal Ctrl-C semantics for the caller (pytest prints its own
+            # KeyboardInterrupt summary).
+            raise KeyboardInterrupt
+        # Otherwise die from the signal so our exit status stays honest.
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    prev_handlers: dict[int, object] = {}
+    for _sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            prev_handlers[_sig] = signal.signal(_sig, _on_interrupt)
+        except (ValueError, OSError):
+            pass  # not the main thread; nothing to restore
+
     while pending or running:
         now = time.monotonic()
 
@@ -771,6 +952,32 @@ def run_parallel(
         for w_id in list(running.keys()):
             run_info = running[w_id]
             rc = run_info.proc.poll()
+            if rc is None:
+                # --- Hard-kill backstop ---
+                # The child's own --timeout is signal-based and cannot fire while
+                # it is blocked inside an uninterruptible FFI call, so a hung
+                # child would otherwise sit here until the CI step timeout and
+                # starve every queued test behind it. Enforce the deadline from
+                # out here, where nothing the child does can block us.
+                action = _deadline_action(run_info, now)
+                if action == "term":
+                    run_info.term_sent_at = now
+                    _print(
+                        f"[w{w_id}] {run_info.test.name} TIMEOUT after "
+                        f"{now - run_info.start_time:.0f}s "
+                        f"(timeout={int(run_info.test.timeout)}s "
+                        f"+ {int(_HARD_KILL_GRACE_S)}s grace) — "
+                        f"sending SIGTERM to its process group"
+                    )
+                    _signal_group(run_info, signal.SIGTERM)
+                elif action == "kill":
+                    run_info.kill_sent_at = now
+                    _print(
+                        f"[w{w_id}] {run_info.test.name} did not exit "
+                        f"{int(_SIGKILL_AFTER_SIGTERM_S)}s after SIGTERM — "
+                        f"escalating to SIGKILL"
+                    )
+                    _signal_group(run_info, signal.SIGKILL)
             if rc is not None:
                 if run_info.reader_thread is not None:
                     run_info.reader_thread.join(timeout=5)
@@ -779,8 +986,16 @@ def run_parallel(
                 test = run_info.test
                 gi = test.assigned_gpu
 
-                # Detect retryable init errors (profiling race, OOM at startup)
-                if not passed and test.retries < _MAX_RETRIES:
+                # Detect retryable init errors (profiling race, OOM at startup).
+                # Never retry a child we killed ourselves: its captured output
+                # can contain the -9/-15 health-check markers as a side effect of
+                # our own signal, and retrying a hang just burns another full
+                # timeout+grace.
+                if (
+                    not passed
+                    and test.retries < _MAX_RETRIES
+                    and not run_info.hard_killed
+                ):
                     matched_marker = None
                     for line in run_info.captured:
                         for marker in _RETRYABLE_INIT_MARKERS:
@@ -808,12 +1023,16 @@ def run_parallel(
                 skipped = False
                 skip_reason: str | None = None
                 if passed:
-                    safe_name = test.name.replace("/", "_").replace("::", "__")
-                    junit_path = os.path.join(_JUNIT_DIR, f"{safe_name}.xml")
-                    skip_reason = _parse_junit_skipped(junit_path)
+                    skip_reason = _parse_junit_skipped(_junit_path_for(test))
                     if skip_reason is not None:
                         passed = False
                         skipped = True
+
+                # A killed child never reached pytest's junitxml writer, so
+                # synthesize its record here or it vanishes from the report.
+                if run_info.hard_killed:
+                    passed = False
+                    skipped = False
 
                 # Dump buffered output on failure only (matches pytest behavior).
                 # With -s, output was already streamed live.
@@ -828,6 +1047,17 @@ def run_parallel(
                         if stripped and not stripped.startswith("="):
                             fail_reason = stripped
                             break
+                if run_info.hard_killed:
+                    fail_reason = (
+                        f"killed by the GPU-parallel orchestrator after "
+                        f"{duration:.0f}s: still running at timeout="
+                        f"{int(test.timeout)}s plus {int(_HARD_KILL_GRACE_S)}s grace, "
+                        f"so pytest-timeout never fired — the child was most likely "
+                        f"blocked in an uninterruptible call"
+                    )
+                    _write_timeout_junit(
+                        _junit_path_for(test), test, duration, fail_reason
+                    )
 
                 if skipped:
                     status = "SKIPPED"
@@ -950,6 +1180,9 @@ def run_parallel(
 
         if running or pending:
             time.sleep(1.0)
+
+    for _sig, _prev in prev_handlers.items():
+        signal.signal(_sig, _prev)
 
     # Summary
     wall_time = time.monotonic() - t0
