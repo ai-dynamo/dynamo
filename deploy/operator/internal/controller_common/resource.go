@@ -54,11 +54,6 @@ const (
 	EventReasonOwnershipConflict = "OwnershipConflict"
 )
 
-// OwnershipConflictError indicates that an existing resource is not controlled
-// by the parent attempting to reconcile it.
-//
-// Callers own the lifecycle of the parent resource, so they must persist any
-// status condition and emit any transition event for this error.
 type OwnershipConflictError struct {
 	Cause error
 }

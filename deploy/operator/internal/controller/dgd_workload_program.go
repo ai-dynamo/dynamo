@@ -140,9 +140,13 @@ func (r *workloadProgramResult) Fail(generation int64, reason Reason, err error)
 func (r *workloadProgramResult) applyOwnershipConflict(generation int64, reconcileErr error) {
 	condition := meta.FindStatusCondition(r.Status.Conditions, nvidiacomv1beta1.ConditionTypeOwnershipConflict)
 
+	if condition == nil {
+		return
+	}
+
 	var ownershipConflict *commoncontroller.OwnershipConflictError
 	if !errors.As(reconcileErr, &ownershipConflict) {
-		if reconcileErr == nil && condition != nil && condition.Status == metav1.ConditionTrue {
+		if reconcileErr == nil && condition.Status == metav1.ConditionTrue {
 			meta.SetStatusCondition(&r.Status.Conditions, metav1.Condition{
 				Type:               nvidiacomv1beta1.ConditionTypeOwnershipConflict,
 				Status:             metav1.ConditionFalse,
@@ -154,7 +158,7 @@ func (r *workloadProgramResult) applyOwnershipConflict(generation int64, reconci
 		return
 	}
 
-	wasActive := condition != nil && condition.Status == metav1.ConditionTrue
+	wasActive := condition.Status == metav1.ConditionTrue
 	meta.SetStatusCondition(&r.Status.Conditions, metav1.Condition{
 		Type:               nvidiacomv1beta1.ConditionTypeOwnershipConflict,
 		Status:             metav1.ConditionTrue,
