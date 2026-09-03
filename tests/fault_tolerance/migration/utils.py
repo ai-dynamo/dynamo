@@ -815,9 +815,11 @@ def run_migration_test(
             shared helper's historical backend-agnostic lower-bound behavior.
         expect_drain: Assert the graceful-shutdown contract instead of the
             migration contract: a SIGTERM'd worker finishes the requests it has
-            already admitted, so the request must succeed and every migration
-            counter must be exactly zero. Requires immediate_kill=False and a
-            graceful_shutdown context, and is mutually exclusive with
+            already admitted, so the request must succeed and both migration
+            counters must be exactly zero. The max_seq_len_exceeded counter is
+            not a migration outcome and keeps its usual expectation -- see
+            Step 6. Requires immediate_kill=False and a graceful_shutdown
+            context, and is mutually exclusive with
             expected_ongoing_request_count.
         graceful_shutdown: Optional backend-specific context that initiates
             graceful shutdown before response validation and performs final
@@ -845,7 +847,7 @@ def run_migration_test(
             )
         if expected_ongoing_request_count is not None:
             raise ValueError(
-                "expect_drain already pins every migration counter to zero; "
+                "expect_drain already pins both migration counters to zero; "
                 "pass expected_ongoing_request_count only without it"
             )
 
@@ -940,15 +942,27 @@ def run_migration_test(
     # log strings. `ongoing_request` counts an error from an established
     # stream, including an attempt that cannot retry because migration_limit is
     # zero. It is the structured equivalent of the old "Stream disconnected,
-    # recreating stream" log assertion. `max_seq_len_exceeded` records hitting
-    # the migration seq-len cap. A drain migrates nothing at all, so every
-    # counter must be exactly zero -- lower-bound checks would pass vacuously.
+    # recreating stream" log assertion.
+    #
+    # `max_seq_len_exceeded` is deliberately NOT part of the drain contract. It
+    # is not a migration outcome: RetryManager increments it from ordinary token
+    # accounting in `exceed_max_seq_len` (lib/llm/src/migration.rs), which runs
+    # once at request build time against the prompt and then per response chunk
+    # from `track_response`. No fault, stream break, or migration is involved,
+    # and the counter fires at most once because it zeroes `retries_left`. So a
+    # request that drains perfectly with migration_max_seq_len=1 still records
+    # exactly one seq-cap event, and both arms share the same expectation.
+    expected_max_seq_len_exceeded_count = 1 if migration_max_seq_len == 1 else 0
+
     if expect_drain:
+        # A drain migrates nothing, so both migration counters must be exactly
+        # zero -- under the default lower-bound mode a zero expectation asserts
+        # nothing at all, hence exact_counts=True.
         verify_migration_metrics(
             frontend.frontend_port,
             expected_ongoing_request_count=0,
             expected_new_request_count=0,
-            expected_max_seq_len_exceeded_count=0,
+            expected_max_seq_len_exceeded_count=expected_max_seq_len_exceeded_count,
             exact_counts=True,
         )
         return
@@ -960,6 +974,6 @@ def run_migration_test(
     verify_migration_metrics(
         frontend.frontend_port,
         expected_ongoing_request_count=expected_ongoing_request_count,
-        expected_max_seq_len_exceeded_count=1 if migration_max_seq_len == 1 else 0,
+        expected_max_seq_len_exceeded_count=expected_max_seq_len_exceeded_count,
         exact_counts=exact_metric_counts,
     )
