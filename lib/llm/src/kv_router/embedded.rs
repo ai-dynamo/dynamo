@@ -28,8 +28,9 @@ use dynamo_kv_router::scheduling::{
 };
 use dynamo_kv_router::sequences::{SequenceError, SequenceRequest};
 use dynamo_kv_router::services::selection::{
-    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, OverlapRefreshSource,
-    SelectionHost, SelectionPartition, SelectionService, SelectionServiceBuilder, WorkerRequest,
+    CatalogObserver, CatalogReconciler, HostCache, HostEligibility, HostLoad, HostReplication,
+    HostTelemetry, OverlapRefreshSource, SelectionHost, SelectionPartition, SelectionService,
+    SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource, WorkerRequest,
     WorkerSelectionPolicyRegistry,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
@@ -177,20 +178,28 @@ impl EmbeddedSelection {
             .ensure_partition(key.clone(), args.block_size, args.is_eagle)
             .context("failed to create embedded selection partition")?;
 
-        let feeder = CatalogFeeder {
-            service: Arc::clone(&service),
+        let mut source = RuntimeDiscoverySource {
+            watch: workers_with_configs,
             key,
             block_size: args.block_size,
             is_eagle: args.is_eagle,
-            known: HashMap::new(),
-            status_metrics: super::metrics::RouterWorkerStatusMetrics::from_component(
-                args.endpoint.component(),
-            ),
-            worker_label: args.metric_worker_type,
+            primed: false,
         };
-        feeder
-            .run(workers_with_configs, cancellation_token.child_token())
-            .await;
+        let mut reconciler = CatalogReconciler::new(Arc::clone(service.core())).with_observer(
+            Arc::new(RegisteredGauge {
+                metrics: super::metrics::RouterWorkerStatusMetrics::from_component(
+                    args.endpoint.component(),
+                ),
+                worker_label: args.metric_worker_type,
+            }),
+        );
+        // The current membership is in the catalog before the router serves.
+        if let Some(snapshot) = source.next_snapshot().await
+            && let Err(error) = reconciler.apply(snapshot).await
+        {
+            tracing::warn!(%error, "embedded selection: initial membership reconcile failed");
+        }
+        tokio::spawn(reconciler.run(source, cancellation_token.child_token()));
 
         tracing::info!(
             worker_type = %worker_type,
@@ -326,92 +335,63 @@ impl EmbeddedSelection {
     }
 }
 
-/// Mirrors the runtime-config watch into the partition's worker catalog.
-struct CatalogFeeder {
-    service: Arc<SelectionService>,
+/// The runtime-config watch as worker membership for the partition.
+struct RuntimeDiscoverySource {
+    watch: RuntimeConfigWatch,
     key: RoutingPartitionId,
     block_size: u32,
     is_eagle: bool,
-    known: HashMap<WorkerId, ModelRuntimeConfig>,
-    /// `router_worker_registered` gauge per worker/dp_rank.
-    status_metrics: Arc<super::metrics::RouterWorkerStatusMetrics>,
+    primed: bool,
+}
+
+#[async_trait::async_trait]
+impl WorkerCatalogSource for RuntimeDiscoverySource {
+    async fn next_snapshot(&mut self) -> Option<Vec<WorkerRequest>> {
+        if self.primed {
+            self.watch.changed().await.ok()?;
+        }
+        self.primed = true;
+        let snapshot = self
+            .watch
+            .borrow_and_update()
+            .iter()
+            .map(|(worker_id, config)| {
+                worker_request_from_runtime_config(
+                    *worker_id,
+                    config,
+                    &self.key,
+                    self.block_size,
+                    self.is_eagle,
+                )
+            })
+            .collect();
+        Some(snapshot)
+    }
+}
+
+/// Keeps the per-worker `router_worker_registered` gauge in step with the catalog.
+struct RegisteredGauge {
+    metrics: Arc<super::metrics::RouterWorkerStatusMetrics>,
     worker_label: &'static str,
 }
 
-fn dp_ranks(config: &ModelRuntimeConfig) -> std::ops::Range<u32> {
-    let start = config.data_parallel_start_rank;
-    start..start.saturating_add(config.data_parallel_size.max(1))
+fn dp_ranks(record: &WorkerCatalogRecord) -> std::ops::Range<u32> {
+    let start = record.data_parallel_start_rank.unwrap_or(0);
+    start..start.saturating_add(record.data_parallel_size.unwrap_or(1).max(1))
 }
 
-impl CatalogFeeder {
-    /// Apply the current snapshot, then keep applying changes until cancelled.
-    async fn run(mut self, mut watch: RuntimeConfigWatch, cancel: CancellationToken) {
-        let snapshot = watch.borrow_and_update().clone();
-        self.apply(snapshot).await;
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    changed = watch.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                    }
-                }
-                let snapshot = watch.borrow_and_update().clone();
-                self.apply(snapshot).await;
-            }
-        });
+impl CatalogObserver for RegisteredGauge {
+    fn upserted(&self, record: &WorkerCatalogRecord) {
+        for dp_rank in dp_ranks(record) {
+            self.metrics
+                .set_registered(record.worker_id, dp_rank, self.worker_label);
+        }
     }
 
-    async fn apply(&mut self, snapshot: HashMap<WorkerId, ModelRuntimeConfig>) {
-        let removed: Vec<WorkerId> = self
-            .known
-            .keys()
-            .copied()
-            .filter(|worker_id| !snapshot.contains_key(worker_id))
-            .collect();
-        for worker_id in removed {
-            if let Some(previous) = self.known.remove(&worker_id) {
-                for dp_rank in dp_ranks(&previous) {
-                    self.status_metrics
-                        .remove_worker(worker_id, dp_rank, self.worker_label);
-                }
-            }
-            if let Err(error) = self.service.delete_worker(worker_id).await {
-                tracing::debug!(worker_id, %error, "embedded selection: worker delete skipped");
-            }
-        }
-        for (worker_id, config) in snapshot {
-            if self.known.get(&worker_id) == Some(&config) {
-                continue;
-            }
-            let request = worker_request_from_runtime_config(
-                worker_id,
-                &config,
-                &self.key,
-                self.block_size,
-                self.is_eagle,
-            );
-            match self.service.upsert_worker(request).await {
-                Ok(record) => {
-                    if !record.not_schedulable_reasons.is_empty() {
-                        tracing::warn!(
-                            worker_id,
-                            reasons = ?record.not_schedulable_reasons,
-                            "embedded selection: worker is not schedulable"
-                        );
-                    }
-                    for dp_rank in dp_ranks(&config) {
-                        self.status_metrics
-                            .set_registered(worker_id, dp_rank, self.worker_label);
-                    }
-                    self.known.insert(worker_id, config);
-                }
-                Err(error) => {
-                    tracing::warn!(worker_id, %error, "embedded selection: worker upsert failed");
-                }
-            }
+    fn removed(&self, record: &WorkerCatalogRecord) {
+        for dp_rank in dp_ranks(record) {
+            self.metrics
+                .remove_worker(record.worker_id, dp_rank, self.worker_label);
         }
     }
 }
