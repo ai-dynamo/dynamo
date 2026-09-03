@@ -20,6 +20,18 @@ from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.port_utils import allocate_port, deallocate_port
 from tests.utils.test_output import resolve_test_output_path
 
+# How long to wait for the `sed`/`tee` output pipeline to flush into the log
+# file after the managed process is observed dead. Bounded because a surviving
+# grandchild can hold the child's stdout pipe open indefinitely, which would
+# otherwise let a wedged pipeline hang the whole test run.
+LOG_DRAIN_TIMEOUT_SECONDS = 5.0
+
+# Line budget for the log tail embedded in a raised RuntimeError. Matches the
+# budget `tests/serve/common.py` already uses when it reports a request failure.
+ERROR_LOG_TAIL_LINES = 80
+
+NO_LOGS_CAPTURED = "<no server logs captured>"
+
 
 def check_health_ready(response: requests.Response) -> bool:
     """Return whether an HTTP health response reports a ready component."""
@@ -631,8 +643,45 @@ class ManagedProcess:
         except (OSError, IOError) as e:
             self._logger.warning("Warning: Failed to remove directory %s: %s", path, e)
 
+    def _drain_output_pipeline(self, timeout: float = LOG_DRAIN_TIMEOUT_SECONDS):
+        """Wait, bounded, for the output pipeline to flush into the log file.
+
+        The child's output does not reach ``self._log_path`` directly. It flows
+        through ``sed`` and (when ``display_output`` is set) ``tee``, so at the
+        moment the child is observed dead its final lines -- typically the
+        traceback that explains the death -- may still be sitting in a kernel
+        pipe buffer or in ``tee``'s stdio buffer rather than in the file. Both
+        stages exit once the child's stdout pipe reaches EOF, so waiting for
+        them is what makes the log file complete.
+
+        A process that outlives the child can hold that pipe open, so the wait
+        is bounded and a timeout only degrades the tail, never fails the call.
+        Either stage may be ``None``: ``display_output=False`` leaves
+        ``_tee_proc`` unset, and neither exists before ``_start_process`` runs.
+        """
+        deadline = time.monotonic() + timeout
+        for stage in (self._sed_proc, self._tee_proc):
+            if stage is None:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                stage.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                self._logger.warning(
+                    "Output pipeline did not drain within %.1fs; "
+                    "the captured log may be truncated.",
+                    timeout,
+                )
+                break
+            except OSError as e:
+                self._logger.warning("Error draining output pipeline: %s", e)
+                break
+
     def _log_tail_on_error(self, lines=20):
         """Print the last few lines of the log file when process dies."""
+        self._drain_output_pipeline()
         if self._log_path and os.path.exists(self._log_path):
             try:
                 with open(self._log_path, "r") as f:
@@ -649,19 +698,40 @@ class ManagedProcess:
             except Exception as e:
                 self._logger.warning("Could not read log file: %s", e)
 
-    def _check_process_alive(self, context=""):
-        """Check if the main process is still alive. Raises RuntimeError if dead."""
+    def _check_process_alive(self, context="", *, log_tail_lines=ERROR_LOG_TAIL_LINES):
+        """Check if the main process is still alive. Raises RuntimeError if dead.
+
+        The raised message carries the log path and a bounded tail of the
+        process output, so the reason the process died reaches the pytest short
+        summary and the JUnit XML instead of only the logger stream.
+
+        The first line of that message is deliberately byte-for-byte what it has
+        always been. CI greps and the retryable-marker substring matching in
+        `tests/utils/pytest_parallel_gpu.py` read it, and `log_tail_lines` is
+        keyword-only with a default so every existing caller keeps working.
+        """
         if self.proc and self.proc.poll() is not None:
             returncode = self.proc.returncode
+            context_suffix = f" {context}" if context else ""
             self._logger.error(
                 "Main server process died with exit code %d%s",
                 returncode,
-                f" {context}" if context else "",
+                context_suffix,
             )
             # Try to get last few lines from log for debugging
             self._log_tail_on_error()
+            log_content = self.read_logs()
+            if log_content:
+                log_tail = "".join(
+                    log_content.splitlines(keepends=True)[-log_tail_lines:]
+                ).rstrip()
+            else:
+                log_tail = NO_LOGS_CAPTURED
             raise RuntimeError(
-                f"Main server process exited with code {returncode}{f' {context}' if context else ''}"
+                f"Main server process exited with code {returncode}{context_suffix}\n"
+                f"Log file: {self.log_path}\n"
+                f"Last {log_tail_lines} lines of process output:\n"
+                f"{log_tail}"
             )
 
     def _check_ports(self, timeout):
