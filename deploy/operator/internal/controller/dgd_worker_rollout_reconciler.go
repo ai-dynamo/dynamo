@@ -1420,16 +1420,6 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		return dynamo.RollingUpdateContext{}, err
 	}
 	newWorkerHash := r.activeWorkerHashForDCDGeneration(dgd, desiredHashes)
-	currentHashes := r.currentWorkerHashes(dgd)
-
-	if currentHashes.contains(newWorkerHash) {
-		return dynamo.RollingUpdateContext{
-			NewWorkerHash:                      newWorkerHash,
-			OldWorkerReplicaTargetsByComponent: make(map[string]int32),
-			OldWorkerReplicaTargetsByDCD:       make(map[string]int32),
-			NewWorkerReplicaTargetsByComponent: make(map[string]int32),
-		}, nil
-	}
 
 	oldDCDsByComponent, oldStates, err := r.getOldWorkerDCDsByComponent(ctx, dgd, newWorkerHash)
 	if err != nil {
