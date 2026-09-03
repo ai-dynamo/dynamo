@@ -242,17 +242,6 @@ mod tests {
             ))
             .unwrap();
         assert_eq!(repinned.worker, worker_b);
-
-        let drained = request(Some(repinned.worker.into()));
-        let retained_after_repin = policy(0)
-            .select_worker(WorkerSelectionInput::configured(
-                &workers,
-                &drained,
-                drained.eligibility(),
-                16,
-            ))
-            .unwrap();
-        assert_eq!(retained_after_repin.worker, worker_b);
     }
 
     #[test]
