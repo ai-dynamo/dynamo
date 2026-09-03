@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Private process entry point for Dynamo integration tests and managed templates."""
+"""Compatibility entry point for 1.5 deployments using the former private module."""
 
 from .main import main
 
