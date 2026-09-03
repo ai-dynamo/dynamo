@@ -8382,6 +8382,99 @@ mod tests {
         assert!(!should_hash_decoded_video(true, false, false, false));
     }
 
+    #[cfg(all(
+        feature = "mm-routing",
+        feature = "media-ffmpeg",
+        feature = "testing-nixl"
+    ))]
+    #[tokio::test]
+    async fn adjacent_videos_reach_media_loader_with_hashing_disabled() {
+        let video_bytes = include_bytes!("../tests/data/media/240p_10.mp4");
+        let mut server = mockito::Server::new_async().await;
+        let video_mock = server
+            .mock("GET", "/video.mp4")
+            .with_status(200)
+            .with_header("content-type", "video/mp4")
+            .with_body(&video_bytes[..])
+            .expect(2)
+            .create_async()
+            .await;
+
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap())
+            .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
+        let media_decoder: MediaDecoder = serde_json::from_value(serde_json::json!({
+            "video": {"num_frames": 2}
+        }))
+        .unwrap();
+        let media_fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+        preprocessor.media_loader = Some(
+            MediaLoader::new(media_decoder, Some(media_fetcher))
+                .expect("test media loader must initialize"),
+        );
+        preprocessor.video_routing_processor = Some(mm_routing::VideoRoutingProcessor::test_stub());
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": format!("{}/video.mp4", server.url())}
+                    },
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": format!("{}/video.mp4", server.url())}
+                    }
+                ]
+            }],
+            "max_tokens": 1
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequest::builder();
+        builder
+            .model("test-model".to_string())
+            .token_ids(Vec::new())
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default());
+
+        let (routing_entries, _) = preprocessor
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
+            .await
+            .unwrap();
+        let preprocessed = builder.build().unwrap();
+        let videos = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .and_then(|media| media.get("video_url"))
+            .expect("both decoded videos must be forwarded");
+
+        assert_eq!(videos.len(), 2);
+        for video in videos {
+            let MultimodalData::Decoded(descriptor) = video else {
+                panic!("video must reach the media loader and be decoded");
+            };
+            assert!(
+                descriptor.content_hash().is_none(),
+                "adjacent videos must reach the media loader with hashing disabled"
+            );
+        }
+        assert!(routing_entries.is_empty());
+        assert!(preprocessed.mm_routing_info.is_none());
+        video_mock.assert_async().await;
+    }
+
     #[test]
     fn replace_reserved_media_slot_preserves_alignment_and_returns_errors() {
         let mut map = HashMap::from([(
