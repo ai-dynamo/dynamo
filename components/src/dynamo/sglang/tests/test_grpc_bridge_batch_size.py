@@ -98,23 +98,20 @@ def _drive(handle, obj, stream=True):
     return chunks
 
 
-def test_unpatched_bridge_reproduces_the_defect():
-    """Without the shim, a streaming request dies on the missing attribute."""
-
-    class Bridge(FakeRuntimeHandle):
-        pass
-
-    with pytest.raises(AttributeError) as excinfo:
-        _drive(Bridge(), FakeGenerateReqInput("hello"))
-
-    assert "batch_size" in str(excinfo.value)
-
-
 def test_shim_lets_a_streaming_request_complete():
-    """With the shim installed, the request normalizes first and streams."""
+    """The unpatched bridge dies on the missing attribute; the shim fixes it.
+
+    Both halves run against one bridge so that each keeps the other honest. The
+    first fails if the fake stops reproducing the upstream ordering -- which
+    would otherwise leave every test in this module passing vacuously -- and the
+    second fails if the shim stops normalizing before the batch size is read.
+    """
 
     class Bridge(FakeRuntimeHandle):
         pass
+
+    with pytest.raises(AttributeError, match="batch_size"):
+        _drive(Bridge(), FakeGenerateReqInput("hello"))
 
     ensure_sglang_grpc_bridge_batch_size(Bridge)
 
