@@ -539,6 +539,21 @@ where
                         PrefillContinueDecisionInput::new(Some(occupancy))
                     }
                     None => {
+                        // Say this loudly once. A scheduler-only plane
+                        // publishes no occupancy at all, so every request
+                        // refuses and the feature is a silent no-op that looks
+                        // exactly like an idle one. The decision counters show
+                        // it after the fact; this shows it as it starts.
+                        static FIRST: std::sync::Once = std::sync::Once::new();
+                        FIRST.call_once(|| {
+                            tracing::warn!(
+                                worker_id = signals.worker.worker_id,
+                                dp_rank = signals.worker.dp_rank,
+                                "Prefill continuation is enabled but this decode worker \
+                                 reports no KV occupancy, so every request will hand off. \
+                                 The worker must publish ActiveLoad with kv_used_blocks"
+                            );
+                        });
                         tracing::debug!(
                             request_id,
                             worker_id = signals.worker.worker_id,
