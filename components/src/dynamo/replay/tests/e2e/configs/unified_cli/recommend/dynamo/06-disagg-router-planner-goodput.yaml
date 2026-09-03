@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+traffic:
+  source: {type: synthetic, input_tokens: 32, output_tokens: 4}
+  load: {type: constant_rate, requests_per_second: 20.0}
+  stop: {requests: 6}
+engine:
+  mode: disaggregated
+  model: components/src/dynamo/replay/tests/e2e/configs/unified_cli/fixtures/tiny-model
+  hardware: h200_sxm
+  backend: vllm
+  context_length: 2048
+  kv_transfer: {bytes_per_token: auto, bandwidth_gb_per_second: 400.0, timing_mode: destination_missing}
+  workers:
+    prefill:
+      parallelism:
+        preset:
+          - {replicas: 1, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 1}
+      kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: fixed, blocks: 256}}
+      timing: {type: fixed, prefill_ms: 1, decode_ms: 1}
+    decode:
+      parallelism:
+        preset:
+          - {replicas: 1, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+          - {replicas: 2, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+      scheduler: {max_batched_tokens: 8192, max_sequences: 256}
+      kv_cache: {block_size: 64, prefix_caching: true, capacity: {type: fixed, blocks: 256}}
+      timing: {type: fixed, prefill_ms: 1, decode_ms: 1}
+router:
+  policy: kv_router
+  prefill_load_model: {type: aic}
+  overlap_score_credit: {choices: [0.5, 1.0]}
+  prefill_load_scale: {choices: [0.5, 1.0, 2.0]}
+  temperature: {choices: [0.0, 0.2]}
+planner:
+  policy: enabled
+  scaling_policy: {preset: [throughput_180_5]}
+  fpm_sampling: {preset: [default]}
+  load_sensitivity: {preset: [default]}
+  load_predictor: {preset: [arima_raw]}
+  max_num_gpus: 3
+  min_workers: 1
+  prefill_min_workers: 1
+  decode_min_workers: 1
+evaluation:
+  sla: {ttft_ms: 10.0, itl_ms: 5.0}
+optimization:
+  target: goodput
+  constraints: {max_candidate_gpus: 3}
+optimizer: {algorithm: random, max_trials: 4, parallelism: 1, candidate_timeout_seconds: 30.0, seed: 26}

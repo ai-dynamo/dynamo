@@ -24,7 +24,6 @@ zmq-events = ["dep:tmq"]
 [dependencies]
 # repo
 aisimulate-core = { workspace = true }
-dynamo-data-gen = { workspace = true }
 dynamo-kv-router = { workspace = true }
 dynamo-tokens = { workspace = true }
 

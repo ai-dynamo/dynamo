@@ -42,6 +42,7 @@ Built in Rust for performance, Python for extensibility.
 <!-- EVENTS:START -->
 | Date | Event | Location |
 |:-----|:------|:---------|
+| Thu, Sep 10, 2026 | **[Baseten x Dynamo x SGLang RL post training meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Baseten+x+Dynamo+x+SGLang+RL+post+training+meetup&dates=20260911T010000Z%2F20260911T040000Z&location=https%3A%2F%2Fluma.com%2FBaseDynSGL)** | [Luma](https://luma.com/BaseDynSGL) |
 | Mon, Aug 24, 2026 | ~~[vLLM x Dynamo meetup](https://calendar.google.com/calendar/render?action=TEMPLATE&text=vLLM+x+Dynamo+meetup&dates=20260825T010000Z%2F20260825T040000Z&location=https%3A%2F%2Fluma.com%2Fr8o604o0)~~ | [Luma](https://luma.com/r8o604o0) |
 | Thu, Jul 30, 2026 | ~~[Dynamo Afterhours](https://calendar.google.com/calendar/render?action=TEMPLATE&text=Dynamo+Afterhours&dates=20260731T010000Z%2F20260731T040000Z&location=https%3A%2F%2Fluma.com%2FJulyDynamoAfterHours)~~ | [Luma](https://luma.com/JulyDynamoAfterHours) |
 <!-- EVENTS:END -->
@@ -102,12 +103,12 @@ Most inference engines optimize a single GPU or a single node. Dynamo is the **o
 | [**ModelExpress**](https://github.com/ai-dynamo/modelexpress) | Streams model weights GPU-to-GPU via NIXL/NVLink | 7x faster cold-start for new replicas |
 | [**Planner**](https://docs.nvidia.com/dynamo/components/planner/planner-guide) | SLA-driven autoscaler that profiles workloads and right-sizes pools | Meets latency targets at minimum total cost of ownership (TCO) |
 | [**Grove**](https://github.com/ai-dynamo/grove) | K8s operator for topology-aware gang scheduling (NVL72) | Places workloads optimally across racks, hosts, and NUMA nodes |
-| [**AIConfigurator**](https://github.com/ai-dynamo/aiconfigurator) | Simulates 10K+ deployment configs in seconds | Finds optimal serving config without burning GPU-hours |
+| [**AISimulate**](https://pypi.org/project/aisimulate/) | Predicts serving behavior and searches deployment configurations offline | Finds a strong serving configuration without bringing up a GPU cluster |
 | [**Fault Tolerance**](https://docs.nvidia.com/dynamo/user-guides/fault-tolerance/request-migration) | Canary health checks + in-flight request migration | Workers fail; user requests don't |
 
 ### New in 1.0
 
-- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AIConfigurator auto-profiles the workload, Planner optimizes the topology, and Dynamo deploys
+- **Zero-config deploy ([DGDR](https://docs.nvidia.com/dynamo/kubernetes-deployment/deploy-models/dgdr-reference))** *(beta):* Specify model, HW, and SLA in one YAML — AISimulate performance models estimate candidate configurations, Planner optimizes the topology, and Dynamo deploys
 - **Agentic inference:** Per-request hints for priority, expected output length, and speculative prefill, plus session metadata for tracing and SGLang subagent KV isolation. [LangChain](https://docs.langchain.com/oss/python/integrations/chat/nvidia_ai_endpoints#use-with-nvidia-dynamo) + [NeMo Agent Toolkit](https://github.com/NVIDIA/NeMo-Agent-Toolkit) integrations
 - **Multimodal E/P/D:** Disaggregated encode/prefill/decode with embedding cache — 30% faster TTFT on image workloads
 - **Video generation:** Native [FastVideo](https://github.com/hao-ai-lab/FastVideo) + [SGLang Diffusion](https://lmsys.org/blog/2026-02-16-sglang-diffusion-advanced-optimizations/) support — real-time 1080p on single B200
@@ -140,7 +141,7 @@ the Gateway API setup, supported features, and configuration.
 
 ```bash
 # Pull a prebuilt container (SGLang example)
-docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.1
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.2
 
 # Inside the container — start frontend and worker
 python3 -m dynamo.frontend --http-port 8000 --discovery-backend file > /dev/null 2>&1 &
@@ -154,7 +155,7 @@ curl -s localhost:8000/v1/chat/completions -H "Content-Type: application/json" -
 }' | jq
 ```
 
-Also available: [`tensorrtllm-runtime:1.4.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.4.1`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
+Also available: [`tensorrtllm-runtime:1.4.2`](https://docs.nvidia.com/dynamo/resources/release-artifacts) and [`vllm-runtime:1.4.2`](https://docs.nvidia.com/dynamo/resources/release-artifacts).
 
 ### Option B: Install from PyPI
 
@@ -258,7 +259,7 @@ This writes to `docs/reference/api/openapi.json`.
 
 ## Service Discovery and Messaging
 
-Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/service-discovery.md)) handle service discovery. External services are optional for most deployments:
+Dynamo uses TCP for inter-component communication. On Kubernetes, native resources ([CRDs + EndpointSlices](docs/fern/pages/developer-guide/knowledge-base/concepts/system-architecture/architecture.md#discovery-plane)) handle service discovery. External services are optional for most deployments:
 
 | Deployment | etcd | NATS | Notes |
 |------------|------|------|-------|

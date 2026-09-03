@@ -59,11 +59,11 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Kimi-K3](kimi-k3/vllm/)** | vLLM | Agg + Disagg | 16x GB200 / 16x GB300 | ✅ | ❌ | Multimodal MoE (1M ctx), MXFP4 experts + BF16 dense + FP8 KV, TP16 over MNNVL (GB200) / TP8 (GB300), KV-aware routing, FlashInfer MLA, reasoning + tool calling; plus disagg 1P1D (32x GB200) / 1P2D (24x GB300) | ❌ |
 | **[Kimi-K2.6](kimi-k2.6/vllm/)** | vLLM | Aggregated | 4x B200 / 8x H200 | ✅ | ✅ | MoE, NVFP4+FP8 KV (B200) / INT4 (H200), TP4/TP8, EAGLE3 MLA spec decode, LMCache CPU offload; text+image, chat + agentic profiles | ❌ |
 | **[Nemotron-3-Super](nemotron-3-super/vllm/)** | vLLM | Aggregated | 4x B200 / 4x H200 | ✅ | ✅ | ~120B hybrid Mamba/Attention/MoE (~12B active), NVFP4 (B200) / FP8 (H200) + FP8 KV, TP4+EP, MTP, KV-aware routing; chat + agentic profiles | ❌ |
-| **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | 4x B200 / 8x H200 | ✅ | ✅ | ~550B hybrid Mamba/Attention/MoE (~55B active), NVFP4 + FP8, TP4 (B200) / TP8 (H200) + EP, MTP, KV-aware routing; chat + agentic, plus 1P1D disagg on B200 | ❌ |
+| **[Nemotron-3-Ultra](nemotron-3-ultra/vllm/)** | vLLM | Agg + Disagg | B200 / GB200 / H200 | ✅ | ✅ | Optimized agentic profiles for native 256K and opt-in 1M context; NVFP4 + FP8, MTP, and KV-aware routing | ❌ |
 
 **Legend:**
 - **Deployment**: ✅ = Complete `deploy.yaml` manifest available
-- **Benchmark**: ✅ = Includes `perf.yaml` for running AIPerf benchmarks
+- **Benchmark**: ✅ = Includes an AIPerf benchmark manifest
 
 ### Functional Recipes (Not Yet Benchmarked)
 
@@ -83,6 +83,7 @@ These recipes are under active development and may require additional setup step
 
 | Model | Framework | Mode | GPUs | Deployment | Notes |
 |-------|-----------|------|------|------------|-------|
+| **[Gemma-4-31B](gemma4-31b/)** | TensorRT-LLM | Aggregated | 8x B200 / 8x GB200 / 8x H200 | ✅ | NVFP4 + FP8 KV on B200/GB200; BF16 + 16-bit KV and TP4 on H200; KV-aware routing; MTP on B200/GB200, not yet verified on H200; agentic profile |
 | **[GLM-5-NVFP4 (EFA)](glm-5-nvfp4/sglang/disagg/efa/)** | SGLang | Disagg Prefill/Decode over AWS EFA | 20x GB200 | ✅ | KV transfer over AWS EFA via NIXL LIBFABRIC instead of UCX. Patched libfabric baked into image. Requires [custom container build](glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa). |
 | **[Nemotron-3-Nano-Omni-NVFP4](nemotron-3-nano-omni/vllm/agg/)** | vLLM | Aggregated | 1x GPU | ✅ | Multimodal text/image/video/audio serving. Requires [custom container build](nemotron-3-nano-omni/). |
 | **[nvidia/Kimi-K2.5-NVFP4](kimi-k2.5/tokenspeed/agg/nvidia/)** | TokenSpeed | Aggregated | 4x B200 | ✅ | Text only — MoE model, TP4×EP4, reasoning + tool calling. Requires [custom container build](kimi-k2.5/tokenspeed/agg/nvidia/Dockerfile) (no public Dynamo+TokenSpeed image yet) and raw `Deployment`s/`Service`s instead of `DynamoGraphDeployment` (operator backend support pending). |
@@ -341,7 +342,7 @@ image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:x.y.z
 - Review pod logs: `kubectl logs <pod-name> -n ${NAMESPACE}`
 
 **For more troubleshooting:**
-- [Dynamo Operator](../docs/fern/pages/developer-guide/knowledge-base/kubernetes/kubernetes-operator/dynamo-operator.md)
+- [Install Dynamo](../docs/fern/pages/kubernetes/installation/install-dynamo.md)
 - [Observability Documentation](../docs/fern/pages/kubernetes/operations/observability.mdx)
 
 ## Related Documentation
