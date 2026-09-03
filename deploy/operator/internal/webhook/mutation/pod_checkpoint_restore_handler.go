@@ -167,7 +167,7 @@ func (h *PodCheckpointRestoreMutator) buildPinnedPodSnapshotRestorePod(
 		podNamespace,
 		config,
 		expectedWorkerHashForPod(pod),
-		checkpoint.PinnedPodSnapshotUse(),
+		checkpoint.ExplicitPodSnapshotUse(),
 	)
 	if err != nil {
 		return nil, err
@@ -211,6 +211,14 @@ func (h *PodCheckpointRestoreMutator) buildAutomaticSnapshotJobRestorePod(
 	if job.UID != expectedJobUID {
 		return automaticCandidateUnavailable(policy, "SnapshotJob UID changed after workload reconciliation")
 	}
+	// Only a controller-stamped automatic job may authorize the managed path.
+	if job.Annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+		return nil, false, fmt.Errorf("automatic SnapshotJob %s/%s is not marked as a Dynamo automatic capture", podNamespace, jobName)
+	}
+	ownerUID := types.UID(job.Annotations[consts.CheckpointOwnerUIDAnnotation])
+	if ownerUID == "" {
+		return nil, false, fmt.Errorf("automatic SnapshotJob %s/%s has no owning DGD UID", podNamespace, jobName)
+	}
 	if snapshotv1alpha1.IsSnapshotJobFailed(job) {
 		return automaticCandidateUnavailable(policy, "SnapshotJob failed")
 	}
@@ -232,7 +240,7 @@ func (h *PodCheckpointRestoreMutator) buildAutomaticSnapshotJobRestorePod(
 		podNamespace,
 		config,
 		expectedWorkerHashForPod(pod),
-		checkpoint.PinnedPodSnapshotUse(),
+		checkpoint.ManagedPodSnapshotUse(ownerUID),
 	)
 	if apierrors.IsNotFound(err) {
 		return automaticCandidateUnavailable(policy, "SnapshotJob PodSnapshot no longer exists")

@@ -119,9 +119,10 @@ func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
 	return validation.warnings, invalidDynamoComponentDeploymentError(newDCD, allErrs)
 }
 
-// validateWorkerClassCheckpointRefOwnership ensures worker compatibility is
-// derived from the DGD controller that owns the DCD instead of from
-// user-authored labels.
+// validateWorkerClassCheckpointRefOwnership limits worker checkpointRef to
+// DCDs marked as DGD-controller-owned, the supported source for worker
+// compatibility. The owner reference selects behavior; it is not an
+// authorization boundary for Snapshot access.
 func (v *dynamoComponentDeploymentValidation) validateWorkerClassCheckpointRefOwnership(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) field.ErrorList {

@@ -609,14 +609,9 @@ func TestDGDCheckpointsReconciler_ExplicitRestoreWaitsForActiveWorkerHash(t *tes
 	workerHash := betaDGDWorkersSpecHash(t, dgd)
 	dgd.Annotations = map[string]string{commonconsts.AnnotationCurrentWorkerHashV2: workerHash}
 
-	result, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
-	require.NoError(t, err)
-	info = result.Infos["worker"]
-	require.NotNil(t, info)
-	assert.Equal(t, ref, info.CheckpointName)
-	assert.False(t, info.Exists)
-	assert.False(t, info.Ready)
-	assert.Equal(t, v1alpha1.CheckpointStartupPolicyWaitForCheckpoint, info.StartupPolicy)
+	t.Log("Verify a missing explicit reference fails reconciliation without synthesizing pending state")
+	_, err = newTestDGDCheckpointsReconciler(reconciler).Reconcile(ctx, dgd)
+	require.ErrorContains(t, err, "get referenced PodSnapshot")
 
 	t.Log("Create the compatible referenced PodSnapshot")
 	referenced := dgdTestPodSnapshot(ref, workerHash, true)
@@ -1354,6 +1349,68 @@ func TestDGDCheckpointsReconciler_DeleteAutomaticSnapshotResourcesForDGD(t *test
 	retainedSnapshotAfter := &snapshotv1alpha1.PodSnapshot{}
 	require.NoError(t, reconciler.Get(ctx, client.ObjectKeyFromObject(retainedSnapshot), retainedSnapshotAfter))
 	assert.Equal(t, dgd.Name, retainedSnapshotAfter.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName])
+}
+
+func TestDGDCheckpointsReconciler_DeletingSnapshotJobDoesNotBlockFinalization(t *testing.T) {
+	t.Log("Build a delete-policy SnapshotJob held by an external finalizer")
+	ctx := context.Background()
+	testScheme := newDynamoGraphDeploymentControllerTestScheme(t)
+	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		Name:      "test-dgd",
+		Namespace: "default",
+		UID:       types.UID("dgd-uid"),
+	}}
+	job := &snapshotv1alpha1.SnapshotJob{ObjectMeta: metav1.ObjectMeta{
+		Name:       "delete-job",
+		Namespace:  dgd.Namespace,
+		UID:        types.UID("delete-job-uid"),
+		Finalizers: []string{"snapshot.nvidia.com/external-cleanup"},
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		},
+		Annotations: map[string]string{
+			commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+			commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyDelete),
+			commonconsts.CheckpointOwnerUIDAnnotation:       string(dgd.UID),
+		},
+	}}
+	snapshot := &snapshotv1alpha1.PodSnapshot{ObjectMeta: metav1.ObjectMeta{
+		Name:      "delete-artifact",
+		Namespace: dgd.Namespace,
+		Labels: map[string]string{
+			commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			snapshotv1alpha1.SnapshotJobOwnerLabel:          job.Name,
+			snapshotv1alpha1.SnapshotJobOwnerUIDLabel:       string(job.UID),
+		},
+		Annotations: map[string]string{
+			commonconsts.CheckpointAutoAnnotation:           commonconsts.KubeLabelValueTrue,
+			commonconsts.CheckpointDeletionPolicyAnnotation: string(v1alpha1.CheckpointDeletionPolicyDelete),
+			commonconsts.CheckpointOwnerUIDAnnotation:       string(dgd.UID),
+		},
+	}}
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(job, snapshot).
+		Build()
+	checkpointReconciler := newTestDGDCheckpointsReconciler(&DynamoGraphDeploymentReconciler{Client: kubeClient})
+
+	t.Log("Request SnapshotJob deletion and observe cleanup pending once")
+	err := checkpointReconciler.deleteAutoCheckpointsForDGD(ctx, dgd)
+	require.ErrorIs(t, err, errAutomaticSnapshotCleanupPending)
+	deletingJob := &snapshotv1alpha1.SnapshotJob{}
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(job), deletingJob))
+	require.NotNil(t, deletingJob.DeletionTimestamp)
+
+	t.Log("Reconcile again while Snapshot still owns final Job cleanup")
+	require.NoError(t, checkpointReconciler.deleteAutoCheckpointsForDGD(ctx, dgd))
+
+	t.Log("Verify Dynamo deletes its artifact without waiting on the foreign finalizer")
+	assert.True(t, apierrors.IsNotFound(kubeClient.Get(
+		ctx,
+		client.ObjectKeyFromObject(snapshot),
+		&snapshotv1alpha1.PodSnapshot{},
+	)))
+	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(job), &snapshotv1alpha1.SnapshotJob{}))
 }
 
 func TestDGDCheckpointsReconciler_RetainProtectsArtifactCreatedDuringFinalization(t *testing.T) {

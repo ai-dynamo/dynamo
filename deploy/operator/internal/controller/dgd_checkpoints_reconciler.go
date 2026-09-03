@@ -164,17 +164,6 @@ func (r *dgdCheckpointsReconciler) Reconcile(
 				expectedWorkerHash,
 				checkpoint.ExplicitPodSnapshotUse(),
 			)
-			if apierrors.IsNotFound(err) {
-				// A missing explicit reference is a resolvable wait state: keep
-				// the workload gated until the referenced PodSnapshot appears.
-				logger.Info("Waiting for referenced PodSnapshot", "component", componentName, "podSnapshot", checkpointName)
-				info = &checkpoint.CheckpointInfo{
-					Enabled:        true,
-					CheckpointName: checkpointName,
-					StartupPolicy:  nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
-				}
-				err = nil
-			}
 		}
 		if err != nil {
 			logger.Error(err, "Failed to resolve checkpoint for component", "component", componentName)
@@ -814,6 +803,14 @@ func (r *dgdCheckpointsReconciler) deleteAutomaticSnapshotJobsForDGD(
 		deletionPolicy := nvidiacomv1alpha1.CheckpointDeletionPolicy(job.Annotations[consts.CheckpointDeletionPolicyAnnotation])
 		if deletionPolicy == "" {
 			deletionPolicy = nvidiacomv1alpha1.CheckpointDeletionPolicyDelete
+		}
+		// Once deletion has been accepted by the API server, Snapshot owns any
+		// finalizer delay and Dynamo can continue cleaning up its artifacts.
+		if job.DeletionTimestamp != nil {
+			if deletionPolicy == nvidiacomv1alpha1.CheckpointDeletionPolicyRetain && job.UID != "" {
+				retainedSnapshotJobs[job.UID] = job.Name
+			}
+			continue
 		}
 		if err := r.syncAutomaticPodSnapshotLifecycle(ctx, job, deletionPolicy); err != nil {
 			return nil, false, err

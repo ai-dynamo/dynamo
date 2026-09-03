@@ -305,7 +305,7 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 			dcd.Namespace,
 			alphaCheckpointConfig,
 			expectedWorkerHash,
-			podSnapshotUseForDCD(dcd),
+			podSnapshotUseForDCD(dcd, automaticSnapshotJob),
 		)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
@@ -331,7 +331,13 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 	return info, nil
 }
 
-func podSnapshotUseForDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) checkpoint.PodSnapshotUse {
+func podSnapshotUseForDCD(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	automaticSnapshotJob *checkpoint.SnapshotJobReference,
+) checkpoint.PodSnapshotUse {
+	if automaticSnapshotJob == nil {
+		return checkpoint.ExplicitPodSnapshotUse()
+	}
 	ownerUID, managed := managedDGDUIDForDCD(dcd)
 	if !managed {
 		return checkpoint.ExplicitPodSnapshotUse()
@@ -356,7 +362,8 @@ func automaticSnapshotJobReferenceForDCD(dcd *nvidiacomv1beta1.DynamoComponentDe
 }
 
 func managedDGDUIDForDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) (types.UID, bool) {
-	// Only a concrete DGD controller reference can grant managed restore authority.
+	// A concrete DGD controller reference selects the supported managed path;
+	// Kubernetes authorization remains the security boundary for Snapshot access.
 	controller := metav1.GetControllerOf(dcd)
 	if controller == nil ||
 		controller.Kind != nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind ||

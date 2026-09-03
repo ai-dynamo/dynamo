@@ -95,7 +95,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}
 		logger.Info("Reconciling DynamoComponentDeployment", "key", key, "name", dcd.Name)
-		if err := r.preserveExistingDCDState(ctx, dcd, checkpointInfos[key]); err != nil {
+		if err := r.preserveExistingDCDState(ctx, dcd); err != nil {
 			logger.Error(err, "failed to preserve existing DynamoComponentDeployment state", "name", dcd.Name)
 			return ReconcileResult{}, fmt.Errorf("failed to preserve existing DynamoComponentDeployment state: %w", err)
 		}
@@ -204,6 +204,14 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 		dcd.Spec.Experimental.Checkpoint.StartupPolicy = nvidiacomv1beta1.CheckpointStartupPolicy(startupPolicy)
 	}
 
+	// Artifact identity is independent of startup policy. Preserve the automatic
+	// SnapshotJob handoff even while WaitForCheckpoint keeps replicas gated.
+	if checkpointInfo.AutomaticSnapshotJob != nil {
+		if err := applyRestoreCandidateMetadataToDCD(dcd, checkpointInfo); err != nil {
+			return err
+		}
+	}
+
 	if checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint && !checkpointInfo.Ready {
 		dcd.Spec.Replicas = ptr.To(int32(0))
 		return nil
@@ -212,7 +220,16 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 		checkpointInfo.StartupPolicy != nvidiacomv1alpha1.CheckpointStartupPolicyImmediate {
 		return nil
 	}
+	if checkpointInfo.AutomaticSnapshotJob != nil {
+		return nil
+	}
+	return applyRestoreCandidateMetadataToDCD(dcd, checkpointInfo)
+}
 
+func applyRestoreCandidateMetadataToDCD(
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	checkpointInfo *checkpoint.CheckpointInfo,
+) error {
 	annotations := dynamo.GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 	if annotations == nil {
 		if dcd.Spec.PodTemplate == nil {
@@ -226,14 +243,11 @@ func (r *componentWorkloadsReconciler) applyCheckpointStartupPolicy(
 	return checkpoint.ApplyRestoreCandidateMetadata(annotations, checkpointInfo)
 }
 
-// preserveExistingDCDState carries forward server state that must not be
-// overwritten by a generated DCD. In particular, an automatic native capture
-// with WaitForCheckpoint gates a new DCD but must not scale down a workload
-// that was already running when the capture began.
+// preserveExistingDCDState carries forward immutable server state that must not
+// be overwritten by a generated DCD.
 func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 	ctx context.Context,
 	desired *nvidiacomv1beta1.DynamoComponentDeployment,
-	checkpointInfo *checkpoint.CheckpointInfo,
 ) error {
 	existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
 	err := r.syncer.Get(
@@ -254,16 +268,5 @@ func (r *componentWorkloadsReconciler) preserveExistingDCDState(
 	}
 
 	desired.Spec.BackendFramework = existing.Spec.BackendFramework
-	if checkpointInfo != nil &&
-		checkpointInfo.Enabled &&
-		checkpointInfo.AutomaticCapture &&
-		checkpointInfo.StartupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint &&
-		!checkpointInfo.Ready {
-		if existing.Spec.Replicas == nil {
-			desired.Spec.Replicas = nil
-		} else {
-			desired.Spec.Replicas = ptr.To(*existing.Spec.Replicas)
-		}
-	}
 	return nil
 }

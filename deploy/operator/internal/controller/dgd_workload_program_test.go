@@ -654,7 +654,7 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 			wantReplicas:     ptr.To(int32(5)),
 		},
 		{
-			name:             "existing running DCD stays at its current size while native capture is pending",
+			name:             "existing DCD follows automatic wait policy while native capture is pending",
 			dcdName:          "vllm-disagg-planner-vllmdecodeworker-2dad72b9",
 			existingReplicas: ptr.To(int32(2)),
 			checkpointInfo: &checkpoint.CheckpointInfo{
@@ -664,10 +664,10 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 				StartupPolicy:    nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
 			},
 			wantFramework: "",
-			wantReplicas:  ptr.To(int32(2)),
+			wantReplicas:  ptr.To(int32(0)),
 		},
 		{
-			name:             "explicit pending snapshot still applies wait policy to an existing DCD",
+			name:             "explicit pending snapshot applies wait policy to an existing DCD",
 			dcdName:          "vllm-disagg-planner-vllmdecodeworker-explicit",
 			existingReplicas: ptr.To(int32(2)),
 			checkpointInfo: &checkpoint.CheckpointInfo{
@@ -726,11 +726,11 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 				},
 			}
 
-			t.Log("Apply checkpoint gating, then preserve state from an existing DCD")
+			t.Log("Apply checkpoint gating, then preserve immutable state from an existing DCD")
 			require.NoError(t, workloads.applyCheckpointStartupPolicy(desired, tt.checkpointInfo))
-			require.NoError(t, workloads.preserveExistingDCDState(context.Background(), desired, tt.checkpointInfo))
+			require.NoError(t, workloads.preserveExistingDCDState(context.Background(), desired))
 
-			t.Log("Verify updates preserve stored state while creates keep generated state")
+			t.Log("Verify stored immutable state is preserved without overriding checkpoint policy")
 			assert.Equal(t, tt.wantFramework, desired.Spec.BackendFramework)
 			assert.Equal(t, tt.wantReplicas, desired.Spec.Replicas)
 		})
@@ -749,7 +749,7 @@ func TestComponentWorkloadsReconciler_ApplyCheckpointStartupPolicy(t *testing.T)
 		wantCandidate     bool
 	}{
 		{
-			name:     "wait for checkpoint gates replicas until ready",
+			name:     "unready explicit snapshot gates replicas under wait policy",
 			replicas: 3,
 			checkpointInfo: checkpoint.CheckpointInfo{
 				Enabled:        true,
@@ -861,23 +861,18 @@ func TestComponentWorkloadsReconciler_ApplyPendingAutomaticSnapshotPolicy(t *tes
 			reconciler := &componentWorkloadsReconciler{}
 			require.NoError(t, reconciler.applyCheckpointStartupPolicy(dcd, info))
 
-			t.Log("Verify Immediate publishes a stable job candidate while Wait remains scaled to zero")
+			t.Log("Verify every startup policy preserves the automatic job identity")
 			assert.Equal(t, tt.wantReplicas, *dcd.Spec.Replicas)
 			if dcd.Spec.Experimental != nil && dcd.Spec.Experimental.Checkpoint != nil {
 				assert.Nil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
 			}
-			if tt.startupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyImmediate {
-				require.NotNil(t, dcd.Spec.PodTemplate)
-				assert.Equal(t, commonconsts.KubeLabelValueTrue,
-					dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
-				assert.Equal(t, commonconsts.RestoreCandidateSourceSnapshotJob,
-					dcd.Spec.PodTemplate.Annotations[commonconsts.RestoreCandidateSourceKindAnnotation])
-				assert.Equal(t, "snapshot-job-uid",
-					dcd.Spec.PodTemplate.Annotations[commonconsts.SnapshotJobCandidateUIDAnnotation])
-			} else if dcd.Spec.PodTemplate != nil {
-				assert.NotContains(t, dcd.Spec.PodTemplate.Annotations,
-					commonconsts.CheckpointRestoreCandidateAnnotation)
-			}
+			require.NotNil(t, dcd.Spec.PodTemplate)
+			assert.Equal(t, commonconsts.KubeLabelValueTrue,
+				dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
+			assert.Equal(t, commonconsts.RestoreCandidateSourceSnapshotJob,
+				dcd.Spec.PodTemplate.Annotations[commonconsts.RestoreCandidateSourceKindAnnotation])
+			assert.Equal(t, "snapshot-job-uid",
+				dcd.Spec.PodTemplate.Annotations[commonconsts.SnapshotJobCandidateUIDAnnotation])
 		})
 	}
 }

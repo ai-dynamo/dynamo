@@ -91,18 +91,20 @@ runs:
         OPERATOR_DEPLOYMENT_NAME="$(kubectl get deployment \
           -n "${NAMESPACE}" \
           -l "app.kubernetes.io/name=snapshot,app.kubernetes.io/instance=${RELEASE_NAME},app.kubernetes.io/component=operator" \
-          -o jsonpath='{.items[0].metadata.name}')"
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
         if [[ -z "${OPERATOR_DEPLOYMENT_NAME}" ]]; then
           echo "::error::Snapshot operator Deployment was not created"
+          kubectl get deployment,daemonset,pods -n "${NAMESPACE}" -o wide
           exit 1
         fi
 
         DAEMONSET_NAME="$(kubectl get daemonset \
           -n "${NAMESPACE}" \
           -l "app.kubernetes.io/name=snapshot,app.kubernetes.io/instance=${RELEASE_NAME},app.kubernetes.io/component=snapshot-agent" \
-          -o jsonpath='{.items[0].metadata.name}')"
+          -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
         if [[ -z "${DAEMONSET_NAME}" ]]; then
           echo "::error::snapshot-agent DaemonSet was not created"
+          kubectl get deployment,daemonset,pods -n "${NAMESPACE}" -o wide
           exit 1
         fi
 

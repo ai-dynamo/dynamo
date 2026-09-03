@@ -228,7 +228,7 @@ func TestPodCheckpointRestoreMutatorAutomaticSnapshotJob(t *testing.T) {
 
 	t.Run("completed capture resolves and shapes the bound PodSnapshot", func(t *testing.T) {
 		t.Log("Given an automatic SnapshotJob completed with its original Ready PodSnapshot")
-		snapshot := nativeRestoreTestSnapshot()
+		snapshot := automaticRestoreTestSnapshot()
 		job := automaticRestoreTestJob(true)
 		job.Status.PodSnapshotName = snapshot.Name
 		job.Status.PodSnapshotUID = snapshot.UID
@@ -266,7 +266,7 @@ func TestPodCheckpointRestoreMutatorAutomaticSnapshotJob(t *testing.T) {
 
 	t.Run("recreated PodSnapshot never restores through the completed job", func(t *testing.T) {
 		t.Log("Given a completed Job pinned to the UID of a deleted PodSnapshot")
-		snapshot := nativeRestoreTestSnapshot()
+		snapshot := automaticRestoreTestSnapshot()
 		job := automaticRestoreTestJob(true)
 		job.Status.PodSnapshotName = snapshot.Name
 		job.Status.PodSnapshotUID = types.UID("original-snapshot-uid")
@@ -280,6 +280,65 @@ func TestPodCheckpointRestoreMutatorAutomaticSnapshotJob(t *testing.T) {
 		t.Log("Then admission cold-starts instead of restoring from a different artifact")
 		assert.True(t, resp.Allowed)
 		assert.Empty(t, resp.Patches)
+	})
+
+	t.Run("automatic candidate requires controller-stamped SnapshotJob ownership", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			mutate func(*snapshotv1alpha1.SnapshotJob)
+			want   string
+		}{
+			{
+				name: "missing automatic marker",
+				mutate: func(job *snapshotv1alpha1.SnapshotJob) {
+					delete(job.Annotations, consts.CheckpointAutoAnnotation)
+				},
+				want: "not marked as a Dynamo automatic capture",
+			},
+			{
+				name: "missing owner UID",
+				mutate: func(job *snapshotv1alpha1.SnapshotJob) {
+					delete(job.Annotations, consts.CheckpointOwnerUIDAnnotation)
+				},
+				want: "has no owning DGD UID",
+			},
+		}
+
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				t.Log("Given a restore candidate whose live SnapshotJob lacks managed-capture identity")
+				job := automaticRestoreTestJob(false)
+				test.mutate(job)
+				pod := automaticRestoreCandidatePod(job, nvidiacomv1alpha1.CheckpointStartupPolicyImmediate)
+				mutator := automaticRestoreTestMutator(t, scheme, job)
+
+				t.Log("When the Pod-create webhook reads the SnapshotJob directly")
+				resp := mutator.Handle(ctx, podCreateAdmissionRequest(t, pod))
+
+				t.Log("Then admission rejects the unsupported managed restore path")
+				assert.False(t, resp.Allowed)
+				require.NotNil(t, resp.Result)
+				assert.Contains(t, resp.Result.Message, test.want)
+			})
+		}
+	})
+
+	t.Run("automatic candidate requires a controller-stamped PodSnapshot", func(t *testing.T) {
+		t.Log("Given a completed automatic SnapshotJob that points at an unmarked PodSnapshot")
+		snapshot := nativeRestoreTestSnapshot()
+		job := automaticRestoreTestJob(true)
+		job.Status.PodSnapshotName = snapshot.Name
+		job.Status.PodSnapshotUID = snapshot.UID
+		pod := automaticRestoreCandidatePod(job, nvidiacomv1alpha1.CheckpointStartupPolicyImmediate)
+		mutator := automaticRestoreTestMutator(t, scheme, job, snapshot)
+
+		t.Log("When the Pod-create webhook resolves the managed artifact")
+		resp := mutator.Handle(ctx, podCreateAdmissionRequest(t, pod))
+
+		t.Log("Then admission rejects the object outside the automatic-capture contract")
+		assert.False(t, resp.Allowed)
+		require.NotNil(t, resp.Result)
+		assert.Contains(t, resp.Result.Message, "not marked as a Dynamo automatic checkpoint")
 	})
 }
 
@@ -406,6 +465,10 @@ func automaticRestoreTestJob(completed bool) *snapshotv1alpha1.SnapshotJob {
 			Name:      "checkpoint-worker",
 			Namespace: "default",
 			UID:       types.UID("job-uid"),
+			Annotations: map[string]string{
+				consts.CheckpointAutoAnnotation:     consts.KubeLabelValueTrue,
+				consts.CheckpointOwnerUIDAnnotation: "dgd-uid",
+			},
 		},
 	}
 	if completed {
@@ -415,6 +478,14 @@ func automaticRestoreTestJob(completed bool) *snapshotv1alpha1.SnapshotJob {
 		}}
 	}
 	return job
+}
+
+func automaticRestoreTestSnapshot() *snapshotv1alpha1.PodSnapshot {
+	snapshot := nativeRestoreTestSnapshot()
+	snapshot.Annotations[consts.CheckpointAutoAnnotation] = consts.KubeLabelValueTrue
+	snapshot.Annotations[consts.CheckpointDeletionPolicyAnnotation] = string(nvidiacomv1alpha1.CheckpointDeletionPolicyRetain)
+	snapshot.Annotations[consts.CheckpointOwnerUIDAnnotation] = "dgd-uid"
+	return snapshot
 }
 
 func automaticRestoreCandidatePod(

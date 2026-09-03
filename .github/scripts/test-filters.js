@@ -312,6 +312,31 @@ const testCases = [
     desc: 'Operator RBAC changes trigger snapshot contract tests'
   },
   {
+    file: 'deploy/operator/api/v1beta1/dynamomodel_types.go',
+    expect: { snapshot: false, operator: true },
+    desc: 'Unrelated operator APIs do not trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/config/crd/bases/nvidia.com_dynamomodels.yaml',
+    expect: { snapshot: false, operator: true },
+    desc: 'Unrelated operator CRDs do not trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/go.mod',
+    expect: { snapshot: true, operator: true },
+    desc: 'Operator dependency changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/consts/consts.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Restore protocol constants trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/features/gates.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Snapshot API feature detection triggers snapshot integration'
+  },
+  {
     file: 'deploy/operator/internal/controller/dgd_component_workloads_reconciler.go',
     expect: { snapshot: true, operator: true },
     desc: 'DGD workload reconciliation changes trigger snapshot integration'
@@ -332,9 +357,24 @@ const testCases = [
     desc: 'GMS replacement changes trigger snapshot integration'
   },
   {
+    file: 'deploy/operator/internal/controller/failover_cascade_controller.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Failover cascade behavior triggers snapshot integration'
+  },
+  {
     file: 'deploy/operator/internal/webhook/mutation/pod_checkpoint_restore_handler.go',
     expect: { snapshot: true, operator: true },
     desc: 'Restore admission changes trigger snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/webhook/setup/setup.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Restore webhook registration triggers snapshot integration'
+  },
+  {
+    file: 'deploy/operator/internal/webhook/validation/shared_v1beta1.go',
+    expect: { snapshot: true, operator: true },
+    desc: 'Checkpoint API validation triggers snapshot integration'
   },
   {
     file: 'deploy/operator/internal/podcache/transform.go',

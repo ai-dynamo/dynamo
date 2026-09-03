@@ -33,12 +33,11 @@ const (
 	podSnapshotUseInvalid podSnapshotUseKind = iota
 	podSnapshotUseExplicitReference
 	podSnapshotUseManagedRestore
-	podSnapshotUsePinnedRestore
 )
 
-// PodSnapshotUse identifies the authority under which a PodSnapshot is being
-// resolved. Managed automatic restores carry the concrete owning DGD UID so a
-// retained artifact cannot be adopted by another graph incarnation.
+// PodSnapshotUse selects the restore-policy checks for a controller-generated
+// path. It is not an authorization boundary; Kubernetes RBAC and namespaced
+// Snapshot access control which callers can read or reference an artifact.
 type PodSnapshotUse struct {
 	kind            podSnapshotUseKind
 	managedOwnerUID types.UID
@@ -56,12 +55,6 @@ func ManagedPodSnapshotUse(ownerUID types.UID) PodSnapshotUse {
 		kind:            podSnapshotUseManagedRestore,
 		managedOwnerUID: ownerUID,
 	}
-}
-
-// PinnedPodSnapshotUse revalidates an admission candidate whose identity and
-// compatibility metadata were pinned by workload rendering.
-func PinnedPodSnapshotUse() PodSnapshotUse {
-	return PodSnapshotUse{kind: podSnapshotUsePinnedRestore}
 }
 
 // ResolvePodSnapshotForService resolves a native PodSnapshot and validates the
@@ -132,8 +125,14 @@ func ResolvePodSnapshotForService(
 		}
 
 		// Automatic snapshots remain private to the DGD incarnation that created them.
-		if annotations[consts.CheckpointAutoAnnotation] == consts.KubeLabelValueTrue &&
-			annotations[consts.CheckpointOwnerUIDAnnotation] != string(use.managedOwnerUID) {
+		if annotations[consts.CheckpointAutoAnnotation] != consts.KubeLabelValueTrue {
+			return nil, fmt.Errorf(
+				"managed PodSnapshot %s/%s is not marked as a Dynamo automatic checkpoint",
+				namespace,
+				snapshotName,
+			)
+		}
+		if annotations[consts.CheckpointOwnerUIDAnnotation] != string(use.managedOwnerUID) {
 			return nil, fmt.Errorf(
 				"automatic PodSnapshot %s/%s belongs to DGD uid %q, not %q",
 				namespace,
@@ -142,7 +141,6 @@ func ResolvePodSnapshotForService(
 				use.managedOwnerUID,
 			)
 		}
-	case podSnapshotUsePinnedRestore:
 	default:
 		return nil, fmt.Errorf("unsupported PodSnapshot use %d", use.kind)
 	}
