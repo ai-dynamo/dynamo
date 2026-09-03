@@ -64,6 +64,7 @@ spec:
           - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
           - --disaggregation-mode
           - prefill
+          - --publish-kv-events
           command:
           - python3
           - -m
