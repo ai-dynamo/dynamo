@@ -132,7 +132,7 @@ impl Selector {
         Self::validate_queueing_requirements(cfg, role, queueing_enabled)?;
 
         // Every role resolves its worker-selection policy on the aggregated
-        // stage; per-role policies are #13407's to wire.
+        // stage; per-role policies are not wired yet.
         warn_for_unserved_worker_selection_policies(&kv_router_config, &[WorkerType::Aggregated])?;
         let peer_replication = cfg.peer_replication.as_ref();
         let peer_client = if peer_replication.is_some() {
@@ -379,12 +379,9 @@ impl Selector {
     }
 
     /// How many workers this selector can currently schedule for `model_name`.
-    ///
-    /// Each selector serves exactly one role, so this needs no role argument —
-    /// and that is also what makes the cross-catalog assertion in tests direct
-    /// rather than tautological: asking the decode selector what it holds cannot
-    /// be answered with "nothing, because I filtered by decode".
-    pub fn schedulable_count(&self, model_name: &str) -> usize {
+    /// Each selector serves exactly one role, so no role argument is needed.
+    #[cfg(test)]
+    pub(crate) fn schedulable_count(&self, model_name: &str) -> usize {
         self.schedulable_records(model_name).count()
     }
 
@@ -396,6 +393,7 @@ impl Selector {
             .collect()
     }
 
+    #[cfg(test)]
     fn schedulable_records(
         &self,
         model_name: &str,
@@ -409,10 +407,6 @@ impl Selector {
 
 /// The selectors this EPP owns — one in aggregated topology, one per role in
 /// disaggregated.
-///
-/// `Clone` is required because the same value must reach both the spawned
-/// reconcile task and the router; the payload is only `Arc`s, so cloning is a
-/// refcount bump, exactly as passing the single `Arc<Selector>` was before.
 #[derive(Clone)]
 pub enum RoleSelectors {
     Aggregated(Arc<Selector>),
@@ -425,8 +419,8 @@ pub enum RoleSelectors {
 impl RoleSelectors {
     /// The selector that answers requests.
     ///
-    /// Disaggregated serves from decode: a prefill worker is a selection input
-    /// for the pairing #13407 will add, never a gateway destination.
+    /// Disaggregated serves from decode: a prefill worker is never a gateway
+    /// destination.
     pub fn serving(&self) -> &Arc<Selector> {
         match self {
             Self::Aggregated(selector) => selector,

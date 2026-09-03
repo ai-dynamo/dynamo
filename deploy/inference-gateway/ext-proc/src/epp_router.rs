@@ -51,9 +51,7 @@ pub struct EppRouter {
     _adapter: TopologyAdapter,
     reflector_ready: Arc<AtomicBool>,
     /// The only role this EPP will ever hand the gateway as a destination:
-    /// `Aggregated` in aggregated topology, `Decode` in disaggregated. Every
-    /// reflector read in `pick()` is scoped by it, which is what makes "never
-    /// route to a prefill endpoint" structural rather than a convention.
+    /// `Aggregated` in aggregated topology, `Decode` in disaggregated.
     serving_role: WorkerRole,
     model_name: String,
     /// Bounds total concurrent in-flight `pick()`s. HTTP/2 stream multiplexing
@@ -274,9 +272,7 @@ impl EndpointPicker for EppRouter {
         }
 
         if !self.reflector.has_ready_workers(self.serving_role) {
-            // Distinguish "this role is empty" from "the pool is empty": under a
-            // role split the pool can be full of prefill pods while decode has
-            // none, and the two need different operator responses.
+            // Distinguish "this role is empty" from "the pool is empty".
             return Err(match self.serving_role {
                 WorkerRole::Aggregated => PickError::NoEndpoints,
                 role => PickError::RoleCatalogEmpty(role),
@@ -650,8 +646,6 @@ mod tests {
         assert!(!fired.load(Ordering::SeqCst));
     }
 
-    // --- the invariant: a prefill worker is never a destination -------------
-
     use crate::pod_discovery::RawWorker;
     use crate::selector::RoleSelectors;
     use dynamo_runtime::discovery::hash_pod_name;
@@ -694,103 +688,63 @@ mod tests {
         EppRouter::from_selector_parts(cfg, renderer, Arc::new(reflector), ready, selectors)
     }
 
+    /// The body-less path resolves an arbitrary worker without consulting the
+    /// selector at all, which is exactly why it must be role-scoped.
     #[tokio::test]
-    async fn serving_role_follows_the_topology() {
-        let agg = router_over(EppStandaloneConfig::for_test(), vec![]).await;
-        assert_eq!(agg.serving_role, WorkerRole::Aggregated);
-
-        // `from_selector_parts` reads the role off the selectors it is handed, so
-        // a disaggregated router is exercised through its real constructor in
-        // `build_selectors`; here we assert the aggregated default explicitly.
-        let disagg_selectors_role = RoleSelectors::Disaggregated {
-            prefill: Arc::new(
-                Selector::new(&disagg_config(), WorkerSelectionPolicyRegistry::default())
-                    .await
-                    .expect("selector should build"),
-            ),
-            decode: Arc::new(
-                Selector::new(&disagg_config(), WorkerSelectionPolicyRegistry::default())
-                    .await
-                    .expect("selector should build"),
-            ),
+    async fn decode_serving_pick_never_returns_a_prefill_endpoint() {
+        enum Expected {
+            Endpoint(&'static str),
+            NoEndpoints,
+            DecodeCatalogEmpty,
         }
-        .serving_role();
-        assert_eq!(disagg_selectors_role, WorkerRole::Decode);
-    }
+        let prefill = || worker("p-0", "10.0.0.1", WorkerRole::Prefill);
+        let decode = || worker("d-0", "10.0.0.2", WorkerRole::Decode);
+        let cases = [
+            (
+                "body-less pick resolves the decode worker",
+                vec![prefill(), decode()],
+                vec![],
+                Expected::Endpoint("10.0.0.2:8000"),
+            ),
+            (
+                "subset hint naming only prefill pods refuses to route",
+                vec![prefill(), decode()],
+                vec!["10.0.0.1:8000".to_string()],
+                Expected::NoEndpoints,
+            ),
+            (
+                "prefill-only catalog reports the empty decode role",
+                vec![prefill()],
+                vec![],
+                Expected::DecodeCatalogEmpty,
+            ),
+        ];
 
-    #[tokio::test]
-    async fn body_less_pick_never_returns_a_prefill_endpoint() {
-        // The body-less path resolves an arbitrary worker without consulting the
-        // selector at all, which is exactly why it must be role-scoped.
-        let mut router = router_over(
-            EppStandaloneConfig::for_test(),
-            vec![
-                worker("p-0", "10.0.0.1", WorkerRole::Prefill),
-                worker("d-0", "10.0.0.2", WorkerRole::Decode),
-            ],
-        )
-        .await;
-        router.serving_role = WorkerRole::Decode;
-
-        let req = RequestInfo {
-            request_id: "r1".to_string(),
-            headers: Vec::new(),
-            body: bytes::Bytes::new(),
-            model: String::new(),
-            candidate_subset: Vec::new(),
-        };
-        let picked = router
-            .pick(&req, &[])
-            .await
-            .expect("decode should be picked");
-        assert_eq!(picked.endpoint, "10.0.0.2:8000");
-    }
-
-    #[tokio::test]
-    async fn a_subset_hint_naming_only_prefill_pods_refuses_to_route() {
-        let mut router = router_over(
-            EppStandaloneConfig::for_test(),
-            vec![
-                worker("p-0", "10.0.0.1", WorkerRole::Prefill),
-                worker("d-0", "10.0.0.2", WorkerRole::Decode),
-            ],
-        )
-        .await;
-        router.serving_role = WorkerRole::Decode;
-
-        let req = RequestInfo {
-            request_id: "r1".to_string(),
-            headers: Vec::new(),
-            body: bytes::Bytes::new(),
-            model: String::new(),
-            candidate_subset: vec!["10.0.0.1:8000".to_string()],
-        };
-        assert!(matches!(
-            router.pick(&req, &[]).await,
-            Err(PickError::NoEndpoints)
-        ));
-    }
-
-    #[tokio::test]
-    async fn a_prefill_only_catalog_reports_the_empty_role() {
-        let mut router = router_over(
-            EppStandaloneConfig::for_test(),
-            vec![worker("p-0", "10.0.0.1", WorkerRole::Prefill)],
-        )
-        .await;
-        router.serving_role = WorkerRole::Decode;
-
-        let req = RequestInfo {
-            request_id: "r1".to_string(),
-            headers: Vec::new(),
-            body: bytes::Bytes::new(),
-            model: String::new(),
-            candidate_subset: Vec::new(),
-        };
-        // Attributable in the client's 503, not conflated with an empty pool.
-        assert!(matches!(
-            router.pick(&req, &[]).await,
-            Err(PickError::RoleCatalogEmpty(WorkerRole::Decode))
-        ));
+        for (label, workers, candidate_subset, expected) in cases {
+            let mut router = router_over(disagg_config(), workers).await;
+            router.serving_role = WorkerRole::Decode;
+            let req = RequestInfo {
+                request_id: "r1".to_string(),
+                headers: Vec::new(),
+                body: bytes::Bytes::new(),
+                model: String::new(),
+                candidate_subset,
+            };
+            let got = router.pick(&req, &[]).await;
+            match expected {
+                Expected::Endpoint(endpoint) => {
+                    assert_eq!(got.expect(label).endpoint, endpoint, "{label}");
+                }
+                Expected::NoEndpoints => {
+                    assert!(matches!(got, Err(PickError::NoEndpoints)), "{label}");
+                }
+                Expected::DecodeCatalogEmpty => {
+                    assert!(
+                        matches!(got, Err(PickError::RoleCatalogEmpty(WorkerRole::Decode))),
+                        "{label}"
+                    );
+                }
+            }
+        }
     }
 }

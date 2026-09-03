@@ -1576,24 +1576,28 @@ mod tests {
         assert_eq!(unique_prefilled, unique);
     }
 
-    /// A shed `PickError::Overloaded` maps to a retryable 503 (not a 4xx), so
-    /// clients back off and retry rather than treating the load-shed as their
-    /// own error.
+    /// Pick errors are never logged, so the 503 body is the only place the
+    /// role distinction reaches the caller.
     #[test]
-    fn overloaded_pick_error_maps_to_503() {
-        let err = ExtProcError::from_pick_error(PickError::Overloaded);
-        assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
-    }
+    fn retryable_pick_errors_map_to_503_with_client_safe_message() {
+        use crate::worker_role::WorkerRole;
 
-    #[test]
-    fn empty_role_catalog_maps_to_503_and_names_the_role() {
-        // Same status as an empty pool, but the message says which role is
-        // missing — the only place that distinction reaches the caller, since
-        // pick errors are never logged.
-        let err = ExtProcError::from_pick_error(PickError::RoleCatalogEmpty(
-            crate::worker_role::WorkerRole::Decode,
-        ));
-        assert_eq!(err.status_code, StatusCode::ServiceUnavailable);
-        assert!(err.message.contains("decode"), "{}", err.message);
+        let cases = [
+            ("overloaded", PickError::Overloaded, "overloaded"),
+            (
+                "empty decode catalog",
+                PickError::RoleCatalogEmpty(WorkerRole::Decode),
+                "decode",
+            ),
+        ];
+        for (label, pick_error, want_fragment) in cases {
+            let err = ExtProcError::from_pick_error(pick_error);
+            assert_eq!(err.status_code, StatusCode::ServiceUnavailable, "{label}");
+            assert!(
+                err.message.contains(want_fragment),
+                "{label}: {:?} should contain {want_fragment:?}",
+                err.message
+            );
+        }
     }
 }

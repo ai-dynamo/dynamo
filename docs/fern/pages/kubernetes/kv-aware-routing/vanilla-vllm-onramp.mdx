@@ -499,8 +499,8 @@ selectors would bind the same replica-sync port.
 | `DYN_KV_CACHE_BLOCK_SIZE` | Yes | Must equal vLLM `--block-size`. |
 | `DYN_EPP_TOPOLOGY_MODE` | No | `aggregated` (default) treats every worker as a routable target. `disaggregated` splits the pool by worker role; see the note below. Any other value fails startup. |
 | `DYN_EPP_WORKER_ROLE_LABEL` | No | Pod label key naming a worker's role; defaults to `nvidia.com/dynamo-worker-role`. Read only under `disaggregated`, where every pool pod must carry it with the value `prefill` or `decode`. |
-| `DYN_EPP_KV_EVENT_PORT` | No | Per-pod vLLM KV event port; defaults to `5557`. |
-| `DYN_EPP_KV_EVENT_REPLAY_PORT` | No | Per-pod replay port for KV event gap recovery. |
+| `DYN_EPP_KV_EVENT_PORT` | No | Per-pod vLLM KV event port; defaults to `5557`. Under `disaggregated` it applies to prefill workers only; decode workers consume no KV events. |
+| `DYN_EPP_KV_EVENT_REPLAY_PORT` | No | Per-pod replay port for KV event gap recovery. Under `disaggregated` it applies to prefill workers only. |
 | `DYN_EPP_MAX_NUM_BATCHED_TOKENS` | Policy-dependent | Must equal vLLM `--max-num-batched-tokens`; required when router queue thresholds are enabled. Under `disaggregated` this is the fallback for both roles. |
 | `DYN_EPP_PREFILL_MAX_NUM_BATCHED_TOKENS` | No | Prefill-worker override; defaults to `DYN_EPP_MAX_NUM_BATCHED_TOKENS`. |
 | `DYN_EPP_DECODE_MAX_NUM_BATCHED_TOKENS` | No | Decode-worker override; defaults to `DYN_EPP_MAX_NUM_BATCHED_TOKENS`. |

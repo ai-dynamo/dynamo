@@ -29,12 +29,7 @@ impl RegistrationDefaults {
         Self::for_role(cfg, WorkerRole::Aggregated)
     }
 
-    /// Catalog metadata for a worker in `role`.
-    ///
-    /// Capacity is per-role because disaggregated fleets size prefill and decode
-    /// differently — shipped recipes differ by 8-16x on batched tokens — and that
-    /// value is the denominator of the scheduler's busy test, so one shared
-    /// number mis-sizes whichever role did not set it.
+    /// Catalog metadata for a worker in `role`; batched-token capacity is per-role.
     pub fn for_role(cfg: &EppStandaloneConfig, role: WorkerRole) -> Self {
         Self {
             model_name: cfg.model_name.clone(),
@@ -123,9 +118,6 @@ async fn reconcile_once(
             apply(selector, *role, desired).await;
         }
         RoleSelectors::Disaggregated { prefill, decode } => {
-            // One snapshot for both roles. Reading them through two calls would
-            // take two locks and observe two generations, and a role flip
-            // between them would put one worker into both desired sets.
             let sets = reflector.ready_workers_by_role();
             for (role, workers) in [
                 (WorkerRole::Prefill, sets.prefill),
@@ -235,6 +227,19 @@ mod tests {
             "tcp://10.0.0.1:5557"
         );
         assert_eq!(reg.total_kv_blocks, Some(1000));
+
+        let cfg = EppStandaloneConfig {
+            prefill_max_num_batched_tokens: Some(16384),
+            decode_max_num_batched_tokens: Some(2048),
+            ..disagg_config()
+        };
+        for (role, want) in [
+            (WorkerRole::Prefill, Some(16384)),
+            (WorkerRole::Decode, Some(2048)),
+        ] {
+            let got = RegistrationDefaults::for_role(&cfg, role).max_num_batched_tokens;
+            assert_eq!(got, want, "{role} max_num_batched_tokens");
+        }
     }
 
     #[tokio::test]
@@ -372,8 +377,7 @@ mod tests {
         let RoleSelectors::Disaggregated { prefill, decode } = &selectors else {
             unreachable!()
         };
-        // The invariant, asserted directly: each instance is one role, so asking
-        // decode what it holds cannot be answered by a role filter.
+        // Asserted directly, not via a role filter: each instance holds one role.
         assert_eq!(decode.schedulable_worker_ids(&model), HashSet::from([2]));
         assert_eq!(prefill.schedulable_worker_ids(&model), HashSet::from([1]));
 
@@ -397,8 +401,6 @@ mod tests {
 
     #[tokio::test]
     async fn decode_workers_are_schedulable_without_kv_event_endpoints() {
-        // The whole reason discovery leaves decode's endpoint `None`: the decode
-        // instance runs with KV events off, so schedulability must not demand one.
         let cfg = disagg_config();
         let selectors = role_selectors(&cfg).await;
         let RoleSelectors::Disaggregated { decode, .. } = &selectors else {
@@ -419,20 +421,5 @@ mod tests {
             .await
             .expect("reconcile should succeed");
         assert_eq!(decode.schedulable_count(&cfg.model_name), 1);
-    }
-
-    #[test]
-    fn per_role_defaults_take_that_role_capacity() {
-        let cfg = EppStandaloneConfig {
-            prefill_max_num_batched_tokens: Some(16384),
-            decode_max_num_batched_tokens: Some(2048),
-            ..disagg_config()
-        };
-
-        let prefill = RegistrationDefaults::for_role(&cfg, WorkerRole::Prefill);
-        assert_eq!(prefill.max_num_batched_tokens, Some(16384));
-
-        let decode = RegistrationDefaults::for_role(&cfg, WorkerRole::Decode);
-        assert_eq!(decode.max_num_batched_tokens, Some(2048));
     }
 }

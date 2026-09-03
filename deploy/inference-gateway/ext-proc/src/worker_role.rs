@@ -3,12 +3,7 @@
 
 //! Worker roles for the standalone EPP's disaggregated topology.
 //!
-//! In `DYN_EPP_TOPOLOGY_MODE=disaggregated` every pod selected by the
-//! `InferencePool` must carry a role label whose value names the stage that pod
-//! serves. The EPP splits the pool on that label into a prefill catalog and a
-//! decode catalog, each backing its own embedded `SelectionService`.
-//!
-//! In `aggregated` mode the label is never read and every eligible pod is
+//! In `aggregated` topology the label is never read and every eligible pod is
 //! [`WorkerRole::Aggregated`].
 
 use std::fmt;
@@ -57,12 +52,8 @@ impl WorkerRole {
         }
     }
 
-    /// Resolve a role from a pod label value.
-    ///
-    /// Delegates to [`WorkerType::from_str`] — which trims and lowercases — so
-    /// the accepted vocabulary cannot drift from the operator's component-type
-    /// enum, then narrows to the two stages a disaggregated pool may contain.
-    /// `encode` and `aggregated` parse as worker types but are not roles here.
+    /// Delegates to [`WorkerType::from_str`] so the accepted vocabulary cannot
+    /// drift from the operator's component-type enum.
     pub fn from_pod_label(value: &str) -> Result<Self, RoleLabelError> {
         match WorkerType::from_str(value) {
             Ok(WorkerType::Prefill) => Ok(Self::Prefill),
@@ -159,90 +150,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_the_two_disaggregated_stages() {
-        assert_eq!(
-            WorkerRole::from_pod_label("prefill").unwrap(),
-            WorkerRole::Prefill
-        );
-        assert_eq!(
-            WorkerRole::from_pod_label("decode").unwrap(),
-            WorkerRole::Decode
-        );
+    fn from_pod_label_narrows_worker_type_to_the_two_stages() {
+        // Label values cannot carry whitespace, but the vocabulary is delegated
+        // to `WorkerType::from_str`, so pin the trim/lowercase leniency inherited
+        // from it. `encode` and `aggregated` are valid WorkerTypes; the
+        // narrowing is what rejects them.
+        let invalid = |token: &str| -> Result<WorkerRole, RoleLabelError> {
+            Err(RoleLabelError::Invalid {
+                token: token.to_string(),
+            })
+        };
+        let cases = [
+            ("prefill", Ok(WorkerRole::Prefill)),
+            ("decode", Ok(WorkerRole::Decode)),
+            (" Decode ", Ok(WorkerRole::Decode)),
+            ("PREFILL", Ok(WorkerRole::Prefill)),
+            ("encode", invalid("encode")),
+            ("aggregated", invalid("aggregated")),
+            ("worker", invalid("worker")),
+            ("", invalid("")),
+            ("gibberish", invalid("gibberish")),
+            // The token keeps the original spelling, not the normalized form.
+            (" Prefil ", invalid(" Prefil ")),
+        ];
+        for (input, want) in cases {
+            let got = WorkerRole::from_pod_label(input);
+            assert_eq!(got, want, "{input:?}");
+            if let Err(error) = got {
+                assert_eq!(error.reason(), "role_label_invalid", "{input:?}");
+            }
+        }
     }
 
     #[test]
-    fn parsing_trims_and_lowercases_via_worker_type() {
-        // Kubernetes label values cannot actually carry surrounding whitespace,
-        // but the vocabulary is delegated to `WorkerType::from_str`, so this
-        // pins the leniency we inherit rather than leaving it undiscovered.
-        assert_eq!(
-            WorkerRole::from_pod_label(" Decode ").unwrap(),
-            WorkerRole::Decode
-        );
-        assert_eq!(
-            WorkerRole::from_pod_label("PREFILL").unwrap(),
-            WorkerRole::Prefill
-        );
-    }
-
-    #[test]
-    fn rejects_values_that_name_no_disaggregated_stage() {
-        // `encode` and `aggregated` are valid WorkerTypes; the narrowing is what
-        // rejects them. `worker` is the operator's component-type value.
-        for value in ["encode", "aggregated", "worker", "", "gibberish"] {
-            let error = WorkerRole::from_pod_label(value)
-                .expect_err("value should not resolve to a disaggregated role");
-            assert_eq!(error.reason(), "role_label_invalid");
+    fn display_matches_as_str_and_only_stages_round_trip() {
+        let cases = [
+            (WorkerRole::Aggregated, "aggregated", false),
+            (WorkerRole::Prefill, "prefill", true),
+            (WorkerRole::Decode, "decode", true),
+        ];
+        for (role, text, round_trips) in cases {
+            assert_eq!(role.as_str(), text, "{text}");
+            assert_eq!(role.to_string(), text, "{text}");
             assert_eq!(
-                error,
-                RoleLabelError::Invalid {
-                    token: value.into()
-                }
+                WorkerRole::from_pod_label(text).ok(),
+                round_trips.then_some(role),
+                "{text}"
             );
         }
-    }
 
-    #[test]
-    fn invalid_token_preserves_the_original_spelling() {
-        // The operator needs to see what they actually wrote, not a normalized
-        // form, to spot a typo or a stray character.
-        let error = WorkerRole::from_pod_label(" Prefil ").unwrap_err();
-        assert_eq!(
-            error,
-            RoleLabelError::Invalid {
-                token: " Prefil ".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn aggregated_is_display_only_and_does_not_round_trip() {
-        // `as_str` feeds logs and the RoleCatalogEmpty message; it is not a
-        // label serializer. Guarding this stops a future round-trip test or a
-        // label built from `as_str()` from silently accepting `aggregated`.
-        assert_eq!(WorkerRole::Aggregated.as_str(), "aggregated");
-        assert!(WorkerRole::from_pod_label(WorkerRole::Aggregated.as_str()).is_err());
-
-        for role in [WorkerRole::Prefill, WorkerRole::Decode] {
-            assert_eq!(WorkerRole::from_pod_label(role.as_str()).unwrap(), role);
-        }
-    }
-
-    #[test]
-    fn display_matches_as_str() {
-        assert_eq!(WorkerRole::Prefill.to_string(), "prefill");
-        assert_eq!(WorkerRole::Decode.to_string(), "decode");
-    }
-
-    #[test]
-    fn missing_and_invalid_have_distinct_reasons() {
         assert_eq!(RoleLabelError::Missing.reason(), "role_label_missing");
-        assert_eq!(
+        assert_ne!(
+            RoleLabelError::Missing.reason(),
             RoleLabelError::Invalid {
                 token: "x".to_string()
             }
-            .reason(),
-            "role_label_invalid"
+            .reason()
         );
     }
 
@@ -260,12 +223,13 @@ mod tests {
         counts.remove(WorkerRole::Prefill);
         assert_eq!(counts.get(WorkerRole::Prefill), 1);
         assert_eq!(counts.get(WorkerRole::Decode), 1);
-    }
 
-    #[test]
-    fn removing_below_zero_saturates() {
-        let mut counts = RoleCounts::default();
         counts.remove(WorkerRole::Decode);
-        assert_eq!(counts.get(WorkerRole::Decode), 0);
+        counts.remove(WorkerRole::Decode);
+        assert_eq!(
+            counts.get(WorkerRole::Decode),
+            0,
+            "remove saturates at zero"
+        );
     }
 }

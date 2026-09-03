@@ -54,9 +54,8 @@ pub struct RawWorker {
 /// error worth surfacing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PodRejection {
-    /// Not `Ready`, not pool-selected, unnamed, or without a parseable IP.
-    /// Pre-existing behavior, and the only outcome possible in aggregated
-    /// topology.
+    /// Not `Ready`, not pool-selected, unnamed, or without a parseable IP; the
+    /// only outcome possible in aggregated topology.
     Ineligible,
     /// Pool-selected and `Ready`, but the role label is missing or unparseable.
     Role(RoleLabelError),
@@ -203,8 +202,7 @@ impl PodDiscovery {
             tokio::pin!(reflect);
             let mut generation = 0u64;
             let mut last_counts = RoleCounts::default();
-            // Set once discovery first has a complete picture; see the census
-            // block below for why the crossed-zero log alone is not enough.
+            // Set once discovery first has a complete picture.
             let mut census_logged = false;
             // The pod cache is "synced" once the reflector's initial LIST lands
             // (InitDone); readiness stays gated on this AND pool presence below.
@@ -275,22 +273,9 @@ impl PodDiscovery {
                 // Readiness based on initial pods being synced and the pool being resolved.
                 let is_ready = pod_synced && pool_rx.borrow().is_some();
 
-                // The first iteration holding a complete picture reports every
-                // role's count, not just the ones that moved: `last_counts`
-                // starts at zeros, so a role that is empty from process start
-                // never crosses zero and `log_role_count_transitions` would say
-                // nothing about it — while the healthy role logs normally. That
-                // is the shape of the likeliest disaggregated misconfiguration
-                // (the role label misspelled on every decode pod), and it would
-                // otherwise be reported by nothing but the 503s themselves. An
-                // all-empty index does not even set `index_changed`, so the
-                // census cannot be gated on it.
-                //
-                // Gated on the role label as well as on readiness, so that under
-                // aggregated topology `first_census` is always false and this
-                // block collapses to exactly the transition-only path it had
-                // before: one catalog makes "no workers" unambiguous already,
-                // and its startup output must not change.
+                // `last_counts` starts at zeros, so a role empty from process
+                // start never crosses zero, and an all-empty index does not set
+                // `index_changed` either; report the census once instead.
                 let first_census = is_ready && !census_logged && role_cfg.role_label.is_some();
 
                 // This loop is the only place with a before/after view of the
@@ -328,7 +313,7 @@ impl PodDiscovery {
     }
 
     // Return all currently `Ready` workers selected by the pool, regardless of
-    // role. Used by the aggregated reconcile path.
+    // role.
     pub fn ready_workers(&self) -> Vec<RawWorker> {
         self.index
             .read()
@@ -357,9 +342,8 @@ impl PodDiscovery {
         sets
     }
 
-    /// Whether any `Ready`, pool-selected worker in `role` exists. O(1) via the
-    /// denormalized counts — this runs on every request, so it must not become
-    /// a scan when the index gains a role dimension.
+    /// Whether any `Ready`, pool-selected worker in `role` exists. This runs on
+    /// every request, so it must not become a scan.
     pub fn has_ready_workers(&self, role: WorkerRole) -> bool {
         self.index.read().unwrap().counts().get(role) > 0
     }
@@ -383,10 +367,6 @@ impl PodDiscovery {
 
     /// Resolve a `worker_id` to its current `ip:port` HTTP endpoint, refusing a
     /// worker whose role is not `role`.
-    ///
-    /// The role check is what makes "never route to a prefill endpoint" a
-    /// compiler-and-runtime property rather than a convention: a caller holding
-    /// a prefill id simply cannot turn it into a destination.
     pub fn resolve_endpoint(&self, worker_id: u64, role: WorkerRole) -> Option<String> {
         self.index
             .read()
@@ -464,11 +444,8 @@ fn index_state_from(workers: Vec<RawWorker>) -> IndexState {
 
 /// The roles to report in a startup census, with the count to report for each.
 ///
-/// Empty under aggregated topology: there is one catalog, "no workers" is
-/// already unambiguous, and staying silent keeps aggregated startup output
-/// byte-identical to its previous behavior. Under a role split the opposite is
-/// true — one catalog can be empty while the other logs normally, and the
-/// difference is invisible without this.
+/// Empty under aggregated topology: one catalog makes "no workers" unambiguous
+/// already.
 fn role_census(cfg: &RoleDiscoveryConfig, counts: RoleCounts) -> Vec<(WorkerRole, usize)> {
     if cfg.role_label.is_none() {
         return Vec::new();
@@ -642,7 +619,6 @@ fn rebuild_index(
                 Ok(worker) => {
                     fresh.insert(worker.worker_id, WorkerEntry::from_raw(worker));
                 }
-                // Silent and expected: the pod is simply not one of ours.
                 Err(PodRejection::Ineligible) => {}
                 Err(_) => excluded += 1,
             }
@@ -669,13 +645,11 @@ fn rebuild_index(
     }
 }
 
-/// Inputs the pure per-pod mapping needs, replacing the loose port pair that
-/// used to be threaded through every index mutator.
+/// Inputs the per-pod mapping needs.
 #[derive(Debug, Clone)]
 pub(crate) struct RoleDiscoveryConfig {
     /// Label key carrying a worker's role, or `None` in aggregated topology.
-    /// When `None` the label is never read at all, which is what keeps
-    /// aggregated discovery byte-identical to its previous behavior.
+    /// When `None` the label is never read at all.
     role_label: Option<String>,
     kv_event_port: u16,
     replay_port: Option<u16>,
@@ -707,10 +681,9 @@ impl RoleDiscoveryConfig {
     }
 }
 
-/// Build a [`RawWorker`] from a pod, or say why the pod produced none. Pure
-/// function — unit-testable.
+/// Build a [`RawWorker`] from a pod, or say why the pod produced none.
 ///
-/// Eligibility is decided first and unchanged, so a `NotReady` prefill pod is
+/// Eligibility is decided first, so a `NotReady` prefill pod is
 /// [`PodRejection::Ineligible`] rather than a role error: a rolling update must
 /// not read as a misconfiguration.
 fn raw_worker_from_pod(
@@ -815,52 +788,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_startup_census_reports_a_role_that_was_never_populated() {
-        // The crossed-zero log cannot: `last_counts` starts at zeros, so a role
-        // that is empty from process start never crosses. Without the census a
-        // fleet whose decode pods are all mislabelled logs a healthy prefill
-        // line and nothing else, and the only remaining signal is the 503s.
-        let counts = RoleCounts {
-            aggregated: 0,
-            prefill: 2,
-            decode: 0,
-        };
-        assert_eq!(
-            role_census(&disagg_cfg(), counts),
-            vec![(WorkerRole::Prefill, 2), (WorkerRole::Decode, 0)]
-        );
-    }
-
-    #[test]
-    fn the_startup_census_is_silent_under_aggregated() {
-        // One catalog makes "no workers" unambiguous already, and aggregated
-        // startup output must stay byte-identical to its previous behavior.
-        assert!(role_census(&agg_cfg(), RoleCounts::default()).is_empty());
-        assert!(
-            role_census(
-                &agg_cfg(),
-                RoleCounts {
-                    aggregated: 3,
-                    prefill: 0,
-                    decode: 0,
-                },
-            )
-            .is_empty()
-        );
-    }
-
-    #[test]
-    fn the_startup_census_covers_the_all_empty_pool() {
-        // This is the case that cannot be gated on `index_changed`: an index
-        // that starts empty and stays empty never reports a change, so gating
-        // the census on one would make both roles silent.
-        assert_eq!(
-            role_census(&disagg_cfg(), RoleCounts::default()),
-            vec![(WorkerRole::Prefill, 0), (WorkerRole::Decode, 0)]
-        );
-    }
-
     fn with_replay(mut cfg: RoleDiscoveryConfig, port: u16) -> RoleDiscoveryConfig {
         cfg.replay_port = Some(port);
         cfg
@@ -877,119 +804,241 @@ mod tests {
     }
 
     #[test]
-    fn ready_selected_pod_maps_to_worker() {
-        let w = raw_worker_from_pod(
-            &pod(
-                "vllm-0",
-                Some("10.0.0.1"),
-                Some(true),
-                &[("app", "vllm-qwen")],
-            ),
-            &pool(),
-            &with_replay(agg_cfg(), 5560),
-        )
-        .expect("ready, selected pod should map");
-        assert_eq!(w.worker_id, hash_pod_name("vllm-0"));
-        assert_eq!(w.http_endpoint, "http://10.0.0.1:8000");
-        assert_eq!(w.kv_events_endpoint.as_deref(), Some("tcp://10.0.0.1:5557"));
-        assert_eq!(w.replay_endpoint.as_deref(), Some("tcp://10.0.0.1:5560"));
-    }
-
-    #[test]
-    fn ipv6_pod_ip_is_bracketed_in_all_endpoints() {
-        let w = raw_worker_from_pod(
-            &pod(
-                "vllm-0",
-                Some("fd00::10"),
-                Some(true),
-                &[("app", "vllm-qwen")],
-            ),
-            &pool(),
-            &with_replay(agg_cfg(), 5560),
-        )
-        .expect("ready, selected IPv6 pod should map");
-        // SocketAddr brackets the IPv6 host so host and port are unambiguous.
-        assert_eq!(w.http_endpoint, "http://[fd00::10]:8000");
-        assert_eq!(
-            w.kv_events_endpoint.as_deref(),
-            Some("tcp://[fd00::10]:5557")
+    fn raw_worker_from_pod_maps_eligible_pods_and_rejects_the_rest() {
+        type Endpoints = (
+            WorkerRole,
+            &'static str,
+            Option<&'static str>,
+            Option<&'static str>,
         );
-        assert_eq!(w.replay_endpoint.as_deref(), Some("tcp://[fd00::10]:5560"));
-    }
+        type Expected = Result<Endpoints, PodRejection>;
 
-    #[test]
-    fn malformed_pod_ip_is_skipped() {
-        assert!(
-            raw_worker_from_pod(
-                &pod(
-                    "vllm-0",
-                    Some("not-an-ip"),
-                    Some(true),
-                    &[("app", "vllm-qwen")]
-                ),
-                &pool(),
-                &agg_cfg(),
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn pod_not_matching_selector_is_skipped() {
-        assert!(
-            raw_worker_from_pod(
-                &pod(
-                    "other-0",
-                    Some("10.0.0.1"),
-                    Some(true),
-                    &[("app", "something-else")]
-                ),
-                &pool(),
-                &agg_cfg(),
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn not_ready_pod_is_skipped() {
-        assert!(
-            raw_worker_from_pod(
-                &pod(
-                    "vllm-0",
-                    Some("10.0.0.1"),
-                    Some(false),
-                    &[("app", "vllm-qwen")]
-                ),
-                &pool(),
-                &agg_cfg(),
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn terminating_pod_is_skipped() {
-        let mut p = pod(
+        let mut terminating = pod(
             "vllm-0",
             Some("10.0.0.1"),
             Some(true),
             &[("app", "vllm-qwen")],
         );
-        p.metadata.deletion_timestamp = Some(Time(k8s_openapi::chrono::Utc::now()));
-        assert!(raw_worker_from_pod(&p, &pool(), &agg_cfg()).is_err());
+        terminating.metadata.deletion_timestamp = Some(Time(k8s_openapi::chrono::Utc::now()));
+
+        let cases: Vec<(&str, Pod, RoleDiscoveryConfig, Expected)> = vec![
+            (
+                "ready selected pod maps to a worker",
+                pod(
+                    "vllm-0",
+                    Some("10.0.0.1"),
+                    Some(true),
+                    &[("app", "vllm-qwen")],
+                ),
+                with_replay(agg_cfg(), 5560),
+                Ok((
+                    WorkerRole::Aggregated,
+                    "http://10.0.0.1:8000",
+                    Some("tcp://10.0.0.1:5557"),
+                    Some("tcp://10.0.0.1:5560"),
+                )),
+            ),
+            (
+                "IPv6 pod IP is bracketed in every endpoint",
+                pod(
+                    "vllm-0",
+                    Some("fd00::10"),
+                    Some(true),
+                    &[("app", "vllm-qwen")],
+                ),
+                with_replay(agg_cfg(), 5560),
+                Ok((
+                    WorkerRole::Aggregated,
+                    "http://[fd00::10]:8000",
+                    Some("tcp://[fd00::10]:5557"),
+                    Some("tcp://[fd00::10]:5560"),
+                )),
+            ),
+            (
+                "malformed pod IP is ineligible",
+                pod(
+                    "vllm-0",
+                    Some("not-an-ip"),
+                    Some(true),
+                    &[("app", "vllm-qwen")],
+                ),
+                agg_cfg(),
+                Err(PodRejection::Ineligible),
+            ),
+            (
+                "pod outside the pool selector is ineligible",
+                pod(
+                    "other-0",
+                    Some("10.0.0.1"),
+                    Some(true),
+                    &[("app", "something-else")],
+                ),
+                agg_cfg(),
+                Err(PodRejection::Ineligible),
+            ),
+            (
+                "NotReady pod is ineligible",
+                pod(
+                    "vllm-0",
+                    Some("10.0.0.1"),
+                    Some(false),
+                    &[("app", "vllm-qwen")],
+                ),
+                agg_cfg(),
+                Err(PodRejection::Ineligible),
+            ),
+            (
+                "terminating pod is ineligible",
+                terminating,
+                agg_cfg(),
+                Err(PodRejection::Ineligible),
+            ),
+            (
+                "pod without an IP is ineligible",
+                pod("vllm-0", None, Some(true), &[("app", "vllm-qwen")]),
+                agg_cfg(),
+                Err(PodRejection::Ineligible),
+            ),
+            (
+                "aggregated topology never reads the role label",
+                role_pod("vllm-0", "10.0.0.1", "prefill"),
+                agg_cfg(),
+                Ok((
+                    WorkerRole::Aggregated,
+                    "http://10.0.0.1:8000",
+                    Some("tcp://10.0.0.1:5557"),
+                    None,
+                )),
+            ),
+            (
+                "prefill carries both KV-event endpoints",
+                role_pod("p-0", "10.0.0.1", "prefill"),
+                with_replay(disagg_cfg(), 5560),
+                Ok((
+                    WorkerRole::Prefill,
+                    "http://10.0.0.1:8000",
+                    Some("tcp://10.0.0.1:5557"),
+                    Some("tcp://10.0.0.1:5560"),
+                )),
+            ),
+            (
+                "decode carries no KV-event endpoint even with a replay port",
+                role_pod("d-0", "10.0.0.2", "decode"),
+                with_replay(disagg_cfg(), 5560),
+                Ok((WorkerRole::Decode, "http://10.0.0.2:8000", None, None)),
+            ),
+            (
+                "missing role label is a role rejection",
+                pod(
+                    "vllm-0",
+                    Some("10.0.0.1"),
+                    Some(true),
+                    &[("app", "vllm-qwen")],
+                ),
+                disagg_cfg(),
+                Err(PodRejection::Role(RoleLabelError::Missing)),
+            ),
+            (
+                "unparseable role label is a role rejection carrying the token",
+                role_pod("vllm-0", "10.0.0.1", "gibberish"),
+                disagg_cfg(),
+                Err(PodRejection::Role(RoleLabelError::Invalid {
+                    token: "gibberish".to_string(),
+                })),
+            ),
+            (
+                "NotReady outranks a valid role label",
+                pod(
+                    "vllm-0",
+                    Some("10.0.0.1"),
+                    Some(false),
+                    &[("app", "vllm-qwen"), (DEFAULT_WORKER_ROLE_LABEL, "prefill")],
+                ),
+                disagg_cfg(),
+                Err(PodRejection::Ineligible),
+            ),
+            (
+                "unselected outranks a valid role label",
+                pod(
+                    "vllm-0",
+                    Some("10.0.0.1"),
+                    Some(true),
+                    &[("app", "other"), (DEFAULT_WORKER_ROLE_LABEL, "prefill")],
+                ),
+                disagg_cfg(),
+                Err(PodRejection::Ineligible),
+            ),
+            (
+                "missing IP outranks a broken role label",
+                pod(
+                    "vllm-0",
+                    None,
+                    Some(true),
+                    &[("app", "vllm-qwen"), (DEFAULT_WORKER_ROLE_LABEL, "bogus")],
+                ),
+                disagg_cfg(),
+                Err(PodRejection::Ineligible),
+            ),
+        ];
+
+        for (label, p, cfg, want) in cases {
+            let got = raw_worker_from_pod(&p, &pool(), &cfg);
+            match want {
+                Ok((role, http, kv, replay)) => {
+                    let w = got.unwrap_or_else(|e| panic!("{label}: {e:?}"));
+                    let name = p.metadata.name.as_deref().unwrap();
+                    assert_eq!(w.worker_id, hash_pod_name(name), "{label}");
+                    assert_eq!(w.role, role, "{label}");
+                    assert_eq!(w.http_endpoint, http, "{label}");
+                    assert_eq!(w.kv_events_endpoint.as_deref(), kv, "{label}");
+                    assert_eq!(w.replay_endpoint.as_deref(), replay, "{label}");
+                }
+                Err(rejection) => assert_eq!(got, Err(rejection), "{label}"),
+            }
+        }
     }
 
     #[test]
-    fn pod_without_ip_is_skipped() {
-        assert!(
-            raw_worker_from_pod(
-                &pod("vllm-0", None, Some(true), &[("app", "vllm-qwen")]),
-                &pool(),
-                &agg_cfg(),
-            )
-            .is_err()
-        );
+    fn role_census_covers_both_roles_or_is_empty_under_aggregated() {
+        let prefill_only = RoleCounts {
+            aggregated: 0,
+            prefill: 2,
+            decode: 0,
+        };
+        let aggregated_only = RoleCounts {
+            aggregated: 3,
+            prefill: 0,
+            decode: 0,
+        };
+        let cases = [
+            (
+                "a role empty from process start is reported at 0",
+                disagg_cfg(),
+                prefill_only,
+                vec![(WorkerRole::Prefill, 2), (WorkerRole::Decode, 0)],
+            ),
+            (
+                "an all-empty pool reports both roles at 0",
+                disagg_cfg(),
+                RoleCounts::default(),
+                vec![(WorkerRole::Prefill, 0), (WorkerRole::Decode, 0)],
+            ),
+            (
+                "aggregated with no workers adds nothing",
+                agg_cfg(),
+                RoleCounts::default(),
+                vec![],
+            ),
+            (
+                "aggregated with workers adds nothing",
+                agg_cfg(),
+                aggregated_only,
+                vec![],
+            ),
+        ];
+        for (label, cfg, counts, want) in cases {
+            assert_eq!(role_census(&cfg, counts), want, "{label}");
+        }
     }
 
     fn store_from_pods(pods: Vec<Pod>) -> kube::runtime::reflector::Store<Pod> {
@@ -1303,7 +1352,7 @@ mod tests {
         );
     }
 
-    // --- role resolution ---------------------------------------------------
+    // --- role changes and counts -------------------------------------------
 
     /// Recompute counts from the map, so the denormalized copy can be checked
     /// against the source of truth after every mutation path.
@@ -1314,111 +1363,6 @@ mod tests {
         }
         counts
     }
-
-    #[test]
-    fn aggregated_topology_ignores_the_role_label() {
-        // Not merely "defaults to Aggregated": the label is never read, which is
-        // what keeps aggregated discovery byte-identical to its old behavior.
-        let w = raw_worker_from_pod(
-            &role_pod("vllm-0", "10.0.0.1", "prefill"),
-            &pool(),
-            &agg_cfg(),
-        )
-        .expect("labelled pod is still eligible under aggregated");
-        assert_eq!(w.role, WorkerRole::Aggregated);
-        assert!(w.kv_events_endpoint.is_some());
-    }
-
-    #[test]
-    fn disaggregated_topology_maps_the_two_roles() {
-        for (label, expected) in [
-            ("prefill", WorkerRole::Prefill),
-            ("decode", WorkerRole::Decode),
-        ] {
-            let w = raw_worker_from_pod(
-                &role_pod("vllm-0", "10.0.0.1", label),
-                &pool(),
-                &disagg_cfg(),
-            )
-            .expect("labelled pod should map");
-            assert_eq!(w.role, expected);
-        }
-    }
-
-    #[test]
-    fn only_prefill_workers_carry_kv_event_endpoints() {
-        // The decode instance runs with KV events off, so an endpoint there would
-        // open a subscription nothing publishes to.
-        let cfg = with_replay(disagg_cfg(), 5560);
-        let prefill = raw_worker_from_pod(&role_pod("p-0", "10.0.0.1", "prefill"), &pool(), &cfg)
-            .expect("prefill should map");
-        assert_eq!(
-            prefill.kv_events_endpoint.as_deref(),
-            Some("tcp://10.0.0.1:5557")
-        );
-        assert_eq!(
-            prefill.replay_endpoint.as_deref(),
-            Some("tcp://10.0.0.1:5560")
-        );
-
-        let decode = raw_worker_from_pod(&role_pod("d-0", "10.0.0.2", "decode"), &pool(), &cfg)
-            .expect("decode should map");
-        assert!(decode.kv_events_endpoint.is_none());
-        assert!(decode.replay_endpoint.is_none());
-    }
-
-    #[test]
-    fn missing_role_label_is_a_role_rejection() {
-        let p = pod(
-            "vllm-0",
-            Some("10.0.0.1"),
-            Some(true),
-            &[("app", "vllm-qwen")],
-        );
-        assert_eq!(
-            raw_worker_from_pod(&p, &pool(), &disagg_cfg()),
-            Err(PodRejection::Role(RoleLabelError::Missing))
-        );
-    }
-
-    #[test]
-    fn unparseable_role_label_is_a_role_rejection() {
-        let p = role_pod("vllm-0", "10.0.0.1", "gibberish");
-        let Err(PodRejection::Role(error)) = raw_worker_from_pod(&p, &pool(), &disagg_cfg()) else {
-            panic!("an unparseable role must be a role rejection");
-        };
-        assert_eq!(error.reason(), "role_label_invalid");
-    }
-
-    #[test]
-    fn ineligibility_outranks_role_resolution() {
-        // The boundary that keeps a rolling update from reading as a
-        // misconfiguration: a NotReady prefill pod is ineligible, not a role error.
-        let not_ready = pod(
-            "vllm-0",
-            Some("10.0.0.1"),
-            Some(false),
-            &[("app", "vllm-qwen"), (DEFAULT_WORKER_ROLE_LABEL, "prefill")],
-        );
-        assert_eq!(
-            raw_worker_from_pod(&not_ready, &pool(), &disagg_cfg()),
-            Err(PodRejection::Ineligible)
-        );
-
-        // Likewise for a pod the pool does not select, even with a valid role.
-        let unselected = pod(
-            "vllm-0",
-            Some("10.0.0.1"),
-            Some(true),
-            &[("app", "other"), (DEFAULT_WORKER_ROLE_LABEL, "prefill")],
-        );
-        assert_eq!(
-            raw_worker_from_pod(&unselected, &pool(), &disagg_cfg()),
-            Err(PodRejection::Ineligible)
-        );
-    }
-
-    // --- role changes and counts -------------------------------------------
 
     #[test]
     fn role_flip_keeps_worker_id_and_moves_counts() {
@@ -1515,6 +1459,16 @@ mod tests {
             assert_eq!(index.counts().decode, 1);
         }
 
+        // remove_pod for every prefill pod: the decode catalog is untouched.
+        assert!(remove_pod(&index, &role_pod("p-0", "10.0.0.1", "prefill")));
+        assert!(remove_pod(&index, &role_pod("p-1", "10.0.0.4", "prefill")));
+        {
+            let index = index.read().unwrap();
+            assert_eq!(index.counts(), recount(&index));
+            assert_eq!(index.counts().prefill, 0);
+            assert_eq!(index.counts().decode, 1);
+        }
+
         // clear
         index.write().unwrap().clear();
         let index = index.read().unwrap();
@@ -1522,25 +1476,10 @@ mod tests {
         assert_eq!(index.counts(), RoleCounts::default());
     }
 
-    #[test]
-    fn deleting_every_prefill_pod_leaves_the_decode_catalog_intact() {
-        let index = RwLock::new(IndexState::default());
-        let store = store_from_pods(vec![
-            role_pod("p-0", "10.0.0.1", "prefill"),
-            role_pod("d-0", "10.0.0.2", "decode"),
-        ]);
-        assert!(rebuild_index(&store, Some(&pool()), &disagg_cfg(), &index));
-
-        assert!(remove_pod(&index, &role_pod("p-0", "10.0.0.1", "prefill")));
-        let index = index.read().unwrap();
-        assert_eq!(index.counts().prefill, 0);
-        assert_eq!(index.counts().decode, 1);
-    }
-
     // --- the invariant: a prefill worker is never a destination -------------
 
-    fn role_discovery(workers: &[(&str, &str, WorkerRole)]) -> PodDiscovery {
-        let raw = workers
+    fn role_workers(workers: &[(&str, &str, WorkerRole)]) -> Vec<RawWorker> {
+        workers
             .iter()
             .map(|(name, ip, role)| RawWorker {
                 worker_id: hash_pod_name(name),
@@ -1552,8 +1491,11 @@ mod tests {
                     .then(|| format!("tcp://{ip}:5557")),
                 replay_endpoint: None,
             })
-            .collect();
-        PodDiscovery::for_test(raw).0
+            .collect()
+    }
+
+    fn role_discovery(workers: &[(&str, &str, WorkerRole)]) -> PodDiscovery {
+        PodDiscovery::for_test(role_workers(workers)).0
     }
 
     #[test]
@@ -1606,27 +1548,22 @@ mod tests {
             discovery.ready_worker_ids_matching(WorkerRole::Prefill, |_| true),
             HashSet::from([hash_pod_name("p-0")])
         );
-    }
 
-    #[test]
-    fn ready_workers_by_role_partitions_one_snapshot() {
-        let discovery = role_discovery(&[
+        // set_workers swaps the whole catalog and recomputes the counts.
+        discovery.set_workers(role_workers(&[
             ("p-0", "10.0.0.1", WorkerRole::Prefill),
             ("d-0", "10.0.0.2", WorkerRole::Decode),
             ("d-1", "10.0.0.3", WorkerRole::Decode),
-        ]);
+        ]));
+        assert_eq!(discovery.role_counts().prefill, 1);
+        assert_eq!(discovery.role_counts().decode, 2);
 
+        // Both role sets partition one snapshot.
         let sets = discovery.ready_workers_by_role();
         assert_eq!(sets.prefill.len(), 1);
         assert_eq!(sets.decode.len(), 2);
         assert!(sets.prefill.iter().all(|w| w.role == WorkerRole::Prefill));
         assert!(sets.decode.iter().all(|w| w.role == WorkerRole::Decode));
-    }
-
-    #[test]
-    fn set_workers_replaces_the_catalog_and_recomputes_counts() {
-        let discovery = role_discovery(&[("p-0", "10.0.0.1", WorkerRole::Prefill)]);
-        assert_eq!(discovery.role_counts().prefill, 1);
 
         discovery.set_workers(vec![]);
         assert_eq!(discovery.role_counts(), RoleCounts::default());
