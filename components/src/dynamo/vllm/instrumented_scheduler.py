@@ -164,6 +164,63 @@ class BenchmarkConfig:
     collect_imbalanced: bool = False
 
 
+def _is_moe_model(vllm_config: "VllmConfig") -> bool:
+    """Whether the engine resolved this model as a mixture-of-experts model.
+
+    Read from the resolved ``ModelConfig`` because that is the same property
+    vLLM itself branches on when it decides whether DP ranks form one
+    coordinated group. ``ParallelConfig.is_moe_model`` is a copy of it and
+    serves as the fallback for engine versions that do not expose the
+    ``ModelConfig`` property.
+    """
+    model_config = getattr(vllm_config, "model_config", None)
+    is_moe = getattr(model_config, "is_moe", None)
+    if is_moe is None:
+        is_moe = getattr(vllm_config.parallel_config, "is_moe_model", False)
+    return bool(is_moe)
+
+
+def validate_benchmark_data_parallelism(
+    vllm_config: "VllmConfig", benchmark_mode: BenchmarkMode | None
+) -> None:
+    """Reject the attention-DP self-benchmark on a dense (non-MoE) model.
+
+    vLLM keeps data-parallel ranks in one coordinated group only for MoE
+    models (``vllm/v1/engine/core.py``: ``if data_parallel and
+    vllm_config.model_config.is_moe``). Every dense DP child takes the other
+    branch, which rewrites ``data_parallel_size`` to ``1`` and leaves the true
+    rank in ``data_parallel_index``. The benchmark then builds no cross-rank
+    synchronizer, so rank 0 expects results from ``[0]`` while rank 1 reports
+    ``[1]`` and dies partway through the sweep with
+    "attention-DP benchmark result ranks do not match".
+
+    This must run in the parent process, against the requested
+    ``--data-parallel-size`` and before the engine is constructed: by the time
+    a dense DP child is alive the model is loaded and the size it would read
+    has already been rewritten to ``1``.
+    """
+    if benchmark_mode is None:
+        return
+
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    data_parallel_size = getattr(parallel_config, "data_parallel_size", 1) or 1
+    if data_parallel_size <= 1:
+        return
+
+    if _is_moe_model(vllm_config):
+        return
+
+    raise ValueError(
+        "--benchmark-mode cannot be combined with --data-parallel-size "
+        f"{data_parallel_size} on a dense (non-MoE) model. The attention-DP "
+        "self-benchmark requires an MoE model, because vLLM runs data-parallel "
+        "ranks as one coordinated group only for MoE models; on a dense model "
+        "each rank is an independent engine and the cross-rank benchmark "
+        "cannot complete. Either run the benchmark with "
+        "--data-parallel-size 1, or benchmark an MoE model."
+    )
+
+
 def _bench_point_is_imbalanced(candidate: PrefillPointCandidate) -> bool:
     """Whether this point spreads work unevenly across the batch.
 

@@ -72,7 +72,11 @@ from .embedding_worker_processes import (
 from .engine_generate import publish_engine_generate_capability
 from .handlers import apply_data_parallel_runtime_config
 from .headless import run_dynamo_headless
-from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
+from .instrumented_scheduler import (
+    ENV_FPM_BENCHMARK_OUTPUT_PATH,
+    ENV_FPM_WORKER_ID,
+    validate_benchmark_data_parallelism,
+)
 from .kv_connector_protocols import (
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
 )
@@ -672,6 +676,11 @@ def setup_vllm_engine(
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
+    # Must stay ahead of engine construction: this is the first point where
+    # ``model_config.is_moe`` is resolved and the last point before weights
+    # load, and it is the only process that still sees the requested
+    # --data-parallel-size (a dense DP child reads it back as 1).
+    validate_benchmark_data_parallelism(vllm_config, config.benchmark_mode)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
