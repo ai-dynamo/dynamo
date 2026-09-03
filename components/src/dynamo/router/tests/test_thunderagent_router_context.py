@@ -55,6 +55,10 @@ def load_thunderagent_router_handler():
             "dynamo.thunderagent_router.capacity",
             WorkerCapacityProvider=placeholder_type,
         ),
+        "dynamo.thunderagent_router.program_state": stub_module(
+            "dynamo.thunderagent_router.program_state",
+            ReplicaKey=tuple[int, int],
+        ),
         "dynamo.thunderagent_router.router": stub_module(
             "dynamo.thunderagent_router.router",
             ThunderAgentScheduler=placeholder_type,
