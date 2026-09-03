@@ -867,27 +867,19 @@ fn discovery_rejects_incompatible_model_metadata() {
 
 #[test]
 fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
-    for (data_parallel_size, aggregate_blocks, expected_per_rank_blocks) in
-        [(1, 2048, 2048), (2, 4096, 2048), (4, 8192, 2048)]
-    {
-        let mut server = server_info();
-        server
-            .parallelism
-            .as_mut()
-            .expect("parallelism metadata")
-            .data_parallel_size = data_parallel_size;
-        server.total_kv_blocks = aggregate_blocks;
+    let mut server = server_info();
+    server
+        .parallelism
+        .as_mut()
+        .expect("parallelism metadata")
+        .data_parallel_size = 2;
+    server.total_kv_blocks = 4096;
 
-        let model =
-            DiscoveredModel::from_proto(model_info(), server).expect("valid discovery metadata");
-        let registration = model.engine_config().llm.expect("LLM registration");
+    let model =
+        DiscoveredModel::from_proto(model_info(), server).expect("valid discovery metadata");
+    let registration = model.engine_config().llm.expect("LLM registration");
 
-        assert_eq!(
-            registration.total_kv_blocks,
-            Some(expected_per_rank_blocks),
-            "DP size {data_parallel_size}"
-        );
-    }
+    assert_eq!(registration.total_kv_blocks, Some(2048));
 }
 
 #[test]

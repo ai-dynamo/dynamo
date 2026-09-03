@@ -806,13 +806,10 @@ fn build_engine_config(
     let max_num_batched_tokens =
         client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
 
-    let (data_parallel_start_rank, data_parallel_size) = if enable_dp_attention && dp_size > 1 {
-        // Native gRPC is exposed by the rank-zero frontend for the complete
-        // multi-node SGLang endpoint, so one sidecar registers every DP rank.
-        (Some(0), Some(dp_size))
-    } else {
-        (Some(0), Some(1))
-    };
+    // Native gRPC is exposed by the rank-zero frontend for the complete
+    // SGLang endpoint, so one sidecar registers every pure- or attention-DP rank.
+    let data_parallel_start_rank = Some(0);
+    let data_parallel_size = Some(dp_size);
 
     if mode.is_prefill() && (bootstrap_host.is_none() || bootstrap_port.is_none()) {
         return Err(client::protocol_error(
@@ -966,7 +963,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.llm.unwrap().max_num_seqs, Some(256));
+        let registration = config.llm.unwrap();
+        assert_eq!(registration.max_num_seqs, Some(256));
+        assert_eq!(registration.data_parallel_start_rank, Some(0));
+        assert_eq!(registration.data_parallel_size, Some(4));
     }
 
     #[test]

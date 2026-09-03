@@ -166,6 +166,8 @@ impl DiscoveredModel {
     fn total_kv_blocks_per_rank(&self) -> Option<u64> {
         let total_kv_blocks = nonzero(self.server.total_kv_blocks)?;
         let data_parallel_size = u64::from(self.data_parallel_size());
+        // Control exposes only the aggregate across DP engines. This arithmetic-mean
+        // estimate assumes homogeneous ranks; exact division does not prove they are equal.
         let per_rank = total_kv_blocks / data_parallel_size;
 
         if per_rank == 0 {
