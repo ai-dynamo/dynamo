@@ -1,0 +1,93 @@
+# syntax=docker/dockerfile:1.7
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG VLLM_RUNTIME_IMAGE=vllm/vllm-openai:v0.26.0-ubuntu2404@sha256:ef7bfc14df9233e3e5d41e733e3be0afa6abbe5ae5f14ee0758110030f6cd53e
+ARG DYNAMO_AXK2_IMAGE=nvcr.io/nvstaging/nim/ax-k2-nvfp4:dynamo-1.4.1-vllm0.26.0-axk2-patches1-4@sha256:d4700ed2346c4766ba9e1c27db215909b58af0151c880828fdc795bd1f629db9
+
+FROM ${VLLM_RUNTIME_IMAGE} AS vllm_native_builder
+
+ARG VLLM_SOURCE_REPO=https://github.com/vllm-project/vllm.git
+ARG VLLM_SOURCE_TAG=v0.26.0
+ARG VLLM_SOURCE_COMMIT=568afb3a13806beb53bb2e6bd518269357b237c0
+ARG TORCH_CUDA_ARCH_LIST=10.0
+ARG MAX_JOBS=128
+ARG NVCC_THREADS=4
+
+USER root
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        cuda-nvrtc-dev-13-0=13.0.88-1 \
+        git \
+        libcusolver-dev-13-0=12.0.4.66-1 \
+        libcusparse-dev-13-0=12.6.3.3-1 && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    python3 -m pip install \
+        "cmake>=3.26.1" \
+        "setuptools>=77.0.3,<81.0.0" \
+        "setuptools-rust>=1.9.0" \
+        "setuptools-scm>=8.0" \
+        build \
+        wheel
+
+WORKDIR /src
+RUN git clone --branch "${VLLM_SOURCE_TAG}" --depth=1 \
+        "${VLLM_SOURCE_REPO}" vllm && \
+    test "$(git -C vllm rev-parse HEAD)" = "${VLLM_SOURCE_COMMIT}"
+
+COPY --chmod=644 container/patches/vllm/axk2/*.patch /tmp/axk2-vllm-patches/
+COPY --chmod=755 container/deps/vllm/validate_fp8_ds_mla_source_patch.py /usr/local/bin/validate_fp8_ds_mla_source_patch
+RUN set -eux; \
+    cd /src/vllm; \
+    for patch_file in /tmp/axk2-vllm-patches/*.patch; do \
+        patch --batch --forward -p1 < "${patch_file}"; \
+    done; \
+    test "$(grep -c 'VLLM_DS_MLA_UE8M0_SCALE' \
+        csrc/libtorch_stable/cache_kernels.cu)" -ge 2; \
+    validate_fp8_ds_mla_source_patch csrc/libtorch_stable/cache_kernels.cu
+
+# Keep the release image's matching Rust frontend while rebuilding every
+# Python and native vLLM component from one patched source tree.
+RUN set -eux; \
+    installed_vllm="$(python3 -c 'import pathlib,vllm; print(pathlib.Path(vllm.__file__).parent)')"; \
+    cp "${installed_vllm}/vllm-rs" /src/vllm/vllm/; \
+    cp "${installed_vllm}"/_rust_*.so /src/vllm/vllm/
+
+WORKDIR /src/vllm
+ENV VLLM_TARGET_DEVICE=cuda \
+    VLLM_VERSION_OVERRIDE=0.26.0 \
+    CMAKE_BUILD_TYPE=Release
+RUN --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    --mount=type=cache,target=/src/vllm/.deps,sharing=locked \
+    --mount=type=cache,id=axk2-patch5-current-base-build-v1,target=/src/vllm/build,sharing=locked \
+    TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST}" \
+    MAX_JOBS="${MAX_JOBS}" \
+    NVCC_THREADS="${NVCC_THREADS}" \
+    python3 -m pip wheel --no-build-isolation --no-deps \
+        --wheel-dir /wheelhouse /src/vllm && \
+    ls -lh /wheelhouse/vllm-0.26.0-*.whl
+
+FROM ${DYNAMO_AXK2_IMAGE} AS runtime
+
+ARG VLLM_SOURCE_COMMIT=568afb3a13806beb53bb2e6bd518269357b237c0
+LABEL org.opencontainers.image.vllm.source="https://github.com/vllm-project/vllm" \
+      org.opencontainers.image.vllm.revision="${VLLM_SOURCE_COMMIT}" \
+      org.opencontainers.image.vllm.axk2.base_patches="1-4" \
+      org.opencontainers.image.vllm.axk2.fp8_ds_mla_ue8m0="true" \
+      org.opencontainers.image.vllm.cuda_arch="sm_100"
+
+USER root
+COPY --chmod=755 container/deps/vllm/validate_axk2_port.py /tmp/validate_axk2_port.py
+COPY --chmod=755 container/deps/vllm/validate_fp8_ds_mla_native.py /usr/local/bin/validate_fp8_ds_mla_native
+RUN --mount=type=bind,from=vllm_native_builder,source=/wheelhouse,target=/tmp/vllm-native,ro \
+    set -eux; \
+    python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
+        /tmp/vllm-native/vllm-0.26.0-*.whl; \
+    python3 /tmp/validate_axk2_port.py; \
+    validate_fp8_ds_mla_native; \
+    rm -f /tmp/validate_axk2_port.py
+
+USER dynamo
