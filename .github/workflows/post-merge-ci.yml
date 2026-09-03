@@ -972,7 +972,7 @@ jobs:
       DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   deploy-operator-checkpoint-vllm:
-    name: vLLM DynamoCheckpoint Operator Setup
+    name: vLLM Snapshot Operator Setup
     needs: [operator]
     if: github.event_name != 'workflow_dispatch'
     runs-on: prod-deploy-tester-v1
@@ -999,10 +999,11 @@ jobs:
         dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
         dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
         checkpoint_enabled: 'true'
-        checkpoint_storage_size: 64Gi
+        model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+        model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
   deploy-operator-checkpoint-sglang:
-    name: SGLang DynamoCheckpoint Operator Setup
+    name: SGLang Snapshot Operator Setup
     needs: [operator]
     if: github.event_name != 'workflow_dispatch'
     runs-on: prod-deploy-tester-v1
@@ -1029,10 +1030,11 @@ jobs:
         dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
         dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
         checkpoint_enabled: 'true'
-        checkpoint_storage_size: 64Gi
+        model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+        model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
   deploy-operator-checkpoint-trtllm:
-    name: TRTLLM DynamoCheckpoint Operator Setup
+    name: TRTLLM Snapshot Operator Setup
     needs: [operator]
     if: github.event_name != 'workflow_dispatch'
     runs-on: prod-deploy-tester-v1
@@ -1059,10 +1061,11 @@ jobs:
         dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
         dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
         checkpoint_enabled: 'true'
-        checkpoint_storage_size: 64Gi
+        model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+        model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
   deploy-snapshot-agent-checkpoint-vllm:
-    name: vLLM DynamoCheckpoint Snapshot Agent Setup
+    name: vLLM Snapshot Agent Setup
     needs: [deploy-operator-checkpoint-vllm]
     if: |
       github.event_name != 'workflow_dispatch' &&
@@ -1093,7 +1096,8 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: $/.github/actions/connect-vcluster
@@ -1106,9 +1110,11 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
+          storage_class: azurefile-csi
+          storage_size: 64Gi
 
   deploy-snapshot-agent-checkpoint-sglang:
-    name: SGLang DynamoCheckpoint Snapshot Agent Setup
+    name: SGLang Snapshot Agent Setup
     needs: [deploy-operator-checkpoint-sglang]
     if: |
       github.event_name != 'workflow_dispatch' &&
@@ -1139,7 +1145,8 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: $/.github/actions/connect-vcluster
@@ -1152,9 +1159,11 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
+          storage_class: azurefile-csi
+          storage_size: 64Gi
 
   deploy-snapshot-agent-checkpoint-trtllm:
-    name: TRTLLM DynamoCheckpoint Snapshot Agent Setup
+    name: TRTLLM Snapshot Agent Setup
     needs: [deploy-operator-checkpoint-trtllm]
     if: |
       github.event_name != 'workflow_dispatch' &&
@@ -1185,7 +1194,8 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: $/.github/actions/connect-vcluster
@@ -1198,9 +1208,11 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
+          storage_class: azurefile-csi
+          storage_size: 64Gi
 
   deploy-test-checkpoint-vllm:
-    name: vLLM DynamoCheckpoint Deploy Test
+    name: vLLM Snapshot Deploy Test
     needs: [deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, snapshot-placeholder-vllm, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
@@ -1233,7 +1245,8 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: $/.github/actions/connect-vcluster
@@ -1246,7 +1259,9 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
-      - name: Run DynamoCheckpoint Deploy Test
+          storage_class: azurefile-csi
+          storage_size: 64Gi
+      - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
@@ -1258,13 +1273,14 @@ jobs:
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.snapshot-placeholder-vllm.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_vllm
           test_file: tests/deploy/test_dynamocheckpoint.py
+          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
           extra_pytest_args: >-
-            -m dynamocheckpoint
+            -m snapshot_restore
             --checkpoint-backend=vllm
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
   deploy-test-checkpoint-sglang:
-    name: SGLang DynamoCheckpoint Deploy Test
+    name: SGLang Snapshot Deploy Test
     needs: [deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, snapshot-placeholder-sglang, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
@@ -1297,7 +1313,8 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: $/.github/actions/connect-vcluster
@@ -1310,7 +1327,9 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
-      - name: Run DynamoCheckpoint Deploy Test
+          storage_class: azurefile-csi
+          storage_size: 64Gi
+      - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
@@ -1322,13 +1341,14 @@ jobs:
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.snapshot-placeholder-sglang.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_sglang
           test_file: tests/deploy/test_dynamocheckpoint.py
+          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
           extra_pytest_args: >-
-            -m dynamocheckpoint
+            -m snapshot_restore
             --checkpoint-backend=sglang
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
   deploy-test-checkpoint-trtllm:
-    name: TRTLLM DynamoCheckpoint Deploy Test
+    name: TRTLLM Snapshot Deploy Test
     needs: [deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, snapshot-placeholder-trtllm, frontend-copy-to-acr]
     if: |
       always() && !cancelled() &&
@@ -1361,7 +1381,8 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
+          model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
+          model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
       - name: Connect to vCluster
         id: connect-vcluster
         uses: $/.github/actions/connect-vcluster
@@ -1374,7 +1395,9 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
-      - name: Run DynamoCheckpoint Deploy Test
+          storage_class: azurefile-csi
+          storage_size: 64Gi
+      - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
@@ -1386,8 +1409,9 @@ jobs:
           image: ${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.snapshot-placeholder-trtllm.outputs.image_tag }}
           test_name: checkpoint_dgd_restore_trtllm
           test_file: tests/deploy/test_dynamocheckpoint.py
+          model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
           extra_pytest_args: >-
-            -m dynamocheckpoint
+            -m snapshot_restore
             --checkpoint-backend=trtllm
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
@@ -1407,7 +1431,7 @@ jobs:
         vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
 
   deploy-cleanup-checkpoint-vllm:
-    name: vLLM DynamoCheckpoint Cleanup
+    name: vLLM Snapshot Cleanup
     if: always() && github.event_name != 'workflow_dispatch'
     needs: [deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, deploy-test-checkpoint-vllm]
     runs-on: prod-deploy-tester-v1
@@ -1420,7 +1444,7 @@ jobs:
         vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-vllm-dt
 
   deploy-cleanup-checkpoint-sglang:
-    name: SGLang DynamoCheckpoint Cleanup
+    name: SGLang Snapshot Cleanup
     if: always() && github.event_name != 'workflow_dispatch'
     needs: [deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, deploy-test-checkpoint-sglang]
     runs-on: prod-deploy-tester-v1
@@ -1433,7 +1457,7 @@ jobs:
         vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
 
   deploy-cleanup-checkpoint-trtllm:
-    name: TRTLLM DynamoCheckpoint Cleanup
+    name: TRTLLM Snapshot Cleanup
     if: always() && github.event_name != 'workflow_dispatch'
     needs: [deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, deploy-test-checkpoint-trtllm]
     runs-on: prod-deploy-tester-v1

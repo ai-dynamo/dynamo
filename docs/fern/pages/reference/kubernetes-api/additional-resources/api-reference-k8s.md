@@ -25,7 +25,6 @@ a high-level, SLA-driven interface for deploying machine learning models on Dyna
 Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API group.
 
 ### Resource Types
-- [DynamoCheckpoint](#dynamocheckpoint)
 - [DynamoComponentDeployment](#dynamocomponentdeployment)
 - [DynamoGraphDeployment](#dynamographdeployment)
 - [DynamoGraphDeploymentRequest](#dynamographdeploymentrequest)
@@ -75,7 +74,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `Delete` | CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint<br />CRs and artifacts when the owning DGD is deleted.<br /> |
-| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Users can reference the<br />retained checkpoint with checkpointRef if they accept compatibility risk.<br /> |
+| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Retained automatic<br />checkpoints are not valid checkpointRef targets.<br /> |
 
 
 #### CheckpointMode
@@ -84,7 +83,7 @@ _Underlying type:_ _string_
 
 Deprecated: use checkpoint.enabled instead.
 enabled=true without checkpointRef creates a DGD-managed automatic
-checkpoint; checkpointRef restores the named checkpoint.
+checkpoint; checkpointRef restores the named PodSnapshot.
 
 _Validation:_
 - Enum: [Auto Manual]
@@ -95,7 +94,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `Auto` | Deprecated: use checkpoint.enabled=true and omit checkpointRef.<br /> |
-| `Manual` | Deprecated: use checkpointRef to restore an existing checkpoint.<br /> |
+| `Manual` | Deprecated: use checkpointRef to restore an existing PodSnapshot.<br /> |
 
 
 #### CheckpointStartupPolicy
@@ -112,7 +111,7 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `Immediate` | CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint<br />job runs in the background, and only pods created after the checkpoint is<br />Ready are restore-shaped by the pod-create mutating webhook.<br /> |
+| `Immediate` | CheckpointStartupPolicyImmediate starts workers immediately. The SnapshotJob<br />capture runs in the background, and only pods created after the checkpoint is<br />Ready are restore-shaped by the pod-create mutating webhook.<br /> |
 | `WaitForCheckpoint` | CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the<br />component's checkpoint is Ready, then starts them from the checkpoint.<br /> |
 
 
@@ -241,152 +240,28 @@ _Appears in:_
 
 
 
-#### DynamoCheckpoint
-
-
-
-DynamoCheckpoint is the Schema for the dynamocheckpoints API
-It represents a container checkpoint that can be used to restore pods to a warm state
-
-
-
-
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `apiVersion` _string_ | `nvidia.com/v1alpha1` | | |
-| `kind` _string_ | `DynamoCheckpoint` | | |
-| `metadata` _[ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta)_ | Refer to Kubernetes API documentation for fields of `metadata`. |  |  |
-| `spec` _[DynamoCheckpointSpec](#dynamocheckpointspec)_ |  |  |  |
-| `status` _[DynamoCheckpointStatus](#dynamocheckpointstatus)_ |  |  |  |
-
-
-
-
 #### DynamoCheckpointIdentity
 
 
 
-Deprecated: legacy identity metadata. Keep it only where v1alpha1 still
-requires spec.identity; omit DGD-managed identity and use checkpointRef for
-explicit restores.
+Deprecated: omit in DGD service checkpoint configs. Automatic capture
+needs no replacement; use CheckpointRef to restore a PodSnapshot.
 
 
 
 _Appears in:_
-- [DynamoCheckpointSpec](#dynamocheckpointspec)
 - [ServiceCheckpointConfig](#servicecheckpointconfig)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `model` _string_ | Model is the model identifier (e.g., "meta-llama/Llama-3-70B")<br />Deprecated: legacy spec.identity only. |  | Required: \{\} <br /> |
-| `backendFramework` _string_ | BackendFramework is the runtime framework (vllm, sglang, trtllm)<br />Deprecated: legacy spec.identity only. |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
-| `dynamoVersion` _string_ | DynamoVersion is the Dynamo platform version (optional).<br />Deprecated: legacy spec.identity only. |  | Optional: \{\} <br /> |
-| `tensorParallelSize` _integer_ | TensorParallelSize is the tensor parallel configuration.<br />Deprecated: checkpoint launch uses the pod template instead. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `pipelineParallelSize` _integer_ | PipelineParallelSize is the pipeline parallel configuration.<br />Deprecated: checkpoint launch uses the pod template instead. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `dtype` _string_ | Dtype is the data type (fp16, bf16, fp8, etc.).<br />Deprecated: legacy spec.identity only. |  | Optional: \{\} <br /> |
-| `maxModelLen` _integer_ | MaxModelLen is the maximum sequence length.<br />Deprecated: legacy spec.identity only. |  | Minimum: 1 <br />Optional: \{\} <br /> |
-| `extraParameters` _object (keys:string, values:string)_ | ExtraParameters are additional parameters that affect the checkpoint hash.<br />Use for any framework-specific or custom parameters not covered above.<br />Deprecated: legacy spec.identity only. |  | Optional: \{\} <br /> |
-
-
-#### DynamoCheckpointJobConfig
-
-
-
-DynamoCheckpointJobConfig defines the configuration for the checkpoint creation Job
-
-
-
-_Appears in:_
-- [DynamoCheckpointSpec](#dynamocheckpointspec)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `podTemplateSpec` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplateSpec allows customizing the checkpoint Job pod<br />This should include the container that runs the workload to be checkpointed<br />and any workload/runtime env, service account, GMS, or DRA wiring needed<br />by that container. Auto-created checkpoints from DynamoGraphDeployment<br />render Dynamo defaults before creating the DynamoCheckpoint. |  | Required: \{\} <br /> |
-| `targetContainerName` _string_ | TargetContainerName is the container in PodTemplateSpec to snapshot. | main | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
-| `sharedMemory` _[SharedMemorySpec](#sharedmemoryspec)_ | SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod.<br />When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components. |  | Optional: \{\} <br /> |
-| `activeDeadlineSeconds` _integer_ | ActiveDeadlineSeconds specifies the maximum time the Job can run | 3600 | Minimum: 1 <br />Optional: \{\} <br /> |
-| `backoffLimit` _integer_ | Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-| `ttlSecondsAfterFinished` _integer_ | Deprecated: TTLSecondsAfterFinished is ignored. The operator deletes checkpoint<br />Jobs after recording their terminal outcome. |  | Minimum: 0 <br />Optional: \{\} <br /> |
-
-
-#### DynamoCheckpointPhase
-
-_Underlying type:_ _string_
-
-DynamoCheckpointPhase represents the current phase of the checkpoint lifecycle
-
-_Validation:_
-- Enum: [Pending Creating Ready Failed]
-
-_Appears in:_
-- [DynamoCheckpointStatus](#dynamocheckpointstatus)
-
-| Field | Description |
-| --- | --- |
-| `Pending` | DynamoCheckpointPhasePending indicates the checkpoint CR has been created but the Job has not started<br /> |
-| `Creating` | DynamoCheckpointPhaseCreating indicates the checkpoint Job is running<br /> |
-| `Ready` | DynamoCheckpointPhaseReady indicates the checkpoint artifact is available<br /> |
-| `Failed` | DynamoCheckpointPhaseFailed indicates the checkpoint creation failed<br /> |
-
-
-#### DynamoCheckpointSpec
-
-
-
-DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
-
-
-
-_Appears in:_
-- [DynamoCheckpoint](#dynamocheckpoint)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: required by v1alpha1 for standalone checkpoints. Auto<br />checkpoints synthesize it; checkpointRef restores use the referenced CR. |  | Required: \{\} <br /> |
-| `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | GPUMemoryService records checkpoint-time GPU Memory Service metadata for<br />a prepared checkpoint Job pod. The DynamoCheckpoint controller does not<br />inject GMS/DRA resources; auto-created checkpoints from<br />DynamoGraphDeployment prepare the pod template before creating this object.<br />Manual GMS-enabled checkpoints must provide the prepared pod template; the<br />controller fails the checkpoint if the required GMS/DRA wiring is missing.<br />This field is intentionally outside spec.identity, so it does not affect<br />the checkpoint identity hash or deduplication. |  | Optional: \{\} <br /> |
-| `job` _[DynamoCheckpointJobConfig](#dynamocheckpointjobconfig)_ | Job defines the configuration for the checkpoint creation Job |  | Required: \{\} <br /> |
-
-
-#### DynamoCheckpointStatus
-
-
-
-DynamoCheckpointStatus defines the observed state of DynamoCheckpoint
-
-
-
-_Appears in:_
-- [DynamoCheckpoint](#dynamocheckpoint)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `phase` _[DynamoCheckpointPhase](#dynamocheckpointphase)_ | Phase represents the current phase of the checkpoint lifecycle |  | Enum: [Pending Creating Ready Failed] <br />Optional: \{\} <br /> |
-| `checkpointID` _string_ | CheckpointID is the artifact ID used by the snapshot protocol. |  | Optional: \{\} <br /> |
-| `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity.<br />Deprecated: use CheckpointID. This field is retained for compatibility<br />with older status consumers. |  | Optional: \{\} <br /> |
-| `location` _string_ | Deprecated: Location is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Optional: \{\} <br /> |
-| `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | Deprecated: StorageType is ignored and no longer populated. It is retained<br />only so older objects continue to validate. |  | Enum: [pvc s3 oci] <br />Optional: \{\} <br /> |
-| `jobName` _string_ | JobName is the name of the checkpoint creation Job |  | Optional: \{\} <br /> |
-| `podSnapshotName` _string_ | PodSnapshotName is the name of the PodSnapshot this checkpoint created to drive capture. It is<br />the authoritative pointer to the snapshot (which is otherwise located by label, not by<br />reconstructing its name) and lets the controller distinguish a never-created snapshot (empty)<br />from one that was created and later went missing (set, but no longer found). |  | Optional: \{\} <br /> |
-| `createdAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | CreatedAt is the timestamp when the checkpoint became ready |  | Optional: \{\} <br /> |
-| `message` _string_ | Message provides additional information about the current state |  | Optional: \{\} <br /> |
-| `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | DEPRECATED: Conditions are deprecated. Use status.phase instead. |  | Optional: \{\} <br /> |
-
-
-#### DynamoCheckpointStorageType
-
-_Underlying type:_ _string_
-
-Deprecated: StorageType is retained for compatibility with older
-DynamoCheckpoint status consumers. The current checkpoint flow publishes
-PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
-
-_Validation:_
-- Enum: [pvc s3 oci]
-
-_Appears in:_
-- [DynamoCheckpointStatus](#dynamocheckpointstatus)
-
+| `model` _string_ | Model is the model identifier (e.g., "meta-llama/Llama-3-70B").<br />Deprecated: legacy identity only. |  | Required: \{\} <br /> |
+| `backendFramework` _string_ | BackendFramework is the runtime framework (vllm, sglang, trtllm).<br />Deprecated: legacy identity only. |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
+| `dynamoVersion` _string_ | DynamoVersion is the Dynamo platform version.<br />Deprecated: legacy identity only. |  | Optional: \{\} <br /> |
+| `tensorParallelSize` _integer_ | TensorParallelSize is the tensor parallel configuration.<br />Deprecated: automatic capture derives compatibility from the worker. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `pipelineParallelSize` _integer_ | PipelineParallelSize is the pipeline parallel configuration.<br />Deprecated: automatic capture derives compatibility from the worker. | 1 | Minimum: 1 <br />Optional: \{\} <br /> |
+| `dtype` _string_ | Dtype is the data type (fp16, bf16, fp8, etc.).<br />Deprecated: legacy identity only. |  | Optional: \{\} <br /> |
+| `maxModelLen` _integer_ | MaxModelLen is the maximum sequence length.<br />Deprecated: legacy identity only. |  | Minimum: 1 <br />Optional: \{\} <br /> |
+| `extraParameters` _object (keys:string, values:string)_ | ExtraParameters contains additional legacy identity parameters.<br />Deprecated: legacy identity only. |  | Optional: \{\} <br /> |
 
 
 #### DynamoComponentDeployment
@@ -966,7 +841,6 @@ GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a worker compon
 
 
 _Appears in:_
-- [DynamoCheckpointSpec](#dynamocheckpointspec)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
@@ -975,7 +849,7 @@ _Appears in:_
 | `enabled` _boolean_ | Enabled activates GMS wiring. GPU resources on client containers are<br />replaced with a DRA ResourceClaim for shared GPU access. |  |  |
 | `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | Mode selects the GMS deployment topology. | intraPod | Enum: [intraPod interPod] <br />Optional: \{\} <br /> |
 | `deviceClassName` _string_ | DeviceClassName is the DRA DeviceClass to request GPUs from. | gpu.nvidia.com | Optional: \{\} <br /> |
-| `extraClientContainers` _string array_ | ExtraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in pods rendered from the enclosing spec.<br />DGD/DCD services apply this to service pods. Auto-created checkpoints<br />apply checkpoint job clients before creating the DynamoCheckpoint; manual<br />DynamoCheckpoint users must provide an already-prepared pod template.<br />Every name must match a user-declared container in the enclosing pod spec. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `extraClientContainers` _string array_ | ExtraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in pods rendered from the enclosing spec.<br />DGD/DCD services apply this to service pods. Automatic captures apply<br />SnapshotJob capture Pod clients before creating the SnapshotJob.<br />Every name must match a user-declared container in the enclosing pod spec. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `extraClientPods` _[GMSClientPodSpec](#gmsclientpodspec) array_ | ExtraClientPods declares additional GMS client pods for inter-pod GMS. This field is<br />reserved for future use and is rejected until inter-pod client orchestration is wired. |  | Optional: \{\} <br /> |
 
 
@@ -1449,21 +1323,21 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | Enabled indicates whether checkpointing is enabled for this service | false | Optional: \{\} <br /> |
-| `mode` _[CheckpointMode](#checkpointmode)_ | Deprecated: omit mode. Use enabled=true without checkpointRef for a<br />DGD-managed automatic checkpoint, or use checkpointRef to restore the<br />named checkpoint. |  | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
+| `enabled` _boolean_ | Enabled indicates whether checkpointing is enabled for this service. When<br />true, omit CheckpointRef for a DGD-managed automatic checkpoint or set<br />CheckpointRef to restore a PodSnapshot in the same namespace. | false | Optional: \{\} <br /> |
+| `mode` _[CheckpointMode](#checkpointmode)_ | Deprecated: omit mode. Use enabled=true without checkpointRef for a<br />DGD-managed automatic checkpoint, or use checkpointRef to restore the<br />named PodSnapshot. |  | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
 | `startupPolicy` _[CheckpointStartupPolicy](#checkpointstartuppolicy)_ | StartupPolicy defines when normal worker replicas are started relative to<br />automatic checkpoint readiness.<br />- Immediate: start workers cold immediately; later Pods restore from the<br />  checkpoint once it is Ready.<br />- WaitForCheckpoint: keep worker replicas at zero until the checkpoint is<br />  Ready, then start them from the checkpoint. | Immediate | Enum: [Immediate WaitForCheckpoint] <br />Optional: \{\} <br /> |
-| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and<br />artifact are deleted or retained when the owning DGD is deleted.<br />Explicit checkpointRef checkpoints are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
-| `checkpointRef` _string_ | CheckpointRef references an existing DynamoCheckpoint CR by metadata.name.<br />If specified, this service's Identity is ignored and the referenced checkpoint is used directly. |  | Optional: \{\} <br /> |
-| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: omit for DGD-managed checkpoints; no action is needed.<br />Use CheckpointRef to restore an existing checkpoint. |  | Optional: \{\} <br /> |
+| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and<br />artifact are deleted or retained when the owning DGD is deleted.<br />Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
+| `checkpointRef` _string_ | CheckpointRef references an existing PodSnapshot in the same namespace by<br />metadata.name. If specified, this service's Identity is ignored and the<br />referenced PodSnapshot is used directly.<br />Standalone worker-class (worker, prefill, or decode)<br />DynamoComponentDeployment resources cannot set this field; configure<br />CheckpointRef on the owning DynamoGraphDeployment service. |  | Optional: \{\} <br /> |
+| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.<br />Use CheckpointRef to restore an existing PodSnapshot. |  | Optional: \{\} <br /> |
 | `targetContainerName` _string_ | TargetContainerName is the workload container to snapshot and restore. | main | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
-| `job` _[ServiceCheckpointJobConfig](#servicecheckpointjobconfig)_ | Job customizes the DGD-managed checkpoint Job. |  | Optional: \{\} <br /> |
+| `job` _[ServiceCheckpointJobConfig](#servicecheckpointjobconfig)_ | Job customizes the DGD-managed SnapshotJob capture Pod. |  | Optional: \{\} <br /> |
 
 
 #### ServiceCheckpointJobConfig
 
 
 
-ServiceCheckpointJobConfig customizes the checkpoint Job created for a DGD service.
+ServiceCheckpointJobConfig customizes the SnapshotJob capture Pod created for a DGD service.
 
 
 
@@ -1472,8 +1346,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gmsClientContainers` _string array_ | GMSClientContainers lists checkpoint Job containers that should receive<br />GMS client wiring. Requires gpuMemoryService on the service. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
-| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate customizes the checkpoint Job pod. The operator starts from the<br />selected workload container and merges this template so users can add helper<br />containers such as gms-saver. |  | Schemaless: \{\} <br />Type: object <br />Optional: \{\} <br /> |
+| `gmsClientContainers` _string array_ | GMSClientContainers lists SnapshotJob capture Pod containers that should receive<br />GMS client wiring. Requires gpuMemoryService on the service. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | PodTemplate customizes the SnapshotJob capture Pod. The operator starts from the<br />selected workload container and merges this template so users can add helper<br />containers such as gms-saver. |  | Schemaless: \{\} <br />Type: object <br />Optional: \{\} <br /> |
 
 
 #### ServiceCheckpointStatus
@@ -1489,9 +1363,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `checkpointName` _string_ | CheckpointName is the name of the associated Checkpoint CR |  | Optional: \{\} <br /> |
-| `checkpointID` _string_ | CheckpointID is the artifact ID used by the snapshot protocol |  | Optional: \{\} <br /> |
-| `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity<br />Deprecated: automatic checkpoints use CheckpointID. This field is retained<br />for older status consumers. |  | Optional: \{\} <br /> |
+| `checkpointName` _string_ | CheckpointName is the name of the active PodSnapshot. |  | Optional: \{\} <br /> |
+| `checkpointID` _string_ | CheckpointID is a deprecated legacy Dynamo artifact ID. Native standalone<br />snapshots leave this field empty. |  | Optional: \{\} <br /> |
+| `identityHash` _string_ | IdentityHash is a deprecated legacy checkpoint identity hash. Native<br />standalone snapshots leave this field empty. |  | Optional: \{\} <br /> |
 | `ready` _boolean_ | Ready indicates the checkpoint artifact is ready for future pods to restore. |  | Optional: \{\} <br /> |
 
 
@@ -1530,7 +1404,6 @@ _Appears in:_
 
 
 _Appears in:_
-- [DynamoCheckpointJobConfig](#dynamocheckpointjobconfig)
 - [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec)
 - [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
@@ -1668,7 +1541,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `Delete` | CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint<br />CRs and artifacts when the owning DGD is deleted.<br /> |
-| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Users can reference the<br />retained checkpoint with checkpointRef if they accept compatibility risk.<br /> |
+| `Retain` | CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs<br />and artifacts after the owning DGD is deleted. Retained automatic<br />checkpoints are not valid checkpointRef targets.<br /> |
 
 
 #### CheckpointMode
@@ -1677,7 +1550,7 @@ _Underlying type:_ _string_
 
 Deprecated: use checkpoint.enabled instead.
 enabled=true without checkpointRef creates a DGD-managed automatic
-checkpoint; checkpointRef restores the named checkpoint.
+checkpoint; checkpointRef restores the named PodSnapshot.
 
 _Validation:_
 - Enum: [Auto Manual]
@@ -1688,7 +1561,7 @@ _Appears in:_
 | Field | Description |
 | --- | --- |
 | `Auto` | Deprecated: use checkpoint.enabled=true and omit checkpointRef.<br /> |
-| `Manual` | Deprecated: use checkpointRef to restore an existing checkpoint.<br /> |
+| `Manual` | Deprecated: use checkpointRef to restore an existing PodSnapshot.<br /> |
 
 
 #### CheckpointStartupPolicy
@@ -1705,7 +1578,7 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `Immediate` | CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint<br />job runs in the background, and only pods created after the checkpoint is<br />Ready are restore-shaped by the pod-create mutating webhook.<br /> |
+| `Immediate` | CheckpointStartupPolicyImmediate starts workers immediately. The SnapshotJob<br />capture runs in the background, and only pods created after the checkpoint is<br />Ready are restore-shaped by the pod-create mutating webhook.<br /> |
 | `WaitForCheckpoint` | CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the<br />component's checkpoint is Ready, then starts them from the checkpoint.<br /> |
 
 
@@ -1742,21 +1615,21 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `enabled` _boolean_ | enabled indicates whether checkpointing is enabled for this component.<br />When true, omit checkpointRef for a DGD-managed automatic checkpoint or<br />set checkpointRef to restore an existing checkpoint. Omit the checkpoint<br />block, or set enabled=false, to disable checkpointing. |  | Required: \{\} <br /> |
-| `mode` _[CheckpointMode](#checkpointmode)_ | Deprecated: omit mode. Use enabled=true without checkpointRef for a<br />DGD-managed automatic checkpoint, or use checkpointRef to restore the<br />named checkpoint. |  | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
+| `enabled` _boolean_ | enabled indicates whether checkpointing is enabled for this component.<br />When true, omit checkpointRef for a DGD-managed automatic checkpoint or<br />set checkpointRef to restore an existing PodSnapshot in the same namespace.<br />Omit the checkpoint block, or set enabled=false, to disable checkpointing. |  | Required: \{\} <br /> |
+| `mode` _[CheckpointMode](#checkpointmode)_ | Deprecated: omit mode. Use enabled=true without checkpointRef for a<br />DGD-managed automatic checkpoint, or use checkpointRef to restore the<br />named PodSnapshot. |  | Enum: [Auto Manual] <br />Optional: \{\} <br /> |
 | `startupPolicy` _[CheckpointStartupPolicy](#checkpointstartuppolicy)_ | startupPolicy defines when normal worker replicas are started relative to<br />automatic checkpoint readiness.<br />`Immediate` (default): start workers cold immediately; later Pods restore<br />from the checkpoint once it is Ready.<br />`WaitForCheckpoint`: keep worker replicas at zero until the checkpoint is<br />Ready, then start them from the checkpoint. | Immediate | Enum: [Immediate WaitForCheckpoint] <br />Optional: \{\} <br /> |
-| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and<br />artifact are deleted or retained when the owning DGD is deleted.<br />Explicit checkpointRef checkpoints are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
-| `checkpointRef` _string_ | checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`.<br />When set, this component's `identity` is ignored and the referenced<br />checkpoint is used directly. |  | Optional: \{\} <br /> |
-| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: omit for DGD-managed checkpoints; no action is needed.<br />Use checkpointRef to restore an existing checkpoint. |  | Optional: \{\} <br /> |
+| `deletionPolicy` _[CheckpointDeletionPolicy](#checkpointdeletionpolicy)_ | DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and<br />artifact are deleted or retained when the owning DGD is deleted.<br />Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD. | Delete | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
+| `checkpointRef` _string_ | checkpointRef references an existing PodSnapshot in the same namespace by<br />metadata.name.<br />When set, this component's `identity` is ignored and the referenced<br />PodSnapshot is used directly.<br />Standalone worker-class (worker, prefill, or decode)<br />DynamoComponentDeployment resources cannot set this field; configure<br />checkpointRef on the owning DynamoGraphDeployment component. |  | Optional: \{\} <br /> |
+| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.<br />Use checkpointRef to restore an existing PodSnapshot. |  | Optional: \{\} <br /> |
 | `targetContainerName` _string_ | targetContainerName is the workload container to snapshot and restore. | main | MaxLength: 63 <br />MinLength: 1 <br />Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
-| `job` _[ComponentCheckpointJobConfig](#componentcheckpointjobconfig)_ | job customizes the DGD-managed checkpoint Job. |  | Optional: \{\} <br /> |
+| `job` _[ComponentCheckpointJobConfig](#componentcheckpointjobconfig)_ | job customizes the DGD-managed SnapshotJob capture Pod. |  | Optional: \{\} <br /> |
 
 
 #### ComponentCheckpointJobConfig
 
 
 
-ComponentCheckpointJobConfig customizes the checkpoint Job created for a DGD component.
+ComponentCheckpointJobConfig customizes the SnapshotJob capture Pod created for a DGD component.
 
 
 
@@ -1765,8 +1638,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `gmsClientContainers` _string array_ | gmsClientContainers lists checkpoint Job containers that should receive<br />GMS client wiring. Requires gpuMemoryService on the component. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
-| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate customizes the checkpoint Job pod. The operator starts from the<br />selected workload container and merges this template so users can add helper<br />containers such as gms-saver. |  | Schemaless: \{\} <br />Type: object <br />Optional: \{\} <br /> |
+| `gmsClientContainers` _string array_ | gmsClientContainers lists SnapshotJob capture Pod containers that should receive<br />GMS client wiring. Requires gpuMemoryService on the component. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `podTemplate` _[PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core)_ | podTemplate customizes the SnapshotJob capture Pod. The operator starts from the<br />selected workload container and merges this template so users can add helper<br />containers such as gms-saver. |  | Schemaless: \{\} <br />Type: object <br />Optional: \{\} <br /> |
 
 
 #### ComponentCheckpointStatus
@@ -1782,9 +1655,9 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `checkpointName` _string_ | checkpointName is the name of the associated DynamoCheckpoint CR. |  | Optional: \{\} <br /> |
-| `checkpointID` _string_ | checkpointID is the artifact ID used by the snapshot protocol. |  | Optional: \{\} <br /> |
-| `identityHash` _string_ | identityHash is the computed hash of the checkpoint identity.<br />Deprecated: automatic checkpoints use checkpointID. This field is retained<br />for older status consumers. |  | Optional: \{\} <br /> |
+| `checkpointName` _string_ | checkpointName is the name of the active PodSnapshot. |  | Optional: \{\} <br /> |
+| `checkpointID` _string_ | checkpointID is a deprecated legacy Dynamo artifact ID. Native standalone<br />snapshots leave this field empty. |  | Optional: \{\} <br /> |
+| `identityHash` _string_ | identityHash is a deprecated legacy checkpoint identity hash. Native<br />standalone snapshots leave this field empty. |  | Optional: \{\} <br /> |
 | `ready` _boolean_ | ready indicates the checkpoint artifact is ready for future pods to restore. |  | Optional: \{\} <br /> |
 
 
@@ -1923,9 +1796,9 @@ _Appears in:_
 
 
 
-Deprecated: omit in DGD component checkpoint configs. Auto needs no
-replacement; use checkpointRef for explicit restores.
-Duplicated from v1alpha1; DynamoCheckpoint itself remains v1alpha1.
+Deprecated: omit in DGD component checkpoint configs. Automatic capture
+needs no replacement; use checkpointRef to restore a PodSnapshot.
+Duplicated from v1alpha1 for conversion compatibility.
 
 
 
@@ -2344,7 +2217,7 @@ _Appears in:_
 | `gpuMemoryService` _[GPUMemoryServiceSpec](#gpumemoryservicespec)_ | gpuMemoryService configures the GPU Memory Service (GMS). When set, GPU<br />access for GMS clients is managed via DRA. |  | Optional: \{\} <br /> |
 | `failover` _[FailoverSpec](#failoverspec)_ | failover configures active-passive GPU failover for this component.<br />Requires `gpuMemoryService` to also be set, and `failover.mode` must<br />match `gpuMemoryService.mode` (enforced by the validation webhook). |  | Optional: \{\} <br /> |
 | `grove` _[GroveSpec](#grovespec)_ | grove groups Grove-specific rendering options. |  | Optional: \{\} <br /> |
-| `checkpoint` _[ComponentCheckpointConfig](#componentcheckpointconfig)_ | checkpoint configures container-image snapshotting and restore for<br />this component. Set `checkpoint.enabled: true` to opt in. Without<br />checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint<br />CR and later restores pods in the same DGD generation from that<br />checkpoint. With checkpointRef, the DGD restores from that existing<br />checkpoint instead. The user-facing shape of this field is still settling,<br />which is why it lives under `experimental` in v1beta1 instead of at the<br />top level. |  | Optional: \{\} <br /> |
+| `checkpoint` _[ComponentCheckpointConfig](#componentcheckpointconfig)_ | checkpoint configures container-image snapshotting and restore for<br />this component. Set `checkpoint.enabled: true` to opt in. Without<br />checkpointRef, the DGD controller creates a DGD-scoped SnapshotJob and<br />later restores pods in the same DGD generation from its PodSnapshot.<br />With checkpointRef, the DGD restores from the named<br />PodSnapshot in the same namespace. The user-facing shape of this field is<br />still settling, which is why it lives under `experimental` in v1beta1<br />instead of at the top level. |  | Optional: \{\} <br /> |
 
 
 #### FailoverSpec
@@ -2441,7 +2314,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `mode` _[GPUMemoryServiceMode](#gpumemoryservicemode)_ | mode selects the GMS deployment topology. | IntraPod | Enum: [IntraPod InterPod] <br />Optional: \{\} <br /> |
 | `deviceClassName` _string_ | deviceClassName is the DRA `DeviceClass` to request GPUs from. | gpu.nvidia.com | Optional: \{\} <br /> |
-| `extraClientContainers` _string array_ | extraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in service pods. Checkpoint Job clients are declared<br />under checkpoint.job.gmsClientContainers. Every name must match a container<br />in the enclosing component's podTemplate.spec.containers. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
+| `extraClientContainers` _string array_ | extraClientContainers lists additional user-declared containers that should<br />be wired as GMS clients in service pods. SnapshotJob capture Pod clients are<br />declared under checkpoint.job.gmsClientContainers. Every name must match a container<br />in the enclosing component's podTemplate.spec.containers. |  | items:MaxLength: 63 <br />items:MinLength: 1 <br />items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` <br />Optional: \{\} <br /> |
 | `extraClientPods` _[GMSClientPodSpec](#gmsclientpodspec) array_ | extraClientPods declares additional GMS client pods for inter-pod GMS. This field is<br />reserved for future use and is rejected until inter-pod client orchestration is wired. |  | Optional: \{\} <br /> |
 
 
@@ -3142,66 +3015,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `enabled` _boolean_ | Enabled indicates if checkpoint functionality is enabled |  |  |
 | `seccomp` _[CheckpointSeccompConfiguration](#checkpointseccompconfiguration)_ | Seccomp controls the localhost seccomp profile applied to checkpoint and<br />restore pods. A nil value means "use the default profile"; set<br />Seccomp.Disabled=true to disable seccomp injection entirely. |  |  |
-| `storage` _[CheckpointStorageConfiguration](#checkpointstorageconfiguration)_ | Storage optionally configures the namespace-local checkpoint PVC that<br />workload pods mount. When omitted, the operator preserves the legacy<br />behavior of discovering storage from a snapshot-agent DaemonSet in the<br />workload namespace. |  |  |
-| `cleanupImage` _string_ | CleanupImage is the image used by best-effort artifact cleanup Jobs for<br />automatically-created checkpoints. It must provide a POSIX shell and `rm`. | busybox:1.36 |  |
-
-
-#### CheckpointOCIConfig
-
-
-
-Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
-the current snapshot flow.
-
-
-
-_Appears in:_
-- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `uri` _string_ | URI is the legacy OCI URI (oci://registry/repository). |  |  |
-| `credentialsSecretRef` _string_ | CredentialsSecretRef is the legacy docker config secret name. |  |  |
-
-
-#### CheckpointPVCConfig
-
-
-
-CheckpointPVCConfig configures the namespace-local PVC mounted into
-checkpoint and restore workload pods.
-
-
-
-_Appears in:_
-- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `pvcName` _string_ | PVCName is the PVC name in each workload namespace. |  |  |
-| `basePath` _string_ | BasePath is the mount path inside checkpoint and restore workload pods. |  |  |
-| `create` _boolean_ | Create tells the operator to create the PVC in workload namespaces when<br />it is missing. When false, the PVC must already exist. |  |  |
-| `size` _string_ | Size is the storage request used when Create is true. |  |  |
-| `storageClassName` _string_ | StorageClassName is the optional StorageClass name used when Create is true. |  |  |
-| `accessMode` _string_ | AccessMode is the PVC access mode used when Create is true. |  |  |
-
-
-#### CheckpointS3Config
-
-
-
-Deprecated: CheckpointS3Config is retained for compatibility and ignored by
-the current snapshot flow.
-
-
-
-_Appears in:_
-- [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `uri` _string_ | URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix). |  |  |
-| `credentialsSecretRef` _string_ | CredentialsSecretRef is the legacy credentials secret name. |  |  |
 
 
 #### CheckpointSeccompConfiguration
@@ -3224,26 +3037,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `disabled` _boolean_ | Disabled, when true, suppresses seccomp profile injection entirely.<br />Use this for clusters where custom localhost profiles are not allowed<br />(e.g. OpenShift's restricted-v2 SCC) or for CRIU builds that handle<br />io_uring natively. |  |  |
 | `profile` _string_ | Profile is the localhost seccomp profile path. Empty falls back to<br />DefaultSeccompProfile. Ignored when Disabled is true. |  |  |
-
-
-#### CheckpointStorageConfiguration
-
-
-
-CheckpointStorageConfiguration configures checkpoint storage for operator
-pod mutations. Only PVC storage is implemented today.
-
-
-
-_Appears in:_
-- [CheckpointConfiguration](#checkpointconfiguration)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `type` _string_ | Type is the storage backend type. Only pvc is implemented today. |  |  |
-| `pvc` _[CheckpointPVCConfig](#checkpointpvcconfig)_ | PVC configuration for pvc-based settings. |  |  |
-| `s3` _[CheckpointS3Config](#checkpoints3config)_ | Deprecated: S3 is retained for compatibility and ignored. |  |  |
-| `oci` _[CheckpointOCIConfig](#checkpointociconfig)_ | Deprecated: OCI is retained for compatibility and ignored. |  |  |
 
 
 #### DRAConfiguration

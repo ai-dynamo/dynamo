@@ -263,12 +263,12 @@ type ExperimentalSpec struct {
 
 	// checkpoint configures container-image snapshotting and restore for
 	// this component. Set `checkpoint.enabled: true` to opt in. Without
-	// checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint
-	// CR and later restores pods in the same DGD generation from that
-	// checkpoint. With checkpointRef, the DGD restores from that existing
-	// checkpoint instead. The user-facing shape of this field is still settling,
-	// which is why it lives under `experimental` in v1beta1 instead of at the
-	// top level.
+	// checkpointRef, the DGD controller creates a DGD-scoped SnapshotJob and
+	// later restores pods in the same DGD generation from its PodSnapshot.
+	// With checkpointRef, the DGD restores from the named
+	// PodSnapshot in the same namespace. The user-facing shape of this field is
+	// still settling, which is why it lives under `experimental` in v1beta1
+	// instead of at the top level.
 	// +optional
 	Checkpoint *ComponentCheckpointConfig `json:"checkpoint,omitempty"`
 }
@@ -293,8 +293,8 @@ type GPUMemoryServiceSpec struct {
 	DeviceClassName string `json:"deviceClassName,omitempty"`
 
 	// extraClientContainers lists additional user-declared containers that should
-	// be wired as GMS clients in service pods. Checkpoint Job clients are declared
-	// under checkpoint.job.gmsClientContainers. Every name must match a container
+	// be wired as GMS clients in service pods. SnapshotJob capture Pod clients are
+	// declared under checkpoint.job.gmsClientContainers. Every name must match a container
 	// in the enclosing component's podTemplate.spec.containers.
 	// +optional
 	// +listType=set
@@ -354,14 +354,14 @@ type FailoverSpec struct {
 
 // Deprecated: use checkpoint.enabled instead.
 // enabled=true without checkpointRef creates a DGD-managed automatic
-// checkpoint; checkpointRef restores the named checkpoint.
+// checkpoint; checkpointRef restores the named PodSnapshot.
 // +kubebuilder:validation:Enum=Auto;Manual
 type CheckpointMode string
 
 const (
 	// Deprecated: use checkpoint.enabled=true and omit checkpointRef.
 	CheckpointModeAuto CheckpointMode = "Auto"
-	// Deprecated: use checkpointRef to restore an existing checkpoint.
+	// Deprecated: use checkpointRef to restore an existing PodSnapshot.
 	CheckpointModeManual CheckpointMode = "Manual"
 )
 
@@ -370,8 +370,8 @@ const (
 type CheckpointStartupPolicy string
 
 const (
-	// CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint
-	// job runs in the background, and only pods created after the checkpoint is
+	// CheckpointStartupPolicyImmediate starts workers immediately. The SnapshotJob
+	// capture runs in the background, and only pods created after the checkpoint is
 	// Ready are restore-shaped by the pod-create mutating webhook.
 	CheckpointStartupPolicyImmediate CheckpointStartupPolicy = "Immediate"
 	// CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the
@@ -389,8 +389,8 @@ const (
 	// CRs and artifacts when the owning DGD is deleted.
 	CheckpointDeletionPolicyDelete CheckpointDeletionPolicy = "Delete"
 	// CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs
-	// and artifacts after the owning DGD is deleted. Users can reference the
-	// retained checkpoint with checkpointRef if they accept compatibility risk.
+	// and artifacts after the owning DGD is deleted. Retained automatic
+	// checkpoints are not valid checkpointRef targets.
 	CheckpointDeletionPolicyRetain CheckpointDeletionPolicy = "Retain"
 )
 
@@ -399,14 +399,14 @@ const (
 type ComponentCheckpointConfig struct {
 	// enabled indicates whether checkpointing is enabled for this component.
 	// When true, omit checkpointRef for a DGD-managed automatic checkpoint or
-	// set checkpointRef to restore an existing checkpoint. Omit the checkpoint
-	// block, or set enabled=false, to disable checkpointing.
+	// set checkpointRef to restore an existing PodSnapshot in the same namespace.
+	// Omit the checkpoint block, or set enabled=false, to disable checkpointing.
 	// +kubebuilder:validation:Required
 	Enabled bool `json:"enabled"`
 
 	// Deprecated: omit mode. Use enabled=true without checkpointRef for a
 	// DGD-managed automatic checkpoint, or use checkpointRef to restore the
-	// named checkpoint.
+	// named PodSnapshot.
 	// +optional
 	Mode CheckpointMode `json:"mode,omitempty"`
 
@@ -422,19 +422,23 @@ type ComponentCheckpointConfig struct {
 
 	// DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and
 	// artifact are deleted or retained when the owning DGD is deleted.
-	// Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+	// Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD.
 	// +optional
 	// +kubebuilder:default=Delete
 	DeletionPolicy CheckpointDeletionPolicy `json:"deletionPolicy,omitempty"`
 
-	// checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`.
+	// checkpointRef references an existing PodSnapshot in the same namespace by
+	// metadata.name.
 	// When set, this component's `identity` is ignored and the referenced
-	// checkpoint is used directly.
+	// PodSnapshot is used directly.
+	// Standalone worker-class (worker, prefill, or decode)
+	// DynamoComponentDeployment resources cannot set this field; configure
+	// checkpointRef on the owning DynamoGraphDeployment component.
 	// +optional
 	CheckpointRef *string `json:"checkpointRef,omitempty"`
 
-	// Deprecated: omit for DGD-managed checkpoints; no action is needed.
-	// Use checkpointRef to restore an existing checkpoint.
+	// Deprecated: omit for DGD-managed checkpoints; the operator ignores this field.
+	// Use checkpointRef to restore an existing PodSnapshot.
 	// +optional
 	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
 
@@ -446,14 +450,14 @@ type ComponentCheckpointConfig struct {
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	TargetContainerName string `json:"targetContainerName,omitempty"`
 
-	// job customizes the DGD-managed checkpoint Job.
+	// job customizes the DGD-managed SnapshotJob capture Pod.
 	// +optional
 	Job *ComponentCheckpointJobConfig `json:"job,omitempty"`
 }
 
-// ComponentCheckpointJobConfig customizes the checkpoint Job created for a DGD component.
+// ComponentCheckpointJobConfig customizes the SnapshotJob capture Pod created for a DGD component.
 type ComponentCheckpointJobConfig struct {
-	// gmsClientContainers lists checkpoint Job containers that should receive
+	// gmsClientContainers lists SnapshotJob capture Pod containers that should receive
 	// GMS client wiring. Requires gpuMemoryService on the component.
 	// +optional
 	// +listType=set
@@ -462,7 +466,7 @@ type ComponentCheckpointJobConfig struct {
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	GMSClientContainers []string `json:"gmsClientContainers,omitempty"`
 
-	// podTemplate customizes the checkpoint Job pod. The operator starts from the
+	// podTemplate customizes the SnapshotJob capture Pod. The operator starts from the
 	// selected workload container and merges this template so users can add helper
 	// containers such as gms-saver.
 	// +optional
@@ -472,9 +476,9 @@ type ComponentCheckpointJobConfig struct {
 	PodTemplate *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
-// Deprecated: omit in DGD component checkpoint configs. Auto needs no
-// replacement; use checkpointRef for explicit restores.
-// Duplicated from v1alpha1; DynamoCheckpoint itself remains v1alpha1.
+// Deprecated: omit in DGD component checkpoint configs. Automatic capture
+// needs no replacement; use checkpointRef to restore a PodSnapshot.
+// Duplicated from v1alpha1 for conversion compatibility.
 type DynamoCheckpointIdentity struct {
 	// model is the model identifier (e.g. "meta-llama/Llama-3-70B").
 	// Deprecated: legacy identity only.
@@ -745,15 +749,15 @@ type RollingUpdateStatus struct {
 
 // ComponentCheckpointStatus contains checkpoint information for a single component.
 type ComponentCheckpointStatus struct {
-	// checkpointName is the name of the associated DynamoCheckpoint CR.
+	// checkpointName is the name of the active PodSnapshot.
 	// +optional
 	CheckpointName string `json:"checkpointName,omitempty"`
-	// checkpointID is the artifact ID used by the snapshot protocol.
+	// checkpointID is a deprecated legacy Dynamo artifact ID. Native standalone
+	// snapshots leave this field empty.
 	// +optional
 	CheckpointID string `json:"checkpointID,omitempty"`
-	// identityHash is the computed hash of the checkpoint identity.
-	// Deprecated: automatic checkpoints use checkpointID. This field is retained
-	// for older status consumers.
+	// identityHash is a deprecated legacy checkpoint identity hash. Native
+	// standalone snapshots leave this field empty.
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
 	// ready indicates the checkpoint artifact is ready for future pods to restore.
