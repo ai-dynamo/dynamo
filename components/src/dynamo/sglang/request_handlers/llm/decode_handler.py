@@ -434,11 +434,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             _plain = stop_conditions.get("stop_token_ids") or []
             _merged = list(set(_hidden).union(_plain))
             stop_token_ids = _merged if _merged else None
+            # min_new_tokens is never sent on this branch. SGLang rejects it when the
+            # engine has no tokenizer, which is exactly what this branch means, and
+            # Dynamo already enforces the floor: the Rust decoder holds the same
+            # min_tokens and the same stop-token set, and suppresses every stop until
+            # the floor is reached. It cannot manufacture tokens the engine never
+            # produced, so when a floor is requested the engine is held open instead —
+            # no stop ids, ignore_eos set — and termination becomes entirely Dynamo's.
+            # The engine may then generate tokens Dynamo discards, bounded by max_tokens.
+            hold_engine_open = (stop_conditions.get("min_tokens") or 0) > 0
+            if hold_engine_open:
+                stop_token_ids = None
             param_mapping = {
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
-                "min_new_tokens": stop_conditions.get("min_tokens"),
-                "ignore_eos": stop_conditions.get("ignore_eos"),
+                "ignore_eos": True
+                if hold_engine_open
+                else stop_conditions.get("ignore_eos"),
                 "stop_token_ids": stop_token_ids,
                 **_sampling_option_params(sampling_opts),
                 **self._get_guided_decoding_params(

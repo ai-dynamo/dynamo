@@ -75,8 +75,16 @@ class SglangUtils:
     """General SGLang utilities (not multimodal-specific)"""
 
     @staticmethod
-    def build_sampling_params(request: SglangMultimodalRequest) -> dict:
-        """Build sampling parameters for SGLang engine (generic functionality)"""
+    def build_sampling_params(
+        request: SglangMultimodalRequest, *, use_sglang_tokenizer: bool
+    ) -> dict:
+        """Build sampling parameters for SGLang engine (generic functionality)
+
+        Args:
+            request: Pre-tokenized multimodal request.
+            use_sglang_tokenizer: Whether the engine owns a tokenizer. When it does not,
+                min_tokens is enforced by Dynamo rather than forwarded to the engine.
+        """
         sampling_params = {}
 
         # Extract sampling options from request
@@ -93,10 +101,20 @@ class SglangUtils:
             sampling_params["n"] = sampling_options.n
         if stop_conditions.max_tokens:
             sampling_params["max_new_tokens"] = stop_conditions.max_tokens
+        # min_new_tokens only goes to an engine that owns a tokenizer; SGLang rejects it
+        # otherwise. Dynamo already enforces the floor -- the Rust decoder holds the same
+        # min_tokens and the same stop-token set and suppresses every stop until the floor
+        # is reached -- but it cannot manufacture tokens the engine never produced, so a
+        # tokenizer-free engine is held open with ignore_eos and left to Dynamo to stop.
+        # The engine may then generate tokens Dynamo discards, bounded by max_tokens.
+        hold_engine_open = False
         if stop_conditions.min_tokens:
-            sampling_params["min_new_tokens"] = stop_conditions.min_tokens
-        if stop_conditions.ignore_eos:
-            sampling_params["ignore_eos"] = stop_conditions.ignore_eos
+            if use_sglang_tokenizer:
+                sampling_params["min_new_tokens"] = stop_conditions.min_tokens
+            else:
+                hold_engine_open = True
+        if hold_engine_open or stop_conditions.ignore_eos:
+            sampling_params["ignore_eos"] = True
 
         logger.debug(f"Sampling params: {sampling_params}")
         return sampling_params
@@ -534,7 +552,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
         if not input_ids:
             raise ValueError("input_ids is required")
 
-        sampling_params = SglangUtils.build_sampling_params(request)
+        sampling_params = SglangUtils.build_sampling_params(
+            request, use_sglang_tokenizer=self.use_sglang_tokenizer
+        )
 
         # Request bootstrap info from prefill worker
         bootstrap_info = await self._get_bootstrap_from_prefill(
@@ -583,7 +603,9 @@ class MultimodalWorkerHandler(BaseWorkerHandler[SglangMultimodalRequest, str]):
             raise ValueError("input_ids is required")
         tensor_id: int | None = None
         try:
-            sampling_params = SglangUtils.build_sampling_params(request)
+            sampling_params = SglangUtils.build_sampling_params(
+                request, use_sglang_tokenizer=self.use_sglang_tokenizer
+            )
             with _nvtx.annotate("mm:pd:load_multimodal", color="cyan"):
                 (
                     image_mm_items,
