@@ -2234,6 +2234,9 @@ class TRTLLMMetricsPayload(MetricsPayload):
 
     def _get_backend_specific_checks(self) -> list[MetricCheck]:
         """TRT-LLM-specific metric checks"""
+        component_prefix = prometheus_names.name_prefix.COMPONENT
+        total_blocks = f"{component_prefix}_{prometheus_names.kvstats.TOTAL_BLOCKS}"
+
         checks = [
             MetricCheck(
                 # Check: Minimum count of unique trtllm_* metrics
@@ -2249,7 +2252,54 @@ class TRTLLMMetricsPayload(MetricsPayload):
                     f"SUCCESS: Found {len(set(value))} unique trtllm_* metrics (minimum required: 4)"
                 ),
                 multiline=True,
-            )
+            ),
+            # The checks above and in the base class count metric *names* and
+            # accept a zero block count. Prometheus registers names when the
+            # collector is constructed, so both pass on a worker whose stats
+            # thread never published a sample and whose engine never recorded
+            # a request. The two checks below require an observation on each
+            # path, so one going dead cannot pass as the other still working.
+            MetricCheck(
+                # Stats path: the per-rank gauges are seeded at 0 by
+                # _init_publish_metrics_thread and only move when iteration
+                # stats arrive from the engine. Any rank reporting a positive
+                # block count proves the polling thread published.
+                name=f"{total_blocks} (positive on some rank)",
+                pattern=lambda name: (
+                    rf"{total_blocks}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
+                ),
+                validator=lambda value: any(float(v) > 0 for v in value),
+                error_msg=lambda name, value: (
+                    f"{name}: every rank reported a non-positive block count "
+                    f"(values: {value}). The stats polling thread never "
+                    f"published iteration stats."
+                ),
+                success_msg=lambda name, value: (f"SUCCESS: {name} (values: {value})"),
+                multiline=True,
+            ),
+            MetricCheck(
+                # Request path: TRT-LLM's own per-request series, recorded by
+                # MetricsCollector as requests finish. Several names are
+                # matched because they come from tensorrt_llm.metrics and one
+                # upstream rename should not silently void the check.
+                name="trtllm_* per-request observations",
+                pattern=lambda name: (
+                    r"trtllm_(?:request_success_total"
+                    r"|e2e_request_latency_seconds_count"
+                    r"|time_to_first_token_seconds_count"
+                    r"|time_per_output_token_seconds_count"
+                    r"|request_queue_time_seconds_count)"
+                    r"(?:\{[^}]*\})?\s+([\d.eE+-]+)"
+                ),
+                validator=lambda value: any(float(v) > 0 for v in value),
+                error_msg=lambda name, value: (
+                    f"{name}: TRT-LLM recorded no per-request observations "
+                    f"(values: {value}). The engine's request metrics are not "
+                    f"reaching the collector."
+                ),
+                success_msg=lambda name, value: (f"SUCCESS: {name} (values: {value})"),
+                multiline=True,
+            ),
         ]
 
         # Check required labels: auto-injected (from prometheus_names.labels) + injected by backend
