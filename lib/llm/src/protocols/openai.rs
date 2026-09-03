@@ -37,6 +37,28 @@ use validate::{
     TEMPERATURE_RANGE, validate_range, validate_top_p,
 };
 
+/// Key under `extra_args` where media handlers nest a request's captured
+/// top-level passthrough before dispatching it to a worker.
+pub const MEDIA_PASSTHROUGH_KEY: &str = "media_passthrough";
+
+/// Move a media request's captured top-level unknowns under an explicit
+/// `extra_args["media_passthrough"]` entry. Handlers call this before
+/// dispatch so the worker boundary carries one nested, namespaced field
+/// instead of loose top-level unknowns.
+pub(crate) fn nest_media_passthrough(
+    passthrough: &mut serde_json::Map<String, serde_json::Value>,
+    extra_args: &mut Option<serde_json::Map<String, serde_json::Value>>,
+) {
+    if passthrough.is_empty() {
+        return;
+    }
+    let nested = std::mem::take(passthrough);
+    extra_args.get_or_insert_with(serde_json::Map::new).insert(
+        MEDIA_PASSTHROUGH_KEY.to_string(),
+        serde_json::Value::Object(nested),
+    );
+}
+
 /// Side from which prompt tokens are truncated.
 #[derive(ToSchema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

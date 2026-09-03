@@ -554,6 +554,174 @@ pub(super) fn new_tool_use_id() -> String {
     format!("toolu_{}", Uuid::new_v4().simple())
 }
 
+/// Decide what an Anthropic `tool_use` block shows for a call whose `arguments` do not
+/// parse, which happens when generation was cut off mid-call at the token limit.
+///
+/// Anthropic's `input` is a typed object, so it cannot carry the raw truncated bytes the
+/// way OpenAI's string-valued `arguments` does. The signal that the call is incomplete
+/// lives in `stop_reason: "max_tokens"` — the value Anthropic's own guidance tells
+/// clients to check before acting on a trailing `tool_use` block — so this function only
+/// decides how much of the call survives in the block.
+///
+/// It keeps the members the model finished writing and drops the one it was still
+/// writing. Nothing is invented: a truncated value is discarded rather than closed with a
+/// guessed quote or brace, so the block never reports a value the model did not emit.
+///
+/// This replaces `unwrap_or(json!({}))`, which turned any unparseable arguments
+/// into a well-formed EMPTY object. That produced a `tool_use` block a client would
+/// happily execute with no arguments and no error anywhere in the response.
+///
+/// `truncated` gates that recovery, and it is what keeps this honest. Partial members
+/// are only safe to emit when something ELSE in the response already tells the client
+/// the call is incomplete, which is exactly `stop_reason: "max_tokens"`. When the
+/// upstream reason instead claims the call finished, malformed arguments mean the
+/// generation is wrong rather than cut short: emitting the members that happen to parse
+/// would hand back a call that looks complete, carries only some of its arguments, and
+/// reports no error anywhere. That is worse than the empty object, because a partial
+/// call can pass schema validation and then run.
+pub(super) fn tool_use_input(
+    tool_name: &str,
+    arguments: &str,
+    truncated: bool,
+) -> serde_json::Value {
+    // One warning per call, logged where the outcome is known. Logging before the
+    // `truncated` check would announce a recovery that the branch below may refuse.
+    let error = match serde_json::from_str::<serde_json::Value>(arguments) {
+        Ok(value) => return value,
+        Err(error) => error,
+    };
+
+    if !truncated {
+        tracing::warn!(
+            tool_name = %tool_name,
+            argument_bytes = arguments.len(),
+            error = %error,
+            "tool call arguments are not valid JSON and generation was not cut off; emitting \
+             an empty tool_use input rather than a partial one, because the response claims \
+             this call completed"
+        );
+        return serde_json::json!({});
+    }
+
+    match recover_completed_members(arguments) {
+        Some(map) => {
+            tracing::warn!(
+                tool_name = %tool_name,
+                argument_bytes = arguments.len(),
+                recovered_members = map.len(),
+                error = %error,
+                "tool call arguments were cut off at the token limit; keeping the members \
+                 that completed. `stop_reason` is `max_tokens`"
+            );
+            serde_json::Value::Object(map)
+        }
+        None => {
+            tracing::warn!(
+                tool_name = %tool_name,
+                argument_bytes = arguments.len(),
+                error = %error,
+                "tool call arguments were cut off at the token limit and no complete member \
+                 survived; emitting an empty tool_use input"
+            );
+            serde_json::json!({})
+        }
+    }
+}
+
+/// Return the members of a truncated JSON object that finished, or `None` when none did.
+///
+/// One forward scan tracking string and nesting state, recording the offset of every
+/// top-level `,`. Each such comma is a point where the object was syntactically whole, so
+/// the text before it plus a closing brace is valid JSON built only from bytes the model
+/// actually produced. The last such point is the most that can be recovered.
+///
+/// Returns `None` for a non-object payload, and for an object truncated before its first
+/// member closed — there is nothing to recover, and guessing would invent content.
+fn recover_completed_members(raw: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let trimmed = raw.trim_start();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let mut depth: i32 = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut last_boundary: Option<usize> = None;
+
+    for (index, ch) in trimmed.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            _ if in_string => {}
+            '{' | '[' => depth += 1,
+            '}' | ']' => depth -= 1,
+            // A top-level comma separates two members, so everything before it is a
+            // complete member list. Depth is 1 while inside the object's own braces.
+            ',' if depth == 1 => last_boundary = Some(index),
+            _ => {}
+        }
+    }
+
+    // Truncation can land after a member's value but before the outer `}`, in which
+    // case there is no trailing comma and the comma scan finds nothing — yet every
+    // member present did finish. Close the object and take it, but only when the last
+    // value is provably complete (see `ends_on_a_finished_value`).
+    if ends_on_a_finished_value(trimmed)
+        && let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+            &format!("{}}}", trimmed.trim_end()),
+        )
+    {
+        return Some(map);
+    }
+
+    let boundary = last_boundary?;
+    let candidate = format!("{}}}", &trimmed[..boundary]);
+    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&candidate).ok()
+}
+
+/// Whether the payload's last value is one that cannot have been cut short.
+///
+/// Appending `}` to a truncated object can turn an unfinished value into a plausible
+/// finished one. `{"n": 25` cut to `{"n": 2` closes into `{"n": 2}`, reporting an
+/// argument the model never emitted — the exact fabrication this module refuses to do.
+///
+/// Four tails prove the value is over:
+/// - trailing whitespace. JSON allows it only between tokens, so the value before it
+///   ended. This also covers a complete number.
+/// - an unescaped closing quote. It appears only once the string is over.
+/// - `}` or `]`. They appear only once the object or array is over.
+/// - `true`, `false` or `null`. No longer JSON token starts with one of them.
+///
+/// Only a bare number with nothing after it stays ambiguous, because its own digits may
+/// be cut short. It falls through to the comma scan.
+fn ends_on_a_finished_value(trimmed: &str) -> bool {
+    let tail = trimmed.trim_end();
+    // Whitespace cannot occur inside a JSON number or literal. Let the normal
+    // parser decide whether the value before it is valid; this also covers
+    // complete `true`, `false`, and `null` values.
+    if tail.len() != trimmed.len() {
+        return true;
+    }
+
+    // A closing quote must not itself be escaped, or the string is still open.
+    if let Some(before_quote) = tail.strip_suffix('"') {
+        let backslashes = before_quote
+            .chars()
+            .rev()
+            .take_while(|ch| *ch == '\\')
+            .count();
+        return backslashes % 2 == 0;
+    }
+    tail.ends_with('}')
+        || tail.ends_with(']')
+        || tail.ends_with("true")
+        || tail.ends_with("false")
+        || tail.ends_with("null")
+}
+
 /// Convert a completed chat completion response into an Anthropic Messages response.
 pub fn chat_completion_to_anthropic_response(
     chat_resp: NvCreateChatCompletionResponse,
@@ -568,20 +736,36 @@ pub fn chat_completion_to_anthropic_response(
     let mut stop_reason = None;
 
     if let Some(choice) = choice {
+        // Only the token limit means "cut off mid-call". Every other terminal reason
+        // claims the call finished, so partial arguments must not be recovered under it.
+        // This describes the choice; the call loop below narrows it to the last call,
+        // which is the only one the limit can have interrupted.
+        let truncated = matches!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Length)
+        );
+
         // Map finish_reason
         stop_reason = choice.finish_reason.map(|fr| match fr {
             dynamo_protocols::types::FinishReason::Stop => AnthropicStopReason::EndTurn,
             dynamo_protocols::types::FinishReason::Length => AnthropicStopReason::MaxTokens,
             dynamo_protocols::types::FinishReason::ToolCalls => AnthropicStopReason::ToolUse,
-            dynamo_protocols::types::FinishReason::ContentFilter => AnthropicStopReason::EndTurn,
+            dynamo_protocols::types::FinishReason::ContentFilter => AnthropicStopReason::Refusal,
             dynamo_protocols::types::FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
         });
 
         // Extract tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
-            for tc in tool_calls {
-                let input: serde_json::Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
+            // The token limit stops generation once, inside the call the model was
+            // writing. Every earlier call finished, so only the last one can carry a
+            // truncated tail.
+            let last_call = tool_calls.len().saturating_sub(1);
+            for (call_index, tc) in tool_calls.into_iter().enumerate() {
+                let input = tool_use_input(
+                    &tc.function.name,
+                    &tc.function.arguments,
+                    truncated && call_index == last_call,
+                );
                 let emitted_id = new_tool_use_id();
                 tracing::debug!(
                     backend_id = %tc.id,
@@ -2318,5 +2502,340 @@ mod tests {
             &chat_req.inner.messages[3],
             ChatCompletionRequestMessage::Tool(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod truncated_tool_call_tests {
+    use super::*;
+
+    /// Build a one-choice response carrying a single tool call with the given
+    /// finish reason and raw argument text, and return the Anthropic `input` it
+    /// converts to.
+    #[allow(deprecated)]
+    fn converted_tool_use_input(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &str,
+    ) -> serde_json::Value {
+        converted_tool_use_response(finish_reason, arguments)
+            .content
+            .into_iter()
+            .find_map(|block| match block {
+                AnthropicResponseContentBlock::ToolUse { input, .. } => Some(input),
+                _ => None,
+            })
+            .expect("expected a tool_use block")
+    }
+
+    #[allow(deprecated)]
+    fn converted_tool_use_response(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &str,
+    ) -> AnthropicMessageResponse {
+        converted_tool_use_response_for(finish_reason, &[arguments])
+    }
+
+    /// Every `tool_use` input in the converted response, in call order.
+    fn converted_tool_use_inputs(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &[&str],
+    ) -> Vec<serde_json::Value> {
+        converted_tool_use_response_for(finish_reason, arguments)
+            .content
+            .into_iter()
+            .filter_map(|block| match block {
+                AnthropicResponseContentBlock::ToolUse { input, .. } => Some(input),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One tool call per entry in `arguments`, so a test can build a choice that
+    /// carries parallel calls.
+    #[allow(deprecated)]
+    fn converted_tool_use_response_for(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &[&str],
+    ) -> AnthropicMessageResponse {
+        let tool_calls = arguments
+            .iter()
+            .enumerate()
+            .map(
+                |(index, args)| dynamo_protocols::types::ChatCompletionMessageToolCall {
+                    id: format!("call_{}", index + 1),
+                    r#type: dynamo_protocols::types::FunctionType::Function,
+                    function: dynamo_protocols::types::FunctionCall {
+                        name: "record_literal".into(),
+                        arguments: args.to_string(),
+                    },
+                },
+            )
+            .collect();
+        let chat_resp = NvCreateChatCompletionResponse {
+            inner: dynamo_protocols::types::CreateChatCompletionResponse {
+                id: "chatcmpl-wiring".into(),
+                choices: vec![dynamo_protocols::types::ChatChoice {
+                    index: 0,
+                    message: dynamo_protocols::types::ChatCompletionResponseMessage {
+                        content: None,
+                        refusal: None,
+                        tool_calls: Some(tool_calls),
+                        role: dynamo_protocols::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                        reasoning_content: None,
+                    },
+                    finish_reason: Some(finish_reason),
+                    logprobs: None,
+                }],
+                created: 1726000000,
+                model: "test-model".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".to_string(),
+                usage: None,
+            },
+            nvext: None,
+        };
+
+        chat_completion_to_anthropic_response(chat_resp, "test-model", None)
+    }
+
+    /// Pins the WIRING, not the helper. The eight helper tests below all call
+    /// `tool_use_input` directly, so reverting the conversion site to the old
+    /// `unwrap_or(json!({}))` left every one of them green. This one goes red,
+    /// because it reaches the recovery only through `chat_completion_to_anthropic_response`.
+    #[test]
+    fn the_conversion_recovers_members_when_the_reason_is_the_token_limit() {
+        assert_eq!(
+            converted_tool_use_input(dynamo_protocols::types::FinishReason::Length, TRUNCATED),
+            serde_json::json!({"label": "customer-eof"}),
+            "a call cut off at the token limit must keep the members that finished"
+        );
+    }
+
+    /// The guard on the rule above. When the upstream reason says the call FINISHED,
+    /// malformed arguments are a generation defect, not a truncation. Recovering members
+    /// there would emit a call that looks complete while silently carrying only some of
+    /// its arguments -- one a client can validate and then run. The empty object is the
+    /// honest answer, because it fails the tool's schema instead of half-succeeding.
+    #[test]
+    fn the_conversion_refuses_partial_arguments_when_the_call_claims_it_finished() {
+        for reason in [
+            dynamo_protocols::types::FinishReason::ToolCalls,
+            dynamo_protocols::types::FinishReason::Stop,
+            dynamo_protocols::types::FinishReason::ContentFilter,
+            dynamo_protocols::types::FinishReason::FunctionCall,
+        ] {
+            assert_eq!(
+                converted_tool_use_input(reason, TRUNCATED),
+                serde_json::json!({}),
+                "{reason:?} claims the call completed, so partial arguments must not be emitted"
+            );
+        }
+    }
+
+    #[test]
+    fn the_conversion_maps_content_filter_to_refusal() {
+        let response = converted_tool_use_response(
+            dynamo_protocols::types::FinishReason::ContentFilter,
+            r#"{"label": "blocked"}"#,
+        );
+        assert_eq!(response.stop_reason, Some(AnthropicStopReason::Refusal));
+    }
+
+    /// Malformed, but NOT cut short: the model closed the object and still emitted
+    /// arguments that do not parse. Recovery must refuse this shape.
+    const MALFORMED_BUT_COMPLETE: &str = r#"{"label": "a", "extra": }"#;
+
+    /// `truncated` describes the CHOICE, but only the last call can be the one the
+    /// model was writing when the budget ran out. It finished every earlier call, so
+    /// malformed arguments there are a generation defect and must still yield `{}`.
+    #[test]
+    fn only_the_final_tool_call_recovers_partial_arguments() {
+        let inputs = converted_tool_use_inputs(
+            dynamo_protocols::types::FinishReason::Length,
+            &[MALFORMED_BUT_COMPLETE, TRUNCATED],
+        );
+
+        assert_eq!(inputs.len(), 2, "both calls must reach the response");
+        assert_eq!(
+            inputs[0],
+            serde_json::json!({}),
+            "a call the model finished must not be repaired, even at the token limit"
+        );
+        assert_eq!(
+            inputs[1],
+            serde_json::json!({"label": "customer-eof"}),
+            "the final call is the only one that can have been cut off"
+        );
+    }
+
+    /// Valid arguments are untouched no matter which reason ended generation.
+    #[test]
+    fn the_conversion_passes_valid_arguments_through_for_every_reason() {
+        for reason in [
+            dynamo_protocols::types::FinishReason::Length,
+            dynamo_protocols::types::FinishReason::ToolCalls,
+            dynamo_protocols::types::FinishReason::Stop,
+        ] {
+            assert_eq!(
+                converted_tool_use_input(reason, r#"{"label": "done"}"#),
+                serde_json::json!({"label": "done"}),
+                "valid arguments must survive {reason:?} unchanged"
+            );
+        }
+    }
+
+    /// The measured payload: `record_literal` cut off inside the second
+    /// argument's string value. `label` finished, `literal_text` did not.
+    const TRUNCATED: &str =
+        r#"{"label": "customer-eof", "literal_text": "customer-eof-xxxxxxxxxxxxxxxxxxxx"#;
+
+    #[test]
+    fn truncated_arguments_keep_the_members_that_completed() {
+        let input = tool_use_input("record_literal", TRUNCATED, true);
+        let obj = input.as_object().expect("input must stay an object");
+
+        // The finished member survives verbatim.
+        assert_eq!(
+            obj.get("label").and_then(|v| v.as_str()),
+            Some("customer-eof")
+        );
+        // The member still being written is dropped rather than closed with a guess.
+        assert!(
+            !obj.contains_key("literal_text"),
+            "a truncated value must not be reported, got: {input}"
+        );
+        assert_eq!(obj.len(), 1);
+    }
+
+    /// The defect this replaced: every unparseable payload became `{}`, so a client
+    /// received a well-formed tool_use block and executed it with no arguments.
+    #[test]
+    fn truncated_arguments_are_not_silently_emptied() {
+        assert_ne!(
+            tool_use_input("record_literal", TRUNCATED, true),
+            serde_json::json!({}),
+            "unparseable arguments must not collapse to an empty object"
+        );
+    }
+
+    #[test]
+    fn valid_arguments_are_passed_through_unchanged() {
+        let input = tool_use_input("get_weather", r#"{"location": "SF", "unit": "c"}"#, true);
+        assert_eq!(input, serde_json::json!({"location": "SF", "unit": "c"}));
+    }
+
+    /// Truncation after a member value but before the closing brace. There is no
+    /// trailing comma, so the comma scan alone finds nothing, yet `label` did finish.
+    /// Returning `{}` here would be the empty-object failure this module exists to stop.
+    #[test]
+    fn a_final_member_without_a_trailing_comma_is_recovered() {
+        let recovered =
+            recover_completed_members(r#"{"label": "customer-eof""#).expect("`label` completed");
+        assert_eq!(
+            recovered.get("label").and_then(|v| v.as_str()),
+            Some("customer-eof")
+        );
+        assert_eq!(recovered.len(), 1);
+
+        // Same shape reached through the public entry point.
+        assert_eq!(
+            tool_use_input("record_literal", r#"{"label": "customer-eof""#, true),
+            serde_json::json!({"label": "customer-eof"})
+        );
+
+        // A closed nested value is equally provably finished.
+        let recovered =
+            recover_completed_members(r#"{"a": 1, "b": {"p": 2}"#).expect("`a` and `b` completed");
+        assert_eq!(recovered.get("b"), Some(&serde_json::json!({"p": 2})));
+        assert_eq!(recovered.len(), 2);
+    }
+
+    /// The guard on the case above: closing the brace after a BARE NUMBER would invent a
+    /// value, because the digits may themselves be truncated. `{"n": 25` cut to `{"n": 2`
+    /// must not be reported as `n = 2`.
+    #[test]
+    fn a_truncated_number_is_never_closed_into_a_value() {
+        assert_eq!(recover_completed_members(r#"{"n": 2"#), None);
+
+        // With an earlier complete member, fall back to the comma boundary and drop the
+        // ambiguous tail rather than reporting it.
+        let recovered = recover_completed_members(r#"{"a": "x", "n": 2"#).expect("`a` completed");
+        assert_eq!(recovered.get("a").and_then(|v| v.as_str()), Some("x"));
+        assert!(
+            !recovered.contains_key("n"),
+            "a possibly-truncated number must not be reported, got: {recovered:?}"
+        );
+
+        // An escaped quote at the very end leaves the string open; it is not a finished
+        // value and must not be closed either.
+        assert_eq!(recover_completed_members(r#"{"a": "he said \""#), None);
+    }
+
+    #[test]
+    fn scalar_values_followed_by_whitespace_are_recovered() {
+        for (key, value, expected) in [
+            ("count", r#"2 "#, serde_json::json!(2)),
+            ("enabled", "true ", serde_json::json!(true)),
+            ("enabled", "false ", serde_json::json!(false)),
+            ("value", "null ", serde_json::Value::Null),
+        ] {
+            let input = format!(r#"{{"{key}": {value}"#);
+            let recovered = recover_completed_members(&input).expect("scalar value completed");
+            assert_eq!(recovered.get(key), Some(&expected));
+        }
+    }
+
+    #[test]
+    fn an_undelimited_scalar_is_not_recovered() {
+        assert_eq!(recover_completed_members(r#"{"count": 2"#), None);
+        assert_eq!(recover_completed_members(r#"{"enabled": tru"#), None);
+        assert_eq!(recover_completed_members(r#"{"value": nul"#), None);
+    }
+
+    #[test]
+    fn nothing_is_recovered_before_the_first_member_closes() {
+        // Truncated inside the FIRST value: no member ever completed, so there is
+        // nothing to show and inventing one would fabricate an argument.
+        assert_eq!(recover_completed_members(r#"{"label": "customer-eo"#), None);
+        assert_eq!(recover_completed_members("{"), None);
+        assert_eq!(recover_completed_members(""), None);
+        // Not an object at all.
+        assert_eq!(recover_completed_members(r#"["a", "b""#), None);
+    }
+
+    #[test]
+    fn commas_inside_strings_and_nested_values_are_not_member_boundaries() {
+        // A comma inside a string value must not be mistaken for a member boundary.
+        let raw = r#"{"a": "x, y", "b": "unterminated"#;
+        let recovered = recover_completed_members(raw).expect("`a` completed");
+        assert_eq!(recovered.get("a").and_then(|v| v.as_str()), Some("x, y"));
+        assert_eq!(recovered.len(), 1);
+
+        // A comma inside a nested object or array belongs to that value, not the
+        // top-level member list.
+        let raw = r#"{"a": {"p": 1, "q": 2}, "b": [1, 2], "c": "cut"#;
+        let recovered = recover_completed_members(raw).expect("`a` and `b` completed");
+        assert_eq!(
+            recovered.get("a"),
+            Some(&serde_json::json!({"p": 1, "q": 2}))
+        );
+        assert_eq!(recovered.get("b"), Some(&serde_json::json!([1, 2])));
+        assert!(!recovered.contains_key("c"));
+    }
+
+    #[test]
+    fn escaped_quotes_do_not_end_the_string() {
+        // The `\"` must not be read as closing the value, which would make the
+        // following comma look like a top-level boundary.
+        let raw = r#"{"a": "he said \"hi\", ok", "b": "cut"#;
+        let recovered = recover_completed_members(raw).expect("`a` completed");
+        assert_eq!(
+            recovered.get("a").and_then(|v| v.as_str()),
+            Some(r#"he said "hi", ok"#)
+        );
+        assert_eq!(recovered.len(), 1);
     }
 }

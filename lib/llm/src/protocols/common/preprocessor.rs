@@ -383,6 +383,13 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mm_processor_kwargs: Option<serde_json::Value>,
 
+    /// Per-request media I/O options, forwarded untouched from the incoming request
+    /// when the worker owns media decoding. Absent when the frontend decoded the
+    /// media itself and already consumed them.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_io_kwargs: Option<serde_json::Value>,
+
     /// Optional request timestamp in milliseconds forwarded from nvext.
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]

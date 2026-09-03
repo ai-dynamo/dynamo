@@ -285,6 +285,7 @@ class SglangPreprocessWorkerResult:
     dynamo_preproc: dict[str, Any]
     request: dict[str, Any]
     force_reasoning: bool = False
+    named_zero_arg_tool: str | None = None
     # ``effective_reasoning_parser_name`` is None when the request opted out
     # via ``separate_reasoning=False``; the main process must skip creating
     # a reasoning parser in that case so the pool path matches the inline
@@ -359,6 +360,7 @@ def _preprocess_worker(
         request=request,
         force_reasoning=pre.force_reasoning,
         effective_reasoning_parser_name=effective_reasoning_parser_name,
+        named_zero_arg_tool=pre.named_zero_arg_tool,
     )
 
 
@@ -606,6 +608,7 @@ class SglangProcessor:
             ),
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
+            named_zero_arg_tool=pre.named_zero_arg_tool,
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
@@ -665,6 +668,7 @@ class SglangProcessor:
             ),
             sglang_tools=convert_tools(request.get("tools")),
             tool_call_parser_name=self.tool_call_parser_name,
+            named_zero_arg_tool=preproc_result.named_zero_arg_tool,
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
