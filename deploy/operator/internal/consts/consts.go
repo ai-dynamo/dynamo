@@ -58,6 +58,26 @@ const (
 	// when the namespace carries istio-injection=enabled.
 	KubeAnnotationIstioSidecarInject = "sidecar.istio.io/inject"
 
+	// KubeAnnotationElasticEPFollower marks a synthesized elastic-EP follower DCD, so the
+	// renderer launches it as a Ray join rather than a serve. Operator-set, never user-set.
+	KubeAnnotationElasticEPFollower = "nvidia.com/elastic-ep-follower"
+
+	// KubeAnnotationElasticEPLeaderComponent carries the leader's component name, so the
+	// follower can resolve infrastructure that exists only for declared components -- the
+	// GMS DRA claim template. See dynamo.ElasticEPComponentIdentity, which documents what
+	// must not be resolved this way. Operator-set, never user-set.
+	KubeAnnotationElasticEPLeaderComponent = "nvidia.com/elastic-ep-leader-component"
+
+	// KubeAnnotationElasticEPLeaderService carries the headless Service name the follower
+	// joins, so it never recomputes an address the emitter may have scoped differently.
+	// See dynamo.ElasticEPLeaderServiceNameForDCD. Operator-set, never user-set.
+	KubeAnnotationElasticEPLeaderService = "nvidia.com/elastic-ep-leader-service"
+
+	// NodeLabelGPUClique is the NVLink-partition label the DRA driver stamps on GB200
+	// nodes: equal values mean a shared NVLink fabric, different values mean no NVLink
+	// route. Used as a pod-affinity topology key to place a follower with its leader.
+	NodeLabelGPUClique = "nvidia.com/gpu.clique"
+
 	KubeAnnotationDisableImagePullSecretDiscovery = "nvidia.com/disable-image-pull-secret-discovery"
 	KubeAnnotationDynamoDiscoveryBackend          = "nvidia.com/dynamo-discovery-backend"
 	KubeAnnotationDynamoKubeDiscoveryMode         = "nvidia.com/dynamo-kube-discovery-mode"
@@ -222,6 +242,9 @@ const (
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
 	GroveRoleSuffixGMS    = "gms"
+	// GroveRoleSuffixFollower names the on-demand elastic-EP follower clique.
+	// Kept to three characters to preserve the combined Grove name budget.
+	GroveRoleSuffixFollower = "flw"
 
 	// MaxCombinedGroveResourceNameLength is the maximum allowed combined length for Grove
 	// resource names (PCS name + PCSG config name + PCLQ template name).

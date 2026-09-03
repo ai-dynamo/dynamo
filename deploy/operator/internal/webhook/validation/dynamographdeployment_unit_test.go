@@ -36,7 +36,7 @@ func TestDynamoGraphDeploymentConversionFailureIsFatal(t *testing.T) {
 	dgd.Spec.Components = append(dgd.Spec.Components, dgd.Spec.Components[0])
 
 	validator := newDynamoGraphDeploymentTestValidator(t)
-	ctx := features.WithGate(context.Background(), features.Gates{Grove: true})
+	ctx := features.WithGate(context.Background(), features.Gates{Grove: true, ElasticEPRayPoC: true})
 	_, err := validator.Validate(ctx, dgd, runtimeVersionSourceV1Beta1)
 	if err == nil || !strings.Contains(err.Error(), "failed to reconstruct compatibility view") {
 		t.Fatalf("Validate() error = %v, want fatal conversion error", err)
@@ -231,6 +231,85 @@ func TestValidateElasticEPRequiresCommand(t *testing.T) {
 	}
 }
 
+// Elastic EP grows by adding followers to one leader's Ray cluster, not by adding
+// leaders. Two replicas mean two independent Ray heads, but the operator renders one
+// "<component>-ray" Service and one derived follower per component, so a follower cannot
+// say which leader it belongs to. Rejecting here is what keeps the operator from silently
+// dropping both the Service and the follower and leaving leaders that can never grow.
+func TestValidateElasticEPSingleReplica(t *testing.T) {
+	const vllm = "vllm"
+	rayArgs := []string{"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep"}
+	command := []string{"python3", "-m", "dynamo.vllm"}
+	fldPath := field.NewPath("spec")
+	const replicasPath = "spec.replicas"
+
+	withReplicas := func(spec *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec, n *int32) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
+		spec.Replicas = n
+		return spec
+	}
+
+	tests := []struct {
+		name    string
+		backend string
+		spec    *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec
+		want    []string
+	}{
+		{
+			name:    "elastic-EP with two replicas is rejected",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(2))),
+			want:    []string{replicasPath},
+		},
+		{
+			name:    "a single replica is accepted",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(1))),
+			want:    nil,
+		},
+		{
+			name:    "unset replicas is accepted: it defaults to one leader",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), nil),
+			want:    nil,
+		},
+		{
+			name:    "zero replicas is accepted: a scaled-to-zero leader has no Ray head to confuse",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(0))),
+			want:    nil,
+		},
+		{
+			name:    "a non-elastic-EP component may scale freely",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, []string{"--model", "test"}), k8sptr.To(int32(4))),
+			want:    nil,
+		},
+		{
+			name:    "elastic-EP on a non-ray backend may scale freely",
+			backend: vllm,
+			spec:    withReplicas(elasticEPSharedSpec(command, []string{"--model", "test", "--data-parallel-backend", "mp", "--enable-elastic-ep"}), k8sptr.To(int32(3))),
+			want:    nil,
+		},
+		{
+			name:    "non-vllm backend is not validated",
+			backend: sglangBackendFramework,
+			spec:    withReplicas(elasticEPSharedSpec(command, rayArgs), k8sptr.To(int32(2))),
+			want:    nil,
+		},
+		{
+			name:    "nil pod template is ignored",
+			backend: vllm,
+			spec:    &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{Replicas: k8sptr.To(int32(2))},
+			want:    nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertFieldPaths(t, validateElasticEPSingleReplica(tt.backend, tt.spec, fldPath), tt.want)
+		})
+	}
+}
+
 // TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand proves the rule is
 // wired into the DGD admission path end to end, not just callable in isolation.
 func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
@@ -241,12 +320,45 @@ func TestDynamoGraphDeploymentRejectsElasticEPWithoutCommand(t *testing.T) {
 	}
 
 	validator := newDynamoGraphDeploymentTestValidator(t)
-	ctx := features.WithGate(context.Background(), features.Gates{Grove: true})
+	ctx := features.WithGate(context.Background(), features.Gates{Grove: true, ElasticEPRayPoC: true})
 	_, err := validator.Validate(ctx, dgd, runtimeVersionSourceV1Beta1)
 	if err == nil || !k8serrors.IsInvalid(err) {
 		t.Fatalf("Validate() error = %v, want invalid field error", err)
 	}
 	if !strings.Contains(err.Error(), "requires an explicit container command") {
 		t.Fatalf("Validate() error = %v, want elastic-EP command requirement", err)
+	}
+}
+
+// TestDynamoGraphDeploymentSkipsElasticEPRulesWhenGated proves the review's third
+// gate-off requirement: a gated-off operator applies no Ray-specific admission rules.
+//
+// It matters because both rules would otherwise reject a deployment that works. Gated
+// off nothing wraps the user's command and no Service or follower is derived, so vLLM
+// starts a private in-process Ray and the component serves normally. Rejecting it would
+// break a running deployment to enforce a rule about a feature nobody enabled -- and on
+// update it would freeze the object, since admission runs over the whole spec.
+func TestDynamoGraphDeploymentSkipsElasticEPRulesWhenGated(t *testing.T) {
+	// Both rules at once: elastic-EP Ray flags, no explicit command, and replicas > 1.
+	dgd := newBetaDGDForValidation()
+	dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Command = nil
+	dgd.Spec.Components[1].PodTemplate.Spec.Containers[0].Args = []string{
+		"--model", "test", "--data-parallel-backend", "ray", "--enable-elastic-ep",
+	}
+	dgd.Spec.Components[1].Replicas = k8sptr.To(int32(2))
+
+	validator := newDynamoGraphDeploymentTestValidator(t)
+
+	t.Log("Gate off: the graph is accepted, because neither rule applies")
+	offCtx := features.WithGate(context.Background(), features.Gates{Grove: true})
+	if _, err := validator.Validate(offCtx, dgd, runtimeVersionSourceV1Beta1); err != nil {
+		t.Fatalf("gate off rejected a config it does not manage: %v", err)
+	}
+
+	t.Log("Gate on: the same graph is rejected, so the skip is the gate and not a broken rule")
+	onCtx := features.WithGate(context.Background(), features.Gates{Grove: true, ElasticEPRayPoC: true})
+	_, err := validator.Validate(onCtx, dgd, runtimeVersionSourceV1Beta1)
+	if err == nil || !k8serrors.IsInvalid(err) {
+		t.Fatalf("gate on error = %v, want invalid field error", err)
 	}
 }

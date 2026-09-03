@@ -69,6 +69,9 @@ type OperatorConfiguration struct {
 	// Checkpoint/restore configuration
 	Checkpoint CheckpointConfiguration `json:"checkpoint"`
 
+	// Operator-managed Ray elastic expert-parallelism configuration
+	ElasticEPRayPoC ElasticEPRayPoCConfiguration `json:"elasticEPRayPoC"`
+
 	// Discovery backend configuration
 	Discovery DiscoveryConfiguration `json:"discovery"`
 
@@ -353,6 +356,18 @@ type MPIConfiguration struct {
 // DefaultSeccompProfile is the localhost seccomp profile applied to checkpoint
 // and restore pods when the operator config does not specify one explicitly.
 const DefaultSeccompProfile = "profiles/block-iouring.json"
+
+// ElasticEPRayPoCConfiguration holds settings for the operator-managed Ray elastic
+// expert-parallelism path.
+//
+// Off by default. The vLLM elastic-EP flags state what the engine does; they are
+// not a grant for the operator to rewrite launch commands or synthesize workloads
+// on the user's behalf. That grant is the cluster administrator's to give, so it
+// lives here rather than on the DynamoGraphDeployment.
+type ElasticEPRayPoCConfiguration struct {
+	// Enabled turns on the operator-managed Ray elastic-EP path.
+	Enabled bool `json:"enabled"`
+}
 
 // CheckpointConfiguration holds checkpoint/restore settings.
 type CheckpointConfiguration struct {

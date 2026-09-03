@@ -786,7 +786,7 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -795,7 +795,7 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	}
 
 	t.Log("Render the reusable component Service and multinode pod templates directly")
-	renderer := newDCDWorkloadRenderer(r.Client, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
+	renderer := newDCDWorkloadRenderer(r.Client, r.NodeReader, r.Config, r.RuntimeConfig, r.DockerSecretRetriever)
 	renderedService, renderedServiceToDelete, err := renderer.generateService(context.Background(), dcd)
 	require.NoError(t, err)
 	require.False(t, renderedServiceToDelete)
@@ -818,6 +818,487 @@ func TestDynamoComponentDeploymentReconciler_LWSNameDoesNotCollideWithComponentS
 	require.Equal(t, "vllm-disagg-decode-4e5bb2af", service.Name)
 	require.Equal(t, "vllm-disagg-decode-4e5bb2af-0", lws.Name)
 	require.NotEqual(t, service.Name, lws.Name)
+}
+
+// The non-Grove twin of the Grove leader-Service gate (isSinglePodElasticEPLeader). The
+// Service selects every pod with the component labels, so it addresses one Ray head only
+// while the component is one pod; anything else must emit a delete stub rather than a
+// Service pointed at the wrong pods.
+func TestDynamoComponentDeploymentReconciler_ElasticEPHeadlessServiceGate(t *testing.T) {
+	const elasticEPArgs = "python3 -m dynamo.vllm --enable-elastic-ep --data-parallel-backend ray"
+
+	tests := []struct {
+		name       string
+		mutate     func(*v1alpha1.DynamoComponentDeployment)
+		gateOff    bool
+		wantDelete bool
+	}{
+		{
+			name:       "emits for a single-pod elastic-EP leader",
+			mutate:     func(*v1alpha1.DynamoComponentDeployment) {},
+			wantDelete: false,
+		},
+		{
+			// The review requires that a gated-off operator create no Ray Services. The
+			// delete stub is what makes that true on upgrade *and* on disable: the same
+			// return both skips creation and removes one a previous operator emitted.
+			name:       "deletes when the ElasticEPRayPoC gate is off",
+			mutate:     func(*v1alpha1.DynamoComponentDeployment) {},
+			gateOff:    true,
+			wantDelete: true,
+		},
+		{
+			name: "deletes for replicas > 1",
+			mutate: func(dcd *v1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Replicas = ptr.To(int32(2))
+			},
+			wantDelete: true,
+		},
+		{
+			name: "deletes for a multinode component",
+			mutate: func(dcd *v1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &v1alpha1.MultinodeSpec{NodeCount: 2}
+			},
+			wantDelete: true,
+		},
+		{
+			name: "deletes for a component that is not an elastic-EP Ray launch",
+			mutate: func(dcd *v1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.ExtraPodSpec.MainContainer.Args = []string{"python3 -m dynamo.vllm"}
+			},
+			wantDelete: true,
+		},
+		{
+			name: "deletes for the follower, which joins the Service but never owns it",
+			mutate: func(dcd *v1alpha1.DynamoComponentDeployment) {
+				dcd.Annotations = map[string]string{
+					commonconsts.KubeAnnotationElasticEPFollower: commonconsts.KubeLabelValueTrue,
+				}
+			},
+			wantDelete: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := scheme.Scheme
+			require.NoError(t, v1alpha1.AddToScheme(s))
+			require.NoError(t, appsv1.AddToScheme(s))
+			require.NoError(t, corev1.AddToScheme(s))
+
+			t.Log("Build an elastic-EP leader DCD and apply the case's shape")
+			alpha := &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "mydgd-decode", Namespace: "default"},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName:     "decode",
+						ComponentType:   commonconsts.ComponentTypeWorker,
+						DynamoNamespace: ptr.To("default"),
+						Replicas:        ptr.To(int32(1)),
+						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							MainContainer: &corev1.Container{
+								Name:  commonconsts.MainContainerName,
+								Image: "test-image:latest",
+								Args:  []string{elasticEPArgs},
+							},
+						},
+					},
+				},
+			}
+			tt.mutate(alpha)
+			dcd := betaDCD(t, alpha)
+
+			r := &DynamoComponentDeploymentReconciler{
+				Client:     fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+				NodeReader: fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+				Config: &configv1alpha1.OperatorConfiguration{
+					Discovery:       configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+					ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: true},
+				},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: !tt.gateOff}},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+				},
+			}
+
+			t.Log("Generate the headless leader Service for this DCD")
+			svc, toDelete, err := r.generateElasticEPHeadlessService(context.Background(), generateResourceOption{
+				dynamoComponentDeployment: dcd,
+			})
+			require.NoError(t, err)
+
+			t.Log("Only the single-pod elastic-EP leader owns a real Service; every other shape is a delete stub")
+			require.Equal(t, tt.wantDelete, toDelete)
+			require.NotNil(t, svc)
+
+			// Pin the naming contract for BOTH outcomes. The name is built from the DCD
+			// resource name, not the component name, so it cannot collide with another
+			// DGD's "decode-ray" or with the other generation's mid-rollout -- and the
+			// delete stub must use that same name or it garbage-collects nothing.
+			t.Log("Both the retained Service and the delete stub are named from the DCD identity")
+			require.Equal(t, dynamo.ElasticEPLeaderServiceNameForDCD(dcd), svc.Name)
+			require.NotEqual(t, dynamo.ElasticEPLeaderServiceName("decode"), svc.Name,
+				"must not be named from the bare component name")
+
+			if !tt.wantDelete {
+				require.Equal(t, corev1.ClusterIPNone, svc.Spec.ClusterIP)
+				require.Equal(t, "decode", svc.Spec.Selector[commonconsts.KubeLabelDynamoComponent])
+
+				t.Log("and the selector is narrowed to this one DCD generation")
+				require.Equal(t, dcd.Name, svc.Spec.Selector[commonconsts.KubeLabelDynamoSelector])
+			}
+		})
+	}
+}
+
+// The follower's NVLink-partition affinity is required, so it can only be honoured when
+// the leader itself sits in a partition. The check is deliberately about the leader's
+// node rather than the cluster: pod affinity on gpu.clique matches by comparing that
+// label against a node already running a leader pod, so an unrelated labelled node in a
+// mixed cluster does not make the term satisfiable. Keeping it anyway would leave the
+// follower Pending forever; dropping it lets the pod schedule normally.
+func TestDynamoComponentDeploymentReconciler_NVLinkTopologyCapability(t *testing.T) {
+	tests := []struct {
+		name                string
+		leaderNodeLabel     bool // leader pod runs on a node carrying gpu.clique
+		otherNodeLabel      bool // an unrelated node carries it (mixed cluster)
+		staleLeaderLabelled bool // a PREVIOUS generation's leader sits on a labelled node
+		leaderScheduled     bool
+		wantCliqueTerm      bool
+	}{
+		{
+			name:            "leader sits in a partition: pin the follower to it",
+			leaderNodeLabel: true,
+			leaderScheduled: true,
+			wantCliqueTerm:  true,
+		},
+		{
+			name:            "leader is on an unlabelled node: schedule normally instead of Pending forever",
+			leaderScheduled: true,
+			wantCliqueTerm:  false,
+		},
+		{
+			// The case a cluster-wide check gets wrong: a GB200 node exists, but not the
+			// leader's, so the required term could never match and the follower would hang.
+			name:            "mixed cluster, leader unlabelled: an unrelated labelled node must not count",
+			otherNodeLabel:  true,
+			leaderScheduled: true,
+			wantCliqueTerm:  false,
+		},
+		{
+			// Unknown, not unsupported. Pod affinity is evaluated by the scheduler when
+			// it places the pod, and a Pending pod is retried until it can be placed, so
+			// a leader that is merely not scheduled yet resolves itself. Dropping the
+			// term here would convert that transient into a permanent loss of the
+			// guarantee -- and the follower rests at zero replicas, so nothing is
+			// Pending during the window anyway.
+			name:            "leader not scheduled yet: keep the term, the scheduler will wait",
+			leaderNodeLabel: true,
+			leaderScheduled: false,
+			wantCliqueTerm:  true,
+		},
+		{
+			// Mid-rollout both generations carry the component and dynamo-namespace
+			// labels, but the term is scoped to one DCD generation, so a retiring
+			// leader does not match it. That leaves no scheduled leader for this
+			// generation, which is unknown rather than unsupported: keep the term so
+			// the follower waits for its own leader instead of being freed to land in
+			// the retiring leader's partition.
+			name:                "old-generation leader pod must not satisfy the check",
+			staleLeaderLabelled: true,
+			leaderScheduled:     false,
+			wantCliqueTerm:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := scheme.Scheme
+			require.NoError(t, v1alpha1.AddToScheme(s))
+			require.NoError(t, appsv1.AddToScheme(s))
+			require.NoError(t, corev1.AddToScheme(s))
+
+			t.Log("Build a follower DCD carrying both placement terms, as synthesis stamps them")
+			alpha := &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "mydgd-decode-flw",
+					Namespace:   "default",
+					Annotations: map[string]string{commonconsts.KubeAnnotationElasticEPFollower: commonconsts.KubeLabelValueTrue},
+				},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName:     "decode-flw",
+						ComponentType:   commonconsts.ComponentTypeWorker,
+						DynamoNamespace: ptr.To("default"),
+						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							MainContainer: &corev1.Container{Name: commonconsts.MainContainerName, Image: "test-image:latest"},
+							PodSpec: &corev1.PodSpec{
+								Affinity: &corev1.Affinity{
+									PodAffinity: &corev1.PodAffinity{
+										RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+											{
+												TopologyKey: commonconsts.NodeLabelGPUClique,
+												LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+													commonconsts.KubeLabelDynamoComponent: "decode",
+													commonconsts.KubeLabelDynamoNamespace: "default",
+													commonconsts.KubeLabelDynamoSelector:  "mydgd-decode-flw",
+												}},
+											},
+										},
+									},
+									PodAntiAffinity: &corev1.PodAntiAffinity{
+										RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+											{TopologyKey: "kubernetes.io/hostname"},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			dcd := betaDCD(t, alpha)
+
+			t.Log("Place the leader pod and its node exactly as the case describes")
+			leaderNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "leader-node"}}
+			if tt.leaderNodeLabel {
+				leaderNode.Labels = map[string]string{commonconsts.NodeLabelGPUClique: "clique-a"}
+			}
+			objects := []client.Object{dcd, leaderNode}
+			if tt.otherNodeLabel {
+				objects = append(objects, &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+					Name:   "unrelated-gb200",
+					Labels: map[string]string{commonconsts.NodeLabelGPUClique: "clique-z"},
+				}})
+			}
+			if tt.staleLeaderLabelled {
+				staleNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{
+					Name:   "stale-leader-node",
+					Labels: map[string]string{commonconsts.NodeLabelGPUClique: "clique-old"},
+				}}
+				stalePod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "old-leader-0",
+						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "decode",
+							commonconsts.KubeLabelDynamoNamespace: "default",
+							// the retiring generation
+							commonconsts.KubeLabelDynamoSelector: "mydgd-decode-OLDHASH",
+						},
+					},
+					Spec: corev1.PodSpec{NodeName: staleNode.Name},
+				}
+				objects = append(objects, staleNode, stalePod)
+			}
+			if tt.leaderScheduled {
+				leaderPod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "leader-0",
+						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "decode",
+							commonconsts.KubeLabelDynamoNamespace: "default",
+							commonconsts.KubeLabelDynamoSelector:  "mydgd-decode-flw",
+						},
+					},
+					Spec: corev1.PodSpec{NodeName: leaderNode.Name},
+				}
+				objects = append(objects, leaderPod)
+			}
+
+			r := &DynamoComponentDeploymentReconciler{
+				Client:        fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build(),
+				NodeReader:    fake.NewClientBuilder().WithScheme(s).WithObjects(objects...).Build(),
+				Config:        &configv1alpha1.OperatorConfiguration{},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+				},
+			}
+
+			t.Log("Render the follower pod template against that cluster")
+			podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(
+				context.Background(), dcd, dynamo.RoleFollower, noContainerGPUs())
+			require.NoError(t, err)
+
+			t.Log("The partition affinity survives only when the leader is in a partition to pin to")
+			var gotClique bool
+			if aff := podTemplate.Spec.Affinity; aff != nil && aff.PodAffinity != nil {
+				for _, term := range aff.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution {
+					if term.TopologyKey == commonconsts.NodeLabelGPUClique {
+						gotClique = true
+					}
+				}
+			}
+			require.Equal(t, tt.wantCliqueTerm, gotClique)
+
+			t.Log("The one-pod-per-node anti-affinity is unaffected either way")
+			require.NotNil(t, podTemplate.Spec.Affinity)
+			require.NotNil(t, podTemplate.Spec.Affinity.PodAntiAffinity)
+			require.Len(t, podTemplate.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, 1)
+		})
+	}
+}
+
+// The follower deep-copies the leader's spec, so a user's own gpu.clique affinity rides
+// along. Only the term synthesis added may be removed: a user term written with
+// MatchExpressions has no MatchLabels for the leader lookup to resolve, so treating every
+// gpu.clique term as operator-owned would silently discard their scheduling intent.
+func TestDynamoComponentDeploymentReconciler_PreservesInheritedCliqueAffinity(t *testing.T) {
+	s := scheme.Scheme
+	require.NoError(t, v1alpha1.AddToScheme(s))
+	require.NoError(t, appsv1.AddToScheme(s))
+	require.NoError(t, corev1.AddToScheme(s))
+
+	t.Log("Build a follower carrying BOTH a user gpu.clique term and the synthesized one")
+	userTerm := corev1.PodAffinityTerm{
+		TopologyKey: commonconsts.NodeLabelGPUClique,
+		LabelSelector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{{
+				Key:      "app",
+				Operator: metav1.LabelSelectorOpIn,
+				Values:   []string{"my-sidecar"},
+			}},
+		},
+	}
+	synthesizedTerm := corev1.PodAffinityTerm{
+		TopologyKey: commonconsts.NodeLabelGPUClique,
+		LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+			commonconsts.KubeLabelDynamoComponent: "decode",
+			commonconsts.KubeLabelDynamoNamespace: "default",
+			commonconsts.KubeLabelDynamoSelector:  "mydgd-decode-flw",
+		}},
+	}
+
+	alpha := &v1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "mydgd-decode-flw",
+			Namespace:   "default",
+			Annotations: map[string]string{commonconsts.KubeAnnotationElasticEPFollower: commonconsts.KubeLabelValueTrue},
+		},
+		Spec: v1alpha1.DynamoComponentDeploymentSpec{
+			BackendFramework: string(dynamo.BackendFrameworkVLLM),
+			DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ServiceName:     "decode-flw",
+				ComponentType:   commonconsts.ComponentTypeWorker,
+				DynamoNamespace: ptr.To("default"),
+				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+					MainContainer: &corev1.Container{Name: commonconsts.MainContainerName, Image: "test-image:latest"},
+					PodSpec: &corev1.PodSpec{
+						Affinity: &corev1.Affinity{
+							PodAffinity: &corev1.PodAffinity{
+								RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{userTerm, synthesizedTerm},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	dcd := betaDCD(t, alpha)
+
+	// No leader pod exists, so the synthesized term is unsatisfiable and gets dropped.
+	// That is exactly the condition under which a naive loop would take the user's too.
+	r := &DynamoComponentDeploymentReconciler{
+		Client:        fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+		NodeReader:    fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
+		DockerSecretRetriever: &mockDockerSecretRetriever{
+			GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+		},
+	}
+
+	t.Log("Render on a leader-on-unlabelled-node cluster, the only case that drops a term")
+	podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(
+		context.Background(), dcd, dynamo.RoleFollower, noContainerGPUs())
+	require.NoError(t, err)
+
+	t.Log("The user's term survives whatever the capability check decides")
+	require.NotNil(t, podTemplate.Spec.Affinity)
+	require.NotNil(t, podTemplate.Spec.Affinity.PodAffinity)
+	remaining := podTemplate.Spec.Affinity.PodAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+
+	var userSurvived bool
+	for _, term := range remaining {
+		if term.LabelSelector == nil {
+			continue
+		}
+		if len(term.LabelSelector.MatchExpressions) > 0 {
+			require.Equal(t, userTerm.LabelSelector.MatchExpressions, term.LabelSelector.MatchExpressions)
+			userSurvived = true
+		}
+	}
+	require.True(t, userSurvived,
+		"the user's MatchExpressions term must never be removed: it carries their scheduling intent "+
+			"and the leader lookup cannot resolve it, so treating it as operator-owned would discard it")
+}
+
+// The follower runs a bare Ray join, not the Dynamo runtime, so it never registers a
+// DynamoWorkerMetadata CR. Discovery labels would only keep it in the daemon's reflector
+// store and wake its debounce loop on every scale-up/scale-down.
+func TestDynamoComponentDeploymentReconciler_DiscoveryLabelsByRole(t *testing.T) {
+	tests := []struct {
+		name       string
+		role       dynamo.Role
+		wantLabels bool
+	}{
+		{name: "main registers a worker and is discoverable", role: dynamo.RoleMain, wantLabels: true},
+		{name: "elastic-EP follower never registers a worker", role: dynamo.RoleFollower, wantLabels: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := scheme.Scheme
+			require.NoError(t, v1alpha1.AddToScheme(s))
+			require.NoError(t, appsv1.AddToScheme(s))
+			require.NoError(t, corev1.AddToScheme(s))
+
+			t.Log("render a pod template for the role, with the Kubernetes discovery backend enabled")
+			dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "mydgd-decode", Namespace: "default"},
+				Spec: v1alpha1.DynamoComponentDeploymentSpec{
+					BackendFramework: string(dynamo.BackendFrameworkVLLM),
+					DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+						ServiceName:     "decode",
+						ComponentType:   commonconsts.ComponentTypeWorker,
+						DynamoNamespace: ptr.To("default"),
+						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
+							MainContainer: &corev1.Container{
+								Name:  commonconsts.MainContainerName,
+								Image: "test-image:latest",
+							},
+						},
+					},
+				},
+			})
+
+			r := &DynamoComponentDeploymentReconciler{
+				Client:     fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+				NodeReader: fake.NewClientBuilder().WithScheme(s).WithObjects(dcd).Build(),
+				Config: &configv1alpha1.OperatorConfiguration{
+					Discovery:       configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
+					ElasticEPRayPoC: configv1alpha1.ElasticEPRayPoCConfiguration{Enabled: true},
+				},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) { return nil, nil },
+				},
+			}
+
+			podTemplate, err := r.workloadRenderer().generatePodTemplateSpec(context.Background(), dcd, tt.role, noContainerGPUs())
+			require.NoError(t, err)
+
+			t.Log("only a role that runs the Dynamo runtime carries the discovery labels")
+			_, gotBackend := podTemplate.Labels[commonconsts.KubeLabelDynamoDiscoveryBackend]
+			_, gotEnabled := podTemplate.Labels[commonconsts.KubeLabelDynamoDiscoveryEnabled]
+			require.Equal(t, tt.wantLabels, gotBackend, "discovery-backend label presence")
+			require.Equal(t, tt.wantLabels, gotEnabled, "discovery-enabled label presence")
+		})
+	}
 }
 
 func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t *testing.T) {
@@ -879,7 +1360,7 @@ func TestDynamoComponentDeploymentReconciler_LegacyAlphaWorkloadComponentType(t 
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -1055,7 +1536,7 @@ func TestDynamoComponentDeploymentReconciler_BetaPrefillWorkloadComponentType(t 
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -1175,7 +1656,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 			fields: fields{
 				Recorder:      events.NewFakeRecorder(100),
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -1551,7 +2032,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 			fields: fields{
 				Recorder:      events.NewFakeRecorder(100),
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -1704,7 +2185,7 @@ func TestDynamoComponentDeploymentReconciler_createOrUpdateOrDeleteDeployments_R
 		Client:        fakeKubeClient,
 		Recorder:      recorder,
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -2321,7 +2802,7 @@ func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(
 					Enabled: true,
 				},
 			},
-			RuntimeConfig: &controller_common.RuntimeConfig{},
+			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		}
 	}
 
@@ -2440,7 +2921,7 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 		Client:        fakeKubeClient,
 		Recorder:      recorder,
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -2694,7 +3175,7 @@ func Test_reconcileLeaderWorkerSetResources(t *testing.T) {
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -2791,7 +3272,7 @@ func Test_reconcileLeaderWorkerSetResources_UpgradesLegacyIndexedLWSReplicas(t *
 				Build(),
 			Recorder:      events.NewFakeRecorder(100),
 			Config:        &configv1alpha1.OperatorConfiguration{},
-			RuntimeConfig: &controller_common.RuntimeConfig{},
+			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 			DockerSecretRetriever: &mockDockerSecretRetriever{
 				GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 					return []string{}, nil
@@ -3008,7 +3489,7 @@ func Test_reconcileDeploymentResources(t *testing.T) {
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -3095,7 +3576,7 @@ func Test_reconcileDeploymentResources_DoesNotRecycleFailedRestorePods(t *testin
 		Client:        fakeKubeClient,
 		Recorder:      events.NewFakeRecorder(100),
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return []string{}, nil
@@ -3576,7 +4057,7 @@ func Test_generateDeployment_Strategy(t *testing.T) {
 				Client:        fakeKubeClient,
 				Recorder:      recorder,
 				Config:        &configv1alpha1.OperatorConfiguration{},
-				RuntimeConfig: &controller_common.RuntimeConfig{},
+				RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 				DockerSecretRetriever: &mockDockerSecretRetriever{
 					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 						return []string{}, nil
@@ -3645,7 +4126,7 @@ func TestGenerateWorkerPodTemplateSpecDoesNotRequireGPUResource(t *testing.T) {
 		Config: &configv1alpha1.OperatorConfiguration{
 			Discovery: configv1alpha1.DiscoveryConfiguration{Backend: configv1alpha1.DiscoveryBackendKubernetes},
 		},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil
@@ -3744,7 +4225,7 @@ func TestRenderMultinodePodTemplateSpecs_VLLMMultinodeDRA(t *testing.T) {
 			WithObjects(dcd, claimTemplate, deviceClass).
 			Build(),
 		Config:        &configv1alpha1.OperatorConfiguration{},
-		RuntimeConfig: &controller_common.RuntimeConfig{},
+		RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{ElasticEPRayPoC: true}},
 		DockerSecretRetriever: &mockDockerSecretRetriever{
 			GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
 				return nil, nil

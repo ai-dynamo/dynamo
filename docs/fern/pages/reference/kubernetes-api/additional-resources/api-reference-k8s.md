@@ -3305,6 +3305,28 @@ _Appears in:_
 | `backend` _[DiscoveryBackend](#discoverybackend)_ | Backend is the discovery backend: "kubernetes" or "etcd" | kubernetes |  |
 
 
+#### ElasticEPRayPoCConfiguration
+
+
+
+ElasticEPRayPoCConfiguration holds settings for the operator-managed Ray elastic
+expert-parallelism path.
+
+Off by default. The vLLM elastic-EP flags state what the engine does; they are
+not a grant for the operator to rewrite launch commands or synthesize workloads
+on the user's behalf. That grant is the cluster administrator's to give, so it
+lives here rather than on the DynamoGraphDeployment.
+
+
+
+_Appears in:_
+- [OperatorConfiguration](#operatorconfiguration)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `enabled` _boolean_ | Enabled turns on the operator-managed Ray elastic-EP path. |  |  |
+
+
 #### GPUConfiguration
 
 
@@ -3569,6 +3591,7 @@ OperatorConfiguration is the Schema for the operator configuration.
 | `rbac` _[RBACConfiguration](#rbacconfiguration)_ | RBAC configuration for cross-namespace resource management (cluster-wide mode) |  |  |
 | `mpi` _[MPIConfiguration](#mpiconfiguration)_ | MPI SSH secret configuration |  |  |
 | `checkpoint` _[CheckpointConfiguration](#checkpointconfiguration)_ | Checkpoint/restore configuration |  |  |
+| `elasticEPRayPoC` _[ElasticEPRayPoCConfiguration](#elasticepraypocconfiguration)_ | Operator-managed Ray elastic expert-parallelism configuration |  |  |
 | `discovery` _[DiscoveryConfiguration](#discoveryconfiguration)_ | Discovery backend configuration |  |  |
 | `gpu` _[GPUConfiguration](#gpuconfiguration)_ | GPU discovery configuration |  |  |
 | `logging` _[LoggingConfiguration](#loggingconfiguration)_ | Logging configuration |  |  |

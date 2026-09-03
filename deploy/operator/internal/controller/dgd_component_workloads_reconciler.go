@@ -41,16 +41,22 @@ import (
 type componentWorkloadsReconciler struct {
 	syncer  dgdResourceSyncer
 	rollout *dgdWorkerRolloutReconciler
+	// elasticEPRayPoCEnabled carries features.ElasticEPRayPoC. Gated off, generation
+	// derives no follower, so no follower DCD, Deployment, or Service is created
+	// and an existing deployment reconciles exactly as it did before.
+	elasticEPRayPoCEnabled bool
 }
 
 func newComponentWorkloadsReconciler(
 	kubeClient client.Client,
 	recorder events.EventRecorder,
 	rollout *dgdWorkerRolloutReconciler,
+	elasticEPRayPoCEnabled bool,
 ) *componentWorkloadsReconciler {
 	return &componentWorkloadsReconciler{
-		syncer:  newDGDResourceSyncer(kubeClient, recorder),
-		rollout: rollout,
+		syncer:                 newDGDResourceSyncer(kubeClient, recorder),
+		rollout:                rollout,
+		elasticEPRayPoCEnabled: elasticEPRayPoCEnabled,
 	}
 }
 
@@ -84,6 +90,7 @@ func (r *componentWorkloadsReconciler) Reconcile(
 		restartState,
 		existingRestartAnnotations,
 		rollingUpdateCtx,
+		r.elasticEPRayPoCEnabled,
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the DynamoComponentsDeployments")
@@ -91,6 +98,11 @@ func (r *componentWorkloadsReconciler) Reconcile(
 	}
 
 	for key, dcd := range dcds {
+		// checkpointInfos is keyed by declared component name, so a synthesized elastic-EP
+		// follower looks up nil -- which is correct. Its command is a bare
+		// `ray start --block`, so inheriting the leader's checkpoint would make it a CRIU
+		// restore target for an engine it never runs. The GMS claim template is the
+		// opposite case and does resolve to the leader; see dynamo.ElasticEPComponentIdentity.
 		if err := r.applyCheckpointStartupPolicy(dcd, checkpointInfos[key]); err != nil {
 			return ReconcileResult{}, fmt.Errorf("failed to apply checkpoint startup policy for %s: %w", key, err)
 		}
@@ -112,6 +124,10 @@ func (r *componentWorkloadsReconciler) Reconcile(
 			return ReconcileResult{}, fmt.Errorf("failed to sync the DynamoComponentDeployment: %w", err)
 		}
 		resources = append(resources, syncedDCD)
+	}
+
+	if err := r.deleteOrphanedElasticEPFollowers(ctx, dgd, dcds); err != nil {
+		return ReconcileResult{}, fmt.Errorf("failed to delete orphaned elastic-EP followers: %w", err)
 	}
 
 	if rollingUpdateCtx.InProgress() {
@@ -259,5 +275,59 @@ func (r *componentWorkloadsReconciler) preserveExistingBackendFramework(
 	}
 
 	desired.Spec.BackendFramework = existing.Spec.BackendFramework
+	return nil
+}
+
+// deleteOrphanedElasticEPFollowers removes synthesized elastic-EP follower DCDs that
+// generation no longer produces.
+//
+// A follower is derived, never declared, so nothing else will ever clean it up. The
+// rollout path prunes worker DCDs by comparing their hash label against the current
+// worker generation, and a follower's label still matches -- the hash is deliberately
+// gate-independent -- so it would survive as an orphan owned by no one.
+//
+// Three things strand a follower this way: an administrator disabling
+// features.ElasticEPRayPoC, a user removing the elastic-EP flags from the leader, and a
+// user deleting the leader component outright. Comparing against what generation
+// actually produced covers all three without asking why.
+func (r *componentWorkloadsReconciler) deleteOrphanedElasticEPFollowers(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	generated map[string]*nvidiacomv1beta1.DynamoComponentDeployment,
+) error {
+	logger := log.FromContext(ctx)
+
+	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
+	if err := r.syncer.List(ctx, dcdList,
+		client.InNamespace(dgd.Namespace),
+		client.MatchingLabels{consts.KubeLabelDynamoGraphDeploymentName: dgd.Name},
+	); err != nil {
+		return fmt.Errorf("failed to list DynamoComponentDeployments: %w", err)
+	}
+
+	wanted := make(map[string]struct{}, len(generated))
+	for _, dcd := range generated {
+		if dcd != nil {
+			wanted[dcd.Name] = struct{}{}
+		}
+	}
+
+	var deleteErrors []error
+	for i := range dcdList.Items {
+		existing := &dcdList.Items[i]
+		if existing.GetAnnotations()[consts.KubeAnnotationElasticEPFollower] != consts.KubeLabelValueTrue {
+			continue
+		}
+		if _, keep := wanted[existing.Name]; keep {
+			continue
+		}
+		logger.Info("Deleting orphaned elastic-EP follower", "name", existing.Name)
+		if err := r.syncer.Delete(ctx, existing); err != nil && !apierrors.IsNotFound(err) {
+			deleteErrors = append(deleteErrors, fmt.Errorf("delete %s: %w", existing.Name, err))
+		}
+	}
+	if len(deleteErrors) > 0 {
+		return fmt.Errorf("failed to delete %d orphaned followers: %v", len(deleteErrors), deleteErrors)
+	}
 	return nil
 }

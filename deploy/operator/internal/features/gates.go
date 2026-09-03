@@ -113,6 +113,22 @@ const (
 	// Default: true when provider is istio and DestinationRule is detected; false otherwise
 	Istio Name = "istio"
 
+	// ElasticEPRayPoC enables the operator-managed Ray elastic expert-parallelism path:
+	// the single-pod Ray head, the headless leader Service, the synthesized follower,
+	// and the Ray-specific admission rules and node inspection.
+	//
+	// Owner: @tzulingk
+	// Experimental since: v1.5.0
+	// Beta since: N/A
+	// GA since: N/A
+	// Configuration: elasticEPRayPoC.enabled
+	// Auto-detection: N/A -- the path rewrites launch commands and synthesizes
+	// workloads, which is an administrator's grant to give, not something to infer
+	// from a cluster capability or from the engine flags a user happens to have set.
+	// Requires: vLLM with --enable-elastic-ep and --data-parallel-backend ray
+	// Default: false
+	ElasticEPRayPoC Name = "elasticEPRayPoC"
+
 	// GPUDiscovery enables automatic GPU hardware discovery.
 	//
 	// Owner: @hhzhang16
@@ -135,6 +151,7 @@ var allNames = [...]Name{
 	VolcanoScheduler,
 	DRA,
 	Istio,
+	ElasticEPRayPoC,
 	GPUDiscovery,
 }
 
@@ -152,6 +169,7 @@ type Gates struct {
 	VolcanoScheduler bool `json:"volcanoScheduler"`
 	DRA              bool `json:"dra"`
 	Istio            bool `json:"istio"`
+	ElasticEPRayPoC  bool `json:"elasticEPRayPoC"`
 	GPUDiscovery     bool `json:"gpuDiscovery"`
 }
 
@@ -166,6 +184,9 @@ func Defaults() Gates {
 func New(ctx context.Context, mgr ctrl.Manager, config *configv1alpha1.OperatorConfiguration) (Gates, error) {
 	gates := Defaults()
 	gates.GPUDiscovery = config.Namespace.Restricted == "" || ptr.Deref(config.GPU.DiscoveryEnabled, true)
+	// No capability detection: the path needs no cluster API beyond core Kubernetes, so
+	// the administrator's setting is the whole answer.
+	gates.ElasticEPRayPoC = config.ElasticEPRayPoC.Enabled
 
 	var err error
 	// Enable Checkpoint only when explicitly configured and its external API dependency is available.
