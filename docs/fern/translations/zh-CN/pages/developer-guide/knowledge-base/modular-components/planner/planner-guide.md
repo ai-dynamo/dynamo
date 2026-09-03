@@ -164,23 +164,26 @@ KV hit rate 和 speculative decode accept length 是引擎/Router 运行时信�
 | `report_interval_hours` | float or `null` | `24.0` | 每 N 小时（模拟时间）生成一份 HTML 诊断报告。设置为 `null` 可禁用周期性报告生成。 |
 | `report_output_dir` | string | `./planner_reports` | HTML 诊断报告的目录。 |
 | `live_dashboard_port` | int | `8080` | 实时诊断 dashboard HTTP 服务器的端口。设置为 `0` 可禁用。启用后，访问 `http://host:port/` 查看累积快照的实时 Plotly 报告。 |
-| `control_api_port` | int | `9086` | 仅监听 loopback 的运行时最小端点 API 端口。设置为 `0` 可禁用。 |
+| `control_api_port` | int | `9086` | 仅监听 loopback 的运行时端点和 GPU budget API 端口。设置为 `0` 可禁用。 |
 
 ### 运行时最小端点 API
 
-Planner 监听 `127.0.0.1:<control_api_port>`，并在 `/v1/min-endpoints` 支持 `GET` 和部分 `PATCH`。该 API 不提供认证，也不会通过 Kubernetes Service 暴露。分离模式使用 `prefill_min_endpoint` 和 `decode_min_endpoint`；单组件模式只使用当前组件对应的字段；聚合模式使用 `min_endpoint`。更新仅作用于当前进程，不会写回 Planner ConfigMap，并会在下一个 planner tick 生效。
+Planner 监听 `127.0.0.1:<control_api_port>`，并在 `/v1/min-endpoints` 支持 `GET` 和部分 `PATCH`。该 API 不提供认证，也不会通过 Kubernetes Service 暴露。分离模式使用 `prefill_min_endpoint` 和 `decode_min_endpoint`；单组件模式只使用当前组件对应的字段；聚合模式使用 `min_endpoint`。所有模式也都接受 `min_gpu_budget` 和 `max_gpu_budget`。响应包含当前模式的端点字段和两个 GPU budget。更新仅作用于当前进程，不会写回 Planner ConfigMap，并会在下一个 planner tick 生效。
 
-在 Kubernetes 中，先 port-forward 到 Planner pod，再修改当前模式对应的字段：
+在 Kubernetes 中，先 port-forward 到 Planner pod，再修改当前模式对应的字段。以下示例更新 `disagg` 模式的 Planner：
 
 ```bash
 kubectl port-forward pod/<planner-pod> 9086:9086
 curl http://127.0.0.1:9086/v1/min-endpoints
 curl --request PATCH http://127.0.0.1:9086/v1/min-endpoints \
   --header 'Content-Type: application/json' \
-  --data '{"decode_min_endpoint": 3}'
+  --data '{"prefill_min_endpoint": 8, "decode_min_endpoint": 8, "min_gpu_budget": 16, "max_gpu_budget": 64}'
 ```
 
-更新是原子的。Planner 会拒绝格式错误的值、当前模式未启用的字段，以及超过 `max_gpu_budget` 或已配置 power budget 的最小资源组合。扩容没有组件级最大端点配置；现有的 GPU、power、Global Planner 和集群容量限制继续作为上限。
+更新是原子的。将任一 GPU budget 设为 `-1` 可禁用该限制。Planner 会拒绝格式错误的值、当前模式未启用的字段、两个 budget 都启用时大于 `max_gpu_budget` 的 `min_gpu_budget`，以及超过 `max_gpu_budget` 或已配置 power budget 的最小资源组合。相同的检查也会在启动时运行，因此不可行的最小配置会在 Planner 进入 tick loop 之前失败。扩容没有组件级最大端点配置；现有的 GPU、power、Global Planner 和集群容量限制继续作为上限。
+
+> [!WARNING]
+> 如果 Planner 停止等待扩缩容提交后仍未收到确认，而该提交随后返回错误，Planner 将无法确定远端是否已执行操作。为避免重复执行远端可能已经应用的操作，Planner 会停止自动提交 effect。运行时 `GET` 和 `PATCH` 仍然可用。请先确认 deployment 的 desired 和 Ready 副本数，再重启 Planner 以恢复自动提交。
 
 这些报告中展示的同一组诊断信号也会以 `dynamo_planner_*` 前缀导出为 Prometheus 指标，例如估算的 TTFT/ITL（`dynamo_planner_estimated_ttft_ms`、`dynamo_planner_estimated_itl_ms`）、建议副本数（`dynamo_planner_predicted_num_prefill_replicas`、`dynamo_planner_predicted_num_decode_replicas`）、每个引擎的容量和 FPM 队列深度，以及负载/吞吐量扩缩容决策枚举。
 
