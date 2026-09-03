@@ -26,6 +26,8 @@ LOAD_DECISION_STATES = [
     "reconcile_clamped_to_ceiling",
     "held_over",
     "rejected_by_plugin",
+    "gpu_budget_guard_hold",
+    "gpu_budget_reconcile",
 ]
 
 THROUGHPUT_DECISION_STATES = [

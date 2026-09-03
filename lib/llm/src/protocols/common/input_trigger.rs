@@ -22,7 +22,10 @@ use crate::protocols::{
 };
 use dynamo_protocols::types::{
     ChatCompletionRequestMessage, CreateChatCompletionRequest,
-    responses::{InputItem, InputParam, InputRole, Item, MessageItem, Role as ResponseRole},
+    responses::{
+        InputItem, InputParam, InputRole, Item, MessageItem, Role as ResponseRole,
+        ToolSearchExecutionType,
+    },
 };
 
 /// Classify an OpenAI Chat Completions request by its last causal message.
@@ -56,7 +59,7 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
                 return InputTrigger::Other;
             };
             match last {
-                InputItem::Item(Item::FunctionCallOutput(_)) => InputTrigger::ToolResult,
+                InputItem::Item(item) if is_response_tool_output(item) => InputTrigger::ToolResult,
                 InputItem::Item(Item::Message(MessageItem::Input(msg))) => {
                     if msg.role == InputRole::User {
                         InputTrigger::UserMessage
@@ -72,10 +75,27 @@ pub fn classify_response_request(request: &NvCreateResponse) -> InputTrigger {
                     ResponseRole::User => InputTrigger::UserMessage,
                     _ => InputTrigger::Other,
                 },
-                // TODO: Classify non-function tool output variants as ToolResult.
                 _ => InputTrigger::Other,
             }
         }
+    }
+}
+
+/// Return whether an item is client-supplied tool output fed back to the model.
+///
+/// Server-executed or origin-unspecified tool search outputs, tool calls, hosted-tool lifecycle
+/// items, and approval workflow items (including `McpApprovalResponse`) remain classified as
+/// `Other`.
+fn is_response_tool_output(item: &Item) -> bool {
+    match item {
+        Item::ToolSearchOutput(output) => output.execution == Some(ToolSearchExecutionType::Client),
+        Item::FunctionCallOutput(_)
+        | Item::ComputerCallOutput(_)
+        | Item::LocalShellCallOutput(_)
+        | Item::ShellCallOutput(_)
+        | Item::ApplyPatchCallOutput(_)
+        | Item::CustomToolCallOutput(_) => true,
+        _ => false,
     }
 }
 
@@ -189,6 +209,18 @@ mod tests {
         }
     }
 
+    fn response_request_with_item(item: serde_json::Value) -> NvCreateResponse {
+        NvCreateResponse {
+            inner: CreateResponse {
+                input: InputParam::Items(vec![serde_json::from_value(item).unwrap()]),
+                model: Some("test".into()),
+                ..Default::default()
+            },
+            nvext: None,
+            chat_template_args: None,
+        }
+    }
+
     #[test]
     fn responses_easy_message_roles() {
         for (role, expected) in [
@@ -199,6 +231,97 @@ mod tests {
             assert_eq!(
                 classify_response_request(&response_request_with_easy_messages(role)),
                 expected
+            );
+        }
+    }
+
+    #[test]
+    fn responses_tool_outputs() {
+        for item in [
+            serde_json::json!({
+                "type": "function_call_output",
+                "call_id": "function-1",
+                "output": "ok",
+            }),
+            serde_json::json!({
+                "type": "tool_search_output",
+                "execution": "client",
+                "tools": [],
+            }),
+            serde_json::json!({
+                "type": "computer_call_output",
+                "call_id": "computer-1",
+                "output": {
+                    "type": "computer_screenshot",
+                    "image_url": "https://example.com/screenshot.png",
+                },
+            }),
+            serde_json::json!({
+                "type": "local_shell_call_output",
+                "id": "shell-1",
+                "output": "done",
+            }),
+            serde_json::json!({
+                "type": "shell_call_output",
+                "call_id": "shell-2",
+                "output": [],
+            }),
+            serde_json::json!({
+                "type": "apply_patch_call_output",
+                "call_id": "patch-1",
+                "status": "completed",
+            }),
+            serde_json::json!({
+                "type": "custom_tool_call_output",
+                "call_id": "custom-1",
+                "output": "done",
+            }),
+        ] {
+            assert_eq!(
+                classify_response_request(&response_request_with_item(item)),
+                InputTrigger::ToolResult
+            );
+        }
+    }
+
+    #[test]
+    fn responses_hosted_or_unspecified_tool_search_outputs_are_not_tool_results() {
+        for item in [
+            serde_json::json!({
+                "type": "tool_search_output",
+                "execution": "server",
+                "tools": [],
+            }),
+            serde_json::json!({
+                "type": "tool_search_output",
+                "tools": [],
+            }),
+        ] {
+            assert_eq!(
+                classify_response_request(&response_request_with_item(item)),
+                InputTrigger::Other
+            );
+        }
+    }
+
+    #[test]
+    fn responses_tool_calls_and_approval_responses_are_not_tool_outputs() {
+        for item in [
+            serde_json::json!({
+                "type": "function_call",
+                "arguments": "{}",
+                "call_id": "function-1",
+                "name": "get_weather",
+            }),
+            serde_json::json!({
+                "type": "mcp_approval_response",
+                "approval_request_id": "approval-1",
+                "approve": true,
+            }),
+        ] {
+            assert_eq!(
+                classify_response_request(&response_request_with_item(item)),
+                InputTrigger::Other
             );
         }
     }

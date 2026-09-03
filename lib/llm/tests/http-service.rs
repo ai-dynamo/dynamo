@@ -3,17 +3,21 @@
 
 use anyhow::Error;
 use async_stream::stream;
+use base64::Engine as _;
 use dynamo_llm::protocols::{
     Annotated,
     codec::SseLineCodec,
     common::extensions::NvExt,
     convert_sse_stream,
     openai::{
+        audios::{AudioData, NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
+use dynamo_llm::types::openai::audios::OpenAIAudiosStreamingEngine;
 use dynamo_llm::{
+    endpoint_type::EndpointType,
     http::service::{
         Metrics,
         error::HttpError,
@@ -67,6 +71,178 @@ impl NvExtCaptureEngine {
 
 struct FirstTokenGateEngine {
     release: Arc<tokio::sync::Notify>,
+}
+
+fn audio_response(
+    request_id: &str,
+    model: &str,
+    output_format: &str,
+    bytes: &[u8],
+    status: &str,
+) -> Annotated<NvAudioSpeechResponse> {
+    Annotated::from_data(NvAudioSpeechResponse {
+        id: request_id.to_string(),
+        object: "audio.speech".to_string(),
+        model: model.to_string(),
+        status: status.to_string(),
+        progress: 100,
+        created: 0,
+        data: vec![AudioData {
+            output_format: output_format.to_string(),
+            url: None,
+            b64_json: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+        }],
+        error: None,
+        inference_time_s: None,
+    })
+}
+
+#[derive(Default)]
+struct ChunkedAudioEngine {
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<NvAudioSpeechResponse>>,
+        Error,
+    > for ChunkedAudioEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateAudioSpeechRequest>,
+    ) -> Result<ManyOut<Annotated<NvAudioSpeechResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let response_ctx = ctx.clone();
+        let request_id = ctx.id().to_string();
+        assert_eq!(
+            request
+                .nvext
+                .and_then(|nvext| nvext.frontend_accepts_audio_chunks),
+            Some(true)
+        );
+        let model = request.model.unwrap_or_default();
+        let release = self.release.clone();
+        let stream = stream! {
+            yield audio_response(&request_id, &model, "pcm", b"first-", "in_progress");
+            release.notified().await;
+            yield audio_response(&request_id, &model, "pcm", b"second", "completed");
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), response_ctx))
+    }
+}
+
+#[derive(Default)]
+struct CompleteAudioEngine {
+    waiting: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<NvAudioSpeechResponse>>,
+        Error,
+    > for CompleteAudioEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateAudioSpeechRequest>,
+    ) -> Result<ManyOut<Annotated<NvAudioSpeechResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+        let response_ctx = ctx.clone();
+        let request_id = ctx.id().to_string();
+        assert_ne!(
+            request
+                .nvext
+                .as_ref()
+                .and_then(|nvext| nvext.frontend_accepts_audio_chunks),
+            Some(true)
+        );
+        let output_format = request.response_format.unwrap_or_else(|| "wav".to_string());
+        let model = request.model.unwrap_or_default();
+        let waiting = self.waiting.clone();
+        let release = self.release.clone();
+        let stream = stream! {
+            yield Annotated::from_data(NvAudioSpeechResponse::empty());
+            waiting.notify_one();
+            release.notified().await;
+            yield audio_response(
+                &request_id,
+                &model,
+                &output_format,
+                b"complete-audio",
+                "completed",
+            );
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), response_ctx))
+    }
+}
+
+#[derive(Default)]
+struct FirstAudioGateEngine {
+    started: Arc<tokio::sync::Notify>,
+    cancelled: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateAudioSpeechRequest>,
+        ManyOut<Annotated<NvAudioSpeechResponse>>,
+        Error,
+    > for FirstAudioGateEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateAudioSpeechRequest>,
+    ) -> Result<ManyOut<Annotated<NvAudioSpeechResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+        let response_ctx = ctx.clone();
+        let started = self.started.clone();
+        let cancelled = self.cancelled.clone();
+        let stream = stream! {
+            started.notify_one();
+            ctx.stopped().await;
+            cancelled.notify_one();
+            yield Annotated::from_data(NvAudioSpeechResponse::empty());
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), response_ctx))
+    }
+}
+
+async fn start_audio_service(
+    engine: OpenAIAudiosStreamingEngine,
+) -> (
+    u16,
+    CancellationToken,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let (listener, port) = bind_random_port().await;
+    let service = HttpService::builder().port(port).build().unwrap();
+    service
+        .enable_model_endpoint(EndpointType::Audios, true)
+        .unwrap();
+    let card = ModelDeploymentCard::with_name_only("audio-model");
+    service
+        .state_clone()
+        .manager()
+        .add_audios_model("audio-model", card.mdcsum(), engine)
+        .unwrap();
+
+    let token = CancellationToken::new();
+    let task = service.spawn_with_listener(token.clone(), listener).await;
+    wait_for_service_ready(port).await;
+    (port, token, task)
 }
 
 // Add a new long-running test engine
@@ -1645,6 +1821,145 @@ async fn test_streaming_responses_returns_4xx_on_backend_invalid_argument() {
     task.await.unwrap().unwrap();
 }
 
+#[tokio::test]
+async fn test_audio_speech_streams_worker_chunks() {
+    let engine = Arc::new(ChunkedAudioEngine::default());
+    let (port, cancel_token, task) = start_audio_service(engine.clone()).await;
+
+    let response = timeout(
+        std::time::Duration::from_secs(1),
+        reqwest::Client::new()
+            .post(format!("http://localhost:{port}/v1/audio/speech"))
+            .json(&serde_json::json!({
+                "model": "audio-model",
+                "input": "hello",
+                "response_format": "pcm"
+            }))
+            .send(),
+    )
+    .await
+    .expect("response headers should arrive with the first audio chunk")
+    .unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(response.headers().get("content-type").unwrap(), "audio/pcm");
+    assert_eq!(response.content_length(), None);
+
+    let mut chunks = response.bytes_stream();
+    let first = timeout(std::time::Duration::from_secs(1), chunks.next())
+        .await
+        .expect("first chunk should be available immediately")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, "first-");
+
+    engine.release.notify_one();
+    let second = timeout(std::time::Duration::from_secs(1), chunks.next())
+        .await
+        .expect("second chunk should arrive after release")
+        .unwrap()
+        .unwrap();
+    assert_eq!(second, "second");
+    assert!(chunks.next().await.is_none());
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_audio_speech_buffers_complete_response_with_content_length() {
+    for (response_format, speed, content_type) in
+        [("mp3", None, "audio/mpeg"), ("wav", Some(2.0), "audio/wav")]
+    {
+        let engine = Arc::new(CompleteAudioEngine::default());
+        let (port, cancel_token, task) = start_audio_service(engine.clone()).await;
+
+        let mut body = serde_json::json!({
+            "model": "audio-model",
+            "input": "hello",
+            "response_format": response_format
+        });
+        if let Some(speed) = speed {
+            body["speed"] = speed.into();
+        }
+        let client = reqwest::Client::new();
+        let mut request = Box::pin(
+            client
+                .post(format!("http://localhost:{port}/v1/audio/speech"))
+                .json(&body)
+                .send(),
+        );
+        timeout(std::time::Duration::from_secs(1), async {
+            tokio::select! {
+                result = &mut request => {
+                    panic!("response headers arrived before complete-file encoding: {result:?}");
+                }
+                _ = engine.waiting.notified() => {}
+            }
+        })
+        .await
+        .expect("worker should reach the complete-file gate");
+
+        engine.release.notify_one();
+        let response = timeout(std::time::Duration::from_secs(1), request)
+            .await
+            .expect("complete audio should arrive after release")
+            .unwrap();
+        assert!(response.status().is_success());
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            content_type
+        );
+        assert_eq!(
+            response.content_length(),
+            Some(b"complete-audio".len() as u64)
+        );
+        assert_eq!(response.bytes().await.unwrap(), "complete-audio");
+
+        cancel_token.cancel();
+        task.await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn test_audio_speech_disconnect_before_first_chunk_cancels_engine() {
+    let engine = Arc::new(FirstAudioGateEngine::default());
+    let (port, cancel_token, task) = start_audio_service(engine.clone()).await;
+
+    let client = reqwest::Client::new();
+    let mut request = Box::pin(
+        client
+            .post(format!("http://localhost:{port}/v1/audio/speech"))
+            .json(&serde_json::json!({
+                "model": "audio-model",
+                "input": "hello",
+                "response_format": "pcm"
+            }))
+            .send(),
+    );
+
+    timeout(std::time::Duration::from_secs(5), async {
+        tokio::select! {
+            result = &mut request => {
+                panic!("request completed before first audio: {result:?}");
+            }
+            _ = engine.started.notified() => {}
+        }
+    })
+    .await
+    .expect("audio engine should have started");
+    drop(request);
+
+    timeout(
+        std::time::Duration::from_secs(2),
+        engine.cancelled.notified(),
+    )
+    .await
+    .expect("disconnect before first audio must cancel the engine context");
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
 /// Audio engine whose only response frame is a `Backend(InvalidArgument)`
 /// error — models a worker rejecting the request during deserialization
 /// (e.g. a `task_type` value outside the backend's accepted set).
@@ -1756,7 +2071,7 @@ async fn test_audio_speech_backend_invalid_argument_returns_4xx() {
         &metrics,
         "tts-model",
         &Endpoint::Audios,
-        &RequestType::Unary,
+        &RequestType::Stream,
         &Status::Error,
         &ErrorType::Validation,
         1,
@@ -1852,7 +2167,7 @@ async fn test_audio_speech_failed_status_meters_as_client_error() {
         &metrics,
         "tts-model",
         &Endpoint::Audios,
-        &RequestType::Unary,
+        &RequestType::Stream,
         &Status::Error,
         &ErrorType::Validation,
         1,
