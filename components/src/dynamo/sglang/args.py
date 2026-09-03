@@ -15,7 +15,6 @@ from typing import Any, Dict, Generator, Optional
 
 import yaml
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 from dynamo.common.config_dump import register_encoder
 from dynamo.common.configuration.groups import DynamoRuntimeConfig
@@ -34,7 +33,11 @@ from dynamo.common.snapshot.lifecycle import (
 )
 from dynamo.common.utils.runtime import parse_endpoint
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang._compat import ensure_sglang_tensor_image_size, resolved_server_args
+from dynamo.sglang._compat import (
+    ConfigArgumentMerger,
+    ensure_sglang_tensor_image_size,
+    resolved_server_args,
+)
 from dynamo.sglang.backend_args import DynamoSGLangArgGroup, DynamoSGLangConfig
 
 configure_dynamo_logging()

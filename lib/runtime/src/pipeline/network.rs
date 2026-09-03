@@ -130,6 +130,12 @@ impl RequestPlanePayloadCodec {
     }
 }
 
+/// Starting capacity for a buffer that one response frame is encoded into.
+///
+/// Matches `serde_json::to_vec`'s own default so msgpack — which otherwise
+/// starts at zero — stops regrowing its buffer on every streamed frame.
+pub const RESPONSE_ENCODE_CAPACITY_HINT: usize = 128;
+
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
 impl<T: PipelineIO + Serialize + for<'de> Deserialize<'de>> Codable for T {}
 
@@ -486,11 +492,13 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SEND_BUFFER_COUNT, NetworkStreamWrapper, RequestControlMessage,
-        RequestPlanePayloadCodec, RequestType, ResponseType, StreamOptions,
+        DEFAULT_SEND_BUFFER_COUNT, IngressResponseEncoder, NetworkStreamWrapper,
+        RequestControlMessage, RequestPlanePayloadCodec, RequestType, ResponseType,
+        SerdeIngressPayloadAdapter, StreamOptions,
     };
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
+    use crate::protocols::annotated::Annotated;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -659,6 +667,53 @@ mod tests {
             assert_eq!(decoded, wrapper);
         }
     }
+
+    /// `encode_into` must stay byte-compatible with `encode` for both codecs.
+    #[tokio::test]
+    async fn serde_ingress_encoder_matches_encode_byte_for_byte() {
+        let data = Annotated::from_data(serde_json::json!({
+            "token_ids": [128, 9001],
+            "index": 3,
+        }));
+        let error = Annotated::<serde_json::Value>::from_error("engine failed");
+
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            for (case, response, complete_final, expect_error) in [
+                ("data frame", Some(data.clone()), false, false),
+                ("error frame", Some(error.clone()), false, true),
+                ("complete final", None, true, false),
+            ] {
+                let expected = codec
+                    .encode(&NetworkStreamWrapper {
+                        data: response.clone(),
+                        complete_final,
+                    })
+                    .expect("reference encode");
+
+                let frame = SerdeIngressPayloadAdapter
+                    .encode_response(codec, response, complete_final)
+                    .await
+                    .expect("adapter encode");
+
+                assert_eq!(
+                    frame.bytes.as_ref(),
+                    expected.as_slice(),
+                    "codec={} case={case}",
+                    codec.name()
+                );
+                assert_eq!(
+                    frame.is_error,
+                    expect_error,
+                    "codec={} case={case}",
+                    codec.name()
+                );
+                assert!(!frame.stop_stream, "codec={} case={case}", codec.name());
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -768,13 +823,17 @@ where
             data: response,
             complete_final,
         };
-        let encoded = payload_codec.encode(&wrapper).map_err(|err| {
-            PipelineError::SerializationError(format!(
-                "Failed serializing {} request-plane response: {}",
-                payload_codec.name(),
-                err
-            ))
-        });
+        let mut bytes = Vec::with_capacity(RESPONSE_ENCODE_CAPACITY_HINT);
+        let encoded = payload_codec
+            .encode_into(&wrapper, &mut bytes)
+            .map(|()| bytes)
+            .map_err(|err| {
+                PipelineError::SerializationError(format!(
+                    "Failed serializing {} request-plane response: {}",
+                    payload_codec.name(),
+                    err
+                ))
+            });
         std::future::ready(encoded.map(|bytes| EncodedResponseFrame {
             bytes: bytes.into(),
             is_error,
