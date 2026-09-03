@@ -733,7 +733,8 @@ useful stand-in for AIPerf / end-to-end pipeline smoke tests. For a
 fully worked example — a custom engine served through the standard
 OpenAI frontend with KV-aware routing, a container build, and a
 `DynamoGraphDeployment`, all CPU-only — see
-[`examples/custom_backend/hello_engine`](../../examples/custom_backend/hello_engine/README.md).
+the `engine/` stage of
+[`examples/custom_backend/hello_world`](https://github.com/ai-dynamo/dynamo/tree/main/examples/custom_backend/hello_world).
 Lift these patterns:
 
 - `from_args` parses CLI args and returns `(engine, WorkerConfig)`

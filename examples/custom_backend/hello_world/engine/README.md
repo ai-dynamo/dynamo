@@ -5,8 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # hello-dynamo-engine
 
+> Stage 2 of the [Hello World](../README.md) ladder — start with
+> [`basic/`](../basic/README.md) if you are new to the Dynamo runtime.
+
 A hello-world **custom engine** for NVIDIA Dynamo, built on the
-[unified backend](https://github.com/ai-dynamo/dynamo/blob/main/docs/development/unified-backends.md)
+[unified backend](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
 contract (`dynamo.common.backend.LLMEngine`).
 
 It runs **no model, needs no GPU, and downloads nothing**. Every
@@ -33,6 +36,29 @@ What it demonstrates:
   engine:     published 3 KV block(s) for prompt
   request 2:  [ROUTING] Best: worker_…  3/4 blocks overlap
   ```
+
+## How it works
+
+```mermaid
+flowchart LR
+    C["curl<br/>(OpenAI API)"]
+    F["Dynamo frontend<br/>tokenize + detokenize<br/>KV router (radix tree)"]
+    W1["worker 1<br/>HelloEngine"]
+    W2["worker 2<br/>HelloEngine"]
+
+    C -- "/v1/chat/completions" --> F
+    F -- "route by prefix overlap" --> W1
+    F -.-> W2
+    W1 -- "hardcoded token stream" --> F
+    F -- "text" --> C
+    W1 -. "KV events<br/>(block hashes)" .-> F
+```
+
+The engine publishes a KV event for each prompt's blocks; the router's
+radix tree learns which worker "holds" which prefix, so a repeat prompt
+routes back to the same worker (`0/13 → 12/13 blocks overlap`) while
+the other worker stays idle. With no cache knowledge, requests would
+round-robin instead.
 
 ## Container
 
@@ -218,7 +244,7 @@ async def generate(self, request, context):
            "finish_reason": "stop", "completion_usage": usage(len(reply))}
 ```
 
-Full contract: [unified-backends guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/development/unified-backends.md)
+Full contract: [unified-backends guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/advanced-customizations/writing-custom-backends/writing-unified-backends.md)
 and the `LLMEngine` docstrings in
 [`engine.py`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/common/backend/engine.py).
 
