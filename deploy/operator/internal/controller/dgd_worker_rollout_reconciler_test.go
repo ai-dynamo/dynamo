@@ -457,7 +457,7 @@ func TestCanonicalWorkerHashLifecycle_FirstDeploySpecChangeAndCompletion(t *test
 	require.NoError(t, err)
 
 	// Verify only the v2 hash was set.
-	hash := r.getCurrentWorkerHashV2(dgd)
+	hash := currentWorkerHashV2(dgd)
 	assert.NotEmpty(t, hash, "Hash should be set after initialization")
 	assert.NotContains(t, dgd.Annotations, consts.AnnotationCurrentWorkerHash)
 
@@ -509,8 +509,8 @@ func TestInitializeWorkerHashIfNeeded_MigratesOpaqueV1WithoutRollout(t *testing.
 	r := createTestReconcilerWithStatus(dgd)
 	err := r.initializeWorkerHashIfNeeded(context.Background(), dgd)
 	require.NoError(t, err)
-	assert.Equal(t, existingHash, r.getCurrentWorkerHash(dgd))
-	assert.Equal(t, desiredV2, r.getCurrentWorkerHashV2(dgd))
+	assert.Equal(t, existingHash, currentWorkerHash(dgd))
+	assert.Equal(t, desiredV2, currentWorkerHashV2(dgd))
 
 	t.Log("Verify recording v2 did not turn the operator upgrade into a worker rollout")
 	trigger, err := r.shouldTriggerRollingUpdate(dgd)
@@ -637,7 +637,7 @@ func TestInitializeWorkerHashIfNeeded_PreservesLegacyAlphaHash(t *testing.T) {
 	err := r.initializeWorkerHashIfNeeded(context.Background(), dgd)
 	require.NoError(t, err)
 
-	assert.Equal(t, legacyHash, r.getCurrentWorkerHash(dgd))
+	assert.Equal(t, legacyHash, currentWorkerHash(dgd))
 	assert.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 	trigger, err := r.shouldTriggerRollingUpdate(dgd)
 	require.NoError(t, err)
@@ -2386,7 +2386,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyDCDsMigration(t *testing.T) {
 	require.NoError(t, err)
 
 	// DGD annotation should be set to the legacy sentinel, NOT the computed hash
-	hash := r.getCurrentWorkerHash(dgd)
+	hash := currentWorkerHash(dgd)
 	assert.Equal(t, consts.LegacyWorkerHash, hash, "Hash should be legacy sentinel after migration")
 
 	// Legacy DCD should now have the worker hash label backfilled
@@ -2471,7 +2471,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyMultipleWorkers(t *testing.T) {
 	require.NoError(t, err)
 
 	// DGD should have legacy sentinel hash
-	assert.Equal(t, consts.LegacyWorkerHash, r.getCurrentWorkerHash(dgd))
+	assert.Equal(t, consts.LegacyWorkerHash, currentWorkerHash(dgd))
 
 	// Both worker DCDs should have hash label backfilled
 	for _, name := range []string{"test-dgd-prefill", "test-dgd-decode"} {

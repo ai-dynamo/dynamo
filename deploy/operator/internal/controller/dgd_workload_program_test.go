@@ -541,18 +541,22 @@ func TestUnsupportedWorkerRolloutEmitsWarningOnlyAfterHashUpdate(t *testing.T) {
 			reconciler := newDGDWorkerRolloutReconciler(kubeClient, recorder)
 
 			t.Log("Advance the unsupported pathway hash")
-			err := reconciler.ReconcileUnsupported(
+			transition, err := reconciler.planUnsupportedWorkerHashTransition(dgd)
+			require.NoError(t, err)
+			commitErr := reconciler.commitUnsupportedWorkerHashTransition(
 				context.Background(),
 				dgd,
+				transition,
 				true,
 			)
-			require.NoError(t, err)
 
 			t.Log("Verify the warning reflects a successfully persisted primary mutation")
 			if tt.wantEvent {
+				require.NoError(t, commitErr)
 				assert.Len(t, recorder.Events, 1)
 				return
 			}
+			require.Error(t, commitErr)
 			assert.Empty(t, recorder.Events)
 		})
 	}

@@ -74,35 +74,6 @@ func newDGDWorkerRolloutReconciler(
 	}
 }
 
-// ReconcileUnsupported advances compatibility hashes for a pathway that does
-// not support operator-managed rolling updates.
-func (r *dgdWorkerRolloutReconciler) ReconcileUnsupported(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	isGrove bool,
-) error {
-	logger := log.FromContext(ctx)
-
-	transition, err := r.planUnsupportedWorkerHashTransition(dgd)
-	if err != nil {
-		logger.Error(err, "Failed to plan worker hash transition for unsupported pathway")
-		return failWorkloadProgram(reasonRollingUpdateFailed, err)
-	}
-	if !transition.needsCommit() {
-		return nil
-	}
-
-	if err := r.commitUnsupportedWorkerHashTransition(ctx, dgd, transition, isGrove); err != nil {
-		if transition.initialize {
-			logger.Error(err, "Failed to initialize worker hash for unsupported pathway")
-			return failWorkloadProgram(reasonFailedToInitializeWorkerHash, err)
-		}
-		// Preserve the existing best-effort behavior: the next reconciliation
-		// retries the metadata update and may emit another warning.
-		logger.Error(err, "Failed to update worker hash for unsupported pathway")
-	}
-	return nil
-}
 
 func (r *dgdWorkerRolloutReconciler) planUnsupportedWorkerHashTransition(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -463,25 +434,11 @@ func (r *dgdWorkerRolloutReconciler) findLegacyWorkerDCDs(
 	return legacyDCDs, nil
 }
 
-// getCurrentWorkerHash returns the v1 worker generation stored on the DGD.
-// It is empty after the DGD has converged to a v2-only generation.
-func (r *dgdWorkerRolloutReconciler) getCurrentWorkerHash(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) string {
-	return currentWorkerHash(dgd)
-}
-
 func currentWorkerHash(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
 	if dgd.Annotations == nil {
 		return ""
 	}
 	return dgd.Annotations[consts.AnnotationCurrentWorkerHash]
-}
-
-func (r *dgdWorkerRolloutReconciler) getCurrentWorkerHashV2(
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-) string {
-	return currentWorkerHashV2(dgd)
 }
 
 func currentWorkerHashV2(dgd *nvidiacomv1beta1.DynamoGraphDeployment) string {
