@@ -175,6 +175,138 @@ def proportional_clamp_pair(
     return new_p, new_d
 
 
+def guard_disagg_load_budget(
+    current_p: int,
+    current_d: int,
+    proposed_p: int,
+    proposed_d: int,
+    p_gpu: int,
+    d_gpu: int,
+    min_gpus: int,
+    max_gpus: int,
+    prefill_min_endpoint: int,
+    decode_min_endpoint: int,
+) -> tuple[int, int, Optional[str]]:
+    """Apply GPU budgets to a disaggregated *load-scaling* proposal safely.
+
+    ``min_gpu_budget`` is a scale-down guard, not an independent source of
+    scale-up intent. Once the current allocation has reached that floor, a
+    down/down or down/hold proposal is held instead of being proportionally
+    grown into a direction-reversing action. At a full (maximum-budget)
+    allocation, a scale-up is admitted only as an explicit opposing rebalance:
+    one pool must propose up while the other proposes down, and the proposed
+    pair itself must fit the budget band.
+
+    If the observed allocation is already outside the budget band, recovery is
+    kept explicit: the current allocation, rather than the load proposal, is
+    reconciled back toward the band and ``"gpu_budget_reconcile"`` is returned.
+    A negative minimum preserves the legacy clamp behavior, including for
+    max-only configurations.
+
+    The returned optional reason is suitable for load-decision diagnostics.
+    """
+    if min_gpus < 0 or p_gpu <= 0 or d_gpu <= 0:
+        new_p, new_d = proportional_clamp_pair(
+            proposed_p,
+            proposed_d,
+            p_gpu,
+            d_gpu,
+            min_gpus,
+            max_gpus,
+            prefill_min_endpoint,
+            decode_min_endpoint,
+        )
+        return new_p, new_d, None
+
+    tolerance = compute_tolerance([p_gpu, d_gpu]) if max_gpus >= 0 else 0
+    current_total = current_p * p_gpu + current_d * d_gpu
+    current_in_band, _ = bounds_for_total(current_total, min_gpus, max_gpus, tolerance)
+
+    # Budget recovery is not an ordinary load decision. Reconcile from the
+    # observed allocation so a stale down proposal cannot dictate which pool
+    # receives recovery capacity (or turn the recovery into churn).
+    if not current_in_band:
+        new_p, new_d = proportional_clamp_pair(
+            current_p,
+            current_d,
+            p_gpu,
+            d_gpu,
+            min_gpus,
+            max_gpus,
+            prefill_min_endpoint,
+            decode_min_endpoint,
+        )
+        return new_p, new_d, "gpu_budget_reconcile"
+
+    p_down = proposed_p < current_p
+    p_up = proposed_p > current_p
+    d_down = proposed_d < current_d
+    d_up = proposed_d > current_d
+    any_down = p_down or d_down
+    any_up = p_up or d_up
+    opposing_rebalance = (p_down and d_up) or (p_up and d_down)
+
+    # The nominal floor is the configured safety intent. Tolerance only makes
+    # integer GPU-width targets feasible; it must not permit repeated
+    # scale-down-only actions once the allocation has reached the floor.
+    if current_total <= min_gpus and any_down and not any_up:
+        return current_p, current_d, "gpu_budget_guard_hold"
+
+    # At the floor, an opposing proposal is one indivisible rebalance. If its
+    # weighted pair does not fit, fail closed rather than letting the generic
+    # clamp suppress the scale-up leg while retaining the donor removal.
+    if current_total <= min_gpus and opposing_rebalance:
+        proposed_total = proposed_p * p_gpu + proposed_d * d_gpu
+        proposed_in_band, _ = bounds_for_total(
+            proposed_total, min_gpus, max_gpus, tolerance
+        )
+        if not proposed_in_band:
+            return current_p, current_d, "gpu_budget_guard_hold"
+        return proposed_p, proposed_d, None
+
+    # At the hard ceiling there is no unallocated capacity for a scale-up.
+    # Refuse to invent a donor from a pool whose load signal said hold/up.
+    # For an explicit opposing proposal, require the pair itself to fit so the
+    # clamp cannot suppress one leg and execute only the other.
+    if max_gpus >= 0 and current_total >= max_gpus and any_up:
+        proposed_total = proposed_p * p_gpu + proposed_d * d_gpu
+        proposed_in_band, _ = bounds_for_total(
+            proposed_total, min_gpus, max_gpus, tolerance
+        )
+        if not opposing_rebalance or not proposed_in_band:
+            return current_p, current_d, "gpu_budget_guard_hold"
+        return proposed_p, proposed_d, None
+
+    new_p, new_d = proportional_clamp_pair(
+        proposed_p,
+        proposed_d,
+        p_gpu,
+        d_gpu,
+        min_gpus,
+        max_gpus,
+        prefill_min_endpoint,
+        decode_min_endpoint,
+    )
+
+    # Constraints may suppress a requested movement, but must not reverse or
+    # amplify it. An explicit recovery path above handles out-of-band current
+    # allocations; ordinary in-band load decisions fail closed to HOLD.
+    def _within_requested_direction(current: int, proposed: int, final: int) -> bool:
+        return min(current, proposed) <= final <= max(current, proposed)
+
+    if not _within_requested_direction(current_p, proposed_p, new_p) or not (
+        _within_requested_direction(current_d, proposed_d, new_d)
+    ):
+        return current_p, current_d, "gpu_budget_guard_hold"
+
+    new_total = new_p * p_gpu + new_d * d_gpu
+    new_in_band, _ = bounds_for_total(new_total, min_gpus, max_gpus, tolerance)
+    if not new_in_band:
+        return current_p, current_d, "gpu_budget_guard_hold"
+
+    return new_p, new_d, None
+
+
 def proportional_clamp_single(
     desired: int,
     engine_gpu: int,

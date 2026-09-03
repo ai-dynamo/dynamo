@@ -343,7 +343,7 @@ navigation:
                   - page: Benchmark Planner Decisions
                     slug: planner-replay
                     path: pages/kubernetes/operations/simulation-with-dynosim/dynosim-planner-replay.mdx
-                  - section: AI Simulate (Experimental)
+                  - section: AISimulate (Experimental)
                     slug: ai-simulate
                     collapsed: true
                     contents:
@@ -763,6 +763,9 @@ navigation:
           - page: Overview
             path: pages/recipes/model-recipes/overview.mdx
             slug: browse
+          - page: Gemma-4-31B
+            path: pages/recipes/model-recipes/gemma-4-31b.mdx
+            slug: gemma-4-31b
           - page: GLM-5.3-Flash
             path: pages/recipes/model-recipes/glm-5-3-flash.mdx
             slug: glm-5-3-flash
