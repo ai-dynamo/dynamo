@@ -753,8 +753,8 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 }
             };
 
-        // Subscribe to KV metrics events using EventSubscriber (Msgpack payloads)
-        // This is optional - if NATS isn't available, we skip KV metrics but still do TTFT/ITL cleanup
+        // Subscribe to KV metrics over the configured event transport. This is
+        // optional; cleanup of TTFT and ITL metrics continues without it.
         let kv_metrics_rx = match KvMetricsSubscriber::for_endpoint(endpoint).await {
             Ok(sub) => Some(sub),
             Err(e) => {

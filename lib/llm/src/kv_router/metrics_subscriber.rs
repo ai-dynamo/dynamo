@@ -13,7 +13,6 @@ use dynamo_kv_router::protocols::{ActiveLoad, WorkerWithDpRank};
 use dynamo_runtime::{
     DistributedRuntime,
     component::{Component, Endpoint},
-    config::environment_names::event_plane::DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY,
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
     transports::event_plane::{Codec, EventSubscriber, TypedEventSubscriber, uses_direct_zmq},
@@ -28,16 +27,7 @@ use crate::{
     direct_zmq_sub_pool::KV_ZMQ_RCVHWM,
 };
 
-const DEFAULT_OUTPUT_CAPACITY: usize = 100_000;
-const CAPACITY_DROP_LEVEL: tracing::Level = tracing::Level::TRACE;
-
-fn output_capacity() -> usize {
-    std::env::var(DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(DEFAULT_OUTPUT_CAPACITY)
-}
+const MAX_PENDING_ACTIVE_LOADS: usize = 100_000;
 
 pub(crate) struct KvMetricsSubscriber {
     inner: KvMetricsSubscriberInner,
@@ -76,14 +66,21 @@ impl PendingActiveLoads {
     fn push(&mut self, load: ActiveLoad) -> PushOutcome {
         let worker = WorkerWithDpRank::new(load.worker_id, load.dp_rank);
         if let Some(pending) = self.values.get_mut(&worker) {
-            if load.active_decode_blocks.is_some() {
-                pending.active_decode_blocks = load.active_decode_blocks;
+            let ActiveLoad {
+                worker_id: _,
+                dp_rank: _,
+                active_decode_blocks,
+                active_prefill_tokens,
+                kv_used_blocks,
+            } = load;
+            if active_decode_blocks.is_some() {
+                pending.active_decode_blocks = active_decode_blocks;
             }
-            if load.active_prefill_tokens.is_some() {
-                pending.active_prefill_tokens = load.active_prefill_tokens;
+            if active_prefill_tokens.is_some() {
+                pending.active_prefill_tokens = active_prefill_tokens;
             }
-            if load.kv_used_blocks.is_some() {
-                pending.kv_used_blocks = load.kv_used_blocks;
+            if kv_used_blocks.is_some() {
+                pending.kv_used_blocks = kv_used_blocks;
             }
             return PushOutcome::Accepted { should_wake: false };
         }
@@ -131,8 +128,7 @@ impl ActiveLoadSender {
         match outcome {
             PushOutcome::Accepted { should_wake: false } => Ok(()),
             PushOutcome::Full => {
-                tracing::event!(
-                    CAPACITY_DROP_LEVEL,
+                tracing::trace!(
                     worker_id,
                     dp_rank,
                     "Direct-ZMQ KV metrics consumer is full; dropping newest update"
@@ -165,7 +161,11 @@ impl ActiveLoadReceiver {
     }
 }
 
-fn active_load_mailbox(capacity: usize) -> (ActiveLoadSender, ActiveLoadReceiver) {
+fn active_load_mailbox() -> (ActiveLoadSender, ActiveLoadReceiver) {
+    active_load_mailbox_with_capacity(MAX_PENDING_ACTIVE_LOADS)
+}
+
+fn active_load_mailbox_with_capacity(capacity: usize) -> (ActiveLoadSender, ActiveLoadReceiver) {
     let (wake_tx, wake_rx) = mpsc::channel(1);
     let pending = Arc::new(Mutex::new(PendingActiveLoads::new(capacity)));
     (
@@ -240,7 +240,7 @@ impl KvMetricsSubscriber {
 impl DirectKvMetricsSubscriber {
     async fn start(component: &Component, endpoint_id: EndpointId) -> Result<Self> {
         let cancellation_token = component.drt().primary_token().child_token();
-        let (sender, receiver) = active_load_mailbox(output_capacity());
+        let (sender, receiver) = active_load_mailbox();
         let handler_cancel = cancellation_token.clone();
         let codec = Codec::default();
         let handler =
@@ -301,9 +301,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn direct_metrics_mailbox_uses_fixed_distinct_key_limit() {
+        let (sender, _receiver) = active_load_mailbox();
+        assert_eq!(sender.pending.lock().capacity, MAX_PENDING_ACTIVE_LOADS);
+    }
+
     #[tokio::test]
     async fn direct_metrics_mailbox_merges_partial_updates_in_key_order() {
-        let (sender, mut receiver) = active_load_mailbox(4);
+        let (sender, mut receiver) = active_load_mailbox_with_capacity(4);
 
         sender.send(load(1, 0, Some(7), None, None)).unwrap();
         sender.send(load(2, 0, None, None, Some(9))).unwrap();
@@ -326,7 +332,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_metrics_mailbox_bounds_distinct_keys_and_drains_on_close() {
-        let (sender, mut receiver) = active_load_mailbox(1);
+        let (sender, mut receiver) = active_load_mailbox_with_capacity(1);
 
         sender.send(load(1, 0, Some(7), None, None)).unwrap();
         sender.send(load(1, 0, None, None, Some(8))).unwrap();
@@ -343,12 +349,11 @@ mod tests {
             Some(load(2, 0, None, None, Some(10)))
         );
         assert_eq!(receiver.recv().await, None);
-        assert_eq!(CAPACITY_DROP_LEVEL, tracing::Level::TRACE);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn direct_metrics_mailbox_wakes_a_waiter_and_reports_receiver_close() {
-        let (sender, mut receiver) = active_load_mailbox(1);
+        let (sender, mut receiver) = active_load_mailbox_with_capacity(1);
         let waiter = tokio::spawn(async move {
             let load = receiver.recv().await;
             (load, receiver)

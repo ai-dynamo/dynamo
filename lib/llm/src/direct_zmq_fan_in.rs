@@ -432,7 +432,7 @@ where
         connected_once = true;
         retry_delay = INITIAL_BACKOFF;
 
-        if !consume_connection(
+        let keep_running = consume_connection(
             publisher_id,
             generation,
             &mut registration.receiver,
@@ -442,16 +442,13 @@ where
             &observer,
             &cancel,
         )
-        .await
-        {
-            group_pool
-                .unregister(registration, publisher_id, generation)
-                .await;
-            break;
-        }
+        .await;
         group_pool
             .unregister(registration, publisher_id, generation)
             .await;
+        if !keep_running {
+            break;
+        }
         if !sleep_or_cancel(retry_delay, &cancel).await {
             break;
         }

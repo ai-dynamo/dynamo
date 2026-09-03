@@ -466,7 +466,6 @@ async fn consume_scope(
     for (_, source) in &stopped_sources {
         source.cancel.cancel();
     }
-    group_pool.shutdown().await;
     let publisher_ids = stopped_sources
         .iter()
         .map(|(publisher_id, _)| *publisher_id)
@@ -477,6 +476,7 @@ async fn consume_scope(
             .map(|(_, source)| stop_source(source, ingress_metrics)),
     )
     .await;
+    group_pool.shutdown().await;
     for publisher_id in publisher_ids {
         client.fence_transport(publisher_id).await;
     }
@@ -690,23 +690,24 @@ async fn run_source(
 ) {
     let mut retry_delay = INITIAL_BACKOFF;
     loop {
-        if cancel.is_cancelled() {
-            return;
-        }
-        let registration = group_pool
-            .register(publisher_id, &endpoint, task_generation)
-            .await;
+        let registration = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return,
+            registration = group_pool.register(publisher_id, &endpoint, task_generation) => registration,
+        };
         let mut registration = match registration {
             Ok(registration) => registration,
             Err(error) => {
                 tracing::warn!(%error, publisher_id, %endpoint, "Failed to register direct-ZMQ KV source with a socket group");
-                if signal_tx
-                    .send(SourceSignal::Disconnected {
+                if !send_source_signal(
+                    &signal_tx,
+                    SourceSignal::Disconnected {
                         publisher_id,
                         task_generation,
-                    })
-                    .await
-                    .is_err()
+                    },
+                    &cancel,
+                )
+                .await
                 {
                     return;
                 }
@@ -726,14 +727,16 @@ async fn run_source(
         retry_delay = INITIAL_BACKOFF;
 
         let (activate, activation) = oneshot::channel();
-        if signal_tx
-            .send(SourceSignal::Ready {
+        if !send_source_signal(
+            &signal_tx,
+            SourceSignal::Ready {
                 publisher_id,
                 task_generation,
                 activate,
-            })
-            .await
-            .is_err()
+            },
+            &cancel,
+        )
+        .await
         {
             return;
         }
@@ -762,13 +765,15 @@ async fn run_source(
             if matches!(activation_outcome, ActivationOutcome::Cancelled) {
                 return;
             }
-            if signal_tx
-                .send(SourceSignal::Disconnected {
+            if !send_source_signal(
+                &signal_tx,
+                SourceSignal::Disconnected {
                     publisher_id,
                     task_generation,
-                })
-                .await
-                .is_err()
+                },
+                &cancel,
+            )
+            .await
             {
                 return;
             }
@@ -791,13 +796,15 @@ async fn run_source(
         if cancelled {
             return;
         }
-        if signal_tx
-            .send(SourceSignal::Disconnected {
+        if !send_source_signal(
+            &signal_tx,
+            SourceSignal::Disconnected {
                 publisher_id,
                 task_generation,
-            })
-            .await
-            .is_err()
+            },
+            &cancel,
+        )
+        .await
         {
             return;
         }
@@ -805,6 +812,18 @@ async fn run_source(
             return;
         }
         retry_delay = (retry_delay * 2).min(MAX_BACKOFF);
+    }
+}
+
+async fn send_source_signal(
+    signal_tx: &mpsc::Sender<SourceSignal>,
+    signal: SourceSignal,
+    cancel: &CancellationToken,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => false,
+        result = signal_tx.send(signal) => result.is_ok(),
     }
 }
 
@@ -904,5 +923,40 @@ async fn sleep_or_cancel(delay: Duration, cancellation_token: &CancellationToken
     tokio::select! {
         _ = cancellation_token.cancelled() => false,
         _ = tokio::time::sleep(delay) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn full_source_status_channel_does_not_delay_shutdown() {
+        let (signal_tx, _signal_rx) = mpsc::channel(1);
+        signal_tx
+            .send(SourceSignal::Disconnected {
+                publisher_id: 1,
+                task_generation: 1,
+            })
+            .await
+            .unwrap();
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let sent = tokio::time::timeout(
+            Duration::from_secs(1),
+            send_source_signal(
+                &signal_tx,
+                SourceSignal::Disconnected {
+                    publisher_id: 2,
+                    task_generation: 1,
+                },
+                &cancel,
+            ),
+        )
+        .await
+        .expect("cancelled status send must finish promptly");
+
+        assert!(!sent);
     }
 }
