@@ -649,8 +649,6 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 	}
 }
 
-// TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank asserts a port per
-// rank, and that a container running no exporter is untouched and never resolves GPUs.
 func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T) {
 	backend := &SGLangBackend{}
 
@@ -667,11 +665,12 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 	}
 
 	tests := []struct {
-		name            string
-		ports           []corev1.ContainerPort
-		telemetryEnable string
-		containerGPUs   int64
-		expectedPorts   map[string]int32
+		name               string
+		ports              []corev1.ContainerPort
+		telemetryEnable    string
+		telemetryValueFrom *corev1.EnvVarSource
+		containerGPUs      int64
+		expectedPorts      map[string]int32
 	}{
 		{
 			name:            "no GPUs declares only the base port",
@@ -715,6 +714,18 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 			containerGPUs:   -1,
 			expectedPorts:   map[string]int32{},
 		},
+		{
+			name:  "a sourced enable value reserves the range it cannot read",
+			ports: workerPorts,
+			telemetryValueFrom: &corev1.EnvVarSource{
+				ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "telemetry"},
+					Key:                  "nixl-enable",
+				},
+			},
+			containerGPUs: 8,
+			expectedPorts: allEightPorts,
+		},
 	}
 
 	for _, tt := range tests {
@@ -724,7 +735,7 @@ func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T)
 				Ports: slices.Clone(tt.ports),
 				Env: []corev1.EnvVar{
 					{Name: "DYN_SYSTEM_PORT", Value: strconv.Itoa(commonconsts.DynamoSystemPort)},
-					{Name: "NIXL_TELEMETRY_ENABLE", Value: tt.telemetryEnable},
+					{Name: "NIXL_TELEMETRY_ENABLE", Value: tt.telemetryEnable, ValueFrom: tt.telemetryValueFrom},
 					{Name: "NIXL_TELEMETRY_EXPORTER", Value: "prometheus"},
 					{Name: "NIXL_TELEMETRY_PROMETHEUS_PORT", Value: strconv.Itoa(commonconsts.DynamoNixlPort)},
 				},

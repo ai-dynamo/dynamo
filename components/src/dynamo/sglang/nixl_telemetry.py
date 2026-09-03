@@ -3,31 +3,17 @@
 
 """Give each co-located SGLang scheduler its own NIXL Prometheus exporter port.
 
-SGLang runs one scheduler process per node-local rank, and each of those
-schedulers builds its own NIXL agent for KV transfer. They all inherit the one
-``NIXL_TELEMETRY_PROMETHEUS_PORT`` the operator injects into the container, so
-every rank after the first fails to bind and aborts, and the pod never reaches
-Ready. See ``dynamo.common.utils.nixl_telemetry`` for why the answer is a
-derived port rather than an ephemeral one.
-
-The port has to be set inside the rank's own process, because NIXL reads the
-variable when the agent is constructed. Two things rule out setting it from
-the worker process before ``sgl.Engine(...)``:
-
-* With the ``spawn`` start method only ``os.environ`` crosses into a child, so
-  a patch applied in the worker process is not inherited -- it would look
-  correct in a single-process test and do nothing in a deployment.
-* Under ``--enable-dp-attention`` the worker process does not start the
-  schedulers at all. It starts one data-parallel controller, and *that* process
-  starts the schedulers, so a hook installed only in the worker process never
-  runs anywhere near a rank.
-
-SGLang supports exactly this case: ``Engine.run_scheduler_process_func`` is a
-documented override point ("Some fields to allow people to override the server
-args and launch processes for their private forks"), it is forwarded into the
-data-parallel controller, and it is invoked in the scheduler process with that
-scheduler's own arguments. Dynamo overrides it with a wrapper that fixes up the
-environment and then calls SGLang's real entry point.
+SGLang runs one scheduler process per node-local rank, each building its own
+NIXL agent, so the port must be set inside the rank's own process: NIXL reads
+``NIXL_TELEMETRY_PROMETHEUS_PORT`` when the agent is constructed, ``spawn``
+carries only ``os.environ`` into a child, and under ``--enable-dp-attention``
+the schedulers are started by a data-parallel controller rather than by the
+worker process. ``Engine.run_scheduler_process_func`` is SGLang's documented
+override point for exactly this: it is forwarded through the data-parallel
+controller and invoked in the scheduler process with that scheduler's own
+arguments. The wrapper below fixes up the environment and then calls SGLang's
+real entry point. See ``dynamo.common.utils.nixl_telemetry`` for the
+derivation.
 """
 
 from __future__ import annotations

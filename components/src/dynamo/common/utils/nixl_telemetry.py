@@ -4,23 +4,13 @@
 """Exporter ports for NIXL telemetry when several ranks share one pod.
 
 NIXL's Prometheus exporter binds one fixed TCP port, read from
-``NIXL_TELEMETRY_PROMETHEUS_PORT`` when the NIXL agent is constructed. The
-operator injects that variable once per container, which is correct for a
-backend that builds a single agent in the worker process, and wrong for one
-that builds an agent per co-located rank: every rank inherits the same value,
-the first exporter wins the port, and each remaining rank aborts with
-``Failed to create exporter: null context when constructing CivetServer``.
-The process that aborts is the rank itself, so the container never reaches
-Ready.
-
-Deriving ``base + local_rank`` is the fix rather than asking NIXL for an
-ephemeral port. NIXL does accept ``0`` and binds an ephemeral port, but it
-logs the port it was *asked* for and offers no accessor for the port it got,
-so nothing can name that port as a ``containerPort`` or as a PodMonitor
-target -- the same reason ``dynamo.vllm.embedding_worker_processes`` gives for
-rejecting ephemeral ports for its own child listeners. A derived port is
-predictable, so the operator can reserve the whole range on the pod and the
-PodMonitor can scrape every rank.
+``NIXL_TELEMETRY_PROMETHEUS_PORT`` when the NIXL agent is constructed, so a
+backend that builds one agent per co-located rank needs one port per rank.
+The port is derived as ``base + local_rank`` rather than left ephemeral
+because it has to be predictable: the operator declares the whole range as
+container ports and the PodMonitor scrapes each one by name. NIXL accepts
+``0`` and binds an ephemeral port, but exposes no accessor for the port it
+actually got, so nothing could name that port as a scrape target.
 
 This module deliberately imports no inference engine: the derivation is pure
 arithmetic over a base port and a rank index, and the callers that know how to
@@ -121,6 +111,24 @@ def derive_nixl_prometheus_port(
     port of its own must say so; falling back to the base port would recreate
     the bind collision this module exists to prevent.
     """
+    if base_port < 1:
+        raise ValueError(
+            f"{NIXL_TELEMETRY_PROMETHEUS_PORT_ENV}={base_port} is not a usable TCP "
+            f"port. Set it between 1 and {MAX_PORT}."
+        )
+
+    # Reject the whole range up front, not just this rank's port. A base that
+    # leaves room for rank 0 alone would start one scheduler and fail the next,
+    # leaving the pod with a partially started scheduler set and never Ready.
+    last_port = base_port + max_ranks - 1
+    if last_port > MAX_PORT:
+        raise ValueError(
+            f"{NIXL_TELEMETRY_PROMETHEUS_PORT_ENV}={base_port} with {max_ranks} "
+            f"co-located ranks needs ports {base_port}-{last_port}, "
+            f"which exceeds the maximum port {MAX_PORT}. Lower "
+            f"{NIXL_TELEMETRY_PROMETHEUS_PORT_ENV}."
+        )
+
     if local_rank < 0 or local_rank >= max_ranks:
         raise ValueError(
             f"node-local rank {local_rank} is outside the reserved NIXL exporter "
@@ -130,14 +138,6 @@ def derive_nixl_prometheus_port(
         )
 
     port = base_port + local_rank
-    if not 0 < port <= MAX_PORT:
-        raise ValueError(
-            f"{NIXL_TELEMETRY_PROMETHEUS_PORT_ENV}={base_port} with {max_ranks} "
-            f"co-located ranks needs ports {base_port}-{base_port + max_ranks - 1}, "
-            f"which exceeds the maximum port {MAX_PORT}. Lower "
-            f"{NIXL_TELEMETRY_PROMETHEUS_PORT_ENV}."
-        )
-
     for env_name, start, end in reserved_port_ranges(env, width=max_ranks):
         if start <= port <= end:
             raise ValueError(

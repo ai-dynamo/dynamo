@@ -68,14 +68,21 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 }
 
 // reserveNixlExporterPorts declares one NIXL exporter port per node-local rank.
-// Skips containers without a nixl port or with NIXL_TELEMETRY_ENABLE not inline "y".
+// Skips containers without a nixl port or with NIXL_TELEMETRY_ENABLE set off.
 func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount ContainerGPUCount) error {
 	if findContainerPort(container, commonconsts.DynamoNixlPortName) == nil {
 		return nil
 	}
 
 	enabled := findEnvVar(container.Env, "NIXL_TELEMETRY_ENABLE")
-	if enabled == nil || !strings.EqualFold(strings.TrimSpace(enabled.Value), "y") {
+	if enabled == nil {
+		return nil
+	}
+	// A value taken from valueFrom is resolved in the container at startup and
+	// is not readable here, so reserve the range rather than assume telemetry is
+	// off: a declared port nothing listens on is harmless, while an undeclared
+	// one leaves the PodMonitor unable to scrape any rank past the base port.
+	if enabled.ValueFrom == nil && !strings.EqualFold(strings.TrimSpace(enabled.Value), "y") {
 		return nil
 	}
 

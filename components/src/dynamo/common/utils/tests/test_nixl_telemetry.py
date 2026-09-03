@@ -34,19 +34,13 @@ def _reserved(env_name: str) -> set[int]:
 
 
 class TestDeriveNixlPrometheusPort:
-    @pytest.mark.parametrize("ranks", range(1, MAX_COLOCATED_NIXL_EXPORTERS + 1))
-    def test_colocated_ranks_never_share_an_exporter_port(self, ranks):
-        """The property the shared container port violated.
-
-        Every rank in the pod must end up with a port of its own; the first
-        duplicate is a rank that fails ``bind()`` and takes the pod down.
-        """
+    def test_colocated_ranks_never_share_an_exporter_port(self):
         base = int(OPERATOR_ENV["NIXL_TELEMETRY_PROMETHEUS_PORT"])
         ports = {
             derive_nixl_prometheus_port(base, rank, env=OPERATOR_ENV)
-            for rank in range(ranks)
+            for rank in range(MAX_COLOCATED_NIXL_EXPORTERS)
         }
-        assert len(ports) == ranks
+        assert len(ports) == MAX_COLOCATED_NIXL_EXPORTERS
 
     def test_derived_ports_stay_inside_the_reserved_range(self):
         """A port past the reserved range binds where nothing scrapes it."""
@@ -81,9 +75,12 @@ class TestDeriveNixlPrometheusPort:
         with pytest.raises(ValueError, match="DYN_SYSTEM_PORT"):
             derive_nixl_prometheus_port(overlapping_base, 1, env=OPERATOR_ENV)
 
-    def test_base_too_high_for_the_reserved_range_is_rejected(self):
+    @pytest.mark.parametrize("local_rank", [0, 1])
+    def test_base_too_high_for_the_reserved_range_is_rejected(self, local_rank):
+        # Rank 0 fits at MAX_PORT on its own; rejecting it is what stops the pod
+        # from starting one scheduler and failing every rank after it.
         with pytest.raises(ValueError, match="exceeds the maximum port"):
-            derive_nixl_prometheus_port(MAX_PORT, 1, env=OPERATOR_ENV)
+            derive_nixl_prometheus_port(MAX_PORT, local_rank, env=OPERATOR_ENV)
 
 
 class TestNixlPrometheusBasePort:
