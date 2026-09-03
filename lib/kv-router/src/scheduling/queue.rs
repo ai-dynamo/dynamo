@@ -936,7 +936,13 @@ impl<
         if let Some(cost) = scheduling_cost_tokens {
             metadata.snapshot.scheduling_cost_tokens = cost;
         }
-        if let Some(target) = worker_selection_target {
+        // A pin is a hard caller constraint and the host never produces a pin and an
+        // affinity target together; applying the classifier target to a pinned request
+        // would manufacture an unsatisfiable pin+affinity pair that the default
+        // selector rejects as NoEndpoints.
+        if let Some(target) = worker_selection_target
+            && request.pinned_worker.is_none()
+        {
             request.affinity_target = target;
         }
         metadata.due_at = due_at;
@@ -2588,6 +2594,17 @@ policy_classes:
             .validate_classification(&mut request, cleared, ingress_at)
             .unwrap();
         assert_eq!(request.affinity_target, None);
+
+        // A pinned request keeps its pin: the classifier target must not create an
+        // unsatisfiable pin+affinity pair.
+        request.pinned_worker = Some(WorkerWithDpRank::from_worker_id(3));
+        let mut pinned = queue.build_classify_request(&request, ingress_at);
+        pinned.set_worker_selection_target(target);
+        queue
+            .validate_classification(&mut request, pinned, ingress_at)
+            .unwrap();
+        assert_eq!(request.affinity_target, None);
+        request.pinned_worker = None;
 
         let mut invalid = queue.build_classify_request(&request, ingress_at);
         invalid.set_policy_class("missing");

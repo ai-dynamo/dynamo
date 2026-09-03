@@ -306,7 +306,7 @@ For prefill and decode, the selection order is the role-specific CLI or environm
 
 ### Register a Request Classifier
 
-The same catalog can install one process-wide request classifier. A classifier observes each request before queue admission and may override its policy class, due time, scheduling cost, or worker-selection target; Dynamo keeps final selection authority. Implement `RequestClassifier` in the policy crate, expose a provider that validates its parameters and returns a `RequestClassifierFactory`, and register it from the catalog's `register_request_classifiers`:
+The same catalog can install request classifiers. Like worker selection, the classifier is selected once at frontend startup from the frontend's policy YAML; the factory then creates one classifier instance per routed model. A classifier observes each request before the decode or aggregated router's queue admission and may override its policy class, due time, scheduling cost, or worker-selection target; Dynamo keeps final selection authority, a pinned request ignores the target, and the prefill router in a disaggregated deployment is not classified. Implement `RequestClassifier` in the policy crate, expose a provider that validates its parameters and returns a `RequestClassifierFactory`, and register it from the catalog's `register_request_classifiers`:
 
 ```rust
 use std::sync::Arc;
@@ -347,7 +347,7 @@ request_classifier:
     pause_threshold: 0.9
 ```
 
-The type `default` is reserved: omit `request_classifier` to keep Dynamo's pass-through behavior. The key is honored by the processes that construct the standard KV chooser — the Python frontend with HTTP input and the direct Python `KvRouter` — and is ignored by the standalone EPP, which only selects workers.
+The type `default` is reserved: omit `request_classifier` to keep Dynamo's pass-through behavior. The key is honored by the processes that construct the standard KV chooser — the Python frontend with HTTP input and the direct Python `KvRouter` — and is ignored by the standalone EPP, which only selects workers. Every policy class the classifier names must exist in each routed model's effective queue profile: a worker-advertised `router_policy_config` replaces the frontend's queue profile for that model, and a classifier that names a missing class fails those requests at admission.
 
 ### Check the Policy and Catalog
 
