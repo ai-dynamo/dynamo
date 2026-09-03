@@ -4633,18 +4633,17 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
                 vanished.append(req_id)
                 continue
-            if (
-                req.num_computed_tokens >= len(self._kvwarm_chain_prompts[req_id])
-                and getattr(req, "num_output_placeholders", 0) == 0
-            ):
-                # Async scheduling advances num_computed_tokens when a step is
-                # scheduled, not when its output lands; wait for the in-flight
-                # tokens to drain before parking so no shadow reads KV that is
-                # still being written.
+            if req.num_computed_tokens >= len(self._kvwarm_chain_prompts[req_id]):
                 if any(r.request_id == req_id for r in self.running):
                     self.running = [
                         r for r in self.running if r.request_id != req_id
                     ]  # park: leave the scheduler's view; blocks and requests stay resident
+                if getattr(req, "num_output_placeholders", 0) > 0:
+                    # Async scheduling advances num_computed_tokens when a step is
+                    # scheduled, not when its output lands. Parking stops new steps;
+                    # the stage is ready only once every parked chain's in-flight
+                    # tokens drained, so no shadow reads KV still being written.
+                    pending = True
             else:
                 pending = True
         if vanished:

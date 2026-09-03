@@ -4358,12 +4358,12 @@ def test_kvwarm_chain_parks_only_after_in_flight_tokens_drain():
     stub._kvwarm_building = True
     stub._kvwarm_stage_batch = 1
     stub._kvwarm_meta_init = lambda: {"stages": []}
-    # In flight: stays pending, still in running.
-    assert InstrumentedScheduler._kvwarm_monitor_build(stub) is True
-    assert stub._kvwarm_building is True
-    assert stub.running == [chain]
-    # Drained: parks (leaves running) and the stage completes.
-    chain.num_output_placeholders = 0
+    # In flight: parked at once (no new steps get scheduled) but the stage
+    # stays pending until the in-flight token lands.
     assert InstrumentedScheduler._kvwarm_monitor_build(stub) is True
     assert stub.running == []
+    assert stub._kvwarm_building is True
+    # Drained: the stage completes.
+    chain.num_output_placeholders = 0
+    assert InstrumentedScheduler._kvwarm_monitor_build(stub) is True
     assert stub._kvwarm_building is False
