@@ -456,8 +456,6 @@ impl AnthropicStreamConverter {
                     // Emit signature delta to close the thinking block.
                     // The engine doesn't produce Anthropic-style cryptographic signatures,
                     // so we use "erased" (the standard placeholder per the Anthropic spec).
-                    // If the backend starts returning real signatures, pass them
-                    // through instead of hardcoding "erased".
                     let sig_delta = AnthropicStreamEvent::ContentBlockDelta {
                         index: self.thinking_block_index,
                         delta: AnthropicDelta::SignatureDelta {

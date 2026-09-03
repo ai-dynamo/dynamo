@@ -2178,6 +2178,7 @@ dependencies = [
  "sha2 0.10.9",
  "strum",
  "switchyard-protocol",
+ "switchyard-translation",
  "tempfile",
  "thiserror 2.0.18",
  "tmq",
@@ -7557,6 +7558,20 @@ dependencies = [
  "http 1.4.1",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "switchyard-translation"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e40cc4f9517e2fa6ecf11c5ffaace82d04689d088ed3095631609e46d2a3f940"
+dependencies = [
+ "async-stream",
+ "futures",
+ "serde",
+ "serde_json",
+ "switchyard-protocol",
  "thiserror 2.0.18",
 ]
 

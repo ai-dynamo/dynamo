@@ -2200,7 +2200,6 @@ mod tests {
         assert!(matches!(output[1], OutputItem::Message(_)));
     }
 
-    /// Unsupported conversation continuation remains unset.
     #[test]
     fn test_without_context_defaults() {
         let params = ResponseParams::default();
