@@ -24,6 +24,7 @@ from tests.utils.port_utils import allocate_port, deallocate_ports
 # Customized utils for migration tests
 from .utils import (
     DynamoFrontendProcess,
+    graceful_worker_shutdown,
     managed_processes_concurrently,
     run_migration_test,
     wait_for_endpoint_instances,
@@ -459,7 +460,11 @@ def test_request_migration_vllm_aggregated(
                 use_chat_completion=(request_api == "chat"),
                 stream=stream,
                 max_tokens=AGGREGATED_MAX_TOKENS,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=1 if immediate_kill else None,
+                expect_drain=not immediate_kill,
+                graceful_shutdown=lambda worker: graceful_worker_shutdown(
+                    frontend, worker
+                ),
             )
 
 
@@ -548,7 +553,11 @@ def test_request_migration_vllm_kv_transfer(
                 max_tokens=KV_TRANSFER_MAX_TOKENS,
                 use_long_prompt=True,
                 long_prompt_repetitions=KV_TRANSFER_PROMPT_REPETITIONS,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=1 if immediate_kill else None,
+                expect_drain=not immediate_kill,
+                graceful_shutdown=lambda worker: graceful_worker_shutdown(
+                    frontend, worker
+                ),
             )
 
 
@@ -633,5 +642,9 @@ def test_request_migration_vllm_decode(
                 stream=True,
                 max_tokens=DECODE_MAX_TOKENS,
                 wait_for_new_response_before_stop=True,
-                expected_ongoing_request_count=1,
+                expected_ongoing_request_count=1 if immediate_kill else None,
+                expect_drain=not immediate_kill,
+                graceful_shutdown=lambda worker: graceful_worker_shutdown(
+                    frontend, worker
+                ),
             )
