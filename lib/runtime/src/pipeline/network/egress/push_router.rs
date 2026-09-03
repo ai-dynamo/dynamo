@@ -883,7 +883,7 @@ where
     }
 
     fn ensure_discovered_for_dispatch(&self, instance_id: u64) -> anyhow::Result<()> {
-        if self.client.instance_ids().contains(&instance_id) {
+        if self.client.is_instance_live(instance_id) {
             return Ok(());
         }
         Err(DynamoError::builder()
