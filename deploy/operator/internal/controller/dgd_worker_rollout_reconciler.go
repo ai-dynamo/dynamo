@@ -48,13 +48,13 @@ type workerGenerationHashes struct {
 // callers commit it only after they have reconciled the workload carrying the
 // corresponding generation.
 type unsupportedWorkerHashTransition struct {
-	next                    workerGenerationHashes
-	initialize              bool
-	workerGenerationChanged bool
+	next             workerGenerationHashes
+	isFirstGeneration bool // no prior hash annotation existed; child may not be stamped yet
+	hashChanged      bool // hash annotation exists but does not match desired
 }
 
 func (t unsupportedWorkerHashTransition) needsCommit() bool {
-	return t.initialize || t.workerGenerationChanged
+	return t.isFirstGeneration || t.hashChanged
 }
 
 // dgdWorkerRolloutReconciler owns worker-generation metadata and the managed
@@ -86,16 +86,16 @@ func (r *dgdWorkerRolloutReconciler) planUnsupportedWorkerHashTransition(
 	current := r.currentWorkerHashes(dgd)
 	if current.empty() {
 		return unsupportedWorkerHashTransition{
-			next:       workerHashesForCompletedGeneration(desired.v2, desired),
-			initialize: true,
+			next:              workerHashesForCompletedGeneration(desired.v2, desired),
+			isFirstGeneration: true,
 		}, nil
 	}
 	if currentWorkerHashesMatchDesired(current, desired) {
 		return unsupportedWorkerHashTransition{}, nil
 	}
 	return unsupportedWorkerHashTransition{
-		next:                    r.workerHashesForUnsupportedPathway(dgd, desired),
-		workerGenerationChanged: true,
+		next:        r.workerHashesForUnsupportedPathway(dgd, desired),
+		hashChanged: true,
 	}, nil
 }
 
@@ -116,7 +116,7 @@ func (r *dgdWorkerRolloutReconciler) commitUnsupportedWorkerHashTransition(
 	if err := r.Update(ctx, dgd); err != nil {
 		return err
 	}
-	if !transition.workerGenerationChanged {
+	if !transition.hashChanged {
 		return nil
 	}
 

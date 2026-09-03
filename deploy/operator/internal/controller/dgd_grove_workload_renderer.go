@@ -189,7 +189,7 @@ func applyGroveWorkerHashSuffix(
 func shouldRenderGroveWorkerHashSuffix(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	existing *grovev1alpha1.PodCliqueSet,
-	workerGenerationChanged bool,
+	hashChanged bool,
 ) bool {
 	if !dgdHasWorkerComponents(dgd) {
 		return false
@@ -198,7 +198,7 @@ func shouldRenderGroveWorkerHashSuffix(
 		return true
 	}
 
-	return workerGenerationChanged
+	return hashChanged
 }
 
 func dgdHasWorkerComponents(dgd *nvidiacomv1beta1.DynamoGraphDeployment) bool {
@@ -227,13 +227,19 @@ func podCliqueSetUsesGroveWorkerHashSuffix(
 	return true
 }
 
-// podCliqueSetObservesWorkerHash reports whether the informer snapshot
-// contains one coherent observed worker generation. A write receipt is not an
-// observation: callers must pass the PodCliqueSet read before any sync.
+// podCliqueSetObservesWorkerHash reports whether the informer snapshot contains
+// one coherent observed worker generation. A write receipt is not an observation:
+// callers must pass the PodCliqueSet read before any sync.
+//
+// Two states are accepted as observed:
+//   - canonical: every worker clique carries the desired hash label.
+//   - unstamped: every worker clique has an empty hash label, which is valid
+//     only when the DGD has no prior hash annotation (first generation). This
+//     covers PodCliqueSets that were created before hash-suffix stamping was
+//     introduced.
 func podCliqueSetObservesWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
-	allowLegacy bool,
 ) (bool, error) {
 	if !dgdHasWorkerComponents(dgd) {
 		return true, nil
@@ -242,8 +248,9 @@ func podCliqueSetObservesWorkerHash(
 	if err != nil {
 		return false, fmt.Errorf("compute desired Grove worker hash: %w", err)
 	}
-	canonical := true
-	legacy := allowLegacy
+	isFirstGeneration := currentWorkerHashes(dgd).empty()
+	allCanonical := true
+	allUnstamped := isFirstGeneration
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
@@ -254,10 +261,10 @@ func podCliqueSetObservesWorkerHash(
 			return false, nil
 		}
 		hash := clique.Labels[commonconsts.KubeLabelDynamoWorkerHash]
-		canonical = canonical && hash == want
-		legacy = legacy && hash == ""
+		allCanonical = allCanonical && hash == want
+		allUnstamped = allUnstamped && hash == ""
 	}
-	return canonical || legacy, nil
+	return allCanonical || allUnstamped, nil
 }
 
 func podCliqueSetCliqueForComponent(

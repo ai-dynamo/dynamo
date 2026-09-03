@@ -130,12 +130,12 @@ func TestGroveWorkerHashSuffixMigration(t *testing.T) {
 		name                    string
 		existing                bool
 		existingHash            string
-		workerGenerationChanged bool
+		hashChanged bool
 		wantSuffix              bool
 	}{
 		{name: "new PCS renders a suffix without a worker generation change", wantSuffix: true},
 		{name: "legacy PCS with no generation change remains unsuffixed", existing: true},
-		{name: "legacy PCS renders a suffix after a worker generation change", existing: true, workerGenerationChanged: true, wantSuffix: true},
+		{name: "legacy PCS renders a suffix after a worker generation change", existing: true, hashChanged: true, wantSuffix: true},
 		{name: "suffixed PCS continues rendering the suffix", existing: true, existingHash: "active", wantSuffix: true},
 	}
 
@@ -156,7 +156,7 @@ func TestGroveWorkerHashSuffixMigration(t *testing.T) {
 			}
 
 			t.Log("Verify suffix rendering from the worker generation")
-			if got := shouldRenderGroveWorkerHashSuffix(dgd, existing, tt.workerGenerationChanged); got != tt.wantSuffix {
+			if got := shouldRenderGroveWorkerHashSuffix(dgd, existing, tt.hashChanged); got != tt.wantSuffix {
 				t.Fatalf("shouldRenderGroveWorkerHashSuffix() = %t, want %t", got, tt.wantSuffix)
 			}
 		})
@@ -179,7 +179,7 @@ func TestPlanUnsupportedWorkerHashTransitionIgnoresScaling(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Log("Verify scaling does not arm a worker generation migration")
-	assert.False(t, transition.workerGenerationChanged)
+	assert.False(t, transition.hashChanged)
 	assert.False(t, transition.needsCommit())
 }
 
@@ -206,7 +206,7 @@ func TestPlanUnsupportedWorkerHashTransitionDoesNotCommit(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Log("Verify planning detects the transition without mutating the DGD")
-	require.True(t, transition.workerGenerationChanged)
+	require.True(t, transition.hashChanged)
 	assert.Equal(t, currentHash, currentWorkerHashV2(dgd), "planning must not commit the DGD hash")
 }
 

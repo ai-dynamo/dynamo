@@ -89,7 +89,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		dgd,
 		restartState,
 		checkpointInfos,
-		workerHashTransition.workerGenerationChanged,
+		workerHashTransition.hashChanged,
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
@@ -102,7 +102,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	}
 	// A successful write only acknowledges the requested change. Project the parent
 	// hash after a later informer observation sees the target suffix on every worker clique.
-	observedWorkerHash, err := podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing, workerHashTransition.initialize)
+	observedWorkerHash, err := podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing)
 	if err != nil {
 		return ReconcileResult{}, failWorkloadProgram(
 			reasonRollingUpdateFailed,
