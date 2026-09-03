@@ -578,8 +578,17 @@ func (r *dgdCheckpointsReconciler) resolveAutomaticSnapshotJob(
 		}
 		return nil, fmt.Errorf("automatic SnapshotJob %s/%s failed: %s", snapshotJob.Namespace, snapshotJob.Name, failure)
 	}
+	if snapshotJob.UID != "" {
+		info.AutomaticSnapshotJob = &checkpoint.SnapshotJobReference{
+			Name: snapshotJob.Name,
+			UID:  snapshotJob.UID,
+		}
+	}
 	if !snapshotv1alpha1.IsSnapshotJobCompleted(snapshotJob) {
 		return info, nil
+	}
+	if info.AutomaticSnapshotJob == nil {
+		return nil, fmt.Errorf("completed automatic SnapshotJob %s/%s has no UID", snapshotJob.Namespace, snapshotJob.Name)
 	}
 	if snapshotJob.Status.PodSnapshotName == "" || snapshotJob.Status.PodSnapshotUID == "" {
 		return nil, fmt.Errorf("completed SnapshotJob %s/%s has no PodSnapshot identity", snapshotJob.Namespace, snapshotJob.Name)
@@ -617,6 +626,7 @@ func (r *dgdCheckpointsReconciler) resolveAutomaticSnapshotJob(
 	}
 	resolved.AutomaticCapture = true
 	resolved.StartupPolicy = startupPolicy
+	resolved.AutomaticSnapshotJob = info.AutomaticSnapshotJob
 	return resolved, nil
 }
 

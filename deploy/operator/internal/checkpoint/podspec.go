@@ -15,40 +15,66 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 const restoreStartupFailureThreshold = 1800 // 30 minutes at 1s cadence.
 
-// ApplyRestoreCandidateMetadata writes Dynamo's private admission handoff for
-// a resolved, Ready PodSnapshot. Pending snapshots deliberately produce no
-// candidate metadata so Immediate workloads continue with a cold start.
+// ApplyRestoreCandidateMetadata writes Dynamo's private admission handoff.
+// Automatic capture pins the immutable SnapshotJob before its PodSnapshot is
+// ready so capture completion does not change an Immediate workload template.
+// Explicit references pin the resolved PodSnapshot itself.
 func ApplyRestoreCandidateMetadata(annotations map[string]string, checkpointInfo *CheckpointInfo) error {
 	if annotations == nil {
 		return fmt.Errorf("checkpoint restore candidate annotations map is required")
 	}
 	removeRestoreCandidateMetadata(annotations)
-	if checkpointInfo == nil || !checkpointInfo.Enabled || !checkpointInfo.Exists || !checkpointInfo.Ready || checkpointInfo.CheckpointName == "" {
+	if checkpointInfo == nil || !checkpointInfo.Enabled {
 		return nil
-	}
-	if checkpointInfo.NativeSnapshot == nil {
-		return fmt.Errorf("restore candidate requires a resolved PodSnapshot")
 	}
 
 	targets := checkpointInfo.RestoreTargetContainers
 	if len(targets) == 0 {
 		targets = []string{commonconsts.MainContainerName}
 	}
+	startupPolicy := checkpointInfo.StartupPolicy
+	if startupPolicy == "" {
+		startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+	}
+
+	if checkpointInfo.AutomaticSnapshotJob != nil {
+		if !checkpointInfo.AutomaticCapture {
+			return fmt.Errorf("SnapshotJob restore candidate requires automatic capture")
+		}
+		if strings.TrimSpace(checkpointInfo.AutomaticSnapshotJob.Name) == "" || checkpointInfo.AutomaticSnapshotJob.UID == "" {
+			return fmt.Errorf("SnapshotJob restore candidate requires a name and UID")
+		}
+		annotations[commonconsts.CheckpointRestoreCandidateAnnotation] = commonconsts.KubeLabelValueTrue
+		annotations[commonconsts.CheckpointNameAnnotation] = checkpointInfo.AutomaticSnapshotJob.Name
+		annotations[commonconsts.RestoreCandidateSourceKindAnnotation] = commonconsts.RestoreCandidateSourceSnapshotJob
+		annotations[commonconsts.SnapshotJobCandidateUIDAnnotation] = string(checkpointInfo.AutomaticSnapshotJob.UID)
+		annotations[commonconsts.RestoreCandidateTargetContainersAnnotation] = strings.Join(targets, ",")
+		annotations[commonconsts.CheckpointStartupPolicyAnnotation] = string(startupPolicy)
+		return nil
+	}
+	if checkpointInfo.AutomaticCapture {
+		return nil
+	}
+	if !checkpointInfo.Exists || !checkpointInfo.Ready || checkpointInfo.CheckpointName == "" {
+		return nil
+	}
+	if checkpointInfo.NativeSnapshot == nil {
+		return fmt.Errorf("restore candidate requires a resolved PodSnapshot")
+	}
+
 	annotations[commonconsts.CheckpointRestoreCandidateAnnotation] = commonconsts.KubeLabelValueTrue
 	annotations[commonconsts.CheckpointNameAnnotation] = checkpointInfo.CheckpointName
+	annotations[commonconsts.RestoreCandidateSourceKindAnnotation] = commonconsts.RestoreCandidateSourcePodSnapshot
 	annotations[commonconsts.SnapshotCandidateUIDAnnotation] = string(checkpointInfo.NativeSnapshot.UID)
 	annotations[commonconsts.SnapshotCandidateContentAnnotation] = checkpointInfo.NativeSnapshot.BoundContentName
 	annotations[commonconsts.SnapshotCandidateGMSModeAnnotation] = checkpointInfo.NativeSnapshot.GMSMode
 	annotations[commonconsts.SnapshotCandidateVersionAnnotation] = checkpointInfo.NativeSnapshot.CompatibilityVersion
 	annotations[commonconsts.RestoreCandidateTargetContainersAnnotation] = strings.Join(targets, ",")
-	startupPolicy := checkpointInfo.StartupPolicy
-	if startupPolicy == "" {
-		startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
-	}
 	annotations[commonconsts.CheckpointStartupPolicyAnnotation] = string(startupPolicy)
 	return nil
 }
@@ -56,12 +82,29 @@ func ApplyRestoreCandidateMetadata(annotations map[string]string, checkpointInfo
 func removeRestoreCandidateMetadata(annotations map[string]string) {
 	delete(annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
 	delete(annotations, commonconsts.CheckpointNameAnnotation)
+	delete(annotations, commonconsts.RestoreCandidateSourceKindAnnotation)
+	delete(annotations, commonconsts.SnapshotJobCandidateUIDAnnotation)
 	delete(annotations, commonconsts.CheckpointStartupPolicyAnnotation)
 	delete(annotations, commonconsts.SnapshotCandidateUIDAnnotation)
 	delete(annotations, commonconsts.SnapshotCandidateContentAnnotation)
 	delete(annotations, commonconsts.SnapshotCandidateGMSModeAnnotation)
 	delete(annotations, commonconsts.SnapshotCandidateVersionAnnotation)
 	delete(annotations, commonconsts.RestoreCandidateTargetContainersAnnotation)
+}
+
+// AutomaticSnapshotJobReferenceFromAnnotations reads a renderer-owned
+// automatic candidate. Callers must independently establish that the
+// containing DCD is controlled by a DGD before trusting the private handoff.
+func AutomaticSnapshotJobReferenceFromAnnotations(annotations map[string]string) (*SnapshotJobReference, bool, error) {
+	if annotations[commonconsts.RestoreCandidateSourceKindAnnotation] != commonconsts.RestoreCandidateSourceSnapshotJob {
+		return nil, false, nil
+	}
+	name := strings.TrimSpace(annotations[commonconsts.CheckpointNameAnnotation])
+	uid := types.UID(strings.TrimSpace(annotations[commonconsts.SnapshotJobCandidateUIDAnnotation]))
+	if name == "" || uid == "" {
+		return nil, true, fmt.Errorf("SnapshotJob restore candidate requires a name and UID")
+	}
+	return &SnapshotJobReference{Name: name, UID: uid}, true, nil
 }
 
 // RestoreCandidateTargetContainers reads Dynamo's candidate-only restore destinations.

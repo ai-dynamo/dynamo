@@ -1666,24 +1666,6 @@ func AddTransportTLSEnvVars(container *corev1.Container, operatorConfig *configv
 	container.Env = MergeEnvs(tlsEnvVars, container.Env)
 }
 
-func applyCheckpointProbeCadence(
-	container *corev1.Container,
-	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-	checkpointInfo *checkpoint.CheckpointInfo,
-) {
-	if checkpointInfo != nil &&
-		checkpointInfo.Enabled &&
-		checkpointInfo.Ready &&
-		IsWorkerComponent(string(component.ComponentType)) {
-		if container.ReadinessProbe != nil {
-			container.ReadinessProbe.PeriodSeconds = 1
-		}
-		if container.StartupProbe != nil {
-			container.StartupProbe.PeriodSeconds = 1
-		}
-	}
-}
-
 // applyDefaultSecurityContext sets secure defaults for pod security context.
 // Currently only sets fsGroup to solve volume permission issues.
 // Does NOT set runAsUser/runAsGroup/runAsNonRoot to maintain backward compatibility
@@ -1773,8 +1755,6 @@ func GenerateBasePodSpec(
 	if err := backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer, containerGPUs); err != nil {
 		return nil, fmt.Errorf("failed to update container for backend %s: %w", backendFramework, err)
 	}
-	applyCheckpointProbeCadence(&container, component, checkpointInfo)
-
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
 	if err != nil {

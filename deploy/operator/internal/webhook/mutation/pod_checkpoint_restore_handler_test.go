@@ -187,6 +187,102 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 	})
 }
 
+func TestPodCheckpointRestoreMutatorAutomaticSnapshotJob(t *testing.T) {
+	t.Log("Register the Pod and Snapshot APIs used by the admission fixtures")
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	require.NoError(t, nvidiacomv1alpha1.AddToScheme(scheme))
+	require.NoError(t, snapshotv1alpha1.AddToScheme(scheme))
+	ctx := features.WithGate(context.Background(), features.Gates{Checkpoint: true})
+
+	t.Run("pending Immediate capture admits an unchanged cold-start Pod", func(t *testing.T) {
+		t.Log("Given an Immediate Pod pinned to an incomplete automatic SnapshotJob")
+		job := automaticRestoreTestJob(false)
+		pod := automaticRestoreCandidatePod(job, nvidiacomv1alpha1.CheckpointStartupPolicyImmediate)
+		mutator := automaticRestoreTestMutator(t, scheme, job)
+		req := podCreateAdmissionRequest(t, pod)
+
+		t.Log("When the Pod-create webhook evaluates the pending capture")
+		resp := mutator.Handle(ctx, req)
+
+		t.Log("Then admission preserves the cold-start Pod without Snapshot shaping")
+		assert.True(t, resp.Allowed)
+		assert.Empty(t, resp.Patches)
+	})
+
+	t.Run("pending WaitForCheckpoint capture fails closed", func(t *testing.T) {
+		t.Log("Given a WaitForCheckpoint Pod pinned to an incomplete automatic SnapshotJob")
+		job := automaticRestoreTestJob(false)
+		pod := automaticRestoreCandidatePod(job, nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint)
+		mutator := automaticRestoreTestMutator(t, scheme, job)
+		req := podCreateAdmissionRequest(t, pod)
+
+		t.Log("When the Pod-create webhook evaluates the pending capture")
+		resp := mutator.Handle(ctx, req)
+
+		t.Log("Then admission denies the Pod until the controller opens the startup gate")
+		assert.False(t, resp.Allowed)
+		require.NotNil(t, resp.Result)
+		assert.Contains(t, resp.Result.Message, "SnapshotJob has not completed")
+	})
+
+	t.Run("completed capture resolves and shapes the bound PodSnapshot", func(t *testing.T) {
+		t.Log("Given an automatic SnapshotJob completed with its original Ready PodSnapshot")
+		snapshot := nativeRestoreTestSnapshot()
+		job := automaticRestoreTestJob(true)
+		job.Status.PodSnapshotName = snapshot.Name
+		job.Status.PodSnapshotUID = snapshot.UID
+		pod := automaticRestoreCandidatePod(job, nvidiacomv1alpha1.CheckpointStartupPolicyImmediate)
+		original := mustMarshalPod(t, pod)
+		mutator := automaticRestoreTestMutator(t, scheme, job, snapshot)
+		req := podCreateAdmissionRequestWithRaw(pod, original)
+
+		t.Log("When the Pod-create webhook resolves the completed capture")
+		resp := mutator.Handle(ctx, req)
+
+		t.Log("Then admission emits the public Snapshot restore contract")
+		require.True(t, resp.Allowed)
+		shaped := applyAdmissionPatches(t, original, resp)
+		assert.Equal(t, snapshot.Name, shaped.Annotations[podcontract.RestoreFromAnnotation])
+		assert.NotContains(t, shaped.Annotations, consts.RestoreCandidateSourceKindAnnotation)
+		assert.NotContains(t, shaped.Annotations, consts.SnapshotJobCandidateUIDAnnotation)
+	})
+
+	t.Run("recreated SnapshotJob never restores through the stale candidate", func(t *testing.T) {
+		t.Log("Given an Immediate Pod pinned to the UID of a deleted SnapshotJob")
+		job := automaticRestoreTestJob(true)
+		pod := automaticRestoreCandidatePod(job, nvidiacomv1alpha1.CheckpointStartupPolicyImmediate)
+		job.UID = types.UID("replacement-job-uid")
+		mutator := automaticRestoreTestMutator(t, scheme, job)
+		req := podCreateAdmissionRequest(t, pod)
+
+		t.Log("When the Pod-create webhook finds a replacement Job with the same name")
+		resp := mutator.Handle(ctx, req)
+
+		t.Log("Then admission cold-starts instead of restoring from a different capture")
+		assert.True(t, resp.Allowed)
+		assert.Empty(t, resp.Patches)
+	})
+
+	t.Run("recreated PodSnapshot never restores through the completed job", func(t *testing.T) {
+		t.Log("Given a completed Job pinned to the UID of a deleted PodSnapshot")
+		snapshot := nativeRestoreTestSnapshot()
+		job := automaticRestoreTestJob(true)
+		job.Status.PodSnapshotName = snapshot.Name
+		job.Status.PodSnapshotUID = types.UID("original-snapshot-uid")
+		pod := automaticRestoreCandidatePod(job, nvidiacomv1alpha1.CheckpointStartupPolicyImmediate)
+		mutator := automaticRestoreTestMutator(t, scheme, job, snapshot)
+		req := podCreateAdmissionRequest(t, pod)
+
+		t.Log("When the Pod-create webhook finds a replacement snapshot with the same name")
+		resp := mutator.Handle(ctx, req)
+
+		t.Log("Then admission cold-starts instead of restoring from a different artifact")
+		assert.True(t, resp.Allowed)
+		assert.Empty(t, resp.Patches)
+	})
+}
+
 func TestUsesSupportedDynamoRestoreEntrypoint(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -287,6 +383,7 @@ func nativeRestoreCandidatePod(snapshot *snapshotv1alpha1.PodSnapshot) *corev1.P
 			Annotations: map[string]string{
 				consts.CheckpointRestoreCandidateAnnotation:       consts.KubeLabelValueTrue,
 				consts.CheckpointNameAnnotation:                   snapshot.Name,
+				consts.RestoreCandidateSourceKindAnnotation:       consts.RestoreCandidateSourcePodSnapshot,
 				consts.SnapshotCandidateUIDAnnotation:             string(snapshot.UID),
 				consts.SnapshotCandidateContentAnnotation:         "content-a",
 				consts.SnapshotCandidateGMSModeAnnotation:         consts.SnapshotGMSModeDisabled,
@@ -301,6 +398,69 @@ func nativeRestoreCandidatePod(snapshot *snapshotv1alpha1.PodSnapshot) *corev1.P
 			},
 		},
 	}
+}
+
+func automaticRestoreTestJob(completed bool) *snapshotv1alpha1.SnapshotJob {
+	job := &snapshotv1alpha1.SnapshotJob{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkpoint-worker",
+			Namespace: "default",
+			UID:       types.UID("job-uid"),
+		},
+	}
+	if completed {
+		job.Status.Conditions = []metav1.Condition{{
+			Type:   snapshotv1alpha1.SnapshotJobConditionCompleted,
+			Status: metav1.ConditionTrue,
+		}}
+	}
+	return job
+}
+
+func automaticRestoreCandidatePod(
+	job *snapshotv1alpha1.SnapshotJob,
+	policy nvidiacomv1alpha1.CheckpointStartupPolicy,
+) *corev1.Pod {
+	pod := nativeRestoreCandidatePod(nativeRestoreTestSnapshot())
+	pod.Annotations[consts.CheckpointNameAnnotation] = job.Name
+	pod.Annotations[consts.RestoreCandidateSourceKindAnnotation] = consts.RestoreCandidateSourceSnapshotJob
+	pod.Annotations[consts.SnapshotJobCandidateUIDAnnotation] = string(job.UID)
+	pod.Annotations[consts.CheckpointStartupPolicyAnnotation] = string(policy)
+	delete(pod.Annotations, consts.SnapshotCandidateUIDAnnotation)
+	delete(pod.Annotations, consts.SnapshotCandidateContentAnnotation)
+	delete(pod.Annotations, consts.SnapshotCandidateGMSModeAnnotation)
+	delete(pod.Annotations, consts.SnapshotCandidateVersionAnnotation)
+	return pod
+}
+
+func automaticRestoreTestMutator(
+	t *testing.T,
+	scheme *runtime.Scheme,
+	objects ...runtime.Object,
+) *PodCheckpointRestoreMutator {
+	t.Helper()
+	apiReader := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).Build()
+	mutator := NewPodCheckpointRestoreMutator(
+		apiReader,
+		&configv1alpha1.OperatorConfiguration{
+			Checkpoint: configv1alpha1.CheckpointConfiguration{Enabled: true},
+		},
+	)
+	mutator.scheme = scheme
+	return mutator
+}
+
+func podCreateAdmissionRequest(t *testing.T, pod *corev1.Pod) admission.Request {
+	t.Helper()
+	return podCreateAdmissionRequestWithRaw(pod, mustMarshalPod(t, pod))
+}
+
+func podCreateAdmissionRequestWithRaw(pod *corev1.Pod, raw []byte) admission.Request {
+	return admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{
+		Operation: admissionv1.Create,
+		Namespace: pod.Namespace,
+		Object:    runtime.RawExtension{Raw: raw},
+	}}
 }
 
 func applyAdmissionPatches(t *testing.T, original []byte, response admission.Response) *corev1.Pod {

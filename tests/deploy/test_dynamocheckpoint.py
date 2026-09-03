@@ -66,14 +66,19 @@ DEFAULT_MAX_TOKENS = 24
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REQUEST_TIMEOUT = 120
 MODEL_READY_MAX_ATTEMPTS = 6
-MODEL_READY_ATTEMPT_TIMEOUT = 10.0
+MODEL_READY_ATTEMPT_TIMEOUTS = [60.0, 30.0, 10.0, 10.0, 10.0, 10.0]
 CHECKPOINT_READY_TIMEOUT = 30
 RESTORE_READY_TIMEOUT = 30
-# Worst case: 750s deployment + 30s checkpoint + 30s restore + 115s model
-# polling/stabilization + 120s inference = 1045s. That leaves 155s of the
-# pytest budget for setup and ManagedDeployment cleanup.
-DEPLOYMENT_READY_TIMEOUT = 750
-TEST_TIMEOUT = 1200
+DECODE_SCALE_TIMEOUT = 60
+RESTORED_DEPLOYMENT_READY_TIMEOUT = 180
+# WaitForCheckpoint: 900s deployment + 30s checkpoint + 30s restore + 180s
+# restored readiness + 305s model/inference = 1445s. Immediate uses a 600s
+# initial deployment budget and adds one 305s initial-inference pass plus a 60s
+# scale-down wait, for 1510s total. The pytest ceiling leaves cleanup time and
+# remains below the job's 30-minute timeout.
+DEPLOYMENT_READY_TIMEOUT = 900
+IMMEDIATE_DEPLOYMENT_READY_TIMEOUT = 600
+TEST_TIMEOUT = 1680
 
 
 @dataclass(frozen=True)
@@ -140,8 +145,6 @@ CHECKPOINT_BACKENDS = {
             "--trust-remote-code",
             "--skip-tokenizer-init",
         ),
-        # Same cold-worker/restore rollout race as vLLM; see above.
-        checkpoint_startup_policy="WaitForCheckpoint",
     ),
     "trtllm": CheckpointBackendConfig(
         name="trtllm",
@@ -465,6 +468,7 @@ async def _wait_for_restored_decode_pod(
     deployment: ManagedDeployment,
     backend: CheckpointBackendConfig,
     snapshot_name: str,
+    old_pod_names: set[str] | None = None,
 ) -> Any:
     def find_restored() -> Any:
         pods = _runtime_decode_pods(deployment, backend)
@@ -472,6 +476,8 @@ async def _wait_for_restored_decode_pod(
         for pod in pods:
             metadata = pod.raw.get("metadata", {})
             name = metadata.get("name", pod.name)
+            if old_pod_names is not None and name in old_pod_names:
+                continue
             annotations = metadata.get("annotations", {})
             last_seen.append(
                 {
@@ -508,6 +514,47 @@ async def _wait_for_restored_decode_pod(
     )
     logger.info("Restored decode pod: %s", restored.name)
     return restored
+
+
+async def _scale_decode_component(
+    deployment: ManagedDeployment,
+    backend: CheckpointBackendConfig,
+    replicas: int,
+) -> None:
+    if deployment._custom_api is None:
+        raise RuntimeError("Kubernetes API not initialized")
+    dgd = await _get_dgd(deployment)
+    components = dgd["spec"]["components"]
+    for component in components:
+        if component.get("name") == backend.decode_component:
+            component["replicas"] = replicas
+            break
+    else:
+        raise AssertionError(f"component {backend.decode_component!r} not found")
+
+    await deployment._custom_api.patch_namespaced_custom_object(
+        group="nvidia.com",
+        version=deployment.deployment_spec.api_version,
+        namespace=deployment.namespace,
+        plural=DGD_PLURAL,
+        name=deployment.deployment_spec.name,
+        body={"spec": {"components": components}},
+        _content_type="application/merge-patch+json",
+    )
+
+
+async def _wait_for_decode_runtime_pod_count(
+    deployment: ManagedDeployment,
+    backend: CheckpointBackendConfig,
+    expected: int,
+) -> list[Any]:
+    return await _wait_for(
+        f"{expected} {backend.name} decode runtime pod(s)",
+        lambda: _runtime_decode_pods(deployment, backend),
+        lambda pods: len(pods) == expected,
+        timeout_s=DECODE_SCALE_TIMEOUT,
+        interval_s=2,
+    )
 
 
 def _assert_chat_response(response: requests.Response, expected_model: str) -> None:
@@ -549,7 +596,7 @@ def _assert_inference(base_url: str, endpoint: str, model: str) -> None:
         model=model,
         logger=logger,
         max_attempts=MODEL_READY_MAX_ATTEMPTS,
-        attempt_timeouts=[MODEL_READY_ATTEMPT_TIMEOUT] * MODEL_READY_MAX_ATTEMPTS,
+        attempt_timeouts=MODEL_READY_ATTEMPT_TIMEOUTS,
     )
     if not model_ready:
         pytest.fail(f"model {model!r} did not become available", pytrace=False)
@@ -570,12 +617,13 @@ def _assert_inference(base_url: str, endpoint: str, model: str) -> None:
     _assert_chat_response(response, expected_model=model)
 
 
-@pytest.mark.dynamocheckpoint
+# The SGLang Immediate case runs a worker while its capture Job holds one GPU.
+@pytest.mark.snapshot_restore
 @pytest.mark.k8s
 @pytest.mark.deploy
 @pytest.mark.post_merge
 @pytest.mark.e2e
-@pytest.mark.gpu_1
+@pytest.mark.gpu_2
 @pytest.mark.timeout(TEST_TIMEOUT)
 async def test_dgd_checkpoint_restore_deploy(
     namespace: str,
@@ -616,7 +664,11 @@ async def test_dgd_checkpoint_restore_deploy(
         deployment_spec=deployment_spec,
         namespace=namespace,
         skip_service_restart=skip_service_restart,
-        readiness_timeout=DEPLOYMENT_READY_TIMEOUT,
+        readiness_timeout=(
+            DEPLOYMENT_READY_TIMEOUT
+            if backend.checkpoint_startup_policy is not None
+            else IMMEDIATE_DEPLOYMENT_READY_TIMEOUT
+        ),
     ) as deployment:
         frontend_pods = deployment.get_pods([backend.frontend_component]).get(
             backend.frontend_component, []
@@ -628,19 +680,34 @@ async def test_dgd_checkpoint_restore_deploy(
             pytest.fail("failed to establish frontend port-forward", pytrace=False)
         base_url = f"http://localhost:{port_forward.local_port}"
 
+        old_pod_names: set[str] | None = None
+        if backend.checkpoint_startup_policy is None:
+            initial_pods = await _wait_for_decode_runtime_pod_count(
+                deployment, backend, expected=1
+            )
+            old_pod_names = {pod.name for pod in initial_pods}
+            logger.info("Validating inference on the initial Immediate worker")
+            _assert_inference(base_url, deployment_spec.endpoint, backend.model)
+
         snapshot_name = await _wait_for_checkpoint_ready(deployment, backend)
 
-        # Every backend runs WaitForCheckpoint, which holds the decode component
-        # at zero replicas until the automatic capture completes. The first
-        # runtime decode pod is therefore already a restore target, so validating
-        # it here covers the restore path with a single restore per run and
-        # without a cold-worker/restore rollout overlap. Repeated restore cycles
-        # (scale to zero, scale back up) belong in a separate soak test.
+        if old_pod_names is not None:
+            logger.info("Scaling Immediate decode worker down after capture")
+            await _scale_decode_component(deployment, backend, replicas=0)
+            await _wait_for_decode_runtime_pod_count(
+                deployment, backend, expected=0
+            )
+            logger.info("Scaling Immediate decode worker up to trigger restore")
+            await _scale_decode_component(deployment, backend, replicas=1)
+
         await _wait_for_restored_decode_pod(
             deployment,
             backend=backend,
             snapshot_name=snapshot_name,
+            old_pod_names=old_pod_names,
         )
+
+        await deployment._wait_for_ready(timeout=RESTORED_DEPLOYMENT_READY_TIMEOUT)
 
         logger.info("Validating inference on the restored worker")
         _assert_inference(base_url, deployment_spec.endpoint, backend.model)

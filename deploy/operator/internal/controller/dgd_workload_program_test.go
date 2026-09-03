@@ -848,20 +848,33 @@ func TestComponentWorkloadsReconciler_ApplyPendingAutomaticSnapshotPolicy(t *tes
 				},
 			}
 			info := &checkpoint.CheckpointInfo{
-				Enabled:       true,
-				StartupPolicy: tt.startupPolicy,
+				Enabled:          true,
+				AutomaticCapture: true,
+				StartupPolicy:    tt.startupPolicy,
+				AutomaticSnapshotJob: &checkpoint.SnapshotJobReference{
+					Name: "checkpoint-worker",
+					UID:  types.UID("snapshot-job-uid"),
+				},
 			}
 
 			t.Log("Apply startup behavior before a PodSnapshot reference exists")
 			reconciler := &componentWorkloadsReconciler{}
 			require.NoError(t, reconciler.applyCheckpointStartupPolicy(dcd, info))
 
-			t.Log("Verify no restore candidate is published before a PodSnapshot exists")
+			t.Log("Verify Immediate publishes a stable job candidate while Wait remains scaled to zero")
 			assert.Equal(t, tt.wantReplicas, *dcd.Spec.Replicas)
 			if dcd.Spec.Experimental != nil && dcd.Spec.Experimental.Checkpoint != nil {
 				assert.Nil(t, dcd.Spec.Experimental.Checkpoint.CheckpointRef)
 			}
-			if dcd.Spec.PodTemplate != nil {
+			if tt.startupPolicy == nvidiacomv1alpha1.CheckpointStartupPolicyImmediate {
+				require.NotNil(t, dcd.Spec.PodTemplate)
+				assert.Equal(t, commonconsts.KubeLabelValueTrue,
+					dcd.Spec.PodTemplate.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
+				assert.Equal(t, commonconsts.RestoreCandidateSourceSnapshotJob,
+					dcd.Spec.PodTemplate.Annotations[commonconsts.RestoreCandidateSourceKindAnnotation])
+				assert.Equal(t, "snapshot-job-uid",
+					dcd.Spec.PodTemplate.Annotations[commonconsts.SnapshotJobCandidateUIDAnnotation])
+			} else if dcd.Spec.PodTemplate != nil {
 				assert.NotContains(t, dcd.Spec.PodTemplate.Annotations,
 					commonconsts.CheckpointRestoreCandidateAnnotation)
 			}

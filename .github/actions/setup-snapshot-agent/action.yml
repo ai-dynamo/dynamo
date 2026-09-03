@@ -54,6 +54,10 @@ runs:
       run: |
         echo "::group::Install snapshot-agent"
         set -euo pipefail
+        if [[ -z "${STORAGE_CLASS}" ]]; then
+          echo "::error::storage_class input is required"
+          exit 1
+        fi
 
         # Install the externally published github.com/ai-dynamo/snapshot chart
         # at a pinned version, using its own default (pinned-to-chart-appVersion)

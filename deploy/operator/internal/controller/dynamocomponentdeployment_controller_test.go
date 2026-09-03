@@ -28,6 +28,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -48,6 +49,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
@@ -1836,6 +1838,63 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 		}
 	}
+	stampAutomaticCandidate := func(t *testing.T, dcd *v1beta1.DynamoComponentDeployment) {
+		t.Helper()
+		require.NotNil(t, dcd.Spec.PodTemplate)
+		if dcd.Spec.PodTemplate.Annotations == nil {
+			dcd.Spec.PodTemplate.Annotations = map[string]string{}
+		}
+		require.NoError(t, checkpoint.ApplyRestoreCandidateMetadata(
+			dcd.Spec.PodTemplate.Annotations,
+			&checkpoint.CheckpointInfo{
+				Enabled:          true,
+				AutomaticCapture: true,
+				StartupPolicy:    v1alpha1.CheckpointStartupPolicyImmediate,
+				AutomaticSnapshotJob: &checkpoint.SnapshotJobReference{
+					Name: "checkpoint-job",
+					UID:  types.UID("snapshot-job-uid"),
+				},
+			},
+		))
+	}
+
+	t.Run("automatic capture completion does not change the Immediate Pod template", func(t *testing.T) {
+		t.Log("Given the same custom-target DGD-managed SnapshotJob candidate before and after its PodSnapshot is Ready")
+		pendingDCD := makeDCD("")
+		pendingDCD.Spec.Experimental.Checkpoint.TargetContainerName = "engine-0"
+		pendingDCD.Spec.PodTemplate.Spec.Containers = append(
+			pendingDCD.Spec.PodTemplate.Spec.Containers,
+			corev1.Container{Name: "engine-0", Image: "test-image:latest"},
+		)
+		stampAutomaticCandidate(t, pendingDCD)
+		readyDCD := makeDCD("worker-snapshot")
+		readyDCD.Spec.Experimental.Checkpoint.TargetContainerName = "engine-0"
+		readyDCD.Spec.PodTemplate.Spec.Containers = append(
+			readyDCD.Spec.PodTemplate.Spec.Containers,
+			corev1.Container{Name: "engine-0", Image: "test-image:latest"},
+		)
+		stampAutomaticCandidate(t, readyDCD)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot.Spec.Source.PodRef.Containers = []string{"engine-0"}
+
+		t.Log("When the pending and Ready DCDs render their workload Pod templates")
+		pendingTemplate, err := makeReconciler(pendingDCD).workloadRenderer().generatePodTemplateSpec(
+			context.Background(), pendingDCD, dynamo.RoleMain, noContainerGPUs(),
+		)
+		require.NoError(t, err)
+		readyTemplate, err := makeReconciler(readyDCD, snapshot).workloadRenderer().generatePodTemplateSpec(
+			context.Background(), readyDCD, dynamo.RoleMain, noContainerGPUs(),
+		)
+		require.NoError(t, err)
+
+		t.Log("Then readiness changes controller state without triggering a worker rollout")
+		assert.Equal(t, pendingTemplate, readyTemplate)
+		assert.Equal(t, commonconsts.RestoreCandidateSourceSnapshotJob,
+			readyTemplate.Annotations[commonconsts.RestoreCandidateSourceKindAnnotation])
+		assert.Equal(t, "checkpoint-job", readyTemplate.Annotations[commonconsts.CheckpointNameAnnotation])
+		assert.Equal(t, "engine-0", readyTemplate.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
+	})
+
 	t.Run("DGD-managed checkpointRef resolves only a native PodSnapshot", func(t *testing.T) {
 		t.Log("Given a DGD-managed DCD reference and a Ready compatible PodSnapshot")
 		dcd := makeDCD("worker-snapshot")
@@ -1852,6 +1911,8 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 
 		t.Log("Then native identity is pinned for admission without legacy artifact metadata")
 		require.NoError(t, err)
+		assert.Equal(t, commonconsts.RestoreCandidateSourcePodSnapshot,
+			podTemplateSpec.Annotations[commonconsts.RestoreCandidateSourceKindAnnotation])
 		assert.Equal(t, string(snapshot.UID), podTemplateSpec.Annotations[commonconsts.SnapshotCandidateUIDAnnotation])
 		assert.Equal(t, "content-a", podTemplateSpec.Annotations[commonconsts.SnapshotCandidateContentAnnotation])
 		assert.Equal(t, commonconsts.MainContainerName, podTemplateSpec.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])

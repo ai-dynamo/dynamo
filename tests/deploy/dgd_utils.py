@@ -1305,7 +1305,7 @@ class ManagedDeployment:
         pod_name: str,
         container: str,
     ) -> Optional[str]:
-        """Fetch the full previous-instance log for a container.
+        """Fetch a bounded previous-instance log for a container.
 
         Returns the log as a single string, or None if no previous instance
         exists or the API call fails. The caller preserves it before a later
@@ -1318,6 +1318,7 @@ class ManagedDeployment:
                 namespace=self.namespace,
                 container=container,
                 previous=True,
+                tail_lines=50000,
             )
             return log if isinstance(log, str) else str(log)
         except exceptions.ApiException as e:

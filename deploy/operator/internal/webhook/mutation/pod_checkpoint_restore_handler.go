@@ -16,9 +16,12 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -97,7 +100,7 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 	}
 	checkpointName := pod.Annotations[consts.CheckpointNameAnnotation]
 	if checkpointName == "" {
-		return admission.Denied("restore candidate has no PodSnapshot name")
+		return admission.Denied("restore candidate has no source name")
 	}
 	if pod.Labels == nil ||
 		pod.Labels[consts.KubeLabelDynamoComponent] == "" ||
@@ -107,12 +110,16 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 		return admission.Denied("restore candidate is not operator-stamped")
 	}
 
-	// Candidates are rebuilt from the public Snapshot contract and fail closed.
-	shaped, err := h.buildNativeRestorePod(ctx, pod, podNamespace)
+	// Candidates are rebuilt from the public Snapshot contract. An automatic
+	// Immediate candidate remains a cold-start Pod until its job completes.
+	shaped, restore, err := h.buildRestoreCandidatePod(ctx, pod, podNamespace)
 	if err != nil {
 		logger.Error(err, "restore candidate rejected",
 			"namespace", podNamespace, "pod", pod.Name, "snapshot", checkpointName)
 		return admission.Denied(err.Error())
+	}
+	if !restore {
+		return admission.Allowed("automatic snapshot is not ready; Immediate policy permits cold start")
 	}
 	pod = shaped
 
@@ -125,17 +132,28 @@ func (h *PodCheckpointRestoreMutator) Handle(ctx context.Context, req admission.
 	return admission.PatchResponseFromRaw(original, mutated)
 }
 
-func (h *PodCheckpointRestoreMutator) buildNativeRestorePod(
+func (h *PodCheckpointRestoreMutator) buildRestoreCandidatePod(
+	ctx context.Context,
+	pod *corev1.Pod,
+	podNamespace string,
+) (*corev1.Pod, bool, error) {
+	switch pod.Annotations[consts.RestoreCandidateSourceKindAnnotation] {
+	case consts.RestoreCandidateSourcePodSnapshot:
+		shaped, err := h.buildPinnedPodSnapshotRestorePod(ctx, pod, podNamespace)
+		return shaped, err == nil, err
+	case consts.RestoreCandidateSourceSnapshotJob:
+		return h.buildAutomaticSnapshotJobRestorePod(ctx, pod, podNamespace)
+	default:
+		return nil, false, fmt.Errorf("restore candidate has unsupported source kind %q", pod.Annotations[consts.RestoreCandidateSourceKindAnnotation])
+	}
+}
+
+func (h *PodCheckpointRestoreMutator) buildPinnedPodSnapshotRestorePod(
 	ctx context.Context,
 	pod *corev1.Pod,
 	podNamespace string,
 ) (*corev1.Pod, error) {
 	snapshotName := pod.Annotations[consts.CheckpointNameAnnotation]
-	workerHash := pod.Labels[consts.KubeLabelDynamoWorkerHash]
-	var expectedWorkerHash *string
-	if dynamo.IsWorkerComponent(pod.Labels[consts.KubeLabelDynamoComponentType]) {
-		expectedWorkerHash = &workerHash
-	}
 	config := &nvidiacomv1alpha1.ServiceCheckpointConfig{
 		Enabled:       true,
 		CheckpointRef: &snapshotName,
@@ -148,7 +166,7 @@ func (h *PodCheckpointRestoreMutator) buildNativeRestorePod(
 		h.apiReader,
 		podNamespace,
 		config,
-		expectedWorkerHash,
+		expectedWorkerHashForPod(pod),
 		checkpoint.PinnedPodSnapshotUse(),
 	)
 	if err != nil {
@@ -160,6 +178,102 @@ func (h *PodCheckpointRestoreMutator) buildNativeRestorePod(
 	if err := validateNativeSnapshotCandidate(pod.Annotations, info.NativeSnapshot); err != nil {
 		return nil, err
 	}
+	return h.shapeNativeRestorePod(pod, snapshotName, info.NativeSnapshot)
+}
+
+func (h *PodCheckpointRestoreMutator) buildAutomaticSnapshotJobRestorePod(
+	ctx context.Context,
+	pod *corev1.Pod,
+	podNamespace string,
+) (*corev1.Pod, bool, error) {
+	policy := nvidiacomv1alpha1.CheckpointStartupPolicy(pod.Annotations[consts.CheckpointStartupPolicyAnnotation])
+	if policy == "" {
+		policy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
+	}
+	if policy != nvidiacomv1alpha1.CheckpointStartupPolicyImmediate &&
+		policy != nvidiacomv1alpha1.CheckpointStartupPolicyWaitForCheckpoint {
+		return nil, false, fmt.Errorf("restore candidate has unsupported checkpoint startup policy %q", policy)
+	}
+
+	jobName := pod.Annotations[consts.CheckpointNameAnnotation]
+	expectedJobUID := types.UID(pod.Annotations[consts.SnapshotJobCandidateUIDAnnotation])
+	if expectedJobUID == "" {
+		return nil, false, fmt.Errorf("automatic restore candidate has no SnapshotJob UID")
+	}
+	job := &snapshotv1alpha1.SnapshotJob{}
+	err := h.apiReader.Get(ctx, types.NamespacedName{Namespace: podNamespace, Name: jobName}, job)
+	if apierrors.IsNotFound(err) {
+		return automaticCandidateUnavailable(policy, "SnapshotJob no longer exists")
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("get automatic SnapshotJob %s/%s: %w", podNamespace, jobName, err)
+	}
+	if job.UID != expectedJobUID {
+		return automaticCandidateUnavailable(policy, "SnapshotJob UID changed after workload reconciliation")
+	}
+	if snapshotv1alpha1.IsSnapshotJobFailed(job) {
+		return automaticCandidateUnavailable(policy, "SnapshotJob failed")
+	}
+	if !snapshotv1alpha1.IsSnapshotJobCompleted(job) {
+		return automaticCandidateUnavailable(policy, "SnapshotJob has not completed")
+	}
+	if job.Status.PodSnapshotName == "" || job.Status.PodSnapshotUID == "" {
+		return nil, false, fmt.Errorf("completed SnapshotJob %s/%s has no PodSnapshot identity", podNamespace, jobName)
+	}
+
+	snapshotName := job.Status.PodSnapshotName
+	config := &nvidiacomv1alpha1.ServiceCheckpointConfig{
+		Enabled:       true,
+		CheckpointRef: &snapshotName,
+	}
+	info, err := checkpoint.ResolvePodSnapshotForService(
+		ctx,
+		h.apiReader,
+		podNamespace,
+		config,
+		expectedWorkerHashForPod(pod),
+		checkpoint.PinnedPodSnapshotUse(),
+	)
+	if apierrors.IsNotFound(err) {
+		return automaticCandidateUnavailable(policy, "SnapshotJob PodSnapshot no longer exists")
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if info.NativeSnapshot.UID != job.Status.PodSnapshotUID {
+		return automaticCandidateUnavailable(policy, "SnapshotJob PodSnapshot UID changed")
+	}
+	if !info.Ready {
+		return automaticCandidateUnavailable(policy, "SnapshotJob PodSnapshot is not Ready")
+	}
+
+	shaped, err := h.shapeNativeRestorePod(pod, snapshotName, info.NativeSnapshot)
+	return shaped, err == nil, err
+}
+
+func automaticCandidateUnavailable(
+	policy nvidiacomv1alpha1.CheckpointStartupPolicy,
+	reason string,
+) (*corev1.Pod, bool, error) {
+	if policy == nvidiacomv1alpha1.CheckpointStartupPolicyImmediate {
+		return nil, false, nil
+	}
+	return nil, false, fmt.Errorf("automatic restore candidate unavailable: %s", reason)
+}
+
+func expectedWorkerHashForPod(pod *corev1.Pod) *string {
+	if !dynamo.IsWorkerComponent(pod.Labels[consts.KubeLabelDynamoComponentType]) {
+		return nil
+	}
+	workerHash := pod.Labels[consts.KubeLabelDynamoWorkerHash]
+	return &workerHash
+}
+
+func (h *PodCheckpointRestoreMutator) shapeNativeRestorePod(
+	pod *corev1.Pod,
+	snapshotName string,
+	resolved *checkpoint.ResolvedPodSnapshot,
+) (*corev1.Pod, error) {
 
 	// Dynamo chooses restore destinations from its rendered topology while the
 	// immutable PodSnapshot spec remains authoritative for the captured source.
@@ -170,14 +284,14 @@ func (h *PodCheckpointRestoreMutator) buildNativeRestorePod(
 	mappings := make([]podcontract.ContainerMapping, 0, len(targets))
 	for _, target := range targets {
 		mappings = append(mappings, podcontract.ContainerMapping{
-			Source:      info.NativeSnapshot.SourceContainer,
+			Source:      resolved.SourceContainer,
 			Destination: target,
 		})
 	}
 
 	request := podcontract.Request{
 		SnapshotName:    snapshotName,
-		SourceContainer: info.NativeSnapshot.SourceContainer,
+		SourceContainer: resolved.SourceContainer,
 		Mappings:        mappings,
 	}
 	options := podcontract.Options{
@@ -318,6 +432,8 @@ func isOperandFreePythonInterpreterFlag(argument string) bool {
 func removeRestoreCandidateAnnotations(annotations map[string]string) {
 	delete(annotations, consts.CheckpointRestoreCandidateAnnotation)
 	delete(annotations, consts.CheckpointNameAnnotation)
+	delete(annotations, consts.RestoreCandidateSourceKindAnnotation)
+	delete(annotations, consts.SnapshotJobCandidateUIDAnnotation)
 	delete(annotations, consts.CheckpointStartupPolicyAnnotation)
 	delete(annotations, consts.SnapshotCandidateUIDAnnotation)
 	delete(annotations, consts.SnapshotCandidateContentAnnotation)

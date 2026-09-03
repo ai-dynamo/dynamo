@@ -272,6 +272,10 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 	}
 
 	alphaCheckpointConfig := dynamo.ToAlphaCheckpointConfig(checkpointConfig)
+	automaticSnapshotJob, err := automaticSnapshotJobReferenceForDCD(dcd)
+	if err != nil {
+		return nil, err
+	}
 	var info *checkpoint.CheckpointInfo
 	if checkpointConfig.CheckpointRef == nil || *checkpointConfig.CheckpointRef == "" {
 		// A DGD-generated DCD temporarily has no reference while its automatic
@@ -281,11 +285,16 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 			startupPolicy = nvidiacomv1alpha1.CheckpointStartupPolicyImmediate
 		}
 		info = &checkpoint.CheckpointInfo{
-			Enabled:       true,
-			StartupPolicy: startupPolicy,
+			Enabled:              true,
+			AutomaticCapture:     automaticSnapshotJob != nil,
+			StartupPolicy:        startupPolicy,
+			AutomaticSnapshotJob: automaticSnapshotJob,
+		}
+		// Preserve an explicit capture target across the pending-to-Ready handoff.
+		if alphaCheckpointConfig.TargetContainerName != "" {
+			info.RestoreTargetContainers = []string{alphaCheckpointConfig.TargetContainerName}
 		}
 	} else {
-		var err error
 		workerHash := dynamo.GetDCDEffectiveWorkerHash(dcd)
 		var expectedWorkerHash *string
 		if dynamo.IsWorkerComponent(string(component.ComponentType)) {
@@ -302,13 +311,16 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
 		}
+		if automaticSnapshotJob != nil {
+			info.AutomaticCapture = true
+			info.AutomaticSnapshotJob = automaticSnapshotJob
+		}
 	}
 	if dynamo.IsIntraPodFailoverEnabled(&dcd.Spec.DynamoComponentDeploymentSharedSpec) {
 		info.RestoreTargetContainers = dynamo.IntraPodFailoverEngineContainerNames()
 	}
 
 	serviceGMS := dynamo.GetGPUMemoryService(component)
-	var err error
 	if info.NativeSnapshot != nil {
 		err = gms.OverlayCompatibleSnapshotClients(&info.GPUMemoryService, info.CheckpointName, serviceGMS)
 	} else {
@@ -321,21 +333,45 @@ func (r *dcdWorkloadRenderer) resolveCheckpointInfo(
 }
 
 func podSnapshotUseForDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) checkpoint.PodSnapshotUse {
+	ownerUID, managed := managedDGDUIDForDCD(dcd)
+	if !managed {
+		return checkpoint.ExplicitPodSnapshotUse()
+	}
+	return checkpoint.ManagedPodSnapshotUse(ownerUID)
+}
+
+func automaticSnapshotJobReferenceForDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) (*checkpoint.SnapshotJobReference, error) {
+	if _, managed := managedDGDUIDForDCD(dcd); !managed {
+		return nil, nil
+	}
+	reference, found, err := checkpoint.AutomaticSnapshotJobReferenceFromAnnotations(
+		dynamo.GetPodTemplateAnnotations(&dcd.Spec.DynamoComponentDeploymentSharedSpec),
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "invalid automatic SnapshotJob restore candidate")
+	}
+	if !found {
+		return nil, nil
+	}
+	return reference, nil
+}
+
+func managedDGDUIDForDCD(dcd *nvidiacomv1beta1.DynamoComponentDeployment) (types.UID, bool) {
 	// Only a concrete DGD controller reference can grant managed restore authority.
 	controller := metav1.GetControllerOf(dcd)
 	if controller == nil ||
 		controller.Kind != nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind ||
 		controller.UID == "" {
-		return checkpoint.ExplicitPodSnapshotUse()
+		return "", false
 	}
 
 	// Accept any served DGD API version from Dynamo's API group.
 	groupVersion, err := schema.ParseGroupVersion(controller.APIVersion)
 	if err != nil || groupVersion.Group != nvidiacomv1beta1.GroupVersion.Group {
-		return checkpoint.ExplicitPodSnapshotUse()
+		return "", false
 	}
 
-	return checkpoint.ManagedPodSnapshotUse(controller.UID)
+	return controller.UID, true
 }
 
 func (r *dcdWorkloadRenderer) generateService(

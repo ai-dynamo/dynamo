@@ -106,6 +106,15 @@ const (
 	CheckpointRestoreCandidateAnnotation = "nvidia.com/dynamo-checkpoint-restore-candidate"
 	// CheckpointNameAnnotation stores the candidate checkpoint resource name.
 	CheckpointNameAnnotation = "nvidia.com/dynamo-checkpoint-name"
+	// RestoreCandidateSourceKindAnnotation identifies whether the private
+	// admission handoff names a PodSnapshot or the SnapshotJob that will
+	// eventually produce one.
+	RestoreCandidateSourceKindAnnotation = "nvidia.com/dynamo-restore-source-kind"
+	RestoreCandidateSourcePodSnapshot    = "PodSnapshot"
+	RestoreCandidateSourceSnapshotJob    = "SnapshotJob"
+	// SnapshotJobCandidateUIDAnnotation pins an automatic candidate to one
+	// immutable SnapshotJob incarnation while capture is still pending.
+	SnapshotJobCandidateUIDAnnotation = "nvidia.com/dynamo-restore-snapshot-job-uid"
 	// CheckpointStartupPolicyAnnotation stores the DGD checkpoint startup policy
 	// on generated pod templates for debugging and admission.
 	CheckpointStartupPolicyAnnotation = "nvidia.com/dynamo-checkpoint-startup-policy"

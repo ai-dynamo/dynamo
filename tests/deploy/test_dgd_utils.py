@@ -33,8 +33,8 @@ def test_logging_config_reads_existing_v1beta1_env(tmp_path) -> None:
     assert deployment_spec.get_logging_config()["jsonl_enabled"] is True
 
 
-async def test_in_flight_restart_preserves_full_previous_log(tmp_path) -> None:
-    """Keep each observed previous instance after Kubernetes rotates again."""
+async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> None:
+    """Keep a bounded previous-instance log before Kubernetes rotates again."""
     deployment = ManagedDeployment(
         log_dir=str(tmp_path),
         deployment_spec=SimpleNamespace(name="test-dgd"),
@@ -65,3 +65,10 @@ async def test_in_flight_restart_preserves_full_previous_log(tmp_path) -> None:
     assert "third line" in warnings[0]
     preserved = tmp_path / "restarts" / "worker-0.main.restart-1.previous.log"
     assert preserved.read_text() == "first line\nsecond line\nthird line\n"
+    deployment._core_api.read_namespaced_pod_log.assert_awaited_once_with(
+        name="worker-0",
+        namespace="default",
+        container="main",
+        previous=True,
+        tail_lines=50000,
+    )

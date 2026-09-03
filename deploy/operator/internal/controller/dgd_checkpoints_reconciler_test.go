@@ -1170,6 +1170,8 @@ func TestDGDCheckpointsReconciler_AutomaticRestoreWaitsForSnapshotJobCompletion(
 	require.NoError(t, reconciler.List(ctx, jobs, client.InNamespace("default")))
 	require.Len(t, jobs.Items, 1)
 	job := jobs.Items[0].DeepCopy()
+	// controller-runtime's fake client does not assign API-server UIDs.
+	job.UID = types.UID("snapshot-job-uid")
 	workerHash, err := checkpointWorkerHashForComponent(dgd, "worker")
 	require.NoError(t, err)
 	snapshot := dgdTestPodSnapshot(job.Name, workerHash, true)
