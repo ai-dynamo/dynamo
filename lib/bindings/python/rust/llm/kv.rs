@@ -20,8 +20,6 @@ use crate::Endpoint;
     feature = "select-service"
 ))]
 use clap::Parser;
-#[cfg(feature = "custom-policy")]
-use dynamo_kv_router::WorkerSelectionPolicy;
 use dynamo_kv_router::WorkerSelectionPolicyFactory;
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::config::try_kv_router_config_from_dynamo_env;
@@ -43,20 +41,15 @@ use dynamo_kv_router::services::selection::{
 use dynamo_kv_router::services::slot_tracker::{self, SlotTrackerConfig};
 #[cfg(feature = "select-service")]
 use dynamo_kv_router::{TrackingHashAlgorithm, WorkerType};
+use llm_rs::kv_router::SelectionPolicySource;
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::protocols::annotated::Annotated as RsAnnotated;
 use tracing;
 
 use llm_rs::discovery::LoadThresholdConfig as RsLoadThresholdConfig;
 use llm_rs::kv_router::RoutingHost;
-#[cfg(not(feature = "custom-policy"))]
 type RsRoutingHost = RoutingHost;
-#[cfg(feature = "custom-policy")]
-type RsRoutingHost = RoutingHost<WorkerSelectionPolicy>;
-#[cfg(not(feature = "custom-policy"))]
 type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter;
-#[cfg(feature = "custom-policy")]
-type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter<WorkerSelectionPolicy>;
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
@@ -2015,14 +2008,33 @@ async fn create_kv_router_from_endpoint(
     .await?;
 
     #[cfg(not(feature = "custom-policy"))]
+    let selection_policy = SelectionPolicySource::Registry;
+    #[cfg(feature = "custom-policy")]
+    let selection_policy = match worker_selection_policy_factory {
+        None => SelectionPolicySource::Registry,
+        // The policy sees the card's typed role and display name, which can
+        // differ from the metric role and the routing model name.
+        Some(factory) => {
+            let policy_worker_role = policy_worker_role
+                .expect("a configured worker-selection policy waits for a typed model card above");
+            let policy_model_name = policy_model_name.unwrap_or_default();
+            SelectionPolicySource::Factory(Arc::new(move |config, _worker_type, _partition| {
+                factory(
+                    config,
+                    policy_worker_role,
+                    dynamo_kv_router::RoutingPartitionRef::new(
+                        &policy_model_name,
+                        dynamo_kv_router::DEFAULT_ROUTING_GROUP,
+                    ),
+                )
+            }))
+        }
+    };
     let kv_router = model_manager
-        .kv_chooser_for_with_selector_and_client(
+        .kv_chooser_for_with_policy_and_client(
             client,
             block_size as u32,
-            dynamo_kv_router::DefaultWorkerSelector::new(
-                kv_router_config.clone(),
-                metric_worker_type,
-            ),
+            selection_policy,
             kv_router_config,
             prefill_load_estimator,
             worker_role,
@@ -2033,42 +2045,6 @@ async fn create_kv_router_from_endpoint(
             load_context.cancellation_token(),
         )
         .await?;
-
-    #[cfg(feature = "custom-policy")]
-    let kv_router = {
-        let effective_config = kv_router_config.clone().unwrap_or_default();
-        let selector = worker_selection_policy_factory.map_or_else(
-            || WorkerSelectionPolicy::default(effective_config.clone(), metric_worker_type),
-            |factory| {
-                let policy_worker_role = policy_worker_role.expect(
-                    "a configured worker-selection policy waits for a typed model card above",
-                );
-                factory(
-                    &effective_config,
-                    policy_worker_role,
-                    dynamo_kv_router::RoutingPartitionRef::new(
-                        policy_model_name.as_deref().unwrap_or_default(),
-                        dynamo_kv_router::DEFAULT_ROUTING_GROUP,
-                    ),
-                )
-            },
-        );
-        model_manager
-            .kv_chooser_for_with_selector_and_client(
-                client,
-                block_size as u32,
-                selector,
-                kv_router_config,
-                prefill_load_estimator,
-                worker_role,
-                metric_worker_type,
-                model_name,
-                enable_eagle,
-                load_context.scheduler_load_sender(),
-                load_context.cancellation_token(),
-            )
-            .await?
-    };
 
     Ok(llm_rs::kv_router::ManagedKvRouter::new(
         load_context,

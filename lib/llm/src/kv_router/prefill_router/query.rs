@@ -10,11 +10,9 @@ use dynamo_kv_router::{
         AdmissionAttempt,
         queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor},
     },
-    selector::WorkerSelector,
 };
 
 use super::{PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter};
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 
 /// A prefill booking that owns cleanup of the exact scheduler attempt it admitted.
 ///
@@ -67,10 +65,7 @@ impl Drop for PrefillReservation {
     }
 }
 
-impl<Sel> PrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl PrefillRouter {
     /// Select a prefill worker and reserve it when KV routing is enabled.
     ///
     /// If this future is dropped while queued, the scheduler retracts its

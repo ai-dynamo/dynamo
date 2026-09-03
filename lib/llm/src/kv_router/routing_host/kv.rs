@@ -4,10 +4,7 @@
 use super::*;
 use crate::kv_router::{FindBestMatchAdmission, routing_host::kv_selection::SelectionOutcome};
 
-impl<Sel> RoutingHost<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RoutingHost {
     #[allow(clippy::too_many_arguments)]
     async fn select_request_outcome(
         &self,
@@ -163,7 +160,7 @@ where
         &self,
         request: &SingleIn<PreprocessedRequest>,
         preview: RoutePreview,
-    ) -> Result<RoutePlan<Sel>, Error> {
+    ) -> Result<RoutePlan, Error> {
         // Inherited, not restarted: this stage continues the route the preview
         // opened.
         let budget = preview.budget;
@@ -221,7 +218,7 @@ where
     pub(crate) async fn dispatch_kv_plan(
         &self,
         request: SingleIn<PreprocessedRequest>,
-        plan: RoutePlan<Sel>,
+        plan: RoutePlan,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let RoutePlan {
             mut selection,
@@ -303,7 +300,7 @@ where
         phase: RequestPhase,
         is_query_only: bool,
         budget: &CleanupBudget,
-    ) -> Result<RequestGuard<Sel>, Error> {
+    ) -> Result<RequestGuard, Error> {
         self.track_selection_with_cleanup(request, selection, phase, is_query_only, None, budget)
             .await
     }
@@ -312,9 +309,9 @@ where
         &self,
         request: &SingleIn<PreprocessedRequest>,
         selection: &mut WorkerSelection,
-        cleanup: KvRequestCleanup<Sel>,
+        cleanup: KvRequestCleanup,
         budget: &CleanupBudget,
-    ) -> Result<RequestGuard<Sel>, Error> {
+    ) -> Result<RequestGuard, Error> {
         let phase = request
             .tracker
             .as_ref()
@@ -330,9 +327,9 @@ where
         selection: &mut WorkerSelection,
         phase: RequestPhase,
         is_query_only: bool,
-        cleanup: Option<KvRequestCleanup<Sel>>,
+        cleanup: Option<KvRequestCleanup>,
         budget: &CleanupBudget,
-    ) -> Result<RequestGuard<Sel>, Error> {
+    ) -> Result<RequestGuard, Error> {
         let context_id = request.context().id().to_string();
         let staged_kv = StagedKv::for_request(request.content());
         let request_context = request.context().clone();
@@ -448,7 +445,7 @@ where
         &self,
         request: SingleIn<PreprocessedRequest>,
         selection: WorkerSelection,
-        mut guard: RequestGuard<Sel>,
+        mut guard: RequestGuard,
         budget: &CleanupBudget,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let context_id = request.context().id().to_string();

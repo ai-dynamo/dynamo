@@ -22,7 +22,6 @@ use dynamo_kv_router::identity::RoutingPartitionId;
 use dynamo_kv_router::indexer::TieredMatchProvider;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor};
-use dynamo_kv_router::scheduling::selector::WorkerSelectionPolicy;
 use dynamo_kv_router::scheduling::{
     AdmittedSchedulingResponse, AdvisorySchedulingResponse, AttemptId, KvSchedulerError,
     OverloadedWorkerProvider, PotentialLoad, ScheduleRequest, WorkerAvailabilityProvider,
@@ -61,128 +60,13 @@ pub(crate) struct EmbeddedSelectionArgs {
     pub endpoint: dynamo_runtime::component::Endpoint,
     /// This router replica's id (ignored on receipt of its own events).
     pub router_id: u64,
-    /// Use this policy instead of resolving one from the registry (a
-    /// caller-injected `WorkerSelector`, wrapped by [`delegating_policy_factory`]).
-    pub policy_override: Option<WorkerSelectionPolicyFactory>,
+    /// Builds the partition's worker-selection policy (see
+    /// `SelectionPolicySource::resolve`).
+    pub policy_factory: WorkerSelectionPolicyFactory,
 }
 
-/// Runs a caller-owned `WorkerSelector<ModelRuntimeConfig>` inside a partition
-/// policy: the partition's worker configs are projected onto
-/// `ModelRuntimeConfig` per selection. Serialized through a mutex because the
-/// selector is only required to be `Send`.
-struct DelegatingSelector<Sel> {
-    inner: std::sync::Mutex<Sel>,
-    inputs: dynamo_kv_router::scheduling::selector::WorkerInputs,
-    exclusive_affinity: bool,
-}
-
-impl<Sel> dynamo_kv_router::scheduling::selector::DelegatedWorkerSelector
-    for DelegatingSelector<Sel>
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    fn required_worker_inputs(&self) -> dynamo_kv_router::scheduling::selector::WorkerInputs {
-        self.inputs
-    }
-
-    fn uses_exclusive_affinity_target(&self) -> bool {
-        self.exclusive_affinity
-    }
-
-    fn select_worker(
-        &self,
-        workers: &HashMap<WorkerId, dynamo_kv_router::scheduling::selector::ErasedWorkerConfig>,
-        request: &dynamo_kv_router::scheduling::SchedulingRequest,
-        eligibility: dynamo_kv_router::scheduling::RoutingEligibility<'_>,
-        block_size: u32,
-    ) -> std::result::Result<
-        dynamo_kv_router::protocols::WorkerSelectionResult,
-        dynamo_kv_router::scheduling::KvSchedulerError,
-    > {
-        let projected: HashMap<WorkerId, ModelRuntimeConfig> = workers
-            .iter()
-            .map(|(id, config)| {
-                (
-                    *id,
-                    ModelRuntimeConfig {
-                        data_parallel_start_rank: config.data_parallel_start_rank,
-                        data_parallel_size: config.data_parallel_size,
-                        max_num_batched_tokens: config.max_num_batched_tokens,
-                        total_kv_blocks: config.total_kv_blocks,
-                        taints: config.taints.clone(),
-                        stable_routing_id: config.stable_routing_id.clone(),
-                        topology_domains: config.topology_domains.clone().unwrap_or_default(),
-                        kv_transfer_domain: config.kv_transfer_domain.clone(),
-                        kv_transfer_enforcement: config.kv_transfer_enforcement,
-                        kv_transfer_preferred_weight: config.kv_transfer_preferred_weight,
-                        ..Default::default()
-                    },
-                )
-            })
-            .collect();
-        let inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        inner.select_worker(
-            dynamo_kv_router::scheduling::selector::WorkerSelectionInput::Configured {
-                workers: &projected,
-                request,
-                eligibility,
-                block_size,
-            },
-        )
-    }
-}
-
-struct SharedDelegate(Arc<dyn dynamo_kv_router::scheduling::selector::DelegatedWorkerSelector>);
-
-impl dynamo_kv_router::scheduling::selector::DelegatedWorkerSelector for SharedDelegate {
-    fn required_worker_inputs(&self) -> dynamo_kv_router::scheduling::selector::WorkerInputs {
-        self.0.required_worker_inputs()
-    }
-    fn uses_exclusive_affinity_target(&self) -> bool {
-        self.0.uses_exclusive_affinity_target()
-    }
-    fn select_worker(
-        &self,
-        workers: &HashMap<WorkerId, dynamo_kv_router::scheduling::selector::ErasedWorkerConfig>,
-        request: &dynamo_kv_router::scheduling::SchedulingRequest,
-        eligibility: dynamo_kv_router::scheduling::RoutingEligibility<'_>,
-        block_size: u32,
-    ) -> std::result::Result<
-        dynamo_kv_router::protocols::WorkerSelectionResult,
-        dynamo_kv_router::scheduling::KvSchedulerError,
-    > {
-        self.0
-            .select_worker(workers, request, eligibility, block_size)
-    }
-}
-
-/// A policy factory that runs `selector` on every partition of the router.
-pub(crate) fn delegating_policy_factory<Sel>(
-    selector: Sel,
-    label: &'static str,
-) -> WorkerSelectionPolicyFactory
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    let inputs = selector.required_worker_inputs();
-    let exclusive_affinity = selector.uses_exclusive_affinity_target();
-    let shared: Arc<dyn dynamo_kv_router::scheduling::selector::DelegatedWorkerSelector> =
-        Arc::new(DelegatingSelector {
-            inner: std::sync::Mutex::new(selector),
-            inputs,
-            exclusive_affinity,
-        });
-    Arc::new(move |config: &KvRouterConfig, _worker_type, _partition| {
-        WorkerSelectionPolicy::delegated(
-            config.clone(),
-            label,
-            Box::new(SharedDelegate(Arc::clone(&shared))),
-        )
-    })
-}
+/// Partition model name when the router has none.
+pub(crate) const DEFAULT_MODEL_NAME: &str = "default";
 
 /// One `SelectionService` partition driven directly by the router.
 pub(crate) struct EmbeddedSelection {
@@ -232,25 +116,9 @@ impl EmbeddedSelection {
         let key = RoutingPartitionId::new(
             args.model_name
                 .clone()
-                .unwrap_or_else(|| "default".to_string()),
+                .unwrap_or_else(|| DEFAULT_MODEL_NAME.to_string()),
             DEFAULT_ROUTING_GROUP,
         );
-
-        // Same selector the runtime path builds: the registry-resolved policy
-        // when router configuration names one, else Dynamo's default scorer
-        // and picker under the router's metric worker label.
-        let label = args.metric_worker_type;
-        let policy_factory: WorkerSelectionPolicyFactory = match args.policy_override {
-            Some(factory) => factory,
-            None => match worker_selection_policy_registry()
-                .resolve_for_worker_type(&args.kv_router_config, worker_type)?
-            {
-                Some(factory) => factory,
-                None => Arc::new(move |config: &KvRouterConfig, _worker_type, _partition| {
-                    WorkerSelectionPolicy::default(config.clone(), label)
-                }),
-            },
-        };
 
         // Replica sync rides the runtime event plane, as the runtime scheduler's
         // did; the partition publishes and consumes through host channels.
@@ -276,7 +144,7 @@ impl EmbeddedSelection {
             worker_type,
             worker_selection_policy_registry(),
         )
-        .worker_selection_policy_factory(policy_factory)
+        .worker_selection_policy_factory(args.policy_factory)
         .indexer_threads(1)
         .external_kv_events()
         .host_hooks(SelectionHostHooks {

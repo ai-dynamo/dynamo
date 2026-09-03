@@ -17,7 +17,6 @@ use dynamo_runtime::pipeline::WorkerLoadMonitor;
 
 use crate::discovery::{KvWorkerMonitor, LoadThresholdHandle};
 use crate::kv_router::KvRouter;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::common::timing::{WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL};
 use crate::worker_type::WorkerType;
 
@@ -388,18 +387,12 @@ impl Drop for RoutingLoadContext {
 }
 
 /// Standalone KV selection surface plus the context that owns its load tasks.
-pub struct ManagedKvRouter<Sel = dynamo_kv_router::selector::DefaultWorkerSelector>
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
-{
+pub struct ManagedKvRouter {
     load_context: Arc<RoutingLoadContext>,
-    router: Arc<KvRouter<Sel>>,
+    router: Arc<KvRouter>,
 }
 
-impl<Sel> Clone for ManagedKvRouter<Sel>
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
-{
+impl Clone for ManagedKvRouter {
     fn clone(&self) -> Self {
         Self {
             load_context: self.load_context.clone(),
@@ -408,22 +401,16 @@ where
     }
 }
 
-impl<Sel> std::ops::Deref for ManagedKvRouter<Sel>
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
-{
-    type Target = KvRouter<Sel>;
+impl std::ops::Deref for ManagedKvRouter {
+    type Target = KvRouter;
 
     fn deref(&self) -> &Self::Target {
         &self.router
     }
 }
 
-impl<Sel> ManagedKvRouter<Sel>
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
-{
-    pub fn new(load_context: Arc<RoutingLoadContext>, router: Arc<KvRouter<Sel>>) -> Self {
+impl ManagedKvRouter {
+    pub fn new(load_context: Arc<RoutingLoadContext>, router: Arc<KvRouter>) -> Self {
         Self {
             load_context,
             router,
@@ -434,7 +421,7 @@ where
         &self.load_context
     }
 
-    pub fn router(&self) -> &Arc<KvRouter<Sel>> {
+    pub fn router(&self) -> &Arc<KvRouter> {
         &self.router
     }
 }

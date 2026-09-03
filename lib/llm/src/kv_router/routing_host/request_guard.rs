@@ -10,9 +10,8 @@ use crate::{
         metrics::RouterRequestMetrics,
         prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
         request_lease::RequestAttemptLease,
-        scheduler::{DefaultWorkerSelector, SchedulerBookingDescriptor},
+        scheduler::SchedulerBookingDescriptor,
     },
-    local_model::runtime_config::ModelRuntimeConfig,
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
     protocols::common::{
@@ -28,7 +27,6 @@ use dynamo_kv_router::{
         compute_next_seq_hash,
     },
     scheduling::AdmissionAttempt,
-    selector::WorkerSelector,
 };
 use dynamo_runtime::{
     error::DynamoError,
@@ -393,23 +391,17 @@ struct OutputBlockTracker {
 
 /// Owns the shared attempt-scoped scheduler and approximate-LRU lifecycle after
 /// a KV worker is selected.
-pub(super) struct KvRequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    chooser: Arc<KvRouter<Sel>>,
+pub(super) struct KvRequestCleanup {
+    chooser: Arc<KvRouter>,
     context_id: String,
     worker: WorkerWithDpRank,
     approximate_lru: Option<ApproximateRequestLease>,
     lifecycle: Option<RequestAttemptLease>,
 }
 
-impl<Sel> KvRequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl KvRequestCleanup {
     pub(super) fn new(
-        chooser: Arc<KvRouter<Sel>>,
+        chooser: Arc<KvRouter>,
         context_id: String,
         worker: WorkerWithDpRank,
         attempt: AdmissionAttempt,
@@ -458,11 +450,8 @@ where
 }
 
 /// Policy-specific state released by the host's common request lifecycle.
-enum RequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    Kv(KvRequestCleanup<Sel>),
+enum RequestCleanup {
+    Kv(KvRequestCleanup),
     Stateless {
         worker_id: u64,
     },
@@ -472,10 +461,7 @@ where
     },
 }
 
-impl<Sel> RequestCleanup<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RequestCleanup {
     fn worker_id(&self) -> u64 {
         match self {
             Self::Kv(cleanup) => cleanup.worker.worker_id,
@@ -569,11 +555,8 @@ impl OutputBlockTracker {
 ///
 /// Session-affinity lifetime is separate: `AffinityAcquire` and
 /// `AffinityLease` own binding commit, release, and invalidation.
-pub(super) struct RequestGuard<Sel = DefaultWorkerSelector>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    cleanup: RequestCleanup<Sel>,
+pub(super) struct RequestGuard {
+    cleanup: RequestCleanup,
     observability: RequestObservability,
     output_blocks: OutputBlockTracker,
     approximate_lru: Option<ApproximateRequestLease>,
@@ -584,12 +567,9 @@ where
     _lora_load: Option<LoraLoadGuard>,
 }
 
-impl<Sel> RequestGuard<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RequestGuard {
     pub(super) fn new_kv(
-        chooser: Arc<KvRouter<Sel>>,
+        chooser: Arc<KvRouter>,
         request_metrics: Arc<RouterRequestMetrics>,
         context_id: String,
         worker: WorkerWithDpRank,
@@ -605,7 +585,7 @@ where
 
     pub(super) fn new_kv_with_cleanup(
         request_metrics: Arc<RouterRequestMetrics>,
-        cleanup: KvRequestCleanup<Sel>,
+        cleanup: KvRequestCleanup,
         request: &PreprocessedRequest,
     ) -> Self {
         let chooser = &cleanup.chooser;
@@ -820,10 +800,7 @@ where
     }
 }
 
-impl<Sel> Drop for RequestGuard<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.observability
             .record_metrics(self.record_itl_at_completion);

@@ -11,7 +11,6 @@ use dynamo_kv_router::{
         BlockExtraInfo, RoutingConstraints, WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
     },
     scheduling::{AdmissionAttempt, AdvisoryWorkerLoad, QueueRejection, RoutingEligibility},
-    selector::WorkerSelector,
 };
 use dynamo_runtime::{dynamo_nvtx_range, pipeline::Error};
 
@@ -20,7 +19,6 @@ use crate::{
         FindBestMatchAdmission, FindBestMatchInnerOutcome, FindBestMatchOutcome,
         routing_host::RoutingHost,
     },
-    local_model::runtime_config::ModelRuntimeConfig,
     preprocessor::PreprocessedRequest,
     protocols::{
         TokenIdType,
@@ -100,10 +98,7 @@ struct BestMatchArgs<'a> {
     admission: FindBestMatchAdmission,
 }
 
-impl<Sel> RoutingHost<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl RoutingHost {
     async fn select_best_match(&self, args: BestMatchArgs<'_>) -> Result<SelectionOutcome, Error> {
         let outcome = self
             .kv_router()

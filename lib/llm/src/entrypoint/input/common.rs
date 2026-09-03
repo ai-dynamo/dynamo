@@ -34,10 +34,7 @@ use crate::{
     },
 };
 
-use dynamo_kv_router::{
-    config::min_initial_workers_from_env,
-    selector::{DefaultWorkerSelector, WorkerSelector},
-};
+use dynamo_kv_router::config::min_initial_workers_from_env;
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -52,13 +49,10 @@ use std::sync::Arc;
 type LlmPushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
 
 #[derive(Clone)]
-pub struct PreprocessedRouting<Sel = DefaultWorkerSelector>
-where
-    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
-{
+pub struct PreprocessedRouting {
     backend_engine:
         ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>,
-    prefill_router: Arc<PrefillRouter<Sel>>,
+    prefill_router: Arc<PrefillRouter>,
     encoder_router: Arc<EncoderRouter>,
 }
 
@@ -108,14 +102,11 @@ async fn wait_for_min_initial_workers(
     }
 }
 
-fn router_client<Sel>(
+fn router_client(
     client: &Client,
     router_mode: RouterMode,
-    chooser: Option<&Arc<KvRouter<Sel>>>,
-) -> anyhow::Result<Client>
-where
-    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
-{
+    chooser: Option<&Arc<KvRouter>>,
+) -> anyhow::Result<Client> {
     if router_mode == RouterMode::KV {
         let Some(chooser) = chooser else {
             anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
@@ -160,19 +151,16 @@ fn validate_router_mode_for_lora(
 }
 
 #[expect(clippy::too_many_arguments)]
-fn preprocessed_backend_engine<Sel>(
+fn preprocessed_backend_engine(
     router: LlmPushRouter,
     router_mode: RouterMode,
-    chooser: Option<Arc<KvRouter<Sel>>>,
+    chooser: Option<Arc<KvRouter>>,
     model_manager: &Arc<crate::discovery::ModelManager>,
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
     load_context: Arc<RoutingLoadContext>,
-) -> anyhow::Result<Arc<RoutingHost<Sel>>>
-where
-    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
-{
+) -> anyhow::Result<Arc<RoutingHost>> {
     // Reject LoRA + unsupported-mode combinations up front (single source of truth, shared with
     // the fail-fast check in `build_preprocessed_routing`). After this, the Direct and advanced
     // arms below are only reached with LoRA serving disabled.
@@ -199,7 +187,7 @@ where
             let lora = model_manager
                 .lora_filter_for(endpoint_id)
                 .map(|filter| (filter, model_manager.lora_load_estimator_for(endpoint_id)));
-            Arc::new(RoutingHost::<Sel>::new_builtin_with_capabilities(
+            Arc::new(RoutingHost::new_builtin_with_capabilities(
                 router,
                 load_context,
                 affinity,
@@ -224,7 +212,7 @@ pub async fn build_preprocessed_routing(
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
 ) -> anyhow::Result<PreprocessedRouting> {
-    build_preprocessed_routing_with_selector(
+    build_preprocessed_routing_with_session_affinity_mode(
         client,
         model_manager,
         router_mode,
@@ -240,21 +228,18 @@ pub async fn build_preprocessed_routing(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
+pub(crate) async fn build_preprocessed_routing_with_session_affinity_mode(
     client: &Client,
     model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
     load_context: Arc<RoutingLoadContext>,
-    chooser: Option<Arc<KvRouter<Sel>>>,
-    prefill_chooser: Option<Arc<PrefillRouter<Sel>>>,
+    chooser: Option<Arc<KvRouter>>,
+    prefill_chooser: Option<Arc<PrefillRouter>>,
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
     session_affinity_mode: SessionAffinityMode,
-) -> anyhow::Result<PreprocessedRouting<Sel>>
-where
-    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
-{
+) -> anyhow::Result<PreprocessedRouting> {
     // Fail fast on an unsupported LoRA + router-mode combination BEFORE waiting for the initial
     // worker set, so a misconfiguration surfaces immediately at startup rather than after the
     // (possibly long) DYN_ROUTER_MIN_INITIAL_WORKERS wait.
@@ -302,7 +287,7 @@ where
     RouterRequestMetrics::from_component(client.endpoint.component());
 
     let prefill_router = prefill_chooser.unwrap_or_else(|| {
-        PrefillRouter::<Sel>::disabled_with_selector(
+        PrefillRouter::disabled_with_session_affinity_mode(
             model_manager.clone(),
             router_mode,
             session_affinity_ttl_secs,
@@ -483,10 +468,7 @@ where
         .link_terminal(frontend)?)
 }
 
-impl<Sel> PreprocessedRouting<Sel>
-where
-    Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
-{
+impl PreprocessedRouting {
     /// The normal way to build an inference pipeline. Connect this directly to HTTP layer.
     pub fn build_pipeline<Req, Resp>(
         &self,

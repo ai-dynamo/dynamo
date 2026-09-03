@@ -10,10 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use dynamo_kv_router::{
-    DefaultWorkerSelector, WorkerSelectionPolicy, config::KvRouterConfig,
-    protocols::RoutingConstraints,
-};
+use dynamo_kv_router::{config::KvRouterConfig, protocols::RoutingConstraints};
+
+use crate::kv_router::SelectionPolicySource;
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
     component::{Client, Instance},
@@ -94,7 +93,7 @@ fn classify_response_item_separates_terminal_failures_from_healthy_frames() {
 fn selector_state_remains_owned_by_the_scheduler_actor() {
     fn assert_send_sync<T: Send + Sync>() {}
 
-    assert_send_sync::<RoutingHost<WorkerSelectionPolicy>>();
+    assert_send_sync::<RoutingHost>();
 }
 
 #[test]
@@ -126,8 +125,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
     let inner = PushRouter::from_client(client.clone(), RouterMode::RoundRobin)
         .await
         .unwrap();
-    let host =
-        RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context.clone()).unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context.clone()).unwrap();
 
     assert_eq!(host.required_worker_inputs(), WorkerInputs::NONE);
     assert!(host.hosted_occupancy.is_none());
@@ -139,7 +137,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
     let inner = PushRouter::from_client(client, RouterMode::PowerOfTwoChoices)
         .await
         .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
     let RoutingPolicy::Builtin(selector) = &host.policy else {
         unreachable!()
     };
@@ -154,7 +152,7 @@ async fn builtin_host_constructs_only_declared_capabilities() {
     assert_eq!(selection.worker_id, 1);
     assert_eq!(selection.occupancy, 1);
     assert_eq!(host.inner.occupancy_for_test(1), 1);
-    let mut guard: RequestGuard<DefaultWorkerSelector> = RequestGuard::new_builtin(
+    let mut guard: RequestGuard = RequestGuard::new_builtin(
         Arc::clone(&host.request_metrics),
         selection.worker_id,
         Some(selection.reservation),
@@ -188,7 +186,7 @@ async fn builtin_occupancy_selection_uses_all_selectable_workers() {
         .unwrap();
     client.override_discovered_instances(vec![1, 2]);
     client.override_instance_avail(vec![1, 2]);
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
     let RoutingPolicy::Builtin(selector) = &host.policy else {
         unreachable!()
     };
@@ -229,7 +227,7 @@ async fn builtin_direct_without_worker_is_invalid_argument() {
         .await
         .unwrap();
     let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+    let host = RoutingHost::new_builtin_with_coordinator(
         inner,
         load_context,
         Some(affinity),
@@ -276,7 +274,7 @@ async fn builtin_direct_uses_bound_soft_affinity_as_exact_target() {
     .await
     .unwrap();
     let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+    let host = RoutingHost::new_builtin_with_coordinator(
         inner,
         load_context,
         Some(affinity.clone()),
@@ -362,7 +360,7 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     .await
     .unwrap();
     let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+    let host = RoutingHost::new_builtin_with_coordinator(
         inner,
         load_context,
         Some(affinity.clone()),
@@ -441,7 +439,7 @@ async fn builtin_lora_keeps_separate_selection_and_cleanup() {
     );
     let filter = Arc::new(LoraFilter::new(routing_table, LoraStateTracker::new()));
     let estimator = Arc::new(LoadEstimator::new());
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_capabilities(
+    let host = RoutingHost::new_builtin_with_capabilities(
         inner,
         load_context,
         None,
@@ -519,7 +517,7 @@ async fn builtin_affinity_uses_common_host_for_every_policy() {
         .await
         .unwrap();
         let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-        let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+        let host = RoutingHost::new_builtin_with_coordinator(
             inner,
             load_context,
             Some(affinity.clone()),
@@ -577,7 +575,7 @@ async fn builtin_hard_affinity_ignores_overload_while_soft_affinity_falls_back()
     let inner = PushRouter::from_client(client, RouterMode::RoundRobin)
         .await
         .unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin(inner, load_context).unwrap();
+    let host = RoutingHost::new_builtin(inner, load_context).unwrap();
     let request = Context::new(request());
 
     let hard = host
@@ -626,7 +624,7 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
     .await
     .unwrap();
     let affinity = AffinityCoordinator::new(Duration::from_secs(10)).unwrap();
-    let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+    let host = RoutingHost::new_builtin_with_coordinator(
         inner,
         load_context,
         Some(affinity.clone()),
@@ -1203,7 +1201,7 @@ async fn router_with_worker_configs_in_mode(
         workers,
         None,
         16,
-        DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+        SelectionPolicySource::Registry,
         Some(config),
         None,
         "decode",
@@ -1854,13 +1852,8 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     assert_eq!(metrics.requests_started_total().get(), started_before + 3);
     assert_eq!(metrics.requests_total.get(), completed_before + 1);
 
-    let mut builtin_guard = RequestGuard::<DefaultWorkerSelector>::new_builtin(
-        Arc::clone(&metrics),
-        7,
-        None,
-        None,
-        &request(),
-    );
+    let mut builtin_guard =
+        RequestGuard::new_builtin(Arc::clone(&metrics), 7, None, None, &request());
     assert_eq!(metrics.requests_started_total().get(), started_before + 4);
     builtin_guard.abort().await;
     drop(builtin_guard);
@@ -2455,7 +2448,7 @@ async fn two_worker_migration_harness(
         workers,
         None,
         16,
-        DefaultWorkerSelector::new(Some(config.clone()), "decode"),
+        SelectionPolicySource::Registry,
         Some(config),
         None,
         None,

@@ -3,21 +3,16 @@
 
 use anyhow::Result;
 use dynamo_kv_router::conditional_disagg::ConditionalDisaggDecisionInput;
-use dynamo_kv_router::selector::WorkerSelector;
 use dynamo_runtime::pipeline::SingleIn;
 
 use super::PrefillRouter;
 use crate::kv_router::routing_host::{RoutePlan, RoutePlanSignals, is_cancelled};
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 use crate::protocols::common::{llm_backend::PreprocessedRequest, timing::RequestPhase};
 
 /// An admitted decode route selected by `RoutingHost` together with the
 /// conditional-disagg policy's diagnostic signals.
-pub(super) struct ConditionalDisaggDecodeDecision<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    pub plan: RoutePlan<Sel>,
+pub(super) struct ConditionalDisaggDecodeDecision {
+    pub plan: RoutePlan,
     pub overlap_tokens: usize,
     pub net_new_tokens: usize,
 }
@@ -30,17 +25,14 @@ fn decode_gate_allows_bypass(
     policy_says_bypass && (!decode_gate_configured || matches!(decode_busy, Some(false)))
 }
 
-impl<Sel> PrefillRouter<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl PrefillRouter {
     /// Preview one decode route, then admit it only when the topology policy
     /// chooses local decode.
     pub(super) async fn plan_conditional_disagg_decode(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         request_id: &str,
-    ) -> Result<Option<ConditionalDisaggDecodeDecision<Sel>>> {
+    ) -> Result<Option<ConditionalDisaggDecodeDecision>> {
         // Conditional disagg chooses a cache-hot decode worker, so it only
         // applies to a KV-routed decode set.
         if !self.decode_router_mode.is_kv_routing() {
