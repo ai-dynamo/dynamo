@@ -644,30 +644,32 @@ def test_vllm_processor_cache_handles_uuid_only_unified_vision_chunk():
     parse_mm_data.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "unsupported_uuids",
-    [
-        {"video_url": ["video-key"]},
-        {"audio_url": "audio-key"},
-    ],
-)
-def test_build_tokens_prompt_rejects_user_audio_video_uuids(
-    unsupported_uuids: dict[str, object],
-) -> None:
+def test_build_tokens_prompt_forwards_user_uuids_for_each_modality() -> None:
     processor = _processor(unified_vision_chunk=True)
+    mm_data = {
+        "vision_chunk": [object(), object()],
+        "video": [object()],
+        "audio": [object(), object(), object()],
+    }
 
-    with pytest.raises(ValueError, match="must use the 'image_url' modality key"):
-        processor.build_tokens_prompt(
-            {
-                "token_ids": [1, 2, 3],
-                "multi_modal_uuids": {
-                    "image_url": ["image-key"],
-                    **unsupported_uuids,
-                },
+    prompt = processor.build_tokens_prompt(
+        {
+            "token_ids": [1, 2, 3],
+            "multi_modal_uuids": {
+                "image_url": ["image-key", None],
+                "video_url": ["video-key"],
+                "audio_url": [None, None, None],
             },
-            {"vision_chunk": [None], "video": [None], "audio": [None]},
-            None,
-        )
+        },
+        mm_data,
+        None,
+    )
+
+    assert prompt["multi_modal_uuids"] == {
+        "vision_chunk": ["image-key", None],
+        "video": ["video-key"],
+        "audio": [None, None, None],
+    }
 
 
 @pytest.mark.parametrize(
@@ -675,7 +677,7 @@ def test_build_tokens_prompt_rejects_user_audio_video_uuids(
     [
         ("image-key", "must be an object"),
         ({"image_url": "image-key"}, "must be a list"),
-        ({"image": ["image-key"]}, "must use the 'image_url' modality key"),
+        ({"video_url": None}, "must be a list"),
         ({"image_url": [""]}, "non-empty strings or null"),
         ({"image_url": [123]}, "non-empty strings or null"),
     ],

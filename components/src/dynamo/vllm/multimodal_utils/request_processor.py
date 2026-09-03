@@ -146,43 +146,36 @@ def _build_user_mm_uuids(
     raw_uuids: Any,
     use_unified_vision_chunk: bool,
 ) -> Optional[dict[str, list[str | None]]]:
-    """Normalize vLLM image cache identities without changing opaque values."""
+    """Map Dynamo media keys to vLLM cache identities without filtering them."""
     if raw_uuids is None:
         return None
     if not isinstance(raw_uuids, dict):
         raise ValueError("multi_modal_uuids must be an object")
 
+    mm_uuids: dict[str, list[str | None]] = {}
+    has_uuid = False
     for modality, values in raw_uuids.items():
-        if modality == IMAGE_URL_KEY:
-            continue
-        has_uuid = (
-            any(value is not None for value in values)
-            if isinstance(values, list)
-            else values is not None
-        )
-        if has_uuid:
-            raise ValueError(
-                "multimodal cache UUIDs must use the 'image_url' modality key"
-            )
+        if not isinstance(values, list):
+            raise ValueError(f"multi_modal_uuids[{modality!r}] must be a list")
+        for index, value in enumerate(values):
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(
+                    f"multi_modal_uuids[{modality!r}] entries must be non-empty "
+                    f"strings or null; got invalid entry at index {index}"
+                )
+            has_uuid |= value is not None
 
-    if IMAGE_URL_KEY not in raw_uuids:
-        return None
-    image_uuids = raw_uuids[IMAGE_URL_KEY]
-    if not isinstance(image_uuids, list):
-        raise ValueError("multi_modal_uuids['image_url'] must be a list")
-    for index, value in enumerate(image_uuids):
-        if value is not None and (not isinstance(value, str) or not value):
-            raise ValueError(
-                "multi_modal_uuids['image_url'] entries must be non-empty "
-                f"strings or null; got invalid entry at index {index}"
-            )
-    if not any(value is not None for value in image_uuids):
-        return None
-    backend_modality = _normalize_forwarded_mm_modality(
-        "image",
-        use_unified_vision_chunk,
-    )
-    return {backend_modality: list(image_uuids)}
+        backend_modality = str(modality)
+        if backend_modality.endswith("_url"):
+            backend_modality = backend_modality.removesuffix("_url")
+        backend_modality = _normalize_forwarded_mm_modality(
+            backend_modality,
+            use_unified_vision_chunk,
+        )
+        mm_uuids.setdefault(backend_modality, []).extend(values)
+
+    # If at least one UUID is present, return a list for each modality.
+    return mm_uuids if has_uuid else None
 
 
 def _get_modality_extra_values(
