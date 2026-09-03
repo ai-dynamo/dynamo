@@ -474,19 +474,21 @@ class Publisher:
         await self.metrics_publisher.create_endpoint(self.endpoint)
 
     def initialize(self) -> None:
-        if self.publish_metrics:
+        # The KV router consumes worker-load samples and the Planner consumes
+        # forward-pass metrics. Both are telemetry the control plane reads, so
+        # they belong with KV-event publishing rather than with the local
+        # Prometheus surface: scraping /metrics must not alter routing.
+        if self.publish_kv_events:
             self.metrics_publisher = WorkerMetricsPublisher()
-            self._init_publish_metrics_thread()
             task = asyncio.create_task(self._create_metrics_publisher_endpoint())
             task.add_done_callback(
                 lambda _: logging.debug("metrics publisher endpoint created")
             )
 
-        # Setup the ForwardPassMetrics publisher with one internal channel per
-        # attention-DP rank. Non-attention-DP engines report size 1. Under
-        # attention-DP, TRT-LLM emits one IterationStats row per rank and
-        # Dynamo forwards attentionDpRank as the FPM dp_rank.
-        if self.publish_metrics:
+            # One internal channel per attention-DP rank. Non-attention-DP
+            # engines report size 1. Under attention-DP, TRT-LLM emits one
+            # IterationStats row per rank and Dynamo forwards attentionDpRank
+            # as the FPM dp_rank.
             try:
                 fpm_dp_size = max(1, int(self.attention_dp_size or 1))
                 self.fpm_publisher = FpmDirectPublisher(
@@ -498,10 +500,19 @@ class Publisher:
                     f"FpmDirectPublisher initialized with dp_size={fpm_dp_size}"
                 )
             except RuntimeError as e:
+                # PyO3 surfaces all FpmDirectPublisher::new failures as
+                # PyRuntimeError (Endpoint missing, tokio runtime missing,
+                # etc.). Catch only that -- any other exception here would
+                # signal a programming error worth surfacing.
                 logging.warning(
                     f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
                 )
                 self.fpm_publisher = None
+
+        # One polling loop feeds the Prometheus gauges, the metrics collector,
+        # the worker-load publisher and FPM alike, so it runs for either path.
+        if self.publish_kv_events or self.publish_metrics:
+            self._init_publish_metrics_thread()
 
         # Setup the kv cache events publisher
         # Publisher selection based on consolidator configuration:
@@ -539,14 +550,17 @@ class Publisher:
         self._init_publish_kv_cache_events_thread()
 
     def _init_publish_metrics_thread(self):
-        # Need to publish stats once so that worker can be selected.
-        if self.metrics_publisher is None:
-            logging.error("KV metrics publisher not initialized!")
-            return
+        """Zero the per-rank gauges and build the stats thread unstarted.
 
+        Runs for the Prometheus-only configuration too, where there is no
+        worker-load publisher to seed.
+        """
         # Publish initial metrics with 0 active blocks for each attention-DP rank.
         for rank in range(self.attention_dp_size):
-            self.metrics_publisher.publish(rank, kv_used_blocks=0)
+            # Seed the router so this worker can be selected before the first
+            # iteration stats arrive. Absent when only Prometheus is enabled.
+            if self.metrics_publisher is not None:
+                self.metrics_publisher.publish(rank, kv_used_blocks=0)
             rank_label = str(rank)
             self.component_gauges.set_total_blocks(rank_label, 0)
             self.component_gauges.set_gpu_cache_usage(rank_label, 0.0)
@@ -676,24 +690,19 @@ class Publisher:
         self.fpm_publisher = None
 
     async def _publish_stats_task(self):
-        """
-        Publish stats to the metrics publisher.
-        """
+        """Poll engine iteration stats into the Prometheus gauges and metrics
+        collector, plus the router and Planner publishers when enabled."""
         if self.engine is None:
             logging.error("LLM engine not initialized!")
             return
-
-        if self.metrics_publisher is None:
-            logging.error("KV metrics publisher not initialized!")
-            return False
 
         def handle_stat(stat):
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
             kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
             dp_rank = int(stat.get("attentionDpRank", 0))
             logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
-            assert self.metrics_publisher is not None
-            self.metrics_publisher.publish(dp_rank, kv_used_blocks=kv_active_blocks)
+            if self.metrics_publisher is not None:
+                self.metrics_publisher.publish(dp_rank, kv_used_blocks=kv_active_blocks)
 
             # Publish Prometheus metrics
             dp_rank_label = str(dp_rank)

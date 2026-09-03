@@ -362,9 +362,10 @@ async def init_llm_worker(
         # and `--override-engine-args` are merged over `arg_map` below and can set
         # it back to true for custom instrumentation.
         "return_perf_metrics": False,
-        # Iteration stats drive the metrics-publishing path but are independent
-        # of KV-event publication. TensorRT backend always has this enabled.
-        "enable_iter_perf_stats": config.publish_metrics,
+        # Iteration stats feed both the Prometheus surface and the worker-load
+        # and forward-pass telemetry the router and Planner read, so either
+        # flag needs them. TensorRT backend always has this enabled.
+        "enable_iter_perf_stats": config.publish_kv_events or config.publish_metrics,
         "kv_connector_config": kv_connector_config,
     }
 
