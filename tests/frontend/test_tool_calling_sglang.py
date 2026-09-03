@@ -10,6 +10,8 @@ Validates:
   - tool_choice variants: auto / required / none / named function
   - Multi-turn conversations carrying tool results
   - Multi-tool parallel calls
+  - End-to-end tool execution: a real subprocess runs and the model must
+    report a value only that execution could have produced
 
 """
 
@@ -21,7 +23,6 @@ import os
 import shutil
 import signal
 import time
-from dataclasses import dataclass
 from typing import Any, Generator
 
 import psutil
@@ -32,6 +33,15 @@ from tests.utils.gpu_args import build_gpu_mem_args
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_ports
+from tests.utils.tool_calling import (
+    assert_chained_tools_thread_real_output,
+    assert_executes_real_tool_and_uses_output,
+    assert_finish_reason,
+    assistant_tool_message_from_result,
+    parse_and_validate_tool_call,
+    stream_chat,
+    tool_schema_map,
+)
 
 openai = pytest.importorskip("openai")
 OpenAI = openai.OpenAI
@@ -480,179 +490,6 @@ TOOLS_GET_TIME = [
 # ---------------------------------------------------------------------------
 
 
-def tool_schema_map(tools: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    out: dict[str, dict[str, Any]] = {}
-    for tool in tools:
-        fn = tool["function"]
-        out[fn["name"]] = fn["parameters"]
-    return out
-
-
-@dataclass
-class StreamResult:
-    content: str
-    reasoning_content: str
-    tool_calls: list[dict[str, Any]]
-    finish_reason: str | None
-    model: str
-    chunks: int
-    ttft_ms: float
-    raw_chunks: list[Any]
-
-
-def collect_stream(stream) -> StreamResult:
-    content_parts: list[str] = []
-    reasoning_parts: list[str] = []
-    tool_calls_by_index: dict[int, dict[str, Any]] = {}
-    finish_reason = None
-    model = ""
-    chunk_count = 0
-    raw_chunks: list[Any] = []
-    t0 = time.monotonic()
-    ttft_ms = 0.0
-
-    for chunk in stream:
-        raw_chunks.append(chunk)
-        chunk_count += 1
-        if chunk_count == 1:
-            ttft_ms = (time.monotonic() - t0) * 1000.0
-        model = chunk.model
-
-        for choice in chunk.choices:
-            delta = choice.delta
-
-            if getattr(delta, "content", None):
-                content_parts.append(delta.content)
-
-            if getattr(delta, "reasoning_content", None):
-                reasoning_parts.append(delta.reasoning_content)
-
-            if getattr(delta, "tool_calls", None):
-                for tc in delta.tool_calls:
-                    idx = tc.index
-                    entry = tool_calls_by_index.setdefault(
-                        idx,
-                        {
-                            "id": "",
-                            "type": "function",
-                            "function": {"name": "", "arguments": ""},
-                        },
-                    )
-
-                    if tc.id:
-                        if entry["id"] and entry["id"] != tc.id:
-                            raise AssertionError(
-                                f"Tool call id changed within same index {idx}: "
-                                f"{entry['id']} -> {tc.id}"
-                            )
-                        entry["id"] = tc.id
-
-                    if tc.type:
-                        entry["type"] = tc.type
-
-                    if tc.function:
-                        if tc.function.name:
-                            if (
-                                entry["function"]["name"]
-                                and entry["function"]["name"] != tc.function.name
-                            ):
-                                raise AssertionError(
-                                    f"Tool name changed within same index {idx}: "
-                                    f"{entry['function']['name']} -> {tc.function.name}"
-                                )
-                            entry["function"]["name"] = tc.function.name
-
-                        if tc.function.arguments:
-                            entry["function"]["arguments"] += tc.function.arguments
-
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
-
-    ordered_tool_calls = [tool_calls_by_index[i] for i in sorted(tool_calls_by_index)]
-    return StreamResult(
-        content="".join(content_parts),
-        reasoning_content="".join(reasoning_parts),
-        tool_calls=ordered_tool_calls,
-        finish_reason=finish_reason,
-        model=model,
-        chunks=chunk_count,
-        ttft_ms=ttft_ms,
-        raw_chunks=raw_chunks,
-    )
-
-
-def stream_chat(
-    client: OpenAI,
-    model: str,
-    *,
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]] | None = None,
-    max_tokens: int = 4096,
-    **kwargs,
-) -> StreamResult:
-    req: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-        "max_tokens": max_tokens,
-    }
-    if tools is not None:
-        req["tools"] = tools
-    req.update(kwargs)
-    stream = client.chat.completions.create(**req)
-    return collect_stream(stream)
-
-
-def parse_and_validate_tool_call(
-    tc: dict[str, Any],
-    schema_by_name: dict[str, dict[str, Any]],
-    *,
-    expected_name: str | None = None,
-) -> dict[str, Any]:
-    assert tc["type"] == "function", f"unexpected tool type: {tc['type']!r}"
-    assert tc["id"], "tool call id must be non-empty"
-    fn_name = tc["function"]["name"]
-    assert fn_name, "tool call function name must be non-empty"
-
-    if expected_name is not None:
-        assert fn_name == expected_name, f"expected {expected_name!r}, got {fn_name!r}"
-
-    assert fn_name in schema_by_name, f"unknown tool name {fn_name!r}"
-    args_str = tc["function"]["arguments"]
-    assert args_str, "tool call arguments must be non-empty"
-
-    try:
-        args = json.loads(args_str)
-    except json.JSONDecodeError as e:
-        raise AssertionError(f"arguments are not valid JSON: {args_str!r}") from e
-
-    assert isinstance(args, dict), f"arguments must decode to object, got {type(args)}"
-
-    validator = Draft7Validator(schema_by_name[fn_name])
-    errors = sorted(validator.iter_errors(args), key=lambda e: list(e.path))
-    if errors:
-        rendered = "; ".join(
-            f"path={list(err.path)} message={err.message}" for err in errors
-        )
-        raise AssertionError(f"arguments failed schema validation: {rendered}")
-
-    return args
-
-
-def assert_finish_reason(result: StreamResult, allowed: set[str]) -> None:
-    assert (
-        result.finish_reason in allowed
-    ), f"unexpected finish_reason={result.finish_reason!r}, allowed={sorted(allowed)}"
-
-
-def assistant_tool_message_from_result(result: StreamResult) -> dict[str, Any]:
-    return {
-        "role": "assistant",
-        "content": result.content or None,
-        "tool_calls": result.tool_calls,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Protocol / contract tests
 # ---------------------------------------------------------------------------
@@ -1035,3 +872,44 @@ class TestToolCallingMultiTurn:
         assert result.content.strip()
         lower = result.content.lower()
         assert "tokyo" in lower or "paris" in lower
+
+
+# ---------------------------------------------------------------------------
+# End-to-end tool execution
+# ---------------------------------------------------------------------------
+# Everything above tests the tool-calling *protocol*: a well-formed tool_calls
+# object comes back, and a hand-written `role: tool` message is consumed.
+# Nothing is executed -- the "tool result" is a literal the test author typed,
+# so a model that ignored it entirely and produced a plausible-looking answer
+# would still pass.
+#
+# The scenarios below close that loop. They live in tests/utils/tool_calling.py
+# because they depend only on (client, model) and are therefore reusable by any
+# deployment topology; see tests/deploy/test_recipe_tool_execution.py for the
+# same scenarios driven against a live Kubernetes DynamoGraphDeployment.
+
+
+class TestToolExecutionE2E:
+    @pytest.mark.flaky(reruns=2, only_rerun=["AssertionError"])
+    def test_model_call_executes_a_real_tool_and_uses_its_output(
+        self, client: OpenAI, model: str
+    ):
+        assert_executes_real_tool_and_uses_output(client, model)
+
+    @pytest.mark.xfail(
+        strict=False,
+        reason=(
+            "Qwen3-0.6B calls both tools in the correct order with schema-valid "
+            "arguments, but substitutes a hallucinated placeholder (observed: "
+            "'alice_user_id', '123456') for the id the first tool actually "
+            "returned. This is a model capability limit, not a frontend defect: "
+            "the protocol is handled correctly end to end. Kept as a capability "
+            "signal rather than relaxed, because relaxing the id assertion is "
+            "exactly what would make the test stop measuring anything. "
+            "strict=False so a stronger model XPASSes instead of breaking CI."
+        ),
+    )
+    def test_chained_tools_second_call_uses_first_calls_real_output(
+        self, client: OpenAI, model: str
+    ):
+        assert_chained_tools_thread_real_output(client, model)
