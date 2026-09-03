@@ -9,6 +9,7 @@ so the test proves the rejection with no network and no model activity.
 """
 
 import pytest
+
 from dynamo.common.protocols import (
     MEDIA_PASSTHROUGH_KEY,
     MediaPassthroughRejected,
@@ -33,7 +34,11 @@ def test_none_and_empty_are_empty():
 
 
 def test_benign_knobs_pass_through():
-    knobs = {"backend_custom_knob": 0.5, "denoise_strength": 0.8, "generate_sound": True}
+    knobs = {
+        "backend_custom_knob": 0.5,
+        "denoise_strength": 0.8,
+        "generate_sound": True,
+    }
     assert sanitize_media_passthrough(_wrap(knobs)) == knobs
 
 
@@ -62,7 +67,9 @@ def test_reserved_and_shaped_keys_are_rejected(key):
 
 
 def test_rejection_names_the_offending_key():
-    with pytest.raises(MediaPassthroughRejected, match="frame_interpolation_model_path"):
+    with pytest.raises(
+        MediaPassthroughRejected, match="frame_interpolation_model_path"
+    ):
         sanitize_media_passthrough(
             _wrap({"frame_interpolation_model_path": "attacker/repo"})
         )
