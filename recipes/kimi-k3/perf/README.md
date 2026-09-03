@@ -70,6 +70,9 @@ Keep `pvc-helper` to fetch artifacts, or delete it after staging.
 
 ### 3. Run the benchmark
 
+Before benchmarking, uncomment the synthetic acceptance-length settings in the
+selected recipe's `deploy.yaml`, then restart the DGD so they take effect.
+
 Before applying, set `INFERENCE_URL` to
 `http://YOUR_DGD_NAME-frontend:8000/v1/chat/completions`, set the pod-affinity
 `nvidia.com/dynamo-graph-deployment-name` value to the same `YOUR_DGD_NAME`, and

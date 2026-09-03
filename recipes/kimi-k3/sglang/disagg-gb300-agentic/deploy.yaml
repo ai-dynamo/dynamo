@@ -1,9 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Kimi-K3 on SGLang via Dynamo, disaggregated 1P1D on 16x GB300.
-# Each worker spans two 4-GPU nodes with TP8 over MNNVL. Prefill-to-decode
-# KV, KDA state, and DSPARK draft-KV transfer uses Mooncake over MNNVL.
 
 apiVersion: v1
 kind: ConfigMap
