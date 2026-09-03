@@ -617,8 +617,9 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             --exclude 'libavutil.so.*' \
             --exclude 'libswresample.so.*' \
             --exclude 'libswscale.so.*' \
-            --plat manylinux_2_28_${ARCH_ALT} \
-            --wheel-dir /opt/dynamo/dist \
+{% if device == "xpu" %}            --plat linux_${ARCH_ALT} \
+{% else %}            --plat manylinux_2_28_${ARCH_ALT} \
+{% endif %}            --wheel-dir /opt/dynamo/dist \
             target/wheels/ai_dynamo_runtime-*.whl; \
     else \
         maturin build --release --features "kv-indexer,slot-tracker,select-service,mm-routing,aic-forward-pass,request-trace-s3" --out /opt/dynamo/dist; \
