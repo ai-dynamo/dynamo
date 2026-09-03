@@ -2177,6 +2177,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "strum",
+ "switchyard-protocol",
  "tempfile",
  "thiserror 2.0.18",
  "tmq",
@@ -7544,6 +7545,20 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "switchyard-protocol"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c8be18d2d2c600ba679651f9e31ec9eb9dff96060a078c39e50e42ccd4e2318"
+dependencies = [
+ "async-trait",
+ "futures",
+ "http 1.4.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "syn"
