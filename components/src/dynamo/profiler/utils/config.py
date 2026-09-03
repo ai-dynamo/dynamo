@@ -187,7 +187,7 @@ def get_main_container_dict(component: dict[str, Any]) -> dict[str, Any] | None:
     )
 
 
-def break_arguments(args: list[str] | None) -> list[str]:
+def break_arguments(args: list[str] | str | None) -> list[str]:
     ans: list[str] = []
     if args is None:
         return ans
@@ -571,6 +571,27 @@ def set_unique_argument_value(args: list[str], arg_name: str, value: str) -> lis
         index += 1
 
     return append_argument(filtered, [arg_name, value])
+
+
+def set_unique_env_value(
+    env: list[dict[str, Any]] | None, name: str, value: str
+) -> list[dict[str, Any]]:
+    """Set one canonical ``name``/``value`` env entry, dropping any duplicates.
+
+    Mutates and returns a list of Kubernetes-style ``{"name", "value"}`` env
+    dicts. Existing entries for ``name`` (including ``valueFrom`` variants) are
+    removed before the canonical literal value is appended, so callers can set
+    identity-bearing env vars idempotently without leaving a stale entry for the
+    downstream process to read.
+    """
+    env_list = env if isinstance(env, list) else []
+    env_list[:] = [
+        entry
+        for entry in env_list
+        if not (isinstance(entry, dict) and entry.get("name") == name)
+    ]
+    env_list.append({"name": name, "value": value})
+    return env_list
 
 
 def update_image(config: dict, image: str) -> dict:

@@ -178,6 +178,20 @@ def cross_validate_config(
             "Shadow mode depends on GMS for VA-stable weight sharing."
         )
 
+    if dynamo_config.embedding_worker_processes > 1:
+        if engine_config.data_parallel_size != 1:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 currently requires "
+                "--data-parallel-size=1. The embedding process pool shares one "
+                "local EngineCore."
+            )
+        if engine_config.enable_lora:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 cannot currently be "
+                "combined with --enable-lora. Runtime LoRA state is not "
+                "synchronized across embedding endpoint processes."
+            )
+
 
 def update_dynamo_config_with_engine(
     dynamo_config: Config, engine_config: AsyncEngineArgs
@@ -383,10 +397,17 @@ def update_engine_config_with_dynamo(
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
             "output_path": dynamo_config.benchmark_output_path,
             "timeout": dynamo_config.benchmark_timeout,
+            "collect_imbalanced": dynamo_config.benchmark_collect_imbalanced,
         }
         explicit_points = dynamo_config._benchmark_points
         if explicit_points is not None:
-            benchmark_config["points"] = explicit_points.model_dump(mode="json")
+            # exclude_none so a v1 manifest round-trips as itself: the v3
+            # optional fields (partition, rows) would otherwise be dumped as
+            # nulls the operator never wrote, into a config the scheduler
+            # re-parses and a test compares against the file it read.
+            benchmark_config["points"] = explicit_points.model_dump(
+                mode="json", exclude_none=True
+            )
         else:
             benchmark_config.update(
                 {
@@ -423,6 +444,17 @@ def update_engine_config_with_dynamo(
             logger.debug(
                 f" Skipping engine_args.{key} (not available in this vLLM version)"
             )
+
+    # DYN_GMS_USE_V1 is operator-injected (env-only, like DYN_SNAPSHOT_CONTROL_DIR).
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        if getattr(engine_config, "load_format", None) == "gms":
+            raise ValueError(
+                "DYN_GMS_USE_V1=true cannot be combined with --load-format gms"
+            )
+        engine_config.worker_cls = (
+            "gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker"
+        )
+        engine_config.enable_sleep_mode = True
 
 
 def create_kv_events_config(

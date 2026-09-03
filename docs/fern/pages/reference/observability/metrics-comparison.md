@@ -18,7 +18,7 @@ For Dynamo's own runtime metrics (`dynamo_*`), see the [Metrics Guide](../../kub
 |-----------|---------------|----------------|----------------|----------------|
 | vLLM | `vllm:` | 36 | v0.19.0 | `DYN_SYSTEM_PORT=8081` |
 | SGLang | `sglang:` | 48 | v0.5.9 | `DYN_SYSTEM_PORT=8081 --enable-metrics` |
-| TensorRT-LLM | `trtllm_` | 14 | v1.3.0rc9 | `DYN_SYSTEM_PORT=8081 --publish-events-and-metrics` |
+| TensorRT-LLM | `trtllm_` | 14 | v1.3.0rc9 | `DYN_SYSTEM_PORT=8081 --publish-metrics` |
 
 > **Note:** Metric names and counts are subject to change with engine version updates. All metrics were verified from live scrapes on 2026-04-10 running Dynamo v1.0.0. Always inspect your actual `/metrics` endpoint for the definitive list.
 

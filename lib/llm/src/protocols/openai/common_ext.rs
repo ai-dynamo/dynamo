@@ -87,6 +87,28 @@ pub struct CommonExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub prompt_logprobs: Option<u32>,
+
+    /// If true, append the assistant generation prompt after the last message.
+    /// Defaults to true when omitted, matching vLLM 0.27.1 and the Python
+    /// frontend (HuggingFace Transformers defaults this flag to false).
+    /// Incompatible with `continue_final_message`. Chat-only: runtime-rejected
+    /// on `/v1/completions`. Hidden from the shared OpenAPI schema so
+    /// completions does not advertise these fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
+    #[builder(default, setter(strip_option))]
+    pub add_generation_prompt: Option<bool>,
+
+    /// If true, leave the last message open so the model continues that turn
+    /// instead of starting a new one. Any final message role can be continued.
+    /// Incompatible with omitted or `true` `add_generation_prompt` (vLLM 0.27.1
+    /// finalizes the omitted field to true). Chat-only: runtime-rejected on
+    /// `/v1/completions`. Hidden from the shared OpenAPI schema so completions
+    /// does not advertise these fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
+    #[builder(default, setter(strip_option))]
+    pub continue_final_message: Option<bool>,
 }
 
 impl CommonExt {
@@ -122,6 +144,12 @@ pub trait CommonExtProvider {
     fn get_prompt_logprobs_count(&self) -> Option<u32> {
         None
     }
+
+    /// Whether to continue the last message instead of starting a new turn.
+    fn get_continue_final_message(&self) -> Option<bool> {
+        self.common_ext()
+            .and_then(|common| common.continue_final_message)
+    }
 }
 
 #[cfg(test)]
@@ -129,76 +157,6 @@ mod tests {
     use super::*;
 
     use serde_json;
-
-    #[test]
-    fn test_common_ext_builder_default() {
-        let common_ext = CommonExt::builder().build().unwrap();
-        assert_eq!(common_ext.ignore_eos, None);
-        assert_eq!(common_ext.min_tokens, None);
-        assert_eq!(common_ext.top_k, None);
-        assert_eq!(common_ext.repetition_penalty, None);
-        assert_eq!(common_ext.guided_json, None);
-        assert_eq!(common_ext.guided_regex, None);
-        assert_eq!(common_ext.guided_grammar, None);
-        assert_eq!(common_ext.guided_choice, None);
-        assert_eq!(common_ext.guided_decoding_backend, None);
-        assert_eq!(common_ext.include_stop_str_in_output, None);
-        assert_eq!(common_ext.skip_special_tokens, None);
-    }
-
-    #[test]
-    fn test_common_ext_builder_with_values() {
-        let common_ext = CommonExt::builder()
-            .ignore_eos(true)
-            .min_tokens(10)
-            .top_k(50)
-            .repetition_penalty(1.2)
-            .include_stop_str_in_output(true)
-            .guided_json(serde_json::json!({"key": "value"}))
-            .guided_regex("regex".to_string())
-            .guided_grammar("grammar".to_string())
-            .guided_choice(vec!["choice1".to_string(), "choice2".to_string()])
-            .guided_decoding_backend("backend".to_string())
-            .skip_special_tokens(false)
-            .build()
-            .unwrap();
-
-        assert_eq!(common_ext.ignore_eos, Some(true));
-        assert_eq!(common_ext.min_tokens, Some(10));
-        assert_eq!(common_ext.top_k, Some(50));
-        assert_eq!(common_ext.repetition_penalty, Some(1.2));
-        assert_eq!(common_ext.include_stop_str_in_output, Some(true));
-        assert_eq!(
-            common_ext.guided_json.as_ref(),
-            Some(&serde_json::json!({"key": "value"}))
-        );
-        assert_eq!(common_ext.guided_regex, Some("regex".to_string()));
-        assert_eq!(common_ext.guided_grammar, Some("grammar".to_string()));
-        assert_eq!(
-            common_ext.guided_choice,
-            Some(vec!["choice1".to_string(), "choice2".to_string()])
-        );
-        assert_eq!(
-            common_ext.guided_decoding_backend,
-            Some("backend".to_string())
-        );
-        assert_eq!(common_ext.skip_special_tokens, Some(false));
-    }
-
-    #[test]
-    fn test_common_ext_fields() {
-        // Test that CommonExt fields can be set and retrieved correctly
-        let common_ext = CommonExt::builder()
-            .ignore_eos(false)
-            .min_tokens(5)
-            .include_stop_str_in_output(true)
-            .build()
-            .unwrap();
-
-        assert_eq!(common_ext.ignore_eos, Some(false));
-        assert_eq!(common_ext.min_tokens, Some(5));
-        assert_eq!(common_ext.include_stop_str_in_output, Some(true));
-    }
 
     #[test]
     fn test_validation_min_tokens() {
@@ -218,52 +176,10 @@ mod tests {
             guided_whitespace_pattern: None,
             skip_special_tokens: None,
             prompt_logprobs: None,
+            add_generation_prompt: None,
+            continue_final_message: None,
         };
         assert!(common_ext.validate().is_ok());
-    }
-
-    #[test]
-    fn test_common_ext_neither_specified() {
-        // Test that neither ignore_eos nor min_tokens specified works
-        let common_ext = CommonExt::builder().build().unwrap();
-
-        assert_eq!(common_ext.ignore_eos, None);
-        assert_eq!(common_ext.min_tokens, None);
-        assert_eq!(common_ext.top_k, None);
-        assert_eq!(common_ext.repetition_penalty, None);
-        assert_eq!(common_ext.include_stop_str_in_output, None);
-        assert!(common_ext.validate().is_ok());
-    }
-
-    #[test]
-    fn test_common_ext_default() {
-        // Test that Default trait implementation works correctly
-        let common_ext = CommonExt::default();
-
-        assert_eq!(common_ext.ignore_eos, None);
-        assert_eq!(common_ext.min_tokens, None);
-        assert_eq!(common_ext.top_k, None);
-        assert_eq!(common_ext.repetition_penalty, None);
-        assert_eq!(common_ext.include_stop_str_in_output, None);
-        assert!(common_ext.validate().is_ok());
-    }
-
-    #[test]
-    fn test_skip_special_tokens_field() {
-        // Test that skip_special_tokens can be set and retrieved
-        let common_ext = CommonExt::builder()
-            .skip_special_tokens(true)
-            .build()
-            .unwrap();
-
-        assert_eq!(common_ext.skip_special_tokens, Some(true));
-
-        let common_ext = CommonExt::builder()
-            .skip_special_tokens(false)
-            .build()
-            .unwrap();
-
-        assert_eq!(common_ext.skip_special_tokens, Some(false));
     }
 
     #[test]

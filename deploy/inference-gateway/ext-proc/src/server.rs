@@ -3,9 +3,8 @@
 
 //! Envoy `ExternalProcessor.Process` bidirectional streaming implementation.
 //!
-//! Mirrors the Go LW-EPP `StreamingServer` from GAIE `pkg/epp-light/server.go`
-//! (issue #2834 / PR #2842). The server handles the ext-proc protocol and
-//! delegates endpoint selection to an `EndpointPicker` implementation.
+//! Handles the ext-proc protocol and delegates endpoint selection to an
+//! `EndpointPicker` implementation.
 //!
 //! The state machine enforces ordered responses:
 //! `RequestHeaders → RequestBody → RequestTrailers → ResponseHeaders → ResponseBody → ResponseTrailers`
@@ -28,7 +27,7 @@ use crate::proto::envoy::service::ext_proc::v3::{
 };
 use crate::proto::envoy::r#type::v3::StatusCode;
 
-/// State machine phases for the ext_proc stream, matching the Go LW-EPP.
+/// State machine phases for the ext_proc stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamState {
     RequestReceived,
@@ -114,7 +113,6 @@ impl RequestContext {
     }
 
     /// Advance the state machine and collect responses that are ready to send.
-    /// Mirrors Go LW-EPP `sendPendingResponses`.
     fn drain_pending_responses(&mut self) -> Vec<ProcessingResponse> {
         let mut out = Vec::new();
 
@@ -192,15 +190,13 @@ impl RequestContext {
     }
 }
 
-/// The ext_proc gRPC server. Mirrors Go LW-EPP `StreamingServer`.
+/// The ext_proc gRPC server.
 ///
 /// Takes an `EndpointPicker` for endpoint selection, decoupling the ext-proc
-/// protocol handling from the routing decision — exactly as the Go LW-EPP
-/// separates `StreamingServer` from `EndpointPicker`.
+/// protocol handling from the routing decision.
 ///
 /// Endpoints are resolved internally by the picker (the `Router` uses a K8s
-/// pod reflector). Pickers receive an empty endpoint slice; this matches the
-/// LW-EPP trait contract while removing the unused `Datastore` plumbing.
+/// pod reflector), so pickers always receive an empty endpoint slice.
 pub struct ExtProcServer<P: EndpointPicker> {
     picker: Arc<P>,
 }
@@ -216,7 +212,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     }
 
     /// Handle request headers phase.
-    /// Mirrors Go LW-EPP `handleRequestHeaders` in `server.go`.
     fn handle_request_headers(ctx: &mut RequestContext, hdr: &ext_proc::HttpHeaders) {
         // Collect headers and resolve the request ID for every request,
         // including header-only (end_of_stream) requests such as GET /v1/models.
@@ -245,7 +240,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     }
 
     /// Handle a header-only request (EndOfStream on headers, no body).
-    /// Mirrors Go LW-EPP `handleHeaderOnlyRequest`.
     async fn handle_header_only_request(
         picker: &P,
         ctx: &mut RequestContext,
@@ -275,7 +269,6 @@ impl<P: EndpointPicker> ExtProcServer<P> {
     }
 
     /// Handle request body phase: extract model, call picker.
-    /// Mirrors Go LW-EPP `handleRequestBody`.
     async fn handle_request_body(
         picker: &P,
         ctx: &mut RequestContext,
@@ -327,9 +320,9 @@ impl<P: EndpointPicker> ExtProcServer<P> {
         ));
 
         // Inject nvext.token_data into the request body JSON so the backend
-        // skips redundant tokenization. Mirrors Go EPP's setTokenizedPrompt.
-        // Only the injection path allocates a new body; forwarding the unchanged
-        // body is a cheap `Bytes` clone (no copy).
+        // skips redundant tokenization. Only the injection path allocates a
+        // new body; forwarding the unchanged body is a cheap `Bytes` clone
+        // (no copy).
         let forwarded_body: Bytes = if let Some(ref token_ids) = result.token_ids {
             match inject_token_data(&raw_body, token_ids) {
                 Ok(modified) => {
@@ -738,8 +731,8 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 
             // TODO(epp-disconnect-semantics): Define how Envoy retries and backend
             // work continuing after an ext_proc disconnect affect booking ownership.
-            // Notify the picker that this request is complete so it can free router
-            // bookkeeping state (mirrors Go EPP PostResponse).
+            // Notify the picker that this request is complete so it can free
+            // router bookkeeping state.
             if ctx.body_routed && !ctx.request_id.is_empty() {
                 let booking_id = ctx
                     .booking_id
@@ -760,7 +753,7 @@ impl<P: EndpointPicker> ExternalProcessor for ExtProcServer<P> {
 }
 
 // ---------------------------------------------------------------------------
-// Request helpers (mirrors Go LW-EPP request.go)
+// Request helpers
 // ---------------------------------------------------------------------------
 
 /// Validate the gateway's `ProtocolConfiguration` against the protocol
@@ -843,7 +836,6 @@ fn validate_protocol_config(
 
 /// Inject pre-computed token IDs into the request body JSON as
 /// `nvext.token_data`. This lets the backend skip redundant tokenization.
-/// Mirrors Go EPP's `setTokenizedPrompt` in `shared.go`.
 fn inject_token_data(body: &[u8], token_ids: &[u32]) -> anyhow::Result<Vec<u8>> {
     let mut parsed: serde_json::Value = serde_json::from_slice(body)?;
 
@@ -873,7 +865,6 @@ fn inject_token_data(body: &[u8], token_ids: &[u32]) -> anyhow::Result<Vec<u8>> 
 }
 
 /// Extract the "model" field from a JSON request body.
-/// Mirrors Go LW-EPP `extractModelFromBody`.
 fn extract_model_from_body(body: &[u8]) -> String {
     #[derive(serde::Deserialize)]
     struct ModelField {
@@ -887,7 +878,6 @@ fn extract_model_from_body(body: &[u8]) -> String {
 }
 
 /// Extract the candidate endpoint subset from ext-proc request metadata.
-/// Mirrors Go LW-EPP `extractCandidateSubset`.
 fn extract_candidate_subset(
     request_metadata: &HashMap<String, prost_types::Struct>,
 ) -> Vec<String> {

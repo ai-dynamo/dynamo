@@ -4,13 +4,15 @@
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use tokio::sync::{Notify, Semaphore, mpsc, watch};
+#[cfg(test)]
+use tokio::sync::watch;
+use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::protocols::{DirectRequest, FpmPublisher};
-use crate::live::{LiveEngine, LiveEngineOptions, ObservedAdmission};
+use crate::live::{LiveEngine, LiveEngineOptions, ObservedAdmission, RequestOutputBuffering};
 use crate::loadgen::WorkloadDriver;
 use crate::replay::TraceSimulationReport;
 
@@ -181,7 +183,14 @@ impl LiveRuntime {
         mode: LiveReplayMode,
         cancel: CancellationToken,
     ) -> Result<Self> {
-        Self::new_inner(config, pending, mode, None, cancel)
+        Self::new_inner(
+            config,
+            pending,
+            mode,
+            #[cfg(test)]
+            None,
+            cancel,
+        )
     }
 
     #[cfg(test)]
@@ -199,7 +208,7 @@ impl LiveRuntime {
         config: OnlineReplayConfig,
         pending: std::collections::VecDeque<DirectRequest>,
         mode: LiveReplayMode,
-        output_gate: Option<watch::Receiver<bool>>,
+        #[cfg(test)] output_gate: Option<watch::Receiver<bool>>,
         cancel: CancellationToken,
     ) -> Result<Self> {
         let OnlineReplayConfig {
@@ -241,14 +250,15 @@ impl LiveRuntime {
                     kv_event_publishers: router.sink(worker_idx as _),
                     admission_tx: Some(admission_tx.clone()),
                     fpm_publisher: FpmPublisher::default(),
-                    request_output_capacity: None,
+                    request_output_buffering: RequestOutputBuffering::FullResponse,
                     allow_zero_output: true,
+                    #[cfg(test)]
+                    output_gate: output_gate.clone(),
                 })
                 .collect();
             engines.extend(LiveEngine::start_grouped_with_options(
                 args.clone(),
                 rank_options,
-                output_gate.clone(),
             )?);
         }
         drop(admission_tx);
