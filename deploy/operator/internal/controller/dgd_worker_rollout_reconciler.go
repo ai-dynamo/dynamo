@@ -26,7 +26,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -376,16 +375,6 @@ func (r managedWorkerRollout) inProgress() bool {
 	return r.targetPending() || !r.targetsReady() || len(r.oldDCDs) > 0
 }
 
-type workerDCDIdentityCollisionError struct {
-	component string
-	name      string
-	detail    string
-}
-
-func (e *workerDCDIdentityCollisionError) Error() string {
-	return fmt.Sprintf("worker DCD identity collision for component %q at %q: %s", e.component, e.name, e.detail)
-}
-
 // buildManagedWorkerRollout resolves the owned DCD cohort by its canonical
 // name. A persisted v1 suffix is eligible only as an explicit v1-to-v2 bridge;
 // worker specs are not used to identify a generation.
@@ -436,9 +425,6 @@ func (r *dgdWorkerRolloutReconciler) buildManagedWorkerRollout(
 			rollout.targetsByComponent[componentName] = target
 			matched[target.Name] = struct{}{}
 			continue
-		}
-		if err := r.rejectDesiredWorkerDCDNameCollision(ctx, dgd, componentName, targetName); err != nil {
-			return managedWorkerRollout{}, err
 		}
 	}
 	for i := range observed {
@@ -525,27 +511,6 @@ func (r *dgdWorkerRolloutReconciler) listOwnedWorkerDCDs(
 		}
 	}
 	return workers, nil
-}
-
-func (r *dgdWorkerRolloutReconciler) rejectDesiredWorkerDCDNameCollision(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	componentName string,
-	targetName string,
-) error {
-	existing := &nvidiacomv1beta1.DynamoComponentDeployment{}
-	err := r.Get(ctx, types.NamespacedName{Name: targetName, Namespace: dgd.Namespace}, existing)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("get desired worker DCD %s: %w", targetName, err)
-	}
-	return &workerDCDIdentityCollisionError{
-		component: componentName,
-		name:      targetName,
-		detail:    "the deterministic target name is occupied outside the managed inventory",
-	}
 }
 
 func workerDCDReady(dcd *nvidiacomv1beta1.DynamoComponentDeployment) bool {

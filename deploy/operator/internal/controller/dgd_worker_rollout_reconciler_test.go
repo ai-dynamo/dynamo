@@ -1935,21 +1935,6 @@ func TestManagedWorkerRolloutScalesObservedOldDCDDespiteDesiredHashLabel(t *test
 	assertWorkerDCDReplicas(t, reconciler, old, 0)
 }
 
-func TestManagedWorkerRolloutRejectsForeignCanonicalNameCollision(t *testing.T) {
-	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-		"worker": {ComponentType: consts.ComponentTypeWorker},
-	})
-	dgd.UID = types.UID("dgd-uid")
-	collision := managedInventoryWorkerDCD(t, dgd, betaDGDWorkersSpecHash(t, dgd))
-	collision.OwnerReferences = nil
-	reconciler := createTestReconcilerWithStatus(dgd, withObjects(collision))
-
-	_, err := reconciler.buildManagedWorkerRollout(context.Background(), dgd)
-	var identityCollision *workerDCDIdentityCollisionError
-	require.ErrorAs(t, err, &identityCollision)
-	assert.Equal(t, "worker", identityCollision.component)
-}
-
 func renderManagedInventoryWorkerDCD(
 	t *testing.T,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,

@@ -56,7 +56,6 @@ const (
 	reasonNoMultinodeOrchestrator             Reason = "no_multinode_orchestrator_available"
 	reasonFailedToReconcileResources          Reason = "failed_to_reconcile_the_resources"
 	reasonRollingUpdateFailed                 Reason = "rolling_update_failed"
-	reasonDCDIdentityCollision                Reason = "dcd_identity_collision"
 	reasonWaitingForCheckpoint                Reason = "waiting_for_checkpoint"
 	reasonSelectedWorkloadProviderUnavailable Reason = "selected_workload_provider_unavailable"
 	reasonUnsupportedWorkloadProvider         Reason = "unsupported_workload_provider"

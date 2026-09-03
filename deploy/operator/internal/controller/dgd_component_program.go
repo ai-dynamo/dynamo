@@ -19,7 +19,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -181,10 +180,6 @@ func (p *componentProgram) reconcileManagedWorkerRollout(
 ) (*managedWorkerRollout, error) {
 	rollout, err := p.rollout.buildManagedWorkerRollout(ctx, dgd)
 	if err != nil {
-		var collision *workerDCDIdentityCollisionError
-		if errors.As(err, &collision) {
-			return nil, failWorkloadProgram(reasonDCDIdentityCollision, err)
-		}
 		return nil, failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}
 	if err := p.rollout.advanceManagedWorkerRollout(ctx, dgd, status, rollout); err != nil {
