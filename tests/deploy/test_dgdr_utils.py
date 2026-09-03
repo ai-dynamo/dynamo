@@ -98,7 +98,6 @@ def initialized_manager() -> ManagedDGDR:
 
 
 def vcluster_connection_error() -> aiohttp.ClientConnectorError:
-    """Build the connection failure raised while the vCluster tunnel is down."""
     connection_key = MagicMock(host="127.0.0.1", port=8443, ssl=True)
     return aiohttp.ClientConnectorError(
         connection_key,
