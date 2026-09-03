@@ -50,6 +50,10 @@ spec:
           - /bin/sh
           - -lc
           env:
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
           # Require reliable-connected RoCE and CUDA memory support; do not fall back to TCP or CUDA IPC.
@@ -182,6 +186,11 @@ spec:
           - /bin/sh
           - -lc
           env:
+          # Use the Pod IP because hostname lookup can prefer an unreachable IPv6 address in dual-stack clusters.
+          - name: VLLM_NIXL_SIDE_CHANNEL_HOST
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
           - name: KV_TRANSFER_CONFIG
             value: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
           # Require reliable-connected RoCE and CUDA memory support; do not fall back to TCP or CUDA IPC.
