@@ -101,12 +101,8 @@ class SglangUtils:
             sampling_params["n"] = sampling_options.n
         if stop_conditions.max_tokens:
             sampling_params["max_new_tokens"] = stop_conditions.max_tokens
-        # min_new_tokens only goes to an engine that owns a tokenizer; SGLang rejects it
-        # otherwise. Dynamo already enforces the floor -- the Rust decoder holds the same
-        # min_tokens and the same stop-token set and suppresses every stop until the floor
-        # is reached -- but it cannot manufacture tokens the engine never produced, so a
-        # tokenizer-free engine is held open with ignore_eos and left to Dynamo to stop.
-        # The engine may then generate tokens Dynamo discards, bounded by max_tokens.
+        # SGLang rejects min_new_tokens without a tokenizer, so Dynamo's decoder enforces
+        # the floor and the engine is held open with ignore_eos until it stops the request.
         hold_engine_open = False
         if stop_conditions.min_tokens:
             if use_sglang_tokenizer:

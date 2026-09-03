@@ -814,9 +814,8 @@ def test_build_sampling_params_enforces_min_tokens_in_dynamo_for_token_requests(
         }
     )
 
-    # SGLang rejects min_new_tokens when the engine has no tokenizer, and Dynamo's
-    # decoder already enforces the floor, so the engine is held open instead of told
-    # about it: no stop ids, ignore_eos set, over-generation bounded by max_tokens.
+    # Tokenizer-free: Dynamo's decoder enforces the floor, so the engine is only held
+    # open -- no min_new_tokens, no stop ids, ignore_eos set.
     assert "min_new_tokens" not in sampling_params
     assert "stop_token_ids" not in sampling_params
     assert sampling_params["ignore_eos"] is True

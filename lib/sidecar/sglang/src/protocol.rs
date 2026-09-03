@@ -40,14 +40,8 @@ pub(crate) fn build_generate_request(
             .transpose()
             .map_err(|_| client::invalid_arg("max_tokens does not fit in i32"))?
     };
-    // `min_new_tokens` is never sent: SGLang rejects it outright when the engine has no
-    // tokenizer, and this gRPC path always submits token ids, so it never has one. Dynamo
-    // enforces the floor itself -- the `Decoder` in `lib/llm/src/backend.rs` holds the same
-    // `min_tokens` and the same stop-token set, and suppresses every stop trigger until the
-    // floor is reached. What the `Decoder` cannot do is manufacture tokens the engine never
-    // produced, so when a floor is requested the engine is held open for the whole request:
-    // it receives no stop ids and is told to ignore EOS, and termination becomes entirely
-    // Dynamo's. The engine may then generate tokens Dynamo discards, bounded by `max_tokens`.
+    // SGLang rejects `min_new_tokens` without a tokenizer and this path never has one, so the
+    // `Decoder` in `lib/llm/src/backend.rs` enforces the floor and the engine is held open.
     let hold_engine_open =
         !mode.is_prefill() && request.stop_conditions.min_tokens.unwrap_or(0) > 0;
 
