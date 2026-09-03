@@ -166,7 +166,6 @@ indicatif = { version = "0.18.0", optional = true }
 axum = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { workspace = true }
-rustls = { version = "0.23" }
 utoipa = { version = "5.3", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 
@@ -236,6 +235,7 @@ hf-hub = { workspace = true }
 modelexpress-client = { workspace = true }
 modelexpress-common = { workspace = true }
 reqwest = { workspace = true }
+rcgen = { workspace = true }
 rstest = "0.18.2"
 serial_test = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }

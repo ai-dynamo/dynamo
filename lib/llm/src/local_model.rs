@@ -69,6 +69,7 @@ pub struct LocalModelBuilder {
     frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
+    tls_client_ca_cert_path: Option<PathBuf>,
     migration_limit: u32,
     migration_max_seq_len: Option<u32>,
     is_mocker: bool,
@@ -94,6 +95,7 @@ impl Default for LocalModelBuilder {
             frontend_api_config: Default::default(),
             tls_cert_path: Default::default(),
             tls_key_path: Default::default(),
+            tls_client_ca_cert_path: Default::default(),
             model_path: Default::default(),
             source_path: Default::default(),
             model_name: Default::default(),
@@ -233,6 +235,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn tls_client_ca_cert_path(&mut self, p: Option<PathBuf>) -> &mut Self {
+        self.tls_client_ca_cert_path = p;
+        self
+    }
+
     pub fn router_config(&mut self, router_config: Option<RouterConfig>) -> &mut Self {
         self.router_config = router_config;
         self
@@ -365,6 +372,7 @@ impl LocalModelBuilder {
                 frontend_api_config: self.frontend_api_config.clone(),
                 tls_cert_path: self.tls_cert_path.take(),
                 tls_key_path: self.tls_key_path.take(),
+                tls_client_ca_cert_path: self.tls_client_ca_cert_path.take(),
                 router_config: self.router_config.take().unwrap_or_default(),
                 runtime_config: self.runtime_config.clone(),
                 namespace: self.namespace.clone(),
@@ -421,6 +429,7 @@ impl LocalModelBuilder {
             frontend_api_config: self.frontend_api_config.clone(),
             tls_cert_path: self.tls_cert_path.take(),
             tls_key_path: self.tls_key_path.take(),
+            tls_client_ca_cert_path: self.tls_client_ca_cert_path.take(),
             router_config: self.router_config.take().unwrap_or_default(),
             runtime_config: self.runtime_config.clone(),
             namespace: self.namespace.clone(),
@@ -445,6 +454,7 @@ pub struct LocalModel {
     frontend_api_config: FrontendApiConfig,
     tls_cert_path: Option<PathBuf>,
     tls_key_path: Option<PathBuf>,
+    tls_client_ca_cert_path: Option<PathBuf>,
     router_config: RouterConfig,
     runtime_config: ModelRuntimeConfig,
     namespace: Option<String>,
@@ -591,6 +601,10 @@ impl LocalModel {
 
     pub fn tls_key_path(&self) -> Option<&Path> {
         self.tls_key_path.as_deref()
+    }
+
+    pub fn tls_client_ca_cert_path(&self) -> Option<&Path> {
+        self.tls_client_ca_cert_path.as_deref()
     }
 
     pub fn router_config(&self) -> &RouterConfig {

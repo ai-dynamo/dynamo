@@ -61,6 +61,7 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
     http_port: int
     tls_cert_path: Optional[pathlib.Path]
     tls_key_path: Optional[pathlib.Path]
+    tls_client_ca_cert_path: Optional[pathlib.Path]
     tcp_tls_cert_path: Optional[str] = None
     tcp_tls_key_path: Optional[str] = None
     tcp_tls_ca_cert_path: Optional[str] = None
@@ -113,6 +114,12 @@ class FrontendConfig(RouterConfigBase, KvRouterConfigBase, AicPerfConfigBase):
         if bool(self.tls_cert_path) ^ bool(self.tls_key_path):  # ^ is XOR
             raise ValueError(
                 "--tls-cert-path and --tls-key-path must be provided together"
+            )
+        if self.tls_client_ca_cert_path and not (
+            self.tls_cert_path and self.tls_key_path
+        ):
+            raise ValueError(
+                "--tls-client-ca-cert-path requires --tls-cert-path and --tls-key-path"
             )
         if self.migration_limit < 0 or self.migration_limit > _U32_MAX:
             raise ValueError(
@@ -293,6 +300,14 @@ class FrontendArgGroup(ArgGroup):
             env_var="DYN_TLS_KEY_PATH",
             default=None,
             help="TLS certificate key path, PEM format.",
+            arg_type=pathlib.Path,
+        )
+        add_argument(
+            g,
+            flag_name="--tls-client-ca-cert-path",
+            env_var="DYN_TLS_CLIENT_CA_CERT_PATH",
+            default=None,
+            help="Client CA certificate path for mutual TLS, PEM format.",
             arg_type=pathlib.Path,
         )
 

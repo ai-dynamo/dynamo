@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::{
@@ -146,22 +146,38 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     let local_model = engine_config.local_model();
-    let mut http_service_builder = match (local_model.tls_cert_path(), local_model.tls_key_path()) {
-        (Some(tls_cert_path), Some(tls_key_path)) => {
+    let mut http_service_builder = match (
+        local_model.tls_cert_path(),
+        local_model.tls_key_path(),
+        local_model.tls_client_ca_cert_path(),
+    ) {
+        (Some(tls_cert_path), Some(tls_key_path), tls_client_ca_cert_path) => {
             if !tls_cert_path.exists() {
                 anyhow::bail!("TLS certificate not found: {}", tls_cert_path.display());
             }
             if !tls_key_path.exists() {
                 anyhow::bail!("TLS key not found: {}", tls_key_path.display());
             }
+            if let Some(client_ca_cert_path) = tls_client_ca_cert_path
+                && !client_ca_cert_path.exists()
+            {
+                anyhow::bail!(
+                    "TLS client CA certificate not found: {}",
+                    client_ca_cert_path.display()
+                );
+            }
             service_v2::HttpService::builder()
                 .enable_tls(true)
                 .tls_cert_path(Some(tls_cert_path.to_path_buf()))
                 .tls_key_path(Some(tls_key_path.to_path_buf()))
+                .tls_client_ca_cert_path(tls_client_ca_cert_path.map(Path::to_path_buf))
                 .port(local_model.http_port())
         }
-        (None, None) => service_v2::HttpService::builder().port(local_model.http_port()),
-        (_, _) => {
+        (None, None, None) => service_v2::HttpService::builder().port(local_model.http_port()),
+        (None, None, Some(_)) => {
+            anyhow::bail!("--tls-client-ca-cert-path requires --tls-cert-path and --tls-key-path");
+        }
+        (_, _, _) => {
             // CLI should prevent us ever getting here
             anyhow::bail!(
                 "Both --tls-cert-path and --tls-key-path must be provided together to enable TLS"

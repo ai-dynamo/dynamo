@@ -441,6 +441,8 @@ async def async_main():
         kwargs["tls_cert_path"] = config.tls_cert_path
     if config.tls_key_path:
         kwargs["tls_key_path"] = config.tls_key_path
+    if config.tls_client_ca_cert_path:
+        kwargs["tls_client_ca_cert_path"] = config.tls_client_ca_cert_path
     if config.namespace:
         kwargs["namespace"] = config.namespace
     if config.namespace_prefix:
