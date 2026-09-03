@@ -20,7 +20,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -35,8 +34,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
-
-const groveWorkerHashObservationRequeueAfter = time.Second
 
 // groveWorkloadsReconciler owns the complete provider workload sequence while
 // exposing no dependency on the top-level DGD controller.
@@ -101,18 +98,17 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
 	// A successful write only acknowledges the requested change. Project the parent
-	// hash only when the transition needs a commit and a later informer observation
-	// confirms the target suffix on every worker clique.
-	var observedWorkerHash bool
+	// hash only when the transition needs a commit and the informer cache reflects
+	// the updated PCS with the target suffix on every worker clique.
 	if workerHashTransition.needsCommit() {
-		observedWorkerHash, err = podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing, workerHashTransition.isFirstGeneration)
+		observed, err := podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing, workerHashTransition.isFirstGeneration)
 		if err != nil {
 			return ReconcileResult{}, failWorkloadProgram(
 				reasonRollingUpdateFailed,
 				fmt.Errorf("observe Grove worker hash before projection: %w", err),
 			)
 		}
-		if observedWorkerHash {
+		if observed {
 			if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, true); err != nil {
 				return ReconcileResult{}, failWorkloadProgram(
 					reasonRollingUpdateFailed,
@@ -143,9 +139,6 @@ func (r *groveWorkloadsReconciler) Reconcile(
 
 	resources := append(stableResources, podCliqueSetResource)
 	result := checkGroveResourcesReadiness(resources, readiness.Classification)
-	if workerHashTransition.needsCommit() && !observedWorkerHash {
-		result.RequeueAfter = groveWorkerHashObservationRequeueAfter
-	}
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
 	return result, nil
 }

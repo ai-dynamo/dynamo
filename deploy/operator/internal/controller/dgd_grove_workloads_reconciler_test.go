@@ -313,9 +313,8 @@ func TestGroveWorkloadsReconciler_RecoversWorkerHashCommitAfterPodCliqueSetSync(
 	t.Log("Persist the PCS suffix without projecting the DGD hash from the write receipt")
 	observedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
 	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), observedDGD))
-	result, err := workloads.Reconcile(context.Background(), observedDGD, nil, nil)
+	_, err = workloads.Reconcile(context.Background(), observedDGD, nil, nil)
 	require.NoError(t, err)
-	assert.Equal(t, groveWorkerHashObservationRequeueAfter, result.RequeueAfter)
 
 	t.Log("Verify the write receipt leaves the parent hash unchanged")
 	storedPCS := &grovev1alpha1.PodCliqueSet{}
