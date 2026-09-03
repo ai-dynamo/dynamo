@@ -19,7 +19,7 @@ use dynamo_runtime::{
     component::{Client, Instance},
     discovery::EventTransportKind,
     distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
-    error::{ErrorType, match_error_chain},
+    error::{BackendError, ErrorType, match_error_chain},
     pipeline::{
         AddressedRequest, AsyncEngineContext, Context, ManyIn, Operator, PushRouter, RouterMode,
         ServerStreamingEngine, StreamingDispatch, context::Controller,
@@ -63,18 +63,28 @@ async fn test_load_context(client: &Client) -> Arc<RoutingLoadContext> {
 }
 
 #[test]
-fn response_item_failed_includes_typed_terminal_failures() {
-    let mut output = LLMEngineOutput::default();
-    assert!(!response_item_failed(&Annotated::from_data(output.clone())));
+fn classify_response_item_separates_terminal_failures_from_healthy_frames() {
+    let outcome =
+        |output: &LLMEngineOutput| classify_response_item(&Annotated::from_data(output.clone()));
 
+    let mut output = LLMEngineOutput::default();
+    assert!(matches!(outcome(&output), ResponseItemOutcome::Healthy));
+
+    // Carries only a bare message, so migration has nothing to act on: drain for a typed error.
     output.finish_reason = Some(FinishReason::Error("decode failed".to_string()));
-    assert!(response_item_failed(&Annotated::from_data(output.clone())));
+    assert!(matches!(
+        outcome(&output),
+        ResponseItemOutcome::DrainableTerminal
+    ));
 
     output.finish_reason = Some(FinishReason::Cancelled);
-    assert!(response_item_failed(&Annotated::from_data(output.clone())));
+    assert!(matches!(
+        outcome(&output),
+        ResponseItemOutcome::DrainableTerminal
+    ));
 
     output.finish_reason = Some(FinishReason::Length);
-    assert!(!response_item_failed(&Annotated::from_data(output)));
+    assert!(matches!(outcome(&output), ResponseItemOutcome::Healthy));
 }
 
 #[test]
@@ -690,6 +700,331 @@ async fn terminal_item_does_not_skip_transport_eof() {
     assert!(monitored.next().await.is_some());
     assert!(monitored.next().await.is_none());
     assert!(drained.load(Ordering::Acquire));
+
+    drop(router);
+    runtime.shutdown();
+}
+
+fn cancelled_frame() -> Annotated<LLMEngineOutput> {
+    Annotated::from_data(LLMEngineOutput {
+        finish_reason: Some(FinishReason::Cancelled),
+        ..Default::default()
+    })
+}
+
+fn engine_shutdown_frame() -> Annotated<LLMEngineOutput> {
+    Annotated {
+        data: None,
+        id: None,
+        event: Some("error".to_string()),
+        comment: None,
+        error: Some(
+            DynamoError::builder()
+                .error_type(ErrorType::Backend(BackendError::EngineShutdown))
+                .message("engine is shutting down")
+                .build(),
+        ),
+    }
+}
+
+fn is_engine_shutdown(item: &Annotated<LLMEngineOutput>) -> bool {
+    item.error.as_ref().is_some_and(|error| {
+        match_error_chain(
+            error,
+            &[ErrorType::Backend(BackendError::EngineShutdown)],
+            &[],
+        )
+    })
+}
+
+/// A trailing `EngineShutdown` error must reach migration, and the `Cancelled` frame that
+/// preceded it must not be forwarded once it does.
+#[tokio::test]
+#[serial_test::serial]
+async fn shutdown_cancellation_drains_trailing_engine_shutdown_error() {
+    let (router, runtime) = router(None).await;
+    let context = Context::new(()).context();
+    // Reaching this at all is what the old code could not do.
+    let polled_past_cancel = Arc::new(AtomicBool::new(false));
+    let source_polled = Arc::clone(&polled_past_cancel);
+    let source = ResponseStream::new(
+        Box::pin(async_stream::stream! {
+            yield cancelled_frame();
+            source_polled.store(true, Ordering::Release);
+            yield engine_shutdown_frame();
+        }),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        Arc::clone(&router.request_metrics),
+        "shutdown-drain".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        &request(),
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+
+    let shutdown = monitored
+        .next()
+        .await
+        .expect("the trailing engine-shutdown error must not be swallowed");
+    assert!(
+        is_engine_shutdown(&shutdown),
+        "migration keys off the typed error, got {:?}",
+        shutdown.error
+    );
+    assert!(monitored.next().await.is_none());
+    assert!(polled_past_cancel.load(Ordering::Acquire));
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// A client cancel arrives through the context, not as a frame, so it must still preempt.
+#[tokio::test]
+#[serial_test::serial]
+async fn client_cancellation_still_ends_stream_without_draining() {
+    let (router, runtime) = router(None).await;
+    let controller = Controller::new("client-cancelled-drain".to_string());
+    controller.stop();
+    let cancelled_request = Context::with_controller((), controller);
+    let context = cancelled_request.context();
+    let source_polled = Arc::new(AtomicBool::new(false));
+    let polled = Arc::clone(&source_polled);
+    let source = ResponseStream::new(
+        Box::pin(async_stream::stream! {
+            polled.store(true, Ordering::Release);
+            yield cancelled_frame();
+            yield engine_shutdown_frame();
+        }),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        Arc::clone(&router.request_metrics),
+        "client-cancelled-drain".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        &request(),
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+
+    assert!(monitored.next().await.is_none());
+    assert!(
+        !source_polled.load(Ordering::Acquire),
+        "a client cancel must not read further worker frames"
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// A worker that sends a terminal frame and then stops talking without closing the transport
+/// must not hold the request open; the drain is bounded.
+#[tokio::test]
+#[serial_test::serial]
+async fn drain_without_trailing_error_gives_up_at_the_deadline() {
+    let (router, runtime) = router(None).await;
+    // Auto-advances the drain deadline once the task idles, so this costs no wall clock.
+    tokio::time::pause();
+    let context = Context::new(()).context();
+    let source = ResponseStream::new(
+        Box::pin(async_stream::stream! {
+            yield cancelled_frame();
+            // Never ends and never sends the error: the transport is wedged open.
+            std::future::pending::<()>().await;
+        }),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        Arc::clone(&router.request_metrics),
+        "shutdown-drain-deadline".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        &request(),
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+
+    // Generous relative to DRAIN_TIMEOUT: the assertion is that the drain is bounded at all.
+    let deadline = DRAIN_TIMEOUT * 4;
+    let item = tokio::time::timeout(deadline, monitored.next())
+        .await
+        .expect("the drain must give up at DRAIN_TIMEOUT")
+        .expect("the withheld frame must be released once the drain gives up");
+    assert!(matches!(
+        item.data
+            .as_ref()
+            .and_then(|data| data.finish_reason.as_ref()),
+        Some(FinishReason::Cancelled)
+    ));
+    assert!(
+        tokio::time::timeout(deadline, monitored.next())
+            .await
+            .expect("the stream must end after the drain gives up")
+            .is_none()
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// The drain window must actually be armed for DRAIN_TIMEOUT, not merely exist. A worker
+/// that sends its typed error a scheduler tick after the `Cancelled` frame -- well inside
+/// the window -- must still have that error reach migration, and the withheld frame must
+/// not be published ahead of it. Removing the `drain_deadline` reset leaves the deadline at
+/// its already-elapsed initial value, which ends the stream on the `Cancelled` frame and
+/// fails this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn trailing_error_within_the_drain_window_still_reaches_migration() {
+    let (router, runtime) = router(None).await;
+    tokio::time::pause();
+    let context = Context::new(()).context();
+    let source = ResponseStream::new(
+        Box::pin(async_stream::stream! {
+            yield cancelled_frame();
+            // Comfortably inside the window: the drain must still be open here.
+            tokio::time::sleep(DRAIN_TIMEOUT / 2).await;
+            yield engine_shutdown_frame();
+        }),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        Arc::clone(&router.request_metrics),
+        "drain-window-armed".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        &request(),
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+
+    let first = monitored
+        .next()
+        .await
+        .expect("the trailing engine-shutdown error must survive the drain window");
+    assert!(
+        is_engine_shutdown(&first),
+        "migration keys off the typed error, and the withheld cancel frame must not \
+         precede it; got {first:?}"
+    );
+    assert!(
+        monitored.next().await.is_none(),
+        "the shutdown error is the whole response"
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// `biased` polls the stream arm before the drain deadline, so a worker that stays
+/// continuously ready with terminal frames must not be able to postpone the deadline
+/// forever. The drain is armed once and checked against the clock on every frame.
+#[tokio::test]
+#[serial_test::serial]
+async fn always_ready_terminals_cannot_starve_the_drain_deadline() {
+    let (router, runtime) = router(None).await;
+    tokio::time::pause();
+    let context = Context::new(()).context();
+    let source = ResponseStream::new(
+        Box::pin(async_stream::stream! {
+            loop {
+                yield cancelled_frame();
+            }
+        }),
+        Arc::clone(&context),
+    );
+    let guard = RequestGuard::new_kv(
+        Arc::clone(router.kv_router()),
+        Arc::clone(&router.request_metrics),
+        "starvation-guard".to_string(),
+        WorkerWithDpRank::from_worker_id(0),
+        dynamo_kv_router::scheduling::AdmissionAttempt::Untracked,
+        &request(),
+    );
+    let monitored = monitor_response_stream(source, context, guard);
+    tokio::pin!(monitored);
+
+    // Paused time does not auto-advance while the source is always ready, so the consumer
+    // moves the clock past the deadline itself.
+    let mut frames = 0u32;
+    while monitored.next().await.is_some() {
+        frames += 1;
+        if frames == 8 {
+            tokio::time::advance(DRAIN_TIMEOUT + Duration::from_millis(1)).await;
+        }
+        assert!(
+            frames < 1_000,
+            "the drain deadline was starved by an always-ready terminal stream"
+        );
+    }
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// Transport EOF ends the drain and releases the booking.
+#[tokio::test]
+#[serial_test::serial]
+async fn shutdown_cancellation_without_trailing_error_still_aborts() {
+    let (router, runtime) = router(None).await;
+    let context_id = "shutdown-cancel-without-error".to_string();
+    let cancelled_request =
+        Context::with_id_and_metadata(request(), context_id.clone(), Default::default());
+    let (mut selection, _) = router
+        .select_with_affinity(&cancelled_request, RequestPhase::Aggregated, false)
+        .await
+        .unwrap();
+    let cancelled_worker = selection.worker;
+    let guard = router
+        .track_selection(&cancelled_request, &mut selection, false)
+        .await
+        .unwrap();
+    let source = ResponseStream::new(
+        Box::pin(stream::once(async { cancelled_frame() })),
+        cancelled_request.context().clone(),
+    );
+    let monitored = monitor_response_stream(source, cancelled_request.context().clone(), guard);
+    tokio::pin!(monitored);
+
+    // Below DRAIN_TIMEOUT so only transport EOF can satisfy these assertions: at 10s the
+    // test would also pass if the drain deadline, not EOF, had ended the stream.
+    let eof_bound = DRAIN_TIMEOUT / 2;
+    let item = tokio::time::timeout(eof_bound, monitored.next())
+        .await
+        .expect("the drain must end at transport EOF, not block on a trailing error")
+        .expect("the cancelled frame must be yielded once EOF proves it was the last");
+    assert!(matches!(
+        item.data
+            .as_ref()
+            .and_then(|data| data.finish_reason.as_ref()),
+        Some(FinishReason::Cancelled)
+    ));
+    assert!(
+        tokio::time::timeout(eof_bound, monitored.next())
+            .await
+            .expect("the drain must end at transport EOF, not wait for a trailing error")
+            .is_none()
+    );
+
+    let retry_request =
+        Context::with_id_and_metadata(request(), context_id.clone(), Default::default());
+    let (mut retry_selection, _) = router
+        .select_with_affinity(&retry_request, RequestPhase::Aggregated, false)
+        .await
+        .unwrap();
+    assert_eq!(retry_selection.worker, cancelled_worker);
+    let mut retry_guard = router
+        .track_selection(&retry_request, &mut retry_selection, false)
+        .await
+        .expect("the booking must be released when the drain reaches transport EOF");
+    retry_guard.abort().await;
 
     drop(router);
     runtime.shutdown();
@@ -1611,9 +1946,22 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>> for Reje
     }
 }
 
-#[tokio::test]
-#[serial_test::serial]
-async fn worker_overload_stream_migration_releases_and_reselects() {
+/// A two-worker routing host wired to a caller-supplied dispatch, for driving migration
+/// end to end by choosing what the first worker answers with.
+struct MigrationHarness {
+    runtime: Runtime,
+    chooser: Arc<KvRouter>,
+    engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+    registered_ids: HashSet<u64>,
+    // Kept alive: dropping these tears down discovery for the workers the router must see.
+    _store: tempfile::TempDir,
+    _drts: Vec<DistributedRuntime>,
+}
+
+async fn two_worker_migration_harness(
+    namespace: &str,
+    dispatch: Arc<dyn StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>>,
+) -> MigrationHarness {
     async fn shared_drt(runtime: Runtime, store_path: &std::path::Path) -> DistributedRuntime {
         DistributedRuntime::new(
             runtime,
@@ -1635,7 +1983,6 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     let router_drt = shared_drt(runtime.clone(), store.path()).await;
     let first_worker_drt = shared_drt(runtime.clone(), store.path()).await;
     let second_worker_drt = shared_drt(runtime.clone(), store.path()).await;
-    let namespace = "worker-overload-migration";
     let endpoint_for = |drt: &DistributedRuntime| {
         drt.namespace(namespace.to_string())
             .unwrap()
@@ -1707,9 +2054,8 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
     )
     .await
     .unwrap();
-    let dispatch = Arc::new(RejectFirstDispatch::default());
     let push_router =
-        PushRouter::from_client_with_dispatch(client.clone(), RouterMode::KV, dispatch.clone())
+        PushRouter::from_client_with_dispatch(client.clone(), RouterMode::KV, dispatch)
             .await
             .unwrap();
     let chooser = Arc::new(chooser);
@@ -1723,11 +2069,33 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
         )
         .unwrap(),
     );
-    let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> = kv_router;
+
+    MigrationHarness {
+        runtime,
+        chooser,
+        engine: kv_router,
+        registered_ids,
+        _store: store,
+        _drts: vec![router_drt, first_worker_drt, second_worker_drt],
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn worker_overload_stream_migration_releases_and_reselects() {
+    let dispatch = Arc::new(RejectFirstDispatch::default());
+    let harness = two_worker_migration_harness("worker-overload-migration", dispatch.clone()).await;
+    let MigrationHarness {
+        runtime,
+        chooser,
+        engine: next,
+        registered_ids,
+        ..
+    } = &harness;
     let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
 
     let responses: Vec<_> = migration
-        .generate(Context::new(request()), next)
+        .generate(Context::new(request()), next.clone())
         .await
         .unwrap()
         .collect()
@@ -1757,4 +2125,115 @@ async fn worker_overload_stream_migration_releases_and_reselects() {
         "all scheduler bookings must be released after migration: {loads:?}"
     );
     runtime.shutdown();
+}
+
+/// A gracefully shutting-down worker: `Cancelled` data frame, then the reason.
+#[derive(Default)]
+struct ShutdownAfterCancelDispatch {
+    attempts: Mutex<Vec<(u64, Vec<u64>)>>,
+}
+
+#[async_trait]
+impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
+    for ShutdownAfterCancelDispatch
+{
+    async fn generate(
+        &self,
+        request: SingleIn<AddressedRequest<PreprocessedRequest>>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let (addressed, context) = request.transfer(());
+        let (request, _, instance) = addressed.into_parts();
+        let worker_id = instance.expect("selected worker instance").id();
+        let excluded_worker_ids = request
+            .migration_state
+            .as_ref()
+            .map(|state| state.excluded_worker_ids())
+            .unwrap_or_default();
+        let attempt = {
+            let mut attempts = self.attempts.lock().unwrap();
+            attempts.push((worker_id, excluded_worker_ids));
+            attempts.len()
+        };
+
+        if attempt == 1 {
+            return Ok(ResponseStream::new(
+                Box::pin(stream::iter(vec![
+                    cancelled_frame(),
+                    engine_shutdown_frame(),
+                ])),
+                context.context(),
+            ));
+        }
+
+        let output = Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![2],
+            finish_reason: Some(FinishReason::Stop),
+            ..Default::default()
+        });
+        Ok(ResponseStream::new(
+            Box::pin(stream::once(async move { output })),
+            context.context(),
+        ))
+    }
+
+    async fn generate_bidirectional(
+        &self,
+        _instance: Instance,
+        _address: String,
+        _input: ManyIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        unreachable!("the KV router dispatches unary requests")
+    }
+}
+
+/// The shutdown error must reach migration, which is the only layer that can move the request.
+#[tokio::test]
+#[serial_test::serial]
+async fn engine_shutdown_after_cancel_frame_migrates_and_reselects() {
+    let dispatch = Arc::new(ShutdownAfterCancelDispatch::default());
+    let harness = two_worker_migration_harness("engine-shutdown-migration", dispatch.clone()).await;
+    let migration = Migration::new(1, None, "test".to_string(), Arc::new(Metrics::new()));
+
+    let responses: Vec<_> = migration
+        .generate(Context::new(request()), harness.engine.clone())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+
+    let attempts = {
+        let attempts = dispatch.attempts.lock().unwrap();
+        attempts.clone()
+    };
+    assert_eq!(attempts.len(), 2, "the shutdown must trigger a migration");
+    let failed_worker = attempts[0].0;
+    let retried_worker = attempts[1].0;
+    assert_ne!(failed_worker, retried_worker);
+    assert!(harness.registered_ids.contains(&failed_worker));
+    assert!(harness.registered_ids.contains(&retried_worker));
+    assert!(attempts[0].1.is_empty());
+    assert_eq!(attempts[1].1, vec![failed_worker]);
+    assert_eq!(
+        responses.len(),
+        1,
+        "a migrated request must read as one clean stream; the aborted attempt's \
+         terminal frame must not surface ahead of the retry: {responses:?}"
+    );
+    let last = responses.last().expect("the retry must produce output");
+    assert!(last.error.is_none());
+    assert_eq!(last.data.as_ref().unwrap().token_ids, vec![2]);
+    assert_eq!(
+        last.data.as_ref().unwrap().finish_reason,
+        Some(FinishReason::Stop)
+    );
+    let loads = harness
+        .chooser
+        .get_potential_loads(&[], None, None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        loads.iter().all(|load| load.active_requests == 0),
+        "all scheduler bookings must be released after migration: {loads:?}"
+    );
+    harness.runtime.shutdown();
 }

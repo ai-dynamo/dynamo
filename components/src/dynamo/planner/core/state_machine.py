@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Literal, Optional
 
 from dynamo.planner.config.planner_config import PlannerConfig, resolve_min_endpoint
 from dynamo.planner.core.budget import (
+    guard_disagg_load_budget,
     proportional_clamp_pair,
     proportional_clamp_single,
 )
@@ -386,6 +387,20 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
     # Budget
     # ------------------------------------------------------------------
 
+    def _resolve_disagg_gpu_costs(self) -> tuple[Optional[int], Optional[int]]:
+        """Resolve per-replica GPU costs for prefill and decode."""
+        p_gpu = (
+            self._capabilities.prefill.resolved_gpu_cost_per_replica
+            if self._capabilities.prefill is not None
+            else None
+        )
+        d_gpu = (
+            self._capabilities.decode.resolved_gpu_cost_per_replica
+            if self._capabilities.decode is not None
+            else None
+        )
+        return p_gpu, d_gpu
+
     def _min_endpoint_for(self, component: Literal["prefill", "decode"]) -> int:
         """Return the effective floor for a planner component."""
 
@@ -410,16 +425,7 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
         ``(num_p, num_d)``. Delegates to ``budget.proportional_clamp_pair``
         for the actual math; this method only resolves the per-replica GPU
         costs from capabilities."""
-        p_gpu = (
-            self._capabilities.prefill.resolved_gpu_cost_per_replica
-            if self._capabilities.prefill is not None
-            else None
-        )
-        d_gpu = (
-            self._capabilities.decode.resolved_gpu_cost_per_replica
-            if self._capabilities.decode is not None
-            else None
-        )
+        p_gpu, d_gpu = self._resolve_disagg_gpu_costs()
         if p_gpu is None or d_gpu is None:
             return num_p, num_d
 
@@ -443,6 +449,49 @@ class PlannerScalingState(LoadScalingMixin, ThroughputScalingMixin):
                 f"({new_p}P + {new_d}D = {new_total})"
             )
         return new_p, new_d
+
+    def _apply_disagg_load_budget(
+        self, num_p: int, num_d: int
+    ) -> tuple[int, int, Optional[str]]:
+        """Apply the direction-preserving budget policy for load scaling."""
+        p_gpu, d_gpu = self._resolve_disagg_gpu_costs()
+        if p_gpu is None or d_gpu is None:
+            return num_p, num_d, None
+
+        new_p, new_d, reason = guard_disagg_load_budget(
+            self._num_p_workers,
+            self._num_d_workers,
+            num_p,
+            num_d,
+            p_gpu,
+            d_gpu,
+            self._config.min_gpu_budget,
+            self._config.max_gpu_budget,
+            self._min_endpoint_for("prefill"),
+            self._min_endpoint_for("decode"),
+        )
+        if reason is not None or (new_p, new_d) != (num_p, num_d):
+            old_total = self._num_p_workers * p_gpu + self._num_d_workers * d_gpu
+            proposed_total = num_p * p_gpu + num_d * d_gpu
+            new_total = new_p * p_gpu + new_d * d_gpu
+            logger.warning(
+                "GPU budget load policy %s: current=(%sP + %sD = %s), "
+                "proposed=(%sP + %sD = %s), final=(%sP + %sD = %s), "
+                "band=[min=%s, max=%s]",
+                reason or "gpu_budget_clamped",
+                self._num_p_workers,
+                self._num_d_workers,
+                old_total,
+                num_p,
+                num_d,
+                proposed_total,
+                new_p,
+                new_d,
+                new_total,
+                self._config.min_gpu_budget,
+                self._config.max_gpu_budget,
+            )
+        return new_p, new_d, reason
 
     def _budget_clamp(self, desired: int, gpu_cost: int, min_endpoint: int) -> int:
         """Apply the GPU budget band to a single component's desired replica

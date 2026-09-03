@@ -57,6 +57,10 @@ redirects:
   - source: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b"
     destination: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b-fp8"
 
+  # Recipe slug renamed to use the canonical model name.
+  - source: "/dynamo/dev/recipes/gemma4-31b"
+    destination: "/dynamo/dev/recipes/gemma-4-31b"
+
   # Documentation navigation consolidation on dev.
   - source: "/dynamo/dev/cli/model-deployment/multi-node-deployment"
     destination: "/dynamo/dev/kubernetes/installation/multinode-orchestration"

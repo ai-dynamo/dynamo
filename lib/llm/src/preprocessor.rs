@@ -799,11 +799,24 @@ impl MmRoutingEntry {
 }
 
 #[cfg(feature = "mm-routing")]
+fn exact_mm_routing_layout_accepts_next_entry(
+    previous_entry_was_video: &mut bool,
+    current_entry_is_video: bool,
+) -> bool {
+    // Adjacent video placeholders cannot be mapped unambiguously to vLLM KV
+    // events. Keep this transition shared by the pre-decode and final checks.
+    let accepted = !(*previous_entry_was_video && current_entry_is_video);
+    *previous_entry_was_video = current_entry_is_video;
+    accepted
+}
+
+#[cfg(feature = "mm-routing")]
 fn exact_mm_routing_entries_are_unambiguous(entries: &[MmRoutingEntry]) -> bool {
-    !entries.windows(2).any(|pair| {
-        matches!(
-            pair,
-            [MmRoutingEntry::Video { .. }, MmRoutingEntry::Video { .. }]
+    let mut previous_entry_was_video = false;
+    entries.iter().all(|entry| {
+        exact_mm_routing_layout_accepts_next_entry(
+            &mut previous_entry_was_video,
+            matches!(entry, MmRoutingEntry::Video { .. }),
         )
     })
 }
@@ -3189,11 +3202,14 @@ impl OpenAIPreprocessor {
         // counter is unavailable or checked addition overflowed.
         #[cfg(feature = "mm-routing")]
         let mut image_tokens = self.image_token_counter.as_ref().map(|_| 0usize);
-        // A raw/passthrough video or unsupported decoded-video processor makes
-        // the model-visible token sequence unknowable. In that case the whole
-        // request falls back rather than publishing a partial routing view.
+        // A raw/passthrough video, unsupported decoded-video processor, or
+        // ambiguous consecutive-video layout makes exact routing unavailable.
+        // In that case the whole request falls back rather than publishing a
+        // partial routing view.
         #[cfg(feature = "mm-routing")]
         let mut exact_mm_routing_eligible = true;
+        #[cfg(feature = "mm-routing")]
+        let mut previous_routing_entry_was_video = false;
         // Total `image_url` content parts in the request. Bumped at every
         // image part regardless of which fetch path handles it. Used at
         // hash forwarding time: if fewer image entries were resolved, we omit
@@ -3238,7 +3254,12 @@ impl OpenAIPreprocessor {
                     total_image_count += 1;
                 }
                 #[cfg(feature = "mm-routing")]
-                if !exact_mm_routing_supports_modality(type_str, has_media_loader) {
+                if !exact_mm_routing_supports_modality(type_str, has_media_loader)
+                    || !exact_mm_routing_layout_accepts_next_entry(
+                        &mut previous_routing_entry_was_video,
+                        type_str == "video_url",
+                    )
+                {
                     exact_mm_routing_eligible = false;
                 }
 
@@ -8359,6 +8380,99 @@ mod tests {
         assert!(!should_hash_decoded_video(true, true, false, true));
         assert!(!should_hash_decoded_video(true, false, true, true));
         assert!(!should_hash_decoded_video(true, false, false, false));
+    }
+
+    #[cfg(all(
+        feature = "mm-routing",
+        feature = "media-ffmpeg",
+        feature = "testing-nixl"
+    ))]
+    #[tokio::test]
+    async fn adjacent_videos_reach_media_loader_with_hashing_disabled() {
+        let video_bytes = include_bytes!("../tests/data/media/240p_10.mp4");
+        let mut server = mockito::Server::new_async().await;
+        let video_mock = server
+            .mock("GET", "/video.mp4")
+            .with_status(200)
+            .with_header("content-type", "video/mp4")
+            .with_body(&video_bytes[..])
+            .expect(2)
+            .create_async()
+            .await;
+
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap())
+            .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
+        let media_decoder: MediaDecoder = serde_json::from_value(serde_json::json!({
+            "video": {"num_frames": 2}
+        }))
+        .unwrap();
+        let media_fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+        preprocessor.media_loader = Some(
+            MediaLoader::new(media_decoder, Some(media_fetcher))
+                .expect("test media loader must initialize"),
+        );
+        preprocessor.video_routing_processor = Some(mm_routing::VideoRoutingProcessor::test_stub());
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": format!("{}/video.mp4", server.url())}
+                    },
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": format!("{}/video.mp4", server.url())}
+                    }
+                ]
+            }],
+            "max_tokens": 1
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequest::builder();
+        builder
+            .model("test-model".to_string())
+            .token_ids(Vec::new())
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default());
+
+        let (routing_entries, _) = preprocessor
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
+            .await
+            .unwrap();
+        let preprocessed = builder.build().unwrap();
+        let videos = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .and_then(|media| media.get("video_url"))
+            .expect("both decoded videos must be forwarded");
+
+        assert_eq!(videos.len(), 2);
+        for video in videos {
+            let MultimodalData::Decoded(descriptor) = video else {
+                panic!("video must reach the media loader and be decoded");
+            };
+            assert!(
+                descriptor.content_hash().is_none(),
+                "adjacent videos must reach the media loader with hashing disabled"
+            );
+        }
+        assert!(routing_entries.is_empty());
+        assert!(preprocessed.mm_routing_info.is_none());
+        video_mock.assert_async().await;
     }
 
     #[test]

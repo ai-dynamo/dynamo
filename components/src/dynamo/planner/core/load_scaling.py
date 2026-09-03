@@ -201,7 +201,9 @@ class LoadScalingMixin:
 
         final_p = max(final_p, resolve_min_endpoint(self._config, "prefill"))
         final_d = max(final_d, resolve_min_endpoint(self._config, "decode"))
-        final_p, final_d = self._apply_global_budget(final_p, final_d)
+        final_p, final_d, budget_reason = self._apply_disagg_load_budget(
+            final_p, final_d
+        )
 
         # Per-component reasons
         def _reason(final: int, original: int, post_floor: int, current: int) -> str:
@@ -235,6 +237,8 @@ class LoadScalingMixin:
             (self._diag_load_reason_prefill, self._diag_load_reason_decode),
             key=lambda r: _PRIORITY.get(r or "", 0),
         )
+        if budget_reason is not None:
+            self._diag_load_reason = budget_reason
 
         if final_p == self._num_p_workers and final_d == self._num_d_workers:
             logger.info("Load-based scaling: no scaling needed")
@@ -248,10 +252,11 @@ class LoadScalingMixin:
                 self._diag_load_reason_decode = d_reason
             # Aggregate reason: surface the most informative of the two
             # so the non-per-component Enum/HTML view also reflects it.
-            for candidate in (p_reason, d_reason):
-                if candidate is not None and candidate != "no_change":
-                    self._diag_load_reason = candidate
-                    break
+            if budget_reason is None:
+                for candidate in (p_reason, d_reason):
+                    if candidate is not None and candidate != "no_change":
+                        self._diag_load_reason = candidate
+                        break
             return None
 
         logger.info(

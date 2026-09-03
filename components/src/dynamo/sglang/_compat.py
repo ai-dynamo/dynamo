@@ -38,6 +38,24 @@ except ImportError:
     # SGLang #36255 exposes ServerArgs._resolved() instead.
     sglang_resolved_view = None
 
+try:
+    from sglang.srt.arg_groups.overrides import (
+        model_config_of as sglang_model_config_of,
+    )
+except ImportError:
+    # Fallback for sglang <= 0.5.18, which exposes ServerArgs.get_model_config().
+    # Remove when min supported version has the accessor move (sgl #36972).
+    sglang_model_config_of = None
+
+try:
+    from sglang.srt.arg_groups.overrides import (
+        use_mla_backend as sglang_use_mla_backend,
+    )
+except ImportError:
+    # Fallback for sglang <= 0.5.18, which exposes ServerArgs.use_mla_backend().
+    # Remove when min supported version has the accessor move (sgl #36972).
+    sglang_use_mla_backend = None
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -47,6 +65,36 @@ except ModuleNotFoundError as exc:
         raise
     # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
     from sglang.srt.server_args_config_parser import ConfigArgumentMerger
+
+
+def get_sglang_model_config(server_args: Any) -> Any:
+    """Return the resolved model config across SGLang ServerArgs APIs.
+
+    SGLang #36972 moved ``ServerArgs.get_model_config()`` to the module-level
+    ``model_config_of()``. Remove the legacy branch when the minimum supported
+    SGLang release contains that move.
+    """
+    legacy_getter = getattr(server_args, "get_model_config", None)
+    if legacy_getter is not None:
+        return legacy_getter()
+    if sglang_model_config_of is None:
+        raise AttributeError("SGLang does not expose a model config accessor")
+    return sglang_model_config_of(server_args)
+
+
+def sglang_uses_mla_backend(server_args: Any) -> bool:
+    """Return whether this configuration selects SGLang's MLA attention backend.
+
+    SGLang #36972 moved ``ServerArgs.use_mla_backend()`` to the module-level
+    ``use_mla_backend()``. Remove the legacy branch when the minimum supported
+    SGLang release contains that move.
+    """
+    legacy_getter = getattr(server_args, "use_mla_backend", None)
+    if legacy_getter is not None:
+        return bool(legacy_getter())
+    if sglang_use_mla_backend is None:
+        raise AttributeError("SGLang does not expose an MLA backend accessor")
+    return bool(sglang_use_mla_backend(server_args))
 
 
 @lru_cache(maxsize=1)
@@ -221,7 +269,9 @@ __all__ = [
     "ConfigArgumentMerger",
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
+    "get_sglang_model_config",
     "override_server_args",
     "require_reasoning_kwargs",
     "resolved_server_args",
+    "sglang_uses_mla_backend",
 ]
