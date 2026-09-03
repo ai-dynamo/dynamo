@@ -50,7 +50,8 @@ EXPECTED_TYPE_COUNTS = {
     # owned by github.com/ai-dynamo/snapshot.
     "nvidia.com/v1alpha1": 75,
     "nvidia.com/v1beta1": 69,
-    "operator.config.dynamo.nvidia.com/v1alpha1": 32,
+    # 33 since ElasticEPRayPoCConfiguration, the operator-managed Ray elastic-EP gate.
+    "operator.config.dynamo.nvidia.com/v1alpha1": 33,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (
     "Pod Specification Defaults",
