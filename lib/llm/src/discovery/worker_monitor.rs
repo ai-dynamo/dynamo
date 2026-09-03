@@ -276,6 +276,10 @@ impl WorkerLoadState {
     /// quantity -- the unique LOGICAL footprint of sequences this router
     /// tracks, after shared-prefix accounting -- and reads far lower.
     pub fn kv_occupancy(&self, dp_rank: u32) -> Option<(u64, u64)> {
+        // Deliberately NO staleness window. The worker publishes on CHANGE, so
+        // silence means "unchanged", not "gone" -- a plateau at high occupancy
+        // is exactly when a time-based expiry would blind this gate. Liveness
+        // is membership: these states are dropped when the worker leaves.
         let used = *self.kv_used_blocks.get(&dp_rank)?;
         let total = *self.kv_total_blocks.get(&dp_rank)?;
         (total > 0).then_some((used, total))
@@ -1407,6 +1411,48 @@ mod tests {
             Some(0.6),
         );
         assert!(!state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+    }
+
+    #[test]
+    fn kv_occupancy_reports_a_fresh_worker_value() {
+        let mut state = WorkerLoadState::default();
+        state.kv_used_blocks.insert(0, 1_659);
+        state.kv_total_blocks.insert(0, 4_168);
+
+        assert_eq!(state.kv_occupancy(0), Some((1_659, 4_168)));
+    }
+
+    #[test]
+    fn kv_occupancy_is_none_when_the_worker_never_reported() {
+        let mut state = WorkerLoadState::default();
+        // The router's own estimate is present; the worker's is not. The gate
+        // must not silently fall back to it -- that is the bug this replaced.
+        state.active_decode_blocks.insert(0, 462);
+        state.kv_total_blocks.insert(0, 4_168);
+
+        assert_eq!(state.kv_occupancy(0), None);
+    }
+
+    #[test]
+    fn kv_occupancy_is_none_when_capacity_is_zero() {
+        let mut state = WorkerLoadState::default();
+        state.kv_used_blocks.insert(0, 0);
+        state.kv_total_blocks.insert(0, 0);
+
+        assert_eq!(state.kv_occupancy(0), None);
+    }
+
+    #[test]
+    fn scheduler_observations_do_not_produce_occupancy() {
+        // LoadObservation::Scheduler carries no kv_used_blocks, so a deployment
+        // fed only by the scheduler plane leaves the gate permanently unknown.
+        // This test pins that so the failure is visible rather than silent.
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 4_168);
+        state.active_decode_blocks.insert(0, 462);
+        state.active_prefill_tokens.insert(0, 0);
+
+        assert_eq!(state.kv_occupancy(0), None);
     }
 
     #[test]
