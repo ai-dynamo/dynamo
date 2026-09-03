@@ -178,6 +178,7 @@ Kubernetes: `>=1.30.0-0`
 | dynamo-operator.namespaceRestriction.lease.renewInterval | string | `"10s"` | DEVELOPMENT AND TESTING ONLY: Namespace ownership Lease renewal interval. |
 | dynamo-operator.gpuDiscovery | object | `{"enabled":true}` | DEVELOPMENT AND TESTING ONLY: GPU discovery settings for namespace-restricted operators. |
 | dynamo-operator.gpuDiscovery.enabled | bool | `true` | DEVELOPMENT AND TESTING ONLY: Enable GPU discovery in namespace-restricted mode. |
+| dynamo-operator.elasticEPRayPoC.enabled | bool | `false` | Enable the operator-managed Ray elastic expert-parallelism path (proof of concept). Off by default; see the operator sub-chart values for what enabling it turns on. |
 | dynamo-operator.controllerManager.tolerations | list | `[]` | Node tolerations for controller manager pods |
 | dynamo-operator.controllerManager.affinity | object | `{}` | Affinity for controller manager pods |
 | dynamo-operator.controllerManager.leaderElection.id | string | `""` | Leader election ID for cluster-wide coordination. WARNING: All cluster-wide operators must use the SAME ID to prevent split-brain. Different IDs would allow multiple leaders simultaneously. |
