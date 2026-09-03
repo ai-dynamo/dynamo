@@ -555,6 +555,13 @@ fn validate_kv_transfer_domain(domain: &str) -> Result<(), ValidationError> {
 }
 
 fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), ValidationError> {
+    if config.data_parallel_size == 0 {
+        return Err(validation_error(
+            "invalid_data_parallel_size",
+            "data_parallel_size must be at least 1",
+        ));
+    }
+
     if let Some(parser) = config
         .tool_call_parser
         .as_deref()
@@ -1213,6 +1220,17 @@ mod tests {
         ] {
             config.validate_config().unwrap();
         }
+    }
+
+    #[test]
+    fn test_validate_config_rejects_zero_data_parallel_size() {
+        let config = ModelRuntimeConfig {
+            data_parallel_size: 0,
+            ..Default::default()
+        };
+
+        let error = config.validate_config().unwrap_err();
+        assert!(error.contains("data_parallel_size must be at least 1"));
     }
 
     #[test]

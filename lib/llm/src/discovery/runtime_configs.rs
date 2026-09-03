@@ -62,6 +62,13 @@ fn base_runtime_config_watch(
                     if id.model_suffix.is_some() || card.lora.is_some() {
                         continue;
                     }
+                    if card.runtime_config.data_parallel_size == 0 {
+                        tracing::warn!(
+                            instance_id = id.instance_id,
+                            "Ignoring base model runtime config with zero data_parallel_size"
+                        );
+                        continue;
+                    }
                     configs.insert(id.instance_id, card.runtime_config);
                 }
                 Ok(DiscoveryEvent::ModelTaintsUpdated(update)) => {
@@ -267,6 +274,26 @@ mod tests {
             .unwrap();
         configs.changed().await.unwrap();
         assert!(configs.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn zero_data_parallel_size_is_ignored_before_runtime_config_watch() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let stream: DiscoveryStream =
+            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx));
+        let mut configs = base_runtime_config_watch(stream, CancellationToken::new());
+        let mut invalid = ModelDeploymentCard::default();
+        invalid.runtime_config.data_parallel_size = 0;
+        let valid = ModelDeploymentCard::default();
+
+        tx.send(Ok(DiscoveryEvent::Added(model_instance(7, None, &invalid))))
+            .unwrap();
+        tx.send(Ok(DiscoveryEvent::Added(model_instance(8, None, &valid))))
+            .unwrap();
+
+        configs.changed().await.unwrap();
+        assert!(!configs.borrow().contains_key(&7));
+        assert_eq!(configs.borrow().get(&8).unwrap().data_parallel_size, 1);
     }
 
     #[tokio::test]
