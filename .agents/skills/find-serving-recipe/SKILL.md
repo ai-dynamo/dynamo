@@ -59,17 +59,23 @@ Two invocation contexts, with different outputs:
 5. **Stop at the first tier that yields a candidate meeting the confidence bar** for the
    invocation context (deployable for baseline selection; hypothesis-grade for candidate
    hunting). Later tiers may still be consulted for expected performance.
-6. **Freshness is part of the verdict.** Serving recipes rot: engines rename flags, change
-   defaults, and ship kernels that invalidate old tuning. For every candidate, record the
-   engine version it pins (image tag, `min_*_version`, or commit) and its verification or
-   publication date, then compare against the engine's CURRENT stable release (the registry's
-   tag list, the engine's release page, or the catalog's own latest entry). A recipe is STALE
-   when its pinned engine is more than one minor release behind current, its verification date
-   is older than roughly ninety days, or any of its flags no longer exists in the current CLI.
-   A stale recipe is `hypothesis` at best, never `deployable` as-is: port its flags to current
-   names, pin the current image, re-verify, and say in the dossier what was ported. A version
-   label alone is evidence of relabeling, not revalidation; only a recorded re-verification
-   resets the clock. When two candidates are otherwise comparable, prefer the fresher one.
+6. **Freshness is part of the verdict, never a reason to discard.** Serving recipes rot
+   unevenly. Split every candidate into its DURABLE content (topology, parallelism dimensions,
+   precision and quantization, KV-cache dtype, memory fractions, sizing, workload fit, and the
+   reasoning behind those choices) and its VERSION-BOUND content (exact flag names and defaults,
+   the image tag, kernel and backend selections, measured performance). Durable content is
+   first-class evidence regardless of the recipe's age; carry it into the dossier and into any
+   candidate's rationale. Version-bound content ages: record the engine version the recipe pins
+   (image tag, `min_*_version`, or commit) and its verification or publication date, and compare
+   against the engine's CURRENT stable release (registry tag list, engine release page, or the
+   catalog's latest entry). When the pinned engine is behind current, verify each flag against
+   the current CLI and port renamed ones, treat the recipe's measured performance as historical
+   (a shape hint, not a target), pin the current image, and re-verify before anything is graded
+   deployable. A recipe verified on the current or immediately previous minor release with
+   unchanged flags may be graded `deployable`; anything older is `hypothesis` until re-verified.
+   A version label alone is evidence of relabeling, not revalidation; only a recorded
+   re-verification resets the clock. Prefer the fresher of otherwise comparable candidates, but
+   never let a fresher, thinner recipe displace the durable lessons of an older, richer one.
 
 ## Tier 0: this repository
 
