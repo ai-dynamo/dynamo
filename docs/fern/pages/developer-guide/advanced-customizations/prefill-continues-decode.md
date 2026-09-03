@@ -67,12 +67,22 @@ fires on every request on another.
 ## `prefill_busy_threshold`
 
 ```
-back off when   active_prefill_tokens  >  threshold x max_num_batched_tokens
+hand off when   active_prefill_tokens  >  threshold x max_num_batched_tokens
 ```
 
+Both sides belong to **one worker**: the prefill worker this request would be routed to. The router
+takes an advisory route preview, reserves nothing, and reads that worker's own in-flight prefill
+tokens against its own batch budget. Normal KV-aware selection picks it, so it is the best
+candidate. A busy verdict means even the best prefill worker is loaded.
+
+**Hand off means serve the request normally.** Nothing is rejected, queued, or delayed. The request
+takes the ordinary disaggregated path: prefill here, KV transfer, decode there. It is what would
+happen with the feature switched off. A `prefill_busy` count of 3,312 means 3,312 requests were
+served the usual way, not that 3,312 requests were refused.
+
 **This is not a fraction.** It is a multiplier on one batch's token budget, so it counts **batches
-of prefill work queued** on the worker. A value of 1.0 backs off when one full batch is queued, and
-values well above 1 are normal.
+of prefill work queued** on the worker. A value of 1.0 hands off once one full batch is
+queued, and values well above 1 are normal.
 
 The setting is new. The quantity is not: `prefill_load_exceeds` and the unit come from the router,
 and `--router-queue-threshold` uses the same predicate. This setting falls back to that one when it
@@ -124,6 +134,9 @@ Another used a 3-worker value of 97 on a 1-worker shape and refused 3,312 of 3,4
 looked clean and measured nothing.
 
 **Too high, and it never fires.** Then `max_concurrent` is the only thing protecting prefill.
+
+If the router's queue rejects the advisory preview, the request counts as busy and hands off. An
+unreadable load also hands off, under `prefill_load_unknown`. Both fail towards the ordinary path.
 
 **Check it after every run.** Read `dynamo_frontend_prefill_continue_decisions_total`. If
 `prefill_busy` dominates, the interlock is binding and the decode gate is not being exercised.
