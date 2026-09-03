@@ -223,6 +223,15 @@ pub(crate) struct RoutePlanSignals {
     pub(crate) cached_tokens: usize,
     pub(crate) potential_decode_blocks: u64,
     pub(crate) total_kv_blocks: Option<u64>,
+    /// Backend KV occupancy as the worker itself reports it, `(used, total)`.
+    ///
+    /// `potential_decode_blocks` above is a different quantity: the unique
+    /// LOGICAL footprint of sequences this router tracks, after shared-prefix
+    /// accounting. On a prefix-heavy workload it reads far below true
+    /// occupancy, so a threshold calibrated on it is not portable. `None` when
+    /// the worker has not reported; callers that need occupancy must treat
+    /// that as unknown rather than falling back to the logical estimate.
+    pub(crate) authoritative_kv: Option<(u64, u64)>,
 }
 
 impl RoutePreview {

@@ -520,11 +520,29 @@ where
         {
             Ok(preview) => {
                 let signals = preview.signals();
-                PrefillContinueDecisionInput::new(
-                    Some(signals.potential_decode_blocks as usize),
-                    signals.total_kv_blocks.map(|total| total as usize),
-                    block_size,
-                )
+                // Use the worker's own occupancy. The router's
+                // `potential_decode_blocks` is a unique LOGICAL footprint after
+                // shared-prefix accounting; on this trace it read 0.112 while
+                // the worker reported 0.398, so a threshold tuned on it fires
+                // by luck. Fail closed when the worker has not reported --
+                // falling back to the logical estimate would restore the bug
+                // silently, which is how it survived until now.
+                match signals.authoritative_kv {
+                    Some((used, total)) => PrefillContinueDecisionInput::new(
+                        Some(used as usize),
+                        Some(total as usize),
+                        block_size,
+                    ),
+                    None => {
+                        tracing::debug!(
+                            request_id,
+                            worker_id = signals.worker.worker_id,
+                            dp_rank = signals.worker.dp_rank,
+                            "No worker-reported KV occupancy; treating decode load as unavailable"
+                        );
+                        PrefillContinueDecisionInput::new(None, None, block_size)
+                    }
+                }
             }
             Err(error) => {
                 tracing::debug!(
