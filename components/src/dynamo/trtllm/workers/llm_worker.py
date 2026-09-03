@@ -64,6 +64,7 @@ from dynamo.trtllm.args import Config
 from dynamo.trtllm.constants import DisaggregationMode, Modality
 from dynamo.trtllm.engine import Backend, TensorRTLLMEngine, get_llm_engine
 from dynamo.trtllm.health_check import TrtllmHealthCheckPayload
+from dynamo.trtllm.metrics import AdditionalMetricsCollector
 from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import DYNAMO_COMPONENT_REGISTRY, get_publisher
 from dynamo.trtllm.request_handlers.handlers import (
@@ -747,58 +748,44 @@ async def init_llm_worker(
         metrics_collector = None
         additional_metrics = None
         if config.publish_metrics:
-            try:
-                model_name_for_metrics = config.served_model_name or config.model
-                metrics_collector = MetricsCollector(
-                    {"model_name": model_name_for_metrics, "engine_type": "trtllm"}
-                )
-                logging.info("TensorRT-LLM MetricsCollector initialized")
+            # A setup failure propagates: the operator asked for these metrics,
+            # and a worker that silently serves without them is the outcome
+            # this path exists to prevent. Matches the vLLM backend.
+            metrics_collector = MetricsCollector(
+                {"model_name": model_name_for_metrics, "engine_type": "trtllm"}
+            )
+            logging.info("TensorRT-LLM MetricsCollector initialized")
 
-                # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix
-                _metric_prefixes = ["trtllm_"]
+            disagg_mode_str = (
+                config.disaggregation_mode.value
+                if hasattr(config.disaggregation_mode, "value")
+                else str(config.disaggregation_mode)
+            )
+            additional_metrics = AdditionalMetricsCollector(
+                labels={
+                    "model_name": model_name_for_metrics,
+                    "disaggregation_mode": disagg_mode_str,
+                    "engine_type": "trtllm",
+                },
+            )
+            logging.info(
+                "Additional metrics initialized (disagg_mode=%s)", disagg_mode_str
+            )
 
-                # Additional metrics (abort tracking, request types, KV transfer perf).
-                # Wrapped in try/except because AdditionalMetricsCollector depends on
-                # prometheus_names which may not be available in all packaging variants.
-                try:
-                    from dynamo.trtllm.metrics import AdditionalMetricsCollector
-
-                    disagg_mode_str = (
-                        config.disaggregation_mode.value
-                        if hasattr(config.disaggregation_mode, "value")
-                        else str(config.disaggregation_mode)
-                    )
-                    additional_metrics = AdditionalMetricsCollector(
-                        labels={
-                            "model_name": model_name_for_metrics,
-                            "disaggregation_mode": disagg_mode_str,
-                            "engine_type": "trtllm",
-                        },
-                    )
-                    logging.info(
-                        "Additional metrics initialized (disagg_mode=%s)",
-                        disagg_mode_str,
-                    )
-                except Exception as e:
-                    logging.warning("Failed to initialize additional metrics: %s", e)
-
-                # Single callback for all Python-side metrics (trtllm_ + additional)
-                register_engine_metrics_callback(
-                    endpoint=endpoint,
-                    registry=REGISTRY,
-                    metric_prefix_filters=_metric_prefixes,
-                    namespace_name=config.namespace,
-                    component_name=config.component,
-                    endpoint_name="generate",
-                    model_name=model_name_for_metrics,
-                )
-                logging.info(
-                    "Prometheus metrics registered (prefixes: %s)", _metric_prefixes
-                )
-            except Exception as e:
-                logging.warning(
-                    f"Failed to initialize TensorRT-LLM Prometheus metrics: {e}"
-                )
+            # Prefix filter: all TRT-LLM metrics (engine + additional) use "trtllm_" prefix
+            metric_prefixes = ["trtllm_"]
+            register_engine_metrics_callback(
+                endpoint=endpoint,
+                registry=REGISTRY,
+                metric_prefix_filters=metric_prefixes,
+                namespace_name=config.namespace,
+                component_name=config.component,
+                endpoint_name="generate",
+                model_name=model_name_for_metrics,
+            )
+            logging.info(
+                "Prometheus metrics registered (prefixes: %s)", metric_prefixes
+            )
 
         # Register callback for Dynamo component metrics using dedicated registry
         register_engine_metrics_callback(
