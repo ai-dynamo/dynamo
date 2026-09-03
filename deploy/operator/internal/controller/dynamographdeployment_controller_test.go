@@ -32,6 +32,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,6 +67,7 @@ func newDynamoGraphDeploymentControllerTestScheme(t testing.TB) *runtime.Scheme 
 		v1alpha1.AddToScheme,
 		v1beta1.AddToScheme,
 		grovev1alpha1.AddToScheme,
+		snapshotv1alpha1.AddToScheme,
 	} {
 		if err := addToScheme(s); err != nil {
 			t.Fatalf("failed to add type to scheme: %v", err)
@@ -181,6 +183,45 @@ func TestDynamoGraphDeploymentReconcileFinalizesDeletingStoredCheckpointIncompat
 	require.NoError(t, err)
 	require.Equal(t, ctrl.Result{}, result)
 
+	var stored v1beta1.DynamoGraphDeployment
+	err = kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored)
+	if !apierrors.IsNotFound(err) {
+		require.NoError(t, err)
+		require.False(t, controller_common.ContainsFinalizer(&stored))
+	}
+}
+
+func TestDynamoGraphDeploymentReconcileFinalizesWithoutSnapshotTypes(t *testing.T) {
+	t.Log("Create a deleting DGD in a scheme without the optional Snapshot API types")
+	now := metav1.Now()
+	dgd := &v1beta1.DynamoGraphDeployment{ObjectMeta: metav1.ObjectMeta{
+		Name:              "test-dgd",
+		Namespace:         "default",
+		DeletionTimestamp: &now,
+	}}
+	controller_common.AddFinalizer(dgd)
+	testScheme := runtime.NewScheme()
+	require.NoError(t, v1beta1.AddToScheme(testScheme))
+	kubeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithObjects(dgd).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeployment{}).
+		Build()
+	reconciler := &DynamoGraphDeploymentReconciler{
+		Client:        kubeClient,
+		Recorder:      events.NewFakeRecorder(10),
+		Config:        &configv1alpha1.OperatorConfiguration{},
+		RuntimeConfig: &controller_common.RuntimeConfig{},
+	}
+
+	t.Log("Finalize while treating unregistered Snapshot resources as unavailable")
+	result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: client.ObjectKeyFromObject(dgd),
+	})
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+
+	t.Log("Verify the DGD finalizer was removed")
 	var stored v1beta1.DynamoGraphDeployment
 	err = kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), &stored)
 	if !apierrors.IsNotFound(err) {
@@ -637,9 +678,9 @@ func TestDGDScalingAdaptersReconciler_EmitsDeleteEventOnlyAfterSuccessfulDelete(
 	}
 }
 
-func TestDynamoGraphDeploymentReconciler_mapAutoCheckpointToDGDRequestsAllowsRetainedWithoutOwnerReference(t *testing.T) {
+func TestDynamoGraphDeploymentReconciler_mapAutoSnapshotJobToDGDRequestsAllowsRetainedWithoutOwnerReference(t *testing.T) {
 	reconciler := &DynamoGraphDeploymentReconciler{}
-	ckpt := &v1alpha1.DynamoCheckpoint{
+	job := &snapshotv1alpha1.SnapshotJob{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "retained",
 			Namespace: "default",
@@ -653,7 +694,7 @@ func TestDynamoGraphDeploymentReconciler_mapAutoCheckpointToDGDRequestsAllowsRet
 		},
 	}
 
-	got := reconciler.mapAutoCheckpointToDGDRequests(context.Background(), ckpt)
+	got := reconciler.mapAutoSnapshotJobToDGDRequests(context.Background(), job)
 	require.Len(t, got, 1)
 	assert.Equal(t, types.NamespacedName{Namespace: "default", Name: "test-dgd"}, got[0].NamespacedName)
 }
