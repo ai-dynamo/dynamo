@@ -15,6 +15,7 @@ from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import (
     EngineSetupResult,
+    SnapshotEngineSetupResult,
     WorkerFactory,
     _DecodeWorkerLifecycle,
     _wait_and_load_benchmark,
@@ -849,11 +850,14 @@ class TestCreate:
         runtime = Mock()
         shutdown_event = asyncio.Event()
         shutdown_endpoints: list = []
-        snapshot_engine: EngineSetupResult = (
-            Mock(),
-            Mock(),
-            Mock(),
-            "/tmp/prometheus",
+        snapshot_engine: SnapshotEngineSetupResult = (
+            (
+                Mock(),
+                Mock(),
+                Mock(),
+                "/tmp/prometheus",
+                Mock(),
+            ),
             Mock(),
         )
 
