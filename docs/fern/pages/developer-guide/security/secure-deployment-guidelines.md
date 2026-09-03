@@ -11,11 +11,14 @@ parts — a frontend, backend workers, a KV router, and internal communication
 planes for discovery, events, and requests — across a cluster. This guide
 describes Dynamo's trust model and how to secure each part of a deployment.
 
-Dynamo assumes it runs inside a trusted network boundary: external clients reach
-only the frontend, through an authenticating gateway, while the internal
-communication planes and infrastructure run on a network the deployer isolates.
-The sections below explain that boundary and how to harden each component and
-plane.
+Dynamo is designed to be deployed within a trusted network boundary: external
+clients reach only the frontend, through an authenticating gateway, and the
+internal communication planes and infrastructure run on a network isolated from
+untrusted access. The sections below explain that boundary and provide details on
+how to further harden different aspects, including further hardening of the
+internal communication planes. Users deploying Dynamo should make their own
+decision in balancing functionality, performance, and security within the trusted
+network boundary.
 
 Throughout this guide, **deployer** refers to the team responsible for deploying
 and operating Dynamo in a cluster — distinct from the **Dynamo Operator**, the
