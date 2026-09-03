@@ -25,9 +25,9 @@ use dynamo_kv_router::{
     router_hint::{RouterHint, RouterHintCandidateSource, RouterHintRootCandidates},
     scheduling::{
         AdmissionAttempt, AttemptId, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider,
-        RequestClassifier, ScheduleMode, ScheduleRequest, TieredOverlapRefresher,
-        WorkerAvailabilityProvider, effective_prefill_tokens,
-        overlap::cache_hit_estimates_from_tiered_matches,
+        RequestClassifier, RequestClassifierContext, RequestClassifierWorker, ScheduleMode,
+        ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
+        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
     },
     selector::WorkerInputs,
 };
@@ -890,13 +890,44 @@ where
     // TODO: wire a production installer (Python bindings / router config); hidden until then.
     #[doc(hidden)]
     pub fn with_request_classifier(self, classifier: impl RequestClassifier) -> Result<Self> {
+        self.install_request_classifier_boxed(Box::new(classifier))?;
+        Ok(self)
+    }
+
+    /// Attach a catalog-created request classifier before placing this router into service.
+    pub fn install_request_classifier_boxed(
+        &self,
+        classifier: Box<dyn RequestClassifier>,
+    ) -> Result<()> {
         if !self
             .scheduler
-            .install_request_classifier(Box::new(classifier), self.cancellation_token.child_token())
+            .install_request_classifier(classifier, self.cancellation_token.child_token())
         {
             anyhow::bail!("request classifier is already configured");
         }
-        Ok(self)
+        Ok(())
+    }
+
+    /// Build the cached worker view passed to a catalog-created classifier.
+    pub fn request_classifier_context(&self) -> RequestClassifierContext {
+        let block_size = self.block_size;
+        let workers_with_configs = self.workers_with_configs.clone();
+        RequestClassifierContext::new(block_size, move || {
+            workers_with_configs
+                .borrow()
+                .iter()
+                .flat_map(|(&worker_id, config)| {
+                    let start = config.data_parallel_start_rank();
+                    let end = start.saturating_add(config.data_parallel_size());
+                    (start..end).map(move |dp_rank| {
+                        RequestClassifierWorker::new(
+                            WorkerWithDpRank::new(worker_id, dp_rank),
+                            config.total_kv_blocks(),
+                        )
+                    })
+                })
+                .collect()
+        })
     }
 
     pub(crate) fn begin_request_lifecycle(

@@ -38,6 +38,9 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 
+use dynamo_kv_router::scheduling::RequestClassifierFactory;
+#[cfg(feature = "custom-policy")]
+use dynamo_kv_router::scheduling::RequestClassifierRegistry;
 #[cfg(any(feature = "custom-policy", feature = "select-service"))]
 use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
 use dynamo_kv_router::{KvRouterConfig, WorkerSelectionPolicyFactory};
@@ -117,6 +120,9 @@ static INIT: OnceCell<()> = OnceCell::new();
 
 #[cfg(feature = "custom-policy")]
 static WORKER_SELECTION_POLICY_REGISTRY: OnceCell<WorkerSelectionPolicyRegistry> = OnceCell::new();
+
+#[cfg(feature = "custom-policy")]
+static REQUEST_CLASSIFIER_REGISTRY: OnceCell<RequestClassifierRegistry> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 const SKIP_PYTHON_LOG_INIT_ENV: &str = "DYNAMO_SKIP_PYTHON_LOG_INIT";
@@ -312,6 +318,30 @@ pub(crate) fn worker_selection_policy_factory(
     }
 }
 
+pub(crate) fn request_classifier_factory(
+    config: &KvRouterConfig,
+) -> anyhow::Result<Option<RequestClassifierFactory>> {
+    #[cfg(feature = "custom-policy")]
+    {
+        Ok(REQUEST_CLASSIFIER_REGISTRY
+            .get()
+            .map(|registry| registry.resolve(config))
+            .transpose()?
+            .flatten())
+    }
+
+    #[cfg(not(feature = "custom-policy"))]
+    {
+        if let Some(classifier) = config.request_classifier_config()? {
+            anyhow::bail!(
+                "request-classifier type {:?} is configured, but this Dynamo build has no linked plugin catalog; rebuild with --features custom-policy",
+                classifier.classifier_type()
+            );
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(feature = "select-service")]
 pub(crate) fn linked_worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
     #[cfg(feature = "custom-policy")]
@@ -329,7 +359,7 @@ pub(crate) fn linked_worker_selection_policy_registry() -> WorkerSelectionPolicy
 }
 
 #[cfg(feature = "custom-policy")]
-fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn register_core_with_custom_router_plugins(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let mut registry = WorkerSelectionPolicyRegistry::default();
     dynamo_worker_selection_policy_catalog::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
@@ -339,6 +369,13 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
         .map_err(|_| {
             PyRuntimeError::new_err("worker-selection policy registry already installed")
         })?;
+
+    let mut classifier_registry = RequestClassifierRegistry::default();
+    dynamo_worker_selection_policy_catalog::register_request_classifiers(&mut classifier_registry)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    REQUEST_CLASSIFIER_REGISTRY
+        .set(classifier_registry)
+        .map_err(|_| PyRuntimeError::new_err("request-classifier registry already installed"))?;
     register_core(m)
 }
 
@@ -346,7 +383,7 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
 #[cfg(feature = "custom-policy")]
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    register_core_with_custom_worker_selection_policy(m)
+    register_core_with_custom_router_plugins(m)
 }
 
 /// The stock extension-module entrypoint.

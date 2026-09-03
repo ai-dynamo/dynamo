@@ -13,6 +13,8 @@ pub mod prefill_load;
 pub mod queue;
 mod queue_admission;
 pub mod request_classifier;
+mod request_classifier_config;
+pub mod request_classifier_registry;
 pub mod selector;
 
 mod worker_selection_config;
@@ -28,8 +30,8 @@ pub use overlap_refresh::{
     NoopOverlapScoresRefresh, OverlapScoresRefresh, RefreshedOverlap, TieredOverlapRefresher,
 };
 pub use policy_config::{
-    PolicyClassConfig, PolicyProfile, RouterPolicyConfig, RouterPolicyConfigError,
-    WorkerSelectionConfig, WorkerSelectionInstance,
+    PolicyClassConfig, PolicyProfile, RequestClassifierConfig, RouterPolicyConfig,
+    RouterPolicyConfigError, WorkerSelectionConfig, WorkerSelectionInstance,
 };
 pub use policy_queue::{
     PolicyQueue, PolicyQueueEntry, QueueLimitKind, QueueRejection, QueueSnapshot,
@@ -41,6 +43,10 @@ pub use prefill_load::{
 pub use queue_admission::{RequestProgress, RequestProgressUpdater, WorkerPlacement};
 pub use request_classifier::{
     AbortCause, ClassifierError, ClassifyEvent, ClassifyFuture, ClassifyRequest, RequestClassifier,
-    RequestLifecycle,
+    RequestClassifierContext, RequestClassifierFactory, RequestClassifierWorker, RequestLifecycle,
+};
+pub use request_classifier_registry::{
+    RequestClassifierParameters, RequestClassifierProvider, RequestClassifierProviderError,
+    RequestClassifierRegistry, RequestClassifierRegistryError,
 };
 pub use types::*;
