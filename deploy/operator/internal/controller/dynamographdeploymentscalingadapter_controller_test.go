@@ -362,6 +362,85 @@ func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_NotFound(t *tes
 	}
 }
 
+func TestDynamoGraphDeploymentScalingAdapterReconcilerReconcileComponentGroupTarget(t *testing.T) {
+	t.Log("Register the scaling adapter API with the test scheme")
+	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {
+		t.Fatalf("Failed to add v1beta1 to scheme: %v", err)
+	}
+
+	t.Log("Create an adapter that targets one enabled component group")
+	adapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd-runtime", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentScalingAdapterSpec{
+			Replicas: 5,
+			DGDRef: v1beta1.DynamoGraphDeploymentComponentRef{
+				Name:               "test-dgd",
+				ComponentGroupName: "runtime",
+			},
+		},
+	}
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				Replicas:      ptr.To(int32(9)),
+			}},
+			Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+				ComponentGroups: []v1beta1.ComponentGroupSpec{{
+					Name:           "Runtime",
+					Replicas:       2,
+					ScalingAdapter: &v1beta1.ScalingAdapter{},
+					Components:     []v1beta1.ComponentGroupComponentSpec{{Name: "worker"}},
+				}},
+			},
+		},
+	}
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme.Scheme).
+		WithObjects(adapter, dgd).
+		WithStatusSubresource(&v1beta1.DynamoGraphDeploymentScalingAdapter{}).
+		Build()
+	r := &DynamoGraphDeploymentScalingAdapterReconciler{
+		Client:   fakeClient,
+		Scheme:   scheme.Scheme,
+		Recorder: events.NewFakeRecorder(10),
+	}
+
+	t.Log("Propagate adapter replicas to the group without mutating member replicas")
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: adapter.Name, Namespace: adapter.Namespace}}
+	if _, err := r.Reconcile(ctx, req); err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	updatedDGD := &v1beta1.DynamoGraphDeployment{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, updatedDGD); err != nil {
+		t.Fatalf("Failed to get updated DGD: %v", err)
+	}
+	if got := updatedDGD.Spec.Experimental.ComponentGroups[0].Replicas; got != 5 {
+		t.Fatalf("component group replicas = %d, want 5", got)
+	}
+	if component := updatedDGD.GetComponentByName("worker"); component == nil || component.Replicas == nil || *component.Replicas != 9 {
+		t.Fatalf("component replicas changed, got %#v", component)
+	}
+
+	t.Log("Publish the group replica count and group label selector")
+	updatedAdapter := &v1beta1.DynamoGraphDeploymentScalingAdapter{}
+	if err := fakeClient.Get(ctx, types.NamespacedName{Name: adapter.Name, Namespace: adapter.Namespace}, updatedAdapter); err != nil {
+		t.Fatalf("Failed to get updated adapter: %v", err)
+	}
+	if updatedAdapter.Status.Replicas != 5 {
+		t.Fatalf("status.replicas = %d, want 5", updatedAdapter.Status.Replicas)
+	}
+	expectedSelector := labels.SelectorFromSet(labels.Set{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		consts.KubeLabelDynamoComponentGroup:      "Runtime",
+	}).String()
+	if updatedAdapter.Status.Selector != expectedSelector {
+		t.Fatalf("status.selector = %q, want %q", updatedAdapter.Status.Selector, expectedSelector)
+	}
+}
+
 func TestDynamoGraphDeploymentScalingAdapterReconciler_Reconcile_DGDNotFound(t *testing.T) {
 	// Register custom types with the scheme
 	if err := v1beta1.AddToScheme(scheme.Scheme); err != nil {

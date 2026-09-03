@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	groveconstants "github.com/ai-dynamo/grove/operator/api/common/constants"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/go-logr/logr"
@@ -17,6 +18,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/componentgroups"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
@@ -46,7 +48,7 @@ type GroveMultinodeDeployer struct {
 func GroveComponentResourceName(dgd *v1beta1.DynamoGraphDeployment, componentName string) string {
 	return fmt.Sprintf(
 		"%s-0-%s",
-		PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+		PCSNameForDGDWithComponentGroups(dgd),
 		strings.ToLower(componentName),
 	)
 }
@@ -135,6 +137,8 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 	logger := log.FromContext(ctx)
 	var notReadyComponents []string
 	aggregatedReason := ""
+	groups := componentgroups.New(dgd.Spec.Experimental)
+	pcsName := PCSNameForDGDWithComponentGroups(dgd)
 	componentReadinesses := make(map[string]groveComponentReadiness, len(dgd.Spec.Components))
 
 	for i := range dgd.Spec.Components {
@@ -144,7 +148,13 @@ func evaluateGroveComponents(ctx context.Context, reader client.Reader, dgd *v1b
 
 		var componentReadiness groveComponentReadiness
 		var checkErr error
-		if component.UsesPCSG() {
+		if group, grouped := groups.GroupForComponent(componentName); grouped {
+			resourceName = grovecommon.GeneratePodCliqueScalingGroupName(
+				grovecommon.ResourceNameReplica{Name: pcsName, Replica: 0},
+				strings.ToLower(group.Name),
+			)
+			componentReadiness, checkErr = observePCSGReadiness(ctx, reader, resourceName, dgd.Namespace, logger)
+		} else if component.UsesPCSG() {
 			componentReadiness, checkErr = observePCSGReadiness(ctx, reader, resourceName, dgd.Namespace, logger)
 		} else {
 			componentReadiness, checkErr = observePodCliqueReadiness(ctx, reader, resourceName, dgd.Namespace, logger)

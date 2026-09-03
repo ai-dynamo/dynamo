@@ -227,6 +227,74 @@ spec:
                     Experimental groups graph-level preview features whose API shape and
                     behavior may change in breaking ways between releases.
                   properties:
+                    componentGroups:
+                      description: |-
+                        ComponentGroups define experimental scale units that contain multiple
+                        components. A group is rendered as one Grove PodCliqueScalingGroup so
+                        all component cliques scale together.
+                      items:
+                        description: ComponentGroupSpec defines an experimental multi-component scale unit.
+                        properties:
+                          components:
+                            description: Components are the components that belong to this component group.
+                            items:
+                              description: ComponentGroupComponentSpec identifies one component in a component group.
+                              properties:
+                                name:
+                                  description: Name is the DGD service included in this group.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - name
+                              type: object
+                            maxItems: 16
+                            minItems: 1
+                            type: array
+                            x-kubernetes-list-map-keys:
+                              - name
+                            x-kubernetes-list-type: map
+                          name:
+                            description: |-
+                              Name is the stable logical identifier for this component group. It must
+                              be unique within spec.experimental.componentGroups.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$
+                            type: string
+                          replicas:
+                            description: |-
+                              Replicas is the desired number of replicas for this component group.
+                              When ScalingAdapter is enabled, this field is managed by the
+                              DynamoGraphDeploymentScalingAdapter and should not be modified directly.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          scalingAdapter:
+                            description: |-
+                              ScalingAdapter configures whether this component group uses the
+                              DynamoGraphDeploymentScalingAdapter. When enabled, Replicas is managed
+                              through the Scale subresource. When disabled, Replicas can be modified
+                              directly.
+                            properties:
+                              enabled:
+                                default: false
+                                description: |-
+                                  Enabled turns the ScalingAdapter on for this service. When true, a DGDSA is created and
+                                  owns the replicas field. When false (the default), no DGDSA is created and replicas are
+                                  set directly on the DGD -- so a bare `scalingAdapter: {}` is disabled; set
+                                  `enabled: true` to opt in.
+                                type: boolean
+                            type: object
+                        required:
+                          - components
+                          - name
+                          - replicas
+                        type: object
+                      maxItems: 16
+                      type: array
+                      x-kubernetes-list-map-keys:
+                        - name
+                      x-kubernetes-list-type: map
                     kvTransferPolicy:
                       description: |-
                         KvTransferPolicy configures topology-aware routing for KV-cache
@@ -21393,6 +21461,64 @@ spec:
                     experimental groups graph-level preview features whose API shape and
                     behavior may change in breaking ways between v1beta1 releases.
                   properties:
+                    componentGroups:
+                      description: |-
+                        componentGroups define experimental scale units that contain multiple
+                        components. A group is rendered as one Grove PodCliqueScalingGroup so
+                        all component cliques scale together.
+                      items:
+                        description: ComponentGroupSpec defines an experimental multi-component scale unit.
+                        properties:
+                          components:
+                            description: components are the components that belong to this component group.
+                            items:
+                              description: ComponentGroupComponentSpec identifies one component in a component group.
+                              properties:
+                                name:
+                                  description: name is the DGD component included in this group.
+                                  minLength: 1
+                                  type: string
+                              required:
+                                - name
+                              type: object
+                            maxItems: 16
+                            minItems: 1
+                            type: array
+                            x-kubernetes-list-map-keys:
+                              - name
+                            x-kubernetes-list-type: map
+                          name:
+                            description: |-
+                              name is the stable logical identifier for this component group. It must
+                              be unique within `spec.experimental.componentGroups`.
+                            maxLength: 63
+                            minLength: 1
+                            pattern: ^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$
+                            type: string
+                          replicas:
+                            description: |-
+                              replicas is the desired number of replicas for this component group.
+                              When `scalingAdapter` is set, this field is managed by the
+                              DynamoGraphDeploymentScalingAdapter and should not be modified directly.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          scalingAdapter:
+                            description: |-
+                              scalingAdapter opts this component group into using the
+                              DynamoGraphDeploymentScalingAdapter. When set, a DGDSA owns `replicas`
+                              through the Scale subresource. Omit the field to opt out.
+                            type: object
+                        required:
+                          - components
+                          - name
+                          - replicas
+                        type: object
+                      maxItems: 16
+                      type: array
+                      x-kubernetes-list-map-keys:
+                        - name
+                      x-kubernetes-list-type: map
                     kvTransferPolicy:
                       description: |-
                         kvTransferPolicy configures topology-aware routing for KV-cache

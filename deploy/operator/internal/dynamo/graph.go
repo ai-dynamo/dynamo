@@ -24,6 +24,7 @@ import (
 	"hash/fnv"
 	"maps"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/discovery"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/componentgroups"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
@@ -1397,19 +1399,23 @@ func LongestPodCliqueNameForDGDComponent(
 // For long names, the PCS name is truncated with a deterministic 4-char hash
 // suffix to guarantee uniqueness and reconcile-loop stability.
 func PCSNameForDGD(dgdName string, components []v1beta1.DynamoComponentDeploymentSharedSpec) string {
+	return pcsNameForDGD(dgdName, components, nil)
+}
+
+// PCSNameForDGDWithComponentGroups computes a PodCliqueSet name that accounts
+// for shared component-group names in Grove's generated child resources.
+func PCSNameForDGDWithComponentGroups(dgd *v1beta1.DynamoGraphDeployment) string {
+	return pcsNameForDGD(dgd.Name, dgd.Spec.Components, componentgroups.New(dgd.Spec.Experimental))
+}
+
+func pcsNameForDGD(
+	dgdName string,
+	components []v1beta1.DynamoComponentDeploymentSharedSpec,
+	groups *componentgroups.ComponentGroups,
+) string {
 	maxComponentBudget := 0
 	for i := range components {
-		component := &components[i]
-		componentName := component.ComponentName
-		lowerName := strings.ToLower(componentName)
-		var budget int
-		if component.UsesPCSG() {
-			// PCSG = lowerName, PCLQ = longest rendered role name.
-			budget = len(lowerName) + len(LongestPodCliqueNameForDGDComponent(componentName, component))
-		} else {
-			// Single-node: PCLQ = lowerName (no PCSG).
-			budget = len(lowerName)
-		}
+		budget := ComponentNameBudget(&components[i], groups)
 		if budget > maxComponentBudget {
 			maxComponentBudget = budget
 		}
@@ -1431,6 +1437,25 @@ func PCSNameForDGD(dgdName string, components []v1beta1.DynamoComponentDeploymen
 	hash.Write([]byte(dgdName))
 	suffix := fmt.Sprintf("%04x", hash.Sum32()&0xFFFF)
 	return dgdName[:pcsBudget-5] + "-" + suffix
+}
+
+// ComponentNameBudget returns the maximum generated Grove child-name suffix
+// budget for a component, including its shared scaling group when present.
+func ComponentNameBudget(
+	component *v1beta1.DynamoComponentDeploymentSharedSpec,
+	groups *componentgroups.ComponentGroups,
+) int {
+	if component == nil {
+		return 0
+	}
+	componentName := strings.ToLower(component.ComponentName)
+	if groupName, grouped := groups.GroupNameForComponent(component.ComponentName); grouped {
+		return len(strings.ToLower(groupName)) + len(LongestPodCliqueNameForDGDComponent(component.ComponentName, component))
+	}
+	if component.UsesPCSG() {
+		return len(componentName) + len(LongestPodCliqueNameForDGDComponent(component.ComponentName, component))
+	}
+	return len(componentName)
 }
 
 func PCSNameForAlphaDGDServices(dgdName string, services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) string {
@@ -2676,7 +2701,7 @@ func GenerateGrovePodCliqueSet(
 	}
 
 	gangSet := &grovev1alpha1.PodCliqueSet{}
-	gangSet.Name = PCSNameForDGD(dynamoDeployment.Name, dynamoDeployment.Spec.Components)
+	gangSet.Name = PCSNameForDGDWithComponentGroups(dynamoDeployment)
 	gangSet.Namespace = dynamoDeployment.Namespace
 	gangSet.Labels = maps.Clone(dynamoDeployment.Spec.Labels)
 	if gangSet.Labels == nil {
@@ -2727,8 +2752,15 @@ func GenerateGrovePodCliqueSet(
 		}
 	}
 
-	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
+	componentGroups := componentgroups.New(dynamoDeployment.Spec.Experimental)
+	scalingGroups := make(
+		[]grovev1alpha1.PodCliqueScalingGroupConfig,
+		0,
+		len(dynamoDeployment.Spec.Components)+len(componentGroups.Groups()),
+	)
 	var resourceClaimTemplates []grovev1alpha1.ResourceClaimTemplateConfig
+	cliqueNamesByComponent := make(map[string][]string, len(dynamoDeployment.Spec.Components))
+	resourceSharingByComponent := make(map[string][]grovev1alpha1.PCSGResourceSharingSpec)
 
 	for i := range dynamoDeployment.Spec.Components {
 		component := dynamoDeployment.Spec.Components[i].DeepCopy()
@@ -2778,6 +2810,7 @@ func GenerateGrovePodCliqueSet(
 		isInterPodGMS := component.IsInterPodGMSEnabled()
 		isInterPodFailover := component.IsInterPodFailoverEnabled()
 		usesPCSG := component.UsesPCSG()
+		groupName, isGrouped := componentGroups.GroupNameForComponent(componentName)
 		roles := expandRolesForComponent(componentName, component.Replicas, numberOfNodes, component)
 		var cliqueNames []string
 
@@ -2809,9 +2842,11 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, err
 			}
+			applyComponentGroupLabel(clique, groupName)
 			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
 			cliqueNames = append(cliqueNames, strings.ToLower(r.Name))
 		}
+		cliqueNamesByComponent[componentName] = cliqueNames
 
 		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes, isInterPodGMS)
 
@@ -2821,9 +2856,12 @@ func GenerateGrovePodCliqueSet(
 				return nil, fmt.Errorf("failed to build GMS ResourceClaimTemplate configs for component %s: %w", componentName, err)
 			}
 			resourceClaimTemplates = append(resourceClaimTemplates, configs...)
+			if isGrouped {
+				resourceSharingByComponent[componentName] = gmsResourceSharingEntries(componentName, roles)
+			}
 		}
 
-		if usesPCSG {
+		if usesPCSG && !isGrouped {
 			scalingGroups = append(scalingGroups, buildGroveScalingGroupConfig(
 				componentName,
 				component,
@@ -2835,6 +2873,13 @@ func GenerateGrovePodCliqueSet(
 			))
 		}
 	}
+	for _, group := range componentGroups.Groups() {
+		scalingGroups = append(scalingGroups, groveScalingGroupForComponentGroup(
+			group,
+			cliqueNamesByComponent,
+			resourceSharingByComponent,
+		))
+	}
 	if len(scalingGroups) > 0 {
 		gangSet.Spec.Template.PodCliqueScalingGroupConfigs = scalingGroups
 	}
@@ -2843,6 +2888,42 @@ func GenerateGrovePodCliqueSet(
 	}
 
 	return gangSet, nil
+}
+
+func applyComponentGroupLabel(clique *grovev1alpha1.PodCliqueTemplateSpec, groupName string) {
+	if clique == nil || groupName == "" {
+		return
+	}
+	if clique.Labels == nil {
+		clique.Labels = make(map[string]string)
+	}
+	clique.Labels[commonconsts.KubeLabelDynamoComponentGroup] = groupName
+}
+
+func groveScalingGroupForComponentGroup(
+	group v1beta1.ComponentGroupSpec,
+	cliqueNamesByComponent map[string][]string,
+	resourceSharingByComponent map[string][]grovev1alpha1.PCSGResourceSharingSpec,
+) grovev1alpha1.PodCliqueScalingGroupConfig {
+	var cliqueNames []string
+	var resourceSharing []grovev1alpha1.PCSGResourceSharingSpec
+	for _, component := range group.Components {
+		cliqueNames = append(cliqueNames, cliqueNamesByComponent[component.Name]...)
+		resourceSharing = append(resourceSharing, resourceSharingByComponent[component.Name]...)
+	}
+
+	slices.Sort(cliqueNames)
+	slices.SortFunc(resourceSharing, func(a, b grovev1alpha1.PCSGResourceSharingSpec) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	return grovev1alpha1.PodCliqueScalingGroupConfig{
+		Name:            strings.ToLower(group.Name),
+		CliqueNames:     cliqueNames,
+		Replicas:        ptr.To(group.Replicas),
+		MinAvailable:    ptr.To(int32(1)),
+		ResourceSharing: resourceSharing,
+	}
 }
 
 func buildGroveScalingGroupConfig(

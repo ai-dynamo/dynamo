@@ -61,7 +61,7 @@ func (r *dgdGroveTopologyConditionReconciler) Reconcile(
 
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	if err := r.reader.Get(ctx, types.NamespacedName{
-		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+		Name:      dynamo.PCSNameForDGDWithComponentGroups(dgd),
 		Namespace: dgd.Namespace,
 	}, pcs); err != nil {
 		if !apierrors.IsNotFound(err) {

@@ -586,9 +586,16 @@ func ConvertToRestartStrategy(src *v1beta1.RestartStrategy, dst *RestartStrategy
 // ConvertFromDynamoGraphDeploymentExperimentalSpec converts graph-level
 // experimental config from v1alpha1 to v1beta1.
 func ConvertFromDynamoGraphDeploymentExperimentalSpec(src *DynamoGraphDeploymentExperimentalSpec, dst *v1beta1.DynamoGraphDeploymentExperimentalSpec) {
+	*dst = v1beta1.DynamoGraphDeploymentExperimentalSpec{}
 	if src.KvTransferPolicy != nil {
 		dst.KvTransferPolicy = &v1beta1.KvTransferPolicy{}
 		ConvertFromKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
+	}
+	if src.ComponentGroups != nil {
+		dst.ComponentGroups = make([]v1beta1.ComponentGroupSpec, len(src.ComponentGroups))
+		for i := range src.ComponentGroups {
+			ConvertFromComponentGroupSpec(&src.ComponentGroups[i], &dst.ComponentGroups[i])
+		}
 	}
 }
 
@@ -599,6 +606,59 @@ func ConvertToDynamoGraphDeploymentExperimentalSpec(src *v1beta1.DynamoGraphDepl
 		dst.KvTransferPolicy = &KvTransferPolicy{}
 		ConvertToKvTransferPolicy(src.KvTransferPolicy, dst.KvTransferPolicy)
 	}
+	if src.ComponentGroups != nil {
+		dst.ComponentGroups = make([]ComponentGroupSpec, len(src.ComponentGroups))
+		for i := range src.ComponentGroups {
+			ConvertToComponentGroupSpec(&src.ComponentGroups[i], &dst.ComponentGroups[i])
+		}
+	}
+}
+
+// ConvertFromComponentGroupSpec converts a component group from v1alpha1 to
+// v1beta1. A disabled v1alpha1 scaling adapter normalizes to absence because
+// v1beta1 represents the setting with a presence-only marker.
+func ConvertFromComponentGroupSpec(src *ComponentGroupSpec, dst *v1beta1.ComponentGroupSpec) {
+	dst.Name = src.Name
+	dst.Replicas = src.Replicas
+	if src.ScalingAdapter != nil && src.ScalingAdapter.Enabled {
+		dst.ScalingAdapter = &v1beta1.ScalingAdapter{}
+		ConvertFromScalingAdapter(src.ScalingAdapter, dst.ScalingAdapter)
+	}
+	if src.Components != nil {
+		dst.Components = make([]v1beta1.ComponentGroupComponentSpec, len(src.Components))
+		for i := range src.Components {
+			ConvertFromComponentGroupComponentSpec(&src.Components[i], &dst.Components[i])
+		}
+	}
+}
+
+// ConvertToComponentGroupSpec converts a component group from v1beta1 to
+// v1alpha1.
+func ConvertToComponentGroupSpec(src *v1beta1.ComponentGroupSpec, dst *ComponentGroupSpec) {
+	dst.Name = src.Name
+	dst.Replicas = src.Replicas
+	if src.ScalingAdapter != nil {
+		dst.ScalingAdapter = &ScalingAdapter{}
+		ConvertToScalingAdapter(src.ScalingAdapter, dst.ScalingAdapter)
+	}
+	if src.Components != nil {
+		dst.Components = make([]ComponentGroupComponentSpec, len(src.Components))
+		for i := range src.Components {
+			ConvertToComponentGroupComponentSpec(&src.Components[i], &dst.Components[i])
+		}
+	}
+}
+
+// ConvertFromComponentGroupComponentSpec converts a component-group member
+// from v1alpha1 to v1beta1.
+func ConvertFromComponentGroupComponentSpec(src *ComponentGroupComponentSpec, dst *v1beta1.ComponentGroupComponentSpec) {
+	dst.Name = src.Name
+}
+
+// ConvertToComponentGroupComponentSpec converts a component-group member from
+// v1beta1 to v1alpha1.
+func ConvertToComponentGroupComponentSpec(src *v1beta1.ComponentGroupComponentSpec, dst *ComponentGroupComponentSpec) {
+	dst.Name = src.Name
 }
 
 // ConvertFromKvTransferPolicy converts KV transfer policy from v1alpha1 to

@@ -19,8 +19,10 @@ package controller
 
 import (
 	"context"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -86,9 +88,16 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 		}
 		return ctrl.Result{}, err
 	}
+	if adapter.Spec.DGDRef.ComponentGroupName != "" {
+		return r.reconcileComponentGroupTarget(ctx, adapter, dgd)
+	}
 
 	// 3. Find the target component in the DGD's components list.
 	componentName := adapter.Spec.DGDRef.ComponentName
+	if componentName == "" {
+		logger.Info("Adapter has no componentName or componentGroupName target")
+		return ctrl.Result{}, nil
+	}
 	component := dgd.GetComponentByName(componentName)
 	if component == nil {
 		logger.Info("Component referenced by adapter not found in DGD; waiting for adapter or DGD update",
@@ -148,6 +157,102 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) Reconcile(ctx context.Co
 	return ctrl.Result{}, nil
 }
 
+func (r *DynamoGraphDeploymentScalingAdapterReconciler) reconcileComponentGroupTarget(
+	ctx context.Context,
+	adapter *nvidiacomv1beta1.DynamoGraphDeploymentScalingAdapter,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	groupName := adapter.Spec.DGDRef.ComponentGroupName
+	if dgd.Spec.Experimental == nil {
+		logger.Info(
+			"Component group referenced by adapter not found in DGD; waiting for adapter or DGD update",
+			"componentGroup", groupName,
+			"dgd", dgd.Name,
+		)
+		return ctrl.Result{}, nil
+	}
+
+	var group *nvidiacomv1beta1.ComponentGroupSpec
+	for i := range dgd.Spec.Experimental.ComponentGroups {
+		if strings.EqualFold(dgd.Spec.Experimental.ComponentGroups[i].Name, groupName) {
+			group = &dgd.Spec.Experimental.ComponentGroups[i]
+			break
+		}
+	}
+	if group == nil {
+		logger.Info(
+			"Component group referenced by adapter not found in DGD; waiting for adapter or DGD update",
+			"componentGroup", groupName,
+			"dgd", dgd.Name,
+		)
+		return ctrl.Result{}, nil
+	}
+	if group.ScalingAdapter == nil {
+		logger.V(1).Info(
+			"Component group no longer uses a scaling adapter; skipping replica propagation",
+			"componentGroup", groupName,
+			"dgd", dgd.Name,
+		)
+		return ctrl.Result{}, nil
+	}
+
+	currentReplicas := group.Replicas
+	if currentReplicas != adapter.Spec.Replicas {
+		group.Replicas = adapter.Spec.Replicas
+
+		if err := r.Update(ctx, dgd); err != nil {
+			logger.Error(err, "Failed to update DGD component group")
+			r.Recorder.Eventf(
+				adapter,
+				dgd,
+				corev1.EventTypeWarning,
+				"UpdateFailed",
+				"Update",
+				"Failed to update DGD %s component group %s: %v",
+				dgd.Name,
+				groupName,
+				err,
+			)
+			return ctrl.Result{}, err
+		}
+
+		logger.Info(
+			"Scaled component group",
+			"dgd", dgd.Name,
+			"componentGroup", groupName,
+			"from", currentReplicas,
+			"to", adapter.Spec.Replicas,
+		)
+		r.Recorder.Eventf(
+			adapter,
+			dgd,
+			corev1.EventTypeNormal,
+			"Scaled",
+			"Scale",
+			"Scaled component group %s from %d to %d replicas",
+			groupName,
+			currentReplicas,
+			adapter.Spec.Replicas,
+		)
+
+		now := metav1.Now()
+		adapter.Status.LastScaleTime = &now
+	}
+
+	adapter.Status.Replicas = adapter.Spec.Replicas
+	adapter.Status.Selector = labels.SelectorFromSet(labels.Set{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		consts.KubeLabelDynamoComponentGroup:      group.Name,
+	}).String()
+	if err := r.Status().Update(ctx, adapter); err != nil {
+		logger.Error(err, "Failed to update adapter status")
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, nil
+}
+
 // buildPodSelector constructs a label selector for the pods managed by this component.
 func (r *DynamoGraphDeploymentScalingAdapterReconciler) buildPodSelector(dgdName, componentName string) string {
 	// Pods are labeled with:
@@ -180,8 +285,8 @@ func (r *DynamoGraphDeploymentScalingAdapterReconciler) SetupWithManager(mgr ctr
 					if !okOld || !okNew {
 						return false
 					}
-					// Trigger if components changed.
-					return !componentsEqual(oldDGD.Spec.Components, newDGD.Spec.Components)
+					return !componentsEqual(oldDGD.Spec.Components, newDGD.Spec.Components) ||
+						!apiequality.Semantic.DeepEqual(oldDGD.Spec.Experimental, newDGD.Spec.Experimental)
 				},
 				GenericFunc: func(ge event.GenericEvent) bool { return false },
 			}),

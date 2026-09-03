@@ -131,6 +131,11 @@ spec:
       Required and used only when `enforcement` is `preferred`. Higher values create a stronger same-domain routing preference but do not guarantee same-domain selection; the value is not a probability. `0` disables the topology preference; `1` is the strongest supported preference. Minimum `0`, maximum `1`.
     </ParamField>
   </Indent>
+  <ParamField path="componentGroups" type="[]ComponentGroupSpec">
+    Experimental multi-component scale units. Each group renders as one Grove `PodCliqueScalingGroup`, so all member cliques scale together. Requires the Grove pathway. Maximum 16 groups.
+
+    See [ComponentGroupSpec](#componentgroupspec).
+  </ParamField>
 </Indent>
 
 ## Status
@@ -208,7 +213,37 @@ The operator maintains observed state under `status`.
 
 ## Additional Types
 
-Nested struct types referenced by the status fields above, broken out here to keep the field lists shallow. Types prefixed `core/v1.` or `metav1.` are standard Kubernetes types and link to their Go package documentation instead of being expanded.
+Nested struct types referenced by the spec and status fields above, broken out here to keep the field lists shallow. Types prefixed `core/v1.` or `metav1.` are standard Kubernetes types and link to their Go package documentation instead of being expanded.
+
+### ComponentGroupSpec
+
+An experimental group of DGD components that Grove scales as one `PodCliqueScalingGroup`. Group names and membership are immutable after creation.
+
+<ParamField path="name" type="string" required={true}>
+  Stable group identifier. Names must be unique within `spec.experimental.componentGroups` when compared case-insensitively, must not shadow a component name, and must match `^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$`. Maximum 63 characters.
+</ParamField>
+
+<ParamField path="replicas" type="integer" required={true}>
+  Desired number of replicas for the whole group. Minimum `1`. Grove does not support zero replicas in a `PodCliqueScalingGroup` template.
+</ParamField>
+
+<ParamField path="scalingAdapter" type="ScalingAdapter">
+  Opts the group into the `DynamoGraphDeploymentScalingAdapter`. When present, update replicas through the adapter's Scale subresource instead of modifying `replicas` directly. Component-group targets require at least one replica.
+</ParamField>
+
+<ParamField path="components" type="[]ComponentGroupComponentSpec" required={true}>
+  Components that scale with this group. Each component may belong to at most one group. Minimum 1 item; maximum 16 items.
+
+  See [ComponentGroupComponentSpec](#componentgroupcomponentspec).
+</ParamField>
+
+### ComponentGroupComponentSpec
+
+Identifies one existing entry in `spec.components` as a component-group member.
+
+<ParamField path="name" type="string" required={true}>
+  Component name. The referenced component must have at least one replica and cannot use multinode mode, a component-level topology constraint, or a component-level scaling adapter. A PCSG-backed member cannot use `providerOverride`, because the group owns the shared PCSG configuration.
+</ParamField>
 
 ### ComponentReplicaStatus
 

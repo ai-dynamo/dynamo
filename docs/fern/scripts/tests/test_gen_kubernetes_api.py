@@ -48,8 +48,8 @@ EXPECTED_TYPE_COUNTS = {
     # (PodReference, PodSnapshotSource/Spec/Status,
     # PodSnapshotContentSource/Spec/Status, PodSnapshotReference), which are
     # owned by github.com/ai-dynamo/snapshot.
-    "nvidia.com/v1alpha1": 75,
-    "nvidia.com/v1beta1": 69,
+    "nvidia.com/v1alpha1": 77,
+    "nvidia.com/v1beta1": 71,
     "operator.config.dynamo.nvidia.com/v1alpha1": 32,
 }
 EXPECTED_OPERATOR_DEFAULT_SECTIONS = (

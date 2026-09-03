@@ -2122,3 +2122,97 @@ func TestDGD_RoundTrip_KvTransferPolicy(t *testing.T) {
 		}
 	})
 }
+
+func TestDGD_RoundTrip_ComponentGroups(t *testing.T) {
+	t.Run("v1beta1", func(t *testing.T) {
+		src := &v1beta1.DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "grouped", Namespace: "ns"},
+			Spec: v1beta1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Components: []v1beta1.DynamoComponentDeploymentSharedSpec{
+					{ComponentName: "prefill", ComponentType: v1beta1.ComponentTypePrefill},
+					{ComponentName: "decode", ComponentType: v1beta1.ComponentTypeDecode},
+				},
+				Experimental: &v1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []v1beta1.ComponentGroupSpec{{
+						Name:           "workers",
+						Replicas:       2,
+						ScalingAdapter: &v1beta1.ScalingAdapter{},
+						Components: []v1beta1.ComponentGroupComponentSpec{
+							{Name: "prefill"},
+							{Name: "decode"},
+						},
+					}},
+				},
+			},
+		}
+
+		got := roundTripFromV1beta1(t, src)
+		if diff := cmp.Diff(src, got); diff != "" {
+			t.Errorf("v1beta1 component group round-trip mismatch (-want +got):\n%s", diff)
+		}
+	})
+
+	t.Run("v1alpha1", func(t *testing.T) {
+		src := &DynamoGraphDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "grouped-alpha", Namespace: "ns"},
+			Spec: DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Services: map[string]*DynamoComponentDeploymentSharedSpec{
+					"prefill": {ComponentType: "prefill"},
+					"decode":  {ComponentType: "decode"},
+				},
+				Experimental: &DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []ComponentGroupSpec{{
+						Name:           "workers",
+						Replicas:       2,
+						ScalingAdapter: &ScalingAdapter{Enabled: true},
+						Components: []ComponentGroupComponentSpec{
+							{Name: "prefill"},
+							{Name: "decode"},
+						},
+					}},
+				},
+			},
+		}
+
+		got := roundTripFromV1alpha1(t, src)
+		if diff := cmp.Diff(src.Spec.Experimental, got.Spec.Experimental); diff != "" {
+			t.Errorf("v1alpha1 component group round-trip mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// TestDGD_FromV1alpha1_ComponentGroupScalingAdapterDisabled documents the
+// lossy mapping for alpha's disabled bool to beta's presence-only marker.
+func TestDGD_FromV1alpha1_ComponentGroupScalingAdapterDisabled(t *testing.T) {
+	src := &DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "group-disabled", Namespace: "ns"},
+		Spec: DynamoGraphDeploymentSpec{
+			Services: map[string]*DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: "worker"},
+			},
+			Experimental: &DynamoGraphDeploymentExperimentalSpec{
+				ComponentGroups: []ComponentGroupSpec{{
+					Name:           "workers",
+					Replicas:       1,
+					ScalingAdapter: &ScalingAdapter{Enabled: false},
+					Components:     []ComponentGroupComponentSpec{{Name: "worker"}},
+				}},
+			},
+		},
+	}
+
+	hub := &v1beta1.DynamoGraphDeployment{}
+	if err := src.ConvertTo(hub); err != nil {
+		t.Fatalf("ConvertTo: %v", err)
+	}
+	if adapter := hub.Spec.Experimental.ComponentGroups[0].ScalingAdapter; adapter != nil {
+		t.Errorf("disabled component group scalingAdapter converted to %+v, want nil", adapter)
+	}
+
+	got := roundTripFromV1alpha1(t, src)
+	if adapter := got.Spec.Experimental.ComponentGroups[0].ScalingAdapter; adapter != nil {
+		t.Errorf("disabled component group scalingAdapter round-tripped to %+v, want nil", adapter)
+	}
+}

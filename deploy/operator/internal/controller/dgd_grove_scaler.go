@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -27,6 +28,8 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/componentgroups"
+	grovecommon "github.com/ai-dynamo/grove/operator/api/common"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -50,10 +53,40 @@ func (s *groveScaler) Reconcile(
 ) error {
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Reconciling Grove scaling operations")
+	componentGroups := componentgroups.New(dgd.Spec.Experimental)
+	pcsName := dynamo.PCSNameForDGDWithComponentGroups(dgd)
 
+	// Component groups scale through their shared PodCliqueScalingGroup child.
+	for _, group := range componentGroups.Groups() {
+		resourceName := grovecommon.GeneratePodCliqueScalingGroupName(
+			grovecommon.ResourceNameReplica{Name: pcsName, Replica: 0},
+			strings.ToLower(group.Name),
+		)
+		if err := s.scaleResource(
+			ctx,
+			consts.PodCliqueScalingGroupGVR,
+			resourceName,
+			dgd.Namespace,
+			group.Replicas,
+		); err != nil {
+			logger.Error(
+				err,
+				"Failed to scale component group PodCliqueScalingGroup",
+				"componentGroup", group.Name,
+				"resourceName", resourceName,
+				"replicas", group.Replicas,
+			)
+			return fmt.Errorf("failed to scale component group PodCliqueScalingGroup %s: %w", resourceName, err)
+		}
+	}
+
+	// Ungrouped components retain their independent Grove scaling behavior.
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 		componentName := component.ComponentName
+		if componentGroups.IsGrouped(componentName) {
+			continue
+		}
 		info := checkpointInfos[componentName]
 		gated := info != nil &&
 			info.Enabled &&

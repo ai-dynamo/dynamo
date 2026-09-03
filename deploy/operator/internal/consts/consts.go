@@ -65,6 +65,7 @@ const (
 
 	KubeLabelDynamoGraphDeploymentName = "nvidia.com/dynamo-graph-deployment-name"
 	KubeLabelDynamoComponent           = "nvidia.com/dynamo-component"
+	KubeLabelDynamoComponentGroup      = "nvidia.com/dynamo-component-group"
 	KubeLabelDynamoNamespace           = "nvidia.com/dynamo-namespace"
 	// KubeLabelDynamoComponentType is the workload selector contract stamped on
 	// DCDs and rendered onto pods/services. Native v1beta1 prefill/decode worker

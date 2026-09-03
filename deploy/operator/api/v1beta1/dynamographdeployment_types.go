@@ -97,6 +97,55 @@ type DynamoGraphDeploymentExperimentalSpec struct {
 	// transfers between prefill and decode workers.
 	// +optional
 	KvTransferPolicy *KvTransferPolicy `json:"kvTransferPolicy,omitempty"`
+
+	// componentGroups define experimental scale units that contain multiple
+	// components. A group is rendered as one Grove PodCliqueScalingGroup so
+	// all component cliques scale together.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	ComponentGroups []ComponentGroupSpec `json:"componentGroups,omitempty"`
+}
+
+// ComponentGroupSpec defines an experimental multi-component scale unit.
+type ComponentGroupSpec struct {
+	// name is the stable logical identifier for this component group. It must
+	// be unique within `spec.experimental.componentGroups`.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9]([-A-Za-z0-9]*[A-Za-z0-9])?$`
+	Name string `json:"name"`
+
+	// replicas is the desired number of replicas for this component group.
+	// When `scalingAdapter` is set, this field is managed by the
+	// DynamoGraphDeploymentScalingAdapter and should not be modified directly.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:Minimum=1
+	Replicas int32 `json:"replicas"`
+
+	// scalingAdapter opts this component group into using the
+	// DynamoGraphDeploymentScalingAdapter. When set, a DGDSA owns `replicas`
+	// through the Scale subresource. Omit the field to opt out.
+	// +optional
+	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
+
+	// components are the components that belong to this component group.
+	// +kubebuilder:validation:Required
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	Components []ComponentGroupComponentSpec `json:"components"`
+}
+
+// ComponentGroupComponentSpec identifies one component in a component group.
+type ComponentGroupComponentSpec struct {
+	// name is the DGD component included in this group.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
 }
 
 // DynamoGraphDeploymentStatus defines the observed state of a DynamoGraphDeployment.

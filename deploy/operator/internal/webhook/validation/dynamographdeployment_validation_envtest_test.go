@@ -49,6 +49,8 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	longDGDName := "test-graph-" + strings.Repeat("x", 50)
 	boundaryComponentName := "w" + strings.Repeat("x", 36)
 	tooLongComponentName := boundaryComponentName + "x"
+	boundaryGroupName := "g" + strings.Repeat("x", 30)
+	tooLongGroupName := boundaryGroupName + "x"
 
 	tests := []struct {
 		name               string
@@ -75,6 +77,205 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 		{
 			name:       "valid deployment with components",
 			deployment: betaDGDForAdmission(nil),
+		},
+
+		// Experimental component-group create-path rules.
+		{
+			name: "valid beta component group",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("runtime", 2, "frontend", "worker"),
+					},
+				}
+			}),
+		},
+		{
+			name: "valid alpha component group crosses the conversion boundary",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1alpha1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1alpha1.ComponentGroupSpec{
+						alphaComponentGroup("runtime", 2, "worker"),
+					},
+				}
+			}),
+		},
+		{
+			name: "component group name is required by the schema",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("", 1, "worker"),
+					},
+				}
+			}),
+			wantSchemaErr: `spec.experimental.componentGroups[0].name: Invalid value: "": spec.experimental.componentGroups[0].name in body should be at least 1 chars long`,
+		},
+		{
+			name: "component group requires at least one member in the schema",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("runtime", 1),
+					},
+				}
+			}),
+			wantSchemaErr: "spec.experimental.componentGroups[0].components: Invalid value: 0: spec.experimental.componentGroups[0].components in body should have at least 1 items",
+		},
+		{
+			name: "component group replicas must be positive in the schema",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("runtime", 0, "worker"),
+					},
+				}
+			}),
+			wantSchemaErr: "spec.experimental.componentGroups[0].replicas: Invalid value: 0: spec.experimental.componentGroups[0].replicas in body should be greater than or equal to 1",
+		},
+		{
+			name:          "component groups require Grove",
+			groveDisabled: true,
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("runtime", 1, "worker"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.componentGroups: Forbidden: requires the Grove pathway, but workload provider "component" is selected`},
+		},
+		{
+			name: "component group names are unique case-insensitively",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("runtime", 1, "worker"),
+						componentGroup("Runtime", 1, "frontend"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.componentGroups[1].name: Duplicate value: "Runtime"`},
+		},
+		{
+			name: "component group name cannot shadow a component",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("worker", 1, "frontend"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.componentGroups[0].name: Forbidden: must not shadow a component name"},
+		},
+		{
+			name: "component group member must exist",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("runtime", 1, "missing"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.componentGroups[0].components[0].name: Unsupported value: "missing": supported values: "frontend", "worker"`},
+		},
+		{
+			name: "component belongs to at most one component group",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("first", 1, "worker"),
+						componentGroup("second", 1, "worker"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.experimental.componentGroups[1].components[0].name: Invalid value: "worker": is already a member of component group "first"`},
+		},
+		{
+			name: "grouped component cannot use its own scaling adapter",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("runtime", 1, "worker"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.componentGroups[0].components[0].name: Forbidden: component groups require scaling through dgdRef.componentGroupName rather than a component scalingAdapter"},
+		},
+		{
+			name: "grouped component replicas cannot be zero",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Replicas = k8sptr.To(int32(0))
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("runtime", 1, "worker"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.componentGroups[0].components[0].name: Forbidden: component groups do not support members with replicas set to 0"},
+		},
+		{
+			name: "grouped PCSG-backed component cannot use a provider override",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+				}
+				worker.ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueScalingGroupConfig,
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}`,
+				)
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("runtime", 1, "worker"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.componentGroups[0].components[0].name: Forbidden: component groups do not support providerOverride on PCSG-backed components"},
+		},
+		{
+			name: "grouped component cannot retain a component topology constraint",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.TopologyConstraint = &nvidiacomv1beta1.SpecTopologyConstraint{
+					ClusterTopologyName: "grove-topology",
+					PackDomain:          "zone",
+				}
+				betaWorkerComponent(dgd).TopologyConstraint = &nvidiacomv1beta1.TopologyConstraint{PackDomain: "rack"}
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup("runtime", 1, "worker"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.componentGroups[0].components[0].name: Forbidden: component groups do not support component-level topology constraints"},
+		},
+		{
+			name: "grouped Grove resource name accepts the boundary",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup(boundaryGroupName, 1, "worker"),
+					},
+				}
+			}),
+		},
+		{
+			name: "grouped Grove resource name rejects overflow",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+					ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{
+						componentGroup(tooLongGroupName, 1, "worker"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{fmt.Sprintf(
+				"spec.components[1].name: Invalid value: %q: combined resource name length 46 exceeds the 45-character pod-name limit (PCS name + component group name + rendered clique name); shorten DynamoGraphDeployment name %q, component group name %q, or component name %q",
+				"worker",
+				"test-graph",
+				tooLongGroupName,
+				"worker",
+			)},
 		},
 		{
 			name: "beta component main image is required when pod template is absent on create",
@@ -2508,6 +2709,58 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 
 		// Scaling adapter updates.
 		{
+			name:          "component group replicas can be changed without a scaling adapter",
+			oldDeployment: betaDGDWithComponentGroup(func(group *nvidiacomv1beta1.ComponentGroupSpec) { group.Replicas = 2 }),
+			deployment:    betaDGDWithComponentGroup(func(group *nvidiacomv1beta1.ComponentGroupSpec) { group.Replicas = 3 }),
+			username:      "system:serviceaccount:default:regular-user",
+		},
+		{
+			name: "component group scaling adapter blocks direct replica changes",
+			oldDeployment: betaDGDWithComponentGroup(func(group *nvidiacomv1beta1.ComponentGroupSpec) {
+				group.Replicas = 2
+				group.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+			}),
+			deployment: betaDGDWithComponentGroup(func(group *nvidiacomv1beta1.ComponentGroupSpec) {
+				group.Replicas = 3
+				group.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+			}),
+			username:        "system:serviceaccount:default:regular-user",
+			wantWebhookErrs: []string{"spec.experimental.componentGroups[0].replicas: Forbidden: cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
+		},
+		{
+			name: "component group scaling adapter removal cannot bypass replica ownership",
+			oldDeployment: betaDGDWithComponentGroup(func(group *nvidiacomv1beta1.ComponentGroupSpec) {
+				group.Replicas = 2
+				group.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+			}),
+			deployment: betaDGDWithComponentGroup(func(group *nvidiacomv1beta1.ComponentGroupSpec) {
+				group.Replicas = 3
+				group.ScalingAdapter = nil
+			}),
+			username:        "system:serviceaccount:default:regular-user",
+			wantWebhookErrs: []string{"spec.experimental.componentGroups[0].replicas: Forbidden: cannot be modified directly when scaling adapter is enabled; scale or update the related DynamoGraphDeploymentScalingAdapter instead"},
+		},
+		{
+			name: "operator can change component-group scaling-adapter-owned replicas",
+			oldDeployment: betaDGDWithComponentGroup(func(group *nvidiacomv1beta1.ComponentGroupSpec) {
+				group.Replicas = 2
+				group.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+			}),
+			deployment: betaDGDWithComponentGroup(func(group *nvidiacomv1beta1.ComponentGroupSpec) {
+				group.Replicas = 3
+				group.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
+			}),
+			username: admissionOperatorPrincipal,
+		},
+		{
+			name:          "component group membership is immutable",
+			oldDeployment: betaDGDWithComponentGroup(nil),
+			deployment: betaDGDWithComponentGroup(func(group *nvidiacomv1beta1.ComponentGroupSpec) {
+				group.Components = []nvidiacomv1beta1.ComponentGroupComponentSpec{{Name: "frontend"}}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.componentGroups: Forbidden: component group names and membership are immutable after creation; update only replicas or scalingAdapter"},
+		},
+		{
 			name: "scaling adapter blocks direct replica changes",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.ScalingAdapter = &nvidiacomv1beta1.ScalingAdapter{}
@@ -2769,6 +3022,44 @@ func setAlphaCompilationCacheVolumeNameEmpty(t *testing.T, request map[string]an
 		t.Fatal("request spec.services.worker.volumeMounts[0] is not an object")
 	}
 	volumeMount["name"] = ""
+}
+
+func componentGroup(name string, replicas int32, componentNames ...string) nvidiacomv1beta1.ComponentGroupSpec {
+	components := make([]nvidiacomv1beta1.ComponentGroupComponentSpec, 0, len(componentNames))
+	for _, componentName := range componentNames {
+		components = append(components, nvidiacomv1beta1.ComponentGroupComponentSpec{Name: componentName})
+	}
+	return nvidiacomv1beta1.ComponentGroupSpec{
+		Name:       name,
+		Replicas:   replicas,
+		Components: components,
+	}
+}
+
+func alphaComponentGroup(name string, replicas int32, componentNames ...string) nvidiacomv1alpha1.ComponentGroupSpec {
+	components := make([]nvidiacomv1alpha1.ComponentGroupComponentSpec, 0, len(componentNames))
+	for _, componentName := range componentNames {
+		components = append(components, nvidiacomv1alpha1.ComponentGroupComponentSpec{Name: componentName})
+	}
+	return nvidiacomv1alpha1.ComponentGroupSpec{
+		Name:       name,
+		Replicas:   replicas,
+		Components: components,
+	}
+}
+
+func betaDGDWithComponentGroup(
+	mutate func(*nvidiacomv1beta1.ComponentGroupSpec),
+) *nvidiacomv1beta1.DynamoGraphDeployment {
+	return betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+		group := componentGroup("runtime", 2, "worker")
+		if mutate != nil {
+			mutate(&group)
+		}
+		dgd.Spec.Experimental = &nvidiacomv1beta1.DynamoGraphDeploymentExperimentalSpec{
+			ComponentGroups: []nvidiacomv1beta1.ComponentGroupSpec{group},
+		}
+	})
 }
 
 func betaDGDForAdmission(

@@ -29,6 +29,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/componentgroups"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -84,7 +85,7 @@ func (r *groveWorkloadRenderer) Render(
 	}
 	existingPodCliqueSet := &grovev1alpha1.PodCliqueSet{}
 	key := types.NamespacedName{
-		Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+		Name:      dynamo.PCSNameForDGDWithComponentGroups(dgd),
 		Namespace: dgd.Namespace,
 	}
 	if err := r.reader.Get(ctx, key, existingPodCliqueSet); err != nil {
@@ -143,6 +144,7 @@ func (r *groveWorkloadRenderer) renderPodCliqueSet(
 	prepareGroveTopologyConstraintUpgrade(desired, existing)
 	preserveGrovePodCliqueSetOrder(desired, existing)
 	preserveGrovePodCliqueSetReplicas(desired, existing, checkpointInfos)
+	preserveGroveComponentGroupMinAvailable(desired, existing, componentgroups.New(renderDeployment.Spec.Experimental))
 	return desired, nil
 }
 
@@ -447,6 +449,32 @@ func preserveGrovePodCliqueSetReplicas(
 		}
 		if replicas, ok := scalingGroupReplicasByName[config.Name]; ok {
 			config.Replicas = replicas
+		}
+	}
+}
+
+// Grove treats a PCSG template's MinAvailable as immutable. Component-group
+// replicas are scaled on the child PCSG, so retain the existing template value.
+func preserveGroveComponentGroupMinAvailable(
+	desired *grovev1alpha1.PodCliqueSet,
+	existing *grovev1alpha1.PodCliqueSet,
+	groups *componentgroups.ComponentGroups,
+) {
+	if desired == nil || existing == nil || len(groups.Groups()) == 0 {
+		return
+	}
+
+	existingMinAvailable := make(map[string]*int32, len(existing.Spec.Template.PodCliqueScalingGroupConfigs))
+	for _, config := range existing.Spec.Template.PodCliqueScalingGroupConfigs {
+		existingMinAvailable[strings.ToLower(config.Name)] = config.MinAvailable
+	}
+	for i := range desired.Spec.Template.PodCliqueScalingGroupConfigs {
+		config := &desired.Spec.Template.PodCliqueScalingGroupConfigs[i]
+		if !groups.HasGroup(config.Name) {
+			continue
+		}
+		if minAvailable, ok := existingMinAvailable[strings.ToLower(config.Name)]; ok {
+			config.MinAvailable = minAvailable
 		}
 	}
 }

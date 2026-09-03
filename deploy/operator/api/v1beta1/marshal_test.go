@@ -349,6 +349,14 @@ func TestDGDMarshal_PreservesScalingAdapterSentinel(t *testing.T) {
 				PodTemplate: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "x"}}},
 				}}},
+			Experimental: &DynamoGraphDeploymentExperimentalSpec{
+				ComponentGroups: []ComponentGroupSpec{{
+					Name:           "workers",
+					Replicas:       1,
+					ScalingAdapter: &ScalingAdapter{},
+					Components:     []ComponentGroupComponentSpec{{Name: "decode"}},
+				}},
+			},
 		},
 	}
 	b, err := json.Marshal(dgd)
@@ -364,6 +372,14 @@ func TestDGDMarshal_PreservesScalingAdapterSentinel(t *testing.T) {
 	}
 	if saMap, isMap := sa.(map[string]any); !isMap || len(saMap) != 0 {
 		t.Errorf("expected scalingAdapter to remain an empty object, got: %v", sa)
+	}
+	group := m["spec"].(map[string]any)["experimental"].(map[string]any)["componentGroups"].([]any)[0].(map[string]any)
+	groupSA, ok := group["scalingAdapter"]
+	if !ok {
+		t.Fatal("expected component group scalingAdapter sentinel to be preserved, but field was stripped")
+	}
+	if groupSAMap, isMap := groupSA.(map[string]any); !isMap || len(groupSAMap) != 0 {
+		t.Errorf("expected component group scalingAdapter to remain an empty object, got: %v", groupSA)
 	}
 }
 
