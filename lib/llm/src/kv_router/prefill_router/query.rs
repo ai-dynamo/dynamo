@@ -25,6 +25,7 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 #[must_use]
 pub struct PrefillReservation {
     worker: WorkerWithDpRank,
+    dp_rank: Option<u32>,
     release: ReservationRelease,
 }
 
@@ -41,8 +42,8 @@ impl PrefillReservation {
         self.worker.worker_id
     }
 
-    pub fn dp_rank(&self) -> u32 {
-        self.worker.dp_rank
+    pub fn dp_rank(&self) -> Option<u32> {
+        self.dp_rank
     }
 
     /// Release this booking and wait for the scheduler to acknowledge it.
@@ -108,6 +109,7 @@ where
                 .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
             return Ok(PrefillReservation {
                 worker: WorkerWithDpRank::new(worker_id, 0),
+                dp_rank: None,
                 release: ReservationRelease::None,
             });
         };
@@ -137,6 +139,7 @@ where
                 };
                 Ok(PrefillReservation {
                     worker,
+                    dp_rank: Some(worker.dp_rank),
                     release: ReservationRelease::Kv {
                         cleanup: chooser.booking_cleanup(),
                         booking: Some(SchedulerBookingDescriptor {
@@ -580,6 +583,7 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(reservation.dp_rank().is_some());
         let dropped_reservation = router
             .reserve_prefill_worker(
                 "epp-prefill/drop",
@@ -655,6 +659,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reservation.worker_id(), expected_workers[0]);
+        assert_eq!(reservation.dp_rank(), None);
         reservation.release().await.unwrap();
 
         let concurrent_peeks = join_all((0..16).map(|_| query_worker(&prefill_router))).await;

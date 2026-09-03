@@ -1545,10 +1545,12 @@ impl EndpointPicker for Router {
                 "x-dynamo-prefill-instance-id".to_string(),
                 format!("{}", prefill_worker_id),
             ));
-            headers.push((
-                "x-dynamo-prefill-dp-rank".to_string(),
-                prefill_dp_rank.to_string(),
-            ));
+            if let Some(prefill_dp_rank) = prefill_dp_rank {
+                headers.push((
+                    "x-dynamo-prefill-dp-rank".to_string(),
+                    prefill_dp_rank.to_string(),
+                ));
+            }
         } else {
             headers.push((
                 "x-dynamo-routing-mode".to_string(),
