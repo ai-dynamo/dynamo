@@ -37,7 +37,7 @@ Include `nvext` as a top-level field alongside standard OpenAI-compatible fields
 | `token_data` | `u32[]` | `None` | Preprocessor | Pre-tokenized prompt tokens. When present, the frontend skips tokenization. |
 | `max_thinking_tokens` | `u32` | `None` | Backend | Maximum thinking tokens allowed (passed through to backends). |
 | `cache_salt` | `string` | `None` | Router / supported backends | Namespaces Dynamo KV routing. vLLM and TensorRT-LLM also isolate backend KV-cache reuse; see [Backend support](#backend-support). This is the recommended cache-isolation input. |
-| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
+| `extra_fields` | `string[]` | `None` | Response builder | Fields to include in the response `nvext`. Supported: `"worker_id"`, `"timing"`, `"routed_experts"`, `"engine_data"`, `"stop_reason"`, `"prompt_token_ids"`, `"completion_token_ids"`, `"prompt_logprobs"`. |
 | `metadata_upload` | object | `None` | SGLang backend | Uploads final cumulative SGLang `meta_info` out of band. The object accepts one required `url` field. Requires an RL-enabled SGLang worker. |
 | `prefill_worker_id` | `u64` | `None` | Router | Routes the request to a specific prefill worker (disaggregated serving). |
 | `decode_worker_id` | `u64` | `None` | Router | Routes the request to a specific decode worker (disaggregated serving). |
@@ -97,7 +97,7 @@ KV-cache entries:
 | TensorRT-LLM | Supported | Router matching and backend KV-cache reuse are isolated by salt. |
 | SGLang | Not supported end to end | Dynamo request hashes are namespaced, but the embedded SGLang engine does not receive the salt. SGLang KV events and radix-cache reuse remain unsalted. Do not rely on `cache_salt` for tenant cache isolation with SGLang. |
 
-Dynamo accepts three inputs, in descending precedence:
+Chat completion and completion requests accept three inputs, in descending precedence:
 
 1. The non-empty `x-tenant-id` HTTP header, intended for gateway-controlled tenant identity.
 2. The recommended `nvext.cache_salt` request field.
@@ -105,20 +105,19 @@ Dynamo accepts three inputs, in descending precedence:
 
 Empty strings are treated as absent. In particular, an empty `nvext.cache_salt` falls back to a
 non-empty top-level compatibility value. Requests without a salt retain the unsalted hashing and
-cache-reuse behavior.
+cache-reuse behavior. Responses and Anthropic Messages accept the first two inputs. Classify and
+pooling requests accept only their independent top-level `cache_salt` field. Embeddings requests do
+not accept a cache salt.
 
-The `nvext` protocol is enabled by default. To turn it off, set `DYN_DISABLE_FRONTEND_NVEXT` to a
-truthy value (`1`, `true`, `yes`, or `on`, case-insensitive). The frontend then drops
-`request.nvext` at handler entry and ignores every routing-override header, along with the
-response-side `extra_fields` opt-in. That includes `x-tenant-id`, which is what sets
-`cache_salt`, so per-tenant cache isolation stops applying: requests fall back to unsalted
-hashing and can share cache entries across tenants. It also includes the worker and rank
-overrides (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
-`x-dynamo-prefill-dp-rank`) and their aliases, and the priority overrides
-(`x-dynamo-request-priority`, `x-dynamo-request-strict-priority`). The top-level `cache_salt`
-field is not part of the NvExt protocol, so it keeps working as the compatibility fallback even
-when nvext is disabled. Cache salt is an isolation key, not an authentication or authorization
-mechanism; gateways must still authenticate the tenant identity they place in `x-tenant-id`.
+`DYN_DISABLE_FRONTEND_NVEXT=true` disables non-salt NvExt fields, non-salt routing headers, and
+response `extra_fields` on endpoints that support those features. Cache isolation is exempt.
+Dynamo continues to use `nvext.cache_salt` and `x-tenant-id` on chat completions, completions,
+Responses, and Anthropic Messages. Top-level cache salts remain active on chat completions,
+completions, classify, and pooling. On embeddings, classify, and pooling, the switch only drops the
+legacy NvExt annotations; these endpoints do not use `x-tenant-id` or the `x-dynamo-*` routing
+headers in either mode. The same precedence and empty-value rules apply when NvExt is disabled.
+Cache salt is an isolation key, not an authentication or authorization mechanism. Gateways must
+still authenticate the tenant identity they place in `x-tenant-id`.
 
 Session identity is header-only. Use the coding-agent headers or Dynamo
 session headers described in [Session IDs](../../use-cases/agents/session-ids.mdx);
@@ -249,6 +248,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 | `routed_experts` | `extra_fields: ["routed_experts"]` | Backend-specific routed expert capture payload returned by compatible vLLM and SGLang engines. |
 | `engine_data` | `extra_fields: ["engine_data"]` | Opaque backend-provided engine metadata. |
 | `stop_reason` | `extra_fields: ["stop_reason"]` | Backend-specific matched stop condition, returned under `nvext` because it is not part of the OpenAI completions schema. Dynamo currently serves this as a response-level field for single-choice requests; supporting `n > 1` will require an indexed per-choice shape. |
+| `prompt_token_ids` | `extra_fields: ["prompt_token_ids"]` | Effective single-prompt token sequence used after preprocessing, including pre-tokenized input supplied through the request. Emitted on the final response. |
 | `completion_token_ids` | `extra_fields: ["completion_token_ids"]` | Generated token IDs. Requires a single prompt and one generated choice. |
 | `prompt_logprobs` | `extra_fields: ["prompt_logprobs"]` | Prompt log probabilities requested with the top-level `prompt_logprobs` field. Emitted on the final response. |
 | `token_ids` | Automatic (GAIE Stage 1) | Tokenized prompt for reuse in Stage 2 query-only mode. |
@@ -276,7 +276,7 @@ When the client requests response metadata via `extra_fields`, the response incl
 
 | Document | Description |
 |----------|-------------|
-| [Frontend Guide](../knowledge-base/modular-components/frontend/frontend-guide.md) | KServe gRPC configuration and integration |
+| [KServe gRPC Frontend](../knowledge-base/modular-components/frontend/frontend-guide.md) | KServe endpoints, backend registration, and flow-control tuning |
 | [Reinforcement Learning Integration](../../use-cases/reinforcement-learning/overview.md) | Token-level rollout data, worker discovery, direct engine routes, and SGLang metadata upload |
 | [Configuration and Tuning](../knowledge-base/modular-components/router/configuration-and-tuning.md) | Full router configuration and CLI arguments |
 | [Session IDs](../../use-cases/agents/session-ids.mdx) | Passive session identity |

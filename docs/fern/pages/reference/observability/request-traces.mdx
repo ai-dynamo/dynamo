@@ -51,10 +51,10 @@ batch. Records are batched in-process and uploaded when the batch reaches
 `DYN_REQUEST_TRACE_S3_ROLL_UNCOMPRESSED_BYTES` or when `DYN_REQUEST_TRACE_S3_FLUSH_INTERVAL_MS`
 elapses. Object keys are `{prefix}/{yyyy}/{mm}/{dd}/{host}-{HHMMSS}-{run_id}-{seq}.jsonl.gz`, where
 `run_id` is a per-process UUID that keeps container restarts and hostname collisions from overwriting
-earlier batches. Credentials come from the AWS SDK default provider chain (environment variables,
-IMDS, IRSA, Pod Identity, shared profiles); how the frontend pod is credentialed is a deployment
-concern. On terminal upload failure the batch is dropped and a warning is logged; no on-disk retry
-queue is kept.
+earlier batches. Credentials come from the shared object-store client's provider chain (environment
+variables, IMDS, IRSA, and Pod Identity). Shared AWS config and credential profiles are not loaded;
+how the frontend pod is credentialed is a deployment concern. On terminal upload failure the batch
+is dropped and a warning is logged; no on-disk retry queue is kept.
 
 ```bash
 export DYN_REQUEST_TRACE=1
@@ -74,8 +74,7 @@ feature. Shipped Dynamo Python wheels enable it; local source builds pass
 
 ### `request_end`
 
-Contains compact replay metadata. Session headers can enrich the row with session identity, request
-metrics, finish metadata, and tool-call metadata. Session identity does not enable sticky routing.
+Contains compact replay metadata and, when available, per-request timing and KV-cache metrics. Session headers add session identity, finish metadata, and tool-call metadata. Session identity does not enable sticky routing.
 
 ### `request_payload`
 
@@ -94,9 +93,7 @@ before fan-out to the configured sinks.
 
 ## Record Schema
 
-All rows use `schema: dynamo.request.trace.v1` and an `event_type`. A context-free replay row
-contains request timing, output length, KV block size, input length, and rolling input-sequence
-hashes:
+All rows use `schema: dynamo.request.trace.v1` and an `event_type`. A context-free replay row always contains the replay hashes, KV block size, input length, and output length. It also includes request timing, token counts, KV-cache hit metrics, and worker information when the tracker has recorded them:
 
 ```json
 {

@@ -7,9 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import dynamo.replay.api as replay_api
-import dynamo.replay.main as replay_main
 from dynamo.llm import KvRouterConfig
-from dynamo.replay import ReplayReport
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -19,7 +17,7 @@ pytestmark = [
 ]
 
 
-def test_replay_api_and_cli_route_trace_file_lists(monkeypatch):
+def test_replay_api_routes_trace_file_lists(monkeypatch):
     api_calls = []
 
     def capture_api(*args, **kwargs):
@@ -40,35 +38,6 @@ def test_replay_api_and_cli_route_trace_file_lists(monkeypatch):
         "request-trace.0002.jsonl.gz",
     ]
     assert api_calls[1][1]["trace_format"] == "dynamo"
-
-    cli_calls = []
-    monkeypatch.setattr(
-        replay_main,
-        "run_trace_replay",
-        lambda trace_files, **kwargs: cli_calls.append((trace_files, kwargs))
-        or ReplayReport(summary={}, per_request=None, coverage={}, planner=None),
-    )
-    monkeypatch.setattr(replay_main, "format_report_table", lambda report: "")
-    monkeypatch.setattr(
-        replay_main, "write_report_json", lambda report, path: "report.json"
-    )
-
-    assert (
-        replay_main.main(
-            [
-                "request-trace.0001.jsonl.gz",
-                "request-trace.0002.jsonl.gz",
-                "--trace-format",
-                "dynamo",
-            ]
-        )
-        == 0
-    )
-    assert cli_calls[0][0] == [
-        "request-trace.0001.jsonl.gz",
-        "request-trace.0002.jsonl.gz",
-    ]
-    assert cli_calls[0][1]["trace_block_size"] is None
 
 
 def test_planner_replay_rejects_empty_dynamo_trace_list():

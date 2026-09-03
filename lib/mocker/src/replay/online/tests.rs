@@ -17,10 +17,13 @@ use crate::common::protocols::{
     DirectRequest, EngineType, MockEngineArgs, PreemptionMode, SglangArgs,
 };
 use crate::live::ObservedAdmission;
-use crate::loadgen::{AgenticTrace, AgenticTurnTrace, SessionTrace, Trace, TurnTrace};
+use crate::loadgen::{
+    AGENTIC_MOONCAKE_SCHEMA, AGENTIC_MOONCAKE_VERSION, AgenticDependency,
+    AgenticDependencyRelation, AgenticDependencyTrigger, AgenticHashIdScope, AgenticMooncakeHeader,
+    AgenticMooncakeRow, AgenticSourceProvenance, AgenticTrace, SessionTrace, Trace, TurnTrace,
+};
 use crate::replay::{ReplayRouterMode, ReplayTerminalStatus, SlaThresholds};
 
-use super::ReplayRouter;
 use super::entrypoints::{
     OnlineReplayConfig, OnlineReplayOptions, simulate_agentic_trace_workload,
     simulate_concurrency_requests_with_stats, simulate_concurrency_workload_with_stats,
@@ -33,6 +36,7 @@ use super::recorder::{
 };
 use super::state::{LiveReplayMode, WorkloadDispatchState, arrival_event};
 use super::task::wait_for_workload_progress;
+use super::{ReplayPlacement, ReplayRouter};
 
 fn replay_args() -> MockEngineArgs {
     MockEngineArgs::builder()
@@ -286,33 +290,47 @@ fn online_report_options_populate_request_goodput_and_capacity_metrics() {
 
 #[test]
 fn online_agentic_trace_releases_dependency_after_parent_completion() {
-    let trace = AgenticTrace {
-        block_size: 64,
-        turns: vec![
-            AgenticTurnTrace {
+    let trace = AgenticTrace::from_agentic_mooncake_rows(
+        AgenticMooncakeHeader {
+            schema: AGENTIC_MOONCAKE_SCHEMA.to_string(),
+            version: AGENTIC_MOONCAKE_VERSION,
+            block_size: 64,
+            hash_id_scope: AgenticHashIdScope::Local,
+            source: AgenticSourceProvenance {
+                format: "test".to_string(),
+                digest: "online-agentic".to_string(),
+            },
+        },
+        vec![
+            AgenticMooncakeRow {
                 request_id: "root".to_string(),
                 session_id: "root".to_string(),
-                input_length: 64,
-                max_output_tokens: 2,
-                hash_ids: vec![1],
-                first_ready_timestamp_ms: Some(0.0),
-                prefix_reset: true,
+                play_id: "play".to_string(),
+                model: "model".to_string(),
+                input_length: Some(64),
+                output_length: Some(2),
+                hash_ids: Some(vec![1]),
                 ..Default::default()
             },
-            AgenticTurnTrace {
+            AgenticMooncakeRow {
                 request_id: "dependent".to_string(),
                 session_id: "dependent".to_string(),
-                input_length: 64,
-                max_output_tokens: 2,
-                hash_ids: vec![2],
-                first_ready_timestamp_ms: Some(0.0),
-                delay_after_dependencies_ms: 5.0,
-                wait_for: vec!["root".to_string()],
-                prefix_reset: true,
+                play_id: "play".to_string(),
+                model: "model".to_string(),
+                input_length: Some(64),
+                output_length: Some(2),
+                hash_ids: Some(vec![2]),
+                dependencies: vec![AgenticDependency {
+                    request_id: "root".to_string(),
+                    trigger: AgenticDependencyTrigger::Completion,
+                    delay_ms: 5.0,
+                    relation: AgenticDependencyRelation::Sequence,
+                }],
                 ..Default::default()
             },
         ],
-    };
+    )
+    .unwrap();
     let report = simulate_agentic_trace_workload(
         replay_config(
             replay_args(),
@@ -389,10 +407,13 @@ async fn test_online_kv_router_prefill_load_estimator_decays_active_tokens() {
 
     assert_eq!(
         router
-            .select_worker(&request(1, 11, Some(0.0)), 1)
+            .select_worker(&request(1, 11, Some(0.0)), 1, 1)
             .await
             .unwrap(),
-        0
+        ReplayPlacement {
+            worker_idx: 0,
+            dp_rank: 0,
+        }
     );
     assert_eq!(
         router.debug_potential_loads(0, true)[0].potential_prefill_tokens,
@@ -524,6 +545,84 @@ fn test_online_trace_replay_uses_round_robin_dispatch() {
             .unwrap();
 
     assert_eq!(stats.dispatch_history, vec![0, 1, 2, 0, 1]);
+}
+
+#[tokio::test]
+async fn test_online_trace_replay_uses_grouped_attention_dp_engine() {
+    let mut args = replay_args();
+    args.dp_size = 2;
+    let pending = VecDeque::from(vec![
+        request(1, 1, Some(0.0)),
+        request(2, 2, Some(1.0)),
+        request(3, 3, Some(2.0)),
+        request(4, 4, Some(3.0)),
+    ]);
+    let runtime = LiveRuntime::new(
+        replay_config(
+            args,
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
+        pending,
+        LiveReplayMode::Trace,
+        CancellationToken::new(),
+    )
+    .unwrap();
+
+    assert_eq!(runtime.engines().len(), 2);
+    let (report, stats) = runtime.run().await.unwrap();
+    assert_eq!(report.request_counts.completed_requests, 4);
+    assert_eq!(stats.dispatch_history, vec![0, 0, 0, 0]);
+}
+
+#[tokio::test]
+async fn terminal_delivery_waits_for_grouped_completion_boundary_before_shutdown() {
+    let mut terminal_request = request(10, 10, Some(0.0));
+    terminal_request.max_output_tokens = 1;
+    terminal_request.output_token_ids = Some(vec![10_010]);
+    let runtime = LiveRuntime::new(
+        replay_config(
+            replay_args(),
+            1,
+            ReplayRouterMode::RoundRobin,
+            OnlineReplayOptions::default(),
+        ),
+        VecDeque::from(vec![terminal_request]),
+        LiveReplayMode::Trace,
+        CancellationToken::new(),
+    )
+    .unwrap();
+    let engines = runtime.engines();
+    let boundary = engines[0].pause_completion_boundary_before_finish();
+    let run = tokio::spawn(runtime.run());
+
+    tokio::time::timeout(Duration::from_secs(1), boundary.wait_until_reached())
+        .await
+        .expect("completion dispatcher should reach the final boundary");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while engines[0].active_request_count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal output should be delivered before boundary finish");
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !engines[0].group_is_cancelled(),
+        "LiveRunSession must drain the completion boundary before shutdown cancellation"
+    );
+    assert!(!run.is_finished());
+
+    boundary.release();
+    let (report, _) = tokio::time::timeout(Duration::from_secs(1), run)
+        .await
+        .expect("orderly boundary release should finish replay")
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.request_counts.completed_requests, 1);
 }
 
 #[tokio::test]

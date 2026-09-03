@@ -24,11 +24,21 @@ class FakeVMM(VMMDevice):
     for FD export/import simulation.
     """
 
-    def __init__(self, devices: list[int] | None = None):
+    def __init__(
+        self,
+        devices: list[int] | None = None,
+        granularity: int = 4096,
+    ):
         self._handles = itertools.count(1000)
         self._vas = itertools.count(0x100000, 0x10000)
         self._devices = devices if devices is not None else [0]
+        self._granularity = granularity
         self.calls: list[tuple] = []
+        self.server_handles: set[int] = set()
+        self.imports: set[int] = set()
+        self.reservations: dict[int, int] = {}
+        self.mapped: dict[int, tuple[int, int]] = {}
+        self.access: dict[int, object] = {}
 
     def ensure_initialized(self):
         pass
@@ -43,37 +53,53 @@ class FakeVMM(VMMDevice):
         return (8 * 1024**3, 16 * 1024**3)
 
     def get_allocation_granularity(self, device):
-        return 4096
+        return self._granularity
 
     def create_tolerate_oom(self, size, device):
-        return (True, next(self._handles))
+        handle = next(self._handles)
+        self.server_handles.add(handle)
+        return True, handle
 
     def release(self, handle):
-        pass
+        self.server_handles.discard(handle)
+        self.imports.discard(handle)
 
     def export_to_shareable_handle(self, handle):
+        if handle not in self.server_handles:
+            raise AssertionError("unknown server handle")
         read_fd, write_fd = os.pipe()
         os.close(write_fd)
         return read_fd
 
     def import_shareable_handle_close_fd(self, fd):
         os.close(fd)
-        return next(self._handles)
+        handle = next(self._handles)
+        self.imports.add(handle)
+        return handle
 
     def address_reserve(self, size, granularity):
-        return next(self._vas)
+        va = next(self._vas)
+        self.reservations[va] = size
+        return va
 
     def address_free(self, va, size):
-        pass
+        if self.reservations.pop(va) != size:
+            raise AssertionError("reservation size mismatch")
 
     def map(self, va, size, handle):
-        pass
+        if handle not in self.imports and handle not in self.server_handles:
+            raise AssertionError("unknown handle")
+        self.mapped[va] = size, handle
 
     def unmap(self, va, size):
-        pass
+        if self.mapped.pop(va)[0] != size:
+            raise AssertionError("mapping size mismatch")
+        self.access.pop(va, None)
 
     def set_access(self, va, size, device, access):
-        pass
+        if self.mapped[va][0] != size:
+            raise AssertionError("access size mismatch")
+        self.access[va] = access
 
     def validate_pointer(self, va):
         pass

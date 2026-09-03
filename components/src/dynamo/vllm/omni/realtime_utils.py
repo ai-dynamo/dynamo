@@ -13,6 +13,7 @@ import asyncio
 import logging
 
 from dynamo import prometheus_names
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.llm import ModelInput, ModelType, WorkerType, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.vllm.main import setup_metrics_collection
@@ -21,6 +22,7 @@ from dynamo.vllm.omni.realtime_handler import RealtimeOmniHandler
 from dynamo.vllm.realtime.serving import build_realtime_serving
 
 from .args import OmniConfig
+from .utils import streaming_sampling_params
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,7 @@ async def init_omni_realtime(
         await shutdown_event.wait()
         return
 
+    register_model_taint_route(runtime, generate_endpoint)
     model_label = config.served_model_name or config.model
     try:
         await register_model(
@@ -114,25 +117,3 @@ def build_streaming_input_factory(config: OmniConfig, engine_client):
         model_path=config.model,
     )
     return serving_realtime.transcribe_realtime
-
-
-def streaming_sampling_params(engine_client) -> list | None:
-    """Default per-stage sampling params coerced for streaming generation.
-
-    vLLM-Omni requires streaming requests to emit incremental (delta) outputs;
-    ``coerce_param_message_types`` flips the engine defaults accordingly. Falls
-    back to ``None`` (engine defaults) if anything is unavailable.
-    """
-    try:
-        from vllm_omni.entrypoints.utils import coerce_param_message_types
-
-        defaults = list(engine_client.default_sampling_params_list or [])
-        if not defaults:
-            return None
-        return coerce_param_message_types(defaults, is_streaming=True)
-    except Exception as e:  # noqa: BLE001 - fall back to engine defaults
-        logger.warning(
-            "Could not coerce streaming sampling params; using engine defaults: %s",
-            e,
-        )
-        return None

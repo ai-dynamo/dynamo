@@ -7,8 +7,10 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use dynamo_kv_router::RouterEventSink;
-use dynamo_kv_router::indexer::LocalKvIndexer;
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent, StorageTier};
+use dynamo_kv_router::indexer::{KvRouterError, LocalKvIndexer};
+use dynamo_kv_router::protocols::{
+    KvCacheEvent, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
+};
 use dynamo_runtime::transports::event_plane::EventPublisher;
 
 pub(super) struct EventPlanePublisher(pub(super) EventPublisher);
@@ -139,18 +141,37 @@ pub(super) fn event_plane_event_batches(
     })
 }
 
+/// Apply one canonical event using the shared local queue-admission contract.
+///
+/// Callers own logging and fail-open/fail-closed policy. `Cleared` is stronger
+/// inside `LocalKvIndexer` and returns only after every affected tier completes.
+pub(super) async fn admit_local_event(
+    local_indexer: Option<&LocalKvIndexer>,
+    event: &RouterEvent,
+) -> Result<(), KvRouterError> {
+    let Some(local_indexer) = local_indexer else {
+        return Ok(());
+    };
+    local_indexer.apply_event_with_buffer(event.clone()).await
+}
+
 pub(super) async fn emit(
     local_indexer: &Option<Arc<LocalKvIndexer>>,
     worker_id: u64,
     storage_tier: StorageTier,
+    residency_domain: ResidencyDomain,
     event: KvCacheEvent,
     output: &mut Vec<RouterEvent>,
-) {
-    let router_event = RouterEvent::with_storage_tier(worker_id, event, storage_tier);
-    if let Some(indexer) = local_indexer
-        && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await
-    {
-        tracing::warn!(worker_id, error = %e, "Failed to apply event to local indexer");
-    }
+) -> bool {
+    let router_event =
+        RouterEvent::with_residency_domain(worker_id, event, storage_tier, residency_domain);
+    let applied = match admit_local_event(local_indexer.as_deref(), &router_event).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(worker_id, %error, "Failed to apply event to local indexer");
+            false
+        }
+    };
     output.push(router_event);
+    applied
 }
