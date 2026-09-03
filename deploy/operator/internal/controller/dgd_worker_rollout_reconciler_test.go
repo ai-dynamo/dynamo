@@ -1097,6 +1097,7 @@ func TestDeleteOldWorkerDCDs(t *testing.T) {
 	oldDCD1 := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-oldhash1",
+			UID:       types.UID("observed-old-generation"),
 			Namespace: "default",
 			Labels: map[string]string{
 				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
@@ -1127,12 +1128,27 @@ func TestDeleteOldWorkerDCDs(t *testing.T) {
 		},
 	})
 
-	r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD1, newDCD))
+	var deleteOptions client.DeleteOptions
+	r := createTestReconcilerWithStatus(
+		dgd,
+		withObjects(oldDCD1, newDCD),
+		withInterceptor(interceptor.Funcs{
+			Delete: func(ctx context.Context, writer client.WithWatch, object client.Object, options ...client.DeleteOption) error {
+				for _, option := range options {
+					option.ApplyToDelete(&deleteOptions)
+				}
+				return writer.Delete(ctx, object, options...)
+			},
+		}),
+	)
 	ctx := context.Background()
 
 	// Delete old worker DCDs
 	err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash)
 	require.NoError(t, err)
+	require.NotNil(t, deleteOptions.Preconditions)
+	require.NotNil(t, deleteOptions.Preconditions.UID)
+	assert.Equal(t, oldDCD1.UID, *deleteOptions.Preconditions.UID)
 
 	// Verify old DCD is deleted
 	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
@@ -1592,18 +1608,23 @@ func TestReconcileRollingUpdate_RecreateAtZeroWaitsForOldPodTermination(t *testi
 			assert.Equal(t, oldWorkerHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(oldDCD), &nvidiacomv1beta1.DynamoComponentDeployment{}))
 
-			// Once the old Pod reaches a terminal phase, the state machine may
-			// complete the rollout and retire the old generation.
+			// Once the old Pod reaches a terminal phase, the state machine deletes
+			// the drained DCD but still waits for a later cache observation before
+			// it projects completion.
 			cachedPod := &corev1.Pod{}
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(oldPod), cachedPod))
 			cachedPod.Status.Phase = corev1.PodSucceeded
 			require.NoError(t, r.Status().Update(ctx, cachedPod))
 
 			require.NoError(t, r.reconcileRollingUpdate(ctx, dgd, &dgd.Status))
-			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-			assert.True(t, r.currentWorkerHashes(dgd).contains(newWorkerHash))
+			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
+			assert.Equal(t, oldWorkerHash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 			err := r.Get(ctx, client.ObjectKeyFromObject(oldDCD), &nvidiacomv1beta1.DynamoComponentDeployment{})
 			assert.True(t, apierrors.IsNotFound(err))
+
+			require.NoError(t, r.reconcileRollingUpdate(ctx, dgd, &dgd.Status))
+			assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
+			assert.True(t, r.currentWorkerHashes(dgd).contains(newWorkerHash))
 
 			// Replicas are excluded from the worker hash. A later scale-up
 			// therefore stays on the completed generation.
@@ -2375,13 +2396,9 @@ func TestInitializeWorkerHashIfNeeded_LegacyDCDsMigration(t *testing.T) {
 	assert.Equal(t, consts.LegacyWorkerHash, updatedDCD.Labels[consts.KubeLabelDynamoWorkerHash],
 		"Legacy DCD should have worker hash label backfilled")
 
-	desired, err := desiredWorkerHashes(dgd)
-	require.NoError(t, err)
-	require.NoError(t, r.completeRollingUpdate(ctx, dgd, &dgd.Status, desired.v1))
-
 	trigger, err := r.shouldTriggerRollingUpdate(dgd)
 	require.NoError(t, err)
-	require.False(t, trigger)
+	assert.True(t, trigger, "legacy migration must begin a managed rollout before projecting a new worker hash")
 }
 
 func TestInitializeWorkerHashIfNeeded_LegacyMultipleWorkers(t *testing.T) {
@@ -4039,8 +4056,8 @@ func TestReconcileRollingUpdate_StuckDetection(t *testing.T) {
 	r := createTestReconcilerWithStatus(dgd)
 	err := r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status)
 	require.NoError(t, err)
-	// Should auto-complete
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
+	// A parent hash match is not completion evidence without an observed target.
+	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
 }
 
 func TestReconcileRollingUpdate_NewRollingUpdate(t *testing.T) {
@@ -4195,10 +4212,10 @@ func TestReconcileRollingUpdate_NonePhaseStartsRollout(t *testing.T) {
 	assert.Nil(t, dgd.Status.RollingUpdate.UpdatedComponents)
 }
 
-func TestReconcileRollingUpdate_StuckDetection_CompletesViaCompleteRollingUpdate(t *testing.T) {
-	// Stuck case: hashes match but phase is InProgress (e.g., operator restarted between
-	// annotation write and status persistence). Should call completeRollingUpdate which
-	// cleans up old DCDs, updates annotation, and sets Completed.
+func TestReconcileRollingUpdate_StuckDetectionWaitsForObservedTarget(t *testing.T) {
+	// Hash annotations are parent-side receipts, not target-readiness evidence.
+	// A resumed reconciliation must wait for the target DCD generation to exist
+	// and report ready before it can enter completion.
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"prefill": {ComponentType: consts.ComponentTypePrefill},
 		"decode":  {ComponentType: consts.ComponentTypeDecode},
@@ -4217,14 +4234,9 @@ func TestReconcileRollingUpdate_StuckDetection_CompletesViaCompleteRollingUpdate
 	err := r.reconcileRollingUpdate(context.Background(), dgd, &dgd.Status)
 	require.NoError(t, err)
 
-	// Phase should be Completed
-	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
-	// EndTime should be set
-	assert.NotNil(t, dgd.Status.RollingUpdate.EndTime)
-	// UpdatedComponents should contain all worker services
-	assert.Contains(t, dgd.Status.RollingUpdate.UpdatedComponents, "prefill")
-	assert.Contains(t, dgd.Status.RollingUpdate.UpdatedComponents, "decode")
-	// Completion records both active compatibility hashes.
+	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
+	assert.Nil(t, dgd.Status.RollingUpdate.EndTime)
+	assert.Empty(t, dgd.Status.RollingUpdate.UpdatedComponents)
 	assert.Equal(t, legacyHash, dgd.Annotations[consts.AnnotationCurrentWorkerHash])
 	assert.Equal(t, v2Hash, dgd.Annotations[consts.AnnotationCurrentWorkerHashV2])
 }

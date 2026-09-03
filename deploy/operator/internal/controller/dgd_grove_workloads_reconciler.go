@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
@@ -34,6 +35,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+const groveWorkerHashObservationRequeueAfter = time.Second
 
 // groveWorkloadsReconciler owns the complete provider workload sequence while
 // exposing no dependency on the top-level DGD controller.
@@ -97,13 +100,22 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
-	// The PCS write is the transition's write barrier. A failed DGD update
-	// leaves its hash unchanged, so the next reconcile replans from live state.
-	if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, true); err != nil {
+	// A successful write only acknowledges the requested change. Project the parent
+	// hash after a later informer observation sees the target suffix on every worker clique.
+	observedWorkerHash, err := podCliqueSetObservesGroveWorkerGeneration(dgd, renderedPodCliqueSet.existing, workerHashTransition.initialize)
+	if err != nil {
 		return ReconcileResult{}, failWorkloadProgram(
 			reasonRollingUpdateFailed,
-			fmt.Errorf("commit worker hash after Grove PodCliqueSet sync: %w", err),
+			fmt.Errorf("observe Grove worker hash before projection: %w", err),
 		)
+	}
+	if observedWorkerHash {
+		if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, true); err != nil {
+			return ReconcileResult{}, failWorkloadProgram(
+				reasonRollingUpdateFailed,
+				fmt.Errorf("project observed Grove worker hash: %w", err),
+			)
+		}
 	}
 
 	if err := r.scaler.Reconcile(ctx, dgd, checkpointInfos); err != nil {
@@ -127,6 +139,9 @@ func (r *groveWorkloadsReconciler) Reconcile(
 
 	resources := append(stableResources, podCliqueSetResource)
 	result := checkGroveResourcesReadiness(resources, readiness.Classification)
+	if workerHashTransition.needsCommit() && !observedWorkerHash {
+		result.RequeueAfter = groveWorkerHashObservationRequeueAfter
+	}
 	applyComponentGPUShapes(result.ComponentStatus, renderedPodCliqueSet.gpuShapes)
 	return result, nil
 }

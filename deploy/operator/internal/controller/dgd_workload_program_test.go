@@ -612,7 +612,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
 	})
 
-	t.Run("multinode component workload keeps unsupported-path hash behavior", func(t *testing.T) {
+	t.Run("multinode component workload leaves the worker hash receipt untouched", func(t *testing.T) {
 		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {
 				ComponentType: commonconsts.ComponentTypeWorker,
@@ -621,7 +621,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 			},
 		})
 		dgd.Annotations = map[string]string{
-			commonconsts.AnnotationCurrentWorkerHash: "old-worker-hash",
+			commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 		}
 		reconciler := createTestDGDReconcilerWithStatus(dgd)
 		program := reconciler.newComponentProgram()
@@ -633,7 +633,8 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		assert.Nil(t, dgd.Status.RollingUpdate)
 		desired, err := desiredWorkerHashes(dgd)
 		require.NoError(t, err)
-		assert.True(t, currentWorkerHashesMatchDesired(currentWorkerHashes(dgd), desired))
+		assert.False(t, currentWorkerHashesMatchDesired(currentWorkerHashes(dgd), desired))
+		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
 	})
 }
 

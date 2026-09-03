@@ -576,25 +576,13 @@ func (r *dgdWorkerRolloutReconciler) reconcileRollingUpdate(
 		"desiredV2WorkerHash", desired.v2)
 
 	if rollingUpdateStatus.Phase == nvidiacomv1beta1.RollingUpdatePhaseCompleted && !current.contains(newWorkerHash) {
-		// Check whether DCDs with the new hash already represent a completed
-		// generation. Recreate also requires its old generation to be fully
-		// drained before a stale annotation can be accepted.
+		// Resume a rollout from observed target and old-generation state. The
+		// completion path performs the destructive-action barriers before it
+		// projects the new hash onto the parent.
 		newInfo, err := r.getWorkerInfoForWorkerHash(ctx, dgd, newWorkerHash)
 		oldInfo, oldErr := r.getOldWorkerInfo(ctx, dgd, newWorkerHash)
 		if err == nil && oldErr == nil && workerGenerationComplete(dgd, oldInfo, newInfo) {
-			recreateDrained, err := r.recreateComponentsDrained(ctx, dgd, newWorkerHash)
-			if err != nil {
-				return fmt.Errorf("check Recreate stale-annotation barrier: %w", err)
-			}
-			if recreateDrained {
-				logger.Info("Updating stale worker hash annotation",
-					"currentV1WorkerHash", current.v1,
-					"currentV2WorkerHash", current.v2,
-					"newHash", newWorkerHash)
-				r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(newWorkerHash, desired))
-				return r.Update(ctx, dgd)
-			}
-			logger.Info("Resuming rolling update while the old Recreate generation drains",
+			logger.Info("Resuming rolling update from observed target generation",
 				"currentV1WorkerHash", current.v1,
 				"currentV2WorkerHash", current.v2,
 				"newHash", newWorkerHash)
@@ -617,14 +605,6 @@ func (r *dgdWorkerRolloutReconciler) reconcileRollingUpdate(
 			rollingUpdateStatus.EndTime = nil
 			rollingUpdateStatus.UpdatedComponents = nil
 		}
-	}
-
-	if current.contains(newWorkerHash) &&
-		rollingUpdateStatus.Phase == nvidiacomv1beta1.RollingUpdatePhaseInProgress {
-		logger.Info("Detected stuck rolling update: hashes match but phase is InProgress",
-			"hash", newWorkerHash,
-			"phase", rollingUpdateStatus.Phase)
-		return r.completeRollingUpdate(ctx, dgd, status, newWorkerHash)
 	}
 
 	switch rollingUpdateStatus.Phase {
@@ -762,8 +742,9 @@ func workerGenerationComplete(
 	return totalWorkerComponents > 0 && len(updatedComponents) == totalWorkerComponents
 }
 
-// completeRollingUpdate marks the rolling update as completed, cleans up old resources, and updates status.
-// This performs all cleanup atomically to avoid race conditions with subsequent reconciles.
+// completeRollingUpdate retires old resources only after the target has been
+// observed ready by continueRollingUpdate. It records completion on a later
+// cache observation after the UID-preconditioned deletes have disappeared.
 func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -772,12 +753,27 @@ func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 ) error {
 	logger := log.FromContext(ctx)
 
-	recreateDrained, err := r.recreateComponentsDrained(ctx, dgd, newWorkerHash)
+	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, newWorkerHash)
 	if err != nil {
-		return fmt.Errorf("check Recreate completion barrier: %w", err)
+		return fmt.Errorf("list old worker DCDs before completion: %w", err)
 	}
-	if !recreateDrained {
-		logger.V(1).Info("Waiting for old Recreate pods to terminate before completing rolling update",
+	if len(oldDCDs) > 0 {
+		drained, err := r.oldWorkerDCDsDrained(ctx, dgd, oldDCDs)
+		if err != nil {
+			return fmt.Errorf("check old worker drain before deletion: %w", err)
+		}
+		if !drained {
+			logger.V(1).Info("Waiting for old worker DCDs to drain before deletion",
+				"oldWorkerDCDs", len(oldDCDs),
+				"newWorkerHash", newWorkerHash)
+			return nil
+		}
+
+		if err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash); err != nil {
+			return fmt.Errorf("delete drained old worker DCDs: %w", err)
+		}
+		logger.Info("Deleted drained old worker DCDs; waiting for cache observation before completion",
+			"oldWorkerDCDs", len(oldDCDs),
 			"newWorkerHash", newWorkerHash)
 		return nil
 	}
@@ -785,11 +781,6 @@ func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 	desired, err := desiredWorkerHashes(dgd)
 	if err != nil {
 		return err
-	}
-
-	// Delete all non-current worker DCDs (any number of old generations)
-	if err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash); err != nil {
-		return fmt.Errorf("failed to delete old worker DCDs: %w", err)
 	}
 
 	r.setCurrentWorkerHashes(dgd, workerHashesForCompletedGeneration(newWorkerHash, desired))
@@ -817,6 +808,25 @@ func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)
 
 	return nil
+}
+
+func (r *dgdWorkerRolloutReconciler) oldWorkerDCDsDrained(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	oldDCDs []nvidiacomv1beta1.DynamoComponentDeployment,
+) (bool, error) {
+	byComponent := make(map[string][]*nvidiacomv1beta1.DynamoComponentDeployment)
+	for i := range oldDCDs {
+		componentName := dynamo.GetDCDComponentName(&oldDCDs[i])
+		byComponent[componentName] = append(byComponent[componentName], &oldDCDs[i])
+	}
+	for componentName, dcds := range byComponent {
+		drained, err := r.oldWorkerComponentDrained(ctx, dgd, componentName, dcds)
+		if err != nil || !drained {
+			return drained, err
+		}
+	}
+	return true, nil
 }
 
 // dcdComponentState holds replica signals extracted from a DCD's Spec and Status.
@@ -1032,51 +1042,6 @@ func (r *dgdWorkerRolloutReconciler) oldWorkerComponentDrained(
 		return false, err
 	}
 	return oldWorkerPodsTerminated(oldDCDs, pods), nil
-}
-
-// recreateComponentsDrained reports whether every Recreate worker component
-// has fully shut down its old generation. Callers use this before accepting a
-// generation as complete, preventing a later scale-up from bypassing the
-// shutdown barrier after the new worker hash has been recorded.
-func (r *dgdWorkerRolloutReconciler) recreateComponentsDrained(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	newWorkerHash string,
-) (bool, error) {
-	recreateComponents := make([]string, 0)
-	for i := range dgd.Spec.Components {
-		spec := &dgd.Spec.Components[i]
-		if !dynamo.IsWorkerComponent(string(spec.ComponentType)) {
-			continue
-		}
-		annotations := dynamo.GetDGDComponentResourceAnnotations(dgd, spec.ComponentName, spec)
-		if deploymentStrategyFromAnnotations(annotations) == common.DeploymentStrategyRecreate {
-			recreateComponents = append(recreateComponents, spec.ComponentName)
-		}
-	}
-	if len(recreateComponents) == 0 {
-		return true, nil
-	}
-
-	oldDCDsByComponent, _, err := r.getOldWorkerDCDsByComponent(ctx, dgd, newWorkerHash)
-	if err != nil {
-		return false, err
-	}
-	for _, componentName := range recreateComponents {
-		drained, err := r.oldWorkerComponentDrained(
-			ctx,
-			dgd,
-			componentName,
-			oldDCDsByComponent[componentName],
-		)
-		if err != nil {
-			return false, err
-		}
-		if !drained {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 func (r *dgdWorkerRolloutReconciler) listDGDComponentPods(
@@ -1325,7 +1290,8 @@ func (r *dgdWorkerRolloutReconciler) deleteOldWorkerDCDs(
 		dcd := &oldDCDs[i]
 		logger.Info("Deleting non-current worker DCD", "name", dcd.Name, "hash", dcd.Labels[consts.KubeLabelDynamoWorkerHash])
 
-		if err := r.Delete(ctx, dcd); err != nil {
+		uid := dcd.UID
+		if err := r.Delete(ctx, dcd, client.Preconditions{UID: &uid}); err != nil {
 			if !apierrors.IsNotFound(err) {
 				deleteErrors = append(deleteErrors, fmt.Errorf("failed to delete DCD %s: %w", dcd.Name, err))
 			}

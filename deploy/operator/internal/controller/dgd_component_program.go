@@ -148,15 +148,18 @@ func (p *componentProgram) reconcileWorkerRollout(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	status *nvidiacomv1beta1.DynamoGraphDeploymentStatus,
 ) error {
-	if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
-		return failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
-	}
-
 	if supportsManagedRollingUpdate(dgd) {
+		if err := p.rollout.migrateCurrentWorkerHashIfNeeded(ctx, dgd); err != nil {
+			log.FromContext(ctx).Error(err, "Failed to migrate worker hash")
+			return failWorkloadProgram(reasonFailedToMigrateWorkerHash, err)
+		}
 		return p.reconcileManagedWorkerRollout(ctx, dgd, status)
 	}
-	return p.rollout.ReconcileUnsupported(ctx, dgd, false)
+
+	// LWS owns multinode rollout progress. DCD and LWS writes are receipts,
+	// not evidence that the selected generation has converged, so do not
+	// project them into DGD worker-generation state.
+	return nil
 }
 
 // supportsManagedRollingUpdate checks whether the component pathway can use

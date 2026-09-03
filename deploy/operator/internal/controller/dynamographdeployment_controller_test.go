@@ -703,13 +703,14 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name                   string
-		dgdSpec                v1alpha1.DynamoGraphDeploymentSpec
-		existingGroveResources []client.Object
-		draEnabled             bool
-		wantReconcileResult    ReconcileResult
-		wantErrSubstring       string
-		interceptorFuncs       interceptor.Funcs
+		name                      string
+		dgdSpec                   v1alpha1.DynamoGraphDeploymentSpec
+		existingGroveResources    []client.Object
+		draEnabled                bool
+		wantReconcileResult       ReconcileResult
+		wantErrSubstring          string
+		wantWorkerHashObservation bool
+		interceptorFuncs          interceptor.Funcs
 	}{
 		{
 			// Covers the error-propagation fix: a non-NotFound Grove read error
@@ -782,7 +783,8 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "frontend service with 1 replica, decode service with 2 replicas - 2 PodCliques - one unready",
+			name:                      "frontend service with 1 replica, decode service with 2 replicas - 2 PodCliques - one unready",
+			wantWorkerHashObservation: true,
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -857,7 +859,8 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "decode worker multinode (PCSG), prefill worker multinode (PCSG) - both ready",
+			name:                      "decode worker multinode (PCSG), prefill worker multinode (PCSG) - both ready",
+			wantWorkerHashObservation: true,
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -938,7 +941,8 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "frontend worker (PodClique), aggregated worker multinode (PCSG) - PCSG unready",
+			name:                      "frontend worker (PodClique), aggregated worker multinode (PCSG) - PCSG unready",
+			wantWorkerHashObservation: true,
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1071,6 +1075,9 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 
 			t.Log("Expect workers to withhold their runtime namespace until a PCS revision is accepted")
 			want := tt.wantReconcileResult
+			if tt.wantWorkerHashObservation {
+				want.RequeueAfter = groveWorkerHashObservationRequeueAfter
+			}
 			want.ComponentStatus = make(map[string]v1beta1.ComponentReplicaStatus, len(tt.wantReconcileResult.ComponentStatus))
 			for componentName, componentStatus := range tt.wantReconcileResult.ComponentStatus {
 				componentStatus.GPUsPerEngine = ptr.To(int64(0))
