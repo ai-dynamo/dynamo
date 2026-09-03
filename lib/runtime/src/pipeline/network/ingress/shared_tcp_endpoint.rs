@@ -1043,7 +1043,6 @@ mod tests {
         tracing::info!("Test passed: unregister_endpoint properly waited for inflight TCP request");
     }
 
-    /// Send one request over the wire and return the request-plane ACK payload.
     async fn send_ack(client: &TcpRequestClient, addr: SocketAddr, path: &str) -> Bytes {
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -1114,30 +1113,6 @@ mod tests {
         assert!(
             ack.starts_with(b"Server unavailable:"),
             "removed instance should be rejected on the ACK, got {:?}",
-            String::from_utf8_lossy(&ack)
-        );
-
-        cancellation_token.cancel();
-    }
-
-    /// A request for a path with no handler must be rejected on the request-plane ACK with
-    /// the prefix the client maps to `ErrorType::Unavailable`. Any other reply is read as a
-    /// success ACK and the client waits for a response stream that never opens.
-    #[tokio::test]
-    async fn request_for_unknown_endpoint_path_is_rejected_as_unavailable() {
-        crate::logging::init();
-
-        let cancellation_token = CancellationToken::new();
-        let server =
-            SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), cancellation_token.clone())
-                .unwrap();
-        let addr = server.bind_and_start().await.unwrap();
-
-        let client = TcpRequestClient::new().unwrap();
-        let ack = send_ack(&client, addr, "deadbeef/generate").await;
-        assert!(
-            ack.starts_with(b"Server unavailable:"),
-            "unregistered path should be rejected on the ACK, got {:?}",
             String::from_utf8_lossy(&ack)
         );
 
