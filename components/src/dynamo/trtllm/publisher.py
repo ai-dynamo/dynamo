@@ -632,9 +632,17 @@ class Publisher:
                 )
                 self.fpm_publisher = None
 
-        # TensorRT-LLM's streaming event manager publishes ZMQ batches itself;
-        # Dynamo subscribes directly and does not poll the engine or use a consolidator.
+        # Select exactly one KV-event path. Metrics above remain independent of
+        # this choice.
+        #
+        # - STREAMING: TRT-LLM publishes ZMQ batches; Dynamo subscribes and
+        #   forwards them to its event pipeline.
+        # - POLLING: Dynamo reads events from the engine, then publishes them
+        #   directly or through the consolidator.
+        # - DISABLED: no KV events are passed through this worker.
         if self.kv_event_publication_mode is KvEventPublicationMode.STREAMING:
+            # TensorRT-LLM's streaming event manager publishes ZMQ batches itself;
+            # Dynamo subscribes directly and does not poll the engine or use a consolidator.
             if self.streaming_kv_events_config is None:
                 raise ValueError(
                     "Streaming KV event publication requires its configuration"
@@ -664,43 +672,37 @@ class Publisher:
                 "polling is disabled",
                 self.attention_dp_size,
             )
-            return
-
-        # Setup the polling KV event publisher.
-        # Publisher selection based on consolidator configuration:
-        # - With consolidator: Use ZmqKvEventPublisher (this module) → ZMQ → Consolidator → NATS → Router
-        # - Without consolidator: Use KvEventPublisher → NATS → Router (direct)
-        # Note: The worker-side KvEventPublisher (from dynamo.llm) that subscribes from
-        # consolidator and publishes to NATS is created separately in main.py, not here.
-        if self.kv_event_publication_mode is KvEventPublicationMode.DISABLED:
-            return
-        assert self.kv_event_publication_mode is KvEventPublicationMode.POLLING
-        if self.zmq_kv_event_publisher:
-            logging.info(
-                "KV Event Consolidator enabled - using ZMQ publisher only. "
-                "Consolidator will publish consolidated events to NATS."
-            )
-            self.kv_event_publishers = None
-        else:
-            # No consolidator: use NATS publisher (router subscribes directly)
-            # Create one KvEventPublisher per attention_dp_rank (similar to vLLM's DP pattern)
-            self.kv_event_publishers = {}
-            for rank in range(self.attention_dp_size):
-                self.kv_event_publishers[rank] = KvEventPublisher(
-                    endpoint=self.endpoint,
-                    worker_id=self.worker_id,
-                    kv_block_size=self.kv_block_size,
-                    dp_rank=rank,
-                    enable_local_indexer=self.enable_local_indexer,
-                    kv_state_endpoint=self.kv_state_endpoint,
-                    image_token_id=self.image_token_id,
+        elif self.kv_event_publication_mode is KvEventPublicationMode.POLLING:
+            # Publisher selection based on consolidator configuration:
+            # - With consolidator: ZmqKvEventPublisher → ZMQ → Consolidator → NATS → Router
+            # - Without consolidator: KvEventPublisher → NATS → Router (direct)
+            if self.zmq_kv_event_publisher:
+                logging.info(
+                    "KV Event Consolidator enabled - using ZMQ publisher only. "
+                    "Consolidator will publish consolidated events to NATS."
                 )
-            logging.info(
-                f"Created {self.attention_dp_size} KV event publisher(s) for attention DP ranks"
-            )
+                self.kv_event_publishers = None
+            else:
+                # No consolidator: use NATS publisher (router subscribes directly).
+                self.kv_event_publishers = {}
+                for rank in range(self.attention_dp_size):
+                    self.kv_event_publishers[rank] = KvEventPublisher(
+                        endpoint=self.endpoint,
+                        worker_id=self.worker_id,
+                        kv_block_size=self.kv_block_size,
+                        dp_rank=rank,
+                        enable_local_indexer=self.enable_local_indexer,
+                        kv_state_endpoint=self.kv_state_endpoint,
+                        image_token_id=self.image_token_id,
+                    )
+                logging.info(
+                    f"Created {self.attention_dp_size} KV event publisher(s) for attention DP ranks"
+                )
 
-        # Always initialize the thread - it routes to either ZMQ or NATS publisher
-        self._init_publish_kv_cache_events_thread()
+            # Polling is the only mode that needs a worker polling thread.
+            self._init_publish_kv_cache_events_thread()
+        else:
+            assert self.kv_event_publication_mode is KvEventPublicationMode.DISABLED
 
     def _init_publish_metrics_thread(self):
         # Need to publish stats once so that worker can be selected.
