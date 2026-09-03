@@ -114,10 +114,11 @@ response-side `extra_fields` opt-in. That includes `x-tenant-id`, which is what 
 `cache_salt`, so per-tenant cache isolation stops applying: requests fall back to unsalted
 hashing and can share cache entries across tenants. It also includes the worker and rank
 overrides (`x-dynamo-worker-instance-id`, `x-dynamo-prefill-instance-id`, `x-dynamo-dp-rank`,
-`x-dynamo-prefill-dp-rank`) and their aliases. The top-level
-backend-compatibility field is not part of the NvExt protocol. Cache salt is an isolation key,
-not an authentication or authorization mechanism;
-gateways must still authenticate the tenant identity they place in `x-tenant-id`.
+`x-dynamo-prefill-dp-rank`) and their aliases, and the priority overrides
+(`x-dynamo-request-priority`, `x-dynamo-request-strict-priority`). The top-level `cache_salt`
+field is not part of the NvExt protocol, so it keeps working as the compatibility fallback even
+when nvext is disabled. Cache salt is an isolation key, not an authentication or authorization
+mechanism; gateways must still authenticate the tenant identity they place in `x-tenant-id`.
 
 Session identity is header-only. Use the coding-agent headers or Dynamo
 session headers described in [Session IDs](../../use-cases/agents/session-ids.mdx);

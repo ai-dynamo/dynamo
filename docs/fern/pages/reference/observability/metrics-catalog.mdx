@@ -357,6 +357,7 @@ Not all router metrics appear in every deployment. This matrix shows which group
 | `dynamo_router_overhead_*` | Registered and populated | Registered and populated | **Not registered** | **Not created** |
 | `dynamo_frontend_router_queue_*` | Registered; populated when a CLI or policy-class queue threshold is set | Registered; populated when a CLI or policy-class queue threshold is set | **Not registered** | **Not created** |
 | `dynamo_component_kv_cache_events_applied` | Populated when KV events received | Populated when KV events received | **Not registered** | Populated when KV events received |
+| `dynamo_component_ckf_mutation_total` | Registered, **always zero** | Registered, **always zero** | **Not registered** | Registered, **always zero** |
 | `dynamo_frontend_worker_*` | Registered and populated | Registered and populated (`worker_type` = `prefill`/`decode`) | Registered and populated (`worker_type` = `decode`) | **Not created** |
 
 **Key:**
