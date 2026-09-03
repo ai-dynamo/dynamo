@@ -95,7 +95,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from itertools import count
-from typing import TYPE_CHECKING, cast
+from typing import Any, TYPE_CHECKING, cast
 
 import msgspec.structs
 import zmq
@@ -4899,7 +4899,7 @@ class InstrumentedScheduler(AsyncScheduler):
         if not reqs:
             return None
         kvwarm_borrowed: set[str] = getattr(self, "_kvwarm_borrowed_ids", set())
-        new_blocks: dict[str, object] = {}
+        new_blocks: dict[str, Any] = {}
         for request in reqs:
             if request.request_id in kvwarm_borrowed:
                 # KVWARM shadow: blocks borrowed from a parked chain; depth headroom

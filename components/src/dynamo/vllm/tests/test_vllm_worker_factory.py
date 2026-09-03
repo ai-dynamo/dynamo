@@ -14,10 +14,10 @@ import pytest
 from dynamo.llm import ModelInput, ModelType, WorkerType
 from dynamo.vllm.constants import DisaggregationMode
 from dynamo.vllm.worker_factory import (
-    _merge_benchmark_rank_results,
     EngineSetupResult,
     WorkerFactory,
     _DecodeWorkerLifecycle,
+    _merge_benchmark_rank_results,
     _wait_and_load_benchmark,
 )
 
