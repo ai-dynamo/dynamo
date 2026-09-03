@@ -79,7 +79,6 @@ fn classification_failure(error: &Error) -> Option<&KvSchedulerError> {
             error,
             KvSchedulerError::RequestClassifierPanicked(_)
                 | KvSchedulerError::RequestClassifierFailed(_)
-                | KvSchedulerError::DuplicateClassificationRequestId(_)
                 | KvSchedulerError::InvalidClassificationMetadata(_)
         )
         .then_some(error)
@@ -91,6 +90,30 @@ fn classifier_abort_error(error: &KvSchedulerError) -> Arc<AbortCause> {
         KvSchedulerError::RequestClassifierFailed(source) => Arc::clone(source),
         _ => owned_abort_error(error),
     }
+}
+
+/// Operator log plus the client-facing error for a classifier failure. A typed
+/// [`DynamoError`] returned by the plugin passes through so flow-control
+/// rejections keep their status; everything else is sanitized to hide
+/// classifier internals from the client.
+fn classifier_failure_response(request_id: &str, error: &KvSchedulerError) -> Error {
+    // The client only sees the mapped error below, so this log is the
+    // operator's sole copy of the original failure.
+    tracing::error!(request_id = %request_id, error = %error, "request classifier failed");
+    if let KvSchedulerError::RequestClassifierFailed(source) = error {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(source.as_ref());
+        while let Some(current) = cause {
+            if let Some(typed) = current.downcast_ref::<DynamoError>() {
+                return typed.clone().into();
+            }
+            cause = current.source();
+        }
+    }
+    DynamoError::builder()
+        .error_type(ErrorType::Unknown)
+        .message("request classifier failed")
+        .build()
+        .into()
 }
 
 fn route_target(worker: WorkerWithDpRank) -> AffinityTarget {
@@ -155,7 +178,9 @@ where
                                 .as_ref()
                                 .is_some_and(|error| crate::migration::is_migratable(error));
                             if !migratable || !guard.release_for_retry().await {
-                                guard.abort().await;
+                                guard
+                                    .abort_with_error(item.error.as_ref().map(|e| e as &AbortCause))
+                                    .await;
                             }
                             yield item;
                             break false;

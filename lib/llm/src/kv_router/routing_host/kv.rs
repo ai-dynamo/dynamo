@@ -79,45 +79,47 @@ where
         phase: RequestPhase,
         is_query_only: bool,
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
-        let mut lifecycle = if is_query_only {
-            None
-        } else {
-            request
-                .migration_state
-                .as_ref()
-                .and_then(|state| state.take_request_lifecycle())
-        };
-        if !is_query_only && lifecycle.is_none() {
+        let select = self.select_with_session_affinity(request, phase, is_query_only, |target| {
+            self.select_request(request, phase, is_query_only, target)
+        });
+        if is_query_only {
+            return select.await;
+        }
+        self.select_with_request_lifecycle(request, select).await
+    }
+
+    /// Claim or begin the classifier lifecycle for `request`, run `select`
+    /// under it, and attach it to the selection. Selection failures either
+    /// park the lifecycle for a migration retry or abort it with the cause.
+    async fn select_with_request_lifecycle<Fut>(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        select: Fut,
+    ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error>
+    where
+        Fut: Future<Output = Result<(WorkerSelection, Option<AffinityAcquire>), Error>>,
+    {
+        let mut lifecycle = request
+            .migration_state
+            .as_ref()
+            .and_then(|state| state.take_request_lifecycle());
+        if lifecycle.is_none() {
             lifecycle = self
                 .kv_router()
                 .begin_request_lifecycle(request.context().id())
-                .map_err(anyhow::Error::from)?
+                .map_err(|error| classifier_failure_response(request.context().id(), &error))?
                 .map(Box::new);
         }
 
-        let selection = self
-            .select_with_session_affinity(request, phase, is_query_only, |target| {
-                self.select_request(request, phase, is_query_only, target)
-            })
-            .await;
-        let (mut selection, affinity) = match selection {
+        let (mut selection, affinity) = match select.await {
             Ok(selection) => selection,
             Err(error) => {
                 if let Some(mut lifecycle) = lifecycle.take() {
                     if let Some(classifier_error) = classification_failure(&error) {
-                        // The client only sees the sanitized message below, so this log
-                        // is the operator's sole copy of the original failure.
-                        tracing::error!(
-                            request_id = %request.context().id(),
-                            error = %classifier_error,
-                            "request classifier failed"
-                        );
                         lifecycle.abort(Some(classifier_abort_error(classifier_error)));
-                        return Err(anyhow::anyhow!(
-                            DynamoError::builder()
-                                .error_type(ErrorType::Unknown)
-                                .message("request classifier failed")
-                                .build()
+                        return Err(classifier_failure_response(
+                            request.context().id(),
+                            classifier_error,
                         ));
                     }
                     if crate::migration::is_migratable(error.as_ref())
@@ -139,7 +141,7 @@ where
         if let Some(lifecycle) = lifecycle.as_mut() {
             lifecycle.selected(selection.worker);
         }
-        selection.lifecycle = lifecycle;
+        selection.request_lifecycle = lifecycle;
         Ok((selection, affinity))
     }
 
@@ -217,8 +219,8 @@ where
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let planned_worker = preview.signals.worker;
-        let (selection, affinity) = self
-            .select_with_session_affinity(request, phase, false, |target| async move {
+        let select =
+            self.select_with_session_affinity(request, phase, false, |target| async move {
                 self.select_request_outcome(
                     request,
                     phase,
@@ -231,8 +233,8 @@ where
                 )
                 .await?
                 .into_result()
-            })
-            .await?;
+            });
+        let (selection, affinity) = self.select_with_request_lifecycle(request, select).await?;
         let signals = self.route_signals(&selection);
         drop(route_guard);
         Ok(RoutePlan {
@@ -355,7 +357,7 @@ where
                 self.request_metrics.clone(),
                 cleanup,
                 request,
-                selection.lifecycle.take(),
+                selection.request_lifecycle.take(),
             ),
             None => RequestGuard::new_kv(
                 Arc::clone(chooser),
@@ -364,7 +366,7 @@ where
                 selected_worker,
                 selection.attempt,
                 request,
-                selection.lifecycle.take(),
+                selection.request_lifecycle.take(),
             ),
         };
 

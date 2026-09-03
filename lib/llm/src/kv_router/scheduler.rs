@@ -301,7 +301,7 @@ where
         self.inner.install_request_classifier(classifier, shutdown)
     }
 
-    pub fn begin_request_lifecycle(
+    pub(crate) fn begin_request_lifecycle(
         &self,
         request_id: &str,
     ) -> Result<Option<RequestLifecycle>, KvSchedulerError> {

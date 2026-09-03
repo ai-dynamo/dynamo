@@ -226,7 +226,8 @@ impl MigrationState {
 }
 
 /// Owned abort payload for classifier lifecycle events: the typed
-/// [`DynamoError`] from the chain when one exists, else the rendered message.
+/// [`DynamoError`] from the chain when one exists, else the whole chain
+/// converted so the root cause survives.
 pub(crate) fn owned_abort_error(error: &AbortCause) -> Arc<AbortCause> {
     let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
     while let Some(current) = cause {
@@ -235,10 +236,9 @@ pub(crate) fn owned_abort_error(error: &AbortCause) -> Arc<AbortCause> {
         }
         cause = current.source();
     }
-    #[derive(Debug, thiserror::Error)]
-    #[error("{0}")]
-    struct AbortMessage(String);
-    Arc::new(AbortMessage(error.to_string()))
+    Arc::new(DynamoError::from(
+        error as &(dyn std::error::Error + 'static),
+    ))
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -542,7 +542,7 @@ impl PreprocessedRequest {
         (tokens, Some(mm.block_mm_infos.as_slice()))
     }
 
-    pub(crate) fn input_token_count(&self) -> usize {
+    pub(crate) fn expanded_prompt_token_count(&self) -> usize {
         self.mm_routing_info
             .as_ref()
             .filter(|mm| !mm.routing_token_ids.is_empty() && mm.expanded_prompt_len > 0)

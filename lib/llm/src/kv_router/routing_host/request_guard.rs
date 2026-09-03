@@ -615,7 +615,7 @@ where
         mut request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
         if let Some(lifecycle) = request_lifecycle.as_mut() {
-            lifecycle.observe_context_tokens(request.input_token_count());
+            lifecycle.observe_context_tokens(request.expanded_prompt_token_count());
         }
         cleanup.request_lifecycle = request_lifecycle;
         let chooser = &cleanup.chooser;
