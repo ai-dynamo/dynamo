@@ -19,6 +19,7 @@ Known limitations) are **shared** and linked from both.
 | Model | Size | Recommended picks | README |
 |---|---|---|---|
 | **DeepSeek-V4-Pro** | 1.6T / 49B active · 1M ctx | B200 → `disagg-b200-agentic` · H200 → `agg-h200-agentic` | [`deepseek-v4-pro/`](deepseek-v4-pro/) |
+| **DeepSeek-V4-Pro-0813** | 1.6T / 49B active · 1M ctx · native FP8 | GB200 → `agg-gb200-agentic` | [`deepseek-v4-pro-0813/`](deepseek-v4-pro-0813/) |
 | **DeepSeek-V4-Flash** | 284B / 13B active | B200 → `disagg-b200-agentic` (2P1D) · H200 → `disagg-h200-agentic` (4P3D) | [`deepseek-v4-flash/`](deepseek-v4-flash/) |
 
 B200 variants serve the NVFP4 checkpoints (`nvidia/DeepSeek-V4-*-NVFP4`); H200 variants serve the
