@@ -51,6 +51,10 @@ redirects:
   - source: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b"
     destination: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b-fp8"
 
+  # Recipe slug renamed to use the canonical model name.
+  - source: "/dynamo/dev/recipes/gemma4-31b"
+    destination: "/dynamo/dev/recipes/gemma-4-31b"
+
   # The per-class NIXL Connect pages were replaced by the generated Python API
   # reference, which covers the same classes from source plus seven more.
   # Keep their published URLs serving, anchored at the matching class.

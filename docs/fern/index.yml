@@ -450,6 +450,9 @@ navigation:
           - page: Overview
             path: pages/recipes/model-recipes/overview.mdx
             slug: browse
+          - page: Gemma-4-31B
+            path: pages/recipes/model-recipes/gemma-4-31b.mdx
+            slug: gemma-4-31b
           - page: Kimi-K3
             path: pages/recipes/model-recipes/kimi-k3.mdx
             slug: kimi-k3
