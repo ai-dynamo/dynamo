@@ -3,21 +3,12 @@
 
 """Parallel sampling (``n > 1``) fan-out for SGLang disaggregated serving.
 
-SGLang cannot run parallel sampling across a prefill/decode handoff: its
-scheduler clones the first sub-request, bootstrap room included, for the
-prefix primer and every sample, so prefill registers one sender while decode
-waits for ``n`` receivers and the request hangs (ai-dynamo/dynamo#14098; the
-draft sgl-project/sglang#30723 would lift this on the SGLang side).
-
-Dynamo keeps SGLang blind to ``n`` in PD mode: the prefill and decode handlers
-run ``n`` independent ``n=1`` sub-requests, one bootstrap room each, and the
-decode handler merges the sub-streams back by choice index. The frontend's
-prefill router draws the rooms, so each keeps ``room % dp_size == dp_rank``
-(SGLang's decode receiver derives the prefill DP rank from the room), and
-carries them as ``bootstrap_info.bootstrap_rooms`` next to the single
-``bootstrap_room`` older peers read. A frontend that predates the field sends
-one room only; its ``n > 1`` requests are rejected with HTTP 400 instead of
-hanging.
+SGLang pairs one bootstrap room per request across a prefill/decode handoff, so
+parallel samples cannot share a request there. In PD mode Dynamo runs an
+``n > 1`` request as ``n`` independent ``n=1`` sub-requests, one room each
+(``bootstrap_info.bootstrap_rooms``, drawn by the prefill router), and merges
+the sub-streams back by choice index. A frontend that sends one room only gets
+HTTP 400 for ``n > 1``.
 """
 
 from __future__ import annotations

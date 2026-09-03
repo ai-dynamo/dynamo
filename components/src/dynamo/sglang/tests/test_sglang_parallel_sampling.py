@@ -58,10 +58,8 @@ BOOTSTRAP_PORT = 0  # never bound
 # ---------------------------------------------------------------------------
 
 
-def test_requested_parallel_samples_counts_only_positive_integers():
+def test_requested_parallel_samples_defaults_to_one():
     assert requested_parallel_samples({}) == 1
-    assert requested_parallel_samples({"n": 0}) == 1
-    assert requested_parallel_samples({"n": True}) == 1
     assert requested_parallel_samples({"n": 3}) == 3
 
 

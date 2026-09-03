@@ -141,7 +141,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     f"Using request-provided bootstrap_port: {bootstrap_port}"
                 )
 
-        # One room per choice: router-drawn when available, else drawn here.
         bootstrap_rooms = resolve_prefill_bootstrap_rooms(
             bootstrap_info_from_req, num_choices, self._generate_bootstrap_room
         )
