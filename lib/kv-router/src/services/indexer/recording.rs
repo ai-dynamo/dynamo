@@ -1,36 +1,39 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_kv_router::{
-    ConcurrentRadixTreeCompressed,
-    indexer::{
-        ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruIncarnation,
-        ApproximateLruLease, ApproximateLruReleaseAck, KvIndexer, KvIndexerInterface,
-        KvRouterError, RoutingDecisionHashes, ThreadPoolIndexer,
-    },
-    protocols::{LocalBlockHash, TokensWithHashes, WorkerWithDpRank},
-    scheduling::AttemptId,
-};
-use dynamo_tokens::SequenceHash;
+//! Routing-decision recording: which physical index a booked routing decision
+//! is written into, and the per-request approximate-LRU lease.
+
 use std::sync::{
     Arc,
     atomic::{AtomicU8, Ordering},
 };
 
-use super::{Indexer, SideIndexer, remote::RemoteIndexer};
+use dynamo_tokens::SequenceHash;
+
+use crate::indexer::{
+    ApproximateAcquireMode, ApproximateLruBlock, ApproximateLruIncarnation, ApproximateLruLease,
+    ApproximateLruReleaseAck, KvIndexer, KvIndexerInterface, KvRouterError, RoutingDecisionHashes,
+};
+use crate::protocols::{LocalBlockHash, TokensWithHashes, WorkerWithDpRank};
+use crate::scheduling::AttemptId;
+use crate::{ConcurrentRadixTreeCompressed, ThreadPoolIndexer};
+
+use super::backend::{Indexer, RemotePrimary, SideIndexer};
 
 const MODE_INACTIVE: u8 = 0;
 const MODE_LRU: u8 = 1;
 const MODE_TTL_FALLBACK: u8 = 2;
 
+/// One request's approximate-LRU lease on its primary indexer.
 #[derive(Clone)]
-pub(crate) struct ApproximateRequestLease {
+pub struct ApproximateRequestLease {
     lease: ApproximateLruLease,
     mode: Arc<AtomicU8>,
 }
 
 impl ApproximateRequestLease {
-    pub(crate) async fn acquire(
+    pub async fn acquire(
         &mut self,
         hashes: RoutingDecisionHashes,
         private_blocks: usize,
@@ -56,7 +59,7 @@ impl ApproximateRequestLease {
         Ok(mode)
     }
 
-    pub(crate) fn materialize(
+    pub fn materialize(
         &self,
         parent_hash: Option<SequenceHash>,
         blocks: Vec<ApproximateLruBlock>,
@@ -70,37 +73,37 @@ impl ApproximateRequestLease {
             .materialize(parent_hash, blocks, start_position, private_blocks)
     }
 
-    pub(crate) fn begin_finish(&self) -> Result<Option<ApproximateLruReleaseAck>, KvRouterError> {
+    pub fn begin_finish(&self) -> Result<Option<ApproximateLruReleaseAck>, KvRouterError> {
         self.lease.begin_finish()
     }
 
-    pub(crate) fn release_now(&self) {
+    pub fn release_now(&self) {
         self.lease.release_now();
     }
 
-    pub(crate) fn is_active_lru(&self) -> bool {
+    pub fn is_active_lru(&self) -> bool {
         self.mode.load(Ordering::Acquire) == MODE_LRU
     }
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum RouteRecordingTarget<'a> {
+enum RouteRecordingTarget<'a> {
     Disabled,
     PrimaryLocal(&'a KvIndexer),
     PrimaryConcurrent(&'a ThreadPoolIndexer<ConcurrentRadixTreeCompressed>),
-    PrimaryRemote(&'a RemoteIndexer),
+    PrimaryRemote(&'a dyn RemotePrimary),
     SideOverlay(&'a SideIndexer),
 }
 
 impl Indexer {
-    pub(crate) fn begin_approximate_lru_request(
+    pub fn begin_approximate_lru_request(
         &self,
         worker: WorkerWithDpRank,
         incarnation: ApproximateLruIncarnation,
         attempt_id: AttemptId,
     ) -> Option<ApproximateRequestLease> {
         let lease = match self {
-            Self::KvIndexer { primary, .. } => {
+            Self::Single { primary, .. } => {
                 primary.begin_approximate_lru_request(worker, incarnation, attempt_id)?
             }
             Self::Concurrent { primary, .. } => {
@@ -114,13 +117,14 @@ impl Indexer {
         })
     }
 
-    pub(crate) fn records_routing_decisions(&self) -> bool {
+    /// Whether booked routing decisions should be written into this indexer.
+    pub fn records_routing_decisions(&self) -> bool {
         !matches!(self.recording_target(), RouteRecordingTarget::Disabled)
     }
 
-    pub(super) fn recording_target(&self) -> RouteRecordingTarget<'_> {
+    fn recording_target(&self) -> RouteRecordingTarget<'_> {
         match self {
-            Self::KvIndexer {
+            Self::Single {
                 approx: Some(side), ..
             }
             | Self::Concurrent {
@@ -137,7 +141,7 @@ impl Indexer {
                 );
                 RouteRecordingTarget::SideOverlay(side)
             }
-            Self::KvIndexer {
+            Self::Single {
                 primary,
                 primary_records_routing_decisions: true,
                 ..
@@ -152,30 +156,15 @@ impl Indexer {
                 primary_records_routing_decisions: true,
                 ..
             } => RouteRecordingTarget::PrimaryRemote(primary.as_ref()),
-            Self::KvIndexer { .. } | Self::Concurrent { .. } | Self::Remote { .. } | Self::None => {
+            Self::Single { .. } | Self::Concurrent { .. } | Self::Remote { .. } | Self::None => {
                 RouteRecordingTarget::Disabled
             }
         }
     }
 
-    pub(crate) async fn record_hashed_routing_decision(
-        &self,
-        worker: WorkerWithDpRank,
-        local_hashes: Vec<LocalBlockHash>,
-        sequence_hashes: Vec<SequenceHash>,
-    ) -> Result<(), KvRouterError> {
-        self.recording_target()
-            .record_routing_hashes(
-                worker,
-                RoutingDecisionHashes {
-                    local_hashes,
-                    sequence_hashes,
-                },
-            )
-            .await
-    }
-
-    pub(crate) async fn record_routing_decision_hashes(
+    /// Record a booked routing decision. Writes to the side indexer when one
+    /// is attached, else to an approximate primary, else is a no-op.
+    pub async fn record_routing_decision(
         &self,
         worker: WorkerWithDpRank,
         hashes: RoutingDecisionHashes,
@@ -185,7 +174,33 @@ impl Indexer {
             .await
     }
 
-    pub(crate) async fn process_routing_decision_for_request(
+    /// Same as [`Self::record_routing_decision`]; kept for callers that name
+    /// the hashes explicitly.
+    pub async fn record_routing_decision_hashes(
+        &self,
+        worker: WorkerWithDpRank,
+        hashes: RoutingDecisionHashes,
+    ) -> Result<(), KvRouterError> {
+        self.record_routing_decision(worker, hashes).await
+    }
+
+    pub async fn record_hashed_routing_decision(
+        &self,
+        worker: WorkerWithDpRank,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        self.record_routing_decision(
+            worker,
+            RoutingDecisionHashes {
+                local_hashes,
+                sequence_hashes,
+            },
+        )
+        .await
+    }
+
+    pub async fn process_routing_decision_for_request(
         &self,
         tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
@@ -241,13 +256,13 @@ impl<'a> RouteRecordingTarget<'a> {
                     .await
             }
             Self::PrimaryRemote(primary) => primary
-                .record_hashed_routing_decision(worker, hashes.local_hashes, hashes.sequence_hashes)
+                .record_routing_decision(worker, hashes)
                 .await
                 .map_err(|error| {
                     tracing::warn!(error = %error, "Remote indexer write failed");
                     KvRouterError::IndexerDroppedRequest
                 }),
-            Self::SideOverlay(side) => side.process_routing_decision_hashes(worker, hashes).await,
+            Self::SideOverlay(side) => side.record_routing_decision(worker, hashes).await,
         }
     }
 }

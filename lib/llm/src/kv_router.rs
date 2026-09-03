@@ -758,7 +758,7 @@ impl KvRouter {
         let min_initial_workers = min_initial_workers_from_env()?;
 
         let indexer = if cache_required {
-            Indexer::new(
+            indexer::build(
                 component,
                 &kv_router_config,
                 block_size,

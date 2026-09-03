@@ -1371,7 +1371,7 @@ mod tests {
         let indexer = KvIndexer::new(CancellationToken::new(), 4, metrics);
         (
             indexer.clone(),
-            Indexer::KvIndexer {
+            Indexer::Single {
                 primary: indexer,
                 lower_tier: LowerTierIndexers::new(1, 4),
                 approx: None,
@@ -1835,7 +1835,7 @@ mod tests {
         let (_tx, rx) = watch::channel(initial.clone());
         let (_primary, indexer) = indexer();
         let lower_tier = match &indexer {
-            Indexer::KvIndexer { lower_tier, .. } => lower_tier.clone(),
+            Indexer::Single { lower_tier, .. } => lower_tier.clone(),
             _ => unreachable!(),
         };
         let client =
