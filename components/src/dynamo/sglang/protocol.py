@@ -3,7 +3,7 @@
 
 from typing import Any, List, Literal, Optional, Tuple, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 
 from dynamo.common.multimodal import TransferRequest
@@ -217,6 +217,15 @@ class CreateVideoRequest(BaseModel):
     response_format: Optional[str] = "url"  # url or b64_json
     output_format: Optional[str] = None  # only mp4 is supported
     nvext: Optional[VideoNvExt] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_typed_input_references(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("input_references") is not None:
+            raise ValueError(
+                "input_references is not supported by the SGLang video backend"
+            )
+        return data
 
 
 class VideoData(BaseModel):

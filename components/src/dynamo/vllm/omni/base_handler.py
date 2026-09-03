@@ -19,6 +19,7 @@ except ImportError:
 
 from dynamo._core import Context
 from dynamo.common.protocols.audio_protocol import NvAudioSpeechResponse
+from dynamo.common.protocols.video_protocol import NvVideosResponse
 from dynamo.common.utils.output_modalities import RequestType
 from dynamo.vllm.handlers import BaseWorkerHandler, build_sampling_params
 from dynamo.vllm.lora_state import LoRAState
@@ -213,14 +214,24 @@ class BaseOmniHandler(BaseWorkerHandler[Dict[str, Any], Dict[str, Any]]):
     ) -> Dict[str, Any]:
         """Create an error response matching the expected protocol for the request type.
 
-        For AUDIO_GENERATION returns NvAudioSpeechResponse format.
-        For all other types returns OpenAI chat.completion.chunk format.
+        Audio and video generation failures use their endpoint response shapes.
+        All other types return an OpenAI chat.completion.chunk.
         """
         if request_type == RequestType.AUDIO_GENERATION:
             return NvAudioSpeechResponse(
                 id=request_id,
                 model=self.config.served_model_name or self.config.model,
                 status="failed",
+                created=int(time.time()),
+                error=error_message,
+            ).model_dump()
+
+        if request_type == RequestType.VIDEO_GENERATION:
+            return NvVideosResponse(
+                id=request_id,
+                model=self.config.served_model_name or self.config.model,
+                status="failed",
+                progress=0,
                 created=int(time.time()),
                 error=error_message,
             ).model_dump()
