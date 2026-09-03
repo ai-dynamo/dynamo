@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: AWS Dev 02 H100 Untainted Smoke
+
+on:
+  push:
+    branches:
+      - release/aws-dev-02-h100-untainted-smoke
+
+permissions:
+  contents: read
+
+jobs:
+  h100-smoke:
+    name: Verify untainted H100 scheduling
+    runs-on: aws-dev-02-tester-amd-gpu-v2
+    timeout-minutes: 15
+    container:
+      image: nvcr.io/nvidia/cuda:12.3.0-base-ubuntu22.04
+      env:
+        HOME: /tmp
+        USER: runner
+    steps:
+      - name: Verify architecture and GPUs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$(uname -m)" != "x86_64" ]]; then
+            echo "Expected x86_64, got $(uname -m)" >&2
+            exit 1
+          fi
+
+          nvidia-smi
+          gpu_count="$(nvidia-smi --query-gpu=uuid --format=csv,noheader | sed '/^[[:space:]]*$/d' | wc -l)"
+          gpu_count="${gpu_count//[[:space:]]/}"
+          if [[ "${gpu_count}" != "2" ]]; then
+            echo "Expected exactly 2 visible GPUs, got ${gpu_count}" >&2
+            exit 1
+          fi
+
+          echo "Verified amd64 scheduling with exactly 2 visible GPUs."
+
+      - name: Hold pod for live scheduling inspection
+        shell: bash
+        run: sleep 180
