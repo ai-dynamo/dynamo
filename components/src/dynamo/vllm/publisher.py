@@ -152,7 +152,6 @@ class StatLoggerFactory:
         self.endpoint = endpoint
         self.component_gauges = component_gauges
         self.embedding_worker = embedding_worker
-        self.created_logger: Optional[DynamoStatLoggerPublisher] = None
         self.created_loggers: dict[int, DynamoStatLoggerPublisher] = {}
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
@@ -171,7 +170,6 @@ class StatLoggerFactory:
             dp_rank=dp_rank,
             component_gauges=self.component_gauges,
         )
-        self.created_logger = logger
         self.created_loggers[dp_rank] = logger
 
         return logger

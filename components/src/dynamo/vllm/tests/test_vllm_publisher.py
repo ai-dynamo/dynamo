@@ -59,11 +59,6 @@ def test_factory_returns_noop_logger_for_embedding_worker(monkeypatch):
     logger = factory.create_stat_logger(dp_rank=0)
 
     assert isinstance(logger, NoopStatLogger)
-    # Embedding factory never tracks a created chat logger, so the
-    # downstream ``init_publish`` / ``set_num_gpu_blocks_all`` calls in
-    # the chat path are safe no-ops if anyone ever wires them on the
-    # embedding branch by mistake.
-    assert factory.created_logger is None
 
 
 def test_noop_stat_logger_record_is_safe_with_none_stats():
@@ -146,7 +141,6 @@ def test_factory_initializes_every_dp_rank_logger(monkeypatch):
     factory.set_num_gpu_blocks_all(4096)
     factory.init_publish()
 
-    assert factory.created_logger is loggers[-1]
     assert factory.created_loggers == dict(enumerate(loggers))
     for logger in loggers:
         logger.set_num_gpu_block.assert_called_once_with(4096)

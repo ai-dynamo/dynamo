@@ -478,15 +478,21 @@ impl WorkerLoadState {
         // Once discovery has supplied the runtime config, its rank set is
         // authoritative. An expected rank without a load observation is free,
         // so one noisy rank cannot exclude the whole worker during startup.
-        let all_dp_ranks = self.declared_dp_ranks.clone().unwrap_or_else(|| {
-            self.active_decode_blocks
-                .keys()
-                .chain(self.kv_used_blocks.keys())
-                .chain(self.decode_overload_latches.keys())
-                .chain(self.active_prefill_tokens.keys())
-                .copied()
-                .collect()
-        });
+        let fallback_dp_ranks;
+        let all_dp_ranks = match &self.declared_dp_ranks {
+            Some(declared_dp_ranks) => declared_dp_ranks,
+            None => {
+                fallback_dp_ranks = self
+                    .active_decode_blocks
+                    .keys()
+                    .chain(self.kv_used_blocks.keys())
+                    .chain(self.decode_overload_latches.keys())
+                    .chain(self.active_prefill_tokens.keys())
+                    .copied()
+                    .collect();
+                &fallback_dp_ranks
+            }
+        };
 
         // If no dp_ranks known, not overloaded
         if all_dp_ranks.is_empty() {
