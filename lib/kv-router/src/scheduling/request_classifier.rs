@@ -153,6 +153,11 @@ pub type AbortCause = dyn Error + Send + Sync + 'static;
 /// at a time in lifecycle order. A terminal event can arrive without a prior
 /// `Sent`: an attempt that recorded a worker via selection but was never
 /// dispatched still ends with `Completed`.
+///
+/// Delivery is asynchronous, so a re-registered request id may be classified
+/// before the previous lifecycle's terminal event is delivered. A plugin
+/// keying state by request id must treat `classify` as the start of a new
+/// lifecycle rather than waiting for the prior terminal event.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ClassifyEvent {
