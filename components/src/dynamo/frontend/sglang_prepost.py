@@ -765,6 +765,7 @@ def preprocess_chat_request(
     # Reject a forced tool_choice that cannot be satisfied by the provided tools.
     # Otherwise the chat template and guided decoding cannot enforce the request.
     tool_choice = request.get("tool_choice", "auto")
+    forced_tool_choice = tool_choice == "required" or _is_named_tool_choice(tool_choice)
     if tool_choice == "required" and not sglang_tools:
         raise PreprocessError('tool_choice is "required" but tools is empty')
     if _is_named_tool_choice(tool_choice):
@@ -775,6 +776,17 @@ def preprocess_chat_request(
                 f"tool_choice names function {chosen_name!r}, but it is not "
                 f"present in tools (available: {sorted(available_names) or 'none'})"
             )
+
+    response_format = request.get("response_format")
+    if (
+        forced_tool_choice
+        and isinstance(response_format, dict)
+        and response_format.get("type") == "structural_tag"
+    ):
+        raise PreprocessError(
+            "tool_choice forces a tool call and cannot be combined with a "
+            "structural_tag response format"
+        )
 
     template_tools = _filter_template_tools(
         request,
@@ -838,7 +850,6 @@ def preprocess_chat_request(
     # This path also never reads the legacy guided_json / guided_regex /
     # guided_grammar / guided_choice fields at all, so those are dropped silently
     # while both other paths honor them (and reject them against a forced choice).
-    forced_tool_choice = tool_choice == "required" or _is_named_tool_choice(tool_choice)
     if (
         response_format_guided_decoding is not None
         and tool_call_guided_decoding is not None

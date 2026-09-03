@@ -1949,6 +1949,34 @@ class TestPreprocessChatRequest:  # FRONTEND.1 — chat-template input preproces
                 reasoning_parser_name=None,
             )
 
+    @pytest.mark.parametrize(
+        "tool_choice",
+        ["required", tool_choice_value("named")],
+        ids=["required", "named"],
+    )
+    def test_forced_tool_choice_rejects_structural_tag_response_format(
+        self, tool_choice
+    ):
+        with pytest.raises(
+            PreprocessError,
+            match="cannot be combined with a structural_tag response format",
+        ):
+            preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "tools": [parity_tool()],
+                    "tool_choice": tool_choice,
+                    "response_format": {
+                        "type": "structural_tag",
+                        "format": {"type": "any_text"},
+                    },
+                },
+                tokenizer=None,
+                tool_call_parser_name="hermes",
+                reasoning_parser_name=None,
+            )
+
     def test_forced_tool_guidance_takes_precedence_over_response_format(
         self, tokenizer, caplog
     ):
