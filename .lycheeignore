@@ -69,3 +69,7 @@
 # catalog yet, so their Security Scanning tab URLs 404 from CI. Remove once
 # the enterprise containers are live.
 ^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/teams/ai-dynamo/containers/[a-z-]+-enterprise/security$
+
+# The GMS blocker example is introduced by the same PR as its docs link, so the
+# blob/main URL 404s from CI until the PR merges. Remove once it lands on main.
+^https://github\.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/gms-dra-blocker\.yaml$
