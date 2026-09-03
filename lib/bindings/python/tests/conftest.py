@@ -403,8 +403,12 @@ def temp_file_store():
     """
     A temporary directory to use as the key-value store. Cleaned up on test exit.
     Local to the unit test using it.
+
+    Endpoint shutdown unregisters from discovery on a detached task that can still be
+    writing here while the tree is removed, so cleanup errors are ignored rather than
+    failing a test that already passed.
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         os.environ["DYN_FILE_KV"] = tmpdir
         yield tmpdir
 
