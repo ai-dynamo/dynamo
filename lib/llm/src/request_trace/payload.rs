@@ -14,6 +14,8 @@ use crate::protocols::openai::chat_completions::{
 /// Context key for the allowlisted headers captured at the HTTP layer.
 pub const HTTP_HEADERS_CONTEXT_KEY: &str = "request_trace.http.request.headers";
 
+const REDACTED_HEADER_VALUE: &str = "<redacted>";
+
 /// True when payload records are being captured and a header allowlist is set.
 pub(crate) fn http_header_capture_active() -> bool {
     if !super::config::capture_enabled() {
@@ -41,16 +43,25 @@ fn capture_http_headers_with_list(
     }
     let mut out = BTreeMap::new();
     for name in capture_list {
-        let joined = headers
+        let values = headers
             .get_all(name.as_str())
             .iter()
             .filter_map(|value| value.to_str().ok())
             .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>()
-            .join(", ");
-        if !joined.is_empty() {
-            out.insert(name.clone(), joined);
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            continue;
         }
+
+        let value = if values
+            .iter()
+            .any(|value| crate::sensitive::is_sensitive_header(name, value))
+        {
+            REDACTED_HEADER_VALUE.to_string()
+        } else {
+            values.join(", ")
+        };
+        out.insert(name.clone(), value);
     }
     (!out.is_empty()).then_some(out)
 }
@@ -221,6 +232,71 @@ mod tests {
         assert!(
             !captured.contains_key("authorization"),
             "non-allowlisted header must never be captured"
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_redacts_credential_bearing_names() {
+        let sensitive_names = [
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+            "x-api-key",
+            "api-key",
+            "x-auth-token",
+            "x-access-token",
+        ];
+        let capture_list = sensitive_names
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+
+        let mut headers = HeaderMap::new();
+        for name in sensitive_names {
+            headers.insert(name, "credential-value".parse().unwrap());
+        }
+
+        let captured = capture_http_headers_with_list(&headers, &capture_list)
+            .expect("sensitive headers are represented as redacted");
+        for name in sensitive_names {
+            assert_eq!(
+                captured.get(name).map(String::as_str),
+                Some("<redacted>"),
+                "{name} must be redacted even when explicitly allowlisted"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_http_headers_redacts_bearer_value_under_benign_name() {
+        let capture_list = vec!["x-forwarded-credential".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-credential", "  bEaReR secret".parse().unwrap());
+
+        let captured = capture_http_headers_with_list(&headers, &capture_list)
+            .expect("sensitive header is represented as redacted");
+        assert_eq!(
+            captured.get("x-forwarded-credential").map(String::as_str),
+            Some("<redacted>")
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_redacts_all_repeated_values_if_any_is_sensitive() {
+        let capture_list = vec!["x-tag".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.append("x-tag", "tenant-a".parse().unwrap());
+        headers.append("x-tag", "Bearer secret".parse().unwrap());
+
+        let captured = capture_http_headers_with_list(&headers, &capture_list)
+            .expect("sensitive header is represented as redacted");
+        assert_eq!(
+            captured.get("x-tag").map(String::as_str),
+            Some("<redacted>"),
+            "a sensitive repeated value must prevent every value from leaking"
         );
     }
 

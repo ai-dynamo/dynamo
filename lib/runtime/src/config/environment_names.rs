@@ -622,8 +622,8 @@ pub mod llm {
             "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
 
         /// Comma/whitespace-separated allowlist of HTTP request header names to
-        /// record in request payload records. Unset/empty captures none. Values
-        /// are recorded unredacted; avoid credential-bearing headers.
+        /// record in request payload records. Unset/empty captures none.
+        /// Credential-bearing header names and values are always redacted.
         pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
             "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
 

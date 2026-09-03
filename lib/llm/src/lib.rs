@@ -37,6 +37,7 @@ pub mod reasoning_field;
 pub mod recorder;
 pub mod request_template;
 pub mod request_trace;
+mod sensitive;
 pub mod session_affinity;
 pub mod telemetry;
 pub use dynamo_tokenizers as tokenizers;
