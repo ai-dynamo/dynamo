@@ -156,9 +156,35 @@ func (p *componentProgram) reconcileWorkerRollout(
 		return p.reconcileManagedWorkerRollout(ctx, dgd, status)
 	}
 
-	// LWS owns multinode rollout progress. DCD and LWS writes are receipts,
-	// not evidence that the selected generation has converged, so do not
-	// project them into DGD worker-generation state.
+	return p.reconcileMultinodeWorkerRollout(ctx, dgd)
+}
+
+// reconcileMultinodeWorkerRollout projects the worker-generation hash onto the
+// DGD only after an informer observation confirms the target hash is present on
+// an owned worker DCD. LWS owns the actual rollout; DCD writes are receipts.
+func (p *componentProgram) reconcileMultinodeWorkerRollout(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+) error {
+	transition, err := p.rollout.planUnsupportedWorkerHashTransition(dgd)
+	if err != nil {
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	if !transition.needsCommit() {
+		return nil
+	}
+
+	observed, err := p.rollout.workerDCDObservesTargetHash(ctx, dgd, transition.next.v2)
+	if err != nil {
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
+	if !observed {
+		return nil
+	}
+
+	if err := p.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, transition, false); err != nil {
+		return failWorkloadProgram(reasonRollingUpdateFailed, err)
+	}
 	return nil
 }
 

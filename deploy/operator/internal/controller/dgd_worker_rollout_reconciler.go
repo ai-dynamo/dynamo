@@ -1264,6 +1264,31 @@ func (r *dgdWorkerRolloutReconciler) listOldWorkerDCDs(
 	return workers, nil
 }
 
+// workerDCDObservesTargetHash reports whether a worker DCD owned by dgd with
+// the given targetHash is visible in the informer cache.
+func (r *dgdWorkerRolloutReconciler) workerDCDObservesTargetHash(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	targetHash string,
+) (bool, error) {
+	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
+	if err := r.List(ctx, dcdList,
+		client.InNamespace(dgd.Namespace),
+		client.MatchingLabels{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			consts.KubeLabelDynamoWorkerHash:          targetHash,
+		},
+	); err != nil {
+		return false, err
+	}
+	for _, dcd := range dcdList.Items {
+		if dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // deleteOldWorkerDCDs deletes all worker DCDs belonging to this DGD whose hash label
 // does NOT match the given newWorkerHash. This cleans up all old generations at once.
 func (r *dgdWorkerRolloutReconciler) deleteOldWorkerDCDs(

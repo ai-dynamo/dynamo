@@ -612,7 +612,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
 	})
 
-	t.Run("multinode component workload leaves the worker hash receipt untouched", func(t *testing.T) {
+	t.Run("multinode component workload defers hash projection until target DCD is observed", func(t *testing.T) {
 		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 			"worker": {
 				ComponentType: commonconsts.ComponentTypeWorker,
@@ -623,6 +623,8 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		dgd.Annotations = map[string]string{
 			commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
 		}
+
+		t.Log("No worker DCD with target hash in cache: hash projection must be deferred")
 		reconciler := createTestDGDReconcilerWithStatus(dgd)
 		program := reconciler.newComponentProgram()
 		status := dgd.DeepCopy().Status
@@ -630,11 +632,54 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
 
 		assert.Nil(t, status.RollingUpdate)
-		assert.Nil(t, dgd.Status.RollingUpdate)
 		desired, err := desiredWorkerHashes(dgd)
 		require.NoError(t, err)
 		assert.False(t, currentWorkerHashesMatchDesired(currentWorkerHashes(dgd), desired))
 		assert.Equal(t, "old-worker-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
+	})
+
+	t.Run("multinode component workload commits hash once target DCD is observed in cache", func(t *testing.T) {
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "new"}},
+				Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
+			},
+		})
+		dgd.Annotations = map[string]string{
+			commonconsts.AnnotationCurrentWorkerHashV2: "old-worker-hash",
+		}
+		desired, err := desiredWorkerHashes(dgd)
+		require.NoError(t, err)
+
+		t.Log("Seed the fake cache with a worker DCD carrying the target hash")
+		targetDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-dgd-worker-" + desired.v2,
+				Namespace: dgd.Namespace,
+				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+					commonconsts.KubeLabelDynamoWorkerHash:          desired.v2,
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeWorker,
+					ServiceName:   "worker",
+					Multinode:     &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 2},
+				},
+			},
+		})
+		reconciler := createTestDGDReconcilerWithStatus(dgd, withObjects(targetDCD))
+		program := reconciler.newComponentProgram()
+		status := dgd.DeepCopy().Status
+
+		t.Log("Reconcile: hash must advance to the observed target generation")
+		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
+
+		assert.Nil(t, status.RollingUpdate)
+		assert.Equal(t, desired.v2, dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
+		assert.True(t, currentWorkerHashesMatchDesired(currentWorkerHashes(dgd), desired))
 	})
 }
 
