@@ -192,6 +192,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	programResult, programErr := program.Reconcile(ctx, workloadProgramRequest{
 		DGD: dynamoDeployment,
 	})
+	programResult.applyOwnershipConflict(dynamoDeployment.Generation, programErr)
 	result = programResult.Result
 	if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
 		logger.Error(statusErr, "unable to persist workload program status")

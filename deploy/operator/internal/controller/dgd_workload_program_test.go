@@ -137,6 +137,72 @@ func TestNewWorkloadProgramResultCopiesStatus(t *testing.T) {
 	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseInProgress, dgd.Status.RollingUpdate.Phase)
 }
 
+func TestWorkloadProgramResultApplyOwnershipConflict(t *testing.T) {
+	ownershipConflict := &commonController.OwnershipConflictError{Cause: errors.New("resource is controlled by another parent")}
+	tests := []struct {
+		name           string
+		existingStatus *metav1.ConditionStatus
+		reconcileErr   error
+		wantStatus     metav1.ConditionStatus
+		wantReason     string
+		wantEvents     int
+	}{
+		{
+			name:         "absent condition transitions to conflict",
+			reconcileErr: ownershipConflict,
+			wantStatus:   metav1.ConditionTrue,
+			wantReason:   commonController.EventReasonOwnershipConflict,
+			wantEvents:   1,
+		},
+		{
+			name:           "false condition transitions to conflict",
+			existingStatus: ptr.To(metav1.ConditionFalse),
+			reconcileErr:   ownershipConflict,
+			wantStatus:     metav1.ConditionTrue,
+			wantReason:     commonController.EventReasonOwnershipConflict,
+			wantEvents:     1,
+		},
+		{
+			name:           "active condition stays level without event",
+			existingStatus: ptr.To(metav1.ConditionTrue),
+			reconcileErr:   ownershipConflict,
+			wantStatus:     metav1.ConditionTrue,
+			wantReason:     commonController.EventReasonOwnershipConflict,
+			wantEvents:     0,
+		},
+		{
+			name:           "successful reconciliation clears active condition",
+			existingStatus: ptr.To(metav1.ConditionTrue),
+			wantStatus:     metav1.ConditionFalse,
+			wantReason:     "OwnershipConflictResolved",
+			wantEvents:     0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := newWorkloadProgramResult(&nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{Generation: 7},
+			})
+			if tt.existingStatus != nil {
+				meta.SetStatusCondition(&result.Status.Conditions, metav1.Condition{
+					Type:   nvidiacomv1beta1.ConditionTypeOwnershipConflict,
+					Status: *tt.existingStatus,
+				})
+			}
+
+			result.applyOwnershipConflict(7, tt.reconcileErr)
+
+			condition := meta.FindStatusCondition(result.Status.Conditions, nvidiacomv1beta1.ConditionTypeOwnershipConflict)
+			require.NotNil(t, condition)
+			assert.Equal(t, tt.wantStatus, condition.Status)
+			assert.Equal(t, tt.wantReason, condition.Reason)
+			assert.Equal(t, int64(7), condition.ObservedGeneration)
+			assert.Len(t, result.Events, tt.wantEvents)
+		})
+	}
+}
+
 func TestPersistWorkloadProgramResultEmitsEventsAfterStatusUpdate(t *testing.T) {
 	statusUpdateErr := errors.New("status update failed")
 	tests := []struct {

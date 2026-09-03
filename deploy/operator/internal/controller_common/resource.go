@@ -50,9 +50,26 @@ const (
 	// NvidiaAnnotationGenerationKey indicates annotation name for last applied generation by the operator
 	// This is used to detect manual changes to resources
 	NvidiaAnnotationGenerationKey = "nvidia.com/last-applied-generation"
-	// EventReasonOwnershipConflict identifies a resource that this reconciliation must not manage.
+	// EventReasonOwnershipConflict identifies a parent resource with a child-resource ownership collision.
 	EventReasonOwnershipConflict = "OwnershipConflict"
 )
+
+// OwnershipConflictError indicates that an existing resource is not controlled
+// by the parent attempting to reconcile it.
+//
+// Callers own the lifecycle of the parent resource, so they must persist any
+// status condition and emit any transition event for this error.
+type OwnershipConflictError struct {
+	Cause error
+}
+
+func (e *OwnershipConflictError) Error() string {
+	return e.Cause.Error()
+}
+
+func (e *OwnershipConflictError) Unwrap() error {
+	return e.Cause
+}
 
 type Reconciler interface {
 	client.Client
@@ -98,7 +115,7 @@ func checkControllerOwnership(existing, parentResource client.Object, scheme *ru
 
 	existingOwner := metav1.GetControllerOf(existing)
 	if existingOwner == nil {
-		return fmt.Errorf(
+		return &OwnershipConflictError{Cause: fmt.Errorf(
 			"%T %s/%s has no controller owner; refusing to reconcile it for %T %s/%s",
 			existing,
 			existing.GetNamespace(),
@@ -106,7 +123,7 @@ func checkControllerOwnership(existing, parentResource client.Object, scheme *ru
 			parentResource,
 			parentResource.GetNamespace(),
 			parentResource.GetName(),
-		)
+		)}
 	}
 
 	parentGVK, err := apiutil.GVKForObject(parentResource, scheme)
@@ -119,7 +136,7 @@ func checkControllerOwnership(existing, parentResource client.Object, scheme *ru
 		existingOwner.Kind != parentGVK.Kind ||
 		existingOwner.Name != parentResource.GetName() ||
 		existingOwner.UID != parentResource.GetUID() {
-		return &controllerutil.AlreadyOwnedError{Object: existing, Owner: *existingOwner}
+		return &OwnershipConflictError{Cause: &controllerutil.AlreadyOwnedError{Object: existing, Owner: *existingOwner}}
 	}
 
 	return nil
@@ -187,7 +204,6 @@ func SyncResource[T client.Object](ctx context.Context, r Reconciler, parentReso
 			err = checkControllerOwnership(oldResource, parentResource, r.Scheme())
 			if err != nil {
 				logs.Error(err, "Refusing to delete a resource with conflicting controller ownership")
-				recordResourceEvent(r, oldResource, corev1.EventTypeWarning, EventReasonOwnershipConflict, "Delete", "Refusing to delete %s %s: %s", resourceType, resourceNamespace, err)
 				return
 			}
 		}
@@ -268,7 +284,6 @@ func SyncObservedResource[T client.Object](
 	if !resolveSyncOptions(opts).sharedOwnership {
 		if err := checkControllerOwnership(observed, parentResource, r.Scheme()); err != nil {
 			logs.Error(err, "Refusing to reconcile a resource with conflicting controller ownership")
-			recordResourceEvent(r, observed, corev1.EventTypeWarning, EventReasonOwnershipConflict, "Sync", "Refusing to reconcile %s %s: %s", resourceType, resourceNamespace, err)
 			var zero T
 			return false, zero, err
 		}

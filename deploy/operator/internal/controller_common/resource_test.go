@@ -19,6 +19,7 @@ package controller_common
 
 import (
 	"context"
+	stderrors "errors"
 	"reflect"
 	"testing"
 
@@ -1196,6 +1197,15 @@ func TestSyncResourceOwnership(t *testing.T) {
 			)
 			if tt.wantErr && err == nil {
 				t.Fatal("SyncResource() error = nil, want ownership conflict")
+			}
+			if tt.wantErr {
+				var ownershipConflict *OwnershipConflictError
+				if !stderrors.As(err, &ownershipConflict) {
+					t.Fatalf("SyncResource() error = %T %v, want OwnershipConflictError", err, err)
+				}
+				if recorder := r.recorder.(*events.FakeRecorder); len(recorder.Events) != 0 {
+					t.Fatalf("SyncResource() recorded %d helper-level ownership event(s), want none", len(recorder.Events))
+				}
 			}
 			if !tt.wantErr && err != nil {
 				t.Fatalf("SyncResource() error = %v", err)

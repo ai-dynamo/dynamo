@@ -44,6 +44,9 @@ const (
 const (
 	DynamoGraphDeploymentConditionTypeAvailable            = "Available"
 	DynamoGraphDeploymentConditionTypeDynamoComponentReady = "DynamoComponentReady"
+	// ConditionTypeOwnershipConflict reports that the controller refused to
+	// manage a same-named resource controlled by another parent.
+	ConditionTypeOwnershipConflict = "OwnershipConflict"
 
 	ConditionTypeTopologyLevelsAvailable      = "TopologyLevelsAvailable"
 	ConditionReasonAllTopologyLevelsAvailable = "AllTopologyLevelsAvailable"
