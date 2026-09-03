@@ -325,7 +325,7 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_S3_REGION" type="string">
-  Region override for the `s3` sink. When unset the AWS SDK resolves the region from the environment, profile, or IMDS.
+  Region override for the `s3` sink. When unset, the client uses `AWS_REGION`, then `AWS_DEFAULT_REGION`, then `us-east-1`.
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_S3_PREFIX" type="string">

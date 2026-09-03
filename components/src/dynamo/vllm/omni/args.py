@@ -66,6 +66,7 @@ class OmniParallelKwargs:
     allgather_degree: int = 1
     cfg_parallel_size: int = 1
     vae_patch_parallel_size: int = 1
+    text_encoder_tp_size: int = 1
     vae_parallel_mode: str = "tile"
     use_hsdp: bool = False
     hsdp_shard_size: int = -1
@@ -281,6 +282,17 @@ class OmniArgGroup(ArgGroup):
         )
         add_argument(
             g,
+            flag_name="--text-encoder-tp-size",
+            env_var="DYN_OMNI_TEXT_ENCODER_TP_SIZE",
+            default=1,
+            arg_type=int,
+            help=(
+                "Number of ranks used to tensor-parallel shard the diffusion "
+                "text encoder."
+            ),
+        )
+        add_argument(
+            g,
             flag_name="--vae-parallel-mode",
             env_var="DYN_OMNI_VAE_PARALLEL_MODE",
             default="tile",
@@ -420,6 +432,8 @@ class OmniConfig(DynamoRuntimeConfig):
             raise ValueError("--ring-degree must be > 0")
         if self.parallel.allgather_degree <= 0:
             raise ValueError("--allgather-degree must be > 0")
+        if self.parallel.text_encoder_tp_size <= 0:
+            raise ValueError("--text-encoder-tp-size must be > 0")
         if not (0 < self.diffusion.boundary_ratio <= 1):
             raise ValueError("--boundary-ratio must be in (0, 1]")
         if self.stage_configs_path is None:

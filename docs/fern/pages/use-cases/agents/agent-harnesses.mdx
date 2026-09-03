@@ -36,7 +36,7 @@ bash examples/backends/sglang/launch/agg_agent.sh
     codex -m zai-org/GLM-4.7-Flash -c model_provider=dynamo
     ```
 
-    Codex sends a `session-id` header that Dynamo maps to `session_id`.
+    Dynamo maps Codex's `thread-id` header to `session_id`. A spawned child thread also sends `x-codex-parent-thread-id`, which Dynamo maps to `parent_session_id`.
 
   </Tab>
   <Tab title="Pi">
@@ -204,6 +204,22 @@ bash examples/backends/sglang/launch/agg_agent.sh
 Use the repository's `.agents/skills/dynamo-agent-harness` skill when an agent needs to keep a Claude Code, Codex, or OpenCode session open across multiple prompts while Dynamo serves the model. The skill uses Agent Client Protocol (ACP) and injects the provider configuration through the child process environment instead of adding harness configuration files to the delegated worktree.
 
 The skill pins the Claude Code and Codex ACP adapters. If a harness release changes the model, endpoint, session header, authentication, or mode configuration, update this page and the skill in the same change after running a persistent two-turn tool smoke test.
+
+## Compaction Signals
+
+An agent harness can compact older conversation history into a summary when its context approaches a limit. The harness creates the summary request and keeps the logical session ID stable. Dynamo observes supported compaction signals but does not start compaction.
+
+| Harness | Signal recognized by Dynamo | Normalized agent context |
+| --- | --- | --- |
+| Codex | `x-codex-turn-metadata` with `request_kind` set to `compaction` | `agent_context.compaction` |
+| Claude Code | No supported mapping | Unset |
+| OpenCode | No supported mapping | Unset |
+
+For Codex, Dynamo preserves the optional `trigger`, `reason`, `implementation`, `phase`, and `strategy` values. The object appears only on the inference request that creates the summary. Invalid JSON and other request kinds leave it unset.
+
+Workers receive the field in `AgentContext` but do not act on it.
+
+Compaction metadata is passive. It does not rotate `session_id`, change request routing, or evict KV cache blocks. See [Agent Tracing](agent-tracing.md#compaction-metadata) for the request-trace format.
 
 ## See Also
 

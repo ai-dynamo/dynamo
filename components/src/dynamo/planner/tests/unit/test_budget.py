@@ -4,14 +4,19 @@
 """Unit tests for the shared GPU budget primitives in
 ``dynamo.planner.core.budget``."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from dynamo.planner.core.budget import (
     bounds_for_total,
     compute_tolerance,
+    guard_disagg_load_budget,
     proportional_clamp_pair,
     proportional_clamp_single,
 )
+from dynamo.planner.core.state_machine import PlannerScalingState
+from dynamo.planner.core.types import EngineCapabilities, WorkerCapabilities
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -99,6 +104,10 @@ def test_bounds_both_disabled():
 
 def test_clamp_pair_no_op_when_both_disabled():
     assert proportional_clamp_pair(3, 5, 1, 1, -1, -1, 1) == (3, 5)
+
+
+def test_clamp_pair_preserves_asymmetric_component_minimums():
+    assert proportional_clamp_pair(10, 10, 1, 1, -1, 5, 2, 1) == (2, 3)
 
 
 def test_clamp_pair_in_band_returns_inputs():
@@ -210,6 +219,173 @@ def test_clamp_pair_infeasible_band_falls_back_to_inputs():
 
 
 # ---------------------------------------------------------------------------- #
+# disaggregated load-budget safety guard                                       #
+# ---------------------------------------------------------------------------- #
+
+
+def _guard(
+    current: tuple[int, int],
+    proposed: tuple[int, int],
+    *,
+    p_gpu: int = 1,
+    d_gpu: int = 1,
+    min_gpus: int = 64,
+    max_gpus: int = 64,
+    prefill_min_endpoint: int = 1,
+    decode_min_endpoint: int = 1,
+) -> tuple[int, int, str | None]:
+    return guard_disagg_load_budget(
+        current[0],
+        current[1],
+        proposed[0],
+        proposed[1],
+        p_gpu,
+        d_gpu,
+        min_gpus,
+        max_gpus,
+        prefill_min_endpoint,
+        decode_min_endpoint,
+    )
+
+
+@pytest.mark.parametrize(
+    ("current", "proposed"),
+    [
+        ((28, 36), (27, 36)),
+        ((27, 36), (26, 35)),
+    ],
+)
+def test_load_budget_holds_scale_down_without_scale_up_at_floor(current, proposed):
+    assert _guard(current, proposed) == (
+        current[0],
+        current[1],
+        "gpu_budget_guard_hold",
+    )
+
+
+def test_load_budget_allows_explicit_opposing_swap_at_fixed_budget():
+    assert _guard((27, 37), (26, 38)) == (26, 38, None)
+
+
+def test_load_budget_allows_reverse_explicit_opposing_swap_at_fixed_budget():
+    assert _guard((27, 37), (28, 36)) == (28, 36, None)
+
+
+@pytest.mark.parametrize("proposed", [(28, 37), (29, 37)])
+def test_load_budget_does_not_invent_donor_at_full_budget(proposed):
+    # hold/up and up/up do not establish that either pool is safe to donate.
+    assert _guard((28, 36), proposed) == (
+        28,
+        36,
+        "gpu_budget_guard_hold",
+    )
+
+
+def test_load_budget_rejects_opposing_swap_that_does_not_fit():
+    # Removing one 1-GPU prefill cannot fund one 2-GPU decode.
+    assert _guard(
+        (2, 1),
+        (1, 2),
+        p_gpu=1,
+        d_gpu=2,
+        min_gpus=4,
+        max_gpus=4,
+    ) == (2, 1, "gpu_budget_guard_hold")
+
+
+def test_load_budget_does_not_execute_only_donor_leg_of_weighted_swap():
+    # The generic clamp turns the 7-GPU proposal into (1P, 1D) = 4 GPUs,
+    # suppressing decode-up but retaining prefill-down because tolerance makes
+    # 4 valid for a min=5 floor. At the floor, the swap must be atomic.
+    assert _guard(
+        (2, 1),
+        (1, 2),
+        p_gpu=1,
+        d_gpu=3,
+        min_gpus=5,
+        max_gpus=6,
+    ) == (2, 1, "gpu_budget_guard_hold")
+
+
+def test_load_budget_allows_scale_down_above_floor():
+    assert _guard((35, 35), (34, 35), max_gpus=80) == (34, 35, None)
+
+
+def test_load_budget_disabled_minimum_preserves_legacy_clamp():
+    expected = proportional_clamp_pair(3, 2, 1, 1, -1, 4, 1, 1)
+    actual_p, actual_d, reason = _guard(
+        (3, 1),
+        (3, 2),
+        min_gpus=-1,
+        max_gpus=4,
+    )
+    assert (actual_p, actual_d) == expected
+    assert reason is None
+
+
+def test_load_budget_weighted_tolerance_does_not_enable_donor_only_churn():
+    # min=max=5 is unreachable with 2-GPU replicas. The existing tolerance
+    # accepts total=4, but the nominal floor still guards donor-only removal.
+    assert _guard(
+        (1, 1),
+        (0, 1),
+        p_gpu=2,
+        d_gpu=2,
+        min_gpus=5,
+        max_gpus=5,
+        prefill_min_endpoint=0,
+    ) == (1, 1, "gpu_budget_guard_hold")
+
+
+def test_load_budget_weighted_tolerance_allows_feasible_opposing_swap():
+    assert _guard(
+        (1, 1),
+        (0, 2),
+        p_gpu=2,
+        d_gpu=2,
+        min_gpus=5,
+        max_gpus=5,
+        prefill_min_endpoint=0,
+    ) == (0, 2, None)
+
+
+def test_load_budget_clamp_never_inverts_hold_into_scale_up():
+    # The proportional floor clamp would turn (1P, 3D) into (2P, 4D),
+    # inventing a decode scale-up from a hold signal. Fail closed instead.
+    assert _guard(
+        (4, 3),
+        (1, 3),
+        min_gpus=6,
+        max_gpus=10,
+    ) == (4, 3, "gpu_budget_guard_hold")
+
+
+def test_load_budget_holds_when_integer_width_clamp_cannot_reach_band():
+    # Current total 5 is valid in the tolerance-relaxed [5, 7] band. The
+    # proportional primitive cannot lift the proposed total 4 without
+    # overshooting the hard max, so it returns the proposal unchanged. The
+    # load guard must not dispatch that out-of-band result.
+    assert _guard(
+        (1, 2),
+        (2, 1),
+        p_gpu=1,
+        d_gpu=2,
+        min_gpus=7,
+        max_gpus=7,
+    ) == (1, 2, "gpu_budget_guard_hold")
+
+
+def test_load_budget_below_floor_uses_explicit_reconcile_from_current():
+    assert _guard(
+        (1, 1),
+        (0, 1),
+        min_gpus=4,
+        max_gpus=6,
+        prefill_min_endpoint=1,
+    ) == (2, 2, "gpu_budget_reconcile")
+
+
+# ---------------------------------------------------------------------------- #
 # proportional_clamp_single (agg)                                              #
 # ---------------------------------------------------------------------------- #
 
@@ -249,3 +425,33 @@ def test_clamp_single_ceiling_below_min_endpoint_zeros():
     # min_endpoint*4=4 — even one replica overshoots the hard cap, so the
     # deployment is infeasible and must be zeroed.
     assert proportional_clamp_single(2, 4, 3, 3, 1) == 0
+
+
+@pytest.mark.parametrize(
+    ("gpu_cost_per_replica", "expected"),
+    [
+        (None, 2),
+        (4, 2),
+        (5, 1),
+    ],
+)
+def test_planner_budget_uses_replica_cost_not_engine_width(
+    gpu_cost_per_replica, expected
+):
+    """A zero-GPU sidecar preserves the old limit; one GPU lowers it."""
+    state = PlannerScalingState.__new__(PlannerScalingState)
+    state._config = SimpleNamespace(
+        min_gpu_budget=-1,
+        max_gpu_budget=8,
+        min_endpoint=1,
+        prefill_min_endpoint=None,
+        decode_min_endpoint=None,
+    )
+    state._capabilities = WorkerCapabilities(
+        decode=EngineCapabilities(
+            num_gpu=4,
+            gpu_cost_per_replica=gpu_cost_per_replica,
+        )
+    )
+
+    assert state._apply_single_budget(3, "decode") == expected

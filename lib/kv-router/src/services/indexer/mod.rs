@@ -24,7 +24,7 @@
 //!   `disk`, per-`dp_rank` device counts, and `longest_matched`.
 //!
 //! The `instances` shape is intended to align with Mooncake's
-//! "[RFC]: KV-Store Indexer API Standardization"
+//! "\[RFC\]: KV-Store Indexer API Standardization"
 //! (<https://github.com/kvcache-ai/Mooncake/issues/1403>).
 //! Tier counts are CUMULATIVE through each tier's walk — see the doc on the
 //! response struct in [`server`] for the exact semantics.

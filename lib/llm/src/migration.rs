@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Error, Result};
 use futures::{stream, stream::StreamExt};
@@ -16,6 +17,7 @@ use crate::{
         common::{
             extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
             llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
+            preprocessor::MultimodalData,
             timing::RequestPhase,
         },
     },
@@ -24,9 +26,13 @@ use crate::{
 
 use dynamo_runtime::engine::Data;
 use dynamo_runtime::error::{self, BackendError, DynamoError, ErrorType};
+use dynamo_runtime::metrics::prometheus_names::frontend_service;
 use dynamo_runtime::pipeline::{
     AsyncEngineContext, AsyncEngineContextProvider, Context, ManyOut, Operator, PipelineOperator,
-    ResponseStream, ServerStreamingEngine, SingleIn, async_trait,
+    ResponseStream, ServerStreamingEngine, SingleIn, async_trait, attach_first_response_guard,
+    network::egress::route_span::{
+        RouteTraceContext, attach_route_trace_context, error_type_from_chain, error_type_name,
+    },
 };
 use dynamo_runtime::protocols::annotated::Annotated;
 
@@ -204,6 +210,8 @@ where
         request: SingleIn<PreprocessedRequest>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     ) -> Result<ManyOut<Annotated<Resp>>> {
+        // NOTE: Keep the migration operator in the request path at limit zero. The limit controls
+        // replacement attempts; RetryManager continues to own the initial attempt uniformly.
         let (preprocessed_request, context) = request.transfer(());
         let engine_ctx = context.context();
         let engine_ctx_ = engine_ctx.clone();
@@ -234,6 +242,20 @@ where
     }
 }
 
+struct MigrationEvent {
+    migration_type: &'static str,
+    started_at: Instant,
+}
+
+impl MigrationEvent {
+    fn new(migration_type: &'static str) -> Self {
+        Self {
+            migration_type,
+            started_at: Instant::now(),
+        }
+    }
+}
+
 struct RetryManager<Resp>
 where
     Resp: Data + HasTokenIds,
@@ -244,13 +266,32 @@ where
     session_affinity: Option<SessionAffinityId>,
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<Resp>>,
     next_stream: Option<ManyOut<Annotated<Resp>>>,
-    retries_left: u32,
+    retries_left: u64,
     max_seq_len: Option<u32>,
     model_name: Arc<String>,
     metrics: Arc<Metrics>,
     /// Latest worker span pointer seen on the active stream; stamped as
     /// `migration_link` on the next retry. Populated by `track_response`.
     last_worker_link: Option<crate::protocols::common::preprocessor::TraceLink>,
+    /// Router-owned metadata for the active attempt. The router fills in its
+    /// selected worker ID so a later migration can identify the failed worker.
+    active_route_trace: Option<Arc<RouteTraceContext>>,
+    /// Zero-based physical dispatch attempt number.
+    next_attempt: u32,
+    /// Number of generated tokens delivered before the next migration.
+    completed_tokens: usize,
+    /// Failure that caused the next physical dispatch to be a migration retry.
+    pending_migration: Option<MigrationCause>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MigrationCause {
+    reason: ErrorType,
+    from_worker_id: Option<u64>,
+    /// The attempt that *failed*, not the retry it may schedule. `next_attempt`
+    /// has already been incremented past this by the time a failure surfaces,
+    /// so recording that instead would name an attempt with no route span.
+    attempt: u32,
 }
 
 impl<Resp> RetryManager<Resp>
@@ -269,6 +310,13 @@ where
         metrics: Arc<Metrics>,
         session_affinity: Option<SessionAffinityId>,
     ) -> Result<Self> {
+        // TODO: prompt_embeds take precedence over replayed token_ids. Disable migration for
+        // embedding prompts until a retry can represent an embedding-based continuation.
+
+        // TODO: Define a replay-capability contract for attempt-local decoder and sampler state.
+        // Stop-string matching, generated-token penalties, and thinking-token budgets are not
+        // currently checkpointed across workers.
+
         // Disable migration for structured-output (guided-decoding) requests.
         // Inference backends initialize the guided-decoding FSM (finite state machine) fresh
         // for every new request and only advance it on newly-generated tokens, not on
@@ -307,13 +355,17 @@ where
             session_affinity,
             next_generate: next,
             next_stream: None,
-            retries_left: retries_left + 1, // +1 to account for the initial attempt
+            retries_left: u64::from(retries_left) + 1, // +1 to account for the initial attempt
             max_seq_len,
             model_name,
             metrics,
             last_worker_link: None,
+            active_route_trace: None,
+            next_attempt: 0,
+            completed_tokens: 0,
+            pending_migration: None,
         };
-        slf.new_stream().await?;
+        slf.new_stream(None).await?;
         slf.exceed_max_seq_len(0); // disable migration if prompt len > max_seq_len
         Ok(slf)
     }
@@ -332,9 +384,25 @@ where
                 if let Some(err) = response.error.as_ref()
                     && is_migratable_for_request(&self.request, err)
                 {
+                    if self.retries_left == 0 {
+                        let route_trace = self.active_route_trace.clone();
+                        self.record_migration_exhausted(MigrationCause {
+                            reason: err.error_type(),
+                            from_worker_id: route_trace
+                                .as_deref()
+                                .and_then(RouteTraceContext::selected_worker_id),
+                            attempt: self.failed_attempt(route_trace.as_deref()),
+                        });
+                    } else {
+                        self.queue_migration(err.error_type(), self.active_route_trace.clone());
+                    }
                     tracing::warn!(error = %err, "Stream disconnected, recreating stream");
                     self.metrics.inc_migration_ongoing_request(&self.model_name);
-                    if let Err(err) = self.new_stream().await {
+                    let migration_event =
+                        MigrationEvent::new(frontend_service::migration_type::ONGOING_REQUEST);
+                    // NOTE: Delegate exhaustion to new_stream so retry accounting has one owner.
+                    // When no replacement is established, preserve the triggering stream error.
+                    if let Err(err) = self.new_stream(Some(migration_event)).await {
                         tracing::warn!(error = ?err, "Cannot recreate stream");
                     } else {
                         continue;
@@ -347,8 +415,17 @@ where
         }
     }
 
-    async fn new_stream(&mut self) -> Result<()> {
-        let mut response_stream: Option<Result<ManyOut<Annotated<Resp>>>> = None;
+    async fn new_stream(&mut self, mut migration_event: Option<MigrationEvent>) -> Result<()> {
+        if self.retries_left == 0 {
+            if let Some(cause) = self.pending_migration.take() {
+                self.record_migration_exhausted(cause);
+            }
+            self.record_migration_outcome(
+                migration_event.as_ref(),
+                frontend_service::migration_outcome::FAILURE,
+            );
+            return Err(Error::msg("Migration limit exhausted"));
+        }
         while self.retries_left > 0 {
             self.retries_left -= 1;
             // Once any chunks have arrived from a previous attempt, stamp
@@ -363,12 +440,49 @@ where
                 self.context.id().to_string(),
                 self.metadata.clone(),
             );
+            let migration = self.pending_migration.take();
+            let attempt = self.next_attempt;
+            self.next_attempt += 1;
+            let route_trace = attach_route_trace_context(
+                &mut request,
+                RouteTraceContext::new(
+                    attempt,
+                    migration.map(|migration| migration.reason),
+                    migration.and_then(|migration| migration.from_worker_id),
+                    self.completed_tokens,
+                ),
+            );
             if let Some(session_affinity) = self.session_affinity.as_ref() {
                 request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_affinity.clone());
             }
             self.context.link_child(request.context());
             if self.context.is_stopped() || self.context.is_killed() {
-                tracing::debug!("Abort creating new stream after context is stopped or killed");
+                if let Some(cause) = migration {
+                    tracing::info!(
+                        target: "request_span",
+                        {
+                            { "request.attempt" } = attempt,
+                            { "migration.is_retry" } = true,
+                            { "migration.reason" } = error_type_name(cause.reason),
+                            { "migration.from_worker_id" } = cause.from_worker_id,
+                            { "migration.tokens_completed" } = self.completed_tokens
+                        },
+                        "migration cancelled before worker dispatch"
+                    );
+                } else {
+                    tracing::info!(
+                        target: "request_span",
+                        {
+                            { "request.attempt" } = attempt,
+                            { "migration.is_retry" } = false
+                        },
+                        "request cancelled before worker dispatch"
+                    );
+                }
+                self.record_migration_outcome(
+                    migration_event.as_ref(),
+                    frontend_service::migration_outcome::CANCELLED,
+                );
                 return Err(DynamoError::builder()
                     .error_type(ErrorType::Cancelled)
                     .message(format!(
@@ -378,36 +492,151 @@ where
                     .build()
                     .into());
             }
-            response_stream = Some(self.next_generate.generate(request).await);
-            if let Some(err) = response_stream.as_ref().unwrap().as_ref().err()
-                && is_migratable_for_request(&self.request, err.as_ref())
-            {
-                tracing::warn!(error = %err, "Creating new stream, retrying");
-                self.metrics.inc_migration_new_request(&self.model_name);
-                continue;
+            let source_guards = self
+                .request
+                .multi_modal_data
+                .as_ref()
+                .into_iter()
+                .flat_map(|media| media.values())
+                .flatten()
+                .filter_map(|item| match item {
+                    MultimodalData::Decoded(descriptor) => descriptor.source_storage.clone(),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !source_guards.is_empty() {
+                attach_first_response_guard(&mut request, Arc::new(source_guards));
             }
-            break;
+            let response_stream = self.next_generate.generate(request).await;
+            match response_stream {
+                Ok(next_stream) => {
+                    self.record_migration_outcome(
+                        migration_event.as_ref(),
+                        frontend_service::migration_outcome::SUCCESS,
+                    );
+                    self.active_route_trace = Some(route_trace);
+                    self.next_stream = Some(next_stream);
+                    return Ok(());
+                }
+                Err(err) if is_migratable_for_request(&self.request, err.as_ref()) => {
+                    let reason = error_type_from_chain(err.as_ref());
+                    if migration_event.is_none() {
+                        migration_event = Some(MigrationEvent::new(
+                            frontend_service::migration_type::NEW_REQUEST,
+                        ));
+                    }
+                    // Preserve the existing per-attempt metric contract.
+                    self.metrics.inc_migration_new_request(&self.model_name);
+                    if self.retries_left == 0 {
+                        let cause = MigrationCause {
+                            reason,
+                            from_worker_id: route_trace.selected_worker_id(),
+                            attempt: route_trace.attempt(),
+                        };
+                        self.record_migration_exhausted(cause);
+                        self.record_migration_outcome(
+                            migration_event.as_ref(),
+                            frontend_service::migration_outcome::FAILURE,
+                        );
+                        return Err(err);
+                    }
+                    self.queue_migration(reason, Some(route_trace));
+                    tracing::warn!(error = %err, "Creating new stream, retrying");
+                }
+                Err(err) => {
+                    let outcome =
+                        if error::match_error_chain(err.as_ref(), &[ErrorType::Cancelled], &[]) {
+                            frontend_service::migration_outcome::CANCELLED
+                        } else {
+                            frontend_service::migration_outcome::FAILURE
+                        };
+                    self.record_migration_outcome(migration_event.as_ref(), outcome);
+                    return Err(err);
+                }
+            }
         }
-        match response_stream {
-            Some(Ok(next_stream)) => {
-                self.next_stream = Some(next_stream);
-                Ok(())
-            }
-            Some(Err(err)) => Err(err), // should propagate original error if any
-            None => Err(Error::msg(
-                "Migration limit exhausted", // should propagate original error if any
-            )),
+        self.record_migration_outcome(
+            migration_event.as_ref(),
+            frontend_service::migration_outcome::FAILURE,
+        );
+        Err(Error::msg("Migration limit exhausted"))
+    }
+
+    /// The attempt a failure belongs to. Prefers the attempt's own trace
+    /// context; falls back to the last dispatched attempt when there is none.
+    fn failed_attempt(&self, route_trace: Option<&RouteTraceContext>) -> u32 {
+        route_trace.map_or_else(
+            || self.next_attempt.saturating_sub(1),
+            RouteTraceContext::attempt,
+        )
+    }
+
+    fn queue_migration(&mut self, reason: ErrorType, route_trace: Option<Arc<RouteTraceContext>>) {
+        let from_worker_id = route_trace
+            .as_deref()
+            .and_then(RouteTraceContext::selected_worker_id);
+        self.pending_migration = Some(MigrationCause {
+            reason,
+            from_worker_id,
+            attempt: self.failed_attempt(route_trace.as_deref()),
+        });
+        tracing::info!(
+            target: "request_span",
+            {
+                { "request.attempt" } = self.next_attempt,
+                { "migration.is_retry" } = true,
+                { "migration.reason" } = error_type_name(reason),
+                { "migration.from_worker_id" } = from_worker_id,
+                { "migration.tokens_completed" } = self.completed_tokens
+            },
+            "migration retry scheduled"
+        );
+    }
+
+    fn record_migration_exhausted(&self, cause: MigrationCause) {
+        tracing::warn!(
+            target: "request_span",
+            {
+                { "request.attempt" } = cause.attempt,
+                { "migration.is_retry" } = true,
+                { "migration.reason" } = error_type_name(cause.reason),
+                { "migration.from_worker_id" } = cause.from_worker_id,
+                { "migration.tokens_completed" } = self.completed_tokens
+            },
+            "migration retries exhausted"
+        );
+    }
+
+    fn record_migration_outcome(&self, migration_event: Option<&MigrationEvent>, outcome: &str) {
+        if let Some(event) = migration_event {
+            self.metrics.observe_migration_duration(
+                &self.model_name,
+                event.migration_type,
+                outcome,
+                event.started_at.elapsed(),
+            );
         }
     }
 
     fn track_response(&mut self, response: &Annotated<Resp>) {
-        if self.retries_left == 0 {
-            return;
-        }
         let llm_engine_output = match response.data.as_ref() {
             Some(output) => output,
             None => return,
         };
+        let token_ids = llm_engine_output.token_ids();
+        // Pure telemetry for the migration lifecycle events, so it has to count
+        // the final allowed attempt as well. `new_stream` decrements
+        // `retries_left` *before* dispatching, so that attempt runs with the
+        // counter already at zero; keeping this behind the replay guard below
+        // would drop its tokens from `migration retries exhausted`.
+        self.completed_tokens += token_ids.len();
+
+        // Everything past this point rebuilds replay state for a *future*
+        // attempt. Once no retry can happen there is nothing to replay onto,
+        // so leave the request untouched.
+        if self.retries_left == 0 {
+            return;
+        }
         // Capture the worker's engine.generate span pointer so a future
         // migration retry can render an OTel Link back to it. The adapter
         // stamps this on the first non-empty chunk; subsequent chunks may
@@ -415,13 +644,17 @@ where
         if let Some(link) = llm_engine_output.worker_trace_link() {
             self.last_worker_link = Some(link.clone());
         }
-        let token_ids = llm_engine_output.token_ids();
-        if self.exceed_max_seq_len(token_ids.len() as u32) {
+        let output_len = u32::try_from(token_ids.len()).unwrap_or(u32::MAX);
+        if self.exceed_max_seq_len(output_len) {
             return;
         }
+        // NOTE: A zero remaining token budget is not retry-budget exhaustion. Backends remain
+        // authoritative for deciding how generation terminates at max_tokens.
         if let Some(max_tokens) = self.request.stop_conditions.max_tokens {
-            self.request.stop_conditions.max_tokens =
-                Some(max_tokens.saturating_sub(token_ids.len() as u32));
+            self.request.stop_conditions.max_tokens = Some(max_tokens.saturating_sub(output_len));
+        }
+        if let Some(min_tokens) = self.request.stop_conditions.min_tokens {
+            self.request.stop_conditions.min_tokens = Some(min_tokens.saturating_sub(output_len));
         }
         for token_id in token_ids.iter() {
             self.request.token_ids.push(*token_id);
@@ -466,6 +699,10 @@ mod tests {
     use tokio::sync::mpsc;
 
     const TEST_MODEL: &str = "test-model";
+
+    fn migration_duration_count(metrics: &Metrics, migration_type: &str, outcome: &str) -> u64 {
+        metrics.get_migration_duration_sample_count(TEST_MODEL, migration_type, outcome)
+    }
 
     // a stalled/frozen worker's stream-inactivity timeout surfaces as
     // ErrorType::ResponseTimeout (push_router fault detection). It must be
@@ -641,6 +878,12 @@ mod tests {
         /// Fails on first call with NoResponders error, then succeeds on subsequent calls
         FailThenSuccess,
         FailThenSuccessWithAffinity,
+        /// Fails on the first call and cancels the request before the retry
+        FailThenCancel {
+            context: Arc<Controller>,
+        },
+        /// Fails on the first call, then generate returns a cancellation error
+        FailThenGenerateCancelled,
         /// One addressed worker rejects admission, then a replacement succeeds.
         WorkerOverloadSequence {
             worker_ids: Vec<u64>,
@@ -668,6 +911,7 @@ mod tests {
         token_offset: u32,
         call_count: Arc<AtomicU32>,
         context_id: String,
+        initial_min_tokens: Option<u32>,
     }
 
     impl MockEngine {
@@ -683,7 +927,13 @@ mod tests {
                 token_offset,
                 call_count: Arc::new(AtomicU32::new(0)),
                 context_id,
+                initial_min_tokens: None,
             }
+        }
+
+        fn with_min_tokens(mut self, min_tokens: u32) -> Self {
+            self.initial_min_tokens = Some(min_tokens);
+            self
         }
     }
 
@@ -731,6 +981,15 @@ mod tests {
                 expected_max_tokens,
                 preprocessed_request.stop_conditions.max_tokens
             );
+            if let Some(initial_min_tokens) = self.initial_min_tokens {
+                let expected_min_tokens =
+                    initial_min_tokens.saturating_sub(responses_already_generated as u32);
+                assert_eq!(
+                    preprocessed_request.stop_conditions.min_tokens,
+                    Some(expected_min_tokens),
+                    "min_tokens should be rebased for each replacement request"
+                );
+            }
 
             match &self.behavior {
                 MockBehavior::Success => {
@@ -752,6 +1011,29 @@ mod tests {
                         self.send_responses(responses_already_generated, self.num_responses)
                             .await
                     }
+                }
+                MockBehavior::FailThenCancel { context } => {
+                    assert_eq!(call_num, 0, "cancelled retry must not reach the engine");
+                    context.stop_generating();
+                    Err(anyhow::anyhow!(
+                        DynamoError::builder()
+                            .error_type(ErrorType::CannotConnect)
+                            .message("no responders")
+                            .build()
+                    ))
+                }
+                MockBehavior::FailThenGenerateCancelled => {
+                    let error_type = if call_num == 0 {
+                        ErrorType::CannotConnect
+                    } else {
+                        ErrorType::Cancelled
+                    };
+                    Err(anyhow::anyhow!(
+                        DynamoError::builder()
+                            .error_type(error_type)
+                            .message("request cancelled")
+                            .build()
+                    ))
                 }
                 MockBehavior::WorkerOverloadSequence { worker_ids } => {
                     let excluded = preprocessed_request
@@ -1037,6 +1319,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maximum_migration_limit_does_not_overflow() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::Success,
+            1,
+            100,
+            context_id.clone(),
+        ));
+        let calls = mock_engine.call_count.clone();
+        let request =
+            Context::with_id_and_metadata(create_mock_request(1), context_id, BTreeMap::new());
+        let migration = Migration::new(
+            u32::MAX,
+            None,
+            TEST_MODEL.to_string(),
+            Arc::new(Metrics::new()),
+        );
+
+        let responses = migration
+            .generate(request, mock_engine)
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(responses.len(), 1);
+        assert!(responses[0].error.is_none());
+    }
+
+    #[tokio::test]
     async fn test_migration_preserves_session_affinity_across_retry() {
         let context_id = uuid::Uuid::new_v4().to_string();
         let mock_engine = Arc::new(MockEngine::new(
@@ -1159,6 +1472,14 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 1);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::NEW_REQUEST,
+                frontend_service::migration_outcome::SUCCESS,
+            ),
+            1
+        );
     }
 
     /// Test case 3: Ongoing request migration
@@ -1216,6 +1537,44 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::ONGOING_REQUEST,
+                frontend_service::migration_outcome::SUCCESS,
+            ),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_rebases_min_tokens_from_the_delivered_prefix() {
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let mut request = create_mock_request(10);
+        request.stop_conditions.min_tokens = Some(7);
+        let mock_engine = Arc::new(
+            MockEngine::new(
+                MockBehavior::MidStreamFail { fail_after: 3 },
+                10,
+                100,
+                context_id.clone(),
+            )
+            .with_min_tokens(7),
+        );
+        let calls = mock_engine.call_count.clone();
+        let request = Context::with_id_and_metadata(request, context_id, BTreeMap::new());
+        let migration = Migration::new(1, None, TEST_MODEL.to_string(), Arc::new(Metrics::new()));
+
+        let responses = migration
+            .generate(request, mock_engine)
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(responses.len(), 10);
+        assert!(responses.iter().all(|response| response.error.is_none()));
     }
 
     /// Test case 4: New request migration - indefinite failure
@@ -1257,8 +1616,16 @@ mod tests {
             assert!(error.to_string().contains("no responders"));
         }
 
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 4); // 3 retries + 1 final failure
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 4);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::NEW_REQUEST,
+                frontend_service::migration_outcome::FAILURE,
+            ),
+            1
+        );
     }
 
     /// Test case 5: Ongoing request migration - indefinite failure
@@ -1318,8 +1685,16 @@ mod tests {
         let err = error_response.err().expect("expected error response");
         assert_eq!(err.error_type(), ErrorType::Disconnected);
 
-        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3); // 2 retries + 1 final failure
-        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1); // initial ongoing failure retry
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 3);
+        assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 1);
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::ONGOING_REQUEST,
+                frontend_service::migration_outcome::FAILURE,
+            ),
+            1
+        );
     }
 
     /// Test case 6: Ongoing request migration - indefinite failure with stream errors
@@ -1381,6 +1756,22 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 4); // 3 retries + 1 final failure
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::ONGOING_REQUEST,
+                frontend_service::migration_outcome::SUCCESS,
+            ),
+            3
+        );
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::ONGOING_REQUEST,
+                frontend_service::migration_outcome::FAILURE,
+            ),
+            1
+        );
     }
 
     /// Test case 7: Request cancelled when creating new stream
@@ -1441,6 +1832,119 @@ mod tests {
 
         assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 0);
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 0);
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_cancelled_during_migration() {
+        dynamo_runtime::logging::init();
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let request = create_mock_request(10);
+        let ctx = Arc::new(Controller::new(context_id.clone()));
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::FailThenCancel {
+                context: ctx.clone(),
+            },
+            10,
+            100,
+            context_id,
+        ));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            mock_engine;
+        let metrics = Arc::new(Metrics::new());
+
+        let result = RetryManager::build(
+            ctx,
+            BTreeMap::new(),
+            request,
+            next_generate,
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+            None,
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("cancelled migration must fail"),
+            Err(error) => error,
+        };
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("error should be a DynamoError");
+        assert_eq!(dynamo_error.error_type(), ErrorType::Cancelled);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 1);
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::NEW_REQUEST,
+                frontend_service::migration_outcome::CANCELLED,
+            ),
+            1
+        );
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::NEW_REQUEST,
+                frontend_service::migration_outcome::FAILURE,
+            ),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_manager_generate_cancelled_during_migration() {
+        dynamo_runtime::logging::init();
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let request = create_mock_request(10);
+        let mock_engine = Arc::new(MockEngine::new(
+            MockBehavior::FailThenGenerateCancelled,
+            10,
+            100,
+            context_id.clone(),
+        ));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            mock_engine;
+        let metrics = Arc::new(Metrics::new());
+
+        let result = RetryManager::build(
+            Arc::new(Controller::new(context_id)),
+            BTreeMap::new(),
+            request,
+            next_generate,
+            3,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            metrics.clone(),
+            None,
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("cancelled migration must fail"),
+            Err(error) => error,
+        };
+        let dynamo_error = error
+            .downcast_ref::<DynamoError>()
+            .expect("error should be a DynamoError");
+        assert_eq!(dynamo_error.error_type(), ErrorType::Cancelled);
+        assert_eq!(metrics.get_migration_new_request_count(TEST_MODEL), 1);
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::NEW_REQUEST,
+                frontend_service::migration_outcome::CANCELLED,
+            ),
+            1
+        );
+        assert_eq!(
+            migration_duration_count(
+                &metrics,
+                frontend_service::migration_type::NEW_REQUEST,
+                frontend_service::migration_outcome::FAILURE,
+            ),
+            0
+        );
     }
 
     /// Test case 8: No migration for guided-decoding (structured-output) requests
@@ -1814,18 +2318,102 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_retry_manager_cancellation_during_migration_skips_retry_dispatch() {
+        dynamo_runtime::logging::init();
+
+        struct CancelBeforeRetryEngine {
+            calls: Arc<AtomicU32>,
+            root: Arc<Controller>,
+            context_id: String,
+        }
+
+        #[async_trait]
+        impl
+            AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+                anyhow::Error,
+            > for CancelBeforeRetryEngine
+        {
+            async fn generate(
+                &self,
+                _request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(call, 0, "cancelled migration must not dispatch a retry");
+                let root = self.root.clone();
+                let responses = async_stream::stream! {
+                    yield create_mock_output(101);
+                    root.stop();
+                    yield Annotated::from_err(
+                        DynamoError::builder()
+                            .error_type(ErrorType::Disconnected)
+                            .message("worker disconnected")
+                            .build(),
+                    );
+                };
+                Ok(ResponseStream::new(
+                    Box::pin(responses),
+                    Arc::new(Controller::new(self.context_id.clone())),
+                ))
+            }
+        }
+
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let root = Arc::new(Controller::new(context_id.clone()));
+        let calls = Arc::new(AtomicU32::new(0));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            Arc::new(CancelBeforeRetryEngine {
+                calls: calls.clone(),
+                root: root.clone(),
+                context_id,
+            });
+        let mut retry_manager = RetryManager::build(
+            root,
+            BTreeMap::new(),
+            create_mock_request(5),
+            next_generate,
+            2,
+            None,
+            Arc::new(TEST_MODEL.to_string()),
+            Arc::new(Metrics::new()),
+            None,
+        )
+        .await
+        .expect("initial stream should be created");
+
+        assert!(retry_manager.next().await.unwrap().err().is_none());
+        let failure = retry_manager
+            .next()
+            .await
+            .expect("disconnect should be returned when retry is cancelled")
+            .err()
+            .expect("second response should be the original disconnect");
+
+        assert_eq!(failure.error_type(), ErrorType::Disconnected);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(retry_manager.completed_tokens, 1);
+        assert_eq!(retry_manager.next_attempt, 2);
+        assert!(retry_manager.pending_migration.is_none());
+    }
+
     /// 2-hop migration: A → fail → B → fail → C. Each retry's
     /// `migration_link` must point at the *latest* failed worker, not the
     /// original.
     #[tokio::test]
     async fn test_retry_manager_propagates_migration_link_over_two_hops() {
         use crate::protocols::common::preprocessor::TraceLink;
+        use dynamo_runtime::pipeline::network::egress::route_span::get_route_trace_context;
         use std::sync::Mutex;
 
         dynamo_runtime::logging::init();
 
+        type CapturedRoute = (u32, Option<ErrorType>, Option<u64>, usize);
+
         struct LinkingMockEngine {
             captured_links: Arc<Mutex<Vec<Option<TraceLink>>>>,
+            captured_routes: Arc<Mutex<Vec<CapturedRoute>>>,
             worker_links: Vec<TraceLink>,
             context_id: String,
             call_count: Arc<AtomicU32>,
@@ -1844,6 +2432,15 @@ mod tests {
                 request: SingleIn<PreprocessedRequest>,
             ) -> Result<ManyOut<Annotated<BackendOutput>>> {
                 let call_num = self.call_count.fetch_add(1, Ordering::SeqCst) as usize;
+                let route_trace = get_route_trace_context(&request)
+                    .expect("migration wrapper must attach route trace context");
+                route_trace.set_selected_worker_id(100 + call_num as u64);
+                self.captured_routes.lock().unwrap().push((
+                    route_trace.attempt(),
+                    route_trace.migration_reason(),
+                    route_trace.from_worker_id(),
+                    route_trace.tokens_completed(),
+                ));
                 let (preprocessed_request, _ctx) = request.transfer(());
                 self.captured_links
                     .lock()
@@ -1899,6 +2496,7 @@ mod tests {
         let context_id = uuid::Uuid::new_v4().to_string();
         let request = create_mock_request(6);
         let captured = Arc::new(Mutex::new(Vec::<Option<TraceLink>>::new()));
+        let captured_routes = Arc::new(Mutex::new(Vec::new()));
         let link_a = TraceLink {
             trace_id: "0123456789abcdef0123456789abcdef".to_string(),
             span_id: "aaaaaaaaaaaaaaaa".to_string(),
@@ -1910,6 +2508,7 @@ mod tests {
 
         let engine = Arc::new(LinkingMockEngine {
             captured_links: captured.clone(),
+            captured_routes: captured_routes.clone(),
             worker_links: vec![link_a.clone(), link_b.clone()],
             context_id: context_id.clone(),
             call_count: Arc::new(AtomicU32::new(0)),
@@ -1963,7 +2562,192 @@ mod tests {
             Some(&link_b),
             "third attempt must link back to worker B (latest worker, not original)"
         );
+        drop(links);
+
+        assert_eq!(
+            *captured_routes.lock().unwrap(),
+            vec![
+                (0, None, None, 0),
+                (1, Some(ErrorType::Disconnected), Some(100), 2),
+                (2, Some(ErrorType::Disconnected), Some(101), 4),
+            ],
+            "each retry must carry the failed worker, reason, and delivered-token count"
+        );
 
         assert_eq!(metrics.get_migration_ongoing_request_count(TEST_MODEL), 2);
+    }
+
+    /// The `migration retries exhausted` event must name the attempt that
+    /// *failed*, not the retry that will never happen.
+    ///
+    /// `next_attempt` is incremented at dispatch, so after attempt 0 is
+    /// dispatched it already reads 1. Recording that would emit
+    /// `request.attempt=1` for a run whose only route span is attempt 0,
+    /// so consumers joining lifecycle events to `router.route_request` spans by
+    /// `request.attempt` could never correlate the exhaustion event.
+    ///
+    /// This asserts on the emitted field rather than on struct state, because
+    /// struct state is exactly what does *not* catch the off-by-one.
+    #[tokio::test]
+    async fn test_migration_exhausted_reports_the_attempt_that_failed() {
+        use std::sync::Mutex;
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context as LayerContext, Layer, SubscriberExt};
+
+        #[derive(Default)]
+        struct Captured {
+            exhausted_attempt: Option<u64>,
+            exhausted_tokens: Option<u64>,
+            scheduled_attempts: Vec<u64>,
+        }
+
+        struct AttemptVisitor {
+            message: Option<String>,
+            attempt: Option<u64>,
+            tokens: Option<u64>,
+        }
+
+        impl Visit for AttemptVisitor {
+            fn record_u64(&mut self, field: &Field, value: u64) {
+                match field.name() {
+                    "request.attempt" => self.attempt = Some(value),
+                    "migration.tokens_completed" => self.tokens = Some(value),
+                    _ => {}
+                }
+            }
+            fn record_i64(&mut self, field: &Field, value: i64) {
+                match field.name() {
+                    "request.attempt" => self.attempt = Some(value as u64),
+                    "migration.tokens_completed" => self.tokens = Some(value as u64),
+                    _ => {}
+                }
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = Some(format!("{value:?}"));
+                }
+            }
+        }
+
+        struct CaptureLayer(Arc<Mutex<Captured>>);
+
+        impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: LayerContext<'_, S>) {
+                let mut visitor = AttemptVisitor {
+                    message: None,
+                    attempt: None,
+                    tokens: None,
+                };
+                event.record(&mut visitor);
+                let (Some(message), Some(attempt)) = (visitor.message, visitor.attempt) else {
+                    return;
+                };
+                let mut captured = self.0.lock().unwrap();
+                if message.contains("migration retries exhausted") {
+                    captured.exhausted_attempt = Some(attempt);
+                    captured.exhausted_tokens = visitor.tokens;
+                } else if message.contains("migration retry scheduled") {
+                    captured.scheduled_attempts.push(attempt);
+                }
+            }
+        }
+
+        /// Fails mid-stream on every attempt, so retries run out.
+        struct AlwaysDisconnectEngine {
+            context_id: String,
+        }
+
+        #[async_trait]
+        impl
+            AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+                anyhow::Error,
+            > for AlwaysDisconnectEngine
+        {
+            async fn generate(
+                &self,
+                _request: SingleIn<PreprocessedRequest>,
+            ) -> Result<ManyOut<Annotated<BackendOutput>>> {
+                let responses = async_stream::stream! {
+                    yield create_mock_output(101);
+                    yield Annotated::from_err(
+                        DynamoError::builder()
+                            .error_type(ErrorType::Disconnected)
+                            .message("worker disconnected")
+                            .build(),
+                    );
+                };
+                Ok(ResponseStream::new(
+                    Box::pin(responses),
+                    Arc::new(Controller::new(self.context_id.clone())),
+                ))
+            }
+        }
+
+        let captured = Arc::new(Mutex::new(Captured::default()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
+
+        let context_id = uuid::Uuid::new_v4().to_string();
+        let root = Arc::new(Controller::new(context_id.clone()));
+        let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<BackendOutput>> =
+            Arc::new(AlwaysDisconnectEngine {
+                context_id: context_id.clone(),
+            });
+
+        // One retry: attempt 0 dispatches, fails, schedules attempt 1; attempt 1
+        // dispatches, fails, and exhausts.
+        let retries = 1;
+        let manager = tracing::subscriber::with_default(subscriber, || {
+            futures::executor::block_on(async {
+                let mut manager = RetryManager::build(
+                    root,
+                    BTreeMap::new(),
+                    create_mock_request(50),
+                    next_generate,
+                    retries,
+                    None,
+                    Arc::new(TEST_MODEL.to_string()),
+                    Arc::new(Metrics::new()),
+                    None,
+                )
+                .await
+                .expect("initial stream should be created");
+                while let Some(response) = manager.next().await {
+                    if response.err().is_some() {
+                        break;
+                    }
+                }
+                manager
+            })
+        });
+
+        let captured = captured.lock().unwrap();
+        let last_dispatched = manager.next_attempt - 1;
+        assert_eq!(
+            captured.exhausted_attempt,
+            Some(u64::from(last_dispatched)),
+            "exhaustion must name the attempt that failed ({last_dispatched}), \
+             not the retry that never ran; scheduled={:?}",
+            captured.scheduled_attempts
+        );
+        // The tally must include the final allowed attempt. `new_stream`
+        // decrements `retries_left` before dispatching, so that attempt runs
+        // with the counter already at zero; when the tally sat behind the
+        // replay guard in `track_response`, the token it delivered was dropped
+        // and this reported 1 instead of 2.
+        assert_eq!(
+            captured.exhausted_tokens,
+            Some(2),
+            "exhaustion must count the token from the final allowed attempt, \
+             not just the attempts that had retries left"
+        );
+        // The forward-looking event keeps naming the retry it schedules, and that
+        // attempt really is dispatched.
+        assert_eq!(
+            captured.scheduled_attempts,
+            vec![u64::from(last_dispatched)],
+            "retry scheduled must name the upcoming attempt"
+        );
     }
 }

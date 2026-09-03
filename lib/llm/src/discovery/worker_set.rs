@@ -8,15 +8,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dynamo_runtime::engine::{AsyncEngine, Data};
+use dynamo_runtime::engine::{AsyncEngine, AsyncEngineContextProvider, Data};
 use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
 use dynamo_runtime::{component::Endpoint, protocols::EndpointId};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    discovery::KvWorkerMonitor,
-    kv_router::{EncoderRouter, prefill_router::PrefillRouterLifecycle},
+    discovery::{LoadThresholdHandle, allocator::AllocatorTrimOnDrop},
+    kv_router::{EncoderRouter, RoutingLoadContext, prefill_router::PrefillRouterLifecycle},
     model_card::ModelDeploymentCard,
     types::{
         RealtimeBidirectionalEngine,
@@ -33,6 +33,45 @@ use crate::{
 };
 
 type StreamingEngine<Req, Resp> = Arc<dyn AsyncEngine<SingleIn<Req>, ManyOut<Resp>, Error>>;
+
+struct RequestLifetimeEngine<Req, Resp>
+where
+    Req: AsyncEngineContextProvider + Send + 'static,
+    Resp: AsyncEngineContextProvider + 'static,
+{
+    inner: Arc<dyn AsyncEngine<Req, Resp, Error>>,
+    teardown: Arc<AllocatorTrimOnDrop>,
+}
+
+#[async_trait]
+impl<Req, Resp> AsyncEngine<Req, Resp, Error> for RequestLifetimeEngine<Req, Resp>
+where
+    Req: AsyncEngineContextProvider + Send + 'static,
+    Resp: AsyncEngineContextProvider + 'static,
+{
+    async fn generate(&self, request: Req) -> Result<Resp, Error> {
+        request.context().retain(self.teardown.clone());
+        let response = self.inner.generate(request).await?;
+        response.context().retain(self.teardown.clone());
+        Ok(response)
+    }
+}
+
+fn retain_teardown_until_requests_finish<Req, Resp>(
+    engine: Option<Arc<dyn AsyncEngine<Req, Resp, Error>>>,
+    teardown: &Arc<AllocatorTrimOnDrop>,
+) -> Option<Arc<dyn AsyncEngine<Req, Resp, Error>>>
+where
+    Req: AsyncEngineContextProvider + Send + 'static,
+    Resp: AsyncEngineContextProvider + 'static,
+{
+    engine.map(|inner| {
+        Arc::new(RequestLifetimeEngine {
+            inner,
+            teardown: teardown.clone(),
+        }) as Arc<dyn AsyncEngine<Req, Resp, Error>>
+    })
+}
 
 struct LoraContextEngine<Req: Data, Resp: Data> {
     inner: StreamingEngine<Req, Resp>,
@@ -120,8 +159,11 @@ pub struct WorkerSet {
     pub(crate) realtime_engine: Option<RealtimeBidirectionalEngine>,
     pub(crate) generate_engine: Option<GenerateStreamingEngine>,
 
-    /// Worker monitor for load-based rejection
-    pub(crate) worker_monitor: Option<KvWorkerMonitor>,
+    /// Owns load monitoring for routed surfaces that do not use `RoutingHost`.
+    load_context: Option<Arc<RoutingLoadContext>>,
+
+    /// Shared configuration handle for this routing load context.
+    pub(crate) load_thresholds: Option<LoadThresholdHandle>,
 
     /// Prefill router for disaggregated serving. Stored here so the watcher can
     /// deactivate it when all prefill workers die, and reactivate when they rejoin.
@@ -137,6 +179,10 @@ pub struct WorkerSet {
 
     /// Cancels background work created while materializing this WorkerSet.
     lifecycle_cancellation: Option<CancellationToken>,
+
+    /// Drops after engine fields and after every active request context releases it.
+    allocator_trim: Option<Arc<AllocatorTrimOnDrop>>,
+    allocator_trim_wrapped: bool,
 }
 
 impl WorkerSet {
@@ -158,11 +204,14 @@ impl WorkerSet {
             tensor_engine: None,
             realtime_engine: None,
             generate_engine: None,
-            worker_monitor: None,
+            load_context: None,
+            load_thresholds: None,
             prefill_router: None,
             encoder_router: None,
             instance_count_rx: None,
             lifecycle_cancellation: None,
+            allocator_trim: None,
+            allocator_trim_wrapped: false,
         }
     }
 
@@ -177,6 +226,15 @@ impl WorkerSet {
     pub(crate) fn set_topology_endpoint(&mut self, endpoint: Endpoint) {
         self.endpoint_id = Some(endpoint.id());
         self.topology_endpoint = Some(endpoint);
+    }
+
+    pub(crate) fn set_load_context(&mut self, load_context: Arc<RoutingLoadContext>) {
+        self.load_context = Some(load_context);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_context(&self) -> Option<&Arc<RoutingLoadContext>> {
+        self.load_context.as_ref()
     }
 
     pub(crate) fn topology_endpoint(&self) -> Option<&Endpoint> {
@@ -237,10 +295,9 @@ impl WorkerSet {
 
     /// Check whether this worker set advertises `capability` in its runtime configuration.
     pub fn supports_runtime_capability(&self, capability: &str) -> bool {
-        matches!(
-            self.card.runtime_config.runtime_data.get(capability),
-            Some(serde_json::Value::Bool(true))
-        )
+        self.card
+            .runtime_config
+            .supports_runtime_capability(capability)
     }
 
     /// Whether this set has any decode engine (chat or completions)
@@ -296,10 +353,18 @@ impl WorkerSet {
 
     /// Build ParsingOptions from this WorkerSet's card configuration.
     pub fn parsing_options(&self) -> crate::protocols::openai::ParsingOptions {
-        crate::protocols::openai::ParsingOptions::new(
-            self.card.runtime_config.tool_call_parser.clone(),
-            self.card.runtime_config.reasoning_parser.clone(),
-        )
+        crate::protocols::openai::ParsingOptions {
+            structural_tag_mode: self.card.runtime_config.structural_tag_mode,
+            structural_tag_scope: self.card.runtime_config.structural_tag_scope,
+            exclude_tools_when_tool_choice_none: self
+                .card
+                .runtime_config
+                .exclude_tools_when_tool_choice_none,
+            ..crate::protocols::openai::ParsingOptions::new(
+                self.card.runtime_config.tool_call_parser.clone(),
+                self.card.runtime_config.reasoning_parser.clone(),
+            )
+        }
     }
 
     /// Number of active workers in this set, derived from the Client's discovery watcher.
@@ -321,6 +386,36 @@ impl WorkerSet {
         self.lifecycle_cancellation = Some(cancellation);
     }
 
+    pub(crate) fn initialize_allocator_trim_on_teardown(&mut self) -> Arc<AllocatorTrimOnDrop> {
+        self.allocator_trim
+            .get_or_insert_with(|| Arc::new(AllocatorTrimOnDrop::new()))
+            .clone()
+    }
+
+    pub(crate) fn enable_allocator_trim_on_teardown(&mut self) {
+        if self.allocator_trim_wrapped {
+            return;
+        }
+        let teardown = self.initialize_allocator_trim_on_teardown();
+        macro_rules! retain_for_requests {
+            ($field:ident) => {
+                self.$field = retain_teardown_until_requests_finish(self.$field.take(), &teardown);
+            };
+        }
+        retain_for_requests!(chat_engine);
+        retain_for_requests!(completions_engine);
+        retain_for_requests!(embeddings_engine);
+        retain_for_requests!(classify_engine);
+        retain_for_requests!(pooling_engine);
+        retain_for_requests!(images_engine);
+        retain_for_requests!(videos_engine);
+        retain_for_requests!(audios_engine);
+        retain_for_requests!(tensor_engine);
+        retain_for_requests!(realtime_engine);
+        retain_for_requests!(generate_engine);
+        self.allocator_trim_wrapped = true;
+    }
+
     pub(crate) fn adapter_view(&self, card: ModelDeploymentCard) -> Self {
         let lora_name = card
             .lora
@@ -334,7 +429,7 @@ impl WorkerSet {
                 lora_name: lora_name.clone(),
             }) as GenerateStreamingEngine
         });
-        Self {
+        let mut view = Self {
             namespace: self.namespace.clone(),
             endpoint_id: self.endpoint_id.clone(),
             topology_endpoint: self.topology_endpoint.clone(),
@@ -353,12 +448,19 @@ impl WorkerSet {
             // inject the adapter identity. Fail closed instead of serving the base weights.
             realtime_engine: None,
             generate_engine,
-            worker_monitor: self.worker_monitor.clone(),
+            load_context: self.load_context.clone(),
+            load_thresholds: self.load_thresholds.clone(),
             prefill_router: self.prefill_router.clone(),
             encoder_router: self.encoder_router.clone(),
             instance_count_rx: self.instance_count_rx.clone(),
             lifecycle_cancellation: None,
+            allocator_trim: None,
+            allocator_trim_wrapped: false,
+        };
+        if self.allocator_trim.is_some() {
+            view.enable_allocator_trim_on_teardown();
         }
+        view
     }
 }
 

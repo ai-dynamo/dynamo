@@ -51,7 +51,7 @@ func newDGDSharedResourcesReconciler(
 	config *configv1alpha1.OperatorConfiguration,
 	runtimeConfig *commoncontroller.RuntimeConfig,
 	restConfig *rest.Config,
-	dockerSecretRetriever dockerSecretRetriever,
+	dockerSecretRetriever DockerSecretRetriever,
 	sshKeyManager *secret.SSHKeyManager,
 	rbacManager rbacManager,
 ) *dgdSharedResourcesReconciler {

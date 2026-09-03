@@ -757,22 +757,25 @@ impl EventSubscriber {
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
 
                     let stream: WireStream = if broker.xpub_endpoints.len() == 1 {
-                        // Single broker - no deduplication needed
-                        let sub_transport = zmq_transport::ZmqSubTransport::connect_broker(
+                        // One EventSubscriber has one consumer. Poll the ZMQ socket
+                        // directly instead of forwarding through a lossy broadcast channel.
+                        let stream = zmq_transport::ZmqSubTransport::connect_single_consumer(
                             &broker.xpub_endpoints[0],
                             &routing_key,
                         )
                         .await?;
-                        sub_transport.subscribe(&routing_key).await?
+                        Box::pin(stream.map(|result| result.map(|message| message.payload)))
                     } else {
                         // Multiple brokers - need deduplication
-                        let sub_transport =
-                            zmq_transport::ZmqSubTransport::connect_broker_multiple(
+                        let inner_stream =
+                            zmq_transport::ZmqSubTransport::connect_single_consumer_multiple(
                                 &broker.xpub_endpoints,
                                 &routing_key,
                             )
                             .await?;
-                        let inner_stream = sub_transport.subscribe(&routing_key).await?;
+                        let inner_stream: WireStream = Box::pin(
+                            inner_stream.map(|result| result.map(|message| message.payload)),
+                        );
 
                         // Wrap with deduplication (default cache size: 100,000 entries)
                         Box::pin(DeduplicatingStream::new(
@@ -922,6 +925,35 @@ fn current_timestamp_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::config::environment_names::zmq_broker as broker_env;
+
+    #[tokio::test]
+    async fn multi_broker_stream_deduplicates_by_publisher_and_sequence() {
+        let codec = Arc::new(Codec::default());
+        let first = codec
+            .encode_envelope_parts(7, 11, 1, "events", b"first")
+            .unwrap();
+        let second = codec
+            .encode_envelope_parts(7, 12, 2, "events", b"second")
+            .unwrap();
+        let other_publisher = codec
+            .encode_envelope_parts(8, 11, 3, "events", b"other")
+            .unwrap();
+        let expected_first = first.clone();
+        let expected_second = second.clone();
+        let expected_other = other_publisher.clone();
+        let inner: WireStream = Box::pin(futures::stream::iter(vec![
+            Ok(first.clone()),
+            Ok(first),
+            Ok(second),
+            Ok(other_publisher),
+        ]));
+        let mut stream = DeduplicatingStream::new(inner, codec, 16);
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), expected_first);
+        assert_eq!(stream.next().await.unwrap().unwrap(), expected_second);
+        assert_eq!(stream.next().await.unwrap().unwrap(), expected_other);
+        assert!(stream.next().await.is_none());
+    }
 
     #[test]
     fn publisher_ids_survive_a_json_number_round_trip() {

@@ -215,7 +215,7 @@ where
 {
     /// Get the agent name from registered storage.
     ///
-    /// This is a convenience method when using ArenaAllocator with NixlRegistered<T> storage.
+    /// This is a convenience method when using ArenaAllocator with `NixlRegistered<T>` storage.
     pub fn agent_name(&self) -> &str {
         self.storage.agent_name()
     }

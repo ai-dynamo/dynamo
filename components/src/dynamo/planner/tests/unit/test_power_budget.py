@@ -63,6 +63,23 @@ def test_minimum_power_footprint_fits(budget, min_endpoint, p, d, fits):
     assert minimum_power_footprint_fits(budget, min_endpoint, p, d) is fits
 
 
+def test_minimum_power_footprint_uses_component_minimums():
+    assert minimum_power_footprint_fits(
+        2600,
+        prefill_min_endpoint=2,
+        decode_min_endpoint=1,
+        p_watts=700,
+        d_watts=1200,
+    )
+    assert not minimum_power_footprint_fits(
+        2599,
+        prefill_min_endpoint=2,
+        decode_min_endpoint=1,
+        p_watts=700,
+        d_watts=1200,
+    )
+
+
 # ---------------------------------------------------------------------------
 # apply_power_budget — ceiling clamp
 # ---------------------------------------------------------------------------
@@ -208,6 +225,8 @@ def _agg_config(**overrides):
         enable_power_awareness=True,
         total_gpu_power_limit=1200,
         min_endpoint=1,
+        prefill_min_endpoint=None,
+        decode_min_endpoint=None,
         min_gpu_budget=8,  # GPU floor: 8 GPUs
         max_gpu_budget=-1,  # no GPU ceiling
         mode="agg",
@@ -266,6 +285,8 @@ def _mode_config(mode, **overrides):
         enable_power_awareness=True,
         total_gpu_power_limit=1200,
         min_endpoint=1,
+        prefill_min_endpoint=None,
+        decode_min_endpoint=None,
         min_gpu_budget=-1,
         max_gpu_budget=-1,
         mode=mode,
@@ -674,6 +695,100 @@ def test_project_scale_to_rebalance_prefill_up_after_decode_stable():
     decision = adapter._project_scale_to(outcome, wc)
     assert decision is not None
     assert decision.num_prefill == 4
+    assert decision.num_decode is None
+
+
+def test_runtime_floor_reconcile_stages_budget_peer_before_scale_up():
+    """A runtime floor must be able to reclaim budget from an unproposed peer."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=1, power_watts_per_replica=100),
+        decode=EngineCapabilities(num_gpu=1, power_watts_per_replica=100),
+    )
+    adapter = _bare_adapter(
+        _mode_config(
+            "disagg",
+            total_gpu_power_limit=1000,
+            max_gpu_budget=10,
+            prefill_min_endpoint=2,
+            decode_min_endpoint=1,
+        ),
+        caps,
+    )
+    outcome = _apply_outcome(
+        SimpleNamespace(sub_component_type="prefill", replicas=1),
+        SimpleNamespace(sub_component_type="decode", replicas=9),
+        proposed=set(),
+    )
+
+    tick_one = adapter._project_scale_to(
+        outcome,
+        WorkerCounts(
+            ready_num_prefill=1,
+            ready_num_decode=9,
+            expected_num_prefill=1,
+            expected_num_decode=9,
+        ),
+    )
+    assert tick_one is not None
+    assert tick_one.num_prefill is None
+    assert tick_one.num_decode == 8
+
+    tick_two = adapter._project_scale_to(
+        _apply_outcome(
+            SimpleNamespace(sub_component_type="prefill", replicas=1),
+            SimpleNamespace(sub_component_type="decode", replicas=8),
+            proposed=set(),
+        ),
+        WorkerCounts(
+            ready_num_prefill=1,
+            ready_num_decode=8,
+            expected_num_prefill=1,
+            expected_num_decode=8,
+        ),
+    )
+    assert tick_two is not None
+    assert tick_two.num_prefill == 2
+    assert tick_two.num_decode is None
+
+
+def test_runtime_floor_reconcile_waits_for_rollout_then_drops_peer_echo():
+    """Implicit floors must not replace an in-flight desired replica count."""
+    caps = WorkerCapabilities(
+        prefill=EngineCapabilities(num_gpu=1),
+        decode=EngineCapabilities(num_gpu=1),
+    )
+    adapter = _bare_adapter(
+        _mode_config(
+            "disagg",
+            enable_power_awareness=False,
+            prefill_min_endpoint=3,
+            decode_min_endpoint=1,
+        ),
+        caps,
+    )
+    outcome = _apply_outcome(
+        SimpleNamespace(sub_component_type="prefill", replicas=1),
+        SimpleNamespace(sub_component_type="decode", replicas=2),
+        proposed=set(),
+    )
+
+    rolling = WorkerCounts(
+        ready_num_prefill=1,
+        ready_num_decode=2,
+        prefill_scaling_in_progress=True,
+        decode_scaling_in_progress=True,
+    )
+    assert adapter._project_scale_to(outcome, rolling) is None
+
+    stable = WorkerCounts(
+        ready_num_prefill=1,
+        ready_num_decode=2,
+        expected_num_prefill=1,
+        expected_num_decode=2,
+    )
+    decision = adapter._project_scale_to(outcome, stable)
+    assert decision is not None
+    assert decision.num_prefill == 3
     assert decision.num_decode is None
 
 

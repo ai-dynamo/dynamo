@@ -54,7 +54,7 @@ invalid configuration. Production integrations should use
 `SelectionServiceBuilder` so startup recovery, readiness, and background-task
 lifecycle remain consistent with the standalone service.
 
-To inject native Rust scorers and a picker while retaining those service-owned capabilities, see [Write Custom Routing Strategies](../../../advanced-customizations/custom-worker-selection.mdx).
+To inject native Rust scorers and a picker while retaining those service-owned capabilities, see [Write Custom Routing Strategies](custom-worker-selection.mdx).
 
 The C and Go bindings do not currently expose `SelectionService`. An EPP
 integration requires separate FFI lifecycle, error-mapping, worker, and peer
@@ -63,7 +63,7 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 
 ### CLI
 
-| Flag | Default | Description |
+| Setting | Default | Description |
 |------|---------|-------------|
 | `--port` | `8092` | HTTP server port. |
 | `--threads` | `4` | KV indexer worker threads. |
@@ -76,9 +76,16 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 | `--router-tracking-hash` | environment/default | Override the tracking algorithm with `public-xxh3-v1` or experimental `keyed-xxh3-v1`. |
 | `--router-tracking-key-file` | environment/none | Override the path to the 32-byte provider key file. |
 | `--router-tracking-key-id` | environment/none | Override the provider-managed key epoch. |
+| `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS` | `300` | Override the absolute request age at which the standalone slot tracker may reclaim stale active state. |
 
 Router scheduling behavior continues to use the standard Dynamo router
 environment configuration.
+
+The standalone expiry guard measures absolute age from admission; output progress does not refresh
+it. Periodic cleanup therefore reclaims stale state approximately five to six minutes after
+admission by default. The embedded `KvRouter` uses the same `300`-second value as its shared
+request-liveness CLOCK scan interval and reclaims an idle lease approximately five to ten minutes
+after the last progress touch.
 
 ## Worker Registration
 
@@ -133,7 +140,8 @@ Select a worker without booking active load:
   "routing_group": "default",
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
-  "isl_tokens": 512
+  "isl_tokens": 512,
+  "session_id": "session-abc"
 }
 ```
 
@@ -149,7 +157,8 @@ globally unique `selection_id`, or allow the service to generate one:
   "routing_group": "default",
   "block_hashes": [11, 12, 13, 14, 15, 16, 17, 18],
   "sequence_hashes": [21, 22, 23, 24, 25, 26, 27, 28],
-  "isl_tokens": 512
+  "isl_tokens": 512,
+  "session_id": "session-abc"
 }
 ```
 
@@ -201,6 +210,29 @@ lookups. Requests that instead supply `block_hashes`, `sequence_hashes`, and
 `isl_tokens` remain trusted precomputed inputs. The service does not reject,
 rewrite, or label those identities in keyed mode. Configure every precomputed
 hash producer with the same algorithm, key, and key ID as the selector.
+
+### `session_id`
+
+Both `POST /select` and `POST /select_and_reserve` accept an optional
+`session_id` string. It defaults to absent. Under the built-in selector,
+omitting it does not change selection; a custom policy that reads the field can
+select differently depending on whether it is present. The selector carries the
+value through scheduling and exposes it to worker-selection policy as
+`WorkerSelectionContext::session_id()`, so a custom picker or scorer can
+implement session affinity by preferring the worker a session used previously.
+
+> [!NOTE]
+> `session_id` is an input to policy, not an affinity mechanism in itself. The
+> built-in selector ignores it, so it changes the chosen worker only when you
+> supply a custom picker or scorer that reads it. See
+> [Write Custom Routing Strategies](custom-worker-selection.mdx).
+> It is also distinct from the frontend's own session affinity, which binds
+> sessions from request headers rather than from this API; see
+> [Configuration and Tuning](configuration-and-tuning.md).
+
+The selection service does not persist, replicate, or expire `session_id`
+bindings. It is not part of the selection response and is not retained by the
+pending-selection cache, so a `POST /reservations` replay does not carry it.
 
 ## Ray Select-Then-Reserve Flow
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # DeepSeek-V4-Flash on vLLM, aggregated, GB200 (TP=4 + EP, single NVL4 tray).
-# Weights: pre-staged on the `model-cache` PVC by `../../model-cache/model-download.yaml`.
+# Weights: pre-staged on the `model-cache` PVC by `../../model-cache/model-download-fp8.yaml`.
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
