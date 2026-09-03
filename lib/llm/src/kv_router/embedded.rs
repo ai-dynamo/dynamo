@@ -19,7 +19,6 @@ use anyhow::{Context, Result};
 use dynamo_kv_router::WorkerType;
 use dynamo_kv_router::config::KvRouterConfig;
 use dynamo_kv_router::identity::RoutingPartitionId;
-use dynamo_kv_router::indexer::TieredMatchProvider;
 use dynamo_kv_router::protocols::{WorkerConfigLike, WorkerId, WorkerWithDpRank};
 use dynamo_kv_router::scheduling::queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor};
 use dynamo_kv_router::scheduling::{
@@ -51,9 +50,9 @@ pub(crate) struct EmbeddedSelectionArgs {
     pub prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     pub overloaded_worker_provider: OverloadedWorkerProvider,
     pub available_worker_provider: WorkerAvailabilityProvider,
-    /// The router's own indexer, used for dequeue-time overlap refresh so
-    /// queued requests are re-scored against the index that scored them.
-    pub overlap_refresh: Option<Arc<dyn TieredMatchProvider>>,
+    /// The router's index, built and fed by the router; the partition reads
+    /// it for selection and dequeue-time refresh.
+    pub indexer: super::indexer::Indexer,
     /// Scheduler-owned load snapshots for the worker monitor's overload
     /// detection, the same feed the runtime scheduler publishes.
     pub scheduler_load: crate::kv_router::routing_load::SchedulerLoadSender,
@@ -156,9 +155,7 @@ impl EmbeddedSelection {
             },
             cache: HostCache {
                 shared: None,
-                index: KvIndexSource::External {
-                    refresh: args.overlap_refresh,
-                },
+                index: KvIndexSource::Provided(Arc::new(args.indexer)),
             },
             eligibility: HostEligibility::default(),
             telemetry: HostTelemetry {

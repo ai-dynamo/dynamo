@@ -820,10 +820,6 @@ impl KvRouter {
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
-        let overlap_refresh: Option<Arc<dyn dynamo_kv_router::indexer::TieredMatchProvider>> =
-            indexer
-                .supports_overlap_refresh()
-                .then(|| Arc::new(indexer.clone()) as Arc<_>);
         let scheduler = embedded::EmbeddedSelection::start(
             embedded::EmbeddedSelectionArgs {
                 kv_router_config: kv_router_config.clone(),
@@ -835,7 +831,7 @@ impl KvRouter {
                 prefill_load_estimator: prefill_load_estimator.clone(),
                 overloaded_worker_provider,
                 available_worker_provider,
-                overlap_refresh,
+                indexer: indexer.clone(),
                 scheduler_load,
                 endpoint: endpoint.clone(),
                 router_id: endpoint.drt().discovery().instance_id(),
