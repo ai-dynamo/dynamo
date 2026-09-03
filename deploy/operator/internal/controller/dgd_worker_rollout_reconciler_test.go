@@ -5029,18 +5029,34 @@ func TestBuildRollingUpdateContext_GetNewDCDError(t *testing.T) {
 	require.NotEqual(t, testOldWorkerHash, betaDGDWorkersSpecHash(t, dgd),
 		"test setup: annotation must differ from computed hash so getNewWorkerDCDsByComponent looks up the new-gen DCD")
 
+	t.Log("Seed an old-gen worker DCD so the loop body executes and reaches the new-DCD Get")
+	oldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd-worker-" + testOldWorkerHash, Namespace: dgd.Namespace},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				ServiceName:   "worker",
+				Replicas:      ptr.To(int32(1)),
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+					consts.KubeLabelDynamoWorkerHash:          testOldWorkerHash,
+				},
+			},
+		},
+	})
+
 	injectedErr := errors.New("simulated apiserver get failure")
 	funcs := interceptor.Funcs{
 		Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
 			return injectedErr
 		},
 	}
-	r := createTestReconcilerWithStatus(dgd, withInterceptor(funcs))
+	r := createTestReconcilerWithStatus(dgd, withObjects(oldDCD), withInterceptor(funcs))
 	ctx := context.Background()
 
 	_, err := r.buildRollingUpdateContext(ctx, dgd)
 
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.ErrorIs(t, err, injectedErr, "non-NotFound Get error must be wrapped and propagated")
 	assert.Contains(t, err.Error(), "failed to get new worker DCD",
 		"error must originate from the new-DCD Get path, not some other call")

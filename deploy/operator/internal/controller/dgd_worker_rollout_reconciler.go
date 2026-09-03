@@ -1459,6 +1459,14 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			continue
 		}
 
+		// Skip drain budget calculation for components with no old DCDs. Inserting
+		// a zero-target entry would cause InProgress() to return true in steady
+		// state, triggering rollout-only paths unnecessarily.
+		oldDCDs := oldDCDsByComponent[componentName]
+		if len(oldDCDs) == 0 {
+			continue
+		}
+
 		desired := int32(1)
 		if spec.Replicas != nil {
 			desired = *spec.Replicas
@@ -1485,7 +1493,6 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 			// have observed the drain and every old workload pod is terminal; only
 			// then start the replacement generation.
 			maxUnavailable = desired
-			oldDCDs := oldDCDsByComponent[componentName]
 			drained, err := r.oldWorkerComponentDrained(ctx, dgd, componentName, oldDCDs)
 			if err != nil {
 				return dynamo.RollingUpdateContext{}, err
@@ -1513,7 +1520,7 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		oldWorkerComponentReplicas[componentName] = oldTarget
 		newWorkerReplicas[componentName] = newTarget
 
-		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDsByComponent[componentName], oldTarget) {
+		for dcdName, target := range allocateOldWorkerDCDReplicas(oldDCDs, oldTarget) {
 			oldWorkerDCDReplicas[dcdName] = target
 		}
 
