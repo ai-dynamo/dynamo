@@ -17,6 +17,12 @@ from dynamo.sglang.engine_generate import (
     native_generate_payload,
     native_generate_stream,
 )
+from dynamo.sglang.parallel_sampling import (
+    BOOTSTRAP_ROOMS_KEY,
+    choice_request_ids,
+    requested_parallel_samples,
+    resolve_prefill_bootstrap_rooms,
+)
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
@@ -106,7 +112,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 k: v for k, v in sampling_params.items() if v is not None
             }
         native_payload = native_generate_payload(inner_request)
+        # n > 1 runs as n single-sample sub-requests, one room each (see
+        # dynamo.sglang.parallel_sampling). Native Generate is always n == 1.
+        num_choices = 1
         if native_payload is None:
+            num_choices = requested_parallel_samples(sampling_params)
             sampling_params["n"] = 1
             sampling_params["max_new_tokens"] = 1
 
@@ -114,10 +124,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Otherwise use real bootstrap host/port from engine and generate room locally
         bootstrap_host = self.bootstrap_host
         bootstrap_port = self.bootstrap_port
-        bootstrap_room = None
 
         bootstrap_info_from_req = inner_request.get("bootstrap_info")
-        if isinstance(bootstrap_info_from_req, dict):
+        if not isinstance(bootstrap_info_from_req, dict):
+            bootstrap_info_from_req = None
+        if bootstrap_info_from_req is not None:
             # Allow overriding bootstrap_host for fake-transfer mode (health checks)
             if "bootstrap_host" in bootstrap_info_from_req:
                 bootstrap_host = bootstrap_info_from_req["bootstrap_host"]
@@ -129,19 +140,20 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 logging.debug(
                     f"Using request-provided bootstrap_port: {bootstrap_port}"
                 )
-            bootstrap_room = bootstrap_info_from_req.get("bootstrap_room")
-            if bootstrap_room is not None:
-                logging.debug(f"Using router-provided bootstrap_room: {bootstrap_room}")
 
-        if bootstrap_room is None:
-            bootstrap_room = self._generate_bootstrap_room()
-            logging.debug(f"Generated bootstrap_room locally: {bootstrap_room}")
+        # One room per choice: router-drawn when available, else drawn here.
+        bootstrap_rooms = resolve_prefill_bootstrap_rooms(
+            bootstrap_info_from_req, num_choices, self._generate_bootstrap_room
+        )
+        logging.debug(f"Using bootstrap rooms: {bootstrap_rooms}")
 
-        bootstrap_info = {
+        bootstrap_info: Dict[str, Any] = {
             "bootstrap_host": bootstrap_host,
             "bootstrap_port": bootstrap_port,
-            "bootstrap_room": bootstrap_room,
+            "bootstrap_room": bootstrap_rooms[0],
         }
+        if num_choices > 1:
+            bootstrap_info[BOOTSTRAP_ROOMS_KEY] = bootstrap_rooms
 
         input_param = self._get_input_param(inner_request)
 
@@ -166,6 +178,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             )
 
         priority_kwargs = self._priority_kwargs(priority)
+        results: list[AsyncIterator[Any]] = []
         if native_payload is not None:
             input_ids = input_param.get("input_ids")
             if not isinstance(input_ids, list):
@@ -178,32 +191,37 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 sampling_overrides={"n": 1, "max_new_tokens": 1},
                 bootstrap_host=bootstrap_host,
                 bootstrap_port=bootstrap_port,
-                bootstrap_room=bootstrap_room,
+                bootstrap_room=bootstrap_rooms[0],
                 external_trace_header=trace_header,
                 routed_dp_rank=dp_rank,
                 lora_path=lora_path,
             )
-            results = native_generate_stream(self.engine, native_request)
+            results.append(native_generate_stream(self.engine, native_request))
         else:
-            results = await self.engine.async_generate(
-                **input_param,
-                **mm_kwargs,
-                sampling_params=sampling_params,
-                stream=True,
-                **require_reasoning_kwargs(self.engine, inner_request),
-                bootstrap_host=bootstrap_host,
-                bootstrap_port=bootstrap_port,
-                bootstrap_room=bootstrap_room,
-                external_trace_header=trace_header,
-                rid=trace_id,
-                data_parallel_rank=dp_rank,
-                lora_path=lora_path,
-                **priority_kwargs,
-            )
+            reasoning_kwargs = require_reasoning_kwargs(self.engine, inner_request)
+            rids = choice_request_ids(trace_id, context.id(), num_choices)
+            for bootstrap_room, rid in zip(bootstrap_rooms, rids):
+                results.append(
+                    await self.engine.async_generate(
+                        **input_param,
+                        **mm_kwargs,
+                        sampling_params=sampling_params,
+                        stream=True,
+                        **reasoning_kwargs,
+                        bootstrap_host=bootstrap_host,
+                        bootstrap_port=bootstrap_port,
+                        bootstrap_room=bootstrap_room,
+                        external_trace_header=trace_header,
+                        rid=rid,
+                        data_parallel_rank=dp_rank,
+                        lora_path=lora_path,
+                        **priority_kwargs,
+                    )
+                )
         if inner_request.get(HEALTH_CHECK_KEY):
             # Canary: stream engine output so the Rust canary sees scheduler output.
             # No _cancellation_monitor — probe is bounded (max_tokens=1, FAKE_BOOTSTRAP_HOST).
-            async for res in results:
+            async for res in results[0]:
                 yield res
             return
 
@@ -216,11 +234,18 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             "disaggregated_params": bootstrap_info,
         }
 
-        task = asyncio.create_task(self._consume_results(results, context))
-        self._consume_tasks.add(task)
-        task.add_done_callback(self._consume_tasks.discard)
+        # Every sub-request must be iterated for SGLang to submit it, so each
+        # gets its own consumer; the handoff completes once all of them have.
+        # A failing consumer leaves its siblings running, bounded by
+        # max_new_tokens=1 and SGLang's bootstrap timeout.
+        tasks = []
+        for choice_results in results:
+            task = asyncio.create_task(self._consume_results(choice_results, context))
+            self._consume_tasks.add(task)
+            task.add_done_callback(self._consume_tasks.discard)
+            tasks.append(task)
 
-        await task
+        await asyncio.gather(*tasks)
 
     async def _consume_results(
         self, results: AsyncIterator[Any], context: Context

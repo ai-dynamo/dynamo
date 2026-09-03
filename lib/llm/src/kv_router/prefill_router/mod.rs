@@ -115,8 +115,21 @@ fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
         bootstrap_host,
         bootstrap_port,
         bootstrap_room,
+        bootstrap_rooms: extract_bootstrap_rooms(params),
         handoff_id: Some(Uuid::new_v4()),
     })
+}
+
+/// Per-choice rooms a prefill worker drew itself for an `n > 1` request.
+/// A malformed list is dropped; decode then rejects the request.
+fn extract_bootstrap_rooms(params: &serde_json::Value) -> Option<Vec<u64>> {
+    let rooms = params
+        .get("bootstrap_rooms")?
+        .as_array()?
+        .iter()
+        .map(serde_json::Value::as_u64)
+        .collect::<Option<Vec<u64>>>()?;
+    (rooms.len() > 1).then_some(rooms)
 }
 
 struct PreparedPrefill {
@@ -603,6 +616,9 @@ where
         let topology_constraints =
             self.preflight_kv_transfer_constraints(Some(endpoint_id), worker_id)?;
 
+        // An `n > 1` request fans out into `n` single-sample sub-requests on
+        // the worker; draw one room each so all keep `room % dp_size == dp_rank`.
+        let parallel_samples = parallel_sample_count(request);
         let bootstrap_info = self
             .model_manager
             .get_disaggregated_endpoint(endpoint_id, worker_id)
@@ -613,12 +629,15 @@ where
                 let dp_size = self
                     .model_manager
                     .get_data_parallel_size(endpoint_id, worker_id);
-                let random_room = rand::random_range(0..=i64::MAX.cast_unsigned());
-                let bootstrap_room = compute_bootstrap_room(dp_rank, dp_size, random_room);
+                let rooms = draw_bootstrap_rooms(dp_rank, dp_size, parallel_samples, || {
+                    rand::random_range(0..=i64::MAX.cast_unsigned())
+                });
+                let bootstrap_room = rooms[0];
                 Some(BootstrapInfo {
                     bootstrap_host: host,
                     bootstrap_port: port,
                     bootstrap_room,
+                    bootstrap_rooms: (rooms.len() > 1).then_some(rooms),
                     handoff_id: Some(Uuid::new_v4()),
                 })
             });
@@ -646,6 +665,33 @@ where
         self.model_manager
             .get_kv_transfer_routing_constraints(endpoint_id, worker_id)
     }
+}
+
+/// Number of independent samples the request asks for (`sampling_options.n`).
+fn parallel_sample_count(request: &PreprocessedRequest) -> usize {
+    request
+        .sampling_options
+        .n
+        .map_or(1, |n| usize::from(n.max(1)))
+}
+
+/// Draw `count >= 1` distinct bootstrap rooms that all satisfy
+/// `room % dp_size == dp_rank` (see [`compute_bootstrap_room`]).
+fn draw_bootstrap_rooms(
+    dp_rank: Option<u32>,
+    dp_size: Option<u32>,
+    count: usize,
+    mut random_room: impl FnMut() -> u64,
+) -> Vec<u64> {
+    let mut rooms = Vec::with_capacity(count);
+    while rooms.len() < count {
+        let room = compute_bootstrap_room(dp_rank, dp_size, random_room());
+        // Two choices of one request must never pair on the same room.
+        if !rooms.contains(&room) {
+            rooms.push(room);
+        }
+    }
+    rooms
 }
 
 fn compute_bootstrap_room(dp_rank: Option<u32>, dp_size: Option<u32>, random_room: u64) -> u64 {
@@ -909,6 +955,44 @@ mod tests {
         assert_eq!(room_a % 48, 7);
     }
 
+    #[test]
+    fn draw_bootstrap_rooms_yields_one_room_for_single_sample() {
+        let rooms = draw_bootstrap_rooms(Some(3), Some(8), 1, || 1_001);
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0] % 8, 3);
+    }
+
+    #[test]
+    fn draw_bootstrap_rooms_keeps_dp_invariant_and_distinct_rooms() {
+        // Repeated randomness must not yield duplicate rooms: the second
+        // draw repeats the first value and has to be skipped.
+        let raw = [500u64, 500, 501, 502];
+        let mut next = 0;
+        let rooms = draw_bootstrap_rooms(Some(5), Some(16), 3, || {
+            let value = raw[next];
+            next += 1;
+            value
+        });
+        assert_eq!(rooms.len(), 3);
+        assert_eq!(next, 4);
+        for room in &rooms {
+            assert_eq!(room % 16, 5);
+            assert!(*room <= MAX_ROOM);
+        }
+        let distinct: HashSet<u64> = rooms.iter().copied().collect();
+        assert_eq!(distinct.len(), 3);
+    }
+
+    #[test]
+    fn parallel_sample_count_reads_sampling_options() {
+        let mut request = request_with_constraints(None);
+        assert_eq!(parallel_sample_count(&request), 1);
+        request.sampling_options.n = Some(0);
+        assert_eq!(parallel_sample_count(&request), 1);
+        request.sampling_options.n = Some(4);
+        assert_eq!(parallel_sample_count(&request), 4);
+    }
+
     fn request_with_constraints(
         routing_constraints: Option<RoutingConstraints>,
     ) -> PreprocessedRequest {
@@ -1015,6 +1099,42 @@ mod tests {
         assert_eq!(info.bootstrap_host, "10.0.0.5");
         assert_eq!(info.bootstrap_port, 12345);
         assert_eq!(info.bootstrap_room, 987654321);
+        assert_eq!(info.bootstrap_rooms, None);
+    }
+
+    #[test]
+    fn extract_bootstrap_info_carries_worker_drawn_choice_rooms() {
+        let params = serde_json::json!({
+            "bootstrap_host": "10.0.0.5",
+            "bootstrap_port": 12345,
+            "bootstrap_room": 10,
+            "bootstrap_rooms": [10, 20, 30],
+        });
+        let info = extract_bootstrap_info(&params).expect("valid params should parse");
+        assert_eq!(info.bootstrap_room, 10);
+        assert_eq!(info.bootstrap_rooms, Some(vec![10, 20, 30]));
+    }
+
+    #[test]
+    fn extract_bootstrap_info_drops_malformed_choice_rooms() {
+        for rooms in [
+            serde_json::json!(null),
+            serde_json::json!("10,20"),
+            serde_json::json!([10, "20"]),
+            serde_json::json!([10, -20]),
+            // A single-entry list is not a fan-out.
+            serde_json::json!([10]),
+        ] {
+            let params = serde_json::json!({
+                "bootstrap_host": "10.0.0.5",
+                "bootstrap_port": 12345,
+                "bootstrap_room": 10,
+                "bootstrap_rooms": rooms,
+            });
+            let info = extract_bootstrap_info(&params).expect("room list is optional");
+            assert_eq!(info.bootstrap_room, 10);
+            assert_eq!(info.bootstrap_rooms, None, "rooms={rooms}");
+        }
     }
 
     #[test]
