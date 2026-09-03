@@ -1,45 +1,42 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashSet, sync::Arc};
+use std::collections::HashSet;
 
 use anyhow::Result;
 use dynamo_kv_router::{
     protocols::{BlockExtraInfo, RoutingConstraints, WorkerId, WorkerWithDpRank},
+    scheduling::{
+        AdmissionAttempt,
+        queue::{SchedulerBookingCleanup, SchedulerBookingDescriptor},
+    },
     selector::WorkerSelector,
 };
 
 use super::{PrefillError, PrefillLifecycleState, PrefillQueryOutcome, PrefillRouter};
-use crate::{
-    kv_router::{KvRouter, sequence::SequenceError},
-    local_model::runtime_config::ModelRuntimeConfig,
-};
+use crate::local_model::runtime_config::ModelRuntimeConfig;
 
-/// A prefill booking that remains tied to the chooser that admitted it.
+/// A prefill booking that owns cleanup of the exact scheduler attempt it admitted.
 ///
-/// KV-routed bookings retain their admitting chooser so cleanup is independent
-/// of a later [`PrefillRouter`] binding change. Built-in router modes use an
-/// untracked, advisory booking whose release is a no-op.
-pub struct PrefillReservation<Sel = dynamo_kv_router::selector::DefaultWorkerSelector>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+/// KV-routed bookings retain their exact scheduler booking descriptor, so
+/// cleanup is independent of a later [`PrefillRouter`] binding change and
+/// cannot release a newer booking that reused its request ID and worker.
+/// Built-in router modes use an untracked, advisory booking whose release is a no-op.
+#[must_use]
+pub struct PrefillReservation {
     worker: WorkerWithDpRank,
-    release: ReservationRelease<Sel>,
+    release: ReservationRelease,
 }
 
-enum ReservationRelease<Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static> {
+enum ReservationRelease {
     Kv {
-        chooser: Arc<KvRouter<Sel>>,
-        scheduler_id: String,
+        cleanup: SchedulerBookingCleanup,
+        booking: Option<SchedulerBookingDescriptor>,
     },
     None,
 }
 
-impl<Sel> PrefillReservation<Sel>
-where
-    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
+impl PrefillReservation {
     pub fn worker_id(&self) -> WorkerId {
         self.worker.worker_id
     }
@@ -48,17 +45,23 @@ where
         self.worker.dp_rank
     }
 
-    /// Free this booking from the chooser that admitted it, when tracked.
-    pub async fn release(&self) -> Result<()> {
-        match &self.release {
-            ReservationRelease::Kv {
-                chooser,
-                scheduler_id,
-            } => match chooser.free_if_worker(scheduler_id, self.worker).await {
-                Ok(()) | Err(SequenceError::RequestNotFound { .. }) => Ok(()),
-                Err(error) => Err(error.into()),
-            },
-            ReservationRelease::None => Ok(()),
+    /// Release this booking and wait for the scheduler to acknowledge it.
+    pub async fn release(mut self) -> Result<()> {
+        if let ReservationRelease::Kv { cleanup, booking } = &mut self.release
+            && let Some(booking) = booking.take()
+        {
+            cleanup.enqueue_acknowledged(booking).wait().await?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for PrefillReservation {
+    fn drop(&mut self) {
+        if let ReservationRelease::Kv { cleanup, booking } = &mut self.release
+            && let Some(booking) = booking.take()
+        {
+            cleanup.enqueue(booking);
         }
     }
 }
@@ -69,12 +72,12 @@ where
 {
     /// Select a prefill worker and reserve it when KV routing is enabled.
     ///
-    /// KV-routed reservations own the exact chooser selected at admission
-    /// time. If this future is dropped while queued, the scheduler retracts
-    /// its pending admission; after success, the caller must release the
-    /// reservation on first output, terminal completion, or an abandoned
-    /// request. Built-in modes retain their existing advisory selection
-    /// semantics and return an untracked reservation.
+    /// If this future is dropped while queued, the scheduler retracts its
+    /// pending admission. After success, the returned reservation owns the
+    /// exact scheduler booking and enqueues cleanup when dropped; explicit
+    /// release waits for that cleanup to be acknowledged. Built-in modes retain
+    /// their existing advisory selection semantics and return an untracked
+    /// reservation.
     #[expect(clippy::too_many_arguments)]
     pub async fn reserve_prefill_worker(
         &self,
@@ -87,7 +90,7 @@ where
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-    ) -> Result<PrefillReservation<Sel>> {
+    ) -> Result<PrefillReservation> {
         if reservation_id.is_empty() {
             anyhow::bail!("prefill reservation ID must not be empty");
         }
@@ -108,8 +111,7 @@ where
                 release: ReservationRelease::None,
             });
         };
-        let chooser = Arc::clone(chooser);
-        let outcome = chooser
+        let admitted = chooser
             .find_best_match_details_with_lifecycle(
                 Some(reservation_id),
                 token_ids,
@@ -127,13 +129,21 @@ where
                 routing_constraints,
             )
             .await?;
+        let (outcome, attempt) = admitted.into_parts();
         match outcome {
             crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
+                let AdmissionAttempt::Tracked(attempt_id) = attempt else {
+                    anyhow::bail!("prefill reservation admission did not return a tracked attempt");
+                };
                 Ok(PrefillReservation {
                     worker,
                     release: ReservationRelease::Kv {
-                        chooser,
-                        scheduler_id: reservation_id.to_string(),
+                        cleanup: chooser.booking_cleanup(),
+                        booking: Some(SchedulerBookingDescriptor {
+                            request_id: reservation_id.to_string(),
+                            worker,
+                            attempt_id,
+                        }),
                     },
                 })
             }
@@ -553,11 +563,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prefill_reservation_releases_the_admitting_chooser_after_rebind() {
+    async fn prefill_reservation_cleans_exact_bookings_after_rebind() {
         let (router, original_chooser) = tracked_prefill_router().await;
         let reservation = router
             .reserve_prefill_worker(
                 "epp-prefill/rebind",
+                &[1u32; 64],
+                None,
+                None,
+                None,
+                0.0,
+                0,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap();
+
+        let dropped_reservation = router
+            .reserve_prefill_worker(
+                "epp-prefill/drop",
                 &[1u32; 64],
                 None,
                 None,
@@ -583,15 +608,21 @@ mod tests {
         router.binding.store(Some(replacement));
         reservation.release().await.unwrap();
 
-        let loads = original_chooser
-            .get_potential_loads(&[], None, None, None, None)
-            .await
-            .unwrap();
-        assert!(loads.iter().all(|load| load.potential_prefill_tokens == 0));
-
-        // A terminal callback may arrive after first output already released the
-        // booking; the second release must be an idempotent no-op.
-        reservation.release().await.unwrap();
+        drop(dropped_reservation);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let loads = original_chooser
+                    .get_potential_loads(&[], None, None, None, None)
+                    .await
+                    .unwrap();
+                if loads.iter().all(|load| load.potential_prefill_tokens == 0) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped reservation must release its admitted booking");
     }
 
     #[tokio::test]

@@ -1298,9 +1298,9 @@ where
 
     /// Admit a best-match request with scheduler-owned cancellation cleanup.
     ///
-    /// If the returned future is dropped while queueing is enabled, the scheduler
-    /// retracts the pending request. Callers own normal lifecycle cleanup after
-    /// this method returns a routed booking.
+    /// If the future is dropped before it returns, the scheduler retracts any
+    /// pending or admitted booking. After success, the returned outcome carries
+    /// the tracked attempt identity required for exact lifecycle cleanup.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn find_best_match_details_with_lifecycle(
         &self,
@@ -1318,7 +1318,7 @@ where
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
         routing_constraints: RoutingConstraints,
-    ) -> anyhow::Result<FindBestMatchOutcome> {
+    ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
         match self
             .find_best_match_details_with_policy_class_inner(
                 context_id,
@@ -1344,7 +1344,7 @@ where
             )
             .await?
         {
-            FindBestMatchInnerOutcome::WithAdmission(outcome) => Ok(outcome.into_parts().0),
+            FindBestMatchInnerOutcome::WithAdmission(outcome) => Ok(outcome),
             FindBestMatchInnerOutcome::WithoutAdmission(_) => {
                 unreachable!("with-admission routing returned advisory outcome")
             }
@@ -1929,6 +1929,11 @@ where
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
         self.scheduler.free_if_worker(request_id, worker).await
+    }
+
+    #[doc(hidden)]
+    pub(crate) fn booking_cleanup(&self) -> scheduler::SchedulerBookingCleanup {
+        self.scheduler.booking_cleanup()
     }
 
     pub(crate) fn request_lease_manager(&self) -> &request_lease::RequestLeaseManager {
