@@ -2287,9 +2287,9 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "5.4.0"
+version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d2723c9ec1c3106cd044ca7f3ff7db71e0e347d1190aa2694a7cc7121376a2a"
+checksum = "dbaf3179de1accba21fcad16eb22b5e113722084265e0315e808e32150088ee7"
 dependencies = [
  "async-openai",
  "derive_builder",
