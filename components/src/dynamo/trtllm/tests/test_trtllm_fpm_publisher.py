@@ -394,7 +394,7 @@ def test_streaming_kv_events_create_direct_subscribers_without_engine_polling(
 
 def test_streaming_kv_events_fall_back_to_slurm_hosts(monkeypatch):
     monkeypatch.delenv("DYN_TRTLLM_KV_EVENT_HOSTS", raising=False)
-    monkeypatch.setenv("SLURM_STEP_NODELIST", "worker[01-02]")
+    monkeypatch.setenv("SLURM_STEP_NODELIST", "worker[01-03]")
 
     assert publisher_mod._streaming_kv_event_hosts(2, 1) == [
         "worker01",

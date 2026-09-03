@@ -164,10 +164,10 @@ def _streaming_kv_event_hosts(
         source = "SLURM_STEP_NODELIST"
 
     required_nodes = (attention_dp_size + gpus_per_node - 1) // gpus_per_node
-    if len(nodes) != required_nodes:
+    if len(nodes) < required_nodes:
         raise RuntimeError(
             "Streaming TRT-LLM KV event subscriber discovery expected "
-            f"{required_nodes} worker nodes from {source}, got {len(nodes)}: {nodes}"
+            f"at least {required_nodes} worker nodes from {source}, got {len(nodes)}: {nodes}"
         )
     return [nodes[rank // gpus_per_node] for rank in range(attention_dp_size)]
 
