@@ -82,7 +82,11 @@ class ThroughputScalingMixin:
                 self._throughput_lower_bound_p = desired
             else:
                 self._throughput_lower_bound_d = desired
-            logger.info(f"Throughput lower bound set to {desired} for {component}")
+            logger.info(
+                "Throughput lower bound set to %s for %s",
+                desired,
+                component,
+            )
             self._diag_throughput_reason = (
                 "gpu_budget_guard_hold"
                 if _ceiling_reason == "gpu_budget_guard_hold"
@@ -234,7 +238,7 @@ class ThroughputScalingMixin:
 
         if self._config.enable_load_scaling:
             self._throughput_lower_bound_d = desired
-            logger.info(f"Agg throughput lower bound set to {desired}")
+            logger.info("Agg throughput lower bound set to %s", desired)
             self._diag_throughput_reason = (
                 "gpu_budget_guard_hold"
                 if _ceiling_reason == "gpu_budget_guard_hold"

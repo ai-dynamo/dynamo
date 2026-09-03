@@ -127,6 +127,8 @@ def _load_decision(
     proposed_p: Optional[int],
     proposed_d: Optional[int],
 ):
+    state.begin_tick()
+
     def _prefill(_self, _stats, _workers):
         return proposed_p
 
