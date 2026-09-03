@@ -963,6 +963,5 @@ async def init_llm_worker(
                 health_check_payload=health_check_payload,
             )
 
-        # Shutdown consolidator publisher if it was created
         if consolidator_publisher:
             consolidator_publisher.shutdown()

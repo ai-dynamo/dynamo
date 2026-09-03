@@ -478,8 +478,6 @@ def _mock_get_llm_engine(engine_args, *args, **kwargs):
 @pytest.mark.parametrize(
     ("publish_flags", "expected_iter_perf_stats"),
     [
-        # Router/Planner telemetry rides on KV-event publishing, and it is fed
-        # by the same iteration stats, so either flag turns them on.
         (["--publish-kv-events"], True),
         (["--publish-metrics"], True),
         ([], False),

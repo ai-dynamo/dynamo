@@ -381,8 +381,8 @@ def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
 
 
 def test_publisher_initialize_metrics_only_sends_nothing_to_router(monkeypatch):
-    """Prometheus-only: no worker-load publisher, no FPM, no KV events. The
-    stats thread still runs -- it is what populates the gauges."""
+    """The metrics thread still starts: it feeds the local Prometheus gauges,
+    not the router."""
     pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
         monkeypatch,
         attention_dp_size=1,
@@ -402,8 +402,6 @@ def test_publisher_initialize_metrics_only_sends_nothing_to_router(monkeypatch):
 def test_publisher_initialize_kv_events_builds_router_and_planner_publishers(
     monkeypatch,
 ):
-    """KV-event publishing owns the router and Planner telemetry, so it builds
-    both publishers and the stats thread that feeds them."""
     pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
         monkeypatch,
         attention_dp_size=1,
@@ -766,8 +764,6 @@ async def test_stats_polling_propagates_handler_error(monkeypatch, caplog):
 
 @pytest.mark.asyncio
 async def test_stats_polling_updates_gauges_without_worker_load_publisher():
-    """Prometheus-only: the stats task still drives the gauges and the metrics
-    collector for every rank with no worker-load publisher present."""
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub._stop_event = threading.Event()
     pub.engine = MagicMock()

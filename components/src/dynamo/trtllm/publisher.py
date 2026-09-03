@@ -55,7 +55,6 @@ _KV_EVENTS_TIMEOUT_SEC = 0.0
 _PUBLISH_MIN_SLEEP_SEC = 0.01
 _PUBLISH_MAX_SLEEP_SEC = 0.1
 _PUBLISH_BACKOFF_FACTOR = 2.0
-# Retry cadence for the stats thread after a non-timeout engine error.
 _STATS_RETRY_MIN_SLEEP_SEC = 0.5
 _STATS_RETRY_MAX_SLEEP_SEC = 30.0
 # Keep a continuously ready TRT-LLM iterator from starving its batch handler.
