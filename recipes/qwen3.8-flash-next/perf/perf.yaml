@@ -89,7 +89,7 @@ spec:
               if [ ! -f "${TRACE_FILE}" ]; then
                 mkdir -p "$(dirname "${TRACE_FILE}")"
                 echo "Trace not found at ${TRACE_FILE}, downloading from ${TRACE_URL}..."
-                curl -sL "${TRACE_URL}" -o "${TRACE_FILE}"
+                curl -sfL "${TRACE_URL}" -o "${TRACE_FILE}"
                 if [ -n "${TRACE_SHA256}" ]; then
                   actual=$(sha256sum "${TRACE_FILE}" | awk '{print $1}')
                   if [ "${actual}" != "${TRACE_SHA256}" ]; then

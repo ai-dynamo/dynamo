@@ -86,26 +86,46 @@ kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeo
 
 ### 4. Deploy
 
+<div data-variant="agg">
+
 ```bash
 # 4-GPU aggregated (1 worker × TP4)
 kubectl apply -f vllm/agg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 
 # 8-GPU aggregated (2 workers × TP4)
 kubectl apply -f vllm/agg-b200-agentic-8gpu/deploy.yaml -n ${NAMESPACE}
+```
 
+</div>
+
+<div data-variant="disagg">
+
+```bash
 # 8-GPU disaggregated (1P1D, InfiniBand RDMA)
 kubectl apply -f vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
 ```
 
+</div>
+
 ### 5. Smoke test
 
+<div data-variant="agg">
+
 ```bash
-# Aggregated
 kubectl port-forward svc/qwen38fn-agg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE} &
+```
 
-# Disaggregated (if using disagg instead of agg)
-# kubectl port-forward svc/qwen38fn-disagg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE} &
+</div>
 
+<div data-variant="disagg">
+
+```bash
+kubectl port-forward svc/qwen38fn-disagg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE} &
+```
+
+</div>
+
+```bash
 curl -s http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
@@ -115,4 +135,4 @@ curl -s http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-See the [recipe README](../../../../recipes/qwen3.8-flash-next/README.md) for full smoke tests including tool calling and image input.
+See the [recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-flash-next/README.md) for full smoke tests including tool calling and image input.

@@ -46,7 +46,7 @@ Dynamo + vLLM deployment profiles for the B200 agentic workload (64K ISL / 400 O
 
 ## Supported features
 
-- Modalities: **Text + Image** (multimodal)
+- Modalities: **Text + Image + Video** (multimodal)
 - Reasoning (`qwen3` reasoning parser)
 - Tool calling (`qwen3_coder` tool-call parser)
 - MTP3 speculative decoding
@@ -115,7 +115,7 @@ from there.
 > [!NOTE]
 > The containers run as `runAsUser: 0` because the cached weight files are root-owned while the image
 > defaults to a non-root uid.
-
+>
 > [!WARNING]
 > The NVFP4 checkpoint is ~130 GiB. First-load time is bounded by the storage backend, not the GPUs.
 > The startup probe budgets 60 minutes per worker; raise it if your storage is slower.
@@ -188,21 +188,12 @@ Expected: `choices[0].message.tool_calls[0].function.name` is `get_weather` and 
 ```bash
 # Download a sample image
 curl -s -o /tmp/test.png https://upload.wikimedia.org/wikipedia/commons/thumb/2/2f/Google_2015_logo.svg/250px-Google_2015_logo.svg.png
+IMAGE_B64=$(base64 -w0 /tmp/test.png)
 
 # Send multimodal request
 curl -s http://localhost:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{
-    "model": "Inferact/Qwen3.8-Flash-Next-NVFP4",
-    "messages": [{
-      "role": "user",
-      "content": [
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,'$(base64 -w0 /tmp/test.png)'"}},
-        {"type": "text", "text": "Describe this image in one sentence."}
-      ]
-    }],
-    "max_tokens": 128
-  }'
+  -d "{\"model\": \"Inferact/Qwen3.8-Flash-Next-NVFP4\", \"messages\": [{\"role\": \"user\", \"content\": [{\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/png;base64,${IMAGE_B64}\"}}, {\"type\": \"text\", \"text\": \"Describe this image in one sentence.\"}]}], \"max_tokens\": 128}"
 ```
 
 #### Video input
@@ -304,8 +295,8 @@ Non-obvious knobs, all already set in the manifest:
   `--no-async-scheduling` to both workers as a workaround. See the Qwen3.5-122B recipe for
   details on the race condition.
 - **Prefill `--max-num-seqs 32` (disagg only).** Reduced from 256 (used in aggregated mode) to
-  avoid OOM on the prefill worker. In disagg mode, the prefill worker has only 4 GPUs (vs 8 in
-  agg) and must hold large prefill activations for 260K-token prompts. With `--gpu-memory-utilization
+  avoid OOM on the prefill worker. In disagg mode, the prefill worker has only 4 GPUs (vs 4 GPUs
+  per worker in agg, but agg can use multiple workers for a total of 8 or 12) and must hold large prefill activations for 260K-token prompts. With `--gpu-memory-utilization
   0.90` and ~133 GB KV cache, there is limited headroom for large GDN prefill activations.
   The decode worker keeps `--max-num-seqs 256` since decode is memory-light per request.
 - **kv_role.** Prefill uses `kv_producer`, decode uses `kv_consumer` (not `kv_both`). This is more

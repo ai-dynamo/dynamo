@@ -95,8 +95,19 @@ kubectl wait --for=condition=Complete \
 
 ### 4. Fetch artifacts
 
+First, create a helper pod with the PVC mounted:
+
 ```bash
+kubectl run pvc-helper --image=alpine --restart=Never --rm -i -n ${NAMESPACE} -- sh -c 'cat /model-cache/perf' --overrides='{"spec":{"containers":[{"name":"pvc-helper","volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}'
+```
+
+Or, to copy results locally:
+
+```bash
+kubectl run pvc-helper --image=alpine --restart=Never -- sleep 300 -n ${NAMESPACE}
+kubectl wait --for=condition=Ready pod/pvc-helper -n ${NAMESPACE} --timeout=60s
 kubectl cp ${NAMESPACE}/pvc-helper:/model-cache/perf/<epoch>_qwen38fn-bench ./results
+kubectl delete pod pvc-helper -n ${NAMESPACE}
 ```
 
 ### 5. Cleanup

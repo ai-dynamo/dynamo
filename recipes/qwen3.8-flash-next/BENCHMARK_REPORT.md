@@ -40,7 +40,7 @@ SPDX-License-Identifier: Apache-2.0
 | **TTFT mean** | 771 ms | 649 ms | 603 ms | 1,256 ms | 699 ms | -14% |
 | | | | | | | |
 | **ITL p50** | 9.7 ms | 7.8 ms | 6.9 ms | 7.5 ms | 7.5 ms | -8% |
-| **ITL p90** | 15.1 ms | 12.8 ms | 11.3 ms | 9.1 ms | 8.9 ms | +21% |
+| **ITL p90** | 15.1 ms | 12.8 ms | 11.3 ms | 9.1 ms | 8.9 ms | +27% |
 | **ITL mean** | 11.3 ms | 9.1 ms | 8.0 ms | 7.4 ms | 7.3 ms | +10% |
 | | | | | | | |
 | **System output tok/s** | 1,830 | 2,474 | 2,857 | 2,641 | 2,735 | +4.5% |
@@ -63,7 +63,7 @@ SPDX-License-Identifier: Apache-2.0
 3. **TTFT**: Nearly identical at p50 (329 vs 339ms) — prefill is compute-bound, not memory-bound
 4. **ITL**: 8-GPU is **20% faster** (9.7 → 7.8 ms) — more KV cache headroom per request
 5. **Prefix cache hit**: 8-GPU has **+5pp higher** hit rate (73.1% vs 67.9%) — more total KV cache = more prefix reuse
-6. **User experience**: Similar at p50 (103 vs 128 tok/s/user) — both deliver excellent interactivity
+6. **User experience**: 8-GPU delivers **24% higher** per-user throughput (103 → 128 tok/s/user); both are well above the interactivity target
 7. **p90 latency**: 8-GPU significantly better (49K vs 67K ms) — more GPUs absorb the long-tail requests
 8. **130 errors** in both runs — requests exceeding 262K context limit (expected, trace has some 1M+ token requests)
 

@@ -29,16 +29,12 @@ targets:
       traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
     deploy:
       asset: recipes/qwen3.8-flash-next/vllm/agg-b200-agentic/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3.8-flash-next/perf/perf.yaml
     expected_performance:
       available: true
-      metrics:
-        system_output_throughput: 1830
-        per_gpu_output_throughput: 457.4
-        user_output_throughput_p50: 102.8
-        ttft_p50_ms: 329
-        itl_p50_ms: 9.7
-        prefix_cache_hit_pct: 67.9
-        concurrency: 24
+      summary: 457.4 output tok/s/GPU, 102.8 user tok/s P50, TTFT P50 329 ms, ITL P50 9.7 ms at concurrency 24 (15% agentic trace subset)
   - id: vllm-agg-b200-agentic-8gpu
     recommended: false
     hardware:
@@ -57,16 +53,12 @@ targets:
       traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
     deploy:
       asset: recipes/qwen3.8-flash-next/vllm/agg-b200-agentic-8gpu/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3.8-flash-next/perf/perf.yaml
     expected_performance:
       available: true
-      metrics:
-        system_output_throughput: 2474
-        per_gpu_output_throughput: 309.3
-        user_output_throughput_p50: 127.6
-        ttft_p50_ms: 339
-        itl_p50_ms: 7.8
-        prefix_cache_hit_pct: 73.1
-        concurrency: 24
+      summary: 309.3 output tok/s/GPU, 127.6 user tok/s P50, TTFT P50 339 ms, ITL P50 7.8 ms at concurrency 24 (15% agentic trace subset)
   - id: vllm-agg-b200-agentic-12gpu
     recommended: false
     hardware:
@@ -85,16 +77,12 @@ targets:
       traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
     deploy:
       asset: recipes/qwen3.8-flash-next/vllm/agg-b200-agentic-12gpu/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3.8-flash-next/perf/perf.yaml
     expected_performance:
       available: true
-      metrics:
-        system_output_throughput: 2857
-        per_gpu_output_throughput: 238.1
-        user_output_throughput_p50: 144.5
-        ttft_p50_ms: 325
-        itl_p50_ms: 6.9
-        prefix_cache_hit_pct: 74.5
-        concurrency: 24
+      summary: 238.1 output tok/s/GPU, 144.5 user tok/s P50, TTFT P50 325 ms, ITL P50 6.9 ms at concurrency 24 (15% agentic trace subset)
   - id: vllm-disagg-b200-agentic
     recommended: false
     hardware:
@@ -114,16 +102,12 @@ targets:
       traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
     deploy:
       asset: recipes/qwen3.8-flash-next/vllm/disagg-b200-agentic/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3.8-flash-next/perf/perf.yaml
     expected_performance:
       available: true
-      metrics:
-        system_output_throughput: 2641
-        per_gpu_output_throughput: 330.2
-        user_output_throughput_p50: 132.8
-        ttft_p50_ms: 452
-        itl_p50_ms: 7.5
-        prefix_cache_hit_pct: 73.4
-        concurrency: 24
+      summary: 330.2 output tok/s/GPU, 132.8 user tok/s P50, TTFT P50 452 ms, ITL P50 7.5 ms at concurrency 24 (15% agentic trace subset)
   - id: vllm-disagg-b200-agentic-2p1d
     recommended: false
     hardware:
@@ -143,16 +127,12 @@ targets:
       traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
     deploy:
       asset: recipes/qwen3.8-flash-next/vllm/disagg-b200-agentic-2p1d/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3.8-flash-next/perf/perf.yaml
     expected_performance:
       available: true
-      metrics:
-        system_output_throughput: 2735
-        per_gpu_output_throughput: 227.9
-        user_output_throughput_p50: 133.4
-        ttft_p50_ms: 407
-        itl_p50_ms: 7.5
-        prefix_cache_hit_pct: 77.2
-        concurrency: 24
+      summary: 227.9 output tok/s/GPU, 133.4 user tok/s P50, TTFT P50 407 ms, ITL P50 7.5 ms at concurrency 24 (15% agentic trace subset)
 related_benchmarks: []
 maintainer: null
 gaps:
