@@ -441,6 +441,10 @@ impl RequestClassifierRuntime {
         if let Some((progress, overrides)) = live_request {
             request.progress = progress;
             if let Some(overrides) = overrides {
+                // Cached overrides replay without re-consulting the plugin, so a retry can
+                // carry a worker-selection target whose worker has since deregistered.
+                // Availability filtering excludes dead workers, degrading to fallback
+                // selection rather than misrouting.
                 request.overrides = overrides;
                 return Ok(request);
             }

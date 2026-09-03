@@ -3,6 +3,7 @@
 
 //! Catalog for the custom worker-selection policy examples.
 
+use dynamo_kv_router::scheduling::{RequestClassifierRegistry, RequestClassifierRegistryError};
 use dynamo_kv_router::services::selection::{
     WorkerSelectionPolicyRegistry, WorkerSelectionPolicyRegistryError,
 };
@@ -15,6 +16,15 @@ pub fn register(
     simple_filter_score_pick_policy::register(registry)?;
     disagg_filter_score_pick_policy::register(registry)?;
     simple_stacked_score_pick_policy::register(registry)
+}
+
+/// Register request classifiers supplied by this example catalog.
+///
+/// Dynamo calls this on every catalog; this example supplies none.
+pub fn register_request_classifiers(
+    _registry: &mut RequestClassifierRegistry,
+) -> Result<(), RequestClassifierRegistryError> {
+    Ok(())
 }
 
 #[cfg(test)]
