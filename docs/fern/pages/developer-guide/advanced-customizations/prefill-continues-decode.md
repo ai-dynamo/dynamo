@@ -71,7 +71,14 @@ back off when   active_prefill_tokens  >  threshold x max_num_batched_tokens
 ```
 
 **This is not a fraction.** It is a multiplier on one batch's token budget, so it counts **batches
-of prefill work queued** on the worker. A value of 1.0 backs off when one full batch is queued.
+of prefill work queued** on the worker. A value of 1.0 backs off when one full batch is queued, and
+values well above 1 are normal.
+
+The setting is new. The quantity is not: `prefill_load_exceeds` and the unit come from the router,
+and `--router-queue-threshold` uses the same predicate. This setting falls back to that one when it
+is unset, so a deployment that already tuned queueing gets a sensible default. The name follows that
+older setting, which its own documentation calls a fraction while writing the formula as a
+multiplier. Read the formula, not the name.
 
 It measures ordinary prefill work. It cannot see a continuation that is already generating, because
 the router clears a request's prefill load at its first token. `max_concurrent` is what bounds
