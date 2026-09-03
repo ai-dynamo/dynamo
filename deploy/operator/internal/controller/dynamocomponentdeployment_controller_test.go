@@ -68,6 +68,7 @@ func noContainerGPUs() dynamo.ContainerGPUCount {
 const (
 	testDottedDCDName     = "service.1"
 	testNormalizedDCDName = "service-1"
+	testDGDUID            = "test-dgd-uid"
 )
 
 func init() {
@@ -1792,7 +1793,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 					APIVersion: v1beta1.GroupVersion.String(),
 					Kind:       v1beta1.DynamoGraphDeploymentGVK.Kind,
 					Name:       "test-dgd",
-					UID:        "test-dgd-uid",
+					UID:        testDGDUID,
 					Controller: ptr.To(true),
 				}},
 			},
@@ -1877,7 +1878,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
 		snapshot.Spec.Source.PodRef.Containers = []string{"engine-0"}
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
-		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = "test-dgd-uid"
+		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
 
 		t.Log("When the pending and Ready DCDs render their workload Pod templates")
 		pendingTemplate, err := makeReconciler(pendingDCD).workloadRenderer().generatePodTemplateSpec(
@@ -1984,7 +1985,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
-		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = "test-dgd-uid"
+		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
 		r := makeReconciler(dcd, snapshot)
 
 		t.Log("When the DCD workload template is rendered")
@@ -2030,7 +2031,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
-		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = "test-dgd-uid"
+		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
 		r := makeReconciler(dcd, snapshot)
 
 		t.Log("When the DCD workload template is rendered")
@@ -2052,7 +2053,7 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
 		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
 		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
-		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = "test-dgd-uid"
+		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
 		r := makeReconciler(dcd, snapshot)
 
 		t.Log("When the DCD workload template is rendered")
