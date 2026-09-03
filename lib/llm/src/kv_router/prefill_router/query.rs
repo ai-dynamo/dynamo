@@ -17,15 +17,23 @@ use crate::{
 
 /// A prefill booking that remains tied to the chooser that admitted it.
 ///
-/// The caller owns this value until it is released. Keeping the chooser here
-/// makes cleanup independent of a later [`PrefillRouter`] binding change.
+/// KV-routed bookings retain their admitting chooser so cleanup is independent
+/// of a later [`PrefillRouter`] binding change. Built-in router modes use an
+/// untracked, advisory booking whose release is a no-op.
 pub struct PrefillReservation<Sel = dynamo_kv_router::selector::DefaultWorkerSelector>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    chooser: Arc<KvRouter<Sel>>,
-    scheduler_id: String,
     worker: WorkerWithDpRank,
+    release: ReservationRelease<Sel>,
+}
+
+enum ReservationRelease<Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static> {
+    Kv {
+        chooser: Arc<KvRouter<Sel>>,
+        scheduler_id: String,
+    },
+    None,
 }
 
 impl<Sel> PrefillReservation<Sel>
@@ -40,15 +48,17 @@ where
         self.worker.dp_rank
     }
 
-    /// Free this booking from the chooser that admitted it.
+    /// Free this booking from the chooser that admitted it, when tracked.
     pub async fn release(&self) -> Result<()> {
-        match self
-            .chooser
-            .free_if_worker(&self.scheduler_id, self.worker)
-            .await
-        {
-            Ok(()) | Err(SequenceError::RequestNotFound { .. }) => Ok(()),
-            Err(error) => Err(error.into()),
+        match &self.release {
+            ReservationRelease::Kv {
+                chooser,
+                scheduler_id,
+            } => match chooser.free_if_worker(scheduler_id, self.worker).await {
+                Ok(()) | Err(SequenceError::RequestNotFound { .. }) => Ok(()),
+                Err(error) => Err(error.into()),
+            },
+            ReservationRelease::None => Ok(()),
         }
     }
 }
@@ -57,13 +67,14 @@ impl<Sel> PrefillRouter<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
-    /// Atomically select and reserve a KV-routed prefill worker.
+    /// Select a prefill worker and reserve it when KV routing is enabled.
     ///
-    /// The returned [`PrefillReservation`] owns the exact chooser selected at
-    /// admission time. If this future is dropped while queued, the scheduler
-    /// retracts its pending admission; after success, the caller must release
-    /// the reservation on first output, terminal completion, or an abandoned
-    /// request.
+    /// KV-routed reservations own the exact chooser selected at admission
+    /// time. If this future is dropped while queued, the scheduler retracts
+    /// its pending admission; after success, the caller must release the
+    /// reservation on first output, terminal completion, or an abandoned
+    /// request. Built-in modes retain their existing advisory selection
+    /// semantics and return an untracked reservation.
     #[expect(clippy::too_many_arguments)]
     pub async fn reserve_prefill_worker(
         &self,
@@ -87,8 +98,15 @@ where
             .binding
             .load_full()
             .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
-        let Some(chooser) = binding.router.kv_router_if_enabled() else {
-            anyhow::bail!("prefill reservation requires KV routing");
+        let router = &binding.router;
+        let Some(chooser) = router.kv_router_if_enabled() else {
+            let worker_id = router
+                .peek_next_worker()
+                .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+            return Ok(PrefillReservation {
+                worker: WorkerWithDpRank::new(worker_id, 0),
+                release: ReservationRelease::None,
+            });
         };
         let chooser = Arc::clone(chooser);
         let outcome = chooser
@@ -112,9 +130,11 @@ where
         match outcome {
             crate::kv_router::FindBestMatchOutcome::Routed { worker, .. } => {
                 Ok(PrefillReservation {
-                    chooser,
-                    scheduler_id: reservation_id.to_string(),
                     worker,
+                    release: ReservationRelease::Kv {
+                        chooser,
+                        scheduler_id: reservation_id.to_string(),
+                    },
                 })
             }
             crate::kv_router::FindBestMatchOutcome::QueueRejected { rejection } => {
@@ -575,7 +595,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rr_prefill_queries_do_not_advance_shared_dispatch_cursor() {
+    async fn rr_prefill_queries_and_reservations_do_not_advance_dispatch_cursor() {
         let runtime = Runtime::from_current().unwrap();
         let discovery_root = tempfile::tempdir().unwrap();
         let namespace = "prefill-query-rr";
@@ -588,6 +608,23 @@ mod tests {
             dispatch.clone(),
         )
         .await;
+
+        let reservation = prefill_router
+            .reserve_prefill_worker(
+                "non-kv-reservation",
+                &[1, 2, 3],
+                None,
+                None,
+                None,
+                0.0,
+                0,
+                None,
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reservation.worker_id(), expected_workers[0]);
+        reservation.release().await.unwrap();
 
         let concurrent_peeks = join_all((0..16).map(|_| query_worker(&prefill_router))).await;
         assert!(
