@@ -822,6 +822,52 @@ def test_build_sampling_params_enforces_min_tokens_in_dynamo_for_token_requests(
     assert sampling_params["max_new_tokens"] == 64
 
 
+def test_build_sampling_params_holds_engine_open_below_max_tokens():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {
+                "max_tokens": 64,
+                "min_tokens": 8,
+                "stop_token_ids": [7],
+                "stop_token_ids_hidden": [151643],
+            },
+        }
+    )
+
+    # A floor below the ceiling is the case that separates the two: the engine still runs
+    # to max_new_tokens, and only Dynamo's decoder knows where the floor is.
+    assert "min_new_tokens" not in sampling_params
+    assert "stop_token_ids" not in sampling_params
+    assert sampling_params["ignore_eos"] is True
+    assert sampling_params["max_new_tokens"] == 64
+
+
+def test_build_sampling_params_holds_engine_open_without_max_tokens():
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {},
+            "stop_conditions": {
+                "min_tokens": 8,
+                "stop_token_ids_hidden": [151643],
+            },
+        }
+    )
+
+    # max_new_tokens is kept as None deliberately -- SGLang reads that as "until EOS or
+    # context length", and omitting it would instead impose a default of 128, which is
+    # below the floor a caller may have asked for. With no ceiling and ignore_eos set,
+    # context length is what bounds the over-generation this buys.
+    assert sampling_params["max_new_tokens"] is None
+    assert "min_new_tokens" not in sampling_params
+    assert "stop_token_ids" not in sampling_params
+    assert sampling_params["ignore_eos"] is True
+
+
 def test_build_sampling_params_maps_min_tokens_for_sglang_tokenizer_requests():
     handler = _new_decode_handler(use_sglang_tokenizer=True)
 
