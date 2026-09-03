@@ -171,10 +171,11 @@ def _is_moe_model(vllm_config: "VllmConfig") -> bool:
     vLLM itself branches on when it decides whether DP ranks form one
     coordinated group. ``ParallelConfig.is_moe_model`` is a copy of it and
     serves as the fallback for engine versions that do not expose the
-    ``ModelConfig`` property.
+    ``ModelConfig`` property, and for the configurations in which
+    ``VllmConfig.model_config`` is ``None``.
     """
-    model_config = getattr(vllm_config, "model_config", None)
-    is_moe = getattr(model_config, "is_moe", None)
+    model_config = vllm_config.model_config
+    is_moe = None if model_config is None else getattr(model_config, "is_moe", None)
     if is_moe is None:
         is_moe = getattr(vllm_config.parallel_config, "is_moe_model", False)
     return bool(is_moe)
@@ -202,8 +203,7 @@ def validate_benchmark_data_parallelism(
     if benchmark_mode is None:
         return
 
-    parallel_config = getattr(vllm_config, "parallel_config", None)
-    data_parallel_size = getattr(parallel_config, "data_parallel_size", 1) or 1
+    data_parallel_size = vllm_config.parallel_config.data_parallel_size or 1
     if data_parallel_size <= 1:
         return
 
