@@ -24,7 +24,6 @@ pub(crate) fn build_generate_request(
     mode: DisaggregationMode,
 ) -> Result<pb::GenerateRequest, DynamoError> {
     validate_request(&request, mode)?;
-    validate_multimodal_cache_uuids(&request)?;
 
     let has_media = request
         .multi_modal_data
@@ -202,24 +201,6 @@ fn media_source(modality: &str, source: &str) -> Result<pb::media_item::Source, 
     }
 }
 
-fn validate_multimodal_cache_uuids(request: &PreprocessedRequest) -> Result<(), DynamoError> {
-    let Some(uuids_by_modality) = request.multi_modal_uuids.as_ref() else {
-        return Ok(());
-    };
-    for (modality, uuids) in uuids_by_modality {
-        if modality != IMAGE_URL_KEY
-            && uuids
-                .iter()
-                .any(|uuid| uuid.as_ref().is_some_and(|uuid| !uuid.is_empty()))
-        {
-            return Err(client::invalid_argument(format!(
-                "multimodal cache UUIDs are supported only for {IMAGE_URL_KEY}; got non-empty multi_modal_uuids.{modality}"
-            )));
-        }
-    }
-    Ok(())
-}
-
 fn forwarded_image_uuids(
     request: &PreprocessedRequest,
 ) -> Result<Option<Vec<String>>, DynamoError> {
@@ -342,15 +323,18 @@ fn build_media(
                     ));
                 }
             };
-            let uuid = if modality == pb::Modality::Image {
-                uuids
-                    .and_then(|uuids| uuids.get(index))
-                    .and_then(Clone::clone)
-                    .or_else(|| forwarded_uuids.and_then(|uuids| uuids.get(index)).cloned())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
+            // If UUIDs are not provided for images, use frontend-computed routing hashes.
+            let uuid = uuids
+                .and_then(|uuids| uuids.get(index))
+                .and_then(Clone::clone)
+                .or_else(|| {
+                    if modality == pb::Modality::Image {
+                        forwarded_uuids.and_then(|uuids| uuids.get(index)).cloned()
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
             media.push(pb::MediaItem {
                 modality: modality as i32,
                 source: Some(source),
