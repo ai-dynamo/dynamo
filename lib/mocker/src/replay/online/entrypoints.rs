@@ -11,7 +11,7 @@ use crate::common::protocols::{DirectRequest, MockEngineArgs};
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
     ReplayPrefillLoadEstimator, ReplayRouterMode, SlaThresholds, TraceSimulationReport,
-    normalize_trace_requests,
+    effective_agentic_lanes, normalize_trace_requests,
 };
 
 use super::live_runtime::LiveRuntime;
@@ -183,6 +183,7 @@ pub(crate) fn simulate_agentic_trace_workload(
     let engine_block_size = config.args.block_size;
     let include_replay_hashes = config.router_mode == ReplayRouterMode::KvRouter;
     let total_turns = trace.node_count();
+    let agentic_lanes = effective_agentic_lanes(agentic_lanes, trace.play_count());
     let (report, _) = run_live_workload_runtime(
         config,
         trace.into_trace_driver_with_options(

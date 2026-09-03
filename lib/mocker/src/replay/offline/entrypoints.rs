@@ -26,7 +26,7 @@ use crate::engine_adapter::{aggregated_replay_setup, disaggregated_replay_setup}
 use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayWorkerArtifacts,
-    SlaThresholds, TraceSimulationReport,
+    SlaThresholds, TraceSimulationReport, effective_agentic_lanes,
 };
 use crate::scheduler::RouterEventVisibility;
 
@@ -599,6 +599,7 @@ pub(crate) fn simulate_agentic_trace_workload(
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
+    let agentic_lanes = effective_agentic_lanes(agentic_lanes, trace.play_count());
     let driver = trace.into_trace_driver_with_options(
         args.block_size,
         router_mode == ReplayRouterMode::KvRouter,
@@ -632,6 +633,7 @@ pub(crate) fn simulate_agentic_trace_workload_disagg(
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
+    let agentic_lanes = effective_agentic_lanes(agentic_lanes, trace.play_count());
     let driver = trace.into_trace_driver_with_options(
         config.prefill_args.block_size,
         router_mode == ReplayRouterMode::KvRouter,

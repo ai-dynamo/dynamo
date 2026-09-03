@@ -169,6 +169,13 @@ pub(crate) fn normalize_trace_requests(
     ))
 }
 
+pub(crate) fn effective_agentic_lanes(
+    requested_lanes: Option<usize>,
+    play_count: usize,
+) -> Option<usize> {
+    requested_lanes.map(|lane_count| lane_count.min(play_count))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,5 +211,12 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(arrivals, vec![0.0, 10.0]);
+    }
+
+    #[test]
+    fn test_effective_agentic_lanes_are_bounded_by_play_count() {
+        assert_eq!(effective_agentic_lanes(None, 3), None);
+        assert_eq!(effective_agentic_lanes(Some(2), 3), Some(2));
+        assert_eq!(effective_agentic_lanes(Some(usize::MAX), 3), Some(3));
     }
 }

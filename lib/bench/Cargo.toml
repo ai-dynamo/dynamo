@@ -121,6 +121,11 @@ name = "request_trace_to_mooncake"
 path = "tests/request_trace_to_mooncake.rs"
 required-features = ["request-trace-to-mooncake"]
 
+[[test]]
+name = "weka_to_agentic_mooncake"
+path = "tests/weka_to_agentic_mooncake.rs"
+required-features = ["weka-to-agentic-mooncake"]
+
 [[bench]]
 name = "offline_replay_bench"
 path = "offline_replay_bench.rs"

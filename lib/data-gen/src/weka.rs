@@ -185,17 +185,9 @@ pub fn load_weka_agentic_rows(
 #[derive(Debug, Deserialize)]
 struct WekaTrace {
     id: String,
-    #[serde(default)]
-    models: Vec<String>,
     block_size: usize,
     hash_id_scope: String,
-    #[serde(default)]
-    tool_tokens: usize,
-    #[serde(default)]
-    system_tokens: usize,
     requests: Vec<WekaEntry>,
-    #[serde(default)]
-    totals: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,38 +212,17 @@ struct WekaRequest {
     #[serde(default)]
     hash_ids: Vec<u64>,
     #[serde(default)]
-    input_types: Vec<String>,
-    #[serde(default)]
-    output_types: Vec<String>,
-    #[serde(default)]
-    stop: String,
-    #[serde(default)]
     api_time: Option<f64>,
-    #[serde(default)]
-    think_time: Option<f64>,
-    #[serde(default)]
-    ttft: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct WekaSubagent {
     t: f64,
     agent_id: String,
-    subagent_type: String,
     #[serde(default)]
     duration_ms: Option<i64>,
-    #[serde(default)]
-    total_tokens: Option<usize>,
-    #[serde(default)]
-    tool_use_count: Option<usize>,
     status: String,
     requests: Vec<WekaInnerEntry>,
-    #[serde(default)]
-    models: Vec<String>,
-    #[serde(default)]
-    tool_tokens: usize,
-    #[serde(default)]
-    system_tokens: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -373,28 +344,21 @@ fn lower_trace(trace: &WekaTrace, relative_path: &str) -> Result<LoweredTrace> {
                 outer_index
             );
         };
-        if owner_candidates
-            .last()
-            .is_some_and(|(_, candidate)| candidate.source_order == owner_request.source_order)
-        {
-            bail!(
-                "Weka trace {} has ambiguous parent-stream ownership for subagent {} at outer index {}",
-                relative_path,
-                subagent.agent_id,
-                outer_index
-            );
-        }
         let spawn_source_id = owner_request.source_id.clone();
 
         let mut inner = Vec::with_capacity(subagent.requests.len());
         for (inner_index, entry) in subagent.requests.iter().enumerate() {
-            let mut request = match entry {
+            let request = match entry {
                 WekaInnerEntry::Normal(request) | WekaInnerEntry::Streaming(request) => {
                     request.clone()
                 }
             };
             if request.t + JOIN_EPSILON_SECONDS < subagent.t {
-                request.t += subagent.t;
+                bail!(
+                    "Weka trace {} has subagent {} with an inner request before its marker; inner request timestamps must be absolute trace-relative times",
+                    relative_path,
+                    subagent.agent_id
+                );
             }
             validate_request(&request, relative_path)?;
             raw_zero_outputs += usize::from(request.output_length == 0);
@@ -1072,12 +1036,6 @@ fn validate_trace_header(trace: &WekaTrace, relative_path: &str) -> Result<()> {
             trace.hash_id_scope
         );
     }
-    let _ = (
-        &trace.models,
-        trace.tool_tokens,
-        trace.system_tokens,
-        &trace.totals,
-    );
     Ok(())
 }
 
@@ -1111,14 +1069,6 @@ fn validate_subagent(subagent: &WekaSubagent, relative_path: &str) -> Result<Sub
             subagent.agent_id
         );
     }
-    let _ = (
-        &subagent.subagent_type,
-        subagent.total_tokens,
-        subagent.tool_use_count,
-        &subagent.models,
-        subagent.tool_tokens,
-        subagent.system_tokens,
-    );
     Ok(mode)
 }
 
@@ -1165,16 +1115,15 @@ fn validate_request(request: &WekaRequest, relative_path: &str) -> Result<()> {
     if request.input_length == 0 {
         bail!("Weka trace {} has a zero-length request", relative_path);
     }
-    if request.api_time.is_some_and(|value| !value.is_finite()) {
+    let Some(api_time) = request.api_time else {
+        bail!(
+            "Weka trace {} has a request without api_time; request durations are required to classify dependencies",
+            relative_path
+        );
+    };
+    if !api_time.is_finite() {
         bail!("Weka trace {} has non-finite api_time", relative_path);
     }
-    let _ = (
-        &request.input_types,
-        &request.output_types,
-        &request.stop,
-        request.think_time,
-        request.ttft,
-    );
     Ok(())
 }
 
@@ -1187,18 +1136,18 @@ fn subagent_end(subagent: &WekaSubagent) -> f64 {
         .iter()
         .map(|entry| match entry {
             WekaInnerEntry::Normal(request) | WekaInnerEntry::Streaming(request) => {
-                let mut request = request.clone();
-                if request.t + JOIN_EPSILON_SECONDS < subagent.t {
-                    request.t += subagent.t;
-                }
-                request_end(&request)
+                request_end(request)
             }
         })
         .fold(subagent.t, f64::max)
 }
 
 fn request_end(request: &WekaRequest) -> f64 {
-    request.t + request.api_time.unwrap_or(0.0).max(0.0)
+    request.t
+        + request
+            .api_time
+            .expect("Weka requests are validated before lowering")
+            .max(0.0)
 }
 
 fn seconds_to_milliseconds(seconds: f64) -> f64 {
@@ -1329,6 +1278,7 @@ mod tests {
             "in": input,
             "out": output,
             "hash_ids": hashes,
+            "api_time": 0.1,
         })
     }
 
@@ -1354,11 +1304,11 @@ mod tests {
                 {"t":0.2,"type":"subagent","agent_id":"a","subagent_type":"Explore","duration_ms":400,"status":"completed","requests":[
                     {"t":0.3,"type":"s","model":"model","in":6,"out":1,"hash_ids":[3,4],"api_time":0.2}
                 ],"models":["model"]},
-                {"t":1.0,"type":"s","model":"model","in":9,"out":1,"hash_ids":[1,2,5]},
+                {"t":1.0,"type":"s","model":"model","in":9,"out":1,"hash_ids":[1,2,5],"api_time":0.1},
                 {"t":1.1,"type":"subagent","agent_id":"bg","subagent_type":"Explore","status":"async_launched","requests":[
                     {"t":1.2,"type":"s","model":"model","in":4,"out":0,"hash_ids":[9],"api_time":0.1}
                 ],"models":["model"]},
-                {"t":1.5,"type":"s","model":"model","in":13,"out":1,"hash_ids":[1,2,5,6]}
+                {"t":1.5,"type":"s","model":"model","in":13,"out":1,"hash_ids":[1,2,5,6],"api_time":0.1}
             ]),
         );
 
@@ -1410,7 +1360,7 @@ mod tests {
                     {"t":0.9,"type":"s","model":"model","in":8,"out":1,"hash_ids":[3,4],"api_time":0.2},
                     {"t":1.15,"type":"s","model":"model","in":12,"out":1,"hash_ids":[3,4,5],"api_time":0.05}
                 ],"models":["model"]},
-                {"t":1.2,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,2,6]}
+                {"t":1.2,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,2,6],"api_time":0.1}
             ]),
         );
 
@@ -1461,7 +1411,7 @@ mod tests {
                 {"t":0.0,"type":"s","model":"model","in":8,"out":1,"hash_ids":[1,2],"api_time":2.0},
                 {"t":0.5,"type":"s","model":"model","in":8,"out":1,"hash_ids":[1,3],"api_time":0.2},
                 {"t":0.8,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,3,4],"api_time":0.2},
-                {"t":2.0,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,2,5]}
+                {"t":2.0,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,2,5],"api_time":0.1}
             ]),
         );
 
@@ -1516,8 +1466,8 @@ mod tests {
                 {"t":0.25,"type":"subagent","agent_id":"owned","subagent_type":"Explore","duration_ms":500,"status":"completed","requests":[
                     {"t":0.3,"type":"s","model":"model","in":4,"out":1,"hash_ids":[9],"api_time":0.1}
                 ],"models":["model"]},
-                {"t":1.0,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,2,4]},
-                {"t":1.2,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,3,5]}
+                {"t":1.0,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,2,4],"api_time":0.1},
+                {"t":1.2,"type":"s","model":"model","in":12,"out":1,"hash_ids":[1,3,5],"api_time":0.1}
             ]),
         );
 
@@ -1650,6 +1600,71 @@ mod tests {
         assert!(error.to_string().contains("mixes block sizes"), "{error:#}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn corpus_preflight_rejects_symlink_sources_and_entries() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        write_trace(&source, serde_json::json!([request(0.0, 4, 1, &[1])]));
+
+        let source_link = directory.path().join("source-link.json");
+        symlink(&source, &source_link).unwrap();
+        let error = WekaImporter::open(&source_link)
+            .err()
+            .expect("symlink source must be rejected");
+        assert!(
+            error.to_string().contains("may not be a symlink"),
+            "{error:#}"
+        );
+
+        let corpus = directory.path().join("corpus");
+        std::fs::create_dir(&corpus).unwrap();
+        symlink(&source, corpus.join("nested-link.json")).unwrap();
+        let error = WekaImporter::open(&corpus)
+            .err()
+            .expect("nested symlink must be rejected");
+        assert!(
+            error.to_string().contains("may not contain symlinks"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn corpus_preflight_rejects_unsupported_hash_scope() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("trace.json");
+        write_trace(&path, serde_json::json!([request(0.0, 4, 1, &[1])]));
+        let mut trace: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        trace["hash_id_scope"] = "global".into();
+        std::fs::write(&path, serde_json::to_vec(&trace).unwrap()).unwrap();
+
+        let error = WekaImporter::open(&path)
+            .err()
+            .expect("unsupported hash scope must be rejected");
+        assert!(
+            error.to_string().contains("unsupported hash_id_scope"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn request_without_api_time_is_rejected() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("trace.json");
+        let mut missing_duration = request(0.0, 4, 1, &[1]);
+        missing_duration.as_object_mut().unwrap().remove("api_time");
+        write_trace(&path, serde_json::json!([missing_duration]));
+
+        let error = load_weka_agentic_rows(&path).unwrap_err();
+        assert!(
+            error.to_string().contains("request without api_time"),
+            "{error:#}"
+        );
+    }
+
     #[test]
     fn emission_rejects_source_changes_after_preflight() {
         let directory = tempdir().unwrap();
@@ -1683,7 +1698,7 @@ mod tests {
             &path,
             serde_json::json!([
                 request(0.0, 4, 1, &[1]),
-                {"t":1.0,"type":"s","model":"other-model","in":4,"out":1,"hash_ids":[2]}
+                {"t":1.0,"type":"s","model":"other-model","in":4,"out":1,"hash_ids":[2],"api_time":0.1}
             ]),
         );
 
@@ -1707,7 +1722,7 @@ mod tests {
                 "failed",
                 serde_json::json!([request(0.0, 4, 1, &[1]), {
                     "t":0.1,"type":"subagent","agent_id":"failed","subagent_type":"Explore","status":"failed","requests":[
-                        {"t":0.2,"type":"s","model":"model","in":4,"out":1,"hash_ids":[2]}
+                        {"t":0.2,"type":"s","model":"model","in":4,"out":1,"hash_ids":[2],"api_time":0.1}
                     ],"models":["model"]
                 }]),
                 "unsupported non-success subagent status",
@@ -1747,7 +1762,7 @@ mod tests {
             &path,
             serde_json::json!([
                 {"t":0.0,"type":"subagent","agent_id":"orphan","subagent_type":"Explore","status":"completed","requests":[
-                    {"t":0.0,"type":"s","model":"model","in":4,"out":1,"hash_ids":[9]}
+                    {"t":0.0,"type":"s","model":"model","in":4,"out":1,"hash_ids":[9],"api_time":0.1}
                 ],"models":["model"]},
                 request(1.0, 4, 1, &[1])
             ]),
@@ -1758,6 +1773,29 @@ mod tests {
             error
                 .to_string()
                 .contains("subagent orphan at outer index 0 without a preceding parent request"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn inner_request_before_subagent_marker_is_rejected() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("trace.json");
+        write_trace(
+            &path,
+            serde_json::json!([
+                request(0.0, 4, 1, &[1]),
+                {"t":1.0,"type":"subagent","agent_id":"child","subagent_type":"Explore","status":"completed","requests":[
+                    {"t":0.2,"type":"s","model":"model","in":4,"out":1,"hash_ids":[9],"api_time":0.1}
+                ],"models":["model"]}
+            ]),
+        );
+
+        let error = load_weka_agentic_rows(&path).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("inner request before its marker"),
             "{error:#}"
         );
     }

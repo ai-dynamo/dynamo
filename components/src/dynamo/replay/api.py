@@ -167,6 +167,10 @@ def run_trace_replay(
     ``wall_time_ms`` and derived throughput measure Rust runtime construction
     and execution. Planner creation and bootstrap happen before that boundary.
     """
+    if isinstance(agentic_lanes, bool) or (
+        agentic_lanes is not None and not isinstance(agentic_lanes, int)
+    ):
+        raise TypeError("agentic_lanes must be an integer or None")
     trace_files = _normalize_trace_files(trace_files)
     replay_kwargs = {
         "extra_engine_args": extra_engine_args,

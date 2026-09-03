@@ -40,7 +40,7 @@ fn direct_weka_and_materialized_v2_compile_to_identical_graphs() {
             {"t":0.2,"type":"subagent","agent_id":"a","subagent_type":"Explore","duration_ms":500,"status":"completed","requests":[
                 {"t":0.25,"type":"s","model":"model","in":6,"out":1,"hash_ids":[3,4],"api_time":0.25}
             ],"models":["model"]},
-            {"t":1.303837,"type":"s","model":"model","in":12,"out":3,"hash_ids":[1,2,5]}
+            {"t":1.303837,"type":"s","model":"model","in":12,"out":3,"hash_ids":[1,2,5],"api_time":0.1}
         ]
     });
     std::fs::write(&source, serde_json::to_vec(&weka).unwrap()).unwrap();
