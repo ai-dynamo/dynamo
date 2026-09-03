@@ -231,6 +231,7 @@ spec:
       serviceAccountName: qwen-decode-db6b6891-k8s-service-discovery
       securityContext:
         fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -426,6 +427,7 @@ spec:
         serviceAccountName: qwen-decode-db6b6891-k8s-service-discovery
         securityContext:
           fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
     workerTemplate:
       metadata:
         labels:
@@ -512,6 +514,7 @@ spec:
         serviceAccountName: qwen-decode-db6b6891-k8s-service-discovery
         securityContext:
           fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
     size: 2
   rolloutStrategy:
     type: ""
@@ -684,6 +687,7 @@ spec:
           terminationGracePeriodSeconds: 60
           securityContext:
             fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
         replicas: 1
         minAvailable: 1
     - name: vllmdecodeworker
@@ -785,6 +789,7 @@ spec:
           terminationGracePeriodSeconds: 60
           securityContext:
             fsGroup: 1000
+            fsGroupChangePolicy: OnRootMismatch
         replicas: 1
         minAvailable: 1
     cliqueStartupType: CliqueStartupTypeAnyOrder

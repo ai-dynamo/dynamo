@@ -326,6 +326,7 @@ spec:
       schedulerName: default-scheduler
       securityContext:
         fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       serviceAccount: aic-deployment-dgd-k8s-service-discovery
       serviceAccountName: aic-deployment-dgd-k8s-service-discovery
       terminationGracePeriodSeconds: 60
@@ -442,6 +443,7 @@ spec:
       schedulerName: default-scheduler
       securityContext:
         fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       serviceAccount: aic-deployment-dgd-k8s-service-discovery
       serviceAccountName: aic-deployment-dgd-k8s-service-discovery
       terminationGracePeriodSeconds: 60
@@ -611,6 +613,7 @@ spec:
       schedulerName: default-scheduler
       securityContext:
         fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       serviceAccount: aic-deployment-dgd-k8s-service-discovery
       serviceAccountName: aic-deployment-dgd-k8s-service-discovery
       terminationGracePeriodSeconds: 60

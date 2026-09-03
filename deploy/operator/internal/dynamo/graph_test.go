@@ -2117,7 +2117,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										ImagePullSecrets: []corev1.LocalObjectReference{
 											{
@@ -2312,7 +2313,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										RestartPolicy: corev1.RestartPolicyAlways,
 
@@ -2731,7 +2733,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										Volumes: []corev1.Volume{
 											{
@@ -2945,7 +2948,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										RestartPolicy:                 corev1.RestartPolicyAlways,
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										Volumes: []corev1.Volume{
 											{
@@ -3131,7 +3135,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
@@ -3294,7 +3299,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Volumes: []corev1.Volume{
@@ -3763,7 +3769,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
@@ -3953,7 +3960,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 									PodSpec: corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										Volumes: []corev1.Volume{
 											{
@@ -4140,7 +4148,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
@@ -4303,7 +4312,8 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										ServiceAccountName:            commonconsts.PlannerServiceAccountName,
 										SecurityContext: &corev1.PodSecurityContext{
-											FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+											FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 										},
 										Volumes: []corev1.Volume{
 											{
@@ -6641,8 +6651,8 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				RestartPolicy:                 corev1.RestartPolicyAlways,
 				TerminationGracePeriodSeconds: ptr.To(int64(60)),
 				SecurityContext: &corev1.PodSecurityContext{
-					// Only fsGroup is injected by default for volume permissions
-					FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+					FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+					FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 				},
 				Volumes: []corev1.Volume{
 					{
@@ -7908,6 +7918,36 @@ func TestApplyCompilationCacheExistingMount(t *testing.T) {
 	}
 }
 
+func TestApplyDefaultSecurityContextPreservesFSGroupChangePolicy(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		SecurityContext: &corev1.PodSecurityContext{
+			FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeAlways),
+		},
+	}
+
+	applyDefaultSecurityContext(podSpec)
+
+	require.NotNil(t, podSpec.SecurityContext.FSGroup)
+	assert.Equal(t, int64(commonconsts.DefaultSecurityContextFSGroup), *podSpec.SecurityContext.FSGroup)
+	require.NotNil(t, podSpec.SecurityContext.FSGroupChangePolicy)
+	assert.Equal(t, corev1.FSGroupChangeAlways, *podSpec.SecurityContext.FSGroupChangePolicy)
+}
+
+func TestApplyDefaultSecurityContextAddsPolicyForExistingFSGroup(t *testing.T) {
+	podSpec := &corev1.PodSpec{
+		SecurityContext: &corev1.PodSecurityContext{
+			FSGroup: ptr.To(int64(2000)),
+		},
+	}
+
+	applyDefaultSecurityContext(podSpec)
+
+	require.NotNil(t, podSpec.SecurityContext.FSGroup)
+	assert.Equal(t, int64(2000), *podSpec.SecurityContext.FSGroup)
+	require.NotNil(t, podSpec.SecurityContext.FSGroupChangePolicy)
+	assert.Equal(t, corev1.FSGroupChangeOnRootMismatch, *podSpec.SecurityContext.FSGroupChangePolicy)
+}
+
 func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 	secretsRetriever := &mockSecretsRetriever{}
 	controllerConfig := &configv1alpha1.OperatorConfiguration{}
@@ -7924,9 +7964,10 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 				ComponentType: commonconsts.ComponentTypeFrontend,
 			},
 			expectedSecurityContext: &corev1.PodSecurityContext{
-				FSGroup: ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+				FSGroup:             ptr.To(int64(commonconsts.DefaultSecurityContextFSGroup)),
+				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeOnRootMismatch),
 			},
-			description: "Operator should only inject fsGroup for volume permissions, not UID/GID (backward compatible)",
+			description: "Operator should inject volume-permission defaults without setting UID/GID",
 		},
 		{
 			name: "full security context override - should use user values",
@@ -7935,19 +7976,21 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 				ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 					PodSpec: &corev1.PodSpec{
 						SecurityContext: &corev1.PodSecurityContext{
-							RunAsNonRoot: ptr.To(true),
-							RunAsUser:    ptr.To(int64(5000)),
-							RunAsGroup:   ptr.To(int64(5000)),
-							FSGroup:      ptr.To(int64(5000)),
+							RunAsNonRoot:        ptr.To(true),
+							RunAsUser:           ptr.To(int64(5000)),
+							RunAsGroup:          ptr.To(int64(5000)),
+							FSGroup:             ptr.To(int64(5000)),
+							FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeAlways),
 						},
 					},
 				},
 			},
 			expectedSecurityContext: &corev1.PodSecurityContext{
-				RunAsNonRoot: ptr.To(true),
-				RunAsUser:    ptr.To(int64(5000)),
-				RunAsGroup:   ptr.To(int64(5000)),
-				FSGroup:      ptr.To(int64(5000)),
+				RunAsNonRoot:        ptr.To(true),
+				RunAsUser:           ptr.To(int64(5000)),
+				RunAsGroup:          ptr.To(int64(5000)),
+				FSGroup:             ptr.To(int64(5000)),
+				FSGroupChangePolicy: ptr.To(corev1.FSGroupChangeAlways),
 			},
 			description: "User-provided security context should completely override defaults",
 		},

@@ -91,6 +91,7 @@ spec:
                     restartPolicy: Always
                     securityContext:
                         fsGroup: 1000
+                        fsGroupChangePolicy: OnRootMismatch
                     serviceAccountName: grove-manifest-k8s-service-discovery
                     terminationGracePeriodSeconds: 60
                     volumes:
@@ -204,6 +205,7 @@ spec:
                     restartPolicy: Always
                     securityContext:
                         fsGroup: 1000
+                        fsGroupChangePolicy: OnRootMismatch
                     serviceAccountName: grove-manifest-k8s-service-discovery
                     terminationGracePeriodSeconds: 60
                     volumes:
@@ -296,6 +298,7 @@ spec:
                     restartPolicy: Always
                     securityContext:
                         fsGroup: 1000
+                        fsGroupChangePolicy: OnRootMismatch
                     serviceAccountName: grove-manifest-k8s-service-discovery
                     terminationGracePeriodSeconds: 60
                     volumes:

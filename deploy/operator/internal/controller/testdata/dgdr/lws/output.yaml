@@ -277,6 +277,7 @@ spec:
       schedulerName: default-scheduler
       securityContext:
         fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       serviceAccount: aic-lws-dgd-k8s-service-discovery
       serviceAccountName: aic-lws-dgd-k8s-service-discovery
       terminationGracePeriodSeconds: 60
@@ -422,6 +423,7 @@ spec:
         restartPolicy: Always
         securityContext:
           fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
         serviceAccountName: aic-lws-dgd-k8s-service-discovery
         terminationGracePeriodSeconds: 60
         volumes:
@@ -558,6 +560,7 @@ spec:
         restartPolicy: Always
         securityContext:
           fsGroup: 1000
+          fsGroupChangePolicy: OnRootMismatch
         serviceAccountName: aic-lws-dgd-k8s-service-discovery
         terminationGracePeriodSeconds: 60
         volumes:
@@ -734,6 +737,7 @@ spec:
       schedulerName: default-scheduler
       securityContext:
         fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
       serviceAccount: aic-lws-dgd-k8s-service-discovery
       serviceAccountName: aic-lws-dgd-k8s-service-discovery
       terminationGracePeriodSeconds: 60
