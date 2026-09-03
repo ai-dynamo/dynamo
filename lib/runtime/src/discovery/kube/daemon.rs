@@ -14,12 +14,9 @@ use kube::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Notify;
-use tokio::time::{Duration, timeout};
 
 use super::crd::DynamoWorkerMetadata;
 use super::utils::{KubeDiscoveryMode, PodInfo, extract_endpoint_info, extract_ready_containers};
-
-const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 struct CachedCrMetadata {
@@ -34,30 +31,172 @@ struct CrRevision {
     uid: Option<String>,
 }
 
-struct AggregatedSnapshot {
-    snapshot: MetadataSnapshot,
+/// Maintains the join of ready pods (left) and valid CRs (right).
+///
+/// An instance enters `known` only when it is present in both sides. Removals
+/// from either side immediately evict the instance from `known` without any
+/// batching or timer dependency.
+struct JoinTable {
+    /// Ready pods: cr_key → instance_id
+    left: HashMap<String, u64>,
+    /// Valid CRs: cr_key → cached metadata
+    right: HashMap<String, CachedCrMetadata>,
+    /// Live instances: instance_id → metadata  (left ∩ right)
+    known: HashMap<u64, Arc<DiscoveryMetadata>>,
+    /// CR revision per instance for generation/UID-based change detection
     revisions: HashMap<u64, CrRevision>,
 }
 
-fn snapshot_has_changes(
-    snapshot: &MetadataSnapshot,
-    previous_snapshot: &MetadataSnapshot,
-    revisions: &HashMap<u64, CrRevision>,
-    previous_revisions: &HashMap<u64, CrRevision>,
-) -> bool {
-    let metadata_changed = snapshot.has_changes_from(previous_snapshot);
-    let revisions_changed = revisions != previous_revisions;
-    if revisions_changed && !metadata_changed {
-        tracing::debug!("DynamoWorkerMetadata CR identity changed");
+impl JoinTable {
+    fn new() -> Self {
+        Self {
+            left: HashMap::new(),
+            right: HashMap::new(),
+            known: HashMap::new(),
+            revisions: HashMap::new(),
+        }
     }
-    metadata_changed || revisions_changed
+
+    /// Apply a full readiness scan from the ES/Pod store. Returns true if `known` changed.
+    fn apply_readiness_scan(&mut self, new_left: HashMap<String, u64>) -> bool {
+        let mut changed = false;
+
+        // Pods that are no longer ready — remove immediately from known.
+        let departed: Vec<(String, u64)> = self
+            .left
+            .iter()
+            .filter(|(k, _)| !new_left.contains_key(*k))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+
+        for (cr_key, instance_id) in departed {
+            self.left.remove(&cr_key);
+            if self.known.remove(&instance_id).is_some() {
+                self.revisions.remove(&instance_id);
+                tracing::info!(
+                    cr_key = %cr_key,
+                    instance_id = format!("{instance_id:x}"),
+                    "Pod no longer ready, removed from known"
+                );
+                changed = true;
+            }
+        }
+
+        // Pods newly ready — join with right if CR is already present.
+        let arrived: Vec<(String, u64)> = new_left
+            .iter()
+            .filter(|(k, _)| !self.left.contains_key(*k))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+
+        for (cr_key, instance_id) in arrived {
+            self.left.insert(cr_key.clone(), instance_id);
+            if let Some(cached) = self.right.get(&cr_key) {
+                self.known.insert(instance_id, cached.metadata.clone());
+                self.revisions.insert(
+                    instance_id,
+                    CrRevision {
+                        generation: cached.generation,
+                        uid: cached.uid.clone(),
+                    },
+                );
+                tracing::info!(
+                    cr_key = %cr_key,
+                    instance_id = format!("{instance_id:x}"),
+                    "Pod became ready, joined with existing CR"
+                );
+                changed = true;
+            }
+        }
+
+        changed
+    }
+
+    /// Apply a full CR store scan. Returns true if `known` changed.
+    fn apply_cr_scan(&mut self, new_right: HashMap<String, CachedCrMetadata>) -> bool {
+        let mut changed = false;
+
+        // CRs that disappeared — evict from known if the pod was ready.
+        let removed: Vec<String> = self
+            .right
+            .keys()
+            .filter(|k| !new_right.contains_key(*k))
+            .cloned()
+            .collect();
+
+        for cr_key in removed {
+            self.right.remove(&cr_key);
+            if let Some(&instance_id) = self.left.get(&cr_key) {
+                if self.known.remove(&instance_id).is_some() {
+                    self.revisions.remove(&instance_id);
+                    tracing::info!(
+                        cr_key = %cr_key,
+                        instance_id = format!("{instance_id:x}"),
+                        "CR removed, evicted from known"
+                    );
+                    changed = true;
+                }
+            }
+        }
+
+        // CRs added or updated.
+        for (cr_key, new_cached) in &new_right {
+            let new_revision = CrRevision {
+                generation: new_cached.generation,
+                uid: new_cached.uid.clone(),
+            };
+            self.right.insert(cr_key.clone(), new_cached.clone());
+
+            let Some(&instance_id) = self.left.get(cr_key) else {
+                // Pod not yet ready; CR is parked in right until readiness arrives.
+                continue;
+            };
+
+            let old_revision = self.revisions.get(&instance_id).cloned();
+
+            if self.known.contains_key(&instance_id) {
+                // Already in known — update only if revision changed (generation or UID).
+                if old_revision.as_ref() != Some(&new_revision) {
+                    self.known.insert(instance_id, new_cached.metadata.clone());
+                    self.revisions.insert(instance_id, new_revision);
+                    tracing::debug!(
+                        cr_key = %cr_key,
+                        instance_id = format!("{instance_id:x}"),
+                        "CR updated for ready pod"
+                    );
+                    changed = true;
+                }
+            } else {
+                // Join completes: pod was ready but CR hadn't arrived yet.
+                self.known.insert(instance_id, new_cached.metadata.clone());
+                self.revisions.insert(instance_id, new_revision);
+                tracing::info!(
+                    cr_key = %cr_key,
+                    instance_id = format!("{instance_id:x}"),
+                    "CR arrived for ready pod, added to known"
+                );
+                changed = true;
+            }
+        }
+
+        changed
+    }
+
+    fn to_snapshot(&self, sequence: u64) -> MetadataSnapshot {
+        MetadataSnapshot {
+            instances: self.known.clone(),
+            generations: self
+                .revisions
+                .iter()
+                .map(|(id, rev)| (*id, rev.generation))
+                .collect(),
+            sequence,
+            timestamp: std::time::Instant::now(),
+        }
+    }
 }
 
 /// Readiness data source for the discovery daemon.
-///
-/// Pod mode watches EndpointSlices (one entry per ready pod).
-/// Container mode watches Pods directly (one entry per ready container).
-/// Both produce the same (instance_id, cr_key) tuples for snapshot correlation.
 enum DiscoverySource {
     EndpointSlice(reflector::Store<EndpointSlice>),
     Pod(reflector::Store<Pod>),
@@ -132,23 +271,26 @@ impl DiscoverySource {
         }
     }
 
-    fn ready_entries(&self) -> Vec<(u64, String)> {
+    /// Returns the current set of ready entries as cr_key → instance_id.
+    fn ready_entries(&self) -> HashMap<String, u64> {
         match self {
             Self::EndpointSlice(reader) => reader
                 .state()
                 .iter()
                 .flat_map(|s| extract_endpoint_info(s.as_ref()))
+                .map(|(id, key)| (key, id))
                 .collect(),
             Self::Pod(reader) => reader
                 .state()
                 .iter()
                 .flat_map(|p| extract_ready_containers(p.as_ref()))
+                .map(|(id, key)| (key, id))
                 .collect(),
         }
     }
 }
 
-/// Discovers and aggregates metadata from DynamoWorkerMetadata CRs in the cluster
+/// Discovers and aggregates metadata from DynamoWorkerMetadata CRs in the cluster.
 #[derive(Clone)]
 pub(super) struct DiscoveryDaemon {
     kube_client: KubeClient,
@@ -171,102 +313,86 @@ impl DiscoveryDaemon {
 
     /// Run the discovery daemon.
     ///
-    /// Watches a readiness source and DynamoWorkerMetadata CRs. An entry is
-    /// included in the snapshot only if it appears ready AND has valid current
-    /// or cached metadata from a matching CR.
+    /// Maintains a join table over two independent Kubernetes watch streams: the
+    /// readiness source (EndpointSlice or Pod) and DynamoWorkerMetadata CRs.
+    /// An instance enters the snapshot only when both sides are present; removal
+    /// from either side evicts the instance immediately without debouncing.
     pub async fn run(
         self,
         watch_tx: tokio::sync::watch::Sender<Arc<MetadataSnapshot>>,
     ) -> Result<()> {
         tracing::info!("Discovery daemon starting");
 
-        let notify = Arc::new(Notify::new());
+        let es_notify = Arc::new(Notify::new());
+        let cr_notify = Arc::new(Notify::new());
 
-        // Readiness source — EndpointSlice or Pod depending on mode
         let source =
-            DiscoverySource::new(&self.pod_info, self.kube_client.clone(), notify.clone()).await;
+            DiscoverySource::new(&self.pod_info, self.kube_client.clone(), es_notify.clone()).await;
 
-        // DynamoWorkerMetadata CR reflector
         let metadata_crs: Api<DynamoWorkerMetadata> =
             Api::namespaced(self.kube_client.clone(), &self.pod_info.pod_namespace);
-
         let (cr_reader, cr_writer) = reflector::store();
-        let cr_watch_config = Config::default();
 
         tracing::info!(
             "Daemon watching DynamoWorkerMetadata CRs in namespace: {}",
             self.pod_info.pod_namespace
         );
 
-        let notify_cr = notify.clone();
-        let cr_reflector_stream = reflector(cr_writer, watcher(metadata_crs, cr_watch_config))
-            .default_backoff()
-            .touched_objects()
-            .for_each(move |res| {
-                match res {
-                    Ok(obj) => {
-                        tracing::debug!(
-                            cr_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
-                            "DynamoWorkerMetadata CR reflector updated"
-                        );
-                        notify_cr.notify_one();
+        let cr_notify_clone = cr_notify.clone();
+        let cr_reflector_stream =
+            reflector(cr_writer, watcher(metadata_crs, Config::default()))
+                .default_backoff()
+                .touched_objects()
+                .for_each(move |res| {
+                    match res {
+                        Ok(obj) => {
+                            tracing::debug!(
+                                cr_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
+                                "DynamoWorkerMetadata CR reflector updated"
+                            );
+                            cr_notify_clone.notify_one();
+                        }
+                        Err(e) => {
+                            tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
+                            cr_notify_clone.notify_one();
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
-                        notify_cr.notify_one();
-                    }
-                }
-                futures::future::ready(())
-            });
-
+                    futures::future::ready(())
+                });
         tokio::spawn(cr_reflector_stream);
 
-        // Event-driven loop with debouncing
         let mut sequence = 0u64;
-        let mut prev_snapshot = MetadataSnapshot::empty();
-        let mut prev_revisions = HashMap::new();
-        // Keeps transient invalid CR updates from looking like removals.
+        let mut join_table = JoinTable::new();
         let mut valid_cr_cache: HashMap<String, CachedCrMetadata> = HashMap::new();
 
         loop {
             tokio::select! {
-                _ = notify.notified() => {
-                    tokio::time::sleep(DEBOUNCE_DURATION).await;
-                    let _ = timeout(Duration::ZERO, notify.notified()).await;
-
-                    tracing::trace!("Debounce window elapsed, processing snapshot");
-
-                    match self
-                        .aggregate_snapshot(&source, &cr_reader, &mut valid_cr_cache, sequence)
-                        .await
-                    {
-                        Ok(aggregated) => {
-                            let AggregatedSnapshot { snapshot, revisions } = aggregated;
-                            if snapshot_has_changes(
-                                &snapshot,
-                                &prev_snapshot,
-                                &revisions,
-                                &prev_revisions,
-                            ) {
-                                prev_snapshot = snapshot.clone();
-                                prev_revisions = revisions;
-
-                                if watch_tx.send(Arc::new(snapshot)).is_err() {
-                                    tracing::debug!("No watch subscribers, daemon stopping");
-                                    break;
-                                }
-                            }
-
-                            sequence += 1;
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to aggregate snapshot: {e}");
-                        }
-                    }
-                }
+                biased;
                 _ = self.cancel_token.cancelled() => {
                     tracing::info!("Discovery daemon received cancellation");
                     break;
+                }
+                _ = es_notify.notified() => {
+                    tracing::trace!("Readiness store updated, scanning");
+                    let new_left = source.ready_entries();
+                    if join_table.apply_readiness_scan(new_left) {
+                        sequence += 1;
+                        if watch_tx.send(Arc::new(join_table.to_snapshot(sequence))).is_err() {
+                            tracing::debug!("No watch subscribers, daemon stopping");
+                            break;
+                        }
+                    }
+                }
+                _ = cr_notify.notified() => {
+                    tracing::trace!("CR store updated, scanning");
+                    let new_right = scan_cr_store(&cr_reader, &mut valid_cr_cache);
+                    if join_table.apply_cr_scan(new_right) {
+                        sequence += 1;
+                        if watch_tx.send(Arc::new(join_table.to_snapshot(sequence))).is_err() {
+                            tracing::debug!("No watch subscribers, daemon stopping");
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -274,161 +400,87 @@ impl DiscoveryDaemon {
         tracing::info!("Discovery daemon stopped");
         Ok(())
     }
+}
 
-    async fn aggregate_snapshot(
-        &self,
-        source: &DiscoverySource,
-        cr_reader: &reflector::Store<DynamoWorkerMetadata>,
-        valid_cr_cache: &mut HashMap<String, CachedCrMetadata>,
-        sequence: u64,
-    ) -> Result<AggregatedSnapshot> {
-        let start = std::time::Instant::now();
+/// Scan the DWM CR store and return all entries with valid (or cached) metadata.
+fn scan_cr_store(
+    cr_reader: &reflector::Store<DynamoWorkerMetadata>,
+    valid_cr_cache: &mut HashMap<String, CachedCrMetadata>,
+) -> HashMap<String, CachedCrMetadata> {
+    let cr_state = cr_reader.state();
+    let mut new_right: HashMap<String, CachedCrMetadata> = HashMap::new();
+    let mut observed: HashSet<String> = HashSet::new();
 
-        let ready_entries = source.ready_entries();
+    for arc_cr in cr_state.iter() {
+        let Some(cr_name) = arc_cr.metadata.name.as_ref() else {
+            continue;
+        };
+        let generation = arc_cr.metadata.generation.unwrap_or(0);
+        let uid = arc_cr.metadata.uid.clone();
+        let resource_version = arc_cr
+            .metadata
+            .resource_version
+            .as_deref()
+            .unwrap_or("unknown");
 
-        tracing::trace!(
-            "Daemon found {} ready entries (mode={:?})",
-            ready_entries.len(),
-            self.pod_info.mode,
-        );
+        observed.insert(cr_name.clone());
 
-        let cr_state = cr_reader.state();
-        let mut cr_map: HashMap<String, CachedCrMetadata> = HashMap::new();
-        let mut invalid_crs: HashMap<String, Option<String>> = HashMap::new();
-        let mut observed_crs: HashSet<String> = HashSet::new();
+        if arc_cr.spec.data.is_null() {
+            tracing::debug!(
+                cr_name = %cr_name,
+                uid = %uid.as_deref().unwrap_or("unknown"),
+                resource_version = %resource_version,
+                generation,
+                managed_fields = ?managed_fields_summary(arc_cr.as_ref()),
+                "DynamoWorkerMetadata CR has null spec.data; reusing last valid metadata if available"
+            );
+            if let Some(cached) =
+                cached_metadata_for_invalid_cr(cr_name, uid.as_deref(), valid_cr_cache)
+            {
+                new_right.insert(cr_name.clone(), cached.clone());
+            }
+            continue;
+        }
 
-        for arc_cr in cr_state.iter() {
-            let Some(cr_name) = arc_cr.metadata.name.as_ref() else {
-                continue;
-            };
-
-            observed_crs.insert(cr_name.clone());
-            let generation = arc_cr.metadata.generation.unwrap_or(0);
-            let uid = arc_cr.metadata.uid.clone();
-            let resource_version = arc_cr
-                .metadata
-                .resource_version
-                .as_deref()
-                .unwrap_or("unknown");
-
-            if arc_cr.spec.data.is_null() {
-                tracing::debug!(
+        match super::crd::deserialize_metadata(arc_cr.spec.data.clone()) {
+            Ok(metadata) => {
+                tracing::trace!("Loaded metadata from CR '{cr_name}'");
+                let cached = CachedCrMetadata {
+                    metadata: Arc::new(metadata),
+                    generation,
+                    uid,
+                };
+                valid_cr_cache.insert(cr_name.clone(), cached.clone());
+                new_right.insert(cr_name.clone(), cached);
+            }
+            Err(e) => {
+                tracing::warn!(
                     cr_name = %cr_name,
                     uid = %uid.as_deref().unwrap_or("unknown"),
                     resource_version = %resource_version,
                     generation,
                     managed_fields = ?managed_fields_summary(arc_cr.as_ref()),
-                    "DynamoWorkerMetadata CR has null spec.data; reusing last valid metadata if available"
+                    error = %e,
+                    "Failed to deserialize metadata from DynamoWorkerMetadata CR"
                 );
-                invalid_crs.insert(cr_name.clone(), uid);
-                continue;
-            }
-
-            match super::crd::deserialize_metadata(arc_cr.spec.data.clone()) {
-                Ok(metadata) => {
-                    tracing::trace!("Loaded metadata from CR '{cr_name}'");
-                    let cached = CachedCrMetadata {
-                        metadata: Arc::new(metadata),
-                        generation,
-                        uid,
-                    };
-                    cr_map.insert(cr_name.clone(), cached.clone());
-                    valid_cr_cache.insert(cr_name.clone(), cached);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        cr_name = %cr_name,
-                        uid = %uid.as_deref().unwrap_or("unknown"),
-                        resource_version = %resource_version,
-                        generation,
-                        managed_fields = ?managed_fields_summary(arc_cr.as_ref()),
-                        error = %e,
-                        "Failed to deserialize metadata from DynamoWorkerMetadata CR"
-                    );
-                    invalid_crs.insert(cr_name.clone(), uid);
-                }
-            }
-        }
-
-        valid_cr_cache.retain(|cr_name, _| observed_crs.contains(cr_name));
-
-        tracing::trace!("Daemon loaded {} DynamoWorkerMetadata CRs", cr_map.len());
-
-        let mut instances: HashMap<u64, Arc<DiscoveryMetadata>> = HashMap::new();
-        let mut generations: HashMap<u64, i64> = HashMap::new();
-        let mut revisions: HashMap<u64, CrRevision> = HashMap::new();
-
-        for (instance_id, cr_key) in ready_entries {
-            if let Some(cached) = cr_map.get(&cr_key) {
-                instances.insert(instance_id, cached.metadata.clone());
-                generations.insert(instance_id, cached.generation);
-                revisions.insert(
-                    instance_id,
-                    CrRevision {
-                        generation: cached.generation,
-                        uid: cached.uid.clone(),
-                    },
-                );
-                tracing::trace!(
-                    "Included '{}' (instance_id={:x}, generation={}) in snapshot",
-                    cr_key,
-                    instance_id,
-                    cached.generation
-                );
-            } else if let Some(uid) = invalid_crs.get(&cr_key) {
                 if let Some(cached) =
-                    cached_metadata_for_invalid_cr(&cr_key, uid.as_deref(), valid_cr_cache)
+                    cached_metadata_for_invalid_cr(cr_name, uid.as_deref(), valid_cr_cache)
                 {
-                    instances.insert(instance_id, cached.metadata.clone());
-                    generations.insert(instance_id, cached.generation);
-                    revisions.insert(
-                        instance_id,
-                        CrRevision {
-                            generation: cached.generation,
-                            uid: cached.uid.clone(),
-                        },
-                    );
-                    tracing::trace!(
-                        "Included cached metadata for '{}' (instance_id={:x}, generation={}) because current CR data is not valid",
-                        cr_key,
-                        instance_id,
-                        cached.generation
-                    );
-                } else {
-                    tracing::trace!(
-                        "Skipping '{}' (instance_id={:x}): DynamoWorkerMetadata CR data is not valid yet",
-                        cr_key,
-                        instance_id
-                    );
+                    new_right.insert(cr_name.clone(), cached.clone());
                 }
-            } else {
-                tracing::trace!(
-                    "Skipping '{}' (instance_id={:x}): no DynamoWorkerMetadata CR found",
-                    cr_key,
-                    instance_id
-                );
             }
         }
-
-        let elapsed = start.elapsed();
-
-        tracing::trace!(
-            "Daemon snapshot complete (seq={}): {} instances in {:?}",
-            sequence,
-            instances.len(),
-            elapsed
-        );
-
-        Ok(AggregatedSnapshot {
-            snapshot: MetadataSnapshot {
-                instances,
-                generations,
-                sequence,
-                timestamp: std::time::Instant::now(),
-            },
-            revisions,
-        })
     }
+
+    valid_cr_cache.retain(|cr_name, _| observed.contains(cr_name));
+
+    tracing::trace!(
+        "CR scan: {} valid entries from {} observed CRs",
+        new_right.len(),
+        observed.len()
+    );
+
+    new_right
 }
 
 fn cached_metadata_for_invalid_cr<'a>(
@@ -437,7 +489,6 @@ fn cached_metadata_for_invalid_cr<'a>(
     valid_cr_cache: &'a HashMap<String, CachedCrMetadata>,
 ) -> Option<&'a CachedCrMetadata> {
     let cached = valid_cr_cache.get(cr_key)?;
-
     if cached.uid.as_deref() == uid {
         Some(cached)
     } else {
@@ -482,46 +533,117 @@ mod tests {
     use super::*;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ManagedFieldsEntry;
 
-    #[test]
-    fn snapshot_detects_recreated_cr_with_same_generation() {
-        let mut previous_snapshot = MetadataSnapshot::empty();
-        previous_snapshot.generations.insert(1, 1);
-        let current_snapshot = previous_snapshot.clone();
-        let previous_revisions = HashMap::from([(
-            1,
-            CrRevision {
-                generation: 1,
-                uid: Some("uid-1".to_string()),
-            },
-        )]);
-        let current_revisions = HashMap::from([(
-            1,
-            CrRevision {
-                generation: 1,
-                uid: Some("uid-2".to_string()),
-            },
-        )]);
-
-        assert!(snapshot_has_changes(
-            &current_snapshot,
-            &previous_snapshot,
-            &current_revisions,
-            &previous_revisions,
-        ));
-    }
-
-    fn cached_cr(uid: &str) -> CachedCrMetadata {
+    fn make_cached(uid: &str, generation: i64) -> CachedCrMetadata {
         CachedCrMetadata {
             metadata: Arc::new(DiscoveryMetadata::new()),
-            generation: 7,
+            generation,
             uid: Some(uid.to_string()),
         }
+    }
+
+    // Regression: a CR delete+recreate with the same generation number must still
+    // update known (UID changes even though generation stays the same).
+    #[test]
+    fn join_table_detects_cr_recreated_with_same_generation() {
+        let mut table = JoinTable::new();
+
+        // Pod is ready
+        table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
+
+        // Initial CR
+        let changed = table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached("uid-1", 1),
+        )]));
+        assert!(changed);
+        assert!(table.known.contains_key(&1u64));
+
+        // Same generation, different UID (pod deleted and recreated)
+        let changed = table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached("uid-2", 1),
+        )]));
+        assert!(changed, "UID change must be detected even at same generation");
+        assert_eq!(
+            table.revisions[&1u64].uid.as_deref(),
+            Some("uid-2")
+        );
+    }
+
+    #[test]
+    fn join_table_removes_immediately_when_pod_not_ready() {
+        let mut table = JoinTable::new();
+
+        table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
+        table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached("uid-1", 1),
+        )]));
+        assert!(table.known.contains_key(&1u64));
+
+        // Pod readiness removed — no timer, immediate eviction
+        let changed = table.apply_readiness_scan(HashMap::new());
+        assert!(changed);
+        assert!(!table.known.contains_key(&1u64));
+        assert!(table.revisions.is_empty());
+    }
+
+    #[test]
+    fn join_table_adds_when_cr_arrives_after_pod_ready() {
+        let mut table = JoinTable::new();
+
+        // Pod ready first, CR not yet present
+        let changed = table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
+        assert!(!changed, "no CR yet, should not enter known");
+        assert!(!table.known.contains_key(&1u64));
+
+        // CR arrives — join completes
+        let changed = table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached("uid-1", 1),
+        )]));
+        assert!(changed);
+        assert!(table.known.contains_key(&1u64));
+    }
+
+    #[test]
+    fn join_table_evicts_when_cr_removed() {
+        let mut table = JoinTable::new();
+
+        table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
+        table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached("uid-1", 1),
+        )]));
+        assert!(table.known.contains_key(&1u64));
+
+        let changed = table.apply_cr_scan(HashMap::new());
+        assert!(changed);
+        assert!(!table.known.contains_key(&1u64));
+    }
+
+    #[test]
+    fn join_table_no_change_on_same_revision() {
+        let mut table = JoinTable::new();
+
+        table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
+        table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached("uid-1", 1),
+        )]));
+
+        // Same UID and generation — no change
+        let changed = table.apply_cr_scan(HashMap::from([(
+            "worker-a".to_string(),
+            make_cached("uid-1", 1),
+        )]));
+        assert!(!changed);
     }
 
     #[test]
     fn cached_metadata_for_invalid_cr_reuses_same_kube_object() {
         let mut cache = HashMap::new();
-        cache.insert("worker-a".to_string(), cached_cr("uid-1"));
+        cache.insert("worker-a".to_string(), make_cached("uid-1", 7));
 
         let cached = cached_metadata_for_invalid_cr("worker-a", Some("uid-1"), &cache)
             .expect("cache should be reused for the same CR UID");
@@ -532,7 +654,7 @@ mod tests {
     #[test]
     fn cached_metadata_for_invalid_cr_rejects_recreated_kube_object() {
         let mut cache = HashMap::new();
-        cache.insert("worker-a".to_string(), cached_cr("uid-1"));
+        cache.insert("worker-a".to_string(), make_cached("uid-1", 7));
 
         assert!(cached_metadata_for_invalid_cr("worker-a", Some("uid-2"), &cache).is_none());
     }
