@@ -984,7 +984,10 @@ def test_lora_aggregated(
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-Embedding-0.6B")
 @pytest.mark.model("codelion/Qwen3-0.6B-accuracy-recovery-lora")
-@pytest.mark.profiled_vram_gib(4.0)
+@pytest.mark.profiled_vram_gib(3.8)  # actual nvidia-smi peak
+@pytest.mark.requested_vllm_kv_cache_bytes(
+    531_964_000
+)  # KV cache cap (2x safety over min=265_981_952)
 @pytest.mark.timeout(300)
 @pytest.mark.post_merge
 def test_lora_embedding_aggregated(
@@ -994,17 +997,8 @@ def test_lora_embedding_aggregated(
     minio_lora_service,
     dynamo_dynamic_ports,
 ):
-    """Adapter selection reaches the pooling forward pass on /v1/embeddings.
-
-    Regression cover for DIS-2639: the embedding worker accepted --enable-lora
-    but never forwarded lora_request into encode(), so an adapter-targeted
-    request was answered from the base weights with no error. The payload
-    embeds the same text through the adapter and through the base model and
-    requires the vectors to differ, so a silent fallback fails the test.
-
-    Qwen3-Embedding is decoder-backed (Qwen3ForCausalLM) and therefore
-    SupportsLoRA; encoder-backed embedders cannot take adapters at all.
-    """
+    """Requires the adapter and base-model embeddings to differ, so a silent
+    fallback to the base weights fails the test instead of passing."""
     minio_config: MinioLoraConfig = minio_lora_service
     base_model = "Qwen/Qwen3-Embedding-0.6B"
 

@@ -26,7 +26,7 @@ export DYN_LORA_PATH=/tmp/dynamo_loras_minio_embed
 
 mkdir -p $DYN_LORA_PATH
 
-MODEL="Qwen/Qwen3-Embedding-0.6B"
+MODEL="${MODEL:-Qwen/Qwen3-Embedding-0.6B}"
 SYSTEM_PORT="${DYN_SYSTEM_PORT1:-8081}"
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 print_launch_banner --no-curl "Launching Aggregated Embeddings + LoRA (1 GPU)" "$MODEL" "$HTTP_PORT"

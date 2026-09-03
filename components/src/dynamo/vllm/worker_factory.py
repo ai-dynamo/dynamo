@@ -954,7 +954,11 @@ class WorkerFactory:
                     needs=[],
                 ),
             ]
-            serve_tasks.extend(self._pooling_lora_serve_tasks(runtime, config, handler))
+            serve_tasks.extend(
+                self._pooling_lora_serve_tasks(
+                    runtime, config, handler, shutdown_endpoints
+                )
+            )
             await asyncio.gather(*serve_tasks)
         except Exception as e:
             logger.error(f"Failed to serve embedding worker endpoint: {e}")
@@ -1037,7 +1041,11 @@ class WorkerFactory:
                     needs=[],
                 ),
             ]
-            serve_tasks.extend(self._pooling_lora_serve_tasks(runtime, config, handler))
+            serve_tasks.extend(
+                self._pooling_lora_serve_tasks(
+                    runtime, config, handler, shutdown_endpoints
+                )
+            )
             await asyncio.gather(*serve_tasks)
         except Exception as e:
             logger.error(f"Failed to serve classify worker endpoint: {e}")
@@ -1046,28 +1054,40 @@ class WorkerFactory:
             handler.cleanup()
 
     def _pooling_lora_serve_tasks(
-        self, runtime: DistributedRuntime, config: Config, handler
+        self,
+        runtime: DistributedRuntime,
+        config: Config,
+        handler,
+        shutdown_endpoints: list,  # mutated in place
     ) -> list:
         """Serve the adapter lifecycle endpoints for a pooling-family worker.
 
         Without these the worker has no way to take delivery of an adapter, so
         an adapter-targeted request could only ever resolve to the base model.
         Returns an empty list when LoRA is off, so the endpoints stay absent
-        rather than registered-and-failing.
+        rather than registered-and-failing. Also extends ``shutdown_endpoints``
+        so the lifecycle endpoints are unregistered on graceful shutdown,
+        matching the decode/prefill worker pattern.
         """
         if not getattr(config.engine_args, "enable_lora", False):
             return []
 
         metrics_labels = [("model", config.model)]
         prefix = f"{config.namespace}.{config.component}"
+        load_lora_endpoint = runtime.endpoint(f"{prefix}.load_lora")
+        unload_lora_endpoint = runtime.endpoint(f"{prefix}.unload_lora")
+        list_loras_endpoint = runtime.endpoint(f"{prefix}.list_loras")
+        shutdown_endpoints.extend(
+            [load_lora_endpoint, unload_lora_endpoint, list_loras_endpoint]
+        )
         return [
-            runtime.endpoint(f"{prefix}.load_lora").serve_endpoint(
+            load_lora_endpoint.serve_endpoint(
                 handler.load_lora, metrics_labels=metrics_labels
             ),
-            runtime.endpoint(f"{prefix}.unload_lora").serve_endpoint(
+            unload_lora_endpoint.serve_endpoint(
                 handler.unload_lora, metrics_labels=metrics_labels
             ),
-            runtime.endpoint(f"{prefix}.list_loras").serve_endpoint(
+            list_loras_endpoint.serve_endpoint(
                 handler.list_loras, metrics_labels=metrics_labels
             ),
         ]

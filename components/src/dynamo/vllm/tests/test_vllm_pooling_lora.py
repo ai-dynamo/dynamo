@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""LoRA adapter selection on the pooling-family workers.
-
-The defect these cover: the handlers accepted ``--enable-lora`` but never put
-``lora_request`` in ``encode_kwargs``, so a request naming an adapter was
-pooled with the base weights and returned a plausible wrong answer with no
-error. Both pooling roles are checked — ``ClassifyWorkerHandler`` extends
-``EmbeddingWorkerHandler``, so a fix applied to only one leaves the sibling
-silently broken.
-"""
+"""LoRA adapter selection on the pooling-family workers."""
 
 import asyncio
 from types import SimpleNamespace
@@ -23,6 +15,7 @@ from vllm.lora.request import LoRARequest
 import dynamo.vllm.handlers as base_handlers
 import dynamo.vllm.pooling_handlers as pooling_mod
 from dynamo.common.lora.manager import LoRAInfo
+from dynamo.vllm.lora_handler import LoRAHandlerMixin
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -133,8 +126,6 @@ async def _drain(agen) -> list[Any]:
 
 
 def test_both_pooling_roles_are_lora_capable():
-    from dynamo.vllm.lora_handler import LoRAHandlerMixin
-
     assert issubclass(base_handlers.EmbeddingWorkerHandler, LoRAHandlerMixin)
     assert issubclass(pooling_mod.ClassifyWorkerHandler, LoRAHandlerMixin)
     for name in ("load_lora", "unload_lora", "list_loras", "_resolve_lora_request"):
@@ -218,7 +209,6 @@ async def test_classify_batch_resolves_adapter_once_for_every_prompt():
 
 @pytest.mark.asyncio
 async def test_embeddings_forwards_lora_request_for_adapter_model():
-    """This is the path that was silently wrong on main."""
     handler = _embedding_handler()
     _install_adapter(handler)
     seen = _capture_encode(handler, _pooling_output([0.1, 0.2, 0.3], [1, 2]))

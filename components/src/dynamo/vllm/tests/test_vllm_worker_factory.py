@@ -47,6 +47,9 @@ def _make_config(**overrides) -> Mock:
         "gms_shadow_mode": False,
         "realtime": False,
         "classify_worker": False,
+        # An unconfigured Mock attribute is truthy, which would spuriously
+        # enable the LoRA lifecycle endpoints on every pooling worker test.
+        "engine_args": SimpleNamespace(enable_lora=False),
     }
     defaults.update(overrides)
     return Mock(**defaults)

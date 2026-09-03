@@ -3508,11 +3508,17 @@ class EmbeddingWorkerHandler(LoRAHandlerMixin):
             )
             return
 
+        # Must match the base card's input mode or the frontend drops the
+        # adapter card during reconciliation. Only embedding workers can set
+        # embedding_frontend_tokenization; classify always registers Text.
+        model_input = (
+            ModelInput.Tokens
+            if getattr(self.config, "embedding_frontend_tokenization", False)
+            else ModelInput.Text
+        )
+
         await register_model(
-            # Text, not Tokens: pooling roles register their base card as Text
-            # and the frontend rejects "classify,pooling with tokens input", so
-            # an adapter card must match or it is dropped during reconciliation.
-            model_input=ModelInput.Text,
+            model_input=model_input,
             model_type=self._lora_model_type(),
             endpoint=self.generate_endpoint,
             model_path=self.config.model,

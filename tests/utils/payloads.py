@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, cast
 import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
+from tests.serve.lora_utils import load_lora_adapter
 from tests.utils.constants import DefaultPort
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
 from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
@@ -739,10 +740,6 @@ class LoraTestChatPayload(ChatPayload):
     def _ensure_lora_loaded(self) -> None:
         """Ensure the LoRA adapter is loaded before making inference requests"""
         if not self._lora_loaded:
-            # Import the load_lora_adapter function
-            # Note: This import is done here to avoid circular dependencies
-            from tests.serve.lora_utils import load_lora_adapter
-
             load_lora_adapter(
                 system_port=self.system_ports[0],
                 lora_name=self.lora_name,
