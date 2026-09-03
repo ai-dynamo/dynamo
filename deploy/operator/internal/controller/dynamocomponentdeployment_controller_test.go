@@ -29,12 +29,11 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
-	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpointjob"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
-	gms "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/google/go-cmp/cmp"
 	"github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
@@ -50,6 +49,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
@@ -68,6 +68,7 @@ func noContainerGPUs() dynamo.ContainerGPUCount {
 const (
 	testDottedDCDName     = "service.1"
 	testNormalizedDCDName = "service-1"
+	testDGDUID            = "test-dgd-uid"
 )
 
 func init() {
@@ -1779,43 +1780,22 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 	if err := appsv1.AddToScheme(s); err != nil {
 		t.Fatalf("Failed to add appsv1 to scheme: %v", err)
 	}
-
-	snapshotAgentDaemonSet := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "snapshot-agent",
-			Namespace: "default",
-			Labels: map[string]string{
-				snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
-			},
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name: snapshotprotocol.SnapshotAgentContainerName,
-						VolumeMounts: []corev1.VolumeMount{{
-							Name:      "checkpoints",
-							MountPath: "/checkpoints",
-						}},
-					}},
-					Volumes: []corev1.Volume{{
-						Name: "checkpoints",
-						VolumeSource: corev1.VolumeSource{
-							PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-								ClaimName: "snapshot-pvc",
-							},
-						},
-					}},
-				},
-			},
-		},
+	if err := snapshotv1alpha1.AddToScheme(s); err != nil {
+		t.Fatalf("Failed to add Snapshot v1alpha1 to scheme: %v", err)
 	}
 
 	makeDCD := func(checkpointRef string) *v1beta1.DynamoComponentDeployment {
-		return betaDCD(t, &v1alpha1.DynamoComponentDeployment{
+		dcd := betaDCD(t, &v1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-worker",
 				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: v1beta1.GroupVersion.String(),
+					Kind:       v1beta1.DynamoGraphDeploymentGVK.Kind,
+					Name:       "test-dgd",
+					UID:        testDGDUID,
+					Controller: ptr.To(true),
+				}},
 			},
 			Spec: v1alpha1.DynamoComponentDeploymentSpec{
 				BackendFramework: string(dynamo.BackendFrameworkVLLM),
@@ -1842,10 +1822,10 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 				},
 			},
 		})
+		return dcd
 	}
 
 	makeReconciler := func(objs ...client.Object) *DynamoComponentDeploymentReconciler {
-		objs = append(objs, snapshotAgentDaemonSet.DeepCopy())
 		return &DynamoComponentDeploymentReconciler{
 			Client: fake.NewClientBuilder().
 				WithScheme(s).
@@ -1859,540 +1839,233 @@ func TestDynamoComponentDeploymentReconciler_generatePodTemplateSpec_RestoreLabe
 			RuntimeConfig: &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}},
 		}
 	}
-
-	t.Run("ready checkpoint in immediate mode adds restore candidate metadata", func(t *testing.T) {
-		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
-		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
-		if err != nil {
-			t.Fatalf("ComputeIdentityHash failed: %v", err)
+	stampAutomaticCandidate := func(t *testing.T, dcd *v1beta1.DynamoComponentDeployment) {
+		t.Helper()
+		require.NotNil(t, dcd.Spec.PodTemplate)
+		if dcd.Spec.PodTemplate.Annotations == nil {
+			dcd.Spec.PodTemplate.Annotations = map[string]string{}
 		}
-		dcd := makeDCD(checkpointName)
-		ckpt := &v1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      checkpointName,
-				Namespace: "default",
+		require.NoError(t, checkpoint.ApplyRestoreCandidateMetadata(
+			dcd.Spec.PodTemplate.Annotations,
+			&checkpoint.CheckpointInfo{
+				Enabled:          true,
+				AutomaticCapture: true,
+				StartupPolicy:    v1alpha1.CheckpointStartupPolicyImmediate,
+				AutomaticSnapshotJob: &checkpoint.SnapshotJobReference{
+					Name: "checkpoint-job",
+					UID:  types.UID("snapshot-job-uid"),
+				},
 			},
-			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
-			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase: v1alpha1.DynamoCheckpointPhaseReady,
-			},
-		}
+		))
+	}
 
-		r := makeReconciler(dcd, ckpt)
+	t.Run("automatic capture completion does not change the Immediate Pod template", func(t *testing.T) {
+		t.Log("Given the same custom-target DGD-managed SnapshotJob candidate before and after its PodSnapshot is Ready")
+		pendingDCD := makeDCD("")
+		pendingDCD.Spec.Experimental.Checkpoint.TargetContainerName = "engine-0"
+		pendingDCD.Spec.PodTemplate.Spec.Containers = append(
+			pendingDCD.Spec.PodTemplate.Spec.Containers,
+			corev1.Container{Name: "engine-0", Image: "test-image:latest"},
+		)
+		stampAutomaticCandidate(t, pendingDCD)
+		readyDCD := makeDCD("worker-snapshot")
+		readyDCD.Spec.Experimental.Checkpoint.TargetContainerName = "engine-0"
+		readyDCD.Spec.PodTemplate.Spec.Containers = append(
+			readyDCD.Spec.PodTemplate.Spec.Containers,
+			corev1.Container{Name: "engine-0", Image: "test-image:latest"},
+		)
+		stampAutomaticCandidate(t, readyDCD)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot.Spec.Source.PodRef.Containers = []string{"engine-0"}
+		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
+		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
+
+		t.Log("When the pending and Ready DCDs render their workload Pod templates")
+		pendingTemplate, err := makeReconciler(pendingDCD).workloadRenderer().generatePodTemplateSpec(
+			context.Background(), pendingDCD, dynamo.RoleMain, noContainerGPUs(),
+		)
+		require.NoError(t, err)
+		readyTemplate, err := makeReconciler(readyDCD, snapshot).workloadRenderer().generatePodTemplateSpec(
+			context.Background(), readyDCD, dynamo.RoleMain, noContainerGPUs(),
+		)
+		require.NoError(t, err)
+
+		t.Log("Then readiness changes controller state without triggering a worker rollout")
+		assert.Equal(t, pendingTemplate, readyTemplate)
+		assert.Equal(t, commonconsts.RestoreCandidateSourceSnapshotJob,
+			readyTemplate.Annotations[commonconsts.RestoreCandidateSourceKindAnnotation])
+		assert.Equal(t, "checkpoint-job", readyTemplate.Annotations[commonconsts.CheckpointNameAnnotation])
+		assert.Equal(t, "engine-0", readyTemplate.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
+	})
+
+	t.Run("DGD-managed checkpointRef resolves only a native PodSnapshot", func(t *testing.T) {
+		t.Log("Given a DGD-managed DCD reference and a Ready compatible PodSnapshot")
+		dcd := makeDCD("worker-snapshot")
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		r := makeReconciler(dcd, snapshot)
+
+		t.Log("When the DCD workload template is rendered")
 		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
 			noContainerGPUs(),
 		)
-		if err != nil {
-			t.Fatalf("generatePodTemplateSpec failed: %v", err)
-		}
 
-		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != "" {
-			t.Fatalf("expected %s to be omitted before pod-create mutation, got %q", snapshotprotocol.CheckpointIDLabel, got)
-		}
-		if _, has := podTemplateSpec.Labels[snapshotprotocol.CheckpointSourceLabel]; has {
-			t.Fatalf("restore pod template must not carry %s label: %#v", snapshotprotocol.CheckpointSourceLabel, podTemplateSpec.Labels)
-		}
-		if got := podTemplateSpec.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation]; got != commonconsts.KubeLabelValueTrue {
-			t.Fatalf("expected restore-candidate annotation, got %q", got)
-		}
-		if got := podTemplateSpec.Annotations[commonconsts.CheckpointNameAnnotation]; got != checkpointName {
-			t.Fatalf("expected checkpoint name annotation %q, got %q", checkpointName, got)
-		}
-		if got := podTemplateSpec.Annotations[snapshotprotocol.TargetContainersAnnotation]; got != commonconsts.MainContainerName {
-			t.Fatalf("expected %s=main annotation, got %q", snapshotprotocol.TargetContainersAnnotation, got)
-		}
+		t.Log("Then native identity is pinned for admission without legacy artifact metadata")
+		require.NoError(t, err)
+		assert.Equal(t, commonconsts.RestoreCandidateSourcePodSnapshot,
+			podTemplateSpec.Annotations[commonconsts.RestoreCandidateSourceKindAnnotation])
+		assert.Equal(t, string(snapshot.UID), podTemplateSpec.Annotations[commonconsts.SnapshotCandidateUIDAnnotation])
+		assert.Equal(t, "content-a", podTemplateSpec.Annotations[commonconsts.SnapshotCandidateContentAnnotation])
+		assert.Equal(t, commonconsts.MainContainerName, podTemplateSpec.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
 	})
 
-	t.Run("ready gms checkpoint injects restore clients", func(t *testing.T) {
-		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
-		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
-		if err != nil {
-			t.Fatalf("ComputeIdentityHash failed: %v", err)
-		}
-		dcd := makeDCD(checkpointName)
+	t.Run("pending explicit snapshot keeps Immediate workload cold-start shaped", func(t *testing.T) {
+		t.Log("Given an Immediate DCD referencing a compatible PodSnapshot that is not Ready")
+		dcd := makeDCD("worker-snapshot")
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", false)
+		r := makeReconciler(dcd, snapshot)
+
+		t.Log("When the DCD workload template is rendered")
+		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
+			context.Background(),
+			dcd,
+			dynamo.RoleMain,
+			noContainerGPUs(),
+		)
+
+		t.Log("Then the workload can cold-start without restore-candidate metadata")
+		require.NoError(t, err)
+		assert.NotContains(t, podTemplateSpec.Annotations, commonconsts.CheckpointRestoreCandidateAnnotation)
+		assert.NotContains(t, podTemplateSpec.Annotations, commonconsts.SnapshotCandidateUIDAnnotation)
+	})
+
+	t.Run("native wait policy remains an admission candidate", func(t *testing.T) {
+		t.Log("Given a WaitForCheckpoint DCD and a Ready compatible PodSnapshot with no legacy checkpoint")
+		dcd := makeDCD("worker-snapshot")
 		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
-		dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{
-			Name:    "gms-loader",
-			Image:   "custom-loader:latest",
-			Command: []string{"/bin/custom-loader"},
-		})
-		dcd.Spec.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{
-			Mode:                  v1beta1.GMSModeIntraPod,
-			ExtraClientContainers: []string{"gms-loader"},
-		}
-		dcd.Spec.PodTemplate.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
-		ckpt := &v1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      checkpointName,
-				Namespace: "default",
-			},
-			Spec: v1alpha1.DynamoCheckpointSpec{
-				Identity:         identity,
-				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
-			},
-			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase: v1alpha1.DynamoCheckpointPhaseReady,
-			},
-		}
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		r := makeReconciler(dcd, snapshot)
 
-		r := makeReconciler(dcd, ckpt)
-		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}}
+		t.Log("When the DCD workload template is rendered after the startup gate opens")
 		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
 			noContainerGPUs(),
 		)
-		if err != nil {
-			t.Fatalf("generatePodTemplateSpec failed: %v", err)
-		}
 
-		find := func(name string) *corev1.Container {
-			for i := range podTemplateSpec.Spec.Containers {
-				if podTemplateSpec.Spec.Containers[i].Name == name {
-					return &podTemplateSpec.Spec.Containers[i]
-				}
-			}
-			for i := range podTemplateSpec.Spec.InitContainers {
-				if podTemplateSpec.Spec.InitContainers[i].Name == name {
-					return &podTemplateSpec.Spec.InitContainers[i]
-				}
-			}
-			return nil
-		}
-
-		gmsServer := find(gms.ServerContainerName)
-		require.NotNil(t, gmsServer)
-		loader := find("gms-loader")
-		require.NotNil(t, loader)
-
-		mounts := map[string]string{}
-		for _, mount := range loader.VolumeMounts {
-			mounts[mount.Name] = mount.MountPath
-		}
-		if got := mounts[gms.SharedVolumeName]; got != gms.SharedMountPath {
-			t.Fatalf("expected gms loader socket mount at %s, got %q", gms.SharedMountPath, got)
-		}
-		if got := gmsServer.Command; len(got) != 3 || got[0] != "python3" || got[1] != "-m" || got[2] != "gpu_memory_service.cli.server" { //nolint:goconst
-			t.Fatalf("expected weights server to run python module, got %#v", got)
-		}
-		// gms-server is a native sidecar (init + restartPolicy=Always); no probe.
-		if gmsServer.RestartPolicy == nil || *gmsServer.RestartPolicy != corev1.ContainerRestartPolicyAlways {
-			t.Fatalf("expected restore gms-server to have RestartPolicy=Always, got %#v", gmsServer.RestartPolicy)
-		}
-		if gmsServer.StartupProbe != nil {
-			t.Fatalf("expected restore gms-server to have no StartupProbe")
-		}
-		// gms-loader is a regular container (no container-level RestartPolicy override).
-		if loader.RestartPolicy != nil {
-			t.Fatalf("expected restore gms-loader to have no container-level RestartPolicy, got %#v", loader.RestartPolicy)
-		}
-		if got := loader.Command; len(got) != 1 || got[0] != "/bin/custom-loader" {
-			t.Fatalf("expected loader command to be user-declared, got %#v", got)
-		}
+		t.Log("Then restore remains on native admission without resolving or injecting legacy storage")
+		require.NoError(t, err)
+		assert.Equal(t, commonconsts.KubeLabelValueTrue, podTemplateSpec.Annotations[commonconsts.CheckpointRestoreCandidateAnnotation])
+		assert.Equal(t, string(snapshot.UID), podTemplateSpec.Annotations[commonconsts.SnapshotCandidateUIDAnnotation])
+		assert.Equal(t, commonconsts.MainContainerName, podTemplateSpec.Annotations[commonconsts.RestoreCandidateTargetContainersAnnotation])
 	})
 
-	t.Run("service gms with non-gms checkpoint is rejected", func(t *testing.T) {
-		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
-		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
-		if err != nil {
-			t.Fatalf("ComputeIdentityHash failed: %v", err)
-		}
-		dcd := makeDCD(checkpointName)
-		dcd.Spec.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{
-			Mode:                  v1beta1.GMSModeIntraPod,
-			ExtraClientContainers: []string{"gms-loader"},
-		}
-		ckpt := &v1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      checkpointName,
-				Namespace: "default",
-			},
-			Spec: v1alpha1.DynamoCheckpointSpec{
-				Identity: identity,
-			},
-			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase: v1alpha1.DynamoCheckpointPhaseReady,
-			},
-		}
-
-		r := makeReconciler(dcd, ckpt)
-		_, err = r.workloadRenderer().generatePodTemplateSpec(
-			context.Background(),
-			dcd,
-			dynamo.RoleMain,
-			noContainerGPUs(),
-		)
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "gpuMemoryService restore requires resolved checkpoint")
-	})
-
-	t.Run("ready gms checkpoint wires user-declared loader", func(t *testing.T) {
-		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
-		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
-		if err != nil {
-			t.Fatalf("ComputeIdentityHash failed: %v", err)
-		}
-		dcd := makeDCD(checkpointName)
-		dcd.Spec.PodTemplate.Spec.Containers[0].Resources.Claims = []corev1.ResourceClaim{{Name: "gpu"}}
-		dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{
-			Name:    "gms-loader",
-			Image:   "custom-loader:latest",
-			Command: []string{"/bin/custom-loader"},
-		})
-		dcd.Spec.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{
-			Mode:                  v1beta1.GMSModeIntraPod,
-			ExtraClientContainers: []string{"gms-loader"},
-		}
-		ckpt := &v1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      checkpointName,
-				Namespace: "default",
-			},
-			Spec: v1alpha1.DynamoCheckpointSpec{
-				Identity:         identity,
-				GPUMemoryService: &v1alpha1.GPUMemoryServiceSpec{Enabled: true},
-			},
-			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase: v1alpha1.DynamoCheckpointPhaseReady,
-			},
-		}
-
-		r := makeReconciler(dcd, ckpt)
-		r.RuntimeConfig = &controller_common.RuntimeConfig{Gate: features.Gates{Checkpoint: true}}
-		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
-			context.Background(),
-			dcd,
-			dynamo.RoleMain,
-			noContainerGPUs(),
-		)
-		if err != nil {
-			t.Fatalf("generatePodTemplateSpec failed: %v", err)
-		}
-
-		loader := findContainer(podTemplateSpec.Spec.Containers, "gms-loader")
-		require.NotNil(t, loader)
-		if got := loader.Image; got != "custom-loader:latest" {
-			t.Fatalf("loader image = %q, want custom-loader:latest", got)
-		}
-		if got := loader.Command; len(got) != 1 || got[0] != "/bin/custom-loader" {
-			t.Fatalf("loader command = %#v, want [/bin/custom-loader]", got)
-		}
-	})
-
-	t.Run("ready checkpoint rewrites only main when extra sidecars are present", func(t *testing.T) {
-		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
-		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
-		if err != nil {
-			t.Fatalf("ComputeIdentityHash failed: %v", err)
-		}
-		dcd := makeDCD(checkpointName)
+	t.Run("owning DGD can render its retained automatic checkpoint", func(t *testing.T) {
+		t.Log("Given a WaitForCheckpoint DCD and its owning DGD's retained automatic PodSnapshot")
+		dcd := makeDCD("worker-snapshot")
 		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
-		dcd.Spec.PodTemplate.Spec.Containers = append(dcd.Spec.PodTemplate.Spec.Containers, corev1.Container{
-			Name:    "gms-loader",
-			Image:   "sidecar:latest",
-			Command: []string{"python3"},
-			Args:    []string{"-m", "sidecar"},
-		})
-		ckpt := &v1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      checkpointName,
-				Namespace: "default",
+		require.NoError(t, (&componentWorkloadsReconciler{}).applyCheckpointStartupPolicy(
+			dcd,
+			&checkpoint.CheckpointInfo{
+				Enabled:          true,
+				Exists:           true,
+				Ready:            true,
+				AutomaticCapture: true,
+				CheckpointName:   "worker-snapshot",
+				StartupPolicy:    v1alpha1.CheckpointStartupPolicyWaitForCheckpoint,
+				AutomaticSnapshotJob: &checkpoint.SnapshotJobReference{
+					Name: "checkpoint-job",
+					UID:  types.UID("snapshot-job-uid"),
+				},
 			},
-			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
-			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase: v1alpha1.DynamoCheckpointPhaseReady,
-			},
-		}
+		))
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
+		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
+		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
+		r := makeReconciler(dcd, snapshot)
 
-		r := makeReconciler(dcd, ckpt)
+		t.Log("When the DCD workload template is rendered")
 		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
 			noContainerGPUs(),
 		)
-		if err != nil {
-			t.Fatalf("generatePodTemplateSpec failed: %v", err)
-		}
 
-		var sidecarContainer, mainContainer *corev1.Container
-		for i := range podTemplateSpec.Spec.Containers {
-			container := &podTemplateSpec.Spec.Containers[i]
-			switch container.Name {
-			case "gms-loader":
-				sidecarContainer = container
-			case commonconsts.MainContainerName:
-				mainContainer = container
-			}
-		}
-		if sidecarContainer == nil || len(sidecarContainer.Command) != 1 || sidecarContainer.Command[0] != "python3" {
-			t.Fatalf("expected user sidecar container to remain unchanged, got %#v", sidecarContainer)
-		}
-		if mainContainer == nil || len(mainContainer.Command) != 1 || mainContainer.Command[0] != "python3" {
-			t.Fatalf("expected main container command to be preserved for restore, got %#v", mainContainer)
-		}
-		if len(mainContainer.Args) == 0 {
-			t.Fatalf("expected main container args to be preserved, got %#v", mainContainer.Args)
-		}
-		if got := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; got != checkpointName {
-			t.Fatalf("expected %s to be checkpoint id, got %q", snapshotprotocol.CheckpointIDLabel, got)
-		}
-		if _, has := podTemplateSpec.Labels[snapshotprotocol.CheckpointSourceLabel]; has {
-			t.Fatalf("restore pod template must not carry %s label: %#v", snapshotprotocol.CheckpointSourceLabel, podTemplateSpec.Labels)
-		}
+		t.Log("Then the owning DGD continues through its pinned automatic SnapshotJob")
+		require.NoError(t, err)
+		assert.Equal(t, commonconsts.RestoreCandidateSourceSnapshotJob,
+			podTemplateSpec.Annotations[commonconsts.RestoreCandidateSourceKindAnnotation])
+		assert.Equal(t, "snapshot-job-uid", podTemplateSpec.Annotations[commonconsts.SnapshotJobCandidateUIDAnnotation])
 	})
 
-	t.Run("operator reasserts restore identity labels after metadata merge", func(t *testing.T) {
-		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
-		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
-		if err != nil {
-			t.Fatalf("ComputeIdentityHash failed: %v", err)
-		}
-		dcd := makeDCD(checkpointName)
-		dcd.Spec.PodTemplate.Labels = map[string]string{
-			commonconsts.KubeLabelDynamoNamespace:           "wrong-namespace",
-			commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeFrontend,
-			commonconsts.KubeLabelDynamoGraphDeploymentName: "wrong-dgd",
-			commonconsts.KubeLabelDynamoWorkerHash:          "wrong-hash",
-		}
-		ckpt := &v1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      checkpointName,
-				Namespace: "default",
-			},
-			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
-			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase: v1alpha1.DynamoCheckpointPhaseReady,
-			},
-		}
+	t.Run("different DGD cannot render a retained automatic checkpoint", func(t *testing.T) {
+		t.Log("Given a generated DCD referencing another DGD's retained automatic PodSnapshot")
+		dcd := makeDCD("worker-snapshot")
+		stampAutomaticCandidate(t, dcd)
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
+		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
+		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = "different-dgd-uid"
+		r := makeReconciler(dcd, snapshot)
 
-		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
+		t.Log("When the DCD workload template is rendered")
+		_, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
 			noContainerGPUs(),
 		)
-		if err != nil {
-			t.Fatalf("generatePodTemplateSpec failed: %v", err)
-		}
 
-		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoNamespace]; got != testNamespace {
-			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoNamespace, "default", got)
-		}
-		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoComponentType]; got != commonconsts.ComponentTypeWorker {
-			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoComponentType, commonconsts.ComponentTypeWorker, got)
-		}
-		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoGraphDeploymentName]; got != "test-dgd" {
-			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoGraphDeploymentName, "test-dgd", got)
-		}
-		if got := podTemplateSpec.Labels[commonconsts.KubeLabelDynamoWorkerHash]; got != "workerhash" {
-			t.Fatalf("expected %s label to be %q, got %q", commonconsts.KubeLabelDynamoWorkerHash, "workerhash", got)
-		}
+		t.Log("Then the DCD cannot adopt the other graph incarnation's snapshot")
+		require.ErrorContains(t, err, "belongs to DGD uid")
 	})
 
-	t.Run("non-ready checkpoint clears stale restore labels", func(t *testing.T) {
-		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
-		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
-		if err != nil {
-			t.Fatalf("ComputeIdentityHash failed: %v", err)
-		}
-		dcd := makeDCD(checkpointName)
-		dcd.Spec.Experimental.Checkpoint.StartupPolicy = v1beta1.CheckpointStartupPolicyWaitForCheckpoint
-		ckpt := &v1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      checkpointName,
-				Namespace: "default",
-			},
-			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
-			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase: v1alpha1.DynamoCheckpointPhaseCreating,
-			},
-		}
+	t.Run("DGD explicit checkpointRef cannot adopt a retained automatic checkpoint", func(t *testing.T) {
+		t.Log("Given a generated DCD with an explicit reference to a retained automatic PodSnapshot")
+		dcd := makeDCD("worker-snapshot")
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
+		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
+		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
+		r := makeReconciler(dcd, snapshot)
 
-		r := makeReconciler(dcd, ckpt)
-		podTemplateSpec, err := r.workloadRenderer().generatePodTemplateSpec(
+		t.Log("When the DCD workload template is rendered")
+		_, err := r.workloadRenderer().generatePodTemplateSpec(
 			context.Background(),
 			dcd,
 			dynamo.RoleMain,
 			noContainerGPUs(),
 		)
-		if err != nil {
-			t.Fatalf("generatePodTemplateSpec failed: %v", err)
-		}
 
-		if _, ok := podTemplateSpec.Labels[snapshotprotocol.CheckpointIDLabel]; ok {
-			t.Fatalf("did not expect %s label when checkpoint is not ready", snapshotprotocol.CheckpointIDLabel)
-		}
-		if _, ok := podTemplateSpec.Annotations[snapshotprotocol.TargetContainersAnnotation]; ok {
-			t.Fatalf("did not expect %s annotation when checkpoint is not ready", snapshotprotocol.TargetContainersAnnotation)
-		}
-	})
-}
-
-func TestDynamoComponentDeploymentReconciler_generateDeployment_RestoreStrategy(t *testing.T) {
-	s := scheme.Scheme
-	if err := v1alpha1.AddToScheme(s); err != nil {
-		t.Fatalf("Failed to add v1alpha1 to scheme: %v", err)
-	}
-	if err := corev1.AddToScheme(s); err != nil {
-		t.Fatalf("Failed to add corev1 to scheme: %v", err)
-	}
-	if err := appsv1.AddToScheme(s); err != nil {
-		t.Fatalf("Failed to add appsv1 to scheme: %v", err)
-	}
-
-	replicas := int32(1)
-	makeDCD := func(checkpointRef string) *v1beta1.DynamoComponentDeployment {
-		return betaDCD(t, &v1alpha1.DynamoComponentDeployment{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-worker",
-				Namespace: "default",
-			},
-			Spec: v1alpha1.DynamoComponentDeploymentSpec{
-				BackendFramework: string(dynamo.BackendFrameworkVLLM),
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					ServiceName:     "worker",
-					ComponentType:   commonconsts.ComponentTypeWorker,
-					DynamoNamespace: ptr.To("default"),
-					Replicas:        &replicas,
-					Labels: map[string]string{
-						commonconsts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
-					},
-					Checkpoint: &v1alpha1.ServiceCheckpointConfig{
-						Enabled:       true,
-						CheckpointRef: &checkpointRef,
-					},
-					ExtraPodSpec: &v1alpha1.ExtraPodSpec{
-						MainContainer: &corev1.Container{
-							Name:    commonconsts.MainContainerName,
-							Image:   "test-image:latest",
-							Command: []string{"python3"},
-							Args:    []string{"-m", "dynamo.vllm"},
-						},
-					},
-				},
-			},
-		})
-	}
-
-	makeReconciler := func(objs ...client.Object) *DynamoComponentDeploymentReconciler {
-		objs = append(objs, &appsv1.DaemonSet{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "snapshot-agent",
-				Namespace: "default",
-				Labels: map[string]string{
-					snapshotprotocol.SnapshotAgentLabelKey: snapshotprotocol.SnapshotAgentLabelValue,
-				},
-			},
-			Spec: appsv1.DaemonSetSpec{
-				Template: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{
-							Name: snapshotprotocol.SnapshotAgentContainerName,
-							VolumeMounts: []corev1.VolumeMount{{
-								Name:      "checkpoints",
-								MountPath: "/checkpoints",
-							}},
-						}},
-						Volumes: []corev1.Volume{{
-							Name: "checkpoints",
-							VolumeSource: corev1.VolumeSource{
-								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-									ClaimName: "snapshot-pvc",
-								},
-							},
-						}},
-					},
-				},
-			},
-		})
-		return &DynamoComponentDeploymentReconciler{
-			Client: fake.NewClientBuilder().
-				WithScheme(s).
-				WithObjects(objs...).
-				Build(),
-			Config: &configv1alpha1.OperatorConfiguration{
-				Checkpoint: configv1alpha1.CheckpointConfiguration{
-					Enabled: true,
-				},
-			},
-			RuntimeConfig: &controller_common.RuntimeConfig{},
-		}
-	}
-
-	t.Run("ready checkpoint keeps RollingUpdate strategy", func(t *testing.T) {
-		// Restore-target pods do not need a special Recreate override. The
-		// default RollingUpdate strategy works for failure-replacement and
-		// scale-up; users who specifically want Recreate on tight-GPU nodes
-		// can still opt in via the nvidia.com/deployment-strategy annotation.
-		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
-		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
-		if err != nil {
-			t.Fatalf("ComputeIdentityHash failed: %v", err)
-		}
-		dcd := makeDCD(checkpointName)
-		ckpt := &v1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      checkpointName,
-				Namespace: "default",
-			},
-			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
-			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase: v1alpha1.DynamoCheckpointPhaseReady,
-			},
-		}
-
-		r := makeReconciler(dcd, ckpt)
-		deploy, toDelete, err := r.generateDeployment(context.Background(), generateResourceOption{
-			dynamoComponentDeployment: dcd,
-		})
-		if err != nil {
-			t.Fatalf("generateDeployment failed: %v", err)
-		}
-		if toDelete {
-			t.Fatalf("expected deployment to be retained")
-		}
-		if deploy.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
-			t.Fatalf("expected RollingUpdate strategy, got %s", deploy.Spec.Strategy.Type)
-		}
+		t.Log("Then the public checkpointRef contract rejects the retained artifact")
+		require.ErrorContains(t, err, "retained automatic checkpoint")
 	})
 
-	t.Run("non-ready checkpoint keeps RollingUpdate strategy", func(t *testing.T) {
-		identity := v1alpha1.DynamoCheckpointIdentity{Model: "test-model", BackendFramework: "vllm"}
-		checkpointName, err := checkpoint.ComputeIdentityHash(identity)
-		if err != nil {
-			t.Fatalf("ComputeIdentityHash failed: %v", err)
-		}
-		dcd := makeDCD(checkpointName)
-		ckpt := &v1alpha1.DynamoCheckpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      checkpointName,
-				Namespace: "default",
-			},
-			Spec: v1alpha1.DynamoCheckpointSpec{Identity: identity},
-			Status: v1alpha1.DynamoCheckpointStatus{
-				Phase: v1alpha1.DynamoCheckpointPhaseCreating,
-			},
-		}
+	t.Run("standalone DCD cannot render a retained automatic checkpoint", func(t *testing.T) {
+		t.Log("Given a standalone DCD referencing a retained automatic PodSnapshot")
+		dcd := makeDCD("worker-snapshot")
+		dcd.OwnerReferences = nil
+		snapshot := dgdTestPodSnapshot("worker-snapshot", "workerhash", true)
+		snapshot.Annotations[commonconsts.CheckpointAutoAnnotation] = commonconsts.KubeLabelValueTrue
+		snapshot.Annotations[commonconsts.CheckpointDeletionPolicyAnnotation] = string(v1alpha1.CheckpointDeletionPolicyRetain)
+		snapshot.Annotations[commonconsts.CheckpointOwnerUIDAnnotation] = testDGDUID
+		r := makeReconciler(dcd, snapshot)
 
-		r := makeReconciler(dcd, ckpt)
-		deploy, toDelete, err := r.generateDeployment(context.Background(), generateResourceOption{
-			dynamoComponentDeployment: dcd,
-		})
-		if err != nil {
-			t.Fatalf("generateDeployment failed: %v", err)
-		}
-		if toDelete {
-			t.Fatalf("expected deployment to be retained")
-		}
-		if deploy.Spec.Strategy.Type != appsv1.RollingUpdateDeploymentStrategyType {
-			t.Fatalf("expected RollingUpdate strategy, got %s", deploy.Spec.Strategy.Type)
-		}
+		t.Log("When the DCD workload template is rendered")
+		_, err := r.workloadRenderer().generatePodTemplateSpec(
+			context.Background(),
+			dcd,
+			dynamo.RoleMain,
+			noContainerGPUs(),
+		)
+
+		t.Log("Then the public checkpointRef contract rejects the retained artifact")
+		require.ErrorContains(t, err, "retained automatic checkpoint")
 	})
 }
 
@@ -2410,7 +2083,7 @@ func Test_createOrUpdateOrDeleteDeployments_K8sAPIDefaults(t *testing.T) {
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	name := "test-component"
-	namespace := testNamespace
+	namespace := "test-namespace"
 
 	// Create DynamoComponentDeployment
 	replicaCount := int32(3)
