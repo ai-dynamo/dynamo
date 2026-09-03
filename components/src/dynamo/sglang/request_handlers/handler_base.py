@@ -1155,6 +1155,9 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             if json_schema is not None:
                 reject_nonprogressing_guided_json_ref_cycles(json_schema)
                 return {"json_schema": json.dumps(json_schema)}
+            regex = guided_decoding.get("regex")
+            if regex is not None:
+                return {"regex": regex}
             structural_tag = guided_decoding.get("structural_tag")
             if structural_tag is not None:
                 return {"structural_tag": serialize_structural_tag(structural_tag)}

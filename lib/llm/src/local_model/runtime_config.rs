@@ -91,6 +91,13 @@ pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
+/// Worker-reported Qwen3 video prompt-expansion contract used by vLLM.
+///
+/// Absence disables exact video routing so a newer frontend remains safe with
+/// older workers that predate this runtime contract.
+pub const VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
+    "vllm_qwen_video_processor_contract";
+
 /// Worker-reported vLLM setting that makes multimodal cache identities depend
 /// on the active LoRA adapter. Missing and explicit `false` are equivalent.
 pub const VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY: &str = "vllm_enable_tower_connector_lora";

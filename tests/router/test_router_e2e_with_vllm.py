@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any, Dict, Optional
 
 import aiohttp
@@ -49,6 +50,9 @@ pytestmark = [
 ]
 SPEEDUP_RATIO = 10.0
 BLOCK_SIZE = 16
+
+WORKER_REGISTRATION_TIMEOUT_S = 180.0
+WORKER_REGISTRATION_POLL_S = 0.5
 
 # Shared vLLM configuration for all tests
 # gpu_memory_utilization limits actual VRAM allocation (required for multi-worker on same GPU)
@@ -434,20 +438,56 @@ class VLLMProcess(ManagedEngineProcessMixin):
                 process.__enter__()
 
                 new_worker_id = None
-                for _ in range(120):
+                started_at = time.monotonic()
+                deadline = started_at + WORKER_REGISTRATION_TIMEOUT_S
+                while True:
                     ids = set(client.instance_ids())
                     new = ids - known_ids
                     if new:
                         new_worker_id = new.pop()
                         known_ids.add(new_worker_id)
                         break
-                    await asyncio.sleep(0.5)
+                    # A dead worker never registers. Check liveness each poll so the
+                    # loop fails in one interval instead of waiting out the full
+                    # budget. Matches _check_port/_check_url/_check_func.
+                    process._check_process_alive(
+                        f"while waiting for vLLM worker {worker_idx} to register"
+                    )
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    await asyncio.sleep(min(WORKER_REGISTRATION_POLL_S, remaining))
+
+                registration_s = time.monotonic() - started_at
 
                 if new_worker_id is None:
+                    try:
+                        returncode = process.proc.poll() if process.proc else None
+                        if process.proc is None:
+                            liveness = "subprocess was never started"
+                        elif returncode is None:
+                            liveness = "subprocess still running"
+                        else:
+                            liveness = (
+                                f"subprocess already exited with code {returncode}"
+                            )
+                    except (OSError, ValueError) as diag_exc:
+                        liveness = f"subprocess liveness unavailable ({diag_exc})"
                     raise RuntimeError(
                         f"Timed out waiting for vLLM worker {worker_idx} to register "
-                        f"(known_ids={known_ids})"
+                        f"(known_ids={known_ids}) after {registration_s:.1f}s of a "
+                        f"{WORKER_REGISTRATION_TIMEOUT_S:.0f}s budget; {liveness}; "
+                        f"worker log: {process.log_path}"
                     )
+
+                logger.info(
+                    "vLLM worker %s registered as instance %s after %.1fs "
+                    "(budget %.0fs)",
+                    worker_idx,
+                    new_worker_id,
+                    registration_s,
+                    WORKER_REGISTRATION_TIMEOUT_S,
+                )
 
                 zmq_endpoint = f"tcp://127.0.0.1:{self._kv_event_ports[worker_idx]}"
                 replay_endpoint = (
