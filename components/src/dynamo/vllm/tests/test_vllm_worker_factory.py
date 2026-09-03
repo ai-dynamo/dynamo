@@ -17,6 +17,7 @@ from dynamo.vllm.worker_factory import (
     EngineSetupResult,
     WorkerFactory,
     _DecodeWorkerLifecycle,
+    _merge_benchmark_rank_results,
     _wait_and_load_benchmark,
 )
 
@@ -1228,3 +1229,85 @@ async def test_embedding_worker_registration_and_cleanup(
     assert register_vllm_model.await_args.args[0] == expected_model_input
     assert cleanup_order == ["handler", "client", "resource"]
     assert shutdown_endpoints == [endpoint]
+
+
+def _rank_artifact(dp_rank: int, regime: str) -> dict:
+    point = {
+        "point_type": "decode",
+        "benchmark_id": 1,
+        "total_prefill_tokens": 0,
+        "total_kv_read_tokens": 64,
+        "batch_size": 2,
+        "expected_cudagraph_mode": "FULL",
+        "expected_capture_size": 2,
+        "padding_tokens": 0,
+        "sample_reasons": ["explicit"],
+        "partition": None,
+        "rows": None,
+    }
+    fpm = {
+        "version": 1,
+        "worker_id": "w",
+        "dp_rank": dp_rank,
+        "counter_id": 1,
+        "wall_time": 0.01,
+        "scheduled_requests": {
+            "num_prefill_requests": 0,
+            "sum_prefill_tokens": 0,
+            "var_prefill_length": 0.0,
+            "sum_prefill_kv_tokens": 0,
+            "num_decode_requests": 2,
+            "sum_decode_kv_tokens": 64,
+            "var_decode_kv_tokens": 0.0,
+        },
+        "queued_requests": {
+            "num_prefill_requests": 0,
+            "sum_prefill_tokens": 0,
+            "var_prefill_length": 0.0,
+            "num_decode_requests": 0,
+            "sum_decode_kv_tokens": 0,
+            "var_decode_kv_tokens": 0.0,
+        },
+    }
+    return {
+        "schema_version": 2,
+        "artifact_type": "rank",
+        "status": "complete",
+        "valid": True,
+        "usable": True,
+        "stop_reason": None,
+        "timing_valid": True,
+        "run_id": "run",
+        "grid_digest": "g" * 64,
+        "timing": {
+            "started_at": "2026-01-01T00:00:00Z",
+            "completed_at": "2026-01-01T00:00:01Z",
+            "benchmark_elapsed_seconds": 1.0,
+            "measured_iteration_seconds": 0.01,
+        },
+        "dp": {"rank": dp_rank, "size": 1},
+        "coverage": {"expected_points": 1, "completed_points": 1, "skipped_points": 0},
+        "results": [{"point": point, "kv_seed_regime": regime, "fpms": [fpm]}],
+        "iteration_groups": [
+            {
+                "benchmark_id": 1,
+                "point": point,
+                "expected_dp_ranks": [0],
+                "complete": True,
+                "wall_time": 0.01,
+                "rank_results": [{"dp_rank": 0, "fpms": [fpm]}],
+            }
+        ],
+        "skipped_points": [],
+        "missing_phases": [],
+        "error": None,
+    }
+
+
+def test_merge_benchmark_rank_results_carries_kv_seed_regime(tmp_path):
+    artifact = _rank_artifact(0, "fake_fallback")
+    merged = _merge_benchmark_rank_results(
+        [(0, tmp_path / "rank0.json", artifact)], tmp_path / "merged.json"
+    )
+    assert merged["results"][0]["kv_seed_regime"] == "fake_fallback"
+    assert merged["results"][0]["point"]["dp_rank"] == 0

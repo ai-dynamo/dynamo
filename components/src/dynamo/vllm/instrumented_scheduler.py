@@ -85,6 +85,8 @@ import logging
 import math
 import os
 import queue
+import random
+import shutil
 import threading
 import time
 import uuid
@@ -93,7 +95,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from itertools import count
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import msgspec.structs
 import zmq
@@ -250,6 +252,10 @@ class _BenchmarkCapacityEnvelope:
     usable_blocks_without_watermark: int
     usable_blocks_with_watermark: int
     grid_invariants_digest: str
+    # KV warm-up eligibility is host-local (dataset availability, model
+    # layout); folding it into the negotiated envelope makes every rank take
+    # the same real/fake plan before the grid digest is synchronized.
+    kvwarm_eligible: bool = True
 
     @classmethod
     def from_dict(cls, payload: object) -> _BenchmarkCapacityEnvelope:
@@ -284,6 +290,11 @@ class _BenchmarkCapacityEnvelope:
             raise RuntimeError(
                 "attention-DP benchmark capacity has invalid grid invariants digest"
             )
+        eligible = payload.get("kvwarm_eligible", True)
+        if not isinstance(eligible, bool):
+            raise RuntimeError(
+                f"attention-DP benchmark capacity has invalid kvwarm_eligible={eligible!r}"
+            )
         return cls(
             max_model_len=values["max_model_len"],
             max_num_scheduled_tokens=values["max_num_scheduled_tokens"],
@@ -291,6 +302,7 @@ class _BenchmarkCapacityEnvelope:
             usable_blocks_without_watermark=values["usable_blocks_without_watermark"],
             usable_blocks_with_watermark=values["usable_blocks_with_watermark"],
             grid_invariants_digest=digest,
+            kvwarm_eligible=eligible,
         )
 
     @classmethod
@@ -315,6 +327,7 @@ class _BenchmarkCapacityEnvelope:
             usable_blocks_without_watermark=min(
                 capacity.usable_blocks_without_watermark for capacity in capacities
             ),
+            kvwarm_eligible=all(capacity.kvwarm_eligible for capacity in capacities),
             usable_blocks_with_watermark=min(
                 capacity.usable_blocks_with_watermark for capacity in capacities
             ),
@@ -2258,6 +2271,29 @@ class InstrumentedScheduler(AsyncScheduler):
         else:
             self._bench_block_hasher = None
 
+        # Vocabulary bound for synthetic token randomization (see
+        # _bench_synthetic_token_ids). Zero disables randomization and falls
+        # back to all-zero prompts.
+        self._bench_vocab_size = 0
+        model_config = getattr(vllm_config, "model_config", None)
+        get_vocab_size = getattr(model_config, "get_vocab_size", None)
+        if callable(get_vocab_size):
+            try:
+                self._bench_vocab_size = int(get_vocab_size())
+            except Exception:
+                logger.warning(
+                    "Could not determine vocab size; synthetic benchmark "
+                    "prompts fall back to all-zero tokens",
+                    exc_info=True,
+                )
+        if self._bench_vocab_size <= 1:
+            logger.warning(
+                "Synthetic benchmark prompts use all-zero tokens "
+                "(vocab_size=%d): MoE routing collapses on constant input and "
+                "biases measured latency",
+                self._bench_vocab_size,
+            )
+
         logger.info(
             "Benchmark mode enabled: %s (cudagraph_mode=%s, capture_sizes=%s)",
             self._bench_config,
@@ -2347,6 +2383,13 @@ class InstrumentedScheduler(AsyncScheduler):
             usable_blocks_without_watermark=available_blocks,
             usable_blocks_with_watermark=max(0, available_blocks - watermark_blocks),
             grid_invariants_digest=self._bench_grid_invariants_digest(),
+            # Resolve eligibility (and the seeding dataset) here, before the
+            # grid digest is negotiated, so a host-local failure demotes the
+            # whole group instead of forking one rank onto a different plan.
+            kvwarm_eligible=(
+                self._bench_config.mode in ("decode", "agg")
+                and self._kvwarm_warm_eligible()
+            ),
         )
 
     def _bench_capacity_limit(self, name: str) -> int:
@@ -2475,6 +2518,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 len(warmup_points),
             )
         self._bench_expected_points = len(self._bench_grid) - len(warmup_points)
+        # Finalize execution order BEFORE numbering: IDs then follow execution
+        # order, so a soft-timeout artifact holds the contiguous prefix 1..k
+        # the native-artifact contract requires, and the grid digest covers
+        # the order every rank will actually run.
+        self._kvwarm_prepare(mode)
         # Published results must carry contiguous benchmark IDs starting at 1
         # (the native-artifact contract), so real points are numbered first;
         # discarded warmup replicas take IDs after the real range. counter_id
@@ -3320,6 +3368,97 @@ class InstrumentedScheduler(AsyncScheduler):
 
     # -- Request injection / cleanup ------------------------------------
 
+    def _bench_synthetic_token_ids(self, salt: str, length: int) -> list[int]:
+        """Salt-seeded random token ids for synthetic benchmark prompts.
+
+        All-zero prompts are not measurement-neutral: an MoE router collapses
+        constant input onto a few experts, which skews expert-parallel load
+        balance and biases measured latency in both phases.
+
+        Determinism contract: ``random.Random(salt)`` seeds from a stable
+        hash of the string, and ``choices`` consumes the stream one draw per
+        element, so the same salt yields the same sequence across processes
+        AND a shorter draw is a strict prefix of a longer one. The fake
+        prefix-cache pairing depends on that prefix property: the seed
+        request (length = prefix_tokens) and the measuring request
+        (length = full prompt) share a salt, so their first prefix_tokens
+        ids -- and therefore their block hashes -- are identical.
+        """
+        vocab_size = getattr(self, "_bench_vocab_size", 0)
+        if vocab_size <= 1:
+            return [0] * length
+        # Mix the attention-DP rank into the seed: salts are derived from
+        # rank-local counters that lockstep keeps identical across ranks, so
+        # without this every rank would inject byte-identical token streams
+        # and expert routing would be correlated across the whole DP group --
+        # a milder cousin of the constant-input collapse this method removes.
+        dp_rank = getattr(self, "_fpm_dp_rank", 0)
+        seed = f"dp{dp_rank}:{salt}"
+        mode = os.environ.get("DYN_BENCH_PREFILL_CONTENT", "")
+        if mode == "sharegpt":
+            return self._bench_content_pool_ids(seed, length)
+        if mode == "sharegpt_chain":
+            # Route through the KV-warmup chain tokenizer so benchmark
+            # prompts are built exactly like ground-truth serving prompts
+            # (same dataset, same concatenation). The offset keeps these
+            # derived chain indices clear of the grid's own chain range.
+            idx = 20_000_000 + (
+                int.from_bytes(hashlib.sha256(seed.encode()).digest()[:4], "big")
+                % 1_000_000
+            )
+            return self._kvwarm_chain_token_ids(idx, length)
+        rng = random.Random(seed)
+        return rng.choices(range(1, vocab_size), k=length)
+
+    def _bench_content_pool_ids(self, seed: str, length: int) -> list[int]:
+        """Deterministic window over a flat pool of real-text token ids.
+
+        Fully random token ids fix the constant-input collapse (see
+        ``_bench_synthetic_token_ids``) but still route MoE experts unlike
+        real text: uniform ids draw an unnaturally flat expert distribution
+        that does not model real-text routing on deep-KV decode.
+        ``DYN_BENCH_PREFILL_CONTENT=sharegpt`` feeds prompts from real
+        conversations instead.
+
+        Invariants mirrored from the random path:
+        - the window START depends only on ``seed`` (never on ``length``),
+          wrapping around the pool end, so for one seed any two lengths are
+          strict prefixes of each other -- the property the fake prefix-cache
+          pairing depends on;
+        - the pool order is seeded once per process, so the mapping is
+          deterministic across ranks and boots.
+
+        ``DYN_BENCH_POOL_TAG`` re-draws every window (same invariants) so
+        repeated boots can vote over content draws as well as boot state.
+        """
+        pool = getattr(self, "_bench_prefill_pool", None)
+        if pool is None:
+            texts = self._kvwarm_load_texts()
+            tokenizer = self._kvwarm_tokenizer()
+            need = 2_400_000
+            order = list(range(len(texts)))
+            random.Random("bench-prefill-pool").shuffle(order)
+            pool = []
+            for i in order:
+                pool.extend(tokenizer.encode(texts[i], add_special_tokens=False))
+                if len(pool) >= need:
+                    break
+            if len(pool) < 4096:
+                raise RuntimeError(
+                    "DYN_BENCH_PREFILL_CONTENT=sharegpt: dataset pool too small "
+                    f"({len(pool)} tokens; need >= 4096)"
+                )
+            self._bench_prefill_pool = pool
+        n = len(pool)
+        tag = os.environ.get("DYN_BENCH_POOL_TAG", "")
+        start = random.Random(f"{tag}:{seed}").randrange(0, n)
+        if start + length <= n:
+            return pool[start : start + length]
+        out = pool[start:]
+        while len(out) < length:
+            out = out + pool
+        return out[:length]
+
     def _bench_cache_fake_prefixes(
         self,
         prefix_lengths: Sequence[int],
@@ -3366,7 +3505,12 @@ class InstrumentedScheduler(AsyncScheduler):
                     continue
                 req = Request(
                     request_id=f"__bench_fake_prefix_{self._bench_seq + index}",
-                    prompt_token_ids=[0] * prefix_tokens,
+                    # Salted by cache_salt: the measuring request draws its
+                    # prompt from the same salt, so the seeded prefix matches
+                    # token-for-token and the block hashes line up.
+                    prompt_token_ids=self._bench_synthetic_token_ids(
+                        cache_salt, prefix_tokens
+                    ),
                     sampling_params=SamplingParams(max_tokens=1),
                     pooling_params=None,
                     block_hasher=self._bench_block_hasher,
@@ -3423,13 +3567,16 @@ class InstrumentedScheduler(AsyncScheduler):
         requests: list[Request] = []
         for index, prompt_len in enumerate(prompt_lens):
             req_id = f"__bench_{self._bench_seq + index}"
+            salt = cache_salts[index] if cache_salts is not None else req_id
             req = Request(
                 request_id=req_id,
-                prompt_token_ids=[0] * prompt_len,
+                # Same salt as the fake-prefix seed for this slot: the first
+                # expected_kv_read_tokens ids reproduce the seeded prefix.
+                prompt_token_ids=self._bench_synthetic_token_ids(salt, prompt_len),
                 sampling_params=SamplingParams(max_tokens=max_tokens),
                 pooling_params=None,
                 block_hasher=self._bench_block_hasher,
-                cache_salt=cache_salts[index] if cache_salts is not None else req_id,
+                cache_salt=salt,
             )
 
             if expected_kv_read_tokens is not None:
@@ -3462,7 +3609,7 @@ class InstrumentedScheduler(AsyncScheduler):
         We pad each synthetic prompt to ``ctx_len + 1`` tokens (rather than
         ``ctx_len``) so the input slot at position ``ctx_len`` -- the one
         the decode iteration reads from -- is part of the request's prompt
-        and therefore guaranteed to be a valid token id (0). Without this
+        and therefore guaranteed to be a valid in-vocab token id. Without this
         padding the worker's async-scheduler bookkeeping writes a ``-1``
         placeholder into ``token_ids_cpu[req_idx, ctx_len]`` after
         sampling (gpu_model_runner._update_states_after_model_execute, see
@@ -3491,7 +3638,7 @@ class InstrumentedScheduler(AsyncScheduler):
         for ctx_len in context_lengths:
             req_id = f"__bench_{self._bench_seq}"
             padded_len = ctx_len + 1
-            prompt = [0] * padded_len
+            prompt = self._bench_synthetic_token_ids(req_id, padded_len)
             req = Request(
                 request_id=req_id,
                 prompt_token_ids=prompt,
@@ -3581,10 +3728,16 @@ class InstrumentedScheduler(AsyncScheduler):
 
     def _bench_cleanup_requests(self) -> None:
         """Free all resources held by active benchmark requests."""
+        kvwarm_borrowed: set[str] = getattr(self, "_kvwarm_borrowed_ids", set())
         for req_id in list(self._bench_active_req_ids):
             req = self.requests.get(req_id)
             if req:
-                self.kv_cache_manager.free(req)
+                if req_id in kvwarm_borrowed:
+                    # Shadows are registered with the managers: freeing them
+                    # drops their shared-prefix references (the chain keeps
+                    # its own) and returns only the shadow-owned tail.
+                    kvwarm_borrowed.discard(req_id)
+                self._kvwarm_release_request(req)
                 self.finished_req_ids.add(req_id)
                 del self.requests[req_id]
         running = self.running  # type: ignore[has-type]
@@ -3599,6 +3752,10 @@ class InstrumentedScheduler(AsyncScheduler):
         """Remove all synthetic prefix entries before normal serving starts."""
         if self._bench_prefix_cache_cleared:
             return
+        if getattr(self, "_kvwarm_chain_ids", None):
+            # KVWARM parked chains still pin blocks (timeout/exception paths skip
+            # the busy chain release); return them to the pool first.
+            self._kvwarm_shed_chains()
         if not self.kv_cache_manager.reset_prefix_cache():
             raise RuntimeError(
                 "failed to clear synthetic prefix cache after self-benchmark"
@@ -3679,6 +3836,7 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_expected_fpms = 1
         self._schedule_times.clear()
         self._last_update_time = 0.0
+        self._kvwarm_release_heavy_state()
         if resume_publisher:
             self._publisher.resume()
 
@@ -3801,6 +3959,8 @@ class InstrumentedScheduler(AsyncScheduler):
         self._bench_start_timing()
         self._bench_build_grid()
 
+        if self._bench_phase == _BenchPhase.DECODE_SWEEP and self._kvwarm_step_busy():
+            return None  # chain fleet under construction: defer to real chunked prefill
         if self._bench_phase == _BenchPhase.WARMUP:
             return self._bench_step_warmup()
         if self._bench_phase == _BenchPhase.PREFILL_SWEEP:
@@ -3971,6 +4131,748 @@ class InstrumentedScheduler(AsyncScheduler):
         )
         return None
 
+    # ------------------------------------------------------------------
+    # KVWARM -- real-content KV warmup (design: FIX_DESIGN_DECODE_SWEEP.md #4.5)
+    # Mechanism: one fleet of mutually distinct real-text chains per decode
+    # batch rung (ShareGPT even-half pool, built through chunked prefill and
+    # then parked resident); each measurement point (B, kv) injects shadow
+    # requests that borrow the chains' block tables 1:1 (read-only, zero
+    # allocation, no manager registration) and runs the original two-step
+    # measurement. Chains live in their own registry (_kvwarm_chain_ids),
+    # with zero interference with existing benchmark bookkeeping.
+    # ------------------------------------------------------------------
+
+    _KVWARM_DEFAULT_DATASET_URL = (
+        "https://huggingface.co/datasets/anon8231489123/"
+        "ShareGPT_Vicuna_unfiltered/resolve/main/"
+        "ShareGPT_V3_unfiltered_cleaned_split.json"
+    )
+    # Pinned digest of the default dataset. A custom DYN_BENCH_KV_WARMUP_DATASET
+    # supplies its own expectation via DYN_BENCH_KV_WARMUP_SHA256.
+    _KVWARM_DEFAULT_DATASET_SHA256 = (
+        "35f0e213ce091ed9b9af2a1f0755e9d39f9ccec34ab281cd4ca60d70f6479ba4"
+    )
+    # Socket-level timeout: a stalled endpoint must fail the download (and
+    # with it the warm-up) instead of blocking the scheduler indefinitely.
+    _KVWARM_DOWNLOAD_TIMEOUT_S = 60
+    _kvwarm_stage_t0: float | None
+    _kvwarm_stage_batch: int | None
+
+    def _kvwarm_flag_on(self) -> bool:
+        """KV warm-up master switch (``DYN_BENCH_KV_WARMUP``, default on)."""
+        return os.environ.get("DYN_BENCH_KV_WARMUP", "on").lower() not in (
+            "off",
+            "0",
+            "false",
+        )
+
+    def _kvwarm_giant_threshold(self) -> int:
+        """Total-KV threshold above which points get repeated measurement."""
+        return int(os.environ.get("DYN_BENCH_GIANT_KV_THRESHOLD", "1000000"))
+
+    def _kvwarm_giant_repeats(self) -> int:
+        """Steady-step repeat count for median protection on giant points."""
+        return max(1, int(os.environ.get("DYN_BENCH_GIANT_KV_REPEATS", "3")))
+
+    def _kvwarm_meta_init(self) -> dict:
+        """Create (once) and return the KVWARM metadata block for results."""
+        meta = getattr(self, "_kvwarm_meta", None)
+        if meta is None:
+            meta = {
+                "enabled": self._kvwarm_flag_on(),
+                "warm_eligible": None,
+                "skip_reason": None,
+                "dataset": None,
+                "stages": [],
+                "points_real_kv": 0,
+                "points_fake_fallback": 0,
+                "giant_kv_threshold": self._kvwarm_giant_threshold(),
+                "giant_kv_repeats": self._kvwarm_giant_repeats(),
+            }
+            self._kvwarm_meta = meta
+        return meta
+
+    def _kvwarm_state_layer_groups(self) -> list[str]:
+        """Names of KV-cache groups backed by recurrent state (Mamba/linear
+        attention). Their per-request state is updated in place, so a borrowed
+        shadow write would corrupt the chain; the warm-up must not run on them
+        until scratch state blocks exist."""
+        manager = getattr(self, "kv_cache_manager", None)
+        config = getattr(manager, "kv_cache_config", None)
+        groups = getattr(config, "kv_cache_groups", None) or []
+        names = []
+        for group in groups:
+            spec_name = type(getattr(group, "kv_cache_spec", None)).__name__
+            if "Mamba" in spec_name:
+                names.append(spec_name)
+        return names
+
+    def _kvwarm_seed_regime(self, point) -> str:
+        """Row-level KV seed provenance for artifact consumers.
+
+        ``real_kv`` / ``fake_fallback`` come from the injection stamp;
+        ``legacy`` means the warm-up was switched off; ``skip:<reason>`` means
+        the gate rejected the configuration; ``unstamped`` is a decode point
+        that never reached injection (e.g. skipped before it); prefill points
+        are ``not_applicable``.
+        """
+        if getattr(point, "point_type", None) != "decode":
+            return "not_applicable"
+        reasons = list(getattr(point, "sample_reasons", None) or [])
+        if "kvwarm_real_kv" in reasons:
+            return "real_kv"
+        if "kvwarm_fake_fallback" in reasons:
+            return "fake_fallback"
+        if not self._kvwarm_flag_on():
+            return "legacy"
+        meta = getattr(self, "_kvwarm_meta", None) or {}
+        if meta.get("warm_eligible") is False:
+            return f"skip:{meta.get('skip_reason')}"
+        return "unstamped"
+
+    def _kvwarm_release_heavy_state(self) -> None:
+        """Drop benchmark-only host state before the scheduler resumes serving.
+
+        The seeding texts, tokenizer, per-chain token caches and the real-text
+        prompt pool can hold hundreds of MB; none of it is needed once the
+        sweep is over (success or abort).
+        """
+        if getattr(self, "_kvwarm_chain_ids", None):
+            self._kvwarm_shed_chains()
+        for attr in (
+            "_kvwarm_texts",
+            "_kvwarm_tok",
+            "_kvwarm_token_cache",
+            "_kvwarm_chain_prompts",
+            "_bench_prefill_pool",
+        ):
+            if hasattr(self, attr):
+                setattr(self, attr, None)
+
+    def _kvwarm_warm_eligible(self) -> bool:
+        """Warmup only matters to first order for EP-sharded MoE; dense and
+        moe_tp topologies are physically immune -- skip."""
+        cached = getattr(self, "_kvwarm_eligible_cache", None)
+        if cached is not None:
+            return cached
+        meta = self._kvwarm_meta_init()
+        eligible = False
+        reason = None
+        if not self._kvwarm_flag_on():
+            reason = "flag_off"
+        else:
+            # Lightweight test schedulers may not carry vllm_config at all;
+            # treat that as "cannot prove eligibility" rather than crashing.
+            vllm_config = getattr(self, "vllm_config", None)
+            parallel = getattr(vllm_config, "parallel_config", None)
+            model = getattr(vllm_config, "model_config", None)
+            hf = getattr(model, "hf_config", None)
+            hf_text = getattr(model, "hf_text_config", hf)
+            has_experts = any(
+                bool(getattr(cfg, key, 0))
+                for cfg in (hf, hf_text)
+                if cfg is not None
+                for key in (
+                    "num_local_experts",
+                    "num_experts",
+                    "n_routed_experts",
+                    "moe_num_experts",
+                )
+            )
+            ep_enabled = bool(getattr(parallel, "enable_expert_parallel", False))
+            prefix_on = bool(
+                getattr(
+                    getattr(self, "cache_config", None),
+                    "enable_prefix_caching",
+                    False,
+                )
+            )
+            if not has_experts:
+                reason = "dense_model_content_insensitive"
+            elif not ep_enabled:
+                reason = "moe_tp_balanced_by_construction"
+            elif not prefix_on:
+                # The batch rungs rely on prefix-cache generational extension
+                # to deepen incrementally; with prefix cache off a full chain
+                # rebuild is prohibitively expensive -- prefer skipping.
+                reason = "prefix_caching_disabled"
+            elif self._kvwarm_state_layer_groups():
+                reason = "hybrid_state_layers_unsupported"
+            else:
+                try:
+                    # Resolve (and, on first use, download) the seeding dataset
+                    # up front: an unreachable or corrupt dataset must disable
+                    # the warm-up cleanly instead of failing mid-collection.
+                    self._kvwarm_resolve_dataset()
+                    eligible = True
+                except Exception as exc:
+                    reason = f"dataset_unavailable: {exc}"
+        meta["warm_eligible"] = eligible
+        meta["skip_reason"] = reason
+        self._kvwarm_eligible_cache = eligible
+        if not eligible:
+            logger.info("KVWARM: warm-up skipped (%s)", reason)
+        return eligible
+
+    # ------- Dataset: three-tier resolution + even-half pool + lazy tokenize -------
+
+    def _kvwarm_resolve_dataset(self) -> str:
+        """Return a local dataset path, downloading and verifying on first use."""
+        spec = os.environ.get(
+            "DYN_BENCH_KV_WARMUP_DATASET", self._KVWARM_DEFAULT_DATASET_URL
+        )
+        if not spec.startswith(("http://", "https://")):
+            if not os.path.exists(spec):
+                raise RuntimeError(f"KVWARM dataset path does not exist: {spec}")
+            return spec
+        cache_root = os.environ.get("DYN_BENCH_KV_WARMUP_CACHE_DIR") or (
+            os.path.join(os.environ["HF_HOME"], os.pardir, "fpm_datasets")
+            if os.environ.get("HF_HOME")
+            else "/tmp/fpm_datasets"
+        )
+        cache_root = os.path.abspath(cache_root)
+        os.makedirs(cache_root, exist_ok=True)
+        name = os.path.basename(spec.split("?")[0]) or "kvwarm_dataset.json"
+        cached = os.path.join(cache_root, name)
+        expected_sha = os.environ.get("DYN_BENCH_KV_WARMUP_SHA256") or (
+            self._KVWARM_DEFAULT_DATASET_SHA256
+            if spec == self._KVWARM_DEFAULT_DATASET_URL
+            else None
+        )
+        if os.path.exists(cached):
+            digest = self._kvwarm_sha256(cached)
+            if expected_sha and digest != expected_sha:
+                raise RuntimeError(
+                    f"KVWARM dataset cache sha mismatch: {digest} != {expected_sha}"
+                )
+            return cached
+        import urllib.request
+
+        logger.info("KVWARM: downloading dataset %s -> %s", spec, cached)
+        # Per-process temp name: same-host ranks may download concurrently;
+        # the final os.replace is atomic and both produce identical bytes.
+        tmp = f"{cached}.{os.getpid()}.part"
+        with urllib.request.urlopen(
+            spec, timeout=self._KVWARM_DOWNLOAD_TIMEOUT_S
+        ) as resp, open(tmp, "wb") as out:
+            shutil.copyfileobj(resp, out)
+        digest = self._kvwarm_sha256(tmp)
+        if expected_sha and digest != expected_sha:
+            os.unlink(tmp)
+            raise RuntimeError(
+                f"KVWARM dataset download sha mismatch: {digest} != {expected_sha}"
+            )
+        os.replace(tmp, cached)
+        logger.info("KVWARM: dataset cached (sha256=%s)", digest)
+        return cached
+
+    @staticmethod
+    def _kvwarm_sha256(path: str) -> str:
+        """Stream-hash ``path`` (sha256 hex digest)."""
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _kvwarm_load_texts(self) -> list:
+        """ShareGPT conversations -> texts; the even hash half feeds collection
+        (the odd half is reserved for held-out evaluation)."""
+        texts = getattr(self, "_kvwarm_texts", None)
+        if texts is not None:
+            return texts
+        path = self._kvwarm_resolve_dataset()
+        data = json.loads(open(path, encoding="utf-8").read())
+        texts = []
+        for item in data:
+            convs = item.get("conversations") or []
+            body = "\n".join(
+                str(turn.get("value", "")) for turn in convs if turn.get("value")
+            )
+            if len(body) < 64:
+                continue
+            digest = hashlib.sha256(body.encode("utf-8", "ignore")).digest()
+            if digest[0] % 2 == 0:  # even pool = collection; odd pool = eval
+                texts.append(body)
+        if not texts:
+            raise RuntimeError("KVWARM: dataset yielded no usable conversations")
+        meta = self._kvwarm_meta_init()
+        meta["dataset"] = {
+            "path": path,
+            "sha256": self._kvwarm_sha256(path),
+            "collection_pool": "conversation_sha256_even",
+            "conversations": len(texts),
+        }
+        self._kvwarm_texts = texts
+        return texts
+
+    def _kvwarm_tokenizer(self):
+        """Lazily construct and cache the seeding-text tokenizer."""
+        tok = getattr(self, "_kvwarm_tok", None)
+        if tok is None:
+            from transformers import AutoTokenizer
+
+            model = self.vllm_config.model_config
+            tok = AutoTokenizer.from_pretrained(
+                model.tokenizer,
+                trust_remote_code=bool(getattr(model, "trust_remote_code", False)),
+            )
+            self._kvwarm_tok = tok
+        return tok
+
+    def _kvwarm_chain_token_ids(self, chain_index: int, depth: int) -> list:
+        """Deterministic chain assembly: seed = (grid digest, dp_rank, chain);
+        conversation-level shuffle and packing. Per-chain caches grow
+        monotonically -- across generations a chain only extends, never
+        recomputes (prefix-cache hits also require the chain prefix to be
+        byte-stable)."""
+        cache = getattr(self, "_kvwarm_token_cache", None)
+        if cache is None:
+            cache = {}
+            self._kvwarm_token_cache = cache
+        tokens, cursor, order = cache.get(chain_index, ([], 0, None))
+        if order is None:
+            texts = self._kvwarm_load_texts()
+            seed = f"{self._bench_grid_digest}:{self._fpm_dp_rank}:{chain_index}"
+            rng = __import__("random").Random(seed)
+            order = list(range(len(texts)))
+            rng.shuffle(order)
+        if len(tokens) < depth:
+            texts = self._kvwarm_load_texts()
+            tok = self._kvwarm_tokenizer()
+            while len(tokens) < depth and cursor < len(order):
+                tokens.extend(
+                    tok.encode(texts[order[cursor]], add_special_tokens=False)
+                )
+                cursor += 1
+            if len(tokens) < depth:
+                raise RuntimeError(
+                    f"KVWARM: dataset too small for chain depth {depth} "
+                    f"(got {len(tokens)} tokens)"
+                )
+        cache[chain_index] = (tokens, cursor, order)
+        return tokens[:depth]
+
+    # ------- Ladder plan: derived entirely from the grid + the pool -------
+
+    @staticmethod
+    def _kvwarm_order_decode_points(decode_pts: list) -> list:
+        """Depth-descending reorder that leaves warmup replicas at the head.
+
+        Warmup replicas (e.g. eager-shape warmups tagged ``eager_warmup`` by
+        the grid builder) must execute before the first real point of their
+        shape, so they are exempt from the reorder and keep their original
+        relative order at the head of the decode segment.
+        """
+        pinned = [
+            p for p in decode_pts if EAGER_WARMUP_REASON in (p.sample_reasons or [])
+        ]
+        sortable = [
+            p for p in decode_pts if EAGER_WARMUP_REASON not in (p.sample_reasons or [])
+        ]
+        sortable.sort(key=lambda p: (-p.batch_size, -p.total_kv_read_tokens))
+        return pinned + sortable
+
+    def _kvwarm_prepare(self, mode: str) -> None:
+        """Plan warm-up stages and reorder the decode grid for chain reuse."""
+        if mode not in ("decode", "agg"):
+            return
+        if not self._kvwarm_flag_on():
+            return
+        meta = self._kvwarm_meta_init()
+        if not self._kvwarm_warm_eligible():
+            return
+        negotiated = getattr(self, "_bench_negotiated_capacity", None)
+        if negotiated is not None and not getattr(negotiated, "kvwarm_eligible", True):
+            # A peer rank could not warm up (dataset, layout); the group
+            # follows the least capable rank so every rank runs one plan.
+            meta["warm_eligible"] = False
+            meta["skip_reason"] = "peer_ineligible"
+            self._kvwarm_eligible_cache = False
+            logger.info("KVWARM: warm-up skipped (peer_ineligible)")
+            return
+        # Point reordering: the decode segment runs in (batch desc, kv desc)
+        # order. Execution order is contractually decoupled from benchmark_id
+        # order (see the grid-numbering comment), so reordering is legal.
+        points = list(self._bench_grid)
+        decode_pts = [p for p in points if p.point_type == "decode"]
+        other_pts = [p for p in points if p.point_type != "decode"]
+        decode_pts = self._kvwarm_order_decode_points(decode_pts)
+        self._bench_grid = deque(other_pts + decode_pts)
+        # Warmup depth per batch rung = max(ctx) of its deepest warmable point
+        # + 1 + steady-write headroom (headroom = giant-point repeat count,
+        # so multi-step writes never overrun the chain blocks); capped by
+        # pool feasibility.
+        giant_thr = self._kvwarm_giant_threshold()
+        repeats = self._kvwarm_giant_repeats()
+        plan: dict = {}
+        for p in decode_pts:
+            ctxs = self._bench_decode_context_lengths(
+                p.total_kv_read_tokens, p.batch_size
+            )
+            margin = 1 + (repeats if p.total_kv_read_tokens >= giant_thr else 1)
+            # Cap at -4: a chain with prompt = max_len-1 is reclaimed by the
+            # length stop right at its prefill completion step (that step
+            # already carries the first sampled token); keep drift headroom.
+            want = min(max(ctxs) + margin, self.max_model_len - 4)
+            plan[p.batch_size] = max(plan.get(p.batch_size, 0), want)
+        for batch, depth in list(plan.items()):
+            while depth > 8 and (
+                self._bench_blocks_per_req(depth) * batch
+                > self._bench_usable_blocks(batch, reserve_watermark=True)
+            ):
+                depth -= 1
+            plan[batch] = depth
+        self._kvwarm_plan = plan
+        # Second reordering: all warmed points first, fake fallbacks last --
+        # fake injection fills the whole pool and evicts the chains' cached
+        # blocks; interleaved between generations it demotes incremental
+        # deepening back to full rebuilds.
+        warmed_pts = [p for p in decode_pts if self._kvwarm_plan_covers(p)]
+        fake_pts = [p for p in decode_pts if not self._kvwarm_plan_covers(p)]
+        self._bench_grid = deque(other_pts + warmed_pts + fake_pts)
+        self._kvwarm_chain_ids: list = []
+        self._kvwarm_chain_prompts: dict = {}
+        self._kvwarm_borrowed_ids: set = set()
+        self._kvwarm_stage_batch = None
+        self._kvwarm_building = False
+        self._kvwarm_seq = 0
+        logger.info(
+            "KVWARM: prepared %d stage plans over %d decode points",
+            len(plan),
+            len(decode_pts),
+        )
+
+    # ------- Warmup state machine (intercepts before phase dispatch) -------
+
+    def _kvwarm_plan_covers(self, point) -> bool:
+        """Plan-level coverage decision (independent of live chains): the shared
+        source of truth for chain building and injection dispatch."""
+        plan = getattr(self, "_kvwarm_plan", None)
+        if not plan:
+            return False
+        depth = plan.get(point.batch_size, 0)
+        if not depth:
+            return False
+        ctxs = self._bench_decode_context_lengths(
+            point.total_kv_read_tokens, point.batch_size
+        )
+        need = self._kvwarm_point_need(point)
+        return max(max(1, c - 1) for c in ctxs) + need <= depth
+
+    def _kvwarm_step_busy(self) -> bool:
+        """DECODE_SWEEP phase: chain-fleet build/park/turnover. True = hand this
+        step back to the real scheduler."""
+        if not getattr(self, "_kvwarm_plan", None):
+            return False
+        if self._bench_active_req_ids or self._bench_current_point is not None:
+            return False
+        grid = self._bench_grid
+        nxt = grid[0] if grid and grid[0].point_type == "decode" else None
+        if nxt is None:
+            self._kvwarm_shed_chains()
+            return False
+        if self._bench_soft_timeout_elapsed() or getattr(
+            self, "_bench_stop_requested", False
+        ):
+            # Soft timeout: never build another fleet. Release the chains and
+            # let the decode step reach the coordinated timeout boundary.
+            if self._kvwarm_chain_ids:
+                self._kvwarm_shed_chains()
+            return False
+        if not self._kvwarm_plan_covers(nxt):
+            # Fake-fallback points need the whole pool: release the chains back
+            # to the pool first, then let fake injection proceed.
+            if self._kvwarm_chain_ids:
+                self._kvwarm_shed_chains()
+            return False
+        if self._kvwarm_building:
+            return self._kvwarm_monitor_build()
+        if self._kvwarm_stage_batch != nxt.batch_size:
+            self._kvwarm_shed_chains()
+            self._kvwarm_start_stage(nxt.batch_size, self._kvwarm_plan[nxt.batch_size])
+            return True
+        return False
+
+    def _kvwarm_start_stage(self, batch: int, depth: int) -> None:
+        """Launch chain prefills for one ``(batch, depth)`` warm-up stage."""
+        t0 = time.monotonic()
+        for i in range(batch):
+            tokens = self._kvwarm_chain_token_ids(i, depth)
+            req_id = f"__kvwarm_chain_{self._kvwarm_seq}"
+            self._kvwarm_seq += 1
+            req = Request(
+                request_id=req_id,
+                prompt_token_ids=tokens,
+                sampling_params=SamplingParams(max_tokens=100_000, ignore_eos=True),
+                pooling_params=None,
+                block_hasher=self._bench_block_hasher,
+                # Salts are stable per (rank, chain index): a new generation's chain
+                # hits the old chain's cached blocks and computes only the extension
+                cache_salt=f"__kvwarm_{self._fpm_dp_rank}_{i}",
+            )
+            self.add_request(req)
+            self._kvwarm_chain_ids.append(req_id)
+            self._kvwarm_chain_prompts[req_id] = tokens
+        self._kvwarm_stage_batch = batch
+        self._kvwarm_building = True
+        self._kvwarm_stage_t0 = t0
+        logger.info("KVWARM: stage build batch=%d depth=%d", batch, depth)
+
+    def _kvwarm_monitor_build(self) -> bool:
+        """Track chain prefills for the active stage; True while building."""
+        pending = False
+        vanished = []
+        for req_id in self._kvwarm_chain_ids:
+            req = self.requests.get(req_id)
+            if req is None:
+                # Length-stop / exception reclaim: drop the chain and degrade
+                # (points that lose coverage fall back to fake) -- not fatal.
+                logger.warning(
+                    "KVWARM: chain %s vanished during build; degrading", req_id
+                )
+                vanished.append(req_id)
+                continue
+            if req.num_computed_tokens >= len(self._kvwarm_chain_prompts[req_id]):
+                if any(r.request_id == req_id for r in self.running):
+                    self.running = [
+                        r for r in self.running if r.request_id != req_id
+                    ]  # park: leave the scheduler's view; blocks and requests stay resident
+                if getattr(req, "num_output_placeholders", 0) > 0:
+                    # Async scheduling advances num_computed_tokens when a step is
+                    # scheduled, not when its output lands. Parking stops new steps;
+                    # the stage is ready only once every parked chain's in-flight
+                    # tokens drained, so no shadow reads KV still being written.
+                    pending = True
+            else:
+                pending = True
+        if vanished:
+            # A partially built fleet cannot serve its rung: surviving chains
+            # would only pin KV that fake injection needs. Fail the whole
+            # stage -- zero its plan depth so every point of this rung takes
+            # the fake-injection fallback -- and release the survivors.
+            batch = self._kvwarm_stage_batch
+            logger.warning(
+                "KVWARM: %d chain(s) of stage batch=%s vanished during the "
+                "build; failing the stage, its points fall back to fake injection",
+                len(vanished),
+                batch,
+            )
+            if batch is not None:
+                self._kvwarm_plan[batch] = 0
+            self._kvwarm_meta_init()["stages"].append(
+                {"batch": batch, "failed": True, "vanished": len(vanished)}
+            )
+            self._kvwarm_shed_chains()
+            return True
+        if pending:
+            return True
+        self._kvwarm_building = False
+        secs = time.monotonic() - getattr(self, "_kvwarm_stage_t0", time.monotonic())
+        self._kvwarm_meta_init()["stages"].append(
+            {
+                "batch": self._kvwarm_stage_batch,
+                "depth": max(
+                    (len(v) for v in self._kvwarm_chain_prompts.values()),
+                    default=0,
+                ),
+                "build_seconds": round(secs, 3),
+            }
+        )
+        logger.info(
+            "KVWARM: stage ready batch=%s (%.1fs)",
+            self._kvwarm_stage_batch,
+            secs,
+        )
+        return True  # idle one more step; normal point flow resumes next tick
+
+    def _kvwarm_shed_chains(self) -> None:
+        """Release every parked chain and return its blocks to the pool."""
+        for req_id in getattr(self, "_kvwarm_chain_ids", []):
+            req = self.requests.pop(req_id, None)
+            if req is not None:
+                self._kvwarm_release_request(req)
+                self.finished_req_ids.add(req_id)
+        self.running = [
+            r
+            for r in self.running
+            if r.request_id not in set(getattr(self, "_kvwarm_chain_ids", []))
+        ]
+        self._kvwarm_chain_ids = []
+        self._kvwarm_chain_prompts = {}
+        self._kvwarm_stage_batch = None
+        self._kvwarm_building = False
+
+    # ------- Shadow injection: borrow chain blocks, original two-step flow -------
+
+    def _kvwarm_point_need(self, point) -> int:
+        """Per-request context length this decode point needs from a chain."""
+        # Non-giant points: admission writes ctx-1, steady writes ctx -> must
+        # cover injected+1, i.e. chain depth >= injected+2; giant multi-step
+        # points add repeats-1.
+        giant = point.total_kv_read_tokens >= self._kvwarm_giant_threshold()
+        return 2 + (self._kvwarm_giant_repeats() - 1 if giant else 0)
+
+    def _kvwarm_covers(self, point, injected_lengths) -> bool:
+        """Whether the parked chains can serve every request of ``point``."""
+        if not getattr(self, "_kvwarm_plan", None):
+            return False
+        if self._kvwarm_building or self._kvwarm_stage_batch is None:
+            return False
+        chains = self._kvwarm_chain_ids
+        if len(chains) < point.batch_size:
+            return False
+        need = self._kvwarm_point_need(point)
+        return all(
+            injected + need <= len(self._kvwarm_chain_prompts[chains[i]])
+            for i, injected in enumerate(injected_lengths)
+        )
+
+    def _kvwarm_release_request(self, req) -> None:
+        """Return a benchmark request's blocks through the scheduler's own
+        free path so deferred-free fences (in-flight GPU steps) are honored;
+        older schedulers without the fence free immediately."""
+        free_fenced = getattr(self, "_free_request_blocks", None)
+        if callable(free_fenced):
+            free_fenced(req)
+        else:
+            self.kv_cache_manager.free(req)
+
+    def _kvwarm_register_shadow(
+        self, req_id: str, chain_id: str, ctx_len: int, headroom: int
+    ) -> tuple[tuple[list[int], ...], list[int]]:
+        """Register a measurement shadow with the KV-cache managers.
+
+        The shadow shares the chain's full prefix blocks (reference-counted,
+        never written) and owns private tail blocks for every position it
+        writes (the admission token plus ``headroom`` steady steps). The tail
+        is a copy-on-write fork of the chain's blocks when the manager offers
+        CoW; otherwise it is zero-filled (the few sub-block slots below
+        ``ctx_len`` then read zeros -- measurement-local, timing-neutral).
+        Returns the shadow's block table per group and the block ids to zero.
+
+        Everything here runs in the untimed admission window; the measured
+        steady steps allocate nothing.
+        """
+        manager = self.kv_cache_manager
+        block_pool = manager.block_pool
+        managers = manager.coordinator.single_type_managers
+        table: list[list[int]] = []
+        zero_ids: list[int] = []
+        for mgr in managers:
+            chain_blocks = list(mgr.req_to_blocks[chain_id])
+            bs = int(
+                getattr(mgr, "block_size", getattr(self.cache_config, "block_size", 16))
+            )
+            n_shared = ctx_len // bs
+            n_total = -(-(ctx_len + 1 + headroom) // bs)
+            if n_total > len(chain_blocks):
+                raise RuntimeError(
+                    f"KVWARM: chain {chain_id} too shallow for shadow {req_id}: "
+                    f"needs {n_total} blocks, has {len(chain_blocks)}"
+                )
+            shared = chain_blocks[:n_shared]
+            tail_src = chain_blocks[n_shared:n_total]
+            block_pool.touch(shared)
+            fresh = block_pool.get_new_blocks(len(tail_src))
+            apply_cow = getattr(mgr, "_apply_cow", None)
+            if callable(apply_cow):
+                mgr.req_to_blocks[req_id] = shared + tail_src
+                for offset, (src, dst) in enumerate(zip(tail_src, fresh)):
+                    apply_cow(req_id, n_shared + offset, src, dst)
+            else:
+                mgr.req_to_blocks[req_id] = shared + fresh
+                zero_ids.extend(b.block_id for b in fresh)
+            cached = getattr(mgr, "num_cached_block", None)
+            if isinstance(cached, dict):
+                # The shared prefix is already hashed by the chain; only the
+                # shadow-owned (salted) tail may be cached under its own hash.
+                cached[req_id] = n_shared
+            table.append([b.block_id for b in mgr.req_to_blocks[req_id]])
+        return tuple(table), zero_ids
+
+    def _kvwarm_inject_borrowed(self, context_lengths) -> "SchedulerOutput":
+        """Real-content counterpart of _bench_inject_fake_decode: the prompt is
+        the chain's real token prefix; the block table shares the chain's
+        prefix blocks and owns a private tail for the write positions (see
+        ``_kvwarm_register_shadow``). Registration happens here, in the
+        untimed admission window."""
+        new_reqs_data: list = []
+        num_scheduled_tokens: dict = {}
+        zero_ids: list[int] = []
+        headroom = max(2, self._kvwarm_giant_repeats())
+        for index, ctx_len in enumerate(context_lengths):
+            chain_id = self._kvwarm_chain_ids[index]
+            chain_req = self.requests[chain_id]
+            chain_tokens = self._kvwarm_chain_prompts[chain_id]
+            req_id = f"__bench_{self._bench_seq}"
+            self._bench_seq += 1
+            block_ids, req_zero_ids = self._kvwarm_register_shadow(
+                req_id, chain_id, ctx_len, headroom
+            )
+            zero_ids.extend(req_zero_ids)
+            prompt = list(chain_tokens[: ctx_len + 1])
+            req = Request(
+                request_id=req_id,
+                prompt_token_ids=prompt,
+                # ignore_eos: a sampled EOS would route the shadow through the
+                # normal stop path, freeing chain blocks it never owned.
+                sampling_params=SamplingParams(max_tokens=100_000, ignore_eos=True),
+                pooling_params=None,
+                block_hasher=self._bench_block_hasher,
+                cache_salt=req_id,
+            )
+            req.num_computed_tokens = ctx_len
+            req.status = RequestStatus.RUNNING
+            self.requests[req_id] = req
+            self.running.append(req)  # type: ignore[has-type]
+            self._bench_active_req_ids.add(req_id)
+            self._kvwarm_borrowed_ids.add(req_id)
+            new_reqs_data.append(
+                NewRequestData(
+                    req_id=req_id,
+                    prompt_token_ids=prompt,
+                    mm_features=[],
+                    sampling_params=req.sampling_params,
+                    pooling_params=None,
+                    block_ids=block_ids,
+                    num_computed_tokens=ctx_len,
+                    lora_request=None,
+                    prefill_token_ids=req._all_token_ids,
+                )
+            )
+            num_scheduled_tokens[req_id] = 1
+            del chain_req  # blocks only; never mutate the chain request itself
+        output = SchedulerOutput(
+            scheduled_new_reqs=new_reqs_data,
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens=num_scheduled_tokens,
+            total_num_scheduled_tokens=len(new_reqs_data),
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=([0] * self.kv_cache_manager.num_kv_cache_groups),
+            finished_req_ids=self.finished_req_ids,
+            free_encoder_mm_hashes=[],
+            new_block_ids_to_zero=zero_ids or None,
+        )
+        take_copies = getattr(self.kv_cache_manager, "take_kv_cache_block_copies", None)
+        if callable(take_copies):
+            # CoW forks of the chain tails run with this admission step; their
+            # retention refs are released once the step has been processed.
+            copies, retained = take_copies()
+            if copies:
+                output.kv_cache_block_copies = copies
+                release = getattr(self, "_free_cow_retained_blocks", None)
+                if callable(release):
+                    release(retained, getattr(self, "sched_step_seq", 0) + 1)
+        if self.connector is not None:
+            output.kv_connector_metadata = self.connector.build_connector_meta(output)
+        if self.ec_connector is not None:
+            output.ec_connector_metadata = self.ec_connector.build_connector_meta(
+                output
+            )
+        return output
+
     def _bench_make_steady_step(self) -> SchedulerOutput | None:
         """One production-shaped decode step for the injected requests.
 
@@ -3996,8 +4898,14 @@ class InstrumentedScheduler(AsyncScheduler):
         ]
         if not reqs:
             return None
-        new_blocks = {}
+        kvwarm_borrowed: set[str] = getattr(self, "_kvwarm_borrowed_ids", set())
+        new_blocks: dict[str, Any] = {}
         for request in reqs:
+            if request.request_id in kvwarm_borrowed:
+                # KVWARM shadow: blocks borrowed from a parked chain; depth headroom
+                # already covers the steady write -- zero allocation.
+                new_blocks[request.request_id] = None
+                continue
             blocks = self.kv_cache_manager.allocate_slots(
                 request,
                 1,
@@ -4013,7 +4921,11 @@ class InstrumentedScheduler(AsyncScheduler):
             new_token_ids=[],
             all_token_ids={},
             new_block_ids=[
-                new_blocks[request.request_id].get_block_ids(allow_none=True)
+                (
+                    new_blocks[request.request_id].get_block_ids(allow_none=True)
+                    if new_blocks[request.request_id] is not None
+                    else None
+                )
                 for request in reqs
             ],
             num_computed_tokens=[request.num_computed_tokens for request in reqs],
@@ -4106,16 +5018,62 @@ class InstrumentedScheduler(AsyncScheduler):
                 total_kv_read_tokens=steady_kv_tokens,
                 sample_reasons=[*point.sample_reasons, "context_clamped"],
             )
+        kvwarm_real = self._kvwarm_covers(point, injected_lengths)
+        if self._kvwarm_flag_on():
+            meta = self._kvwarm_meta_init()
+            if kvwarm_real:
+                meta["points_real_kv"] += 1
+            else:
+                meta["points_fake_fallback"] += 1
+            point = replace(
+                point,
+                sample_reasons=[
+                    *point.sample_reasons,
+                    "kvwarm_real_kv" if kvwarm_real else "kvwarm_fake_fallback",
+                ],
+            )
         self._bench_current_point = point
         self._bench_current_fpms = []
         self._bench_extra_steps_left = 1
         self._bench_expected_fpms = 2
+        if self._kvwarm_flag_on() and (
+            kvwarm_real or point.total_kv_read_tokens >= self._kvwarm_giant_threshold()
+        ):
+            # Warmed points allocate nothing at steady state, so extra steps
+            # are nearly free: median protection covers all of them,
+            # eliminating sporadic timer migration; fake points keep median
+            # protection for giants only.
+            # Giant-KV timing guard (HANDOVER #6.1): repeat the steady step
+            # and take the median. A fake-injected giant that cannot fit the
+            # extra steps at the pool boundary degrades to the legacy
+            # two-step flow (warmed shadows allocate nothing, unaffected).
+            repeats = self._kvwarm_giant_repeats()
+            # Model-length cap: after step k, total = ctx+k <= max_model_len,
+            # and runner bookkeeping writes through +1 (points at the cap
+            # fall back to the legacy single steady step automatically).
+            max_ctx = max(injected_lengths) + 1
+            repeats = min(repeats, max(1, self.max_model_len - 1 - max_ctx))
+            if not kvwarm_real:
+                multi = sum(
+                    self._bench_blocks_per_req(max(c, 2) + repeats)
+                    for c in injected_lengths
+                )
+                if multi > self._bench_usable_blocks(
+                    point.batch_size, reserve_watermark=True
+                ):
+                    repeats = 1
+            self._bench_extra_steps_left = repeats
+            self._bench_expected_fpms = repeats + 1
         logger.info(
             "Benchmark decode: total_kv_reads=%d batch_size=%d",
             point.total_kv_read_tokens,
             point.batch_size,
         )
-        output = self._bench_inject_fake_decode(injected_lengths)
+        output = (
+            self._kvwarm_inject_borrowed(injected_lengths)
+            if kvwarm_real
+            else self._bench_inject_fake_decode(injected_lengths)
+        )
         if output.total_num_scheduled_tokens != point.batch_size:
             logger.warning(
                 "Skipping benchmark decode point after request injection produced "
@@ -4151,7 +5109,20 @@ class InstrumentedScheduler(AsyncScheduler):
             point = self._bench_current_point
             local_fpms = list(self._bench_current_fpms)
             expected_fpms = getattr(self, "_bench_expected_fpms", 1)
-            if expected_fpms > 1 and len(local_fpms) >= expected_fpms:
+            if expected_fpms > 2 and len(local_fpms) >= 2:
+                # Giant-KV median: several adjacent steady steps, counting however
+                # many actually ran (later steady steps at pool-boundary
+                # points may fail allocation and stop early; median_of
+                # records what happened); coordinates come from the first
+                # steady step; with only admission left, fall back to the
+                # original path and let shape validation skip the point.
+                steadies = local_fpms[1:expected_fpms]
+                walls = sorted(float(f.get("wall_time", 0.0)) for f in steadies)
+                chosen = dict(steadies[0])
+                chosen["wall_time"] = walls[len(walls) // 2]
+                chosen["kvwarm_giant_median_of"] = len(steadies)
+                local_fpms = [chosen]
+            elif expected_fpms > 1 and len(local_fpms) >= expected_fpms:
                 # Keep only the steady-state sample; the admission step is
                 # scaffolding. A rank that reached the deadline with the
                 # admission FPM alone sends it through collect_result
@@ -4354,6 +5325,11 @@ class InstrumentedScheduler(AsyncScheduler):
         )
         output = {
             "schema_version": 2,
+            **(
+                {"kvwarm": self._kvwarm_meta}
+                if getattr(self, "_kvwarm_meta", None) is not None
+                else {}
+            ),
             "artifact_type": "rank",
             "status": status,
             "valid": coverage_complete
@@ -4408,6 +5384,18 @@ class InstrumentedScheduler(AsyncScheduler):
                 "decode": "steady_state_second_step",
                 "prefill": "single_step",
             },
+            # Provenance for the synthetic prompt content: a vocab-size
+            # lookup failure silently reverts prompts to all-zeros, whose
+            # MoE bias this schema exists to rule out -- consumers must be
+            # able to tell the two artifact populations apart.
+            "synthetic_prompts": {
+                "mode": (
+                    "salted_random"
+                    if getattr(self, "_bench_vocab_size", 0) > 1
+                    else "zeros"
+                ),
+                "vocab_size": getattr(self, "_bench_vocab_size", 0),
+            },
             "capacity": {
                 "common": (
                     asdict(negotiated_capacity)
@@ -4436,11 +5424,20 @@ class InstrumentedScheduler(AsyncScheduler):
                 ),
             },
             "results": [
-                {"point": asdict(r.point), "fpms": r.fpms} for r in self._bench_results
+                {
+                    "point": asdict(r.point),
+                    "kv_seed_regime": self._kvwarm_seed_regime(r.point),
+                    "fpms": r.fpms,
+                }
+                for r in self._bench_results
             ],
             "iteration_groups": iteration_groups,
             "skipped_points": [
-                {"point": asdict(skipped.point), "reason": skipped.reason}
+                {
+                    "point": asdict(skipped.point),
+                    "kv_seed_regime": self._kvwarm_seed_regime(skipped.point),
+                    "reason": skipped.reason,
+                }
                 for skipped in self._bench_skipped_points
             ],
             "missing_phases": missing_phases,
