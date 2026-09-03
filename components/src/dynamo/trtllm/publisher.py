@@ -22,12 +22,15 @@ Event Flow:
 import asyncio
 import concurrent.futures
 import logging
+import os
+import re
 import threading
 import time
 import traceback
 import weakref
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from enum import Enum
 from queue import Queue
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, Union, cast
 
@@ -60,6 +63,126 @@ _POLLING_BATCH_MAX_ITEMS = 256
 _KV_EVENTS_MIN_SLEEP_SEC = 0.005
 _KV_EVENTS_MAX_SLEEP_SEC = 0.02
 _KV_EVENTS_BACKOFF_FACTOR = 1.5
+_STREAMING_KV_EVENT_HOSTS_ENV = "DYN_TRTLLM_KV_EVENT_HOSTS"
+
+
+class KvEventPublicationMode(str, Enum):
+    """The source Dynamo uses to publish TensorRT-LLM KV cache events."""
+
+    DISABLED = "disabled"
+    POLLING = "polling"
+    STREAMING = "streaming"
+
+
+def _offset_endpoint_port(endpoint: str, rank: int) -> str:
+    """Apply TensorRT-LLM's base-port-plus-rank endpoint convention."""
+    if rank == 0:
+        return endpoint
+    if endpoint.startswith(("inproc://", "ipc://")):
+        return f"{endpoint}_dp{rank}"
+    if endpoint.startswith("tcp://"):
+        host_port = endpoint.removeprefix("tcp://")
+        if ":" not in host_port:
+            raise ValueError(f"TCP KV event endpoint must include a port: {endpoint!r}")
+        last_colon_idx = endpoint.rfind(":")
+        base_addr = endpoint[:last_colon_idx]
+        port_text = endpoint[last_colon_idx + 1 :]
+        if not (port_text.isdigit() and 1 <= int(port_text) <= 65_535):
+            raise ValueError(
+                f"TCP KV event endpoint must have a port in [1, 65535]: {endpoint!r}"
+            )
+        new_port = int(port_text) + rank
+        if new_port > 65_535:
+            raise ValueError(f"KV event endpoint port exceeds 65535 for rank {rank}")
+        return f"{base_addr}:{new_port}"
+    raise ValueError(
+        "Invalid KV event endpoint: must start with 'inproc://', 'ipc://', or 'tcp://'"
+    )
+
+
+def _expand_slurm_nodelist(nodelist: str) -> list[str]:
+    """Expand the numeric bracket syntax used by SLURM_STEP_NODELIST."""
+    groups: list[str] = []
+    start = 0
+    depth = 0
+    for index, character in enumerate(nodelist):
+        if character == "[":
+            depth += 1
+        elif character == "]":
+            depth -= 1
+        elif character == "," and depth == 0:
+            groups.append(nodelist[start:index])
+            start = index + 1
+    groups.append(nodelist[start:])
+
+    hosts: list[str] = []
+    for group in groups:
+        match = re.fullmatch(r"([^\[]*)\[([^\]]+)\](.*)", group)
+        if match is None:
+            hosts.append(group)
+            continue
+        prefix, ranges, suffix = match.groups()
+        for item in ranges.split(","):
+            if "-" not in item:
+                hosts.append(f"{prefix}{item}{suffix}")
+                continue
+            first, last = item.split("-", 1)
+            width = max(len(first), len(last))
+            hosts.extend(
+                f"{prefix}{value:0{width}d}{suffix}"
+                for value in range(int(first), int(last) + 1)
+            )
+    return hosts
+
+
+def _streaming_kv_event_hosts(
+    attention_dp_size: int, gpus_per_node: Optional[int]
+) -> list[str]:
+    """Map each attention-DP rank to the host running its streaming publisher."""
+    if attention_dp_size < 1:
+        raise ValueError(f"attention_dp_size must be positive, got {attention_dp_size}")
+    if not gpus_per_node or gpus_per_node < 1:
+        raise ValueError(
+            "gpus_per_node must be positive for streaming TRT-LLM KV events"
+        )
+    if attention_dp_size <= gpus_per_node:
+        return ["127.0.0.1"] * attention_dp_size
+
+    raw_hosts = os.environ.get(_STREAMING_KV_EVENT_HOSTS_ENV)
+    if raw_hosts:
+        nodes = [host.strip() for host in raw_hosts.split(",") if host.strip()]
+        source = _STREAMING_KV_EVENT_HOSTS_ENV
+    else:
+        slurm_nodelist = os.environ.get("SLURM_STEP_NODELIST")
+        if not slurm_nodelist:
+            raise RuntimeError(
+                "Streaming TRT-LLM KV event subscribers require either "
+                f"{_STREAMING_KV_EVENT_HOSTS_ENV} or SLURM_STEP_NODELIST for a "
+                "multi-node distributed worker"
+            )
+        nodes = _expand_slurm_nodelist(slurm_nodelist)
+        source = "SLURM_STEP_NODELIST"
+
+    required_nodes = (attention_dp_size + gpus_per_node - 1) // gpus_per_node
+    if len(nodes) != required_nodes:
+        raise RuntimeError(
+            "Streaming TRT-LLM KV event subscriber discovery expected "
+            f"{required_nodes} worker nodes from {source}, got {len(nodes)}: {nodes}"
+        )
+    return [nodes[rank // gpus_per_node] for rank in range(attention_dp_size)]
+
+
+def _streaming_kv_event_connect_endpoint(endpoint: str, rank: int, host: str) -> str:
+    endpoint = _offset_endpoint_port(endpoint, rank)
+    if not endpoint.startswith("tcp://"):
+        if host != "127.0.0.1":
+            raise ValueError("Multi-node streaming KV events require a TCP endpoint")
+        return endpoint
+    address, port = endpoint.removeprefix("tcp://").rsplit(":", 1)
+    if address in {"*", "0.0.0.0", "[::]"}:
+        address = host
+    return f"tcp://{address}:{port}"
+
 
 # InflightBatchingStats fields the FPM publisher consumes. As of
 # NVIDIA/TensorRT-LLM#13199 (merged 2026-04-27) all 11 fields live nested
@@ -403,6 +526,9 @@ class Publisher:
         image_token_id: Optional[int] = None,
         publish_kv_events: bool = True,
         publish_metrics: bool = True,
+        kv_event_publication_mode: KvEventPublicationMode = KvEventPublicationMode.DISABLED,
+        streaming_kv_events_config: Optional[dict[str, Any]] = None,
+        streaming_kv_events_gpus_per_node: Optional[int] = None,
     ) -> None:
         self.endpoint = endpoint
         self.engine = engine
@@ -420,6 +546,9 @@ class Publisher:
         self.image_token_id = image_token_id
         self.publish_kv_events = publish_kv_events
         self.publish_metrics = publish_metrics
+        self.kv_event_publication_mode = kv_event_publication_mode
+        self.streaming_kv_events_config = streaming_kv_events_config
+        self.streaming_kv_events_gpus_per_node = streaming_kv_events_gpus_per_node
         self.attention_dp_size = engine.get_attention_dp_size()
 
         # The first few kv events from the model engine are always "created" type events.
@@ -503,14 +632,49 @@ class Publisher:
                 )
                 self.fpm_publisher = None
 
-        # Setup the kv cache events publisher
+        # TensorRT-LLM's streaming event manager publishes ZMQ batches itself;
+        # Dynamo subscribes directly and does not poll the engine or use a consolidator.
+        if self.kv_event_publication_mode is KvEventPublicationMode.STREAMING:
+            if self.streaming_kv_events_config is None:
+                raise ValueError(
+                    "Streaming KV event publication requires its configuration"
+                )
+            self.kv_event_publishers = {}
+            base_endpoint = self.streaming_kv_events_config["endpoint"]
+            topic = self.streaming_kv_events_config.get("topic", "")
+            rank_hosts = _streaming_kv_event_hosts(
+                self.attention_dp_size, self.streaming_kv_events_gpus_per_node
+            )
+            for rank in range(self.attention_dp_size):
+                zmq_endpoint = _streaming_kv_event_connect_endpoint(
+                    base_endpoint, rank, rank_hosts[rank]
+                )
+                self.kv_event_publishers[rank] = KvEventPublisher(
+                    endpoint=self.endpoint,
+                    kv_block_size=self.kv_block_size,
+                    zmq_endpoint=zmq_endpoint,
+                    zmq_topic=topic,
+                    enable_local_indexer=self.enable_local_indexer,
+                    dp_rank=rank,
+                    kv_state_endpoint=self.kv_state_endpoint,
+                    image_token_id=self.image_token_id,
+                )
+            logging.info(
+                "Streaming TRT-LLM KV events enabled with %d direct subscriber(s); "
+                "polling is disabled",
+                self.attention_dp_size,
+            )
+            return
+
+        # Setup the polling KV event publisher.
         # Publisher selection based on consolidator configuration:
         # - With consolidator: Use ZmqKvEventPublisher (this module) → ZMQ → Consolidator → NATS → Router
         # - Without consolidator: Use KvEventPublisher → NATS → Router (direct)
         # Note: The worker-side KvEventPublisher (from dynamo.llm) that subscribes from
         # consolidator and publishes to NATS is created separately in main.py, not here.
-        if not self.publish_kv_events:
+        if self.kv_event_publication_mode is KvEventPublicationMode.DISABLED:
             return
+        assert self.kv_event_publication_mode is KvEventPublicationMode.POLLING
         if self.zmq_kv_event_publisher:
             logging.info(
                 "KV Event Consolidator enabled - using ZMQ publisher only. "
@@ -1155,6 +1319,9 @@ async def get_publisher(
     image_token_id: Optional[int] = None,
     publish_kv_events: bool = True,
     publish_metrics: bool = True,
+    kv_event_publication_mode: KvEventPublicationMode = KvEventPublicationMode.DISABLED,
+    streaming_kv_events_config: Optional[dict[str, Any]] = None,
+    streaming_kv_events_gpus_per_node: Optional[int] = None,
 ) -> AsyncGenerator[Publisher, None]:
     publisher = Publisher(
         endpoint,
@@ -1172,6 +1339,9 @@ async def get_publisher(
         image_token_id=image_token_id,
         publish_kv_events=publish_kv_events,
         publish_metrics=publish_metrics,
+        kv_event_publication_mode=kv_event_publication_mode,
+        streaming_kv_events_config=streaming_kv_events_config,
+        streaming_kv_events_gpus_per_node=streaming_kv_events_gpus_per_node,
     )
     try:
         publisher.initialize()
