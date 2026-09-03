@@ -617,7 +617,7 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
             --exclude 'libavutil.so.*' \
             --exclude 'libswresample.so.*' \
             --exclude 'libswscale.so.*' \
-{% if device == "xpu" %}            --plat linux_${ARCH_ALT} \
+{% if device == "xpu" %}            --plat manylinux_2_39_${ARCH_ALT} \
 {% else %}            --plat manylinux_2_28_${ARCH_ALT} \
 {% endif %}            --wheel-dir /opt/dynamo/dist \
             target/wheels/ai_dynamo_runtime-*.whl; \
