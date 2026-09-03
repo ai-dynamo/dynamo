@@ -73,6 +73,7 @@ pub mod shared_cache;
 pub use dynamo_kv_router::scheduling::{
     OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore,
 };
+pub use embedded::{install_worker_selection_policy_registry, worker_selection_policy_registry};
 pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
 pub use prefill_router::PrefillRouter;
@@ -807,11 +808,18 @@ where
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
-        // The embedded partition builds its own selection policy (the default
-        // scorer/picker or a registry-resolved policy); a caller-injected custom
-        // `WorkerSelector` type can only run on the runtime scheduler.
-        let custom_selector = std::any::TypeId::of::<Sel>()
-            != std::any::TypeId::of::<dynamo_kv_router::selector::DefaultWorkerSelector>();
+        // The embedded partition builds its own selection policy: the default
+        // scorer/picker, or the registry-resolved policy the router config names
+        // (the same resolution `WorkerSelectionPolicy` callers perform). Only an
+        // arbitrary caller-injected `WorkerSelector` type still needs the runtime
+        // scheduler.
+        let sel = std::any::TypeId::of::<Sel>();
+        let custom_selector = sel
+            != std::any::TypeId::of::<dynamo_kv_router::selector::DefaultWorkerSelector>()
+            && sel
+                != std::any::TypeId::of::<
+                    dynamo_kv_router::scheduling::selector::WorkerSelectionPolicy,
+                >();
         if kv_router_config.router_embedded_selection && custom_selector {
             tracing::warn!(
                 selector = std::any::type_name::<Sel>(),

@@ -335,6 +335,8 @@ fn register_core_with_custom_worker_selection_policy(m: &Bound<'_, PyModule>) ->
     dynamo_worker_selection_policy_catalog::register(&mut registry)
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
+    // Embedded selection partitions resolve linked policies from the same registry.
+    dynamo_llm::kv_router::install_worker_selection_policy_registry(registry.clone());
     WORKER_SELECTION_POLICY_REGISTRY
         .set(registry)
         .map_err(|_| {

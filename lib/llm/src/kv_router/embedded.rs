@@ -73,6 +73,21 @@ pub(crate) struct EmbeddedSelection {
     worker_type: &'static str,
 }
 
+static INSTALLED_POLICY_REGISTRY: std::sync::OnceLock<WorkerSelectionPolicyRegistry> =
+    std::sync::OnceLock::new();
+
+/// Install the process-wide worker-selection policy registry (linked custom
+/// policies) that embedded selection partitions resolve `KvRouterConfig`
+/// policy instances against. Returns `false` if one is already installed.
+pub fn install_worker_selection_policy_registry(registry: WorkerSelectionPolicyRegistry) -> bool {
+    INSTALLED_POLICY_REGISTRY.set(registry).is_ok()
+}
+
+/// The installed registry, or the built-in default.
+pub fn worker_selection_policy_registry() -> WorkerSelectionPolicyRegistry {
+    INSTALLED_POLICY_REGISTRY.get().cloned().unwrap_or_default()
+}
+
 /// Bridges the partition's scheduler load snapshots to the router's
 /// `SchedulerLoadSender`, which feeds `KvWorkerMonitor`.
 struct SenderLoadSink(crate::kv_router::routing_load::SchedulerLoadSender);
@@ -105,15 +120,14 @@ impl EmbeddedSelection {
         // when router configuration names one, else Dynamo's default scorer
         // and picker under the router's metric worker label.
         let label = args.metric_worker_type;
-        let policy_factory: WorkerSelectionPolicyFactory =
-            match WorkerSelectionPolicyRegistry::default()
-                .resolve_for_worker_type(&args.kv_router_config, worker_type)?
-            {
-                Some(factory) => factory,
-                None => Arc::new(move |config: &KvRouterConfig, _worker_type, _partition| {
-                    WorkerSelectionPolicy::default(config.clone(), label)
-                }),
-            };
+        let policy_factory: WorkerSelectionPolicyFactory = match worker_selection_policy_registry()
+            .resolve_for_worker_type(&args.kv_router_config, worker_type)?
+        {
+            Some(factory) => factory,
+            None => Arc::new(move |config: &KvRouterConfig, _worker_type, _partition| {
+                WorkerSelectionPolicy::default(config.clone(), label)
+            }),
+        };
 
         // Replica sync rides the runtime event plane, as the runtime scheduler's
         // did; the partition publishes and consumes through host channels.
@@ -137,7 +151,7 @@ impl EmbeddedSelection {
         let service = SelectionServiceBuilder::new(
             args.kv_router_config.clone(),
             worker_type,
-            WorkerSelectionPolicyRegistry::default(),
+            worker_selection_policy_registry(),
         )
         .worker_selection_policy_factory(policy_factory)
         .indexer_threads(1)
