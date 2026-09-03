@@ -290,6 +290,14 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
+  - dynamoworkermetadatas
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - nvidia.com
+  resources:
   - podsnapshots
   verbs:
   - create

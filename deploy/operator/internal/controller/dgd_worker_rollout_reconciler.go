@@ -1505,10 +1505,12 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		}
 
 		var newState dcdComponentState
+		var newDCDExists bool
 		newDCDName := dynamo.GetDCDResourceName(dgd, componentName, newWorkerHash)
 		newDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
 		if err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD); err == nil {
 			newState = dcdComponentStateFromDCD(newDCD)
+			newDCDExists = true
 		} else if !apierrors.IsNotFound(err) {
 			return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
 		}
@@ -1536,18 +1538,41 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		default:
 			maxSurge, maxUnavailable = resolveRollingUpdateParams(annotations, desired)
 			minAvailable = desired - maxUnavailable
+			rolloutNewState := newState
+			frontendAdmissionActive := false
+			if newDCDExists && newState.Available > 0 {
+				admitted, active, err := r.frontendAdmittedReplicas(
+					ctx, dgd, newDCD, newState.Available,
+				)
+				if err != nil {
+					return dynamo.RollingUpdateContext{}, fmt.Errorf(
+						"check frontend admission for new worker DCD %s: %w", newDCDName, err,
+					)
+				}
+				frontendAdmissionActive = active
+				if active {
+					rolloutNewState.Available = admitted
+				}
+			}
 
-			newUnavailable := max(int32(0), newState.Spec-newState.Available)
+			newUnavailable := max(int32(0), rolloutNewState.Spec-rolloutNewState.Available)
 			// maxScaledDown is the maximum number of old replicas that can be scaled down
-			maxScaledDown := max(int32(0), (oldState.Spec+newState.Spec)-minAvailable-newUnavailable)
+			maxScaledDown := max(int32(0), (oldState.Spec+rolloutNewState.Spec)-minAvailable-newUnavailable)
 			oldUnhealthy := max(int32(0), oldState.Spec-oldState.Available)
 			// availableSurplus is how many extra available replicas we have above minAvailable (min 0)
-			availableSurplus := max(int32(0), (oldState.Available+newState.Available)-minAvailable)
+			availableSurplus := max(int32(0), (oldState.Available+rolloutNewState.Available)-minAvailable)
 			oldTarget = max(int32(0), oldState.Spec-min(maxScaledDown, oldUnhealthy+availableSurplus))
 
 			// Surge budget uses Spec (declared intent) like K8s Deployment controller; scheduler enforces actual resource constraints.
 			scaleUpBudget := max(int32(0), desired+maxSurge-oldState.Spec-newState.Spec)
 			newTarget = min(desired, newState.Spec+scaleUpBudget)
+
+			if frontendAdmissionActive && rolloutNewState.Available < newState.Available {
+				logger.V(1).Info("Waiting for frontend admission before scaling down old workers",
+					"component", componentName,
+					"locallyAvailable", newState.Available,
+					"frontendAdmitted", rolloutNewState.Available)
+			}
 		}
 
 		oldWorkerComponentReplicas[componentName] = oldTarget
