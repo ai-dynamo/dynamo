@@ -426,6 +426,23 @@ class TestHealthCheckFailureDiagnostics:
         # reads in a CI report, so the test should notice if it changes.
         assert "<no server logs captured>" in str(excinfo.value)
 
+    @pytest.mark.parametrize("bad_value", [0, -1])
+    def test_non_positive_tail_is_rejected(self, tmp_path, bad_value):
+        """`[-0:]` is the whole list, so a non-positive tail length would put
+        the entire log in the error message instead of a bounded tail. Reject
+        it rather than let the bound silently disappear."""
+        mp = ManagedProcess(
+            command=["bash", "-c", "exit 1"],
+            health_check_funcs=[lambda *_: False],
+            timeout=10,
+            display_output=False,
+            terminate_all_matching_process_names=False,
+            log_dir=str(tmp_path),
+        )
+
+        with pytest.raises(ValueError, match="log_tail_lines must be positive"):
+            mp._check_process_alive(log_tail_lines=bad_value)
+
     def test_healthy_process_raises_nothing(self, tmp_path):
         """Negative control: a live process whose health check passes must not
         raise, so the test above cannot pass by making ManagedProcess raise

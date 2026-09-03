@@ -710,7 +710,14 @@ class ManagedProcess:
         always been. CI greps and the retryable-marker substring matching in
         `tests/utils/pytest_parallel_gpu.py` read it, and `log_tail_lines` is
         keyword-only with a default so every existing caller keeps working.
+
+        `log_tail_lines` must be positive. Python's `[-0:]` is the whole list,
+        so a zero or negative value would quietly turn the bounded tail into
+        the entire log.
         """
+        if log_tail_lines <= 0:
+            raise ValueError(f"log_tail_lines must be positive, got {log_tail_lines}")
+
         if self.proc and self.proc.poll() is not None:
             returncode = self.proc.returncode
             context_suffix = f" {context}" if context else ""
