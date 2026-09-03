@@ -6,7 +6,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Coroutine,
+    List,
+    Optional,
+    Tuple,
+)
 from urllib.parse import urlparse
 
 import sglang as sgl
@@ -564,6 +573,102 @@ async def setup_sgl_metrics(
     return publisher, task, metrics_labels
 
 
+# Teardown is never abandoned, so a metrics task that ignores cancel() can hang
+# shutdown. Warn on this interval so it is visible rather than silent.
+_TEARDOWN_WARN_INTERVAL_S = 30.0
+
+
+async def cancel_metrics_task(metrics_task: asyncio.Task) -> None:
+    """Cancel the metrics task and wait for it to finish unwinding.
+
+    ``await metrics_task`` cannot tell the task's own cancellation from the
+    caller's. ``asyncio.wait`` never raises on behalf of the task it waits on,
+    so any ``CancelledError`` escaping here is the caller's. Classifying on
+    ``metrics_task.done()`` instead looks equivalent but swallows the caller's.
+    """
+    metrics_task.cancel()
+    await asyncio.wait([metrics_task])
+    if metrics_task.cancelled():
+        logging.info("Metrics task successfully cancelled")
+        return
+    exc = metrics_task.exception()
+    if exc is not None:
+        raise exc
+
+
+async def run_to_completion(coro: Coroutine[Any, Any, None]) -> bool:
+    """Run ``coro`` to completion even if the calling task is cancelled.
+
+    Returns ``True`` if a cancellation was aimed at the caller while waiting.
+    Never raises ``CancelledError``; the caller decides when to re-raise.
+    """
+    task = asyncio.ensure_future(coro)
+    loop = asyncio.get_running_loop()
+    outer_cancelled = False
+    t0 = loop.time()
+    next_warn_at = _TEARDOWN_WARN_INTERVAL_S
+    while not task.done():
+        try:
+            await asyncio.wait([task], timeout=_TEARDOWN_WARN_INTERVAL_S)
+        except asyncio.CancelledError:
+            # No Task.uncancel(); it is 3.11+ and requires-python is >=3.10.
+            # Revisit if a caller above starts using TaskGroup or asyncio.timeout.
+            outer_cancelled = True
+        # Elapsed wall time, checked unconditionally: repeated cancellation
+        # would otherwise keep resetting asyncio.wait's timer before it fires.
+        elapsed = loop.time() - t0
+        if not task.done() and elapsed >= next_warn_at:
+            logging.warning("Worker teardown still running after %.0fs", elapsed)
+            next_warn_at += _TEARDOWN_WARN_INTERVAL_S
+    if task.cancelled():
+        logging.error("Worker teardown was itself cancelled; cleanup is incomplete")
+        return True
+    exc = task.exception()
+    if exc is not None:
+        raise exc
+    return outer_cancelled
+
+
+async def finish_worker_teardown(
+    metrics_task: asyncio.Task,
+    cleanup: Callable[[], None],
+    run_deferred_handlers: Callable[[], Awaitable[None]] | None = None,
+    *,
+    body_failed: bool = False,
+) -> None:
+    """Run worker teardown to completion, then honour any cancellation.
+
+    The cancellation is absorbed until teardown finishes; re-raising earlier
+    would skip the deferred handlers that reap SGLang's scheduler subprocesses.
+    When the worker body already failed, that exception stays the reported one.
+    """
+
+    async def _teardown() -> None:
+        metrics_exc: Exception | None = None
+        try:
+            await cancel_metrics_task(metrics_task)
+        except Exception as exc:
+            logging.exception("Metrics task failed during teardown; continuing")
+            metrics_exc = exc
+        cleanup()
+        if run_deferred_handlers is not None:
+            logging.info("Running deferred handlers")
+            await run_deferred_handlers()
+        # Surfaced only once cleanup is done, and never over a body failure.
+        if metrics_exc is not None and not body_failed:
+            raise metrics_exc
+
+    outer_cancelled = await run_to_completion(_teardown())
+    if outer_cancelled:
+        if body_failed:
+            logging.warning(
+                "Worker cancelled during teardown; an earlier exception is "
+                "already propagating"
+            )
+        else:
+            raise asyncio.CancelledError
+
+
 async def handle_non_leader_node(
     engine: sgl.Engine,
     publisher: DynamoSglangPublisher,
@@ -583,6 +688,7 @@ async def handle_non_leader_node(
         "Running with metrics and KV event publishing for local DP ranks."
     )
 
+    body_failed = True
     try:
         if publisher.dynamo_args.use_kv_events and publishes_kv_events(
             publisher.server_args
@@ -597,9 +703,6 @@ async def handle_non_leader_node(
 
         await asyncio.Event().wait()
     finally:
-        metrics_task.cancel()
-        try:
-            await metrics_task
-        except asyncio.CancelledError:
-            pass
-        publisher.cleanup()
+        await finish_worker_teardown(
+            metrics_task, publisher.cleanup, body_failed=body_failed
+        )

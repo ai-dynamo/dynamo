@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -13,8 +14,11 @@ from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_
 from dynamo.sglang.publisher import (
     DynamoSglangPublisher,
     _resolve_multinode_leader_worker_id,
+    cancel_metrics_task,
+    finish_worker_teardown,
     get_local_dp_rank_range,
     handle_non_leader_node,
+    run_to_completion,
     set_forward_pass_metrics_worker_id,
     setup_sgl_metrics,
 )
@@ -742,3 +746,181 @@ async def test_setup_sgl_metrics_returns_publisher_for_chat_worker(monkeypatch):
             await task
         except asyncio.CancelledError:
             pass
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_cancel_metrics_task_waits_for_a_real_shaped_task():
+    """The real metrics tasks (publisher.run, _idle) park on a single await and
+    unwind with no further awaits after cancel(). Cancelling one must leave it
+    done and cancelled, and must not raise at the caller."""
+
+    async def metrics_loop():
+        await asyncio.Event().wait()
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await asyncio.sleep(0)
+
+    await cancel_metrics_task(metrics_task)
+
+    assert metrics_task.done()
+    assert metrics_task.cancelled()
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_cancel_metrics_task_propagates_a_real_failure():
+    """A non-cancellation failure inside the metrics task still surfaces."""
+
+    async def metrics_loop():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("zmq close blew up") from None
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await asyncio.sleep(0)
+
+    with pytest.raises(RuntimeError, match="zmq close blew up"):
+        await cancel_metrics_task(metrics_task)
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_cancel_metrics_task_propagates_a_caller_cancellation():
+    """A cancellation aimed at the caller while it is suspended inside
+    cancel_metrics_task must reach the caller."""
+
+    async def metrics_loop():
+        # Takes several event-loop ticks to unwind after cancel(), so the
+        # caller is still suspended inside cancel_metrics_task -- not
+        # already past it -- when the caller's own cancellation lands.
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            for _ in range(3):
+                await asyncio.sleep(0)
+            raise
+
+    metrics_task = asyncio.create_task(metrics_loop())
+    await asyncio.sleep(0)
+
+    async def caller():
+        await cancel_metrics_task(metrics_task)
+
+    outer = asyncio.create_task(caller())
+    await asyncio.sleep(0)  # outer cancels metrics_task, then suspends inside
+    # cancel_metrics_task's await -- genuinely parked there, not finished.
+    outer.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+    try:
+        await metrics_task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_run_to_completion_finishes_the_body_when_the_caller_is_cancelled():
+    """The whole point: a cancellation aimed at the caller must not truncate
+    the teardown body, and must be reported rather than raised."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    steps = []
+
+    async def body():
+        steps.append("first")
+        started.set()
+        await release.wait()
+        steps.append("second")
+
+    result = {}
+
+    async def caller():
+        result["cancelled"] = await run_to_completion(body())
+
+    outer = asyncio.create_task(caller())
+    await started.wait()
+    outer.cancel()
+    release.set()
+
+    await outer
+
+    assert result["cancelled"] is True
+    assert steps == ["first", "second"]
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_run_to_completion_propagates_a_body_failure():
+    """A teardown step blowing up is a real error and must not be swallowed."""
+
+    async def body():
+        raise RuntimeError("cleanup blew up")
+
+    with pytest.raises(RuntimeError, match="cleanup blew up"):
+        await run_to_completion(body())
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_run_to_completion_warns_under_repeated_cancellation(caplog, monkeypatch):
+    """A caller cancelling faster than the warn interval must still get the
+    "teardown is taking a while" warning."""
+    monkeypatch.setattr(publisher_mod, "_TEARDOWN_WARN_INTERVAL_S", 0.1)
+
+    release = asyncio.Event()
+
+    async def body():
+        await release.wait()
+
+    async def caller():
+        return await run_to_completion(body())
+
+    outer = asyncio.create_task(caller())
+    await asyncio.sleep(0)
+
+    with caplog.at_level(logging.WARNING):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 0.6
+        while loop.time() < deadline:
+            outer.cancel()
+            await asyncio.sleep(0.09)  # faster than the 0.1s interval
+
+    release.set()
+    await outer
+
+    assert "still running" in caplog.text
+
+
+@pytest.mark.timeout(5)
+@pytest.mark.asyncio
+async def test_finish_worker_teardown_continues_after_metrics_task_failure():
+    """A metrics task that fails (not just cancels) during teardown -- e.g. a
+    real ZMQ error -- must not skip cleanup() and run_deferred_handlers(), and
+    must still surface once they have run."""
+
+    async def failing_metrics_loop():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("zmq close blew up") from None
+
+    metrics_task = asyncio.create_task(failing_metrics_loop())
+    await asyncio.sleep(0)
+
+    steps = []
+
+    def cleanup():
+        steps.append("cleanup")
+
+    async def run_deferred_handlers():
+        steps.append("run_deferred_handlers")
+
+    with pytest.raises(RuntimeError, match="zmq close blew up"):
+        await finish_worker_teardown(metrics_task, cleanup, run_deferred_handlers)
+
+    assert steps == ["cleanup", "run_deferred_handlers"]

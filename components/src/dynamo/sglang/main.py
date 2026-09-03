@@ -161,7 +161,14 @@ async def worker(argv: list[str] | None = None):
 
 
 def main():
-    uvloop.run(worker())
+    try:
+        uvloop.run(worker())
+    except asyncio.CancelledError:
+        # Teardown re-raised the cancellation that stopped the worker; that is
+        # a clean shutdown, and exiting non-zero would read as a crash to K8s.
+        # An error-initiated shutdown must force its own non-zero exit at the
+        # failure site (as vLLM/TensorRT-LLM do), since this cannot tell them apart.
+        logger.info("Worker cancelled; shutdown complete")
 
 
 if __name__ == "__main__":
