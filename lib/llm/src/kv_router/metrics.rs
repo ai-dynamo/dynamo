@@ -677,10 +677,22 @@ pub struct PrefillContinueMetrics {
     pub demotions_total: IntCounterVec,
     /// Continuations generating right now, summed over the prefill pool.
     pub active: IntGauge,
+    /// What the selected decode worker reported it was holding, every time the
+    /// router read it, as a fraction of that worker's capacity.
+    ///
+    /// This is how a threshold gets chosen. Run one arm with
+    /// `decode_busy_threshold` above 1.0: the router still reads occupancy and
+    /// still fills this histogram, and `decode_has_room` refuses every request,
+    /// so nothing continues. The distribution then says where the line belongs,
+    /// and it is read before the treatment arm is looked at.
+    ///
+    /// A degenerate distribution is also the readable form of a stuck
+    /// publisher, which membership alone cannot report.
+    pub decode_occupancy: prometheus::Histogram,
 }
 
-pub static PREFILL_CONTINUE_METRICS: LazyLock<PrefillContinueMetrics> =
-    LazyLock::new(|| PrefillContinueMetrics {
+pub static PREFILL_CONTINUE_METRICS: LazyLock<PrefillContinueMetrics> = LazyLock::new(|| {
+    PrefillContinueMetrics {
         decisions_total: IntCounterVec::new(
             Opts::new(
                 format!("{}_prefill_continue_decisions_total", name_prefix::FRONTEND),
@@ -705,7 +717,18 @@ pub static PREFILL_CONTINUE_METRICS: LazyLock<PrefillContinueMetrics> =
              in this process",
         )
         .expect("Failed to create prefill_continue_active gauge"),
-    });
+        decode_occupancy: prometheus::Histogram::with_opts(
+            HistogramOpts::new(
+                format!("{}_prefill_continue_decode_occupancy", name_prefix::FRONTEND),
+                "Decode KV occupancy the router read when deciding, as a fraction of the                  selected worker's capacity. Absent readings are counted as the                  decode_load_unknown decision instead",
+            )
+            // Occupancy is a fraction, so the range is fixed and even steps
+            // read directly as a threshold sweep.
+            .buckets((0..=20).map(|step| f64::from(step) * 0.05).collect()),
+        )
+        .expect("Failed to create prefill_continue_decode_occupancy histogram"),
+    }
+});
 
 /// `decision` label values the router settles before it asks the policy.
 ///
@@ -785,6 +808,7 @@ pub fn register_prefill_continue_metrics(
     registry.register(Box::new(m.decisions_total.clone()))?;
     registry.register(Box::new(m.demotions_total.clone()))?;
     registry.register(Box::new(m.active.clone()))?;
+    registry.register(Box::new(m.decode_occupancy.clone()))?;
     Ok(())
 }
 
@@ -1872,5 +1896,37 @@ mod prefill_continue_metric_tests {
             );
             assert!(names.contains(&series), "missing {series}");
         }
+        assert!(
+            names.contains(&format!(
+                "{}_prefill_continue_decode_occupancy{{}}",
+                name_prefix::FRONTEND
+            )),
+            "missing the occupancy histogram in {names:?}"
+        );
+    }
+
+    /// The calibration arm reads this histogram to pick a threshold, so its
+    /// buckets must span the whole range a fraction can take. A reading that
+    /// lands only in `+Inf` carries no information about where the line is.
+    #[test]
+    fn the_occupancy_histogram_covers_the_whole_fraction_range() {
+        use prometheus::core::Collector;
+        let families = PREFILL_CONTINUE_METRICS.decode_occupancy.collect();
+        let bounds: Vec<f64> = families[0].get_metric()[0]
+            .get_histogram()
+            .get_bucket()
+            .iter()
+            .map(|bucket| bucket.upper_bound())
+            .collect();
+
+        assert_eq!(bounds.len(), 21);
+        assert_eq!(bounds.first(), Some(&0.0));
+        assert_eq!(bounds.last(), Some(&1.0));
+        // A full worker must not fall off the end into +Inf.
+        assert!(
+            bounds
+                .iter()
+                .any(|&bound| (bound - 1.0).abs() < f64::EPSILON)
+        );
     }
 }

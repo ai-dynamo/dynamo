@@ -987,9 +987,20 @@ pub struct KvRouterConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub prefill_continue_enabled: bool,
 
-    /// Continue when projected decode load exceeds this fraction of KV capacity.
-    /// When unset the feature never triggers, unless `prefill_continue_force`
-    /// is set. Leaving it unset therefore fails closed.
+    /// Continue when the selected decode worker reports it is holding more than
+    /// this fraction of its KV capacity. When unset the feature never triggers,
+    /// unless `prefill_continue_force` is set. Leaving it unset fails closed.
+    ///
+    /// The reading is the worker's own, taken before this request is admitted,
+    /// and nothing is projected onto it. So the value means one thing only:
+    /// how full decode must already be before prefill keeps a request.
+    ///
+    /// **Set it above 1.0 to get a calibration arm.** The router still reads
+    /// occupancy and still fills the `prefill_continue_decode_occupancy`
+    /// histogram, and every request refuses with `decode_has_room`. That arm
+    /// pays the same probe cost as the treatment arm, so the two differ in this
+    /// value alone. Read the histogram, freeze a threshold, then run the
+    /// treatment. Do not pick the threshold after seeing the treatment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_continue_decode_busy_threshold: Option<f64>,
 

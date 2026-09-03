@@ -519,9 +519,13 @@ where
                 // cannot classify one snapshot differently.
                 match signals.decode_occupancy() {
                     Some(occupancy) => {
-                        // The raw pair is logged, not decided on: the shadow
-                        // counters need the distribution, and the gate needs
-                        // one number.
+                        // Recorded on every read, whatever the gate then does
+                        // with it. An arm whose threshold sits above 1.0 fills
+                        // this and continues nothing, which is the calibration
+                        // control.
+                        PREFILL_CONTINUE_METRICS.decode_occupancy.observe(occupancy);
+                        // The raw pair is logged, not decided on: the gate
+                        // needs one number.
                         let (used, total) = signals.authoritative_kv.unwrap_or_default();
                         tracing::debug!(
                             request_id,
