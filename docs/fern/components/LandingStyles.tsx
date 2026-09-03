@@ -299,6 +299,22 @@ article:has(.dynamo-welcome) > header .fern-page-subtitle p {
   transition: transform 160ms ease;
 }
 
+.dynamo-welcome__cta--secondary {
+  border-color: color-mix(in srgb, var(--grayscale-a12) 16%, transparent);
+  background: var(--grayscale-a1);
+  color: var(--grayscale-a12) !important;
+  box-shadow: none;
+}
+
+.dynamo-welcome__cta--secondary:hover {
+  border-color: rgba(118, 185, 0, 0.55);
+  background: color-mix(in srgb, var(--grayscale-a2) 84%, rgba(118, 185, 0, 0.12));
+}
+
+.dynamo-welcome__cta--secondary svg {
+  stroke: currentColor;
+}
+
 .dynamo-welcome__cta:hover svg {
   transform: translateX(2px);
 }
