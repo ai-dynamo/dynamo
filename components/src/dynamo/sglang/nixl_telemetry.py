@@ -45,9 +45,8 @@ from dynamo.common.utils.nixl_telemetry import (
 
 logger = logging.getLogger(__name__)
 
-# SGLang reindexes CUDA_VISIBLE_DEVICES per child when this is set, which
-# collapses every scheduler's gpu_id to 0 and destroys the only node-local rank
-# index the scheduler process is handed.
+# SGLang reindexes CUDA_VISIBLE_DEVICES per child when this is set, collapsing every
+# scheduler's gpu_id to 0 -- the only node-local rank index the process is handed.
 _ONE_VISIBLE_DEVICE_ENV = "SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS"
 
 _TRUTHY = frozenset({"1", "true", "yes", "y", "on"})
@@ -123,9 +122,8 @@ def install_per_rank_nixl_prometheus_ports() -> None:
     import sglang as sgl
 
     if not hasattr(sgl.Engine, "run_scheduler_process_func"):
-        # Log rather than raise: without the override the deployment behaves
-        # exactly as it did before this wrapper existed, and turning a metrics
-        # feature into a startup failure would be the worse outcome.
+        # Log rather than raise: without the override the deployment behaves as it
+        # did before, and a metrics feature should not become a startup failure.
         logger.error(
             "sglang.Engine has no run_scheduler_process_func override point, so "
             "co-located ranks keep one shared %s and all but one will fail to "

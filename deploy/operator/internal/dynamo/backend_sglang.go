@@ -67,27 +67,8 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	return nil
 }
 
-// reserveNixlExporterPorts declares one NIXL Prometheus exporter port per
-// node-local rank on an SGLang worker container.
-//
-// SGLang runs one scheduler process per node-local GPU and each of those
-// processes builds its own NIXL agent, so the single DynamoNixlPortName port
-// the worker container declares covers rank 0 only. dynamo.sglang gives rank i
-// DynamoNixlPort+i (see components/src/dynamo/sglang/nixl_telemetry.py); a port
-// the pod does not declare generates no PodMonitor target, so the whole range
-// has to be declared here for those ranks to be scraped.
-//
-// Two containers are left alone. Those without DynamoNixlPortName - the
-// frontend, planner and router share this backend - never run an exporter. So
-// do those whose resolved NIXL_TELEMETRY_ENABLE is not "y", which is the
-// operator default: reserving there would declare ports nothing binds, and
-// resolving the GPU count is not free (a DRA-backed claim needs an API read
-// that some render paths cannot perform).
-//
-// A deployment that supplies NIXL_TELEMETRY_ENABLE indirectly, through envFrom
-// or valueFrom, is not recognized here. Those ranks still get distinct ports
-// and still reach Ready; only their scrape targets are missing. Set the
-// variable inline to have them declared.
+// reserveNixlExporterPorts declares one NIXL exporter port per node-local rank.
+// Skips containers without a nixl port or with NIXL_TELEMETRY_ENABLE not inline "y".
 func reserveNixlExporterPorts(container *corev1.Container, containerGPUCount ContainerGPUCount) error {
 	if findContainerPort(container, commonconsts.DynamoNixlPortName) == nil {
 		return nil

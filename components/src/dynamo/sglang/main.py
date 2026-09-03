@@ -46,8 +46,7 @@ async def worker(argv: list[str] | None = None):
     dump_config(config.dynamo_args.dump_config_to, config)
 
     # Must run before any sgl.Engine is constructed: it changes how the engine
-    # launches its scheduler processes, and each of those processes needs its
-    # own NIXL exporter port.
+    # launches its scheduler processes, each of which needs its own exporter port.
     install_per_rank_nixl_prometheus_ports()
 
     if (

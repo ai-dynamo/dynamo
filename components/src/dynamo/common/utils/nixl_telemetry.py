@@ -40,17 +40,12 @@ NIXL_TELEMETRY_PROMETHEUS_PORT_ENV = "NIXL_TELEMETRY_PROMETHEUS_PORT"
 
 DEFAULT_NIXL_PROMETHEUS_PORT = 19090
 
-# Upper bound on the ranks that may share one pod's NIXL exporter range, and so
-# on the ports the operator reserves and the PodMonitor names. Keep in sync with
-# DynamoMaxNixlPorts in deploy/operator/internal/consts/consts.go: a rank that
-# derived a port past the reserved range would bind a port no scrape targets.
+# Keep in sync with DynamoMaxNixlPorts in deploy/operator/internal/consts/consts.go:
+# a rank deriving a port past the reserved range would bind a port nothing scrapes.
 MAX_COLOCATED_NIXL_EXPORTERS = 8
 
-# Listeners the worker container already owns, as (env var, default base). Both
-# are treated as ranges MAX_COLOCATED_NIXL_EXPORTERS wide because both are
-# themselves per-rank bases elsewhere in Dynamo -- the embedding worker
-# processes offset DYN_SYSTEM_PORT and the vLLM instrumented scheduler offsets
-# DYN_FORWARDPASS_METRIC_PORT. Reserving the width is the conservative reading.
+# Listeners the container already owns, as (env var, default base). Each is
+# treated as a MAX_COLOCATED_NIXL_EXPORTERS-wide range: both are per-rank bases elsewhere.
 _COLLIDING_PORT_ENVS = ("DYN_SYSTEM_PORT", "DYN_FORWARDPASS_METRIC_PORT")
 
 

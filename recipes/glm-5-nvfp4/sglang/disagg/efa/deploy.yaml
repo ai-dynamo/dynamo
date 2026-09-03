@@ -184,10 +184,8 @@ spec:
             - name: LD_LIBRARY_PATH
               value: /opt/amazon/efa/lib:/opt/amazon/efa/lib64:/opt/aws-ofi-nccl/lib:/opt/nvidia/nvda_nixl/lib64:/opt/nvidia/nvda_nixl/lib64/plugins:/opt/nvidia/nvda_nixl/lib/aarch64-linux-gnu:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:/usr/local/cuda/lib64:/usr/local/lib
             # === NIXL telemetry (use =y, _ENABLED=1 is a no-op) ===
-            # This pod runs one SGLang scheduler per local GPU and each builds
-            # its own NIXL agent, so the port below is the BASE of the range:
-            # local rank i exports on 19090+i. The operator declares the whole
-            # range as container ports so every rank is scraped.
+            # BASE of a range: this pod runs one SGLang scheduler per local GPU,
+            # and local rank i exports on 19090+i. The operator declares the range.
             - name: NIXL_TELEMETRY_ENABLE
               value: "y"
             - name: NIXL_TELEMETRY_EXPORTER

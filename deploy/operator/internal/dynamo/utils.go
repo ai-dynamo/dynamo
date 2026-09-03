@@ -73,10 +73,8 @@ func shellQuotePOSIX(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// findEnvVar returns the named environment variable, or nil when the list does
-// not carry it. The caller sees the entry itself rather than its value so that a
-// variable sourced from valueFrom - whose Value is empty but whose meaning is
-// not - can be told apart from an absent one.
+// findEnvVar returns the named environment variable entry, or nil when absent. The
+// entry, not its value, so a valueFrom variable is distinguishable from an absent one.
 func findEnvVar(env []corev1.EnvVar, name string) *corev1.EnvVar {
 	for i := range env {
 		if env[i].Name == name {

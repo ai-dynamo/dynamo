@@ -138,12 +138,8 @@ spec:
       sourceLabels:
       - __meta_kubernetes_pod_label_nvidia_com_dynamo_component_type
       targetLabel: dynamo_component_type
-  # A backend that runs one process per co-located rank builds one NIXL agent per
-  # rank, and each agent needs an exporter port of its own; rank i binds nixl-<i>
-  # (see deploy/operator/internal/dynamo/backend_sglang.go). Scraping only `nixl`
-  # would leave every rank but the first invisible. The upper bound matches
-  # DynamoMaxNixlPorts. As with system-0/system-1 above, pods that don't declare
-  # these named ports generate no extra targets.
+  # Rank i of a co-located worker binds nixl-<i>; scraping only `nixl` would leave
+  # every rank but the first invisible. Upper bound matches DynamoMaxNixlPorts.
   {{- range $rank := untilStep 1 8 1 }}
   - interval: 5s
     path: /metrics

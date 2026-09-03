@@ -27,13 +27,8 @@ const (
 	DynamoNixlPort     = 19090
 	DynamoNixlPortName = "nixl"
 
-	// DynamoMaxNixlPorts bounds the NIXL Prometheus exporter ports reserved on a
-	// single pod. A backend that builds one NIXL agent per co-located rank needs
-	// one exporter port per rank, derived as DynamoNixlPort+i and declared as
-	// DynamoNixlPortName for rank 0 and "nixl-<i>" for rank i. Keep in sync with
-	// MAX_COLOCATED_NIXL_EXPORTERS in
-	// components/src/dynamo/common/utils/nixl_telemetry.py: a rank whose port is
-	// outside this range would bind a port that nothing scrapes.
+	// DynamoMaxNixlPorts bounds the per-pod NIXL exporter ports: rank i uses
+	// DynamoNixlPort+i. Keep in sync with MAX_COLOCATED_NIXL_EXPORTERS (nixl_telemetry.py).
 	DynamoMaxNixlPorts = 8
 
 	DynamoFPMBasePort = 20380

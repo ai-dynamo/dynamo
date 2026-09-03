@@ -3,10 +3,6 @@
 
 # Document order in prometheus.yaml: 0 dynamo-frontend, 1 dynamo-worker,
 # 2 dynamo-planner, 3 dynamo-epp, 4 dynamo-router.
-# A worker that co-locates N ranks runs N NIXL agents, each with an exporter of
-# its own on nixl-<rank>. An endpoint list that names only `nixl` scrapes rank 0
-# and silently loses the rest, so the reserved range is asserted here rather
-# than only where the operator declares the container ports.
 suite: PodMonitor NIXL exporter ports
 templates:
   - charts/dynamo-operator/templates/prometheus.yaml

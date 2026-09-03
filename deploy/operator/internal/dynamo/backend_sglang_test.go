@@ -649,14 +649,8 @@ func TestSGLangBackend_UpdateContainer_UseAsCompilationCache(t *testing.T) {
 	}
 }
 
-// TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank covers both
-// halves of the reservation: an SGLang worker that runs one NIXL exporter per
-// co-located rank must declare a port for every one of them, and a container
-// that runs no exporter must be left exactly as it was. The second half is
-// asserted with a GPU-count resolver that fails, because resolving that count
-// can require a Kubernetes API read that some render paths cannot perform - so
-// "reserves nothing" and "does not even ask how many GPUs there are" are one
-// requirement rather than two.
+// TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank asserts a port per
+// rank, and that a container running no exporter is untouched and never resolves GPUs.
 func TestSGLangBackend_ReservesOneNixlExporterPortPerColocatedRank(t *testing.T) {
 	backend := &SGLangBackend{}
 
