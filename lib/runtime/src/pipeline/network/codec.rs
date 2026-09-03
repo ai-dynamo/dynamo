@@ -233,6 +233,27 @@ pub struct TcpRequestFrame {
     pub payload: Bytes,
 }
 
+#[derive(Default)]
+struct EncodedLenCounter {
+    len: usize,
+}
+
+impl std::io::Write for EncodedLenCounter {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, std::io::Error> {
+        self.len = self.len.checked_add(buf.len()).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "TCP request message length overflow",
+            )
+        })?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+}
+
 impl TcpRequestFrame {
     pub fn encoded_len(&self) -> usize {
         self.header.len() + self.payload.len()
@@ -258,6 +279,24 @@ impl TcpRequestMessage {
             headers,
             payload,
         }
+    }
+
+    /// Return the exact wire length without retaining an encoded header.
+    pub(super) fn encoded_len(&self) -> Result<usize, std::io::Error> {
+        let mut headers_len = EncodedLenCounter::default();
+        serde_json::to_writer(&mut headers_len, &self.headers).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Failed to encode headers: {}", e),
+            )
+        })?;
+
+        Ok(validate_tcp_request_encode_lengths(
+            self.endpoint_path.len(),
+            headers_len.len,
+            self.payload.len(),
+        )?
+        .total_len)
     }
 
     /// Encode message to bytes.
@@ -576,6 +615,7 @@ mod tests {
         for (endpoint, headers, payload) in cases {
             let msg = TcpRequestMessage::with_headers(endpoint, headers, payload.clone());
             let encoded = msg.clone().encode().unwrap();
+            assert_eq!(msg.encoded_len().unwrap(), encoded.len());
             let frame = msg.into_frame().unwrap();
 
             assert_eq!(frame.encoded_len(), encoded.len());

@@ -15,7 +15,9 @@ use crate::error::{DynamoError, ErrorType};
 use crate::metrics::transport_metrics::{
     TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
 };
-use crate::pipeline::network::codec::{TcpRequestFrame, check_tcp_request_max_message_size};
+use crate::pipeline::network::codec::{
+    TcpRequestFrame, TcpRequestMessage, check_tcp_request_max_message_size,
+};
 use crate::pipeline::network::get_tcp_max_message_size;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -888,8 +890,8 @@ impl TcpConnection {
         Ok(())
     }
 
-    /// Send an already-validated request frame.
-    async fn send_request_frame(&self, frame: TcpRequestFrame) -> Result<Bytes> {
+    /// Send an already-validated request.
+    async fn send_request_message(&self, request: TcpRequestMessage) -> Result<Bytes> {
         if !self.healthy.load(Ordering::Relaxed) {
             anyhow::bail!("Connection unhealthy (tasks failed)");
         }
@@ -905,14 +907,17 @@ impl TcpConnection {
         };
 
         // Bounded admission keeps queued and in-flight frames at or below
-        // channel_buffer. Callers retain validated frames while waiting; the
-        // payload stays in its original Bytes allocation. The permit is released
-        // on every return, error, and cancellation path.
+        // channel_buffer. The permit is released on every return, error, and
+        // cancellation path.
         let _permit = self
             .admission
             .acquire()
             .await
             .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?;
+
+        // Header serialization stays inside the admission bound. The payload
+        // remains in its original Bytes allocation.
+        let frame = request.into_frame().map_err(invalid_request_error)?;
 
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -977,8 +982,8 @@ impl TcpConnection {
 
     #[cfg(test)]
     async fn send_request(&self, payload: Bytes, headers: &Headers) -> Result<Bytes> {
-        let frame = prepare_request_frame(payload, headers, get_tcp_max_message_size())?;
-        self.send_request_frame(frame).await
+        let request = prepare_request(payload, headers.clone(), get_tcp_max_message_size())?;
+        self.send_request_message(request).await
     }
 
     /// Check if connection is healthy
@@ -1032,13 +1037,11 @@ fn invalid_request_error(cause: std::io::Error) -> anyhow::Error {
     )
 }
 
-fn prepare_request_frame(
+fn prepare_request(
     payload: Bytes,
-    headers: &Headers,
+    headers: Headers,
     max_message_size: usize,
-) -> Result<TcpRequestFrame> {
-    use crate::pipeline::network::codec::TcpRequestMessage;
-
+) -> Result<TcpRequestMessage> {
     let endpoint_path = headers
         .get("x-endpoint-path")
         .ok_or_else(|| {
@@ -1048,10 +1051,10 @@ fn prepare_request_frame(
             ))
         })?
         .to_string();
-    let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
-    let frame = request_msg.into_frame().map_err(invalid_request_error)?;
-    validate_request_frame_size(frame.encoded_len(), max_message_size)?;
-    Ok(frame)
+    let request = TcpRequestMessage::with_headers(endpoint_path, headers, payload);
+    let encoded_len = request.encoded_len().map_err(invalid_request_error)?;
+    validate_request_frame_size(encoded_len, max_message_size)?;
+    Ok(request)
 }
 
 /// Per-host connection pool with LRU lifecycle and ArcSwap-based snapshot.
@@ -1682,13 +1685,12 @@ impl RequestPlaneClient for TcpRequestClient {
             headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
         }
 
-        let frame =
-            prepare_request_frame(payload, &headers, self.max_message_size).map_err(|e| {
-                self.stats.errors.fetch_add(1, Ordering::Relaxed);
-                TCP_ERRORS_TOTAL.inc();
-                tracing::warn!(%addr, error = ?e, "TCP request validation failed");
-                e
-            })?;
+        let request = prepare_request(payload, headers, self.max_message_size).map_err(|e| {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
+            TCP_ERRORS_TOTAL.inc();
+            tracing::warn!(%addr, error = ?e, "TCP request validation failed");
+            e
+        })?;
         self.stats.requests_sent.fetch_add(1, Ordering::Relaxed);
         self.stats
             .bytes_sent
@@ -1703,8 +1705,11 @@ impl RequestPlaneClient for TcpRequestClient {
             e
         })?;
 
-        let result =
-            tokio::time::timeout(self.config.request_timeout, conn.send_request_frame(frame)).await;
+        let result = tokio::time::timeout(
+            self.config.request_timeout,
+            conn.send_request_message(request),
+        )
+        .await;
 
         match result {
             Ok(Ok(response)) => {
