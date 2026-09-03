@@ -1310,9 +1310,6 @@ policy_classes:
     }
 
     #[test]
-    // Pins behavior newly reachable since every admission transits the policy
-    // queue: an idle-arrival pop charges DRR cost where the old direct-admit
-    // path charged nothing.
     fn drr_charges_cost_when_the_queue_was_empty() {
         let mut queue = PolicyQueue::new(admission_profile());
         let mut snapshot = QueueSnapshot::new(100, 0);
