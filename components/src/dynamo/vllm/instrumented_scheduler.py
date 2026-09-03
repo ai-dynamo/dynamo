@@ -164,54 +164,6 @@ class BenchmarkConfig:
     collect_imbalanced: bool = False
 
 
-def _is_moe_model(vllm_config: "VllmConfig") -> bool:
-    """Whether the engine resolved this model as a mixture-of-experts model.
-
-    Read from the resolved ``ModelConfig`` because that is the same property
-    vLLM itself branches on when it decides whether DP ranks form one
-    coordinated group. ``ParallelConfig.is_moe_model`` is a copy of it and
-    serves as the fallback for engine versions that do not expose the
-    ``ModelConfig`` property, and for the configurations in which
-    ``VllmConfig.model_config`` is ``None``.
-    """
-    model_config = vllm_config.model_config
-    is_moe = None if model_config is None else getattr(model_config, "is_moe", None)
-    if is_moe is None:
-        is_moe = getattr(vllm_config.parallel_config, "is_moe_model", False)
-    return bool(is_moe)
-
-
-def validate_benchmark_data_parallelism(
-    vllm_config: "VllmConfig", benchmark_mode: BenchmarkMode | None
-) -> None:
-    """Reject the attention-DP self-benchmark on a dense (non-MoE) model.
-
-    Call this in the parent process and before the engine is constructed. A
-    dense DP child is not part of a coordinated group and rewrites its local
-    ``data_parallel_size`` to ``1``, so by the time one is alive the requested
-    size is no longer readable and the model is already loaded.
-    """
-    if benchmark_mode is None:
-        return
-
-    data_parallel_size = vllm_config.parallel_config.data_parallel_size or 1
-    if data_parallel_size <= 1:
-        return
-
-    if _is_moe_model(vllm_config):
-        return
-
-    raise ValueError(
-        "--benchmark-mode cannot be combined with --data-parallel-size "
-        f"{data_parallel_size} on a dense (non-MoE) model. The attention-DP "
-        "self-benchmark requires an MoE model, because vLLM runs data-parallel "
-        "ranks as one coordinated group only for MoE models; on a dense model "
-        "each rank is an independent engine and the cross-rank benchmark "
-        "cannot complete. Either run the benchmark with "
-        "--data-parallel-size 1, or benchmark an MoE model."
-    )
-
-
 def _bench_point_is_imbalanced(candidate: PrefillPointCandidate) -> bool:
     """Whether this point spreads work unevenly across the batch.
 

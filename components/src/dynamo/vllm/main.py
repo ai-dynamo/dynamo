@@ -72,11 +72,7 @@ from .embedding_worker_processes import (
 from .engine_generate import publish_engine_generate_capability
 from .handlers import apply_data_parallel_runtime_config
 from .headless import run_dynamo_headless
-from .instrumented_scheduler import (
-    ENV_FPM_BENCHMARK_OUTPUT_PATH,
-    ENV_FPM_WORKER_ID,
-    validate_benchmark_data_parallelism,
-)
+from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .kv_connector_protocols import (
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
 )
@@ -675,10 +671,21 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    # Dense DP ranks are independent vLLM engines and cannot synchronize a
+    # multi-rank self-benchmark. Reject before AsyncLLM starts those engines.
+    if (
+        config.benchmark_mode is not None
+        and vllm_config.parallel_config.data_parallel_size > 1
+        and not vllm_config.model_config.is_moe
+    ):
+        raise ValueError(
+            "--benchmark-mode cannot be combined with --data-parallel-size "
+            f"{vllm_config.parallel_config.data_parallel_size} on a dense "
+            "(non-MoE) model. The attention-DP self-benchmark requires an MoE "
+            "model because vLLM runs dense data-parallel ranks as independent "
+            "engines. Use --data-parallel-size 1 or benchmark an MoE model."
+        )
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
-    # Must run before engine construction: weights load past this point, and a
-    # dense DP child reads --data-parallel-size back as 1.
-    validate_benchmark_data_parallelism(vllm_config, config.benchmark_mode)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
