@@ -41,9 +41,13 @@ try:
     from sglang.srt.arg_groups.model_override_base import (
         model_config_of as _sglang_model_config_of,
     )
+    from sglang.srt.arg_groups.model_override_base import (
+        use_mla_backend as _sglang_use_mla_backend,
+    )
 except ImportError:
     # Fallback for SGLang 0.5.18. Remove when minimum supported SGLang is 0.5.19+.
     _sglang_model_config_of = None
+    _sglang_use_mla_backend = None
 
 try:
     from sglang.srt.runtime_context import publish as _sglang_publish
@@ -61,6 +65,16 @@ def model_config_of(server_args: Any) -> Any:
     if _sglang_model_config_of is None:
         raise AttributeError("SGLang does not expose a model-config accessor")
     return _sglang_model_config_of(server_args)
+
+
+def sglang_uses_mla_backend(server_args: Any) -> bool:
+    """Return whether SGLang selected an MLA attention backend across versions."""
+    legacy_use_mla_backend = getattr(server_args, "use_mla_backend", None)
+    if callable(legacy_use_mla_backend):
+        return bool(legacy_use_mla_backend())
+    if _sglang_use_mla_backend is None:
+        raise AttributeError("SGLang does not expose an MLA-backend accessor")
+    return bool(_sglang_use_mla_backend(server_args))
 
 
 def publish_server_args(server_args: Any, *, role: str) -> None:
@@ -92,14 +106,6 @@ except ImportError:
         sglang_resolved_view = None
 
 logger = logging.getLogger(__name__)
-
-try:
-    from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
-except ModuleNotFoundError as exc:
-    if exc.name != "sglang.srt.utils.server_args_config_parser":
-        raise
-    # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
-    from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 
 def get_mm_encoder_class() -> type[Any]:
@@ -338,4 +344,5 @@ __all__ = [
     "publish_server_args",
     "require_reasoning_kwargs",
     "resolved_server_args",
+    "sglang_uses_mla_backend",
 ]

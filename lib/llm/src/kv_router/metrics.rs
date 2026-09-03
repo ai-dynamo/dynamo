@@ -206,7 +206,7 @@ pub(crate) fn kv_publisher_metrics() -> Option<Arc<KvPublisherMetrics>> {
 }
 
 // ---------------------------------------------------------------------------
-// Direct-ZMQ KV ingress metrics
+// ZMQ KV ingress metrics
 // ---------------------------------------------------------------------------
 
 pub(crate) struct KvZmqIngressMetrics {
@@ -225,7 +225,7 @@ impl KvZmqIngressMetrics {
                 let sources = metrics
                     .create_intgaugevec(
                         "router_kv_zmq_ingress_sources",
-                        "Number of direct-ZMQ KV ingress sources by lifecycle state",
+                        "Number of ZMQ KV ingress sources by lifecycle state",
                         &["state"],
                         &[],
                     )
@@ -233,14 +233,14 @@ impl KvZmqIngressMetrics {
                 let batches_total = metrics
                     .create_intcounter(
                         "router_kv_zmq_ingress_batches_total",
-                        "Total direct-ZMQ KV ingress batches handed to WorkerQueryClient",
+                        "Total ZMQ KV ingress batches handed to WorkerQueryClient",
                         &[],
                     )
                     .expect("failed to create router_kv_zmq_ingress_batches_total counter");
                 let lifecycle_total = metrics
                     .create_intcountervec(
                         "router_kv_zmq_ingress_lifecycle_total",
-                        "Total direct-ZMQ KV ingress lifecycle transitions and errors",
+                        "Total ZMQ KV ingress lifecycle transitions and errors",
                         &["action"],
                         &[],
                     )
@@ -268,6 +268,17 @@ impl KvZmqIngressMetrics {
 
     pub(crate) fn increment_lifecycle(&self, action: &'static str) {
         self.lifecycle_total.with_label_values(&[action]).inc();
+    }
+
+    pub(crate) fn increment_lifecycle_by(&self, action: &'static str, value: u64) {
+        self.lifecycle_total
+            .with_label_values(&[action])
+            .inc_by(value);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lifecycle_count(&self, action: &'static str) -> u64 {
+        self.lifecycle_total.with_label_values(&[action]).get()
     }
 }
 

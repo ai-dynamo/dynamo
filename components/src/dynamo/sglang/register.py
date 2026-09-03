@@ -30,6 +30,7 @@ from dynamo.llm import (
     WorkerType,
     register_model,
 )
+from dynamo.sglang._compat import sglang_uses_mla_backend
 from dynamo.sglang._disagg import SGLANG_WORKER_GROUP_ID_KEY, get_sglang_worker_group_id
 from dynamo.sglang.args import DynamoConfig, use_modelexpress_remote_instance
 from dynamo.sglang.capacity import (
@@ -291,7 +292,7 @@ def _get_mooncake_runtime_data(server_args: ServerArgs) -> Optional[dict[str, An
     pp_size = int(getattr(server_args, "pp_size", 1) or 1)
 
     try:
-        is_mla_model = bool(server_args.use_mla_backend())
+        is_mla_model = sglang_uses_mla_backend(server_args)
     except Exception as e:
         logging.warning(f"Failed to determine whether model uses MLA backend: {e}")
         is_mla_model = False

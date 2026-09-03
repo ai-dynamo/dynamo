@@ -183,7 +183,7 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
   Minimum decode endpoints in `disagg` and `decode` modes. When set, replaces the decode value supplied by `min_endpoint`. Must be at least `1`.
 </ParamField>
 
-The Planner does not have per-component maximum endpoint fields. `max_gpu_budget`, the power budget when enabled, Global Planner allocation, and cluster capacity continue to bound scale-up. At startup and for runtime updates, the Planner rejects minimum endpoint combinations that cannot fit the configured GPU or power budget.
+The Planner does not have per-component maximum endpoint fields. `max_gpu_budget`, the power budget when enabled, Global Planner allocation, and cluster capacity continue to bound scale-up. At startup and for runtime updates, the Planner rejects minimum endpoint combinations that cannot fit the configured GPU or power budget. Send `min_gpu_budget` and `max_gpu_budget` with the endpoint fields to `PATCH /v1/min-endpoints` to update them atomically at runtime. Set either budget to `-1` to disable that bound. When both budgets are enabled, `min_gpu_budget` must not exceed `max_gpu_budget`. The response from `GET` or `PATCH` includes both budgets.
 
 <ParamField path="decode_engine_num_gpu" type="integer" default="null">
   GPUs per decode engine replica. Auto-detected from the deployment when unset.
