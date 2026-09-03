@@ -624,7 +624,6 @@ def test_setup_vllm_engine_reuses_engine_config_model_config(monkeypatch):
     )
 
     config = SimpleNamespace(
-        benchmark_mode=None,
         component="backend",
         namespace="dynamo",
         engine_args=FakeEngineArgs(),

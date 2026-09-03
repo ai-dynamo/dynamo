@@ -671,20 +671,6 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-    # Dense DP ranks are independent vLLM engines and cannot synchronize a
-    # multi-rank self-benchmark. Reject before AsyncLLM starts those engines.
-    if (
-        config.benchmark_mode is not None
-        and vllm_config.parallel_config.data_parallel_size > 1
-        and not vllm_config.model_config.is_moe
-    ):
-        raise ValueError(
-            "--benchmark-mode cannot be combined with --data-parallel-size "
-            f"{vllm_config.parallel_config.data_parallel_size} on a dense "
-            "(non-MoE) model. The attention-DP self-benchmark requires an MoE "
-            "model because vLLM runs dense data-parallel ranks as independent "
-            "engines. Use --data-parallel-size 1 or benchmark an MoE model."
-        )
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 
@@ -714,6 +700,19 @@ def setup_vllm_engine(
 
     # Pass benchmark config to InstrumentedScheduler via additional_config.
     if hasattr(config, "_benchmark_additional_config"):
+        # Dense DP ranks are independent vLLM engines and cannot synchronize a
+        # multi-rank self-benchmark. Reject before AsyncLLM starts those engines.
+        if (
+            vllm_config.parallel_config.data_parallel_size > 1
+            and not vllm_config.model_config.is_moe
+        ):
+            raise ValueError(
+                "--benchmark-mode cannot be combined with --data-parallel-size "
+                f"{vllm_config.parallel_config.data_parallel_size} on a dense "
+                "(non-MoE) model. The attention-DP self-benchmark requires an MoE "
+                "model because vLLM runs dense data-parallel ranks as independent "
+                "engines. Use --data-parallel-size 1 or benchmark an MoE model."
+            )
         bench = config._benchmark_additional_config
         if fpm_worker_id and bench["output_path"] == "/tmp/benchmark_results.json":
             short_id = fpm_worker_id[-8:]
