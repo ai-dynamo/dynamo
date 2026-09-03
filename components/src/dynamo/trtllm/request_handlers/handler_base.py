@@ -466,8 +466,9 @@ class HandlerBase(BaseGenerativeHandler):
 
         Raise EngineShutdown if shutdown event is triggered.
         """
+        cancellation_triggers: list[asyncio.Future[Any]] = []
         try:
-            cancellation_triggers: list[asyncio.Future[Any]] = [
+            cancellation_triggers = [
                 context.async_killed_or_stopped(),  # Request cancellation
             ]
             # Shutdown cancellation
@@ -500,6 +501,14 @@ class HandlerBase(BaseGenerativeHandler):
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
             pass
+        finally:
+            to_drain = []
+            for task in cancellation_triggers:
+                if not task.done():
+                    task.cancel()
+                    to_drain.append(task)
+            if to_drain:
+                await asyncio.gather(*to_drain, return_exceptions=True)
 
     @asynccontextmanager
     async def _cancellation_monitor(
