@@ -331,10 +331,6 @@ def test_request_migration_trtllm_prefill(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         use_long_prompt=True,
-                        expect_drain=not immediate_kill,
-                        graceful_shutdown=lambda worker: graceful_worker_shutdown(
-                            frontend, worker, endpoint=("prefill", "generate")
-                        ),
                     )
 
 
@@ -410,10 +406,6 @@ def test_request_migration_trtllm_kv_transfer(
                         use_chat_completion=(request_api == "chat"),
                         stream=stream,
                         use_long_prompt=True,
-                        expect_drain=not immediate_kill,
-                        graceful_shutdown=lambda worker: graceful_worker_shutdown(
-                            frontend, worker
-                        ),
                     )
 
 

@@ -25,6 +25,10 @@ from tests.utils.prometheus import sum_metric_samples
 
 logger = logging.getLogger(__name__)
 
+# The (component, endpoint) pair a decode or aggregated worker registers with
+# the frontend.
+BACKEND_ENDPOINT = ("backend", "generate")
+
 
 @contextmanager
 def managed_processes_concurrently(
@@ -470,7 +474,6 @@ def wait_for_endpoint_instance_reduction(
 def graceful_worker_shutdown(
     frontend: DynamoFrontendProcess,
     worker: ManagedProcess,
-    endpoint: tuple[str, str] = ("backend", "generate"),
 ) -> Iterator[None]:
     """Send SIGTERM only, and keep the worker alive until the outcome is known.
 
@@ -484,8 +487,6 @@ def graceful_worker_shutdown(
     Args:
         frontend: Frontend whose `/health` view reports endpoint instances
         worker: Worker to shut down
-        endpoint: The (component, endpoint) pair this worker registers.
-            Prefill workers register ("prefill", "generate").
     """
     response = requests.get(
         f"http://localhost:{frontend.frontend_port}/health",
@@ -495,7 +496,7 @@ def graceful_worker_shutdown(
     previous_count = sum(
         1
         for instance in response.json().get("instances", [])
-        if (instance.get("component"), instance.get("endpoint")) == endpoint
+        if (instance.get("component"), instance.get("endpoint")) == BACKEND_ENDPOINT
     )
 
     pid = worker.get_pid()
@@ -505,16 +506,16 @@ def graceful_worker_shutdown(
         for child in parent.children(recursive=True):
             try:
                 process_groups.add(os.getpgid(child.pid))
-            except (ProcessLookupError, OSError):
+            except ProcessLookupError:
                 pass
-    except (psutil.AccessDenied, psutil.NoSuchProcess):
+    except psutil.NoSuchProcess:
         pass
 
     try:
         parent.terminate()
         wait_for_endpoint_instance_reduction(
             frontend.frontend_port,
-            endpoint,
+            BACKEND_ENDPOINT,
             previous_count,
         )
         yield
@@ -814,13 +815,8 @@ def run_migration_test(
             opt into strict metric validation. When omitted, preserve the
             shared helper's historical backend-agnostic lower-bound behavior.
         expect_drain: Assert the graceful-shutdown contract instead of the
-            migration contract: a SIGTERM'd worker finishes the requests it has
-            already admitted, so the request must succeed and both migration
-            counters must be exactly zero. The max_seq_len_exceeded counter is
-            not a migration outcome and keeps its usual expectation -- see
-            Step 6. Requires immediate_kill=False and a graceful_shutdown
-            context, and is mutually exclusive with
-            expected_ongoing_request_count.
+            migration contract: a SIGTERM'd worker finishes the request it has
+            already admitted, so the request succeeds and nothing migrates.
         graceful_shutdown: Optional backend-specific context that initiates
             graceful shutdown before response validation and performs final
             cleanup after the request outcome is known.
