@@ -454,6 +454,25 @@ pub struct WorkerWithDpRank {
     pub dp_rank: DpRank,
 }
 
+/// A worker affinity target that may apply to every data-parallel rank of a worker.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WorkerAffinityTarget {
+    pub worker_id: WorkerId,
+    pub dp_rank: Option<DpRank>,
+}
+
+impl WorkerAffinityTarget {
+    pub fn new(worker_id: WorkerId, dp_rank: Option<DpRank>) -> Self {
+        Self { worker_id, dp_rank }
+    }
+}
+
+impl From<WorkerWithDpRank> for WorkerAffinityTarget {
+    fn from(worker: WorkerWithDpRank) -> Self {
+        Self::new(worker.worker_id, Some(worker.dp_rank))
+    }
+}
+
 impl WorkerWithDpRank {
     pub fn new(worker_id: WorkerId, dp_rank: DpRank) -> Self {
         Self { worker_id, dp_rank }

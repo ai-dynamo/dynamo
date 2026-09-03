@@ -91,6 +91,8 @@ class frontend_service:
 
     # Environment variable that overrides the default metric prefix
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
+    # Whether the frontend can route at least one inference request for a model
+    MODEL_READY = "model_ready"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
     # Total number of LLM requests accepted by the frontend handler

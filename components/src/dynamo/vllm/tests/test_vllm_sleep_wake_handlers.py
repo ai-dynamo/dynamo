@@ -3,7 +3,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -96,6 +96,71 @@ async def test_pause_without_level_uses_vllm_default_sleep():
     assert changed is True
     engine_client.pause_generation.assert_awaited_once()
     engine_client.sleep.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_wraps_sleep_wake_with_communicator_checkpoint_calls():
+    engine_client = AsyncMock()
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+
+    assert await controller.pause(None) is True
+    assert await controller.resume() is True
+
+    assert engine_client.mock_calls == [
+        call.pause_generation(),
+        call.sleep(),
+        call.checkpoint_prepare(),
+        call.checkpoint_restore(),
+        call.wake_up(),
+        call.resume_generation(),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_restore_failure_is_fail_closed():
+    """A failed communicator restore must not be replayed.
+
+    The restored process keeps the engine paused and lets the exception
+    propagate, so it dies rather than resuming on half-rebuilt communicators.
+    """
+    engine_client = AsyncMock()
+    engine_client.checkpoint_restore.side_effect = RuntimeError("restore failed")
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+    assert await controller.pause(None) is True
+
+    with pytest.raises(RuntimeError, match="restore failed"):
+        await controller.resume()
+
+    engine_client.checkpoint_restore.assert_awaited_once()
+    # Never reaches wake_up, so memory is not remapped and scheduling stays
+    # stopped; the controller is still paused because only mark_resumed()
+    # clears that, and the caller never gets there.
+    engine_client.wake_up.assert_not_awaited()
+    engine_client.resume_generation.assert_not_awaited()
+    assert controller.is_paused is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_prepare_failure_leaves_controller_unpaused():
+    """A failed prepare must not record a pause it did not complete, or the
+    next resume would issue a checkpoint_restore with no matching prepare."""
+    engine_client = AsyncMock()
+    engine_client.checkpoint_prepare.side_effect = RuntimeError("prepare failed")
+    controller = VllmEnginePauseController(
+        engine_client,
+        prepare_for_process_checkpoint=True,
+    )
+
+    with pytest.raises(RuntimeError, match="prepare failed"):
+        await controller.pause(None)
+
+    assert controller.is_paused is False
 
 
 @pytest.mark.asyncio
