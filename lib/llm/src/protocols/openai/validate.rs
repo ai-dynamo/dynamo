@@ -869,6 +869,40 @@ pub fn validate_chat_template_args(
     Ok(())
 }
 
+/// vLLM `ChatCompletionRequest` (`mode="before"`): both flags true on the raw
+/// payload is an error. Omitted `add_generation_prompt` finalizes to true (vLLM
+/// 0.27.1 and the Python frontend), so `continue_final_message=true` requires
+/// an explicit `add_generation_prompt=false`. Generic HuggingFace continuation
+/// is not assistant-only; last-message role is checked at truncation time.
+pub fn validate_continue_final_message(
+    add_generation_prompt: Option<bool>,
+    continue_final_message: Option<bool>,
+) -> Result<(), anyhow::Error> {
+    if continue_final_message != Some(true) {
+        return Ok(());
+    }
+    if add_generation_prompt.unwrap_or(true) {
+        anyhow::bail!(
+            "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
+        );
+    }
+    Ok(())
+}
+
+/// Chat-template generation controls are meaningless on `/v1/completions`.
+/// Reject them so they are not silently ignored after landing on `CommonExt`.
+pub fn validate_chat_only_generation_flags(
+    add_generation_prompt: Option<bool>,
+    continue_final_message: Option<bool>,
+) -> Result<(), anyhow::Error> {
+    if add_generation_prompt.is_some() || continue_final_message.is_some() {
+        anyhow::bail!(
+            "`add_generation_prompt` and `continue_final_message` are only supported on /v1/chat/completions"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;

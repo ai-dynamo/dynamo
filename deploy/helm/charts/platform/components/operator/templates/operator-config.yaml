@@ -76,7 +76,7 @@ data:
     {{- else if and .Values.global .Values.global.etcd .Values.global.etcd.install }}
       {{- $etcdAddr = printf "%s-etcd.%s.svc.cluster.local:2379" .Release.Name .Release.Namespace }}
     {{- end }}
-    {{- if or $natsAddr $etcdAddr .Values.modelExpressURL .Values.dynamo.metrics.prometheusEndpoint }}
+    {{- if or $natsAddr $etcdAddr .Values.modelExpressURL .Values.dynamo.metrics.prometheusEndpoint .Values.natsTLSCAPath .Values.natsTLSClientCertPath .Values.natsTLSClientKeyPath .Values.tcpTLSCertPath .Values.tcpTLSKeyPath .Values.tcpTLSCAPath .Values.tcpTLSClientCertPath .Values.tcpTLSClientKeyPath .Values.tcpTLSClientCAPath .Values.tcpTLSServerName }}
     infrastructure:
       {{- if $natsAddr }}
       natsAddress: {{ $natsAddr | quote }}
@@ -89,6 +89,36 @@ data:
       {{- end }}
       {{- if .Values.dynamo.metrics.prometheusEndpoint }}
       prometheusEndpoint: {{ .Values.dynamo.metrics.prometheusEndpoint | quote }}
+      {{- end }}
+      {{- if .Values.natsTLSCAPath }}
+      natsTLSCAPath: {{ .Values.natsTLSCAPath | quote }}
+      {{- end }}
+      {{- if .Values.natsTLSClientCertPath }}
+      natsTLSClientCertPath: {{ .Values.natsTLSClientCertPath | quote }}
+      {{- end }}
+      {{- if .Values.natsTLSClientKeyPath }}
+      natsTLSClientKeyPath: {{ .Values.natsTLSClientKeyPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSCertPath }}
+      tcpTLSCertPath: {{ .Values.tcpTLSCertPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSKeyPath }}
+      tcpTLSKeyPath: {{ .Values.tcpTLSKeyPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSCAPath }}
+      tcpTLSCAPath: {{ .Values.tcpTLSCAPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSClientCertPath }}
+      tcpTLSClientCertPath: {{ .Values.tcpTLSClientCertPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSClientKeyPath }}
+      tcpTLSClientKeyPath: {{ .Values.tcpTLSClientKeyPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSClientCAPath }}
+      tcpTLSClientCAPath: {{ .Values.tcpTLSClientCAPath | quote }}
+      {{- end }}
+      {{- if .Values.tcpTLSServerName }}
+      tcpTLSServerName: {{ .Values.tcpTLSServerName | quote }}
       {{- end }}
     {{- end }}
     {{- $vsGateway := "" }}
@@ -166,7 +196,6 @@ data:
     {{- if .Values.checkpoint.enabled }}
     checkpoint:
       enabled: true
-      cleanupImage: {{ .Values.checkpoint.cleanupImage | default "busybox:1.36" | quote }}
       {{- if or .Values.checkpoint.seccomp.disabled .Values.checkpoint.seccomp.profile }}
       seccomp:
         {{- if .Values.checkpoint.seccomp.disabled }}
@@ -174,30 +203,6 @@ data:
         {{- else if .Values.checkpoint.seccomp.profile }}
         profile: {{ .Values.checkpoint.seccomp.profile | quote }}
         {{- end }}
-      {{- end }}
-      {{- with .Values.checkpoint.storage }}
-      {{- if .type }}
-      {{- $pvc := .pvc | default dict }}
-      storage:
-        type: {{ .type | quote }}
-        {{- if eq .type "pvc" }}
-        pvc:
-          pvcName: {{ required "checkpoint.storage.pvc.pvcName is required when checkpoint.storage.type=pvc" $pvc.pvcName | quote }}
-          basePath: {{ required "checkpoint.storage.pvc.basePath is required when checkpoint.storage.type=pvc" $pvc.basePath | quote }}
-          {{- if $pvc.create }}
-          create: true
-          {{- end }}
-          {{- if $pvc.size }}
-          size: {{ $pvc.size | quote }}
-          {{- end }}
-          {{- if $pvc.storageClassName }}
-          storageClassName: {{ $pvc.storageClassName | quote }}
-          {{- end }}
-          {{- if $pvc.accessMode }}
-          accessMode: {{ $pvc.accessMode | quote }}
-          {{- end }}
-        {{- end }}
-      {{- end }}
       {{- end }}
     {{- end }}
     {{- if and .Values.discoveryBackend (ne (.Values.discoveryBackend | toString) "kubernetes") }}

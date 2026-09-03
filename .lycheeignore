@@ -60,6 +60,16 @@
 # URL 404s from CI until v1.4.0 is cut. Remove after the tag exists.
 ^https://github\.com/ai-dynamo/dynamo/releases/tag/v1\.4\.0$
 
+# The Dynamo Enterprise NGC collection is not published on the public catalog
+# yet, so the canonical collection URL 404s from CI. The org and team segments
+# are correct; only the collection is missing. Remove once it is live.
+^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/ai-dynamo/collections/dynamo-enterprise
+
+# The Dynamo Enterprise container pages are not published on the public
+# catalog yet, so their Security Scanning tab URLs 404 from CI. Remove once
+# the enterprise containers are live.
+^https://catalog\.ngc\.nvidia\.com/orgs/nvidia/teams/ai-dynamo/containers/[a-z-]+-enterprise/security$
+
 # The DeepSeek-V4-Pro-0813 recipe is introduced by the same PR as its docs links,
 # so the main-branch URLs return 404 until merge. Remove these entries after merge.
 ^https://github\.com/ai-dynamo/dynamo/tree/main/recipes/deepseek-v4/deepseek-v4-pro-0813$

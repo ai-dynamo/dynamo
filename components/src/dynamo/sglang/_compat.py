@@ -26,7 +26,75 @@ from collections.abc import Mapping
 from functools import lru_cache, wraps
 from typing import Any
 
+try:
+    from sglang.srt.arg_groups.overrides import declare_late_resolution
+except ImportError:
+    # SGLang 0.5.17 and the XPU 0.5.11 pin predate declarations.
+    declare_late_resolution = None
+
+try:
+    from sglang.srt.arg_groups.overrides import resolved_view as sglang_resolved_view
+except ImportError:
+    # SGLang #36255 exposes ServerArgs._resolved() instead.
+    sglang_resolved_view = None
+
+try:
+    from sglang.srt.arg_groups.overrides import (
+        model_config_of as sglang_model_config_of,
+    )
+except ImportError:
+    # Fallback for sglang <= 0.5.18, which exposes ServerArgs.get_model_config().
+    # Remove when min supported version has the accessor move (sgl #36972).
+    sglang_model_config_of = None
+
+try:
+    from sglang.srt.arg_groups.overrides import (
+        use_mla_backend as sglang_use_mla_backend,
+    )
+except ImportError:
+    # Fallback for sglang <= 0.5.18, which exposes ServerArgs.use_mla_backend().
+    # Remove when min supported version has the accessor move (sgl #36972).
+    sglang_use_mla_backend = None
+
 logger = logging.getLogger(__name__)
+
+try:
+    from sglang.srt.utils.server_args_config_parser import ConfigArgumentMerger
+except ModuleNotFoundError as exc:
+    if exc.name != "sglang.srt.utils.server_args_config_parser":
+        raise
+    # Keep the CUDA 0.5.18 and XPU 0.5.11 pins working until both move here.
+    from sglang.srt.server_args_config_parser import ConfigArgumentMerger
+
+
+def get_sglang_model_config(server_args: Any) -> Any:
+    """Return the resolved model config across SGLang ServerArgs APIs.
+
+    SGLang #36972 moved ``ServerArgs.get_model_config()`` to the module-level
+    ``model_config_of()``. Remove the legacy branch when the minimum supported
+    SGLang release contains that move.
+    """
+    legacy_getter = getattr(server_args, "get_model_config", None)
+    if legacy_getter is not None:
+        return legacy_getter()
+    if sglang_model_config_of is None:
+        raise AttributeError("SGLang does not expose a model config accessor")
+    return sglang_model_config_of(server_args)
+
+
+def sglang_uses_mla_backend(server_args: Any) -> bool:
+    """Return whether this configuration selects SGLang's MLA attention backend.
+
+    SGLang #36972 moved ``ServerArgs.use_mla_backend()`` to the module-level
+    ``use_mla_backend()``. Remove the legacy branch when the minimum supported
+    SGLang release contains that move.
+    """
+    legacy_getter = getattr(server_args, "use_mla_backend", None)
+    if legacy_getter is not None:
+        return bool(legacy_getter())
+    if sglang_use_mla_backend is None:
+        raise AttributeError("SGLang does not expose an MLA backend accessor")
+    return bool(sglang_use_mla_backend(server_args))
 
 
 @lru_cache(maxsize=1)
@@ -82,14 +150,19 @@ def ensure_sglang_tensor_image_size() -> None:
 
 
 def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
-    """Apply a post-resolution, pre-publish SGLang configuration update.
+    """Declare launcher-stage SGLang configuration fields.
 
-    SGLang 0.5.18 replaced ``ServerArgs.override`` with
-    ``ServerArgs._late_resolution`` for launcher-stage updates that every holder
-    of the instance must observe. SGLang 0.5.17 exposes the former API. The
-    separately pinned XPU image still uses SGLang 0.5.11, which predates both;
-    preserve its legacy assignment behavior until its engine pin is upgraded.
+    SGLang 0.5.18+ resolves its effective configuration separately from raw
+    ``ServerArgs`` input. Declare pre-engine changes through its resolution API
+    so the engine's resolved projection observes them. SGLang 0.5.17 exposes
+    ``ServerArgs.override`` instead. The separately pinned XPU image still uses
+    SGLang 0.5.11, which predates both APIs; preserve its legacy assignment
+    behavior until its engine pin is upgraded.
     """
+    if declare_late_resolution is not None:
+        declare_late_resolution(server_args, source, **fields)
+        return
+
     late_resolution = getattr(server_args, "_late_resolution", None)
     if callable(late_resolution):
         late_resolution(source, **fields)
@@ -105,6 +178,22 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
     # upgraded to 0.5.16+.
     for name, value in fields.items():
         setattr(server_args, name, value)
+
+
+def resolved_server_args(server_args: Any) -> Any:
+    """Return SGLang's effective configuration for one initialized engine.
+
+    SGLang #36255 exposes ``ServerArgs._resolved()``. Current SGLang keeps
+    ``ServerArgs`` raw and exposes the same projection through
+    ``resolved_view()``. Older supported releases and Dynamo's non-LLM argument
+    stubs retain effective values on the object itself.
+    """
+    resolve = getattr(server_args, "_resolved", None)
+    if callable(resolve):
+        return resolve()
+    if sglang_resolved_view is not None:
+        return sglang_resolved_view(server_args)
+    return server_args
 
 
 @lru_cache(maxsize=32)
@@ -177,8 +266,12 @@ def require_reasoning_kwargs(engine: Any, request: Mapping[str, Any]) -> dict[st
 
 
 __all__ = [
+    "ConfigArgumentMerger",
     "ensure_sglang_tensor_image_size",
     "filter_supported_async_generate_kwargs",
+    "get_sglang_model_config",
     "override_server_args",
     "require_reasoning_kwargs",
+    "resolved_server_args",
+    "sglang_uses_mla_backend",
 ]

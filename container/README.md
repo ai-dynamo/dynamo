@@ -266,14 +266,7 @@ The frontend image is a specialized container that includes the Dynamo component
 
 **Build EPP Image**
 ```bash
-sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
-curl --retry 5 --retry-delay 3 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-. "$HOME/.cargo/env"
-cargo install cbindgen
-
-pushd deploy/inference-gateway/epp
-make all
-popd
+make -C deploy/inference-gateway/ext-proc all
 
 EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
 EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
@@ -288,10 +281,11 @@ docker build -t dynamo:frontend --build-arg EPP_IMAGE=${EPP_IMAGE} -f container/
 # NIXL comes from PyPI; override the release with --build-arg NIXL_REF=v1.4.0
 ```
 
+**Note on `EPP_IMAGE`**: it must be an image built from `deploy/inference-gateway/ext-proc/Dockerfile`, not an arbitrary EPP image. Beyond the `/epp` binary, the frontend's compliance stages read `/sbom-rust-epp.cdx.json` and `/rust-licenses` out of it, and only that Dockerfile places them there. Pointing `EPP_IMAGE` at an older release or a third-party EPP fails the build on the `COPY --from=epp` of those paths, with a message (`lstat /sbom-rust-epp.cdx.json: no such file or directory`) that mentions neither EPP nor SBOMs. CI is unaffected: it builds the EPP image in the same workflow and feeds that URI straight through.
+
 The build process automatically:
-1. Builds the Dynamo static library for EPP KV-aware routing
-2. Builds the custom EPP Docker image using `make all` from `deploy/inference-gateway/epp/Makefile`
-3. Builds the frontend image with the EPP binary and Dynamo runtime components
+1. Builds the native Rust EPP Docker image using `make all` from `deploy/inference-gateway/ext-proc/Makefile`
+2. Builds the frontend image with the EPP binary and Dynamo runtime components
 
 For more details, see [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md).
 

@@ -6,15 +6,17 @@ SPDX-License-Identifier: Apache-2.0
 # TensorRT-LLM sidecar
 
 > [!WARNING]
-> **Experimental.** This sidecar and its deployment example are experimental and
-> not yet packaged for distribution (see [Packaging](#packaging)). The manifest,
-> flags, and behavior may change without notice.
+> **Experimental.** This sidecar and its deployment example are experimental.
+> The Python launcher ships in the `ai-dynamo` and `ai-dynamo-runtime` wheel
+> pair, but the container image is not yet packaged for distribution. The
+> manifest, flags, and behavior may change without notice.
 
 `dynamo-trtllm-sidecar` connects a Dynamo worker to TensorRT-LLM's native
 `trtllm.TrtllmService` gRPC `Generate` service. It is a standalone Rust
-executable composed with `dynamo_backend_common::run`: TensorRT-LLM runs as its
-own process while the sidecar owns Dynamo worker registration, request
-conversion, transport, cancellation, and abort.
+executable composed with `dynamo_backend_common::run` and is also compiled into
+`ai-dynamo-runtime` for the importable `dynamo.trtllm.sidecar` launcher.
+TensorRT-LLM runs as its own process while the sidecar owns Dynamo worker
+registration, request conversion, transport, cancellation, and abort.
 
 ## Supported
 
@@ -32,9 +34,13 @@ carries no context-phase handoff.
 
 ## Run
 
-Start TensorRT-LLM with its native gRPC listener (TRT-LLM `1.3.0rc21`; rc22 has a broken `--grpc`):
+Start TensorRT-LLM with its native gRPC listener. Its protobuf bindings are an
+optional extra, so install them first. Install the package directly rather than
+via `tensorrt_llm[grpc-smg]`: the extra makes pip re-resolve TensorRT-LLM's whole
+dependency closure, which fails on an image whose site-packages is read-only.
 
 ```bash
+pip install "smg-grpc-proto>=0.4.2"
 python -m tensorrt_llm.commands.serve <model> --grpc --host 0.0.0.0 --port 50051
 ```
 
@@ -46,6 +52,14 @@ Start the Dynamo worker:
 
 ```bash
 dynamo-trtllm-sidecar \
+  --grpc-endpoint 127.0.0.1:50051 \
+  --model-path <model>
+```
+
+After installing `ai-dynamo`, the Python module runs the same native worker:
+
+```bash
+python -m dynamo.trtllm.sidecar \
   --grpc-endpoint 127.0.0.1:50051 \
   --model-path <model>
 ```
