@@ -672,16 +672,10 @@ mod tests {
         .unwrap();
         let sampling = mapped.sampling_params.unwrap();
 
-        // SGLang refuses min_new_tokens when it has no tokenizer, and it never has one on
-        // this path, so the parameter is not sent. The Decoder holds the same min_tokens.
         assert_eq!(sampling.min_new_tokens, None);
-        // The Decoder can only withhold stops, not manufacture tokens, so the engine must be
-        // held open past the threshold: it gets no stop ids, no stop strings, and is told to
-        // ignore EOS.
         assert!(sampling.stop_token_ids.is_empty());
         assert!(sampling.stop.is_empty());
         assert_eq!(sampling.ignore_eos, Some(true));
-        // max_tokens still bounds the over-generation this buys.
         assert_eq!(sampling.max_new_tokens, Some(8));
     }
 
