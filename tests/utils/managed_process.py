@@ -702,8 +702,11 @@ class ManagedProcess:
         """Check if the main process is still alive. Raises RuntimeError if dead.
 
         The raised message carries the log path and a bounded tail of the
-        process output, so the reason the process died reaches the pytest short
-        summary and the JUnit XML instead of only the logger stream.
+        process output, so the reason the process died reaches the pytest
+        failure report and the JUnit XML `message` attribute instead of only the
+        logger stream. Note that pytest's short summary line shows just the
+        first line of the message, which is unchanged; the gain is in the
+        traceback body and in the XML.
 
         The first line of that message is deliberately byte-for-byte what it has
         always been. CI greps and the retryable-marker substring matching in
