@@ -48,9 +48,9 @@ type workerGenerationHashes struct {
 // callers commit it only after they have reconciled the workload carrying the
 // corresponding generation.
 type unsupportedWorkerHashTransition struct {
-	next             workerGenerationHashes
+	next              workerGenerationHashes
 	isFirstGeneration bool // no prior hash annotation; child workload may not be stamped yet
-	hashChanged      bool // hash annotation exists but does not match desired
+	hashChanged       bool // hash annotation exists but does not match desired
 }
 
 func (t unsupportedWorkerHashTransition) needsCommit() bool {
@@ -73,7 +73,6 @@ func newDGDWorkerRolloutReconciler(
 		dgdResourceSyncer: newDGDResourceSyncer(kubeClient, recorder),
 	}
 }
-
 
 func (r *dgdWorkerRolloutReconciler) planUnsupportedWorkerHashTransition(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,

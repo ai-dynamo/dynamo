@@ -599,7 +599,7 @@ func TestGroveWorkloadsReconciler_SkipsHashObservationWhenHashIsCurrent(t *testi
 		Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
 				Labels: map[string]string{
-					consts.KubeLabelDynamoComponent: "prefill",
+					consts.KubeLabelDynamoComponent:  "prefill",
 					consts.KubeLabelDynamoWorkerHash: currentHash,
 				},
 			}},

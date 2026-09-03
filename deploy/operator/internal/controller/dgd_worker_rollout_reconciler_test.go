@@ -127,11 +127,11 @@ func newTestComponentWorkloadsReconciler(
 
 func TestGroveWorkerHashSuffixMigration(t *testing.T) {
 	tests := []struct {
-		name                    string
-		existing                bool
-		existingHash            string
-		hashChanged bool
-		wantSuffix              bool
+		name         string
+		existing     bool
+		existingHash string
+		hashChanged  bool
+		wantSuffix   bool
 	}{
 		{name: "new PCS renders a suffix without a worker generation change", wantSuffix: true},
 		{name: "legacy PCS with no generation change remains unsuffixed", existing: true},
