@@ -62,6 +62,127 @@ pub(crate) struct EmbeddedSelectionArgs {
     pub endpoint: dynamo_runtime::component::Endpoint,
     /// This router replica's id (ignored on receipt of its own events).
     pub router_id: u64,
+    /// Use this policy instead of resolving one from the registry (a
+    /// caller-injected `WorkerSelector`, wrapped by [`delegating_policy_factory`]).
+    pub policy_override: Option<WorkerSelectionPolicyFactory>,
+}
+
+/// Runs a caller-owned `WorkerSelector<ModelRuntimeConfig>` inside a partition
+/// policy: the partition's worker configs are projected onto
+/// `ModelRuntimeConfig` per selection. Serialized through a mutex because the
+/// selector is only required to be `Send`.
+struct DelegatingSelector<Sel> {
+    inner: std::sync::Mutex<Sel>,
+    inputs: dynamo_kv_router::scheduling::selector::WorkerInputs,
+    exclusive_affinity: bool,
+}
+
+impl<Sel> dynamo_kv_router::scheduling::selector::DelegatedWorkerSelector
+    for DelegatingSelector<Sel>
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    fn required_worker_inputs(&self) -> dynamo_kv_router::scheduling::selector::WorkerInputs {
+        self.inputs
+    }
+
+    fn uses_exclusive_affinity_target(&self) -> bool {
+        self.exclusive_affinity
+    }
+
+    fn select_worker(
+        &self,
+        workers: &HashMap<WorkerId, dynamo_kv_router::scheduling::selector::ErasedWorkerConfig>,
+        request: &dynamo_kv_router::scheduling::SchedulingRequest,
+        eligibility: dynamo_kv_router::scheduling::RoutingEligibility<'_>,
+        block_size: u32,
+    ) -> std::result::Result<
+        dynamo_kv_router::protocols::WorkerSelectionResult,
+        dynamo_kv_router::scheduling::KvSchedulerError,
+    > {
+        let projected: HashMap<WorkerId, ModelRuntimeConfig> = workers
+            .iter()
+            .map(|(id, config)| {
+                (
+                    *id,
+                    ModelRuntimeConfig {
+                        data_parallel_start_rank: config.data_parallel_start_rank,
+                        data_parallel_size: config.data_parallel_size,
+                        max_num_batched_tokens: config.max_num_batched_tokens,
+                        total_kv_blocks: config.total_kv_blocks,
+                        taints: config.taints.clone(),
+                        stable_routing_id: config.stable_routing_id.clone(),
+                        topology_domains: config.topology_domains.clone().unwrap_or_default(),
+                        kv_transfer_domain: config.kv_transfer_domain.clone(),
+                        kv_transfer_enforcement: config.kv_transfer_enforcement,
+                        kv_transfer_preferred_weight: config.kv_transfer_preferred_weight,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner.select_worker(
+            dynamo_kv_router::scheduling::selector::WorkerSelectionInput::Configured {
+                workers: &projected,
+                request,
+                eligibility,
+                block_size,
+            },
+        )
+    }
+}
+
+struct SharedDelegate(Arc<dyn dynamo_kv_router::scheduling::selector::DelegatedWorkerSelector>);
+
+impl dynamo_kv_router::scheduling::selector::DelegatedWorkerSelector for SharedDelegate {
+    fn required_worker_inputs(&self) -> dynamo_kv_router::scheduling::selector::WorkerInputs {
+        self.0.required_worker_inputs()
+    }
+    fn uses_exclusive_affinity_target(&self) -> bool {
+        self.0.uses_exclusive_affinity_target()
+    }
+    fn select_worker(
+        &self,
+        workers: &HashMap<WorkerId, dynamo_kv_router::scheduling::selector::ErasedWorkerConfig>,
+        request: &dynamo_kv_router::scheduling::SchedulingRequest,
+        eligibility: dynamo_kv_router::scheduling::RoutingEligibility<'_>,
+        block_size: u32,
+    ) -> std::result::Result<
+        dynamo_kv_router::protocols::WorkerSelectionResult,
+        dynamo_kv_router::scheduling::KvSchedulerError,
+    > {
+        self.0
+            .select_worker(workers, request, eligibility, block_size)
+    }
+}
+
+/// A policy factory that runs `selector` on every partition of the router.
+pub(crate) fn delegating_policy_factory<Sel>(
+    selector: Sel,
+    label: &'static str,
+) -> WorkerSelectionPolicyFactory
+where
+    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    let inputs = selector.required_worker_inputs();
+    let exclusive_affinity = selector.uses_exclusive_affinity_target();
+    let shared: Arc<dyn dynamo_kv_router::scheduling::selector::DelegatedWorkerSelector> =
+        Arc::new(DelegatingSelector {
+            inner: std::sync::Mutex::new(selector),
+            inputs,
+            exclusive_affinity,
+        });
+    Arc::new(move |config: &KvRouterConfig, _worker_type, _partition| {
+        WorkerSelectionPolicy::delegated(
+            config.clone(),
+            label,
+            Box::new(SharedDelegate(Arc::clone(&shared))),
+        )
+    })
 }
 
 /// One `SelectionService` partition driven directly by the router.
@@ -120,13 +241,16 @@ impl EmbeddedSelection {
         // when router configuration names one, else Dynamo's default scorer
         // and picker under the router's metric worker label.
         let label = args.metric_worker_type;
-        let policy_factory: WorkerSelectionPolicyFactory = match worker_selection_policy_registry()
-            .resolve_for_worker_type(&args.kv_router_config, worker_type)?
-        {
+        let policy_factory: WorkerSelectionPolicyFactory = match args.policy_override {
             Some(factory) => factory,
-            None => Arc::new(move |config: &KvRouterConfig, _worker_type, _partition| {
-                WorkerSelectionPolicy::default(config.clone(), label)
-            }),
+            None => match worker_selection_policy_registry()
+                .resolve_for_worker_type(&args.kv_router_config, worker_type)?
+            {
+                Some(factory) => factory,
+                None => Arc::new(move |config: &KvRouterConfig, _worker_type, _partition| {
+                    WorkerSelectionPolicy::default(config.clone(), label)
+                }),
+            },
         };
 
         // Replica sync rides the runtime event plane, as the runtime scheduler's
@@ -183,6 +307,10 @@ impl EmbeddedSelection {
             block_size: args.block_size,
             is_eagle: args.is_eagle,
             known: HashMap::new(),
+            status_metrics: super::metrics::RouterWorkerStatusMetrics::from_component(
+                args.endpoint.component(),
+            ),
+            worker_label: args.metric_worker_type,
         };
         feeder
             .run(workers_with_configs, cancellation_token.child_token())
@@ -329,6 +457,14 @@ struct CatalogFeeder {
     block_size: u32,
     is_eagle: bool,
     known: HashMap<WorkerId, ModelRuntimeConfig>,
+    /// `router_worker_registered` gauge per worker/dp_rank.
+    status_metrics: Arc<super::metrics::RouterWorkerStatusMetrics>,
+    worker_label: &'static str,
+}
+
+fn dp_ranks(config: &ModelRuntimeConfig) -> std::ops::Range<u32> {
+    let start = config.data_parallel_start_rank;
+    start..start.saturating_add(config.data_parallel_size.max(1))
 }
 
 impl CatalogFeeder {
@@ -360,7 +496,12 @@ impl CatalogFeeder {
             .filter(|worker_id| !snapshot.contains_key(worker_id))
             .collect();
         for worker_id in removed {
-            self.known.remove(&worker_id);
+            if let Some(previous) = self.known.remove(&worker_id) {
+                for dp_rank in dp_ranks(&previous) {
+                    self.status_metrics
+                        .remove_worker(worker_id, dp_rank, self.worker_label);
+                }
+            }
             if let Err(error) = self.service.delete_worker(worker_id).await {
                 tracing::debug!(worker_id, %error, "embedded selection: worker delete skipped");
             }
@@ -384,6 +525,10 @@ impl CatalogFeeder {
                             reasons = ?record.not_schedulable_reasons,
                             "embedded selection: worker is not schedulable"
                         );
+                    }
+                    for dp_rank in dp_ranks(&config) {
+                        self.status_metrics
+                            .set_registered(worker_id, dp_rank, self.worker_label);
                     }
                     self.known.insert(worker_id, config);
                 }

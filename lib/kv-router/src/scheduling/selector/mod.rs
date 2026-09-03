@@ -10,9 +10,9 @@ pub use default::DefaultWorkerSelector;
 
 use default::{DefaultWorkerPicker, DefaultWorkerScorer};
 pub use policy::{
-    ScoredWorkerCandidate, WorkerCacheInput, WorkerCandidate, WorkerFilter, WorkerInputView,
-    WorkerInputs, WorkerLoadInput, WorkerPicker, WorkerScorer, WorkerSelectionContext,
-    WorkerSelectionPolicy,
+    DelegatedWorkerSelector, ErasedWorkerConfig, ScoredWorkerCandidate, WorkerCacheInput,
+    WorkerCandidate, WorkerFilter, WorkerInputView, WorkerInputs, WorkerLoadInput, WorkerPicker,
+    WorkerScorer, WorkerSelectionContext, WorkerSelectionPolicy,
 };
 
 use default::{pick_default_worker, selection_weights};

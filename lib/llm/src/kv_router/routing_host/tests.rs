@@ -1171,10 +1171,12 @@ async fn embedded_router_with_workers(
     router_with_worker_configs_in_mode(session_affinity_ttl, workers, true).await
 }
 
+/// `_embedded_selection` is kept for call-site stability: the embedded
+/// partition is the only scheduler now.
 async fn router_with_worker_configs_in_mode(
     session_affinity_ttl: Option<Duration>,
     workers: HashMap<u64, ModelRuntimeConfig>,
-    embedded_selection: bool,
+    _embedded_selection: bool,
 ) -> (RoutingHost, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
@@ -1193,7 +1195,7 @@ async fn router_with_worker_configs_in_mode(
         skip_initial_worker_wait: true,
         use_kv_events: false,
         router_track_active_blocks: false,
-        router_embedded_selection: embedded_selection,
+        router_embedded_selection: true,
         ..Default::default()
     };
     let chooser = KvRouter::new(

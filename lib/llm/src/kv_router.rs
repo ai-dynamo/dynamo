@@ -28,8 +28,8 @@ use dynamo_kv_router::{
     },
     scheduling::{
         AdmissionAttempt, AttemptId, CacheHitEstimates, OverlapAnalysis, OverloadedWorkerProvider,
-        ScheduleMode, ScheduleRequest, TieredOverlapRefresher, WorkerAvailabilityProvider,
-        effective_prefill_tokens, overlap::cache_hit_estimates_from_tiered_matches,
+        ScheduleMode, ScheduleRequest, WorkerAvailabilityProvider, effective_prefill_tokens,
+        overlap::cache_hit_estimates_from_tiered_matches,
     },
     selector::WorkerInputs,
 };
@@ -85,7 +85,7 @@ pub use routing_load::{
 use crate::{
     discovery::{KvSourceMembershipWatch, RuntimeConfigWatch},
     kv_router::{
-        scheduler::{DefaultWorkerSelector, KvScheduler, PotentialLoad},
+        scheduler::{DefaultWorkerSelector, PotentialLoad},
         sequence::{SequenceError, SequenceRequest},
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -536,7 +536,10 @@ where
     Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
 {
     indexer: Indexer,
-    scheduler: RouterScheduler<Sel>,
+    scheduler: embedded::EmbeddedSelection,
+    /// `Sel` only names the selector type the caller injected; the partition
+    /// owns it. `fn() -> Sel` keeps the router `Send + Sync` regardless of `Sel`.
+    _selector: std::marker::PhantomData<fn() -> Sel>,
     required_worker_inputs: dynamo_kv_router::selector::WorkerInputs,
     workers_with_configs: RuntimeConfigWatch,
     block_size: u32,
@@ -560,39 +563,6 @@ where
     lora_filter: Option<Arc<crate::lora::LoraFilter>>,
     endpoint_registration: Option<dynamo_runtime::discovery::EndpointRegistrationLease>,
     teardown_task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
-}
-
-/// The scheduler behind a `KvRouter`: the runtime-bound `KvScheduler`, or one
-/// partition of an embedded selection service
-/// (`KvRouterConfig::router_embedded_selection`). Both expose the same
-/// surface; every router method dispatches statically through this enum.
-enum RouterScheduler<Sel>
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig>,
-{
-    Runtime(KvScheduler<Sel, TieredOverlapRefresher<Indexer>>),
-    Embedded(embedded::EmbeddedSelection),
-}
-
-macro_rules! dispatch_scheduler {
-    ($self:expr, $scheduler:ident => $body:expr) => {
-        match &$self.scheduler {
-            RouterScheduler::Runtime($scheduler) => $body,
-            RouterScheduler::Embedded($scheduler) => $body,
-        }
-    };
-}
-
-impl<Sel> RouterScheduler<Sel>
-where
-    Sel: dynamo_kv_router::selector::WorkerSelector<ModelRuntimeConfig> + Send + 'static,
-{
-    fn booking_cleanup(&self) -> scheduler::SchedulerBookingCleanup {
-        match self {
-            Self::Runtime(scheduler) => scheduler.booking_cleanup(),
-            Self::Embedded(scheduler) => scheduler.booking_cleanup(),
-        }
-    }
 }
 
 fn resolve_tracking_model_name(
@@ -793,13 +763,6 @@ where
             );
         }
 
-        let overlap_scores_refresh = indexer.supports_overlap_refresh().then(|| {
-            Arc::new(TieredOverlapRefresher::new(
-                indexer.clone(),
-                kv_router_config.clone(),
-                block_size,
-            ))
-        });
         let client_for_overload = client.clone();
         let overloaded_worker_provider: OverloadedWorkerProvider =
             Arc::new(move || client_for_overload.overloaded_instance_ids());
@@ -808,11 +771,16 @@ where
         let available_worker_provider: WorkerAvailabilityProvider =
             Arc::new(move || client_for_availability.available_instance_ids());
 
-        // The embedded partition builds its own selection policy: the default
-        // scorer/picker, or the registry-resolved policy the router config names
-        // (the same resolution `WorkerSelectionPolicy` callers perform). Only an
-        // arbitrary caller-injected `WorkerSelector` type still needs the runtime
-        // scheduler.
+        if !kv_router_config.router_embedded_selection {
+            tracing::warn!(
+                "router_embedded_selection=false is ignored: the runtime-bound KV router scheduler \
+                 was removed and scheduling always runs on the embedded selection partition"
+            );
+        }
+        // Scheduling and active-sequence accounting run on a selection-service
+        // partition. A caller-injected `WorkerSelector` type (anything other than
+        // the default selector or a registry `WorkerSelectionPolicy`) runs inside
+        // the partition through a delegating policy.
         let sel = std::any::TypeId::of::<Sel>();
         let custom_selector = sel
             != std::any::TypeId::of::<dynamo_kv_router::selector::DefaultWorkerSelector>()
@@ -820,79 +788,37 @@ where
                 != std::any::TypeId::of::<
                     dynamo_kv_router::scheduling::selector::WorkerSelectionPolicy,
                 >();
-        if kv_router_config.router_embedded_selection && custom_selector {
-            tracing::warn!(
-                selector = std::any::type_name::<Sel>(),
-                "custom WorkerSelector is not supported on the embedded selection partition; using the runtime scheduler"
-            );
-        }
-        let scheduler = if kv_router_config.router_embedded_selection && !custom_selector {
-            // The router keeps its indexer and transport; scheduling and
-            // active-sequence accounting run on a selection-service partition.
-            let overlap_refresh: Option<Arc<dyn dynamo_kv_router::indexer::TieredMatchProvider>> =
-                indexer
-                    .supports_overlap_refresh()
-                    .then(|| Arc::new(indexer.clone()) as Arc<_>);
-            drop(overlap_scores_refresh);
-            RouterScheduler::Embedded(
-                embedded::EmbeddedSelection::start(
-                    embedded::EmbeddedSelectionArgs {
-                        kv_router_config: kv_router_config.clone(),
-                        worker_role,
-                        metric_worker_type,
-                        model_name: model_name.clone(),
-                        block_size,
-                        is_eagle,
-                        prefill_load_estimator: prefill_load_estimator.clone(),
-                        overloaded_worker_provider,
-                        available_worker_provider,
-                        overlap_refresh,
-                        scheduler_load,
-                        endpoint: endpoint.clone(),
-                        router_id: endpoint.drt().discovery().instance_id(),
-                    },
-                    workers_with_configs.clone(),
-                    cancellation_token.child_token(),
-                )
-                .await?,
-            )
-        } else {
-            tracing::warn!(
-                "the runtime-bound KV router scheduler (--no-router-embedded-selection) is \
-                 deprecated and kept for one release as a rollback; the embedded selection \
-                 partition is the default"
-            );
-            RouterScheduler::Runtime(
-                KvScheduler::start_with_shared_request_leases(
-                    endpoint.clone(),
-                    block_size,
-                    workers_with_configs.clone(),
-                    selector,
-                    &kv_router_config,
-                    prefill_load_estimator.clone(),
-                    overlap_scores_refresh,
-                    Some(overloaded_worker_provider),
-                    Some(available_worker_provider),
-                    model_name.as_deref(),
-                    metric_worker_type,
-                    scheduler_load,
-                    cancellation_token.child_token(),
-                )
-                .await?,
-            )
-        };
+        let policy_override = custom_selector
+            .then(|| embedded::delegating_policy_factory(selector, metric_worker_type));
+        let overlap_refresh: Option<Arc<dyn dynamo_kv_router::indexer::TieredMatchProvider>> =
+            indexer
+                .supports_overlap_refresh()
+                .then(|| Arc::new(indexer.clone()) as Arc<_>);
+        let scheduler = embedded::EmbeddedSelection::start(
+            embedded::EmbeddedSelectionArgs {
+                kv_router_config: kv_router_config.clone(),
+                worker_role,
+                metric_worker_type,
+                model_name: model_name.clone(),
+                block_size,
+                is_eagle,
+                prefill_load_estimator: prefill_load_estimator.clone(),
+                overloaded_worker_provider,
+                available_worker_provider,
+                overlap_refresh,
+                scheduler_load,
+                endpoint: endpoint.clone(),
+                router_id: endpoint.drt().discovery().instance_id(),
+                policy_override,
+            },
+            workers_with_configs.clone(),
+            cancellation_token.child_token(),
+        )
+        .await?;
         let request_leases = request_lease::RequestLeaseManager::new(
             scheduler.booking_cleanup(),
             cancellation_token.child_token(),
         );
-        if let RouterScheduler::Runtime(runtime_scheduler) = &scheduler
-            && !runtime_scheduler
-                .set_replica_request_lease_observer(Arc::new(request_leases.clone()))
-        {
-            return Err(anyhow::anyhow!(
-                "request lease observer is already installed for this router"
-            ));
-        }
         // Start KV event subscription if needed — skip when using a remote indexer.
         let kv_event_subscription = if cache_required
             && kv_event_source_requirement.should_subscribe(&kv_router_config)
@@ -950,6 +876,7 @@ where
         Ok(Self {
             indexer,
             scheduler,
+            _selector: std::marker::PhantomData,
             required_worker_inputs,
             workers_with_configs,
             block_size,
@@ -1695,8 +1622,7 @@ where
         let seq_hash_elapsed = start.elapsed();
 
         let is_admitted_routing = matches!(admission, FindBestMatchAdmission::WithAdmission { .. });
-        let supports_overlap_refresh =
-            dispatch_scheduler!(self, scheduler => scheduler.supports_overlap_refresh());
+        let supports_overlap_refresh = self.scheduler.supports_overlap_refresh();
         let retain_block_hashes = supports_overlap_refresh || return_routing_hashes;
         let has_transfer_capable_workers = self.has_transfer_capable_workers();
         let should_prepare_transfer_hint = is_admitted_routing && has_transfer_capable_workers;
@@ -1788,10 +1714,11 @@ where
         };
         let (response, attempt, selected_worker_load) = match admission {
             FindBestMatchAdmission::WithAdmission { .. } => {
-                match dispatch_scheduler!(self, scheduler => scheduler
-                .schedule_request_admitted(schedule_request)
-                .instrument(tracing::info_span!("kv_router.schedule"))
-                .await)
+                match self
+                    .scheduler
+                    .schedule_request_admitted(schedule_request)
+                    .instrument(tracing::info_span!("kv_router.schedule"))
+                    .await
                 {
                     Ok(admitted) => (admitted.response, admitted.attempt, None),
                     Err(KvSchedulerError::QueueRejected(rejection)) => {
@@ -1806,10 +1733,11 @@ where
                 }
             }
             FindBestMatchAdmission::WithoutAdmission => {
-                match dispatch_scheduler!(self, scheduler => scheduler
-                .select_without_admission(schedule_request)
-                .instrument(tracing::info_span!("kv_router.select_without_admission"))
-                .await)
+                match self
+                    .scheduler
+                    .select_without_admission(schedule_request)
+                    .instrument(tracing::info_span!("kv_router.select_without_admission"))
+                    .await
                 {
                     Ok(advisory) => (
                         advisory.response,
@@ -1953,7 +1881,7 @@ where
 
     /// Register externally-provided workers in the slot tracker.
     pub fn register_workers(&self, worker_ids: &HashSet<WorkerId>) {
-        dispatch_scheduler!(self, scheduler => scheduler.register_workers(worker_ids));
+        self.scheduler.register_workers(worker_ids);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2002,9 +1930,7 @@ where
             worker,
             lora_name,
         };
-        let admission = dispatch_scheduler!(self, scheduler => scheduler
-            .add_request_admitted(sequence_request)
-            .await);
+        let admission = self.scheduler.add_request_admitted(sequence_request).await;
         let attempt_id = match admission {
             Ok(attempt_id) => attempt_id,
             Err(error) => {
@@ -2025,7 +1951,7 @@ where
     }
 
     pub async fn mark_prefill_completed(&self, request_id: &str) -> Result<(), SequenceError> {
-        dispatch_scheduler!(self, scheduler => scheduler.mark_prefill_completed(request_id).await)?;
+        self.scheduler.mark_prefill_completed(request_id).await?;
         self.request_leases.touch_request(request_id);
         Ok(())
     }
@@ -2034,7 +1960,7 @@ where
         if self.request_leases.finish_request(request_id).await {
             return Ok(());
         }
-        dispatch_scheduler!(self, scheduler => scheduler.free(request_id).await)
+        self.scheduler.free(request_id).await
     }
 
     /// Release a booking only if it still belongs to `worker`.
@@ -2046,7 +1972,7 @@ where
         request_id: &str,
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
-        dispatch_scheduler!(self, scheduler => scheduler.free_if_worker(request_id, worker).await)
+        self.scheduler.free_if_worker(request_id, worker).await
     }
 
     #[doc(hidden)]
@@ -2062,19 +1988,19 @@ where
         &self,
         booking: &scheduler::SchedulerBookingDescriptor,
     ) -> Result<(), KvSchedulerError> {
-        dispatch_scheduler!(self, scheduler => scheduler
+        self.scheduler
             .mark_prefill_completed_if_booking(booking)
-            .await)
+            .await
     }
 
     /// Number of requests currently parked in the scheduler queue.
     pub fn pending_count(&self) -> usize {
-        dispatch_scheduler!(self, scheduler => scheduler.pending_count())
+        self.scheduler.pending_count()
     }
 
     /// Sum of ISL tokens for requests currently parked in the scheduler queue.
     pub fn pending_isl_tokens(&self) -> usize {
-        dispatch_scheduler!(self, scheduler => scheduler.pending_isl_tokens())
+        self.scheduler.pending_isl_tokens()
     }
 
     fn prefill_load_hint_for(
@@ -2117,7 +2043,7 @@ where
     /// Get the worker type for this router ("prefill" or "decode").
     /// Used for Prometheus metric labeling.
     pub fn worker_type(&self) -> &'static str {
-        dispatch_scheduler!(self, scheduler => scheduler.worker_type())
+        self.scheduler.worker_type()
     }
 
     /// Return the worker's unique global DP rank when it owns exactly one rank.
@@ -2132,7 +2058,7 @@ where
         request_id: &str,
         decay_fraction: Option<f64>,
     ) -> Result<(), SequenceError> {
-        dispatch_scheduler!(self, scheduler => scheduler.add_output_block(request_id, decay_fraction))
+        self.scheduler.add_output_block(request_id, decay_fraction)
     }
 
     pub(crate) async fn enqueue_output_block_if_booking(
@@ -2140,9 +2066,9 @@ where
         booking: &scheduler::SchedulerBookingDescriptor,
         decay_fraction: Option<f64>,
     ) -> Result<(), KvSchedulerError> {
-        dispatch_scheduler!(self, scheduler => scheduler
+        self.scheduler
             .enqueue_output_block_if_booking(booking, decay_fraction)
-            .await)
+            .await
     }
 
     pub fn block_size(&self) -> u32 {
@@ -2256,14 +2182,12 @@ where
 
         let effective_cached_tokens: HashMap<WorkerWithDpRank, usize> =
             cache_hit_estimates.cached_tokens.into_iter().collect();
-        Ok(
-            dispatch_scheduler!(self, scheduler => scheduler.get_potential_loads(
-                maybe_seq_hashes,
-                isl_tokens,
-                effective_cached_tokens,
-                track_prefill_tokens,
-            )),
-        )
+        Ok(self.scheduler.get_potential_loads(
+            maybe_seq_hashes,
+            isl_tokens,
+            effective_cached_tokens,
+            track_prefill_tokens,
+        ))
     }
 
     /// Return per-worker KV overlap by storage tier.

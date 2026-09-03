@@ -811,10 +811,9 @@ pub struct KvRouterConfig {
     #[serde(default = "default_track_prefill_tokens")]
     pub router_track_prefill_tokens: bool,
 
-    /// Run the frontend router's scheduling and active-sequence accounting on
-    /// an embedded selection-service partition (default: true). `false`
-    /// selects the deprecated runtime-bound scheduler, kept for one release as
-    /// a rollback. Frontend-local; workers ignore it.
+    /// Deprecated and ignored: the frontend router always schedules on an
+    /// embedded selection-service partition. Kept so existing configurations
+    /// and wire records still parse; `false` logs a warning.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub router_embedded_selection: bool,
 

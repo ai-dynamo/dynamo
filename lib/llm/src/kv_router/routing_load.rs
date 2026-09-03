@@ -197,25 +197,19 @@ impl SchedulerLoadShared {
 pub struct SchedulerLoadSender {
     wake_tx: Option<mpsc::Sender<()>>,
     shared: Arc<SchedulerLoadShared>,
-    source: RouterLoadSource,
     cancellation_token: CancellationToken,
 }
 
 impl SchedulerLoadSender {
     pub(crate) fn disabled(
-        source: RouterLoadSource,
+        _source: RouterLoadSource,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             wake_tx: None,
             shared: Arc::new(SchedulerLoadShared::new(SCHEDULER_LOAD_CHANNEL_CAPACITY)),
-            source,
             cancellation_token,
         }
-    }
-
-    pub(crate) const fn metric_label(&self) -> &'static str {
-        self.source.metric_label()
     }
 
     pub fn publish(&self, snapshot: SchedulerLoadSnapshot) {
@@ -291,7 +285,7 @@ pub(crate) fn scheduler_load_channel(
 }
 
 fn scheduler_load_channel_with_capacity(
-    source: RouterLoadSource,
+    _source: RouterLoadSource,
     cancellation_token: CancellationToken,
     capacity: usize,
 ) -> (SchedulerLoadSender, SchedulerLoadReceiver) {
@@ -301,7 +295,6 @@ fn scheduler_load_channel_with_capacity(
         SchedulerLoadSender {
             wake_tx: Some(wake_tx),
             shared: shared.clone(),
-            source,
             cancellation_token,
         },
         SchedulerLoadReceiver { wake_rx, shared },

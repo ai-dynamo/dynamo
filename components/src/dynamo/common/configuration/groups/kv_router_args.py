@@ -432,10 +432,8 @@ class KvRouterArgGroup(ArgGroup):
             default=True,
             dest="router_embedded_selection",
             help=(
-                "KV Router: Run scheduling and active-sequence accounting on an "
-                "embedded selection-service partition (default). "
-                "--no-router-embedded-selection selects the deprecated runtime-bound "
-                "scheduler, kept for one release as a rollback."
+                "Deprecated and ignored: the KV Router always schedules on an embedded "
+                "selection-service partition. --no-router-embedded-selection only logs a warning."
             ),
         )
         add_negatable_bool_argument(

@@ -17,10 +17,9 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use dynamo_kv_router::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
-use dynamo_runtime::component::{Component, Endpoint};
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 
-use crate::kv_router::scheduler::KvScheduler;
 use crate::kv_router::sequence::{RuntimeSequenceSubscriber, SequenceSubscriber};
 use crate::lora::config::PredictorType;
 use crate::lora::predictor::{EmaPredictor, LoadPredictor};
@@ -454,31 +453,6 @@ impl LoadEstimator {
             .clear();
     }
 
-    pub fn start_polling(
-        self: Arc<Self>,
-        scheduler: Arc<KvScheduler>,
-        component: Component,
-    ) -> tokio::task::JoinHandle<()> {
-        let cancel_token = component.drt().child_token();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(self.config.read().poll_interval);
-            tracing::info!("Started LORA load polling");
-
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        tracing::debug!("LORA load polling task cancelled");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        let lora_counts = scheduler.get_active_lora_counts();
-                        self.update_from_counts(lora_counts);
-                    }
-                }
-            }
-        })
-    }
-
     pub fn start_event_subscription(
         self: Arc<Self>,
         endpoint: Endpoint,
@@ -632,6 +606,7 @@ impl LoadEstimator {
     /// — net delta 0) is invisible, and sub-interval oscillation is lost.
     /// Event-based mode (`handle_event` / `increment_load`) gives accurate
     /// arrival rates; prefer it when arrival precision matters.
+    #[cfg(test)]
     fn update_from_counts(&self, lora_counts: HashMap<String, usize>) {
         let now = Instant::now();
         let cfg = self.config.read();
