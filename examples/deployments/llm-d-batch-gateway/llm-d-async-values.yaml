@@ -21,6 +21,8 @@ ap:
   concurrency: 8
   drainTimeout: 30s
   igwBaseURL: "http://qwen3-0-6b-batch-frontend:8000"
+  prometheusURL: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+  prometheusCacheTTL: 1s
   messageQueueImpl: redis-sortedset
   redis:
     enabled: true
@@ -31,8 +33,11 @@ ap:
     resultQueueName: "llm-d-async:results:dynamo-batch"
     pollIntervalMs: 100
     batchSize: 8
-    gateType: constant
-    gateParams: {}
+    gateType: prometheus-query
+    gateParams:
+      pool: dynamo-batch
+      query: 'min(dynamo_frontend_model_ready{model="Qwen/Qwen3-0.6B",namespace="dynamo-batch-example"})'
+      fallback: "0"
   metrics:
     enabled: true
     port: 9090
