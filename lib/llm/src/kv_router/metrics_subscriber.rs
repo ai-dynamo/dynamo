@@ -3,8 +3,13 @@
 
 //! Transport-selecting subscription for worker KV load metrics.
 
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
+
 use anyhow::Result;
-use dynamo_kv_router::protocols::ActiveLoad;
+use dynamo_kv_router::protocols::{ActiveLoad, WorkerWithDpRank};
 use dynamo_runtime::{
     DistributedRuntime,
     component::{Component, Endpoint},
@@ -13,6 +18,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
     transports::event_plane::{Codec, EventSubscriber, TypedEventSubscriber, uses_direct_zmq},
 };
+use parking_lot::Mutex;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -23,6 +29,7 @@ use crate::{
 };
 
 const DEFAULT_OUTPUT_CAPACITY: usize = 100_000;
+const CAPACITY_DROP_LEVEL: tracing::Level = tracing::Level::TRACE;
 
 fn output_capacity() -> usize {
     std::env::var(DYN_ZMQ_EVENT_SUBSCRIBER_CHANNEL_CAPACITY)
@@ -42,9 +49,132 @@ enum KvMetricsSubscriberInner {
 }
 
 struct DirectKvMetricsSubscriber {
-    receiver: mpsc::Receiver<ActiveLoad>,
+    receiver: ActiveLoadReceiver,
     cancellation_token: CancellationToken,
     _supervisor: JoinHandle<()>,
+}
+
+struct PendingActiveLoads {
+    capacity: usize,
+    order: VecDeque<WorkerWithDpRank>,
+    values: HashMap<WorkerWithDpRank, ActiveLoad>,
+}
+
+impl PendingActiveLoads {
+    fn new(capacity: usize) -> Self {
+        assert!(
+            capacity > 0,
+            "active-load mailbox capacity must be positive"
+        );
+        Self {
+            capacity,
+            order: VecDeque::new(),
+            values: HashMap::new(),
+        }
+    }
+
+    fn push(&mut self, load: ActiveLoad) -> PushOutcome {
+        let worker = WorkerWithDpRank::new(load.worker_id, load.dp_rank);
+        if let Some(pending) = self.values.get_mut(&worker) {
+            if load.active_decode_blocks.is_some() {
+                pending.active_decode_blocks = load.active_decode_blocks;
+            }
+            if load.active_prefill_tokens.is_some() {
+                pending.active_prefill_tokens = load.active_prefill_tokens;
+            }
+            if load.kv_used_blocks.is_some() {
+                pending.kv_used_blocks = load.kv_used_blocks;
+            }
+            return PushOutcome::Accepted { should_wake: false };
+        }
+        if self.values.len() >= self.capacity {
+            return PushOutcome::Full;
+        }
+
+        let should_wake = self.values.is_empty();
+        self.order.push_back(worker);
+        self.values.insert(worker, load);
+        PushOutcome::Accepted { should_wake }
+    }
+
+    fn pop(&mut self) -> Option<ActiveLoad> {
+        let worker = self.order.pop_front()?;
+        Some(
+            self.values
+                .remove(&worker)
+                .expect("active-load order and values must stay synchronized"),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PushOutcome {
+    Accepted { should_wake: bool },
+    Full,
+}
+
+#[derive(Clone)]
+struct ActiveLoadSender {
+    wake_tx: mpsc::Sender<()>,
+    pending: Arc<Mutex<PendingActiveLoads>>,
+}
+
+impl ActiveLoadSender {
+    fn send(&self, load: ActiveLoad) -> Result<()> {
+        if self.wake_tx.is_closed() {
+            anyhow::bail!("direct-ZMQ KV metrics consumer closed");
+        }
+
+        let worker_id = load.worker_id;
+        let dp_rank = load.dp_rank;
+        let outcome = self.pending.lock().push(load);
+        match outcome {
+            PushOutcome::Accepted { should_wake: false } => Ok(()),
+            PushOutcome::Full => {
+                tracing::event!(
+                    CAPACITY_DROP_LEVEL,
+                    worker_id,
+                    dp_rank,
+                    "Direct-ZMQ KV metrics consumer is full; dropping newest update"
+                );
+                Ok(())
+            }
+            PushOutcome::Accepted { should_wake: true } => match self.wake_tx.try_send(()) {
+                Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(()),
+                Err(mpsc::error::TrySendError::Closed(())) => {
+                    anyhow::bail!("direct-ZMQ KV metrics consumer closed")
+                }
+            },
+        }
+    }
+}
+
+struct ActiveLoadReceiver {
+    wake_rx: mpsc::Receiver<()>,
+    pending: Arc<Mutex<PendingActiveLoads>>,
+}
+
+impl ActiveLoadReceiver {
+    async fn recv(&mut self) -> Option<ActiveLoad> {
+        loop {
+            if let Some(load) = self.pending.lock().pop() {
+                return Some(load);
+            }
+            self.wake_rx.recv().await?;
+        }
+    }
+}
+
+fn active_load_mailbox(capacity: usize) -> (ActiveLoadSender, ActiveLoadReceiver) {
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    let pending = Arc::new(Mutex::new(PendingActiveLoads::new(capacity)));
+    (
+        ActiveLoadSender {
+            wake_tx,
+            pending: pending.clone(),
+        },
+        ActiveLoadReceiver { wake_rx, pending },
+    )
 }
 
 impl Drop for DirectKvMetricsSubscriber {
@@ -110,26 +240,17 @@ impl KvMetricsSubscriber {
 impl DirectKvMetricsSubscriber {
     async fn start(component: &Component, endpoint_id: EndpointId) -> Result<Self> {
         let cancellation_token = component.drt().primary_token().child_token();
-        let (sender, receiver) = mpsc::channel(output_capacity());
+        let (sender, receiver) = active_load_mailbox(output_capacity());
         let handler_cancel = cancellation_token.clone();
         let codec = Codec::default();
         let handler =
             move |envelope: dynamo_runtime::transports::event_plane::ValidatedEnvelope| {
                 let load = codec.decode_payload::<ActiveLoad>(&envelope.payload)?;
-                match sender.try_send(load) {
-                    Ok(()) => Ok(()),
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!(
-                            publisher_id = envelope.publisher_id,
-                            "Direct-ZMQ KV metrics consumer is full; dropping newest update"
-                        );
-                        Ok(())
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        handler_cancel.cancel();
-                        anyhow::bail!("direct-ZMQ KV metrics consumer closed")
-                    }
+                if let Err(error) = sender.send(load) {
+                    handler_cancel.cancel();
+                    return Err(error);
                 }
+                Ok(())
             };
         let supervisor = start_direct_zmq_fan_in_for_endpoint_id(
             component.clone(),
@@ -163,6 +284,87 @@ mod tests {
 
     use super::*;
     use crate::direct_zmq_sub_pool::ENDPOINTS_PER_SUB_ENV;
+
+    fn load(
+        worker_id: u64,
+        dp_rank: u32,
+        active_decode_blocks: Option<u64>,
+        active_prefill_tokens: Option<u64>,
+        kv_used_blocks: Option<u64>,
+    ) -> ActiveLoad {
+        ActiveLoad {
+            worker_id,
+            dp_rank,
+            active_decode_blocks,
+            active_prefill_tokens,
+            kv_used_blocks,
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_metrics_mailbox_merges_partial_updates_in_key_order() {
+        let (sender, mut receiver) = active_load_mailbox(4);
+
+        sender.send(load(1, 0, Some(7), None, None)).unwrap();
+        sender.send(load(2, 0, None, None, Some(9))).unwrap();
+        sender.send(load(1, 0, None, Some(11), None)).unwrap();
+        sender.send(load(1, 0, Some(0), None, Some(5))).unwrap();
+        sender.send(load(1, 1, None, None, Some(13))).unwrap();
+
+        assert_eq!(
+            receiver.recv().await,
+            Some(load(1, 0, Some(0), Some(11), Some(5)))
+        );
+        sender.send(load(1, 0, None, None, Some(6))).unwrap();
+        assert_eq!(receiver.recv().await, Some(load(2, 0, None, None, Some(9))));
+        assert_eq!(
+            receiver.recv().await,
+            Some(load(1, 1, None, None, Some(13)))
+        );
+        assert_eq!(receiver.recv().await, Some(load(1, 0, None, None, Some(6))));
+    }
+
+    #[tokio::test]
+    async fn direct_metrics_mailbox_bounds_distinct_keys_and_drains_on_close() {
+        let (sender, mut receiver) = active_load_mailbox(1);
+
+        sender.send(load(1, 0, Some(7), None, None)).unwrap();
+        sender.send(load(1, 0, None, None, Some(8))).unwrap();
+        sender.send(load(2, 0, None, None, Some(9))).unwrap();
+
+        assert_eq!(
+            receiver.recv().await,
+            Some(load(1, 0, Some(7), None, Some(8)))
+        );
+        sender.send(load(2, 0, None, None, Some(10))).unwrap();
+        drop(sender);
+        assert_eq!(
+            receiver.recv().await,
+            Some(load(2, 0, None, None, Some(10)))
+        );
+        assert_eq!(receiver.recv().await, None);
+        assert_eq!(CAPACITY_DROP_LEVEL, tracing::Level::TRACE);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn direct_metrics_mailbox_wakes_a_waiter_and_reports_receiver_close() {
+        let (sender, mut receiver) = active_load_mailbox(1);
+        let waiter = tokio::spawn(async move {
+            let load = receiver.recv().await;
+            (load, receiver)
+        });
+        tokio::task::yield_now().await;
+
+        sender.send(load(1, 0, None, None, Some(3))).unwrap();
+        let (received, receiver) = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiting receiver must wake")
+            .unwrap();
+        assert_eq!(received, Some(load(1, 0, None, None, Some(3))));
+
+        drop(receiver);
+        assert!(sender.send(load(1, 0, None, None, Some(4))).is_err());
+    }
 
     #[tokio::test]
     #[serial_test::serial]
