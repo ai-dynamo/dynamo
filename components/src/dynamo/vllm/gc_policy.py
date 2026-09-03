@@ -140,9 +140,18 @@ def start_gc_policy() -> bool:
 
 
 def stop_gc_policy() -> None:
-    """Restore normal GC once benchmarking ends: stop the freeze loop,
-    re-enable automatic gen2 collections, and reclaim everything frozen so
-    far. Idempotent; no-op if the policy never started."""
+    """Restore the serving GC state once benchmarking ends.
+
+    Stops the freeze loop, re-enables automatic gen2 collections, reclaims
+    the benchmark-era garbage (including cycles the periodic ticks froze),
+    and then re-establishes vLLM's own serving freeze. vLLM deliberately
+    freezes the EngineCore startup heap and each GPU worker's post-warmup
+    heap (``vllm.utils.gc_utils.freeze_gc_heap``: collect every generation,
+    then ``gc.freeze()``) so gen2 never scans model weights, KV caches, or
+    CUDA graphs during inference; a bare ``gc.unfreeze()`` here would strip
+    that baseline and leave the process paying larger gen2 pauses than one
+    that never benchmarked. Idempotent; no-op if the policy never started.
+    """
     global _started, _stop_event, _freeze_thread, _saved_gen2_threshold
     with _lock:
         if not _started:
@@ -161,9 +170,24 @@ def stop_gc_policy() -> None:
         _saved_gen2_threshold = None
     if thread is not None:
         thread.join(timeout=5.0)
-    gc.unfreeze()
-    gc.collect()
-    logger.info("FPM GC policy stopped: auto-gen2 restored (pid=%d)", os.getpid())
+    # Serialized like gc_maintain(): a late tick must not interleave with
+    # the unfreeze/collect/freeze sequence.
+    with _lock:
+        gc.unfreeze()
+        gc.collect()
+        # Mirror freeze_gc_heap(): a full collection has already promoted
+        # every survivor to the oldest generation, so freezing now pins the
+        # static serving heap vLLM intended to exclude from collection plus
+        # whatever benchmark-era objects are still alive at this point (a
+        # small superset of the baseline; anything in it that dies later is
+        # never reclaimed, which matches the behaviour of vLLM's own freeze
+        # for long-lived startup objects).
+        gc.freeze()
+    logger.info(
+        "FPM GC policy stopped: auto-gen2 restored, serving freeze "
+        "re-established (pid=%d)",
+        os.getpid(),
+    )
 
 
 class FpmGcWorkerExtension:

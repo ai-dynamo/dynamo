@@ -3,6 +3,8 @@
 
 import gc
 import importlib
+import json
+import os
 import weakref
 
 import pytest
@@ -165,24 +167,6 @@ def test_worker_lifecycle_normal_completion_restores_gc(monkeypatch):
     _assert_gc_equivalent_to_never_benchmarked(gc_policy, thresholds)
 
 
-def test_worker_lifecycle_after_abort_restores_gc(monkeypatch):
-    """Abort path: ``_bench_abort`` still writes rank artifacts, so the
-    launcher's benchmark wait completes and issues the same
-    ``fpm_gc_stop``; the worker-side contract is identical to normal
-    completion even when the stop races a mid-flight maintenance call."""
-    monkeypatch.setenv("DYN_FPM_GC_FREEZE_INTERVAL_S", "3600")
-    thresholds = gc.get_threshold()
-    gc_policy = _fresh_module(monkeypatch, "freeze")
-    ext = gc_policy.FpmGcWorkerExtension()
-    try:
-        assert ext.fpm_gc_start() is True
-        gc_policy.gc_maintain()  # abort may interrupt an untimed window
-        ext.fpm_gc_stop()
-    finally:
-        gc_policy.stop_gc_policy()
-    _assert_gc_equivalent_to_never_benchmarked(gc_policy, thresholds)
-
-
 def test_invalid_interval_falls_back(monkeypatch):
     monkeypatch.setenv("DYN_FPM_GC_FREEZE_INTERVAL_S", "not-a-number")
     gc_policy = _fresh_module(monkeypatch, None)
@@ -194,3 +178,134 @@ def test_non_finite_interval_falls_back(monkeypatch):
     for raw in ("inf", "-inf", "nan"):
         monkeypatch.setenv("DYN_FPM_GC_FREEZE_INTERVAL_S", raw)
         assert gc_policy._interval_seconds() == 60.0
+
+
+def test_stop_reestablishes_vllm_serving_freeze(monkeypatch):
+    """vLLM freezes the serving heap after startup/warmup (freeze_gc_heap)
+    so gen2 never scans model, KV-cache, or CUDA-graph objects. Stopping
+    the policy must reclaim benchmark garbage and then put that baseline
+    freeze back, not leave the whole heap unfrozen."""
+    monkeypatch.setenv("DYN_FPM_GC_FREEZE_INTERVAL_S", "3600")
+    thresholds = gc.get_threshold()
+    gc_policy = _fresh_module(monkeypatch, "freeze")
+    ext = gc_policy.FpmGcWorkerExtension()
+    try:
+        # Worker ordering: the policy auto-starts on extension import, and
+        # vLLM's post-warmup freeze lands afterwards.
+        assert ext.fpm_gc_start() is True
+
+        # A GC-tracked stand-in for a static serving object. Plain object()
+        # instances and atomic-only dicts are untracked in CPython and would
+        # make the visibility assertion below vacuous.
+        class Static:
+            pass
+
+        sentinel = Static()
+        assert gc.is_tracked(sentinel)
+        gc.collect()
+        gc.freeze()
+        assert gc.get_freeze_count() > 0
+
+        class Node:
+            pass
+
+        node = Node()
+        node.self_ref = node
+        ref = weakref.ref(node)
+        del node
+        with gc_policy._lock:
+            gc.freeze()  # a tick pins the benchmark-era cycle
+
+        ext.fpm_gc_stop()
+
+        assert ref() is None, "benchmark garbage must be reclaimed"
+        # gc.get_objects() walks generations 0-2 only, never the permanent
+        # generation: a live baseline object that is absent from it has been
+        # re-frozen. The pre-fix stop (unfreeze without re-freeze) leaves the
+        # sentinel visible here.
+        assert not any(
+            obj is sentinel for obj in gc.get_objects()
+        ), "serving freeze was not re-established after stop"
+    finally:
+        gc_policy.stop_gc_policy()
+        gc.unfreeze()  # do not leave the pytest heap frozen for later tests
+    _assert_gc_equivalent_to_never_benchmarked(gc_policy, thresholds)
+
+
+_LIFECYCLE_CHILD = r"""
+import gc, json, os, sys, weakref
+os.environ["DYN_FPM_GC_POLICY"] = "freeze"
+os.environ["DYN_FPM_GC_FREEZE_INTERVAL_S"] = "3600"
+baseline_thresholds = gc.get_threshold()
+
+# Worker semantics: importing the extension module auto-starts the policy.
+import dynamo.vllm.gc_policy as gc_policy
+ext = gc_policy.FpmGcWorkerExtension()
+thread = gc_policy._freeze_thread
+assert thread is not None and thread.is_alive()
+
+# vLLM's post-warmup serving freeze happens after the policy is already on.
+class Static:
+    pass
+
+sentinel = Static()  # GC-tracked stand-in for model/KV/CUDA-graph objects
+assert gc.is_tracked(sentinel)
+gc.collect()
+gc.freeze()
+assert gc.get_freeze_count() > 0
+
+class Node:
+    pass
+
+node = Node()
+node.self_ref = node
+bench_cycle = weakref.ref(node)
+del node
+with gc_policy._lock:
+    gc.freeze()  # periodic tick pins the benchmark-era cycle
+
+ext.fpm_gc_stop()  # what the launcher's collective_rpc("fpm_gc_stop") runs
+
+probe = Node()
+probe.self_ref = probe
+new_cycle = weakref.ref(probe)
+del probe
+gc.collect()
+
+print(json.dumps({
+    "thresholds_restored": gc.get_threshold() == baseline_thresholds,
+    "enabled": gc.isenabled(),
+    "thread_dead": not thread.is_alive(),
+    # permanent-generation membership: absent from gc.get_objects() == frozen
+    "freeze_reestablished": not any(o is sentinel for o in gc.get_objects()),
+    "benchmark_cycle_reclaimed": bench_cycle() is None,
+    "new_cycle_collectible": new_cycle() is None,
+    "policy_stopped": gc_policy._started is False,
+}))
+"""
+
+
+def test_worker_process_gc_equivalent_after_stop():
+    """Process-level equivalence check in a fresh interpreter mirroring a
+    model worker (policy auto-started on import, vLLM serving freeze applied
+    afterwards): after ``fpm_gc_stop`` the worker's GC state matches a process
+    that never benchmarked (thresholds, enabled flag, dead freeze thread,
+    serving freeze at least as large as the baseline) and both benchmark-era
+    garbage and new cycles are collectible. The normal-vs-abort distinction
+    lives in the launcher and is covered in test_vllm_worker_factory.py with
+    a real ``status=failed`` artifact driving the failure path."""
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DYN_FPM_GC")}
+    result = subprocess.run(
+        [sys.executable, "-c", _LIFECYCLE_CHILD],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    failed = {k: v for k, v in report.items() if v is not True}
+    assert not failed, failed
