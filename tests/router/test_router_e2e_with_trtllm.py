@@ -160,7 +160,7 @@ class TRTLLMProcess(ManagedEngineProcessMixin):
                 "--kv-block-size",
                 str(TRTLLM_BLOCK_SIZE),
                 # Enable KV events publishing for router integration
-                "--publish-events-and-metrics",
+                "--publish-kv-events",
             ]
 
             if disaggregation_mode is not None:

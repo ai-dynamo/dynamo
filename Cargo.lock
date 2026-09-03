@@ -2500,6 +2500,7 @@ dependencies = [
  "dynamo-custom-policy-example-disagg-filter-score-pick",
  "dynamo-custom-policy-example-simple-filter-score-pick",
  "dynamo-custom-policy-example-simple-stacked-score-pick",
+ "dynamo-custom-policy-example-soft-pin-repin",
  "dynamo-kv-router",
 ]
 
@@ -2539,6 +2540,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-custom-policy-example-soft-pin-repin"
+version = "1.5.0"
+dependencies = [
+ "dynamo-kv-router",
+ "serde",
+]
+
+[[package]]
 name = "dynamo-data-gen"
 version = "1.5.0"
 dependencies = [
@@ -2561,6 +2570,7 @@ dependencies = [
  "bytes",
  "dynamo-kv-router",
  "dynamo-llm",
+ "dynamo-protocols",
  "dynamo-runtime",
  "futures",
  "hyper-util",
@@ -2662,6 +2672,9 @@ dependencies = [
  "async-nats 0.49.1",
  "async-stream",
  "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-types",
  "axum 0.8.4",
  "axum-server",
  "base64 0.22.1",
@@ -5516,7 +5529,6 @@ dependencies = [
  "dynamo-runtime",
  "libc",
  "once_cell",
- "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

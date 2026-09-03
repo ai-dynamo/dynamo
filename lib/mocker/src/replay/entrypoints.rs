@@ -63,7 +63,10 @@ fn load_trace_from_file(
         TraceFileFormat::Dynamo => {
             bail!("Dynamo request traces must be loaded through the multi-file replay path")
         }
-        _ => bail!("unsupported trace format: {}", trace_format.as_str()),
+        other => bail!(
+            "trace format '{}' is not supported by Dynamo replay",
+            other.as_str()
+        ),
     }
 }
 
@@ -2602,7 +2605,8 @@ mod tests {
                 "not_before_ms": 100.0,
                 "input_length": 4,
                 "output_length": 1,
-                "hash_ids": [1]
+                "hash_ids": [1],
+                "dependencies": []
             })
         )
         .unwrap();
@@ -2635,6 +2639,37 @@ mod tests {
         assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
         assert_eq!(trace.nodes()[1].not_before_ms(), 15.0);
         assert_eq!(trace.nodes()[1].dependencies()[0].delay_ms, 8.0);
+
+        for engine_type in [EngineType::Vllm, EngineType::Sglang] {
+            let mut args = replay_test_args();
+            args.engine_type = engine_type;
+            if engine_type == EngineType::Sglang {
+                args.sglang = Some(SglangArgs {
+                    page_size: Some(4),
+                    chunked_prefill_size: Some(64),
+                    ..Default::default()
+                });
+            }
+            let report = simulate_agentic_trace_workload_with_router_mode(
+                args,
+                None,
+                None,
+                trace.clone(),
+                1,
+                ReplayRouterMode::RoundRobin,
+                true,
+                None,
+                Some(1),
+                SlaThresholds::default(),
+            )
+            .unwrap();
+            assert_eq!(report.request_counts.completed_requests, 2);
+            let trajectories = report.trajectories.unwrap();
+            assert_eq!(trajectories.total, 1);
+            assert_eq!(trajectories.completed, 1);
+            assert_eq!(trajectories.incomplete, 0);
+            assert!(trajectories.e2e.max_ms > 0.0);
+        }
 
         let report = simulate_trace_live_file_with_router_mode_and_format_and_options(
             replay_test_args(),

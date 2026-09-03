@@ -37,7 +37,8 @@ fn pi_direct_dynamo_lowering_builds_agentic_trace() {
         direct
             .nodes()
             .iter()
-            .any(|node| { node.dependencies().iter().any(|edge| edge.delay_ms > 0.0) })
+            .flat_map(|node| node.dependencies())
+            .any(|dependency| dependency.delay_ms > 0.0)
     );
 }
 

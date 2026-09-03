@@ -3,11 +3,9 @@ SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# llm-d Batch Gateway with Dynamo
+# Offline Batch Inference with Dynamo
 
-Use this example to deploy llm-d Batch Gateway in front of a dedicated NVIDIA Dynamo
-worker pool. The steps submit an OpenAI Batch job, run its inference requests on
-Dynamo, and retrieve the results through the Batch API.
+Use this example to submit OpenAI Batch jobs to a dedicated NVIDIA Dynamo worker pool. The batch layer manages the job lifecycle and sends each inference request through the Dynamo frontend and router.
 
 > [!WARNING]
 > This is an experimental validation example, not a supported production recipe.
@@ -22,16 +20,19 @@ You need:
 - A `model-cache` PVC for the model worker.
 - An `hf-token-secret` secret in the target namespace.
 - A default storage class that supports `ReadWriteMany` persistent volumes.
+- A Prometheus server installed at the service address used in `llm-d-async-values.yaml` and configured to scrape Dynamo frontend pods. The [Dynamo observability installation guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/installation/observability.md) creates this service and the required PodMonitor setup.
 
 The example uses the following versions:
 
 | Component | Version |
 | --- | --- |
-| Dynamo runtime images | `1.3.0` |
-| llm-d Batch Gateway chart and images | `0.3.0` |
-| llm-d Async chart and image | `v0.9.0` |
+| Dynamo runtime images | `1.5.0` |
+| Batch Gateway chart and images | `0.3.0` |
+| Async Processor chart and image | `v0.9.0` |
 | Valkey | `8.0.10-alpine` |
 | Model | `Qwen/Qwen3-0.6B` |
+
+The readiness-gated Async path requires a Dynamo build that exposes `dynamo_frontend_model_ready`. If the `1.5.0` runtime image has not been published yet, use frontend and worker images built from a Dynamo revision that contains that metric. Older runtime images do not expose the series, so the fail-closed gate remains at zero.
 
 Update the chart version and all three Batch Gateway image tags together, then
 rerun the complete example. Update the Dynamo frontend and worker images
@@ -45,7 +46,7 @@ Set a namespace and apply the dedicated backend:
 
 ```bash
 cd examples/deployments/llm-d-batch-gateway
-export NAMESPACE=your-namespace
+export NAMESPACE=dynamo-batch-example
 
 kubectl apply -n "${NAMESPACE}" -f dynamo.yaml
 kubectl wait -n "${NAMESPACE}" \
@@ -74,10 +75,17 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   }'
 ```
 
+Verify that the frontend exposes the same model readiness decision used by request routing:
+
+```bash
+curl --fail --silent http://127.0.0.1:8000/metrics \
+  | grep 'dynamo_frontend_model_ready{model="Qwen/Qwen3-0.6B"} 1'
+```
+
 ### 3. Deploy Batch Metadata and File Storage
 
 Apply the validation-only Valkey service and shared file PVC. Valkey provides
-the Redis-compatible metadata service expected by llm-d Batch Gateway. The
+the Redis-compatible metadata service expected by Batch Gateway. The
 v0.3.0 chart treats `global.secretName` as a reference to a pre-existing Secret;
 it does not create or own that Secret. `batch-infra.yaml` creates the referenced
 Secret, and the cleanup order below removes it after the Helm release:
@@ -138,18 +146,17 @@ The example client performs three jobs:
 The command exits with an error if a job reaches an unexpected terminal state
 or returns unexpected request counts or output identifiers.
 
-### 6. Switch to llm-d Async Dispatch
+### 6. Switch to Asynchronous Dispatch
 
-Install the pinned llm-d Async chart. The Async Processor reads requests from a
-Redis sorted set, sends each request to the same Dynamo frontend, and writes
-results to the configured Redis list:
+Install the pinned Async Processor chart. The processor reads requests from a Redis sorted set, sends each request to the same Dynamo frontend, and writes results to the configured Redis list. Its Prometheus-query gate reads `dynamo_frontend_model_ready` and fails closed with a zero dispatch budget if Prometheus or the metric is unavailable. A registered model with no complete serving topology also reports zero, so queued requests remain in Redis instead of being sent to a frontend that cannot route them. The example uses a one-second metric cache; with the Dynamo PodMonitor's default five-second scrape interval, dispatch normally opens within roughly six seconds of the first serving unit registering:
 
 ```bash
 helm upgrade --install async-dispatch \
   oci://ghcr.io/llm-d/charts/llm-d-async \
   --version v0.9.0 \
   --namespace "${NAMESPACE}" \
-  --values llm-d-async-values.yaml
+  --values llm-d-async-values.yaml \
+  --set-string ap.redis.gateParams.query="min(dynamo_frontend_model_ready{model=\"Qwen/Qwen3-0.6B\"\\,namespace=\"${NAMESPACE}\"})"
 
 kubectl rollout status -n "${NAMESPACE}" \
   deployment/async-dispatch-llm-d-async \
@@ -178,11 +185,68 @@ Keep the Batch API port-forward running and repeat the lifecycle:
 python3 run_example.py --base-url http://127.0.0.1:8001
 ```
 
-The same client validates both modes. In Async mode, Batch Gateway continues to
-own files, job state, cancellation, and output assembly. llm-d Async owns the
-request and result queues and sends ordinary OpenAI-compatible requests to the
-Dynamo frontend. Dynamo remains responsible for routing each request to a
-worker.
+The same client validates both modes. In asynchronous mode, Batch Gateway continues to own files, job state, cancellation, and output assembly. The Async Processor owns the request and result queues and sends ordinary OpenAI-compatible requests to the Dynamo frontend. Dynamo remains responsible for routing each request to a worker.
+
+### 7. Validate Dispatch Across Zero Capacity
+
+This check proves that Async preserves a submitted batch while Dynamo has no routable worker, then begins dispatch after the first serving unit registers. It does not wait for every desired worker replica to become ready.
+
+Forward the Async Processor metrics in a third terminal. Keep this port-forward running for the rest of the check:
+
+```bash
+kubectl port-forward -n "${NAMESPACE}" \
+  deployment/async-dispatch-llm-d-async 9090:9090
+```
+
+Scale the worker component to zero:
+
+```bash
+kubectl patch -n "${NAMESPACE}" \
+  dynamographdeployment/qwen3-0-6b-batch \
+  --type=json \
+  --patch='[{"op":"replace","path":"/spec/components/1/replicas","value":0}]'
+```
+
+Wait for the gate to close. This loop fails if the metrics request fails and exits successfully only after the dispatch budget is exactly `0`. The source-availability metric is diagnostic: `1` means Async read an explicit readiness value of zero, and `0` means the series was absent and Async used its fail-closed fallback:
+
+```bash
+for attempt in $(seq 1 60); do
+  metrics="$(curl --fail --silent http://127.0.0.1:9090/metrics)" || exit 1
+  if printf '%s\n' "${metrics}" | awk '$1 ~ /^llm_d_async_async_dispatch_budget{/ && $2 == 0 { found=1 } END { exit !found }'; then
+    break
+  fi
+  if [ "${attempt}" -eq 60 ]; then
+    echo "dispatch budget did not reach zero" >&2
+    exit 1
+  fi
+  sleep 2
+done
+
+printf '%s\n' "${metrics}" \
+  | grep '^llm_d_async_async_gate_metric_source_available{'
+```
+
+With the Batch API port-forward still running, start a successful batch in another terminal. The client remains in a non-terminal state while the dispatch budget is zero:
+
+```bash
+python3 run_example.py \
+  --base-url http://127.0.0.1:8001 \
+  --success-only
+```
+
+Restore one worker. The pending client should complete after the worker registers and Prometheus observes the readiness value of `1`:
+
+```bash
+kubectl patch -n "${NAMESPACE}" \
+  dynamographdeployment/qwen3-0-6b-batch \
+  --type=json \
+  --patch='[{"op":"replace","path":"/spec/components/1/replicas","value":1}]'
+
+kubectl wait -n "${NAMESPACE}" \
+  --for=condition=Ready \
+  dynamographdeployment/qwen3-0-6b-batch \
+  --timeout=900s
+```
 
 ## What This Example Covers
 
@@ -191,21 +255,21 @@ worker.
 - Running real `/v1/chat/completions` inference through a Dynamo frontend and
   one-GPU vLLM worker.
 - Running the same lifecycle with synchronous dispatch and with requests routed
-  through llm-d Async Redis queues.
+  through Redis request and result queues.
+- Holding queued requests while Dynamo has no routable worker and resuming dispatch after the first complete serving unit registers.
 - Isolating batch traffic in a `DynamoGraphDeployment` that does not share a
   frontend, router, or worker with an online pool.
-- Pinning the Dynamo and llm-d versions used by the example.
+- Pinning the Dynamo, Batch Gateway, and Async Processor versions used by the example.
 - Reproducing the lifecycle with the standalone example client.
 
-This workflow was validated with one B200 GPU, Dynamo `1.3.0`, llm-d Batch
-Gateway `0.3.0`, llm-d Async `v0.9.0`, and Qwen3-0.6B.
+This workflow was validated on one H200 GPU with a Dynamo `1.5.0` CI image, Batch Gateway `0.3.0`, Async Processor `v0.9.0`, and Qwen3-0.6B.
 
 ## What This Example Does Not Cover
 
 - Cancelling requests that are already running on Dynamo. Cancellation was
   validated before the requests were dispatched.
 - Propagating a Dynamo-generated backend error into the Batch error file. The
-  example client uses an llm-d unmapped-model error.
+  example client uses a Batch Gateway unmapped-model error.
 - Fault-injecting authentication forwarding, request timeouts, retries, worker
   restarts, or processor recovery.
 - Expiration and garbage collection. The example disables the garbage
@@ -213,10 +277,10 @@ Gateway `0.3.0`, llm-d Async `v0.9.0`, and Qwen3-0.6B.
 - TLS, ingress, production authentication, metadata-store authentication, HA,
   or multi-replica Batch Gateway components.
 - Shared online and offline capacity or Planner-controlled dispatch budgets.
-- Durable request redelivery after an llm-d Async failure, multi-replica Batch
+- Durable request redelivery after an Async Processor failure, multi-replica Batch
   Processor result routing, or resuming a batch after Processor pod or node
   loss. Track these limitations in
-  [llm-d Async issue 404](https://github.com/llm-d/llm-d-async/issues/404),
+  [Async Processor issue 404](https://github.com/llm-d/llm-d-async/issues/404),
   [Batch Gateway issue 644](https://github.com/llm-d/llm-d-batch-gateway/issues/644),
   and [Batch Gateway issue 645](https://github.com/llm-d/llm-d-batch-gateway/issues/645).
 - Completions, embeddings, multimodal inputs, Parquet, or object storage.
@@ -232,18 +296,15 @@ was not exercised unchanged.
 
 | Area | Behavior in this example |
 | --- | --- |
-| Authentication | `X-MaaS-Username` selects the llm-d tenant. `Authorization` is passed to Dynamo, but the example does not deploy an authentication boundary. |
+| Authentication | `X-MaaS-Username` selects the Batch API tenant. `Authorization` is passed to Dynamo, but the example does not deploy an authentication boundary. |
 | Model | `Qwen/Qwen3-0.6B` maps directly to `qwen3-0-6b-batch-frontend`. |
 | Request timeout | The processor allows five minutes and up to three retries per inference request. |
-| Cancellation | llm-d stops queued dispatch and assembles the terminal result. Requests already accepted by Dynamo can still finish. |
-| Output and errors | llm-d stores and assembles Batch files. Dynamo returns ordinary OpenAI-compatible responses. |
-| Dispatch | Sync mode calls the Dynamo frontend directly. Async mode uses Redis request/result queues and a constant-open gate before calling the same frontend. |
+| Cancellation | Batch Gateway stops queued dispatch and assembles the terminal result. Requests already accepted by Dynamo can still finish. |
+| Output and errors | Batch Gateway stores and assembles Batch files. Dynamo returns ordinary OpenAI-compatible responses. |
+| Dispatch | Sync mode calls the Dynamo frontend directly. Async mode uses Redis request/result queues and opens its fail-closed Prometheus-query gate only while the model is routable through the Dynamo frontend. |
 | Capacity | The processor can reach only the dedicated Dynamo frontend and worker in this graph. |
 
-llm-d owns the Batch API, file and job state, queueing, cancellation, recovery,
-and output assembly. Dynamo owns inference execution and dedicated worker
-capacity. Dynamo's disabled Batch route skeleton is not enabled or used by this
-example.
+Batch Gateway owns the Batch API, file and job state, queueing, cancellation, recovery, and output assembly. Dynamo owns inference execution and dedicated worker capacity. Dynamo's disabled Batch route skeleton is not enabled or used by this example.
 
 ## Cleanup
 
@@ -271,6 +332,6 @@ kubectl delete pvc data-batch-gateway-valkey-0 -n "${NAMESPACE}"
 
 ## Further Reading
 
-- [llm-d Batch Gateway](https://github.com/llm-d/llm-d-batch-gateway)
+- [Batch Gateway upstream repository](https://github.com/llm-d/llm-d-batch-gateway)
 - [Dynamo Kubernetes quickstart](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/getting-started/quickstart.mdx)
 - [Dynamo vLLM deployment examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/README.md)
