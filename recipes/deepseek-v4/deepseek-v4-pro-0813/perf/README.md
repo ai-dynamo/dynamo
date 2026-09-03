@@ -9,8 +9,8 @@ A single [AIPerf](https://github.com/ai-dynamo/aiperf) trace-replay Job —
 [`perf.yaml`](perf.yaml) — covers all four DeepSeek-V4-Pro-0813 DGDs. Set `ENDPOINT` for the
 target DGD.
 
-The Job waits for the target model on the DGD frontend, runs a short warmup,
-replays the configured trace at one `CONCURRENCY` value, and writes raw
+The Job waits for the target model on the DGD frontend, then replays the
+configured trace at one `CONCURRENCY` value, and writes raw
 artifacts to the shared `model-cache` PVC. The benchmark pod is co-located with
 a DGD frontend through `podAffinity`.
 
@@ -42,7 +42,7 @@ is referenced from the DeepSeek-V4 family recipes via a symlink under [`traces`]
 
 ```text
 traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
-  -> ../../../deepseek-v4/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+  -> ../../../perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
 ```
 
 The default 15% trace contains 3,541 requests. Its SHA-256 is
@@ -68,16 +68,20 @@ git lfs pull --include='recipes/deepseek-v4/perf/traces/64k_400_90kv_agent_new_n
 
 kubectl run pvc-helper -n ${NAMESPACE} \
   --image=busybox:1.36 --restart=Never \
-  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
-  --command -- sleep 3600
+  --overrides='{"spec":{"containers":[{"name":"helper","image":"busybox:1.36","command":["sleep","86400"],"volumeMounts":[{"name":"model-cache","mountPath":"/model-cache"}]}],"volumes":[{"name":"model-cache","persistentVolumeClaim":{"claimName":"model-cache"}}]}}' \
+  --command -- sleep 86400
 
 TRACE_SOURCE="$(git rev-parse --show-toplevel)/recipes/deepseek-v4/perf/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
+kubectl wait --for=condition=Ready pod/pvc-helper -n "${NAMESPACE}" --timeout=300s
 kubectl exec -n "${NAMESPACE}" pvc-helper -- mkdir -p /model-cache/traces
 kubectl cp "${TRACE_SOURCE}" \
   "${NAMESPACE}/pvc-helper:/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
 ```
 
-Keep `pvc-helper` for fetching artifacts, or delete it after staging.
+Keep `pvc-helper` for fetching artifacts, or delete it after staging. It sleeps for
+24 h to outlive the benchmark Job -- H200 trace runs take 11-14 h, so a shorter-lived
+helper exits before the artifacts it is meant to copy exist. If it has already gone,
+recreate it with the same command before the collection step below.
 
 ### 3. Run the benchmark
 
@@ -136,7 +140,7 @@ errored, and unfinished requests before reporting aggregate throughput.
 | --- | --- | --- |
 | `ENDPOINT` | `dsv4-pro-0813-agg-h200-agentic-frontend:8000` | Change per DGD variant |
 | `TRACE_FILE` | `/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl` | 3,541-request 15% agent trace |
-| `CONCURRENCY` | `6` | Single value; reset server state between values |
+| `CONCURRENCY` | `4` | Single value; reset server state between values |
 | `TARGET_MODEL` | `deepseek-ai/DeepSeek-V4-Pro-0813` | Must match `--served-model-name` |
 
 ## Artifacts
@@ -145,7 +149,6 @@ Results are written to:
 
 ```text
 /model-cache/perf/<epoch>_<job-name>/
-  warmup/
   DeepSeek-V4-Pro-0813_trace_c<concurrency>_<timestamp>/
     profile_export_aiperf.json
     inputs.json

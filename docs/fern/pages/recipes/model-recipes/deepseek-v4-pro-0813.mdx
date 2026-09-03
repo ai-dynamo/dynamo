@@ -131,7 +131,7 @@ kubectl wait --for=condition=Ready dgd/dsv4-pro-0813-disagg-h200-agentic -n ${NA
 
 ```bash
 kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/agg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Ready dgd/dsv4-pro-0813-agg-gb200-agentic -n ${NAMESPACE} --timeout=3600s
+kubectl wait --for=condition=Ready dgd/dsv4-pro-0813-agg-gb200-agentic -n ${NAMESPACE} --timeout=21600s
 ```
 
 </div>
@@ -140,12 +140,14 @@ kubectl wait --for=condition=Ready dgd/dsv4-pro-0813-agg-gb200-agentic -n ${NAME
 
 ```bash
 kubectl apply -f recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/disagg-gb200-agentic/deploy.yaml -n ${NAMESPACE}
-kubectl wait --for=condition=Ready dgd/dsv4-pro-0813-disagg-gb200-agentic -n ${NAMESPACE} --timeout=3600s
+kubectl wait --for=condition=Ready dgd/dsv4-pro-0813-disagg-gb200-agentic -n ${NAMESPACE} --timeout=21600s
 ```
 
 </div>
 
-Loading the 832 GiB checkpoint takes roughly 15–20 minutes on first start.
+Loading the 832 GiB checkpoint takes roughly 15–20 minutes on first start on H200.
+GB200 is slower — allow several hours, which is why the GB200 manifests set
+`VLLM_ENGINE_READY_TIMEOUT_S: 21600` and the waits above use a six-hour timeout.
 
 ## Smoke Test
 
@@ -189,8 +191,8 @@ curl -s localhost:8000/v1/chat/completions \
   -d '{
     "model": "deepseek-ai/DeepSeek-V4-Pro-0813",
     "messages": [{"role": "user", "content": "What is 17 * 23?"}],
-    "max_tokens": 256
-  }' | jq -r '.choices[0].message.content'
+    "max_tokens": 2048
+  }' | jq -r '.choices[0].message | .content // .reasoning_content'
 ```
 
 This is a reasoning model. The chain of thought is returned in `reasoning_content` and the answer in `content`; a small `max_tokens` can leave `content` empty because the budget is consumed by reasoning.

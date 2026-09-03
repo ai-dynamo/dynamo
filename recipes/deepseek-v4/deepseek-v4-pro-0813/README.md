@@ -143,8 +143,8 @@ PVC, running the AIPerf trace-replay Job, running a concurrency sweep, and fetch
 The gate is **joint**: E2E ≥ 50 tok/s/user **and** TTFT p50 < 5 s, where
 `E2E = OSL / (TTFT + OSL × ITL)` — the per-user rate *including* time-to-first-token.
 
-Modified Mooncake traces are provided to showcase the value of KV-aware routing and CPU
-offloading, see [perf/README.md](perf/README.md) for details.
+Modified Mooncake traces are provided to exercise KV-aware routing and prefix-cache reuse,
+see [perf/README.md](perf/README.md) for details.
 
 ## Performance results
 

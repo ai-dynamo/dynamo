@@ -9,11 +9,16 @@
 # GB200 is 4 GPUs per node, so each TP8 worker spans two nodes:
 # `multinode.nodeCount: 2`. Both workers share one ComputeDomain.
 #
-# KV moves between workers over NIXL. On this cluster that path must be RDMA --
-# over TCP, P50 TTFT was 4663 ms against 479 ms on RDMA, an order of magnitude.
-# The `networking.gke.io.*` annotations and resources below are GKE-specific;
-# adapt them to your cluster's RDMA plumbing. `rdma/ib` does NOT exist here and
-# requesting it leaves pods Pending.
+# KV moves between workers over NIXL, and that path must be RDMA: over TCP we
+# measured P50 TTFT of 4663 ms against 479 ms on RDMA, an order of magnitude.
+#
+# RDMA attachment is CLOUD-PROVIDER SPECIFIC. The `networking.gke.io/*`
+# annotations and `networking.gke.io.networks/*` resource requests below are a
+# worked example for one provider, not a portable requirement -- the interface
+# names (eth0, rdma0-3) and network names (rdma-0..3) are this cluster's, and
+# yours will differ. Replace the whole block with your provider's mechanism
+# before deploying: some clusters use an `rdma/ib` resource request instead.
+# Requesting a resource your cluster does not define leaves the pods Pending.
 apiVersion: resource.nvidia.com/v1beta1
 kind: ComputeDomain
 metadata:

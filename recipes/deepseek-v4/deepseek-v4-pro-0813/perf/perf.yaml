@@ -40,7 +40,7 @@ spec:
                 # Must match the DGD behind ENDPOINT below so the benchmark Job co-locates
                 # with the target frontend. Change this together with ENDPOINT when you
                 # switch variants (one of:
-                # dsv4-pro-0813-{agg,disagg}-h200-{agentic,1m},
+                # dsv4-pro-0813-{agg,disagg}-h200-agentic,
                 # dsv4-pro-0813-{agg,disagg}-gb200-agentic).
                 - dsv4-pro-0813-agg-h200-agentic
             topologyKey: kubernetes.io/hostname
@@ -55,7 +55,7 @@ spec:
         - |
           set -euo pipefail
           ulimit -n 600000
-          apt-get update && apt-get install -y --no-install-recommends curl jq procps git ca-certificates && apt-get clean
+          apt-get update && apt-get install -y --no-install-recommends curl jq procps git ca-certificates build-essential && apt-get clean
           pip install --no-cache-dir "aiperf==${AIPERF_VERSION}" "protobuf==7.35.0" "transformers==4.57.3" "tiktoken==0.13.0"
 
           wait_for_model_ready() {
@@ -111,7 +111,7 @@ spec:
             --export-http-trace
           echo "Done. Artifacts: ${RUN_DIR}"
         env:
-        # Defaults target AGG H200 at its validated operating point (C=2).
+        # Defaults target AGG H200 at its validated operating point (C=4).
         # Edit ENDPOINT + CONCURRENCY per variant AND update the podAffinity
         # graph-deployment-name above to the same DGD (see README.md).
         - name: ENDPOINT
@@ -121,7 +121,7 @@ spec:
         - name: TRACE_FILE
           value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
         - name: CONCURRENCY
-          value: "6"
+          value: "4"
         - name: REQUEST_TIMEOUT_SECONDS
           value: "3600"
         - name: AIPERF_VERSION

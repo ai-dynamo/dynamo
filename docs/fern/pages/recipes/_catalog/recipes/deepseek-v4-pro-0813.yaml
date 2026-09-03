@@ -28,7 +28,7 @@ targets:
   workload:
     type: trace-replay
     traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse'
-    sla: user output >= 50 tok/s
+    sla: user output >= 50 tok/s and TTFT p50 < 5 s
   deploy:
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/agg-gb200-agentic/deploy.yaml
   benchmark:
@@ -55,7 +55,7 @@ targets:
   workload:
     type: trace-replay
     traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 1P1D'
-    sla: user output >= 50 tok/s
+    sla: user output >= 50 tok/s and TTFT p50 < 5 s
   deploy:
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/disagg-gb200-agentic/deploy.yaml
   benchmark:
@@ -81,7 +81,7 @@ targets:
   workload:
     type: trace-replay
     traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; TP8 + EP, Marlin MoE, max_model_len 1048576'
-    sla: user output >= 50 tok/s
+    sla: user output >= 50 tok/s and TTFT p50 < 5 s
   deploy:
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/agg-h200-agentic/deploy.yaml
   benchmark:
@@ -108,7 +108,7 @@ targets:
   workload:
     type: trace-replay
     traffic: 'Agentic Mooncake trace: 64K median ISL / 400 median OSL, ~90% KV reuse; 1P1D (TP8 + EP per worker), NIXL KV transfer'
-    sla: user output >= 50 tok/s
+    sla: user output >= 50 tok/s and TTFT p50 < 5 s
   deploy:
     asset: recipes/deepseek-v4/deepseek-v4-pro-0813/vllm/disagg-h200-agentic/deploy.yaml
   benchmark:
