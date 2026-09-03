@@ -391,6 +391,9 @@ impl LocalModelBuilder {
         // path of the downloaded model.
         if let Some(source_path) = self.source_path.take() {
             card.set_source_path(source_path);
+        } else {
+            // Custom display names must not replace source_path.
+            card.set_source_path(model_path.clone());
         }
         // The served model name defaults to the full model path.
         // This matches what vllm and sglang do.
@@ -912,6 +915,153 @@ fn harvest_extra_files(
         out.push(CheckedFile::from_disk(&path)?);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod metadata_publish_tests {
+    use super::*;
+    use crate::discovery::{ModelManager, ModelWatcher};
+    use crate::http::service::metrics::Metrics;
+    use crate::namespace::NamespaceFilter;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn sample_model_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/sample-models/TinyLlama_v1.1")
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn attach_and_frontend_watcher_preserve_local_source_with_custom_name() {
+        const NAMESPACE: &str = "source-path-test";
+        const COMPONENT: &str = "worker";
+        const ENDPOINT: &str = "generate";
+        const CUSTOM_NAME: &str = "my-custom-name";
+
+        let model_dir = sample_model_dir();
+        let canonical = fs::canonicalize(&model_dir).unwrap();
+        let runtime = dynamo_runtime::Runtime::from_current().unwrap();
+        let drt = dynamo_runtime::DistributedRuntime::new(
+            runtime,
+            dynamo_runtime::distributed::DistributedConfig::process_local(),
+        )
+        .await
+        .unwrap();
+        let endpoint = drt
+            .namespace(NAMESPACE)
+            .unwrap()
+            .component(COMPONENT)
+            .unwrap()
+            .endpoint(ENDPOINT);
+
+        let cache_home = tempfile::tempdir().unwrap();
+        temp_env::async_with_vars([("HOME", Some(cache_home.path()))], async {
+            // Exercise the consumer side too: the frontend watcher must be able to
+            // resolve the published metadata and register the model under its
+            // custom served name.
+            let manager = Arc::new(ModelManager::new());
+            let watcher = Arc::new(ModelWatcher::new(
+                drt.clone(),
+                manager.clone(),
+                RouterConfig::default(),
+                0,
+                None,
+                None,
+                None,
+                Arc::new(Metrics::new_with_prefix(Some(
+                    "local_source_custom_name_test".to_string(),
+                ))),
+            ));
+            let discovery_stream = drt
+                .discovery()
+                .list_and_watch(
+                    dynamo_runtime::discovery::DiscoveryQuery::AllModels,
+                    Some(drt.primary_token()),
+                )
+                .await
+                .unwrap();
+            let watcher_task = tokio::spawn(
+                watcher
+                    .clone()
+                    .watch(discovery_stream, NamespaceFilter::Global),
+            );
+
+            let mut model = LocalModelBuilder::default()
+                .model_path(model_dir)
+                .model_name(Some(CUSTOM_NAME.to_string()))
+                .self_host_metadata(false)
+                .build()
+                .await
+                .unwrap();
+            model
+                .attach(
+                    &endpoint,
+                    ModelType::Chat,
+                    ModelInput::Text,
+                    None,
+                    Some(crate::worker_type::WorkerType::Aggregated),
+                    Vec::new(),
+                )
+                .await
+                .unwrap();
+
+            let instances = drt
+                .discovery()
+                .list(dynamo_runtime::discovery::DiscoveryQuery::EndpointModels {
+                    namespace: NAMESPACE.to_string(),
+                    component: COMPONENT.to_string(),
+                    endpoint: ENDPOINT.to_string(),
+                })
+                .await
+                .unwrap();
+            assert_eq!(instances.len(), 1);
+
+            let card: ModelDeploymentCard = instances[0].deserialize_model().unwrap();
+            assert_eq!(card.display_name, CUSTOM_NAME);
+            assert_eq!(card.source_path(), canonical.display().to_string());
+            let metadata_files = card.iter_metadata_files();
+            assert!(!metadata_files.is_empty());
+            assert!(
+                metadata_files.into_iter().all(|(file, _)| file
+                    .path()
+                    .is_some_and(|path| path.starts_with(&canonical))
+                    && file.url().is_none()),
+                "local model metadata must not be published as Hugging Face URLs"
+            );
+
+            let frontend_name =
+                tokio::time::timeout(Duration::from_secs(10), watcher.wait_for_chat_model())
+                    .await
+                    .expect("frontend watcher did not register the custom model name");
+            assert_eq!(frontend_name, CUSTOM_NAME);
+            let frontend_card = manager
+                .get_model_cards()
+                .into_iter()
+                .find(|card| card.display_name == CUSTOM_NAME)
+                .expect("custom model card missing from the frontend model manager");
+            assert_eq!(frontend_card.source_path(), canonical.display().to_string());
+            let frontend_model = manager
+                .get_model(CUSTOM_NAME)
+                .expect("custom model name missing from the frontend model manager");
+            assert!(frontend_model.has_chat_engine());
+
+            watcher_task.abort();
+            let _ = watcher_task.await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn build_local_model_explicit_source_path_wins() {
+        let mut builder = LocalModelBuilder::default();
+        builder.model_path(sample_model_dir());
+        builder.source_path(PathBuf::from("Qwen/Qwen3-0.6B"));
+        builder.model_name(Some("served-name".to_string()));
+        let model = builder.build().await.unwrap();
+
+        assert_eq!(model.display_name(), "served-name");
+        assert_eq!(model.card().source_path(), "Qwen/Qwen3-0.6B");
+    }
 }
 
 #[cfg(test)]
