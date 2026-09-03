@@ -685,6 +685,33 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		assert.Equal(t, desired.v2, dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2])
 		assert.True(t, currentWorkerHashesMatchDesired(currentWorkerHashes(dgd), desired))
 	})
+
+	t.Run("v1-only annotation migrates to v2 without triggering a rollout", func(t *testing.T) {
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {
+				ComponentType: commonconsts.ComponentTypeWorker,
+				Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "v1"}},
+			},
+		})
+		desired, err := desiredWorkerHashes(dgd)
+		require.NoError(t, err)
+		dgd.Annotations = map[string]string{
+			commonconsts.AnnotationCurrentWorkerHash: "pre-v2-hash",
+		}
+		reconciler := createTestDGDReconcilerWithStatus(dgd)
+		program := reconciler.newComponentProgram()
+		status := dgd.DeepCopy().Status
+
+		t.Log("Reconcile: migration must write v2 annotation from spec without starting a rollout")
+		require.NoError(t, program.reconcileWorkerRollout(context.Background(), dgd, &status))
+
+		assert.Equal(t, desired.v2, dgd.Annotations[commonconsts.AnnotationCurrentWorkerHashV2],
+			"v2 annotation must be populated from the current spec")
+		assert.Equal(t, "pre-v2-hash", dgd.Annotations[commonconsts.AnnotationCurrentWorkerHash],
+			"v1 annotation must be preserved during migration")
+		assert.Nil(t, status.RollingUpdate,
+			"migration must not trigger a rollout when the spec has not changed")
+	})
 }
 
 func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {

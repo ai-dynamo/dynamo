@@ -1173,6 +1173,85 @@ func TestDeleteOldWorkerDCDs_NoDCDsToDelete(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestDCDObservesWorkerHash(t *testing.T) {
+	const targetHash = "targethash"
+
+	makeDCD := func(name, componentName, componentType, hash string) *nvidiacomv1alpha1.DynamoComponentDeployment {
+		return &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+					consts.KubeLabelDynamoWorkerHash:          hash,
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: componentType,
+					ServiceName:   componentName,
+				},
+			},
+		}
+	}
+
+	prefillDCD := betaDCD(t, makeDCD("test-dgd-prefill-"+targetHash, "prefill", string(consts.ComponentTypePrefill), targetHash))
+	decodeDCD := betaDCD(t, makeDCD("test-dgd-decode-"+targetHash, "decode", string(consts.ComponentTypeDecode), targetHash))
+
+	tests := []struct {
+		name     string
+		services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		objs     []runtime.Object
+		want     bool
+	}{
+		{
+			name: "single worker component with matching DCD",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {ComponentType: consts.ComponentTypePrefill},
+			},
+			objs: []runtime.Object{prefillDCD},
+			want: true,
+		},
+		{
+			name: "single worker component with no DCD in cache",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {ComponentType: consts.ComponentTypePrefill},
+			},
+			objs: nil,
+			want: false,
+		},
+		{
+			name: "two worker components both observed",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {ComponentType: consts.ComponentTypePrefill},
+				"decode":  {ComponentType: consts.ComponentTypeDecode},
+			},
+			objs: []runtime.Object{prefillDCD, decodeDCD},
+			want: true,
+		},
+		{
+			name: "two worker components only one observed",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {ComponentType: consts.ComponentTypePrefill},
+				"decode":  {ComponentType: consts.ComponentTypeDecode},
+			},
+			objs: []runtime.Object{prefillDCD},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := createTestDGD("test-dgd", tt.services)
+			r := createTestReconcilerWithStatus(dgd, withObjects(tt.objs...))
+
+			got, err := r.dcdObservesWorkerHash(context.Background(), dgd, targetHash)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestContinueRollingUpdate_UpdatedComponentsPartialCompletion(t *testing.T) {
 	oldWorkerHash := testOldWorkerHash
 	newWorkerHash := testNewWorkerHash
@@ -4801,6 +4880,58 @@ func TestBuildRollingUpdateContext_NoNewDCDExists(t *testing.T) {
 	assert.Equal(t, int32(3), result.NewWorkerReplicaTargetsByComponent["worker"])
 }
 
+func TestBuildRollingUpdateContext_RollbackToSameHash(t *testing.T) {
+	t.Log("Build a DGD whose annotation already matches the desired hash, simulating an A→B→A spec revert")
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Replicas:      ptr.To(int32(3)),
+		},
+	})
+	hashA := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{
+		consts.AnnotationCurrentWorkerHashV2: hashA,
+	}
+
+	t.Log("Seed an orphaned B-gen DCD left over from the aborted A→B rollout")
+	orphanedDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-worker-bbbbbbbb",
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoWorkerHash:          "orphaned-b-gen-hash",
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				ServiceName:   "worker",
+				Replicas:      ptr.To(int32(3)),
+			},
+		},
+		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+				Replicas:          3,
+				AvailableReplicas: ptr.To(int32(3)),
+			},
+		},
+	})
+
+	r := createTestReconcilerWithStatus(dgd, withObjects(orphanedDCD))
+	ctx := context.Background()
+
+	t.Log("Build rolling update context: orphaned B-gen DCD must receive drain targets even though current hash matches desired")
+	result, err := r.buildRollingUpdateContext(ctx, dgd)
+
+	require.NoError(t, err)
+	assert.Equal(t, hashA, result.NewWorkerHash)
+	assert.NotEmpty(t, result.OldWorkerReplicaTargetsByComponent,
+		"orphaned B-gen DCD must produce component drain targets")
+	assert.Contains(t, result.OldWorkerReplicaTargetsByDCD, orphanedDCD.Name,
+		"B-gen DCD must be individually tracked for draining")
+}
+
 func TestBuildRollingUpdateContext_ListOldDCDsError(t *testing.T) {
 	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker": {
@@ -4813,7 +4944,7 @@ func TestBuildRollingUpdateContext_ListOldDCDsError(t *testing.T) {
 	}
 
 	assert.NotEqual(t, testOldWorkerHash, betaDGDWorkersSpecHash(t, dgd),
-		"test setup: computed hash must differ so we proceed past the early-return")
+		"test setup: annotation must differ from computed hash so getOldWorkerDCDsByComponent finds old DCDs")
 
 	injectedErr := errors.New("simulated apiserver list failure")
 	funcs := interceptor.Funcs{
@@ -4896,7 +5027,7 @@ func TestBuildRollingUpdateContext_GetNewDCDError(t *testing.T) {
 	}
 
 	require.NotEqual(t, testOldWorkerHash, betaDGDWorkersSpecHash(t, dgd),
-		"test setup: computed hash must differ so we proceed past the early-return")
+		"test setup: annotation must differ from computed hash so getNewWorkerDCDsByComponent looks up the new-gen DCD")
 
 	injectedErr := errors.New("simulated apiserver get failure")
 	funcs := interceptor.Funcs{

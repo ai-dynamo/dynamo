@@ -726,7 +726,7 @@ func (r *dgdWorkerRolloutReconciler) completeRollingUpdate(
 			return nil
 		}
 
-		if err := r.deleteOldWorkerDCDs(ctx, dgd, newWorkerHash); err != nil {
+		if err := r.deleteWorkerDCDs(ctx, oldDCDs); err != nil {
 			return fmt.Errorf("delete drained old worker DCDs: %w", err)
 		}
 		logger.Info("Deleted drained old worker DCDs; waiting for cache observation before completion",
@@ -1222,7 +1222,7 @@ func (r *dgdWorkerRolloutReconciler) listOldWorkerDCDs(
 }
 
 // dcdObservesWorkerHash reports whether a worker DCD owned by dgd with
-// the given targetHash is visible in the informer cache.
+// the given targetHash is visible in the informer cache for every worker component.
 func (r *dgdWorkerRolloutReconciler) dcdObservesWorkerHash(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
@@ -1238,38 +1238,60 @@ func (r *dgdWorkerRolloutReconciler) dcdObservesWorkerHash(
 	); err != nil {
 		return false, err
 	}
-	for _, dcd := range dcdList.Items {
+
+	// Build a set of observed worker component names from the cache.
+	observed := make(map[string]struct{}, len(dcdList.Items))
+	for i := range dcdList.Items {
+		dcd := &dcdList.Items[i]
 		if dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
-			return true, nil
+			observed[dynamo.GetDCDComponentName(dcd)] = struct{}{}
 		}
 	}
-	return false, nil
+
+	// Every DGD worker component must appear in the cache before the hash is projected.
+	for i := range dgd.Spec.Components {
+		component := &dgd.Spec.Components[i]
+		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {
+			continue
+		}
+		if _, ok := observed[component.ComponentName]; !ok {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
-// deleteOldWorkerDCDs deletes all worker DCDs belonging to this DGD whose hash label
-// does NOT match the given newWorkerHash. This cleans up all old generations at once.
+// deleteOldWorkerDCDs lists and deletes all worker DCDs belonging to this DGD whose
+// hash label does NOT match newWorkerHash. This cleans up all old generations at once.
 func (r *dgdWorkerRolloutReconciler) deleteOldWorkerDCDs(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	newWorkerHash string,
 ) error {
-	logger := log.FromContext(ctx)
-
 	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, newWorkerHash)
 	if err != nil {
 		return fmt.Errorf("failed to list non-current worker DCDs: %w", err)
 	}
+	return r.deleteWorkerDCDs(ctx, oldDCDs)
+}
 
-	if len(oldDCDs) == 0 {
-		logger.Info("No non-current worker DCDs found to delete", "newWorkerHash", newWorkerHash)
+// deleteWorkerDCDs deletes the given worker DCDs with a UID precondition on each.
+func (r *dgdWorkerRolloutReconciler) deleteWorkerDCDs(
+	ctx context.Context,
+	dcds []nvidiacomv1beta1.DynamoComponentDeployment,
+) error {
+	logger := log.FromContext(ctx)
+
+	if len(dcds) == 0 {
+		logger.Info("No non-current worker DCDs found to delete")
 		return nil
 	}
 
-	logger.Info("Deleting non-current worker DCDs", "count", len(oldDCDs), "newWorkerHash", newWorkerHash)
+	logger.Info("Deleting non-current worker DCDs", "count", len(dcds))
 
 	var deleteErrors []error
-	for i := range oldDCDs {
-		dcd := &oldDCDs[i]
+	for i := range dcds {
+		dcd := &dcds[i]
 		logger.Info("Deleting non-current worker DCD", "name", dcd.Name, "hash", dcd.Labels[consts.KubeLabelDynamoWorkerHash])
 
 		uid := dcd.UID
