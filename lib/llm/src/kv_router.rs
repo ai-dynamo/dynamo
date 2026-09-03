@@ -887,7 +887,8 @@ where
     }
 
     /// Attach a request classifier before placing this router into service.
-    // TODO: wire a production installer (Python bindings / router config); hidden until then.
+    // Test/embedder convenience; production installs through the catalog via
+    // `install_request_classifier_boxed`.
     #[doc(hidden)]
     pub fn with_request_classifier(self, classifier: impl RequestClassifier) -> Result<Self> {
         self.install_request_classifier_boxed(Box::new(classifier))?;

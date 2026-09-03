@@ -57,12 +57,6 @@ type RsRoutingHost = RoutingHost<WorkerSelectionPolicy>;
 type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter;
 #[cfg(feature = "custom-policy")]
 type RsManagedKvRouter = llm_rs::kv_router::ManagedKvRouter<WorkerSelectionPolicy>;
-
-struct RouterPluginFactories {
-    worker_selection: Option<WorkerSelectionPolicyFactory>,
-    request_classifier: Option<RequestClassifierFactory>,
-}
-
 use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
 use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
@@ -74,6 +68,11 @@ use super::entrypoint::AicPerfConfig;
 mod demand_driven;
 
 const MAX_RESPONSE_BUFFER_SIZE: usize = tokio::sync::Semaphore::MAX_PERMITS;
+
+struct RouterPluginFactories {
+    worker_selection: Option<WorkerSelectionPolicyFactory>,
+    request_classifier: Option<RequestClassifierFactory>,
+}
 
 #[pyclass(frozen)]
 #[derive(Clone, Debug)]

@@ -14,7 +14,7 @@ pub mod queue;
 mod queue_admission;
 pub mod request_classifier;
 mod request_classifier_config;
-pub mod request_classifier_registry;
+mod request_classifier_registry;
 pub mod selector;
 
 mod worker_selection_config;
