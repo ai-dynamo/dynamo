@@ -40,7 +40,8 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use dynamo_runtime::error::DynamoError;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use dynamo_runtime::pipeline::network::{
-    EncodedResponseFrame, NetworkStreamWrapper, RequestPlanePayloadCodec,
+    EncodedResponseFrame, NetworkStreamWrapper, RESPONSE_ENCODE_CAPACITY_HINT,
+    RequestPlanePayloadCodec,
 };
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, ManyOut, PipelineError, ResponseStream, SingleIn,
@@ -110,9 +111,9 @@ impl EncodeBuffer {
     /// make the next one ask for less room than any frame could need.
     const MIN_RESERVE: usize = 64;
     /// Starting capacity for the private buffer a re-entrant `send` falls back
-    /// to. Matches what `encode_annotated_response` gives the pull path, so the
+    /// to. Shares the constant every other response encoder starts from, so the
     /// fallback does not grow from zero.
-    const SCRATCH_CAPACITY: usize = 128;
+    const SCRATCH_CAPACITY: usize = RESPONSE_ENCODE_CAPACITY_HINT;
 
     fn new() -> Self {
         Self {

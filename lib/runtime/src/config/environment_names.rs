@@ -316,6 +316,9 @@ pub mod kvbm {
 
 /// LLM (Language Model) inference environment variables
 pub mod llm {
+    /// Delay between tokens emitted by the token echo engine, in milliseconds.
+    pub const DYN_TOKEN_ECHO_DELAY_MS: &str = "DYN_TOKEN_ECHO_DELAY_MS";
+
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
 
@@ -718,6 +721,12 @@ pub mod request_plane {
     /// The process-wide value is cached on first use and defaults to "msgpack". Outbound requests
     /// use the destination endpoint's advertised codec, or "json" for a legacy destination.
     pub const DYN_REQUEST_PLANE_CODEC: &str = "DYN_REQUEST_PLANE_CODEC";
+
+    /// Maximum TCP request-plane message size, in bytes.
+    pub const DYN_TCP_MAX_MESSAGE_SIZE: &str = "DYN_TCP_MAX_MESSAGE_SIZE";
+
+    /// Buffer size above which the TCP decoder shrinks an empty buffer, in bytes.
+    pub const DYN_TCP_SHRINK_MESSAGE_SIZE: &str = "DYN_TCP_SHRINK_MESSAGE_SIZE";
 }
 
 /// TCP response stream server (CallHome listener) environment variables
@@ -976,6 +985,7 @@ mod tests {
             llm::DYN_LORA_ALLOCATION_PREDICTOR_TYPE,
             llm::DYN_LORA_ALLOCATION_EMA_ALPHA,
             llm::DYN_LORA_MCF_CONFIG,
+            llm::DYN_TOKEN_ECHO_DELAY_MS,
             llm::DYN_HTTP_SSE_KEEP_ALIVE_INTERVAL_MS,
             llm::metrics::DYN_METRICS_PREFIX,
             llm::audit::DYN_AUDIT_SINKS,
@@ -1027,6 +1037,8 @@ mod tests {
             router::DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS,
             request_plane::DYN_REQUEST_PLANE,
             request_plane::DYN_REQUEST_PLANE_CODEC,
+            request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
+            request_plane::DYN_TCP_SHRINK_MESSAGE_SIZE,
             // TCP Response Stream
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
             tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,

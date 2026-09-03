@@ -70,7 +70,7 @@ Each policy stage has one job:
 
 Each example keeps its implemented stages in these matching files. `lib.rs` parses parameters, composes the stages, and registers the policy. The stacked example keeps each scorer implementation in a separate file under [`scorer/`](simple-stacked-score-pick/src/scorer/).
 
-Read the [custom worker-selection guide](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) for input groups, method contracts, and error handling.
+Read the [custom worker-selection guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx) for input groups, method contracts, and error handling.
 
 ## 3. Parse Parameters and Build the Factory
 
@@ -263,14 +263,9 @@ Follow the [standalone EPP guide](../../../docs/fern/pages/kubernetes/kv-aware-r
 - Prove that filter failures, all-filtered candidate sets, scorer failures, and invalid picker rows do not reserve a worker.
 - Benchmark stateful or input-heavy policies at the expected worker count.
 
-The [custom routing API reference](../../../docs/fern/pages/developer-guide/advanced-customizations/custom-worker-selection.mdx) lists the available context and worker signals.
+The [custom routing API reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/custom-worker-selection.mdx) lists the available context and worker signals.
 
 ## Try the Policies End to End With Mocker
-
-> [!WARNING]
-> Online simulation with Mocker is temporarily unavailable. The `python -m dynamo.mocker` commands
-> in this section do not run in this release. This workflow will return through the unified
-> AISimulate surface in a future release.
 
 Use the embedded Python frontend for this local test. The standalone EPP uses Kubernetes `InferencePool` discovery. Complete [Run With the Python Frontend](#run-with-the-python-frontend) first so that the extension links this example catalog.
 
@@ -294,7 +289,7 @@ python -m dynamo.frontend \
 In the second terminal, start two aggregated Mocker workers:
 
 ```bash
-python -m dynamo.mocker \
+python3 -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --num-workers 2
@@ -346,7 +341,7 @@ The two flags override `worker_selection.prefill` and `worker_selection.decode`.
 In the second terminal, start two prefill Mocker workers:
 
 ```bash
-python -m dynamo.mocker \
+python3 -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --disaggregation-mode prefill \
@@ -359,7 +354,7 @@ python -m dynamo.mocker \
 In the third terminal, start two decode Mocker workers:
 
 ```bash
-python -m dynamo.mocker \
+python3 -m dynamo.mocker \
   --model-path Qwen/Qwen3-0.6B \
   --discovery-backend file \
   --disaggregation-mode decode \

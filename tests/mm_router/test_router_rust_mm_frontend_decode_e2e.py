@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""End-to-end test for MM-aware KV routing with frontend image decoding.
+"""End-to-end tests for MM-aware KV routing with frontend media decoding.
 
 Architecture:
   Frontend (Rust preprocessor + KV router + MediaLoader)
@@ -21,6 +21,9 @@ Without content hashing (e.g. if the code regressed to URL hashing in the
 decoded branch), the second request would miss and overlap would be
 text-prefix only.
 
+The video case applies the same contract to sampled RGB frames plus the
+model-visible temporal metadata and verifies grouped video hashes reach vLLM.
+
 Kept in a separate module from test_router_rust_mm_router_e2e.py so its
 module-scoped fixture (different worker, different DYN_NAMESPACE) does
 not collide with the URL-passthrough fixture's registry entries.
@@ -34,6 +37,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import BytesIO
+from pathlib import Path
 from typing import Any, Generator
 
 import pytest
@@ -50,13 +54,13 @@ from tests.utils.router_logs import (
 )
 
 VLLM_MM_MODEL = os.getenv("DYN_TEST_VLLM_MM_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
+VIDEO_NUM_FRAMES = int(os.getenv("DYN_TEST_MM_VIDEO_NUM_FRAMES", "4"))
 BLOCK_SIZE = 16
 # Distinct namespace from test_router_rust_mm_router_e2e.py so the two
 # modules' workers/frontends don't register against each other.
 NAMESPACE = "router-rust-mm-fed"
 
 pytestmark = [
-    pytest.mark.post_merge,
     pytest.mark.e2e,
     pytest.mark.vllm,
     pytest.mark.multimodal,
@@ -137,7 +141,10 @@ class VLLMWorkerFrontendDecodeProcess(ManagedProcess):
                     f'"enable_kv_cache_events": true}}'
                 ),
             ],
-            env=_make_process_env(DYN_SYSTEM_PORT=str(system_port)),
+            env=_make_process_env(
+                DYN_SYSTEM_PORT=str(system_port),
+                DYN_MM_VIDEO_NUM_FRAMES=str(VIDEO_NUM_FRAMES),
+            ),
             health_check_urls=[
                 (f"http://localhost:{system_port}/health", _check_ready)
             ],
@@ -222,6 +229,22 @@ def _build_payload(image_uris: list[str]) -> dict[str, Any]:
     }
 
 
+def _build_video_payload(video_uri: str) -> dict[str, Any]:
+    return {
+        "model": VLLM_MM_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this video."},
+                    {"type": "video_url", "video_url": {"url": video_uri}},
+                ],
+            }
+        ],
+        "max_tokens": 4,
+    }
+
+
 def _send(
     frontend_port: int,
     router_proc: ManagedProcess,
@@ -258,6 +281,7 @@ def _make_image_handler(image_map: dict[str, bytes]) -> type:
             if data is None:
                 self.send_error(404)
                 return
+            content_type = "video/mp4" if path.endswith(".mp4") else "image/png"
             range_hdr = self.headers.get("Range", "")
             if range_hdr.startswith("bytes="):
                 spec = range_hdr[len("bytes=") :]
@@ -275,14 +299,14 @@ def _make_image_handler(image_map: dict[str, bytes]) -> type:
                     return
                 chunk = data[lo : hi + 1]
                 self.send_response(206)
-                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(chunk)))
                 self.send_header("Content-Range", f"bytes {lo}-{hi}/{len(data)}")
                 self.end_headers()
                 self.wfile.write(chunk)
             else:
                 self.send_response(200)
-                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
@@ -319,6 +343,33 @@ def http_image_server_with_alias() -> Generator[dict[str, str], None, None]:
         thread.join(timeout=5)
 
 
+@pytest.fixture(scope="module")
+def http_video_server_with_alias() -> Generator[dict[str, str], None, None]:
+    (port,) = allocate_ports(count=1, start_port=18700)
+    media_dir = Path(__file__).resolve().parents[2] / "lib/llm/tests/data/media"
+    video_bytes = (media_dir / "240p_100.mp4").read_bytes()
+    secondary_video_bytes = (media_dir / "triangle_240p_10.mp4").read_bytes()
+    media_map = {
+        "/video_A.mp4": video_bytes,
+        "/video_A_alias.mp4": video_bytes,
+        "/video_B.mp4": secondary_video_bytes,
+    }
+    server = HTTPServer(("127.0.0.1", port), _make_image_handler(media_map))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield {
+            "primary": f"http://127.0.0.1:{port}/video_A.mp4",
+            "alias": f"http://127.0.0.1:{port}/video_A_alias.mp4",
+            "secondary": f"http://127.0.0.1:{port}/video_B.mp4",
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.mark.post_merge
 @pytest.mark.timeout(300)
 def test_frontend_decode_content_hash_collides_across_urls(
     start_frontend_decode_services,
@@ -344,10 +395,9 @@ def test_frontend_decode_content_hash_collides_across_urls(
         frontend_port, router_proc, _build_payload([alias_url]), "fed_alias"
     )
 
-    assert total_1 > 1 and total_2 > 1, (
-        f"expected non-trivial total blocks for MM request, got "
-        f"{total_1}, {total_2}"
-    )
+    assert (
+        total_1 > 1 and total_2 > 1
+    ), f"expected non-trivial total blocks for MM request, got {total_1}, {total_2}"
     assert overlap_2 > overlap_1 + 1, (
         f"frontend-decode mm_hash must be content-addressed: distinct URLs "
         f"serving the same image bytes should collide on the routing key. "
@@ -367,6 +417,7 @@ def test_frontend_decode_content_hash_collides_across_urls(
     )
 
 
+@pytest.mark.post_merge
 @pytest.mark.timeout(300)
 def test_frontend_decode_logs_decoded_bytes_source(
     start_frontend_decode_services,
@@ -394,3 +445,56 @@ def test_frontend_decode_logs_decoded_bytes_source(
         "`url_fallback` branch (descriptor lost source_storage) or the "
         "URL-passthrough branch (media_loader was None)."
     )
+
+
+@pytest.mark.pre_merge
+@pytest.mark.timeout(1800)
+def test_frontend_decoded_video_routes_by_sampled_content(
+    start_frontend_decode_services,
+    predownload_models,
+    http_video_server_with_alias,
+):
+    """Cover video identity reuse and separation under one model startup.
+
+    CI runs each selected test in its own pytest process, so keeping both video
+    scenarios here avoids paying the vLLM startup cost twice in pre-merge.
+    """
+    frontend_port, router_proc = start_frontend_decode_services
+    overlap_a1, total_a1, _ = _send(
+        frontend_port,
+        router_proc,
+        _build_video_payload(http_video_server_with_alias["primary"]),
+        "fed_video_a_primary",
+    )
+    overlap_a2, total_a2, data_a2 = _send(
+        frontend_port,
+        router_proc,
+        _build_video_payload(http_video_server_with_alias["alias"]),
+        "fed_video_a_alias",
+    )
+
+    assert total_a1 > 1 and total_a2 > 1
+    assert overlap_a2 > overlap_a1, (
+        "frontend-decoded aliases of the same video should share the sampled "
+        f"video routing key, got {overlap_a1}/{total_a1} then "
+        f"{overlap_a2}/{total_a2}"
+    )
+    cached_a2 = (data_a2.get("usage", {}).get("prompt_tokens_details") or {}).get(
+        "cached_tokens"
+    )
+    prompt_tokens_a2 = data_a2.get("usage", {}).get("prompt_tokens", 0)
+    assert cached_a2 is not None and cached_a2 > prompt_tokens_a2 // 2
+
+    overlap_b1, total_b1, _ = _send(
+        frontend_port,
+        router_proc,
+        _build_video_payload(http_video_server_with_alias["secondary"]),
+        "fed_video_b_primary",
+    )
+
+    assert total_b1 > 1
+    assert overlap_b1 < overlap_a2, (
+        "a distinct decoded video must not reuse video A's full routing prefix, "
+        f"got A warm={overlap_a2}/{total_a2}, B cold={overlap_b1}/{total_b1}"
+    )
+    assert "video routing metadata resolved" in router_proc.read_logs()
