@@ -247,7 +247,8 @@ privileges.
   needs. The Dynamo Operator ships with scoped roles; do not broaden them.
 - Apply **NetworkPolicies** so the internal communication planes, the workers, and the
   NIXL/RDMA fabric are reachable only by the components that need them, and never
-  from outside the cluster boundary.
+  from outside the cluster boundary. The operator does not ship a NetworkPolicy by
+  default.
 - Run pods as **non-root** with a read-only root filesystem where possible, drop
   unneeded Linux capabilities, and set resource limits.
 
