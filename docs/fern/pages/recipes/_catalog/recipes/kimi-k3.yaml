@@ -200,7 +200,7 @@ targets:
   recommended: false
   hardware:
     gpu: GB200
-    count: 32
+    count: 48
   runtime:
     framework: sglang
   topology: disaggregated
@@ -213,7 +213,7 @@ targets:
   - pd-kv-transfer
   workload:
     type: agentic-trace-replay
-    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit
+    traffic: Mooncake agentic trace, 64K median ISL / 400 median OSL, 90% KV cache hit, concurrency 24
     sla: 50 user output tok/s, TTFT P50 <= 5 s
   deploy:
     asset: recipes/kimi-k3/sglang/disagg-gb200-agentic/deploy.yaml
@@ -221,8 +221,7 @@ targets:
     tool: aiperf
     asset: recipes/kimi-k3/perf/perf.yaml
   expected_performance:
-    available: false
+    available: true
+    summary: 29.3 output tok/s/GPU, 77.9 user tok/s P50, TTFT P50 3090 ms at concurrency 24 (2P1D, 15% agentic trace subset)
 related_benchmarks: []
 maintainer: null
-gaps:
-- SGLang GB200 disaggregated does not yet have validated expected-performance numbers

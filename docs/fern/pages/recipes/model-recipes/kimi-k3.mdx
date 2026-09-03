@@ -105,7 +105,7 @@ Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-
 <div className="dynamo-target-picker-summary" data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
 <span><b>Checkpoint</b> moonshotai/Kimi-K3</span>
 <span><b>Precision</b> MXFP4 experts, FP8 KV</span>
-<span><b>GPUs</b> 32x GB200 (1P1D)</span>
+<span><b>GPUs</b> 48x GB200 (2P1D)</span>
 <span><b>Parallelism</b> Prefill TEP16; decode DCP16 attention, TEP16 MoE</span>
 <span><b>Routing</b> Load-aware</span>
 <span><b>Speculative decoding</b> DSPARK</span>
@@ -179,7 +179,7 @@ Each target below is a Dynamo + vLLM or SGLang deployment of Moonshot AI's Kimi-
 
 <div data-recipe-framework="sglang" data-sku="gb200" data-variant="disagg">
 
-- A Kubernetes cluster with the Dynamo platform installed and 32 GB200 GPUs available. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A Kubernetes cluster with the Dynamo platform installed and 48 GB200 GPUs available. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
 - The NVIDIA DRA driver with ComputeDomain support installed (required for multi-node NVLink).
 - A Hugging Face token with access to the checkpoint `moonshotai/Kimi-K3` and draft model `RadixArk/Kimi-K3-DSpark`.
 
@@ -358,7 +358,7 @@ The benchmark replays the Mooncake-format agentic trace described in [perf/READM
 | Workload | Framework | Recipe | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: |
 | Agentic (15% subset) | SGLang | Aggregated (2 workers) | GB200 | 28 | 32.9 | 56.1 | 828 |
-| Agentic (15% subset) | SGLang | Disaggregated (1P1D) | GB200 | | | | |
+| Agentic (15% subset) | SGLang | Disaggregated (2P1D) | GB200 | 24 | 29.3 | 77.9 | 3,090 |
 | Agentic (15% subset) | SGLang | Aggregated (3 workers) | GB300 | 54 | 84.4 | 51.3 | 573 |
 | Agentic (15% subset) | SGLang | Disaggregated (1P1D) | GB300 | 18 | 61.0 | 75.9 | 4,809 |
 | Agentic (15% subset) | vLLM | Aggregated (1 worker) | H200 | 4 | 3.54 | 39.95 | 3660 |
@@ -377,7 +377,7 @@ The benchmark replays the Mooncake-format agentic trace described in [perf/READM
 | SGLang | GB300 | Aggregated (3 workers) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
 | SGLang | GB300 | Disaggregated (1P1D) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
 | SGLang | GB200 | Aggregated (2 workers) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
-| SGLang | GB200 | Disaggregated (1P1D) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
+| SGLang | GB200 | Disaggregated (2P1D) | MXFP4 experts, FP8 KV | Load-aware | DSPARK | 1M |
 
 ## Limitations
 
