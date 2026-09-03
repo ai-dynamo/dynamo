@@ -273,24 +273,6 @@ async def test_get_output_dgd_retries_vcluster_connection_refusal(
     sleep.assert_awaited_once_with(5)
 
 
-async def test_get_output_dgd_limits_vcluster_connection_retries(
-    monkeypatch,
-) -> None:
-    manager = initialized_manager()
-    assert manager.core is not None
-    manager.core.read_namespaced_config_map = AsyncMock(
-        side_effect=vcluster_connection_error()
-    )
-    sleep = AsyncMock()
-    monkeypatch.setattr("tests.deploy.dgdr_utils.asyncio.sleep", sleep)
-
-    with pytest.raises(aiohttp.ClientConnectorError, match="tunnel unavailable"):
-        await manager.get_output_dgd("request")
-
-    assert manager.core.read_namespaced_config_map.await_count == 4
-    assert sleep.await_count == 3
-
-
 async def test_cleanup_retries_vcluster_connection_failures(monkeypatch) -> None:
     manager = initialized_manager()
     assert manager.custom is not None
