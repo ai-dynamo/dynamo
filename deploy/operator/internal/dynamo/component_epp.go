@@ -141,9 +141,9 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		container.Args = []string{}
 
 		// Pin HOME rather than inheriting whatever the image sets. The native
-		// EPP's default image (frontend) uses /home/dynamo while the standalone
-		// dynamo-epp image runs as nonroot, so without this the mount below can
-		// only be right for one of them.
+		// Rust EPP's default image (frontend) uses /home/dynamo while the
+		// standalone dynamo-epp image runs as nonroot, so without this the
+		// mount below can only be right for one of them.
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  "HOME",
 			Value: nativeRustEPPHome,
@@ -154,11 +154,29 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		// a mount that does not match is silently inert and the blobs grow on
 		// the container's writable layer instead.
 		//
-		// Native only. The legacy Go EPP reaches the same download_config
-		// through libdynamo_llm_capi, but once at startup over a fixed file set
-		// -- a few MB and a re-fetch on restart, for a component being removed.
-		// Its HOME is not derivable here either, since eppConfig selects the
-		// contract but not the image.
+		// Native Rust EPP only. Four contract/image combinations reach this
+		// renderer, and the image's own HOME differs across them:
+		//
+		//   contract  image                     image HOME      mounted
+		//   native    dynamo-frontend:1.5.0+    /home/dynamo    yes, HOME pinned
+		//   native    dynamo-epp:1.5.0          /home/nonroot   yes, HOME pinned
+		//   legacy    epp-image:1.4.x           /home/nonroot   no
+		//   legacy    dynamo-frontend:1.4.x     /home/dynamo    no
+		//
+		// The two native images disagree just as the legacy pair does, but the
+		// operator sets HOME itself above, so both converge on /home/dynamo and
+		// one mount path is right for both. The legacy rows get no such pin, and
+		// nothing available here picks between them: eppConfig names the launch
+		// contract, not the image, and the resolved runtime version only bounds
+		// it to "below 1.5.0", which both legacy images satisfy. A mount at the
+		// wrong HOME is worse than none -- nothing errors, the blobs go to the
+		// writable layer anyway, and the volume merely looks correct.
+		//
+		// Going without costs little there in any case: the legacy Go EPP does
+		// download the same files, calling the same download_config through
+		// libdynamo_llm_capi, but only once at startup over a fixed file set --
+		// so the loss is a few MB and a re-fetch on restart, on a component
+		// being removed.
 		//
 		// Withholding it re-renders existing legacy EPP Pods, so they roll once
 		// on an operator upgrade. That is a deliberate exception to the no-roll
@@ -188,7 +206,7 @@ func (e *EPPDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, 
 		podSpec.Volumes = append(podSpec.Volumes, volume)
 	} else {
 		// Backs the model-config cache mounted in GetBaseContainer, which is
-		// native-only; see there for why the legacy path goes without.
+		// native Rust EPP only; see there for why the legacy path goes without.
 		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 			Name: "hf-cache",
 			VolumeSource: corev1.VolumeSource{
