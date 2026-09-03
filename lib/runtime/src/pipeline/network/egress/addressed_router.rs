@@ -834,7 +834,10 @@ fn detect_worker_rejection_response(res_bytes: &[u8]) -> Option<DynamoError> {
         // worker scope for migration instead of reporting pool exhaustion.
         ErrorType::WorkerOverloaded
     } else if res_bytes.starts_with(UNAVAILABLE_PREFIX) {
-        ErrorType::Unavailable
+        // Same scope: the addressed server is up but has no handler for this
+        // instance, or is closing its worker pool. Other instances may still
+        // serve the endpoint, so this stays migratable.
+        ErrorType::WorkerUnavailable
     } else {
         return None;
     };
@@ -860,11 +863,16 @@ mod rejection_detection_tests {
     }
 
     #[test]
-    fn unavailable_payload_maps_to_unavailable() {
-        // The TCP server answers a request for an unregistered path with this prefix.
-        let err = detect_worker_rejection_response(b"Server unavailable: unknown endpoint x")
-            .expect("should detect unavailable");
-        assert_eq!(err.error_type(), ErrorType::Unavailable);
+    fn unavailable_payload_maps_to_worker_unavailable() {
+        // Both payloads come from the one server addressed by the dispatch, so they
+        // must keep worker scope rather than report the whole pool as unavailable.
+        for payload in [
+            b"Server unavailable: unknown endpoint x".as_slice(),
+            b"Server unavailable: worker pool channel closed".as_slice(),
+        ] {
+            let err = detect_worker_rejection_response(payload).expect("should detect unavailable");
+            assert_eq!(err.error_type(), ErrorType::WorkerUnavailable);
+        }
     }
 
     #[test]
