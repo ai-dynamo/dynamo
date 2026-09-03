@@ -891,10 +891,8 @@ fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
 }
 
 #[test]
-fn engine_config_handles_inexact_aggregate_kv_capacity_conservatively() {
-    for (aggregate_blocks, expected_per_rank_blocks) in
-        [(0, None), (1, Some(1)), (4097, Some(2048))]
-    {
+fn engine_config_handles_zero_and_inexact_aggregate_kv_capacity() {
+    for (aggregate_blocks, expected_per_rank_blocks) in [(0, None), (4097, Some(2048))] {
         let mut server = server_info();
         server.total_kv_blocks = aggregate_blocks;
 

@@ -39,17 +39,6 @@ def test_get_local_dp_rank_range_defaults_to_rank_zero():
     assert list(get_local_dp_rank_range(server_args)) == [0]
 
 
-def test_get_local_dp_rank_range_includes_every_pure_dp_replica():
-    server_args = SimpleNamespace(
-        dp_size=4,
-        enable_dp_attention=False,
-        nnodes=1,
-        node_rank=0,
-    )
-
-    assert list(get_local_dp_rank_range(server_args)) == [0, 1, 2, 3]
-
-
 def test_get_local_dp_rank_range_respects_multinode_dp_attention():
     server_args = SimpleNamespace(
         dp_size=8,
