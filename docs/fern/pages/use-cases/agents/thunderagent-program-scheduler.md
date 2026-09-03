@@ -148,14 +148,14 @@ scheduler.tick resumed=<N> still_paused=<M>
 
 ThunderAgent serves two Dynamo runtime endpoints alongside `generate`:
 
-- `<namespace>.thunderagent_router.status` returns scheduler state, active/paused program counts, per-program lifecycle state, per-worker utilization, and request counters.
-- `<namespace>.thunderagent_router.metrics` returns counters and gauges shaped for quick operational checks, including created/ended programs, admitted/paused requests, pause/resume totals, forced resumes, and per-worker utilization.
+- `<namespace>.thunderagent_router.status` returns scheduler state, active/paused program counts, per-program lifecycle state, per-replica utilization keyed `<worker_id>:<dp_rank>`, and request counters (including `unpinned_turns`).
+- `<namespace>.thunderagent_router.metrics` returns counters and gauges shaped for quick operational checks, including created/ended programs, admitted/paused requests, pause/resume totals, forced resumes, `unpinned_turns_total`, and per-replica utilization.
 
 These are Dynamo runtime endpoints, not public OpenAI HTTP routes. Use them from another Dynamo component or a small runtime client connected to the same namespace.
 
 ### Response Route Proof
 
-For response-level debugging, request `nvext.extra_fields=["engine_data"]`. Only when that field is requested, ThunderAgent adds a `thunderagent` object under `nvext.engine_data` on generated chunks, with fields such as `handled_by`, `path`, `program_id`, `was_paused`, `waited_seconds`, `priority_jump`, `assigned_worker_hint`, and `selected_worker_id` when worker attribution is available.
+For response-level debugging, request `nvext.extra_fields=["engine_data"]`. Only when that field is requested, ThunderAgent adds a `thunderagent` object under `nvext.engine_data` on generated chunks, with fields such as `handled_by`, `path`, `program_id`, `was_paused`, `waited_seconds`, `priority_jump`, `assigned_worker_hint`, `assigned_dp_rank_hint`, and `selected_worker_id` with `selected_dp_rank` when worker attribution is available.
 
 For per-request tracing (token counts, cache hits, worker placement), the router also integrates with [Agent Tracing](agent-tracing.md#enable-output): set `DYN_REQUEST_TRACE=1` on the frontend to land a `request_end` record per LLM call. Harness tool-event spans are separate: they require `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` plus a configured publisher.
 

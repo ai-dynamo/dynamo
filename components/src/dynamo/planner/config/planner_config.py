@@ -463,7 +463,7 @@ class PlannerConfig(BaseModel):
         ge=0,
         le=65535,
         description=(
-            "Port for the localhost-only runtime minimum-endpoint API. "
+            "Port for the localhost-only runtime endpoint and GPU-budget API. "
             "Set to 0 to disable the API."
         ),
     )

@@ -116,15 +116,36 @@ A validated `request_end` trace preserves request schedule, input and output len
 | Live replay | Measure serving latency, throughput, cache behavior, and regressions on real workers | Synthetic requests do not rerun training, rewards, tools, or original model decisions. |
 | Offline DynoSim | Compare worker counts, routing, cache capacity, topology, and planner choices | Results are directional until calibrated against a matching live run. |
 
-Run DynoSim directly on the captured trace:
+Save an offline prediction config as `/tmp/rl-run/dynosim.yaml`. Set the `engine` identity to match
+the deployment that produced the trace, and list every trace shard explicitly under `paths`:
+
+```yaml
+traffic:
+  source:
+    type: trace
+    format: dynamo
+    paths:
+    - /tmp/rl-run/request-trace.000000.jsonl.gz
+  load: {type: trace_timestamps, speedup: 1.0}
+engine:
+  mode: aggregated
+  model: Qwen/Qwen3-0.6B
+  hardware: h200_sxm
+  backend: vllm
+  workers:
+    aggregated:
+      parallelism: {replicas: 4, tensor: 1, pipeline: 1, attention_data: 1, moe_tensor: 1, moe_expert: 1}
+router:
+  policy: kv_router
+```
+
+Run DynoSim on the captured trace:
 
 ```bash
-python -m dynamo.replay /tmp/rl-run/request-trace.*.jsonl.gz \
-  --trace-format dynamo \
-  --replay-mode offline \
-  --router-mode kv_router \
-  --num-workers 4 \
-  --report-json /tmp/rl-run/dynosim-report.json
+aisimulate predict \
+  --stack dynamo \
+  --config /tmp/rl-run/dynosim.yaml \
+  --output-dir /tmp/rl-run/dynosim-output
 ```
 
 Change one serving factor at a time. Use [DynoSim](../../cli/operations/simulation-with-dynosim/overview.md) for the complete workflow and [Agent Trace Replay](../agents/agent-simulation.mdx) for the live synthetic replay path.
