@@ -18,7 +18,6 @@
 package dynamo
 
 import (
-	"github.com/google/go-cmp/cmp"
 	"maps"
 	"regexp"
 	"slices"
@@ -27,6 +26,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
