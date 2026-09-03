@@ -344,99 +344,6 @@ pub(super) enum WorkerSelectionPolicyState {
     Default(DefaultWorkerPicker),
     /// Policy-local state owned and called serially by one scheduler queue actor.
     Custom(RefCell<CustomWorkerSelectionState>),
-    /// A caller-owned selector that sees the request and a config-erased view of
-    /// the eligible workers. Lets a host run its own `WorkerSelector` on a
-    /// partition whose worker-config type it does not know.
-    Delegated(Box<dyn DelegatedWorkerSelector>),
-}
-
-/// Worker configuration reduced to the [`WorkerConfigLike`] surface, so a
-/// selector written against one host's config type can run on any partition.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ErasedWorkerConfig {
-    pub data_parallel_start_rank: u32,
-    pub data_parallel_size: u32,
-    pub max_num_batched_tokens: Option<u64>,
-    pub total_kv_blocks: Option<u64>,
-    pub native_offloading_capacity_tokens: Option<u64>,
-    pub taints: std::collections::HashSet<String>,
-    pub stable_routing_id: Option<String>,
-    pub topology_domains: Option<HashMap<String, String>>,
-    pub kv_transfer_domain: Option<String>,
-    pub kv_transfer_enforcement: Option<crate::protocols::KvTransferEnforcement>,
-    pub kv_transfer_preferred_weight: Option<f32>,
-}
-
-impl ErasedWorkerConfig {
-    pub fn from_config_like<C: WorkerConfigLike>(config: &C) -> Self {
-        Self {
-            data_parallel_start_rank: config.data_parallel_start_rank(),
-            data_parallel_size: config.data_parallel_size(),
-            max_num_batched_tokens: config.max_num_batched_tokens(),
-            total_kv_blocks: config.total_kv_blocks(),
-            native_offloading_capacity_tokens: config.native_offloading_capacity_tokens(),
-            taints: config.taints().clone(),
-            stable_routing_id: config.stable_routing_id().map(str::to_owned),
-            topology_domains: config.topology_domains().cloned(),
-            kv_transfer_domain: config.kv_transfer_domain().map(str::to_owned),
-            kv_transfer_enforcement: config.kv_transfer_enforcement(),
-            kv_transfer_preferred_weight: config.kv_transfer_preferred_weight(),
-        }
-    }
-}
-
-impl WorkerConfigLike for ErasedWorkerConfig {
-    fn data_parallel_start_rank(&self) -> u32 {
-        self.data_parallel_start_rank
-    }
-    fn data_parallel_size(&self) -> u32 {
-        self.data_parallel_size
-    }
-    fn max_num_batched_tokens(&self) -> Option<u64> {
-        self.max_num_batched_tokens
-    }
-    fn total_kv_blocks(&self) -> Option<u64> {
-        self.total_kv_blocks
-    }
-    fn native_offloading_capacity_tokens(&self) -> Option<u64> {
-        self.native_offloading_capacity_tokens
-    }
-    fn taints(&self) -> &std::collections::HashSet<String> {
-        &self.taints
-    }
-    fn stable_routing_id(&self) -> Option<&str> {
-        self.stable_routing_id.as_deref()
-    }
-    fn topology_domains(&self) -> Option<&HashMap<String, String>> {
-        self.topology_domains.as_ref()
-    }
-    fn kv_transfer_domain(&self) -> Option<&str> {
-        self.kv_transfer_domain.as_deref()
-    }
-    fn kv_transfer_enforcement(&self) -> Option<crate::protocols::KvTransferEnforcement> {
-        self.kv_transfer_enforcement
-    }
-    fn kv_transfer_preferred_weight(&self) -> Option<f32> {
-        self.kv_transfer_preferred_weight
-    }
-}
-
-/// A caller-owned selector a partition policy delegates to. Receives the
-/// scheduling request and a config-erased view of the eligible workers.
-pub trait DelegatedWorkerSelector: Send + Sync {
-    fn required_worker_inputs(&self) -> WorkerInputs;
-
-    fn uses_exclusive_affinity_target(&self) -> bool {
-        false
-    }
-
-    fn select_worker(
-        &self,
-        workers: &HashMap<WorkerId, ErasedWorkerConfig>,
-        request: &SchedulingRequest,
-        eligibility: RoutingEligibility<'_>,
-        block_size: u32,
-    ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
 
 pub(super) enum WorkerSelectionPolicyStateRef<'a> {
@@ -478,19 +385,6 @@ impl WorkerSelectionPolicy {
         picker: Box<dyn WorkerPicker>,
     ) -> Self {
         Self::new_with_filters(kv_router_config, worker_label, Vec::new(), scorers, picker)
-    }
-
-    /// Run `selector` for every selection on this partition.
-    pub fn delegated(
-        kv_router_config: KvRouterConfig,
-        worker_label: &'static str,
-        selector: Box<dyn DelegatedWorkerSelector>,
-    ) -> Self {
-        Self {
-            kv_router_config,
-            worker_label,
-            state: WorkerSelectionPolicyState::Delegated(selector),
-        }
     }
 
     /// Build a custom policy from ordered filters, additive scorers, and one picker.
@@ -696,13 +590,7 @@ pub(super) fn collect_custom_candidates<C: WorkerConfigLike>(
 
 impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
     fn uses_exclusive_affinity_target(&self) -> bool {
-        match &self.state {
-            WorkerSelectionPolicyState::Default(_) => true,
-            WorkerSelectionPolicyState::Custom(_) => false,
-            WorkerSelectionPolicyState::Delegated(selector) => {
-                selector.uses_exclusive_affinity_target()
-            }
-        }
+        matches!(&self.state, WorkerSelectionPolicyState::Default(_))
     }
 
     fn required_worker_inputs(&self) -> WorkerInputs {
@@ -712,7 +600,6 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
                 let state = state.borrow();
                 state.filter_inputs | state.scorer_picker_inputs
             }
-            WorkerSelectionPolicyState::Delegated(selector) => selector.required_worker_inputs(),
         }
     }
 
@@ -728,13 +615,6 @@ impl<C: WorkerConfigLike> WorkerSelector<C> for WorkerSelectionPolicy {
             }
             WorkerSelectionPolicyState::Custom(state) => {
                 WorkerSelectionPolicyStateRef::Custom(state)
-            }
-            WorkerSelectionPolicyState::Delegated(selector) => {
-                let erased: HashMap<WorkerId, ErasedWorkerConfig> = workers
-                    .iter()
-                    .map(|(id, config)| (*id, ErasedWorkerConfig::from_config_like(config)))
-                    .collect();
-                return selector.select_worker(&erased, request, eligibility, block_size);
             }
         };
         select_worker_with_policy(
