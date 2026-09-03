@@ -25,7 +25,7 @@ func TestEnsureServerSidecar(t *testing.T) {
 		}},
 	}
 
-	EnsureServerSidecar(podSpec, &podSpec.Containers[0])
+	EnsureServerSidecar(podSpec, &podSpec.Containers[0], false)
 
 	require.Len(t, podSpec.InitContainers, 1)
 	server := &podSpec.InitContainers[0]
@@ -52,8 +52,8 @@ func TestEnsureServerSidecarIdempotent(t *testing.T) {
 	podSpec := &corev1.PodSpec{
 		Containers: []corev1.Container{{Name: "main", Image: "test:latest"}},
 	}
-	EnsureServerSidecar(podSpec, &podSpec.Containers[0])
-	EnsureServerSidecar(podSpec, &podSpec.Containers[0])
+	EnsureServerSidecar(podSpec, &podSpec.Containers[0], false)
+	EnsureServerSidecar(podSpec, &podSpec.Containers[0], false)
 
 	assert.Len(t, podSpec.InitContainers, 1)
 }
@@ -62,7 +62,7 @@ func TestEnsureServerSidecarDoesNotAddCheckpointControl(t *testing.T) {
 	podSpec := &corev1.PodSpec{
 		Containers: []corev1.Container{{Name: "main", Image: "test:latest"}},
 	}
-	EnsureServerSidecar(podSpec, &podSpec.Containers[0])
+	EnsureServerSidecar(podSpec, &podSpec.Containers[0], false)
 
 	for _, v := range podSpec.Volumes {
 		if v.Name == "gms-control" {

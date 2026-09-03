@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from tests.utils.vllm_omni import vllm_omni_skip_reason
+
+if _omni_skip_reason := vllm_omni_skip_reason():
+    pytest.skip(_omni_skip_reason, allow_module_level=True)
+
 try:
     from dynamo.vllm.omni.args import OmniConfig  # noqa: F401
 except (ImportError, OSError, NotImplementedError):
@@ -174,10 +179,6 @@ vllm_omni_configs = {
             pytest.mark.xpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(1200),
-            pytest.mark.skip(
-                reason="vLLM-Omni audio release/v0.19.0rc1 uses the pre-vLLM 0.20 "
-                "GPUModelRunner._bookkeeping_sync signature"
-            ),
         ],
         model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
         request_payloads=[

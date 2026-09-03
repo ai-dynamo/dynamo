@@ -24,30 +24,34 @@ Dynamo publishes nightly builds from `main`. Nightlies let you try the latest fe
 
 Every night, the [Nightly CI pipeline](https://github.com/ai-dynamo/dynamo/blob/main/.github/workflows/nightly-ci.yml) builds `main` and publishes:
 
-- **Container images (CUDA 13):** `vllm-runtime-nightly`, `sglang-runtime-nightly`, `tensorrtllm-runtime-nightly`, `dynamo-frontend-nightly`, `kubernetes-operator-nightly`, and `dynamo-planner-nightly` to NGC.
-- **Helm chart:** `dynamo-platform-nightly` to NGC, published when the operator image was staged in the same run.
+- **Runtime container images (CUDA 13):** `vllm-runtime-nightly`, `sglang-runtime-nightly`, and `tensorrtllm-runtime-nightly` to NGC, each with an Elastic Fabric Adapter (EFA) variant under a `-efa` tag suffix.
+- **Component container images:** `kubernetes-operator-nightly`, `dynamo-planner-nightly`, and `dynamo-frontend-nightly` to NGC.
 - **Python wheels:** `ai-dynamo`, `ai-dynamo-runtime`, and `kvbm` to the NVIDIA prerelease index at [pypi.nvidia.com](https://pypi.nvidia.com/).
+- **Helm chart:** [`dynamo-platform-nightly`](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/helm-charts/dynamo-platform-nightly) to the NGC Helm registry, kept separate from the stable `dynamo-platform` chart.
 
-Nightly deliberately does **not** publish `snapshot-agent` or Rust crates. For those, use a [stable or pre-release build](release-artifacts.mdx).
+The runtime images and the wheels gate the release: if any of them fails to build, that night publishes nothing. The component images, the EFA variants, and the Helm chart stage fail-soft, so a flake in one of them skips that artifact for the night without holding back the rest.
+
+Nightly does not publish Rust crates — for those, use a [stable or pre-release build](release-artifacts.mdx).
 
 ## Installing Nightly Containers
 
-Nightly images live in their own `-nightly` NGC repositories so they cannot be pulled accidentally in place of a stable image. Every nightly image carries a floating `:latest` tag for the most recent build, and an immutable `:YYYYMMDD-<shortsha>` tag for the specific build.
+Nightly images live in their own `-nightly` NGC repositories so they cannot be pulled accidentally in place of a stable image. Every nightly build pushes an immutable `YYYYMMDD-<shortsha>` tag and moves the `latest` tag to that build.
 
 ```bash
-# Latest nightly. This tag moves every night.
+# Most recent nightly
 docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest
 docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime-nightly:latest
 docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime-nightly:latest
-docker pull nvcr.io/nvidia/ai-dynamo/dynamo-frontend-nightly:latest
-docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator-nightly:latest
-docker pull nvcr.io/nvidia/ai-dynamo/dynamo-planner-nightly:latest
 
-# A specific nightly, pinned. Use this for anything reproducible.
-docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260825-f7de8eb
+# Pin one nightly build
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260830-4c7e981
+
+# EFA variant, floating or pinned
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:latest-efa
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime-nightly:20260830-4c7e981-efa
 ```
 
-Pin the immutable tag for CI jobs, benchmarks, and bug reports, so the build under test does not change overnight. Browse the **Tags** tab on a nightly repository to find the tag you want.
+Pin the dated tag for anything you need to reproduce later: `latest` moves every night, so the image behind it changes underneath you. The runtime repositories also carry a `nightly` tag, but it stopped tracking `main` in July 2026 — use `latest` or a dated tag instead. The component repositories publish the same dated tags and a `latest` float, without the `nightly` alias or the EFA variants.
 
 ## Installing Nightly Wheels
 
@@ -61,7 +65,7 @@ uv pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo
 pip install --pre --extra-index-url https://pypi.nvidia.com/ ai-dynamo
 
 # Pin a specific nightly wheel
-uv pip install --pre --extra-index-url https://pypi.nvidia.com/ "ai-dynamo[vllm]==1.4.0.dev20260803"
+uv pip install --pre --extra-index-url https://pypi.nvidia.com/ "ai-dynamo[vllm]==1.5.0.dev20260831"
 ```
 
 Backend extras such as `ai-dynamo[vllm]` and `ai-dynamo[sglang]` use the same flags. For TensorRT-LLM, use the nightly container rather than a PyPI extra.
