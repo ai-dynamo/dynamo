@@ -857,7 +857,6 @@ def test_build_sampling_params_leaves_engine_stopping_alone_for_zero_min_tokens(
         }
     )
 
-    # A zero floor asks for nothing, so the engine keeps its own stop conditions.
     assert "min_new_tokens" not in sampling_params
     assert sampling_params["stop_token_ids"] == [7]
     assert "ignore_eos" not in sampling_params

@@ -104,7 +104,7 @@ class SglangUtils:
         # SGLang rejects min_new_tokens without a tokenizer, so Dynamo's decoder enforces
         # the floor and the engine is held open with ignore_eos until it stops the request.
         hold_engine_open = False
-        if stop_conditions.min_tokens:
+        if (stop_conditions.min_tokens or 0) > 0:
             if use_sglang_tokenizer:
                 sampling_params["min_new_tokens"] = stop_conditions.min_tokens
             else:

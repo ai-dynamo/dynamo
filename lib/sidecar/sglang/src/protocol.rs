@@ -62,8 +62,12 @@ pub(crate) fn build_generate_request(
             }
         }
     }
+    let mut stop = request.stop_conditions.stop.clone().unwrap_or_default();
     if hold_engine_open {
+        // The `Decoder` withholds every stop until the floor is reached, stop strings
+        // included, so any stop left with the engine can end the stream below the floor.
         stop_token_ids.clear();
+        stop.clear();
     }
 
     let guided = request.sampling_options.guided_decoding.as_ref();
@@ -77,7 +81,7 @@ pub(crate) fn build_generate_request(
         repetition_penalty: request.sampling_options.repetition_penalty,
         max_new_tokens,
         min_new_tokens: None,
-        stop: request.stop_conditions.stop.clone().unwrap_or_default(),
+        stop,
         stop_token_ids,
         ignore_eos: if hold_engine_open {
             Some(true)
@@ -656,6 +660,7 @@ mod tests {
         request.stop_conditions.min_tokens = Some(4);
         request.stop_conditions.stop_token_ids = Some(vec![7]);
         request.stop_conditions.stop_token_ids_hidden = Some(vec![151643]);
+        request.stop_conditions.stop = Some(vec!["STOP".to_string()]);
 
         let mapped = build_generate_request(
             &request,
@@ -671,8 +676,10 @@ mod tests {
         // this path, so the parameter is not sent. The Decoder holds the same min_tokens.
         assert_eq!(sampling.min_new_tokens, None);
         // The Decoder can only withhold stops, not manufacture tokens, so the engine must be
-        // held open past the threshold: it gets no stop ids and is told to ignore EOS.
+        // held open past the threshold: it gets no stop ids, no stop strings, and is told to
+        // ignore EOS.
         assert!(sampling.stop_token_ids.is_empty());
+        assert!(sampling.stop.is_empty());
         assert_eq!(sampling.ignore_eos, Some(true));
         // max_tokens still bounds the over-generation this buys.
         assert_eq!(sampling.max_new_tokens, Some(8));
@@ -683,6 +690,7 @@ mod tests {
         let mut request = request();
         request.stop_conditions.stop_token_ids = Some(vec![7]);
         request.stop_conditions.stop_token_ids_hidden = Some(vec![151643]);
+        request.stop_conditions.stop = Some(vec!["STOP".to_string()]);
 
         let mapped = build_generate_request(
             &request,
@@ -696,6 +704,7 @@ mod tests {
 
         assert_eq!(sampling.min_new_tokens, None);
         assert_eq!(sampling.stop_token_ids, vec![7, 151643]);
+        assert_eq!(sampling.stop, vec!["STOP".to_string()]);
         assert_eq!(sampling.ignore_eos, None);
     }
 
