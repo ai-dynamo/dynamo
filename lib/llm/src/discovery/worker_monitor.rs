@@ -281,6 +281,10 @@ impl WorkerLoadState {
 
         self.kv_total_blocks.clear();
         if let Some(total_blocks) = total_kv_blocks {
+            // TODO(rank-aware-kv-capacity): resolve each rank from a validated advertisement and
+            // retain its provenance. Aggregate/representative estimates may support approximate
+            // routing, but must not trip this hard overload threshold. Exclusion remains
+            // worker-granular until the overloaded-worker contract itself becomes rank-aware.
             self.kv_total_blocks.extend(
                 declared_dp_ranks
                     .iter()

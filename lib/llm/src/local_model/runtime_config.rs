@@ -199,8 +199,13 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u32>,
 
-    /// Physical KV-cache capacity for each router-visible data-parallel rank.
-    /// This is per rank, never the aggregate capacity of the worker process.
+    /// Compatibility KV-cache capacity applied to each router-visible data-parallel rank.
+    /// Some adapters derive this scalar from aggregate or representative-rank data.
+    ///
+    /// TODO(rank-aware-kv-capacity): Add an additive per-rank advertisement whose resolver
+    /// preserves exact/conservative/estimated provenance. Exact heterogeneous producers must
+    /// dual-write their minimum here for old readers; aggregate division stays an adapter-only
+    /// estimate and must not silently become a hard-admission denominator.
     pub total_kv_blocks: Option<u64>,
 
     pub max_num_seqs: Option<u64>,

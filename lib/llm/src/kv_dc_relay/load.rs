@@ -180,6 +180,9 @@ fn load_ranks_from_configs(
         // registering process and uses zero as an unknown-capacity sentinel. Runtime
         // config does not carry backend identity, and zero is never a usable pressure
         // denominator for any backend, so normalize it fail-closed for every engine.
+        // TODO(rank-aware-kv-capacity): resolve exact/conservative capacity per rank and carry
+        // quality into the pool snapshot. Estimated fallbacks must not count as authoritative
+        // rank coverage merely because every rank received a scalar.
         let total_kv_blocks = config.total_kv_blocks.filter(|&total| total != 0);
         for dp_rank in config.data_parallel_start_rank..end {
             ranks.insert(

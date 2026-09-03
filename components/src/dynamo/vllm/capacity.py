@@ -32,6 +32,8 @@ def per_rank_kv_blocks(
     """Estimate rank capacity from vLLM's process-wide DP aggregate.
 
     The arithmetic mean assumes homogeneous ranks; exact division does not prove equality.
+    TODO(rank-aware-kv-capacity): consume a per-rank Control response when vLLM exposes one,
+    then publish the rank vector atomically instead of upgrading this quotient to exact data.
     """
     if total_kv_blocks is None:
         return None

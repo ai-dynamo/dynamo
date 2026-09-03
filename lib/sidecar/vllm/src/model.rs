@@ -168,6 +168,8 @@ impl DiscoveredModel {
         let data_parallel_size = u64::from(self.data_parallel_size());
         // Control exposes only the aggregate across DP engines. This arithmetic-mean
         // estimate assumes homogeneous ranks; exact division does not prove they are equal.
+        // TODO(rank-aware-kv-capacity): consume a per-rank Control response when available and
+        // publish it atomically; never relabel this quotient as exact for hard admission.
         let per_rank = total_kv_blocks / data_parallel_size;
 
         if per_rank == 0 {
