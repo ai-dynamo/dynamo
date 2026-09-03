@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, List, Literal, Optional
 
+import aiohttp
+import httpx
 import kr8s
 import pytest
 import requests
@@ -20,6 +22,7 @@ from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+from tests.utils.client import send_request
 from tests.utils.test_output import resolve_test_output_path
 
 logger = logging.getLogger(__name__)
@@ -49,6 +52,8 @@ DEFAULT_REQUEST_TIMEOUT = 120
 # Minimum response content length to validate that the model is generating meaningful output.
 # This matches the validation threshold from the original shell-based deployment tests.
 MIN_RESPONSE_CONTENT_LENGTH = 100
+VCLUSTER_CONNECTION_RETRY_LIMIT = 3
+VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS = 5
 
 
 def validate_chat_response(
@@ -1472,28 +1477,42 @@ class ManagedDeployment:
         return Service.get(full_service_name, namespace=self.namespace)
 
     def get_pods(self, service_names: list[str] | None = None) -> dict[str, list[Pod]]:
-        result: dict[str, list[Pod]] = {}
-
         if not service_names:
             service_names = [service.name for service in self.deployment_spec.services]
 
-        for original_name in service_names:
-            # List pods using stable labels that are not affected by worker hash suffixes.
-            label_selector = (
-                f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name},"
-                f"nvidia.com/dynamo-component={original_name}"
-            )
+        for attempt in range(VCLUSTER_CONNECTION_RETRY_LIMIT + 1):
+            try:
+                result: dict[str, list[Pod]] = {}
+                for original_name in service_names:
+                    # List pods using stable labels that are not affected by worker hash suffixes.
+                    label_selector = (
+                        f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name},"
+                        f"nvidia.com/dynamo-component={original_name}"
+                    )
 
-            pods: list[Pod] = []
+                    result[original_name] = list(  # type: ignore[arg-type]
+                        kr8s.get(
+                            "pods",
+                            namespace=self.namespace,
+                            label_selector=label_selector,
+                        )
+                    )
+                return result
+            except httpx.TransportError as error:
+                if attempt == VCLUSTER_CONNECTION_RETRY_LIMIT:
+                    raise
+                self._logger.warning(
+                    "vCluster API connection failed while listing pods; "
+                    "the port-forward watchdog may restore the tunnel, "
+                    "retrying in %ss (%s/%s): %s",
+                    VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
+                    attempt + 1,
+                    VCLUSTER_CONNECTION_RETRY_LIMIT,
+                    error,
+                )
+                time.sleep(VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
 
-            for pod in kr8s.get(
-                "pods", namespace=self.namespace, label_selector=label_selector
-            ):
-                pods.append(pod)  # type: ignore[arg-type]
-
-            result[original_name] = pods
-
-        return result
+        raise AssertionError("unreachable")
 
     def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
         directory = os.path.join(self.log_dir, service_name)
@@ -1614,8 +1633,11 @@ class ManagedDeployment:
         """
         Delete the DynamoGraphDeployment CR.
         """
-        try:
-            if self._deployment_name and self._custom_api is not None:
+        if not self._deployment_name or self._custom_api is None:
+            return
+
+        for attempt in range(VCLUSTER_CONNECTION_RETRY_LIMIT + 1):
+            try:
                 await self._custom_api.delete_namespaced_custom_object(
                     group="nvidia.com",
                     version=self.deployment_spec.api_version,
@@ -1623,9 +1645,25 @@ class ManagedDeployment:
                     plural="dynamographdeployments",
                     name=self._deployment_name,
                 )
-        except exceptions.ApiException as e:
-            if e.status != 404:  # Ignore if already deleted
+                return
+            except exceptions.ApiException as error:
+                if error.status == 404:  # Ignore if already deleted
+                    return
                 raise
+            except aiohttp.ClientConnectionError as error:
+                if attempt == VCLUSTER_CONNECTION_RETRY_LIMIT:
+                    raise
+                self._logger.warning(
+                    "vCluster API connection failed while deleting deployment %s; "
+                    "the port-forward watchdog may restore the tunnel, "
+                    "retrying in %ss (%s/%s): %s",
+                    self._deployment_name,
+                    VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
+                    attempt + 1,
+                    VCLUSTER_CONNECTION_RETRY_LIMIT,
+                    error,
+                )
+                await asyncio.sleep(VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
 
     def port_forward(
         self, pod: Pod, remote_port: int, max_connection_attempts: int = 3
@@ -1722,6 +1760,47 @@ class ManagedDeployment:
             )
             return None
 
+    def send_request_with_port_forward_retry(
+        self,
+        pod: Pod,
+        remote_port: int,
+        endpoint: str,
+        payload: dict[str, Any],
+        timeout: float,
+        port_forward: Any,
+        request_sender: Any = send_request,
+    ) -> requests.Response:
+        """Retry one request after rebuilding a dropped pod port-forward."""
+        active_port_forward = port_forward
+
+        for attempt in range(2):
+            url = f"http://localhost:{active_port_forward.local_port}{endpoint}"
+            try:
+                return request_sender(url, payload, timeout=timeout, method="POST")
+            except (requests.ConnectionError, httpx.TransportError) as error:
+                if attempt == 1:
+                    raise
+
+                self._logger.warning(
+                    "Frontend request transport failed; rebuilding the pod "
+                    "port-forward and retrying once: %s",
+                    error,
+                )
+                try:
+                    active_port_forward.stop()
+                except Exception as stop_error:
+                    self._logger.debug(
+                        "Error stopping failed frontend port-forward: %s", stop_error
+                    )
+
+                time.sleep(VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
+                replacement = self.port_forward(pod, remote_port)
+                if replacement is None:
+                    raise
+                active_port_forward = replacement
+
+        raise AssertionError("unreachable")
+
     async def _cleanup(self):
         try:
             # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
@@ -1764,13 +1843,29 @@ class ManagedDeployment:
             await self._create_deployment()
             await self._wait_for_ready(timeout=self.readiness_timeout)
 
-        except:
-            await self._cleanup()
+        except BaseException:
+            try:
+                await self._cleanup()
+            except Exception:
+                self._logger.exception(
+                    "Cleanup failed while handling deployment setup failure; "
+                    "preserving the original error"
+                )
             raise
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self._cleanup()
+        if exc_type is None:
+            await self._cleanup()
+            return None
+
+        try:
+            await self._cleanup()
+        except Exception:
+            self._logger.exception(
+                "Cleanup failed while handling test failure; preserving the original error"
+            )
+        return False
 
 
 async def main():

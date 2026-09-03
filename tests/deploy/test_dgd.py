@@ -33,7 +33,7 @@ from tests.deploy.dgd_utils import (
     _get_workspace_dir,
     validate_chat_response,
 )
-from tests.utils.client import send_request, wait_for_model_availability
+from tests.utils.client import wait_for_model_availability
 
 logger = logging.getLogger(__name__)
 
@@ -200,8 +200,10 @@ async def test_deployment(
             model_ready
         ), f"Model '{model}' did not become available within the timeout period"
 
-        # Send test request
-        url = f"{base_url}{endpoint}"
+        # Send test request. A transient vCluster API tunnel interruption also
+        # tears down the pod port-forward, so rebuild it and retry once on
+        # transport errors. Chat completion requests are side-effect free in
+        # this test, making one retry safe.
         payload = {
             "model": model,
             "messages": [{"role": "user", "content": TEST_PROMPT}],
@@ -214,8 +216,13 @@ async def test_deployment(
             if validate_agg_logging
             else 0
         )
-        response = send_request(
-            url, payload, timeout=float(DEFAULT_REQUEST_TIMEOUT), method="POST"
+        response = deployment.send_request_with_port_forward_retry(
+            pod=frontend_pod,
+            remote_port=port,
+            endpoint=endpoint,
+            payload=payload,
+            timeout=float(DEFAULT_REQUEST_TIMEOUT),
+            port_forward=port_forward,
         )
 
         # Validate response
