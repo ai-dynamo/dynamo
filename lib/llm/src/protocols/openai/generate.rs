@@ -295,7 +295,7 @@ pub struct GenerateResponseChoice {
 
     pub finish_reason: Option<String>,
 
-    pub routed_experts: Option<String>,
+    pub routed_experts: Option<Value>,
 }
 
 /// Token-in/token-out generation response.
@@ -323,7 +323,7 @@ struct GenerateChoiceAcc {
     token_ids: Vec<crate::protocols::TokenIdType>,
     logprobs: Option<Vec<Value>>,
     finish_reason: Option<String>,
-    routed_experts: Option<String>,
+    routed_experts: Option<Value>,
 }
 
 impl GenerateChoiceAcc {
@@ -547,11 +547,7 @@ impl GenerateAggregator {
         });
         if let Some(engine_data) = output.engine_data.as_ref() {
             if let Some(routed_experts) = engine_data.get("routed_experts") {
-                choice.routed_experts = Some(
-                    serde_json::from_value(routed_experts.clone()).map_err(|error| {
-                        anyhow::anyhow!("invalid generate routed_experts payload: {error}")
-                    })?,
-                );
+                choice.routed_experts = Some(routed_experts.clone());
             }
             if let Some(kv_transfer_params) = engine_data.get("kv_transfer_params") {
                 self.kv_transfer_params = Some(kv_transfer_params.clone());
@@ -1041,8 +1037,8 @@ mod tests {
         assert_eq!(response.choices[0].token_ids, Some(vec![100, 101]));
         assert_eq!(response.choices[0].finish_reason.as_deref(), Some("length"));
         assert_eq!(
-            response.choices[0].routed_experts.as_deref(),
-            Some("encoded-experts")
+            response.choices[0].routed_experts,
+            Some(json!("encoded-experts"))
         );
         let logprobs = response.choices[0]
             .logprobs
@@ -1105,35 +1101,40 @@ mod tests {
             .expect("aggregate routed experts");
 
         assert_eq!(response.choices[0].index, 0);
-        assert_eq!(
-            response.choices[0].routed_experts.as_deref(),
-            Some("experts-0")
-        );
+        assert_eq!(response.choices[0].routed_experts, Some(json!("experts-0")));
         assert_eq!(response.choices[1].index, 1);
-        assert_eq!(
-            response.choices[1].routed_experts.as_deref(),
-            Some("experts-1")
-        );
+        assert_eq!(response.choices[1].routed_experts, Some(json!("experts-1")));
     }
 
     #[tokio::test]
-    async fn generate_response_rejects_malformed_routed_experts() {
+    async fn generate_response_preserves_structured_routed_experts() {
         let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
             token_ids: vec![100],
             index: Some(0),
             finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-            engine_data: Some(json!({"routed_experts": {"unexpected": "object"}})),
+            engine_data: Some(json!({
+                "routed_experts": {
+                    "data": "AQIDBA==",
+                    "shape": [2, 1, 2],
+                    "start": 3,
+                    "dtype": "uint8"
+                }
+            })),
             ..Default::default()
         })]);
 
-        let error = GenerateResponse::from_annotated_stream(stream, "req-routed".to_string())
+        let response = GenerateResponse::from_annotated_stream(stream, "req-routed".to_string())
             .await
-            .expect_err("malformed routed experts must fail");
+            .expect("structured routed experts must pass through");
 
-        assert!(
-            error
-                .to_string()
-                .contains("invalid generate routed_experts payload")
+        assert_eq!(
+            response.choices[0].routed_experts,
+            Some(json!({
+                "data": "AQIDBA==",
+                "shape": [2, 1, 2],
+                "start": 3,
+                "dtype": "uint8"
+            }))
         );
     }
 
