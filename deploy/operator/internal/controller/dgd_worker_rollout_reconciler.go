@@ -1221,9 +1221,9 @@ func (r *dgdWorkerRolloutReconciler) listOldWorkerDCDs(
 	return workers, nil
 }
 
-// workerDCDObservesTargetHash reports whether a worker DCD owned by dgd with
+// dcdObservesWorkerHash reports whether a worker DCD owned by dgd with
 // the given targetHash is visible in the informer cache.
-func (r *dgdWorkerRolloutReconciler) workerDCDObservesTargetHash(
+func (r *dgdWorkerRolloutReconciler) dcdObservesWorkerHash(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	targetHash string,

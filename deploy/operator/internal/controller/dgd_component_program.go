@@ -173,7 +173,7 @@ func (p *componentProgram) reconcileMultinodeWorkerRollout(
 		return nil
 	}
 
-	observed, err := p.rollout.workerDCDObservesTargetHash(ctx, dgd, transition.next.v2)
+	observed, err := p.rollout.dcdObservesWorkerHash(ctx, dgd, transition.next.v2)
 	if err != nil {
 		return failWorkloadProgram(reasonRollingUpdateFailed, err)
 	}

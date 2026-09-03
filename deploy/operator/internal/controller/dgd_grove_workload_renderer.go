@@ -227,10 +227,10 @@ func podCliqueSetUsesGroveWorkerHashSuffix(
 	return true
 }
 
-// podCliqueSetObservesGroveWorkerGeneration reports whether the informer snapshot
+// podCliqueSetObservesWorkerHash reports whether the informer snapshot
 // contains one coherent observed worker generation. A write receipt is not an
 // observation: callers must pass the PodCliqueSet read before any sync.
-func podCliqueSetObservesGroveWorkerGeneration(
+func podCliqueSetObservesWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
 	allowLegacy bool,

@@ -102,7 +102,7 @@ func (r *groveWorkloadsReconciler) Reconcile(
 	}
 	// A successful write only acknowledges the requested change. Project the parent
 	// hash after a later informer observation sees the target suffix on every worker clique.
-	observedWorkerHash, err := podCliqueSetObservesGroveWorkerGeneration(dgd, renderedPodCliqueSet.existing, workerHashTransition.initialize)
+	observedWorkerHash, err := podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing, workerHashTransition.initialize)
 	if err != nil {
 		return ReconcileResult{}, failWorkloadProgram(
 			reasonRollingUpdateFailed,
