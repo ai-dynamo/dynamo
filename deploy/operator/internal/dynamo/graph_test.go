@@ -33,6 +33,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
+	vllmmutation "github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/mutation/vllm"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	gmsruntime "github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
@@ -4586,7 +4587,7 @@ func TestGenerateGrovePodCliqueSet_VLLMMultinodeDRA(t *testing.T) {
 	require.Contains(t, cliques, "agg-wkr")
 	leader := cliques["agg-ldr"].Spec.PodSpec.Containers[0]
 	worker := cliques["agg-wkr"].Spec.PodSpec.Containers[0]
-	assert.Contains(t, leader.Args, distributedExecutorFlag)
+	assert.Contains(t, leader.Args, vllmmutation.DistributedExecutorFlag)
 	assert.Contains(t, leader.Args, "--nnodes")
 	assert.Contains(t, leader.Args, "--node-rank")
 	assert.Contains(t, leader.Args, "0")
