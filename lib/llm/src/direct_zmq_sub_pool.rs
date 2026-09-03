@@ -86,6 +86,11 @@ enum GroupCommand {
         started: oneshot::Sender<()>,
         release: oneshot::Receiver<()>,
     },
+    #[cfg(test)]
+    Dispatch {
+        message: ZmqWireMessage,
+        completed: oneshot::Sender<DispatchOutcome>,
+    },
 }
 
 struct SocketGroup {
@@ -114,6 +119,13 @@ pub(crate) struct DirectZmqSubRegistration {
     pub(crate) group_id: u64,
     pub(crate) receiver: mpsc::Receiver<DirectZmqSubItem>,
     pub(crate) disconnected: CancellationToken,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DispatchOutcome {
+    Delivered,
+    RouteClosed { publisher_id: u64, generation: u64 },
+    GroupCancelled,
 }
 
 struct PendingRegistration {
@@ -321,7 +333,21 @@ impl DirectZmqSubPool {
         })
     }
 
-    pub(crate) async fn unregister(&self, group_id: u64, publisher_id: u64, generation: u64) {
+    pub(crate) async fn unregister(
+        &self,
+        registration: DirectZmqSubRegistration,
+        publisher_id: u64,
+        generation: u64,
+    ) {
+        let DirectZmqSubRegistration {
+            group_id,
+            receiver,
+            disconnected: _,
+        } = registration;
+        // Wake a group task that may be waiting to send to this publisher before
+        // queuing the ordered socket removal below.
+        drop(receiver);
+
         let (completed, group_to_stop) = {
             let (completed_tx, completed_rx) = oneshot::channel();
             let group =
@@ -437,13 +463,7 @@ async fn run_socket_group(
                         let _ = completed.send(result);
                     }
                     GroupCommand::Remove { publisher_id, generation, completed } => {
-                        let result = match routes.get(&publisher_id) {
-                            Some(route) if route.generation == generation => {
-                                let route = routes.remove(&publisher_id).expect("route was present");
-                                socket.remove_endpoint(&route.endpoint)
-                            }
-                            _ => Ok(()),
-                        };
+                        let result = remove_route(&mut socket, &mut routes, publisher_id, generation);
                         if let Some(completed) = completed {
                             let _ = completed.send(result);
                         }
@@ -454,6 +474,29 @@ async fn run_socket_group(
                         tokio::select! {
                             _ = cancellation_token.cancelled() => return,
                             _ = release => {}
+                        }
+                    }
+                    #[cfg(test)]
+                    GroupCommand::Dispatch { message, completed } => {
+                        let outcome = dispatch_group_message(
+                            group_id,
+                            &topic,
+                            message,
+                            &codec,
+                            &routes,
+                            &cancellation_token,
+                        )
+                        .await;
+                        let keep_running = handle_dispatch_outcome(
+                            outcome,
+                            group_id,
+                            &topic,
+                            &mut socket,
+                            &mut routes,
+                        );
+                        let _ = completed.send(outcome);
+                        if !keep_running {
+                            return;
                         }
                     }
                 }
@@ -470,20 +513,81 @@ async fn run_socket_group(
                         return;
                     }
                 };
-                dispatch_group_message(group_id, &topic, message, &codec, &routes);
+                let outcome = dispatch_group_message(
+                    group_id,
+                    &topic,
+                    message,
+                    &codec,
+                    &routes,
+                    &cancellation_token,
+                )
+                .await;
+                if !handle_dispatch_outcome(
+                    outcome,
+                    group_id,
+                    &topic,
+                    &mut socket,
+                    &mut routes,
+                ) {
+                    return;
+                }
                 tokio::task::consume_budget().await;
             }
         }
     }
 }
 
-fn dispatch_group_message(
+fn handle_dispatch_outcome(
+    outcome: DispatchOutcome,
+    group_id: u64,
+    topic: &str,
+    socket: &mut DynamicZmqSubSocket,
+    routes: &mut HashMap<u64, GroupRoute>,
+) -> bool {
+    let DispatchOutcome::RouteClosed {
+        publisher_id,
+        generation,
+    } = outcome
+    else {
+        return outcome == DispatchOutcome::Delivered;
+    };
+
+    if let Err(error) = remove_route(socket, routes, publisher_id, generation) {
+        tracing::warn!(
+            %error,
+            group_id,
+            topic,
+            publisher_id,
+            generation,
+            "Failed to disconnect closed direct-ZMQ publisher lane"
+        );
+    }
+    true
+}
+
+fn remove_route(
+    socket: &mut DynamicZmqSubSocket,
+    routes: &mut HashMap<u64, GroupRoute>,
+    publisher_id: u64,
+    generation: u64,
+) -> Result<()> {
+    match routes.get(&publisher_id) {
+        Some(route) if route.generation == generation => {
+            let route = routes.remove(&publisher_id).expect("route was present");
+            socket.remove_endpoint(&route.endpoint)
+        }
+        _ => Ok(()),
+    }
+}
+
+async fn dispatch_group_message(
     group_id: u64,
     topic: &str,
     message: ZmqWireMessage,
     codec: &Codec,
     routes: &HashMap<u64, GroupRoute>,
-) {
+    cancellation_token: &CancellationToken,
+) -> DispatchOutcome {
     let Some(route) = routes.get(&message.publisher_id) else {
         tracing::warn!(
             group_id,
@@ -491,7 +595,7 @@ fn dispatch_group_message(
             publisher_id = message.publisher_id,
             "Dropping direct-ZMQ envelope from an unknown publisher"
         );
-        return;
+        return DispatchOutcome::Delivered;
     };
     let item = match codec.decode_envelope(&message.payload) {
         Ok(envelope)
@@ -532,19 +636,25 @@ fn dispatch_group_message(
     };
 
     match route.sender.try_send(item) {
-        Ok(()) => {}
-        Err(mpsc::error::TrySendError::Full(_)) => tracing::warn!(
-            group_id,
-            topic,
-            publisher_id = message.publisher_id,
-            "Direct-ZMQ publisher lane is full; dropping newest envelope"
-        ),
-        Err(mpsc::error::TrySendError::Closed(_)) => tracing::warn!(
-            group_id,
-            topic,
-            publisher_id = message.publisher_id,
-            "Direct-ZMQ publisher lane is closed; dropping envelope"
-        ),
+        Ok(()) => DispatchOutcome::Delivered,
+        Err(mpsc::error::TrySendError::Full(item)) => {
+            let result = tokio::select! {
+                biased;
+                _ = cancellation_token.cancelled() => return DispatchOutcome::GroupCancelled,
+                result = route.sender.send(item) => result,
+            };
+            match result {
+                Ok(()) => DispatchOutcome::Delivered,
+                Err(_) => DispatchOutcome::RouteClosed {
+                    publisher_id: message.publisher_id,
+                    generation: route.generation,
+                },
+            }
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => DispatchOutcome::RouteClosed {
+            publisher_id: message.publisher_id,
+            generation: route.generation,
+        },
     }
 }
 
@@ -564,8 +674,6 @@ async fn stop_group(mut group: SocketGroup) {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-
     use super::*;
 
     fn config_lookup(value: Option<&str>) -> impl FnMut(&str) -> Option<OsString> {
@@ -597,6 +705,23 @@ mod tests {
             DirectZmqSubItem::Envelope(envelope) => envelope.sequence,
             other => panic!("expected envelope, got {other:?}"),
         }
+    }
+
+    fn dispatch_on_group(
+        pool: &DirectZmqSubPool,
+        group_id: u64,
+        message: ZmqWireMessage,
+    ) -> oneshot::Receiver<DispatchOutcome> {
+        let (completed, completion) = oneshot::channel();
+        pool.inner
+            .lock()
+            .groups
+            .get(&group_id)
+            .expect("socket group must exist")
+            .command_tx
+            .send(GroupCommand::Dispatch { message, completed })
+            .expect("socket group must be running");
+        completion
     }
 
     #[test]
@@ -653,92 +778,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_publisher_lane_does_not_block_a_sibling() {
-        let (full_tx, mut full_rx) = mpsc::channel(1);
-        full_tx
-            .try_send(DirectZmqSubItem::Envelope(ValidatedEnvelope {
-                publisher_id: 1,
-                sequence: 0,
-                published_at: 0,
-                payload: Bytes::new(),
-            }))
-            .unwrap();
-        let (sibling_tx, mut sibling_rx) = mpsc::channel(2);
-        let routes = HashMap::from([
-            (
-                1,
-                GroupRoute {
-                    endpoint: "tcp://127.0.0.1:1".to_string(),
-                    generation: 1,
-                    sender: full_tx,
-                    disconnected: CancellationToken::new(),
-                },
-            ),
-            (
-                2,
-                GroupRoute {
-                    endpoint: "tcp://127.0.0.1:2".to_string(),
-                    generation: 1,
-                    sender: sibling_tx,
-                    disconnected: CancellationToken::new(),
-                },
-            ),
-        ]);
-        let codec = Codec::default();
+    async fn full_lane_backpressures_and_preserves_order() {
+        let pool = pool("kv_metrics", 64, 1);
+        let mut source = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
+        let mut sibling = pool.register(2, "tcp://127.0.0.1:31002", 1).await.unwrap();
+        assert_eq!(source.group_id, sibling.group_id);
 
-        dispatch_group_message(
-            1,
-            "kv_metrics",
-            wire_message("kv_metrics", 1, 1),
-            &codec,
-            &routes,
+        assert_eq!(
+            dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 1, 0),)
+                .await
+                .unwrap(),
+            DispatchOutcome::Delivered
         );
-        dispatch_group_message(
-            1,
-            "kv_metrics",
-            wire_message("kv_metrics", 2, 1),
-            &codec,
-            &routes,
-        );
-        dispatch_group_message(
-            1,
-            "kv_metrics",
-            wire_message("kv_metrics", 2, 2),
-            &codec,
-            &routes,
-        );
+        let mut blocked =
+            dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 1, 1));
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            blocked.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
 
-        assert_eq!(sequence(full_rx.recv().await.unwrap()), 0);
-        assert_eq!(sequence(sibling_rx.recv().await.unwrap()), 1);
-        assert_eq!(sequence(sibling_rx.recv().await.unwrap()), 2);
+        assert_eq!(sequence(source.receiver.recv().await.unwrap()), 0);
+        assert_eq!(blocked.await.unwrap(), DispatchOutcome::Delivered);
+        assert_eq!(sequence(source.receiver.recv().await.unwrap()), 1);
+
+        assert_eq!(
+            dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 2, 0),)
+                .await
+                .unwrap(),
+            DispatchOutcome::Delivered
+        );
+        assert_eq!(sequence(sibling.receiver.recv().await.unwrap()), 0);
+        pool.shutdown().await;
     }
 
     #[tokio::test]
-    async fn publisher_lane_preserves_a_burst_above_the_old_limit() {
-        let (sender, mut receiver) = mpsc::channel(128);
-        let routes = HashMap::from([(
-            1,
-            GroupRoute {
-                endpoint: "tcp://127.0.0.1:1".to_string(),
-                generation: 1,
-                sender,
-                disconnected: CancellationToken::new(),
-            },
-        )]);
-        let codec = Codec::default();
+    async fn unregister_unblocks_a_full_lane_and_keeps_the_group_alive() {
+        let pool = pool("kv_metrics", 64, 1);
+        let source = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
+        let mut sibling = pool.register(2, "tcp://127.0.0.1:31002", 1).await.unwrap();
+        let disconnected = source.disconnected.clone();
+        assert_eq!(source.group_id, sibling.group_id);
 
-        for sequence in 1..=65 {
-            dispatch_group_message(
-                1,
-                "kv-events",
-                wire_message("kv-events", 1, sequence),
-                &codec,
-                &routes,
-            );
-        }
-        for expected in 1..=65 {
-            assert_eq!(sequence(receiver.recv().await.unwrap()), expected);
-        }
+        assert_eq!(
+            dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 1, 0),)
+                .await
+                .unwrap(),
+            DispatchOutcome::Delivered
+        );
+        let blocked = dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 1, 1));
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(Duration::from_secs(1), pool.unregister(source, 1, 1))
+            .await
+            .expect("unregister must interrupt a blocked lane send");
+        assert_eq!(
+            blocked.await.unwrap(),
+            DispatchOutcome::RouteClosed {
+                publisher_id: 1,
+                generation: 1,
+            }
+        );
+        assert!(disconnected.is_cancelled());
+
+        assert_eq!(
+            dispatch_on_group(&pool, sibling.group_id, wire_message("kv_metrics", 2, 0),)
+                .await
+                .unwrap(),
+            DispatchOutcome::Delivered
+        );
+        assert_eq!(sequence(sibling.receiver.recv().await.unwrap()), 0);
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_a_blocked_lane_send() {
+        let pool = pool("kv_metrics", 64, 1);
+        let source = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
+        let disconnected = source.disconnected.clone();
+
+        assert_eq!(
+            dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 1, 0),)
+                .await
+                .unwrap(),
+            DispatchOutcome::Delivered
+        );
+        let blocked = dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 1, 1));
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(Duration::from_secs(1), pool.shutdown())
+            .await
+            .expect("shutdown must interrupt a blocked lane send");
+        assert_eq!(blocked.await.unwrap(), DispatchOutcome::GroupCancelled);
+        assert!(disconnected.is_cancelled());
+        assert_eq!(pool.group_count(), 0);
+        assert!(pool.register(2, "tcp://127.0.0.1:31002", 1).await.is_err());
     }
 
     #[tokio::test]
@@ -755,19 +889,29 @@ mod tests {
         )]);
         let codec = Codec::default();
 
-        dispatch_group_message(
-            1,
-            "kv_metrics",
-            wire_message("kv-events", 1, 1),
-            &codec,
-            &routes,
+        assert_eq!(
+            dispatch_group_message(
+                1,
+                "kv_metrics",
+                wire_message("kv-events", 1, 1),
+                &codec,
+                &routes,
+                &CancellationToken::new(),
+            )
+            .await,
+            DispatchOutcome::Delivered
         );
-        dispatch_group_message(
-            1,
-            "kv_metrics",
-            wire_message("kv_metrics", 1, 2),
-            &codec,
-            &routes,
+        assert_eq!(
+            dispatch_group_message(
+                1,
+                "kv_metrics",
+                wire_message("kv_metrics", 1, 2),
+                &codec,
+                &routes,
+                &CancellationToken::new(),
+            )
+            .await,
+            DispatchOutcome::Delivered
         );
 
         assert!(matches!(
@@ -806,9 +950,10 @@ mod tests {
     async fn removing_last_publisher_stops_group_and_shutdown_closes_pool() {
         let pool = pool("kv-events", 64, 128);
         let registration = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
+        let disconnected = registration.disconnected.clone();
 
-        pool.unregister(registration.group_id, 1, 1).await;
-        assert!(registration.disconnected.is_cancelled());
+        pool.unregister(registration, 1, 1).await;
+        assert!(disconnected.is_cancelled());
         assert_eq!(pool.group_count(), 0);
 
         pool.shutdown().await;

@@ -445,12 +445,12 @@ where
         .await
         {
             group_pool
-                .unregister(registration.group_id, publisher_id, generation)
+                .unregister(registration, publisher_id, generation)
                 .await;
             break;
         }
         group_pool
-            .unregister(registration.group_id, publisher_id, generation)
+            .unregister(registration, publisher_id, generation)
             .await;
         if !sleep_or_cancel(retry_delay, &cancel).await {
             break;

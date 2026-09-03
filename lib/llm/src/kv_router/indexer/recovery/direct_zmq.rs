@@ -719,7 +719,7 @@ async fn run_source(
         };
         if cancel.is_cancelled() {
             group_pool
-                .unregister(registration.group_id, publisher_id, task_generation)
+                .unregister(registration, publisher_id, task_generation)
                 .await;
             return;
         }
@@ -757,7 +757,7 @@ async fn run_source(
         };
         if !matches!(activation_outcome, ActivationOutcome::Activated) {
             group_pool
-                .unregister(registration.group_id, publisher_id, task_generation)
+                .unregister(registration, publisher_id, task_generation)
                 .await;
             if matches!(activation_outcome, ActivationOutcome::Cancelled) {
                 return;
@@ -786,7 +786,7 @@ async fn run_source(
             _ = consume_connection(publisher_id, &mut registration.receiver, &client, &metrics) => false,
         };
         group_pool
-            .unregister(registration.group_id, publisher_id, task_generation)
+            .unregister(registration, publisher_id, task_generation)
             .await;
         if cancelled {
             return;
