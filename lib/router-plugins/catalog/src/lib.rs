@@ -3,6 +3,9 @@
 
 //! The empty router-plugin catalog used when a custom image does not replace Dynamo's catalog
 //! slot.
+//!
+//! A replacement catalog must export both [`register`] and [`register_request_classifiers`];
+//! Dynamo calls both at startup even when one registry stays empty.
 
 use dynamo_kv_router::scheduling::{RequestClassifierRegistry, RequestClassifierRegistryError};
 use dynamo_kv_router::services::selection::{

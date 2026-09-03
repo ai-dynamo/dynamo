@@ -121,6 +121,15 @@ pub(super) fn replay_selector_with_seed(
     {
         anyhow::bail!("custom worker-selection policy {instance:?} is not supported by replay");
     }
+    if let Some(classifier) = config
+        .request_classifier_config()
+        .map_err(anyhow::Error::from)?
+    {
+        anyhow::bail!(
+            "custom request classifier {:?} is not supported by replay",
+            classifier.classifier_type()
+        );
+    }
 
     Ok(match selector_seed {
         #[cfg(feature = "replay-bench")]
