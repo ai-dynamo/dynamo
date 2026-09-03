@@ -135,7 +135,7 @@ The common local environment variables are:
 | `DYN_NAMESPACE` | unset | Exact Dynamo discovery namespace fallback. If unset, the binary uses `vllm-agg`. |
 | `DYN_COMPONENT_NAME` | `backend` | Dynamo component that exposes the `generate` endpoint. |
 | `DYN_ENFORCE_DISAGG` | `false` | Deprecated and ignored. Registered worker types determine routing topology and readiness. |
-| `DYN_KUBE_DISCOVERY_MODE` | `pod` | Kubernetes discovery identity mode. `container` (intra-pod GMS failover) is supported under the default `DYN_EPP_MODE=dynamo`, which resolves per-container worker identities from reflected Pods. `DYN_EPP_MODE=standalone` rejects it at startup: standalone selects workers from the Pod's aggregate `Ready` condition, which a pod holding an intentionally-standby engine container never satisfies. Deferred there, not permanent — see `TODO(epp-standalone-container-discovery)` in `src/epp_standalone_config.rs`. |
+| `DYN_KUBE_DISCOVERY_MODE` | `pod` | Kubernetes discovery identity mode. `container` (intra-pod GMS failover) is supported under the default `DYN_EPP_MODE=dynamo`, which resolves per-container worker identities from reflected Pods. `DYN_EPP_MODE=standalone` rejects it at startup: standalone selects workers from the Pod's aggregate `Ready` condition, which a pod holding an intentionally-standby engine container never satisfies. Standalone support is planned rather than ruled out, tracked by [DEP #11661](https://github.com/ai-dynamo/dynamo/issues/11661) (EPP Embedded SelectionService Interface). |
 | `RUST_LOG` | `info` | Tracing log filter. |
 
 ## Cleaning

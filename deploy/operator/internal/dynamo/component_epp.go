@@ -157,21 +157,30 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		// unbounded toward node DiskPressure and fails outright under
 		// readOnlyRootFilesystem: true.
 		//
-		// Only the native EPP gets this mount. The legacy Go EPP downloads no
-		// model configs, and its HOME cannot be derived from the launch contract
-		// alone: eppConfig selects the contract but not the image, so a legacy
-		// component on the frontend image (HOME=/home/dynamo) would take the
-		// nonroot path and mount the cache somewhere nothing ever reads.
+		// Only the native EPP gets this mount. The legacy Go EPP does reach the
+		// same download_config -- it statically links libdynamo_llm_capi, whose
+		// create_routers -> init_preprocessor path calls it, and resolves the
+		// same $HOME-rooted cache (its image sets no ENV HOME, so the runtime
+		// derives HOME=/home/nonroot from /etc/passwd). But it runs once at
+		// startup over a fixed set of metadata files, so the cost of dropping
+		// the volume is a few MB on the writable layer and a re-fetch on
+		// restart. That is bounded, unlike the growth the native path guards
+		// against, and not worth a volume for a component being removed.
+		//
+		// Its HOME cannot be derived here in any case: eppConfig selects the
+		// contract but not the image, so keying a mount path off it would put
+		// the cache where nothing reads it for a legacy component running on
+		// the frontend image (HOME=/home/dynamo).
 		//
 		// Withholding it from the legacy path re-renders every existing legacy
 		// EPP Pod, so those components roll once on an operator upgrade even
 		// though their DGD did not change. That is a deliberate exception to the
 		// rule that an operator-only upgrade must not roll unchanged workloads
-		// (deploy/operator/internal/AGENTS.md): the volume being withdrawn was
-		// never read on this path, and the Go EPP it was shaped for is
-		// deprecated, with its source removed in this release. The enumerated
-		// legacy Pod contract that upgrade compatibility actually promises --
-		// CLI flags, config volume, Service selector -- is untouched.
+		// (deploy/operator/internal/AGENTS.md), taken on deprecation grounds:
+		// the Go EPP this was shaped for is deprecated, with its source removed
+		// in this release. The enumerated legacy Pod contract that upgrade
+		// compatibility actually promises -- CLI flags, config volume, Service
+		// selector -- is untouched.
 		//
 		// A HOME supplied through podTemplate still wins over the one set above
 		// (MergeEnvs gives user env precedence), which would re-break the
@@ -199,10 +208,11 @@ func (e *EPPDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, 
 		podSpec.Volumes = append(podSpec.Volumes, volume)
 	} else {
 		// Backs the model-config cache mounted in GetBaseContainer. Native EPP
-		// only: the legacy Go EPP downloads no model configs, so the volume
-		// would be dead weight and its mount path unknowable from the contract.
-		// See GetBaseContainer for why withholding it from the legacy path is a
-		// deliberate exception to the no-roll-on-operator-upgrade rule.
+		// only: the legacy Go EPP's own config download is bounded and small
+		// enough not to warrant a volume, and its mount path is not derivable
+		// from the launch contract. See GetBaseContainer for both, and for why
+		// withholding it from the legacy path is a deliberate exception to the
+		// no-roll-on-operator-upgrade rule.
 		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 			Name: "hf-cache",
 			VolumeSource: corev1.VolumeSource{

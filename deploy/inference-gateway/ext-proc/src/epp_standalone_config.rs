@@ -231,8 +231,8 @@ impl EppStandaloneConfig {
 }
 
 /// Reject `DYN_KUBE_DISCOVERY_MODE=container` (e.g. intra-pod GMS failover)
-/// in standalone mode. Deferred, not a permanent restriction — see
-/// TODO(epp-standalone-container-discovery) below for what unblocks it.
+/// in standalone mode. Standalone support is planned rather than ruled out;
+/// see the note below for what it requires.
 ///
 /// Unlike `DYN_EPP_MODE=dynamo` (which already resolves per-container worker
 /// identities; see `hash_container_name` / `pod_worker_ids` in `epp.rs`),
