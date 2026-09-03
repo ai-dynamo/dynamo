@@ -103,6 +103,13 @@ pub(super) async fn await_with_phase_policy<T>(
 /// KV blocks remote prefill staged for that worker are not released and will sit
 /// until they expire. Reported separately from an ordinary client disconnect,
 /// which is not a leak, so the two are distinguishable in logs.
+///
+/// The distinction is carried by the warning and the message, not by a new
+/// [`ErrorType`]. `Cancelled` is listed in `migration::NON_MIGRATABLE`, so any
+/// other type would make migration retry the request on a second worker for a
+/// client that has already gone away — spending a fresh dispatch to fix nothing,
+/// since the blocks are staged for the *original* worker and only it can free
+/// them.
 fn cleanup_budget_exhausted(context_id: &str, stage: &'static str) -> Error {
     tracing::warn!(
         request_id = %context_id,
