@@ -16,15 +16,13 @@ use std::str::FromStr;
 
 use dynamo_kv_router::WorkerType;
 
-/// Default pod label key naming a worker's role, per DEP #11661's environment
-/// contract. Overridable with `DYN_EPP_WORKER_ROLE_LABEL`.
+/// Default pod label key naming a worker's role; `DYN_EPP_WORKER_ROLE_LABEL`
+/// overrides it, for example to reuse the operator's component-type label.
 ///
-/// Deliberately not the operator's `nvidia.com/dynamo-component-type`: that key
-/// is the operator's own workload-selector contract and admits the value
-/// `worker`, which names no disaggregated stage. The standalone path fronts
-/// user-managed raw engine Deployments that carry no `nvidia.com/*` labels at
-/// all, so the operator's key would match nothing anyway.
-pub const DEFAULT_WORKER_ROLE_LABEL: &str = "nvidia.com/role";
+/// Not the operator's `nvidia.com/dynamo-component-type` by default: that key
+/// admits the value `worker`, which names no disaggregated stage, and the raw
+/// engine Deployments this path fronts do not carry it.
+pub const DEFAULT_WORKER_ROLE_LABEL: &str = "nvidia.com/dynamo-worker-role";
 
 /// The stage a discovered worker serves.
 ///

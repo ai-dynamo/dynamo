@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_role_label_defaults_to_the_dep_contract() {
+    fn worker_role_label_has_a_default() {
         let cfg = cfg_with(&[]).unwrap();
         assert_eq!(cfg.worker_role_label, DEFAULT_WORKER_ROLE_LABEL);
         assert_eq!(cfg.topology_mode, EppTopologyMode::Aggregated);
@@ -1104,7 +1104,7 @@ mod tests {
     #[test]
     fn valid_prefixed_and_bare_role_label_keys_pass() {
         for key in [
-            "nvidia.com/role",
+            "nvidia.com/dynamo-worker-role",
             "role",
             "a.b.c/some_name.with-punct",
             "x/y",
