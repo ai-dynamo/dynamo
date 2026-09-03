@@ -181,37 +181,64 @@ struct ReservationBooking {
     routing_hashes: Option<Vec<LocalBlockHash>>,
 }
 
-/// Host-supplied hooks applied to every partition scheduler the core creates.
-///
-/// A host that owns request transport (for example the frontend `KvRouter`)
-/// uses these to feed overload shedding and hard availability from its own
-/// client state, to attach a prefill-duration estimator, and to consult a
-/// shared (cross-worker) KV cache during selection. The standalone HTTP
-/// service leaves them unset.
+/// What an embedding host supplies to every partition the core creates,
+/// grouped by purpose. Each group defaults to the standalone service's
+/// behavior, so a host overrides only the groups it owns: the frontend
+/// `KvRouter` feeds load and availability from its request client, points
+/// overlap refresh at its own index, and carries replica sync on its own
+/// transport.
 #[derive(Clone, Default)]
-pub struct SelectionHostHooks {
-    pub prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
-    pub overloaded_worker_provider: Option<OverloadedWorkerProvider>,
-    pub available_worker_provider: Option<WorkerAvailabilityProvider>,
+pub struct SelectionHost {
+    pub load: HostLoad,
+    pub cache: HostCache,
+    pub eligibility: HostEligibility,
+    pub telemetry: HostTelemetry,
+    pub replication: HostReplication,
+}
+
+/// Load signals the host knows and the partition scheduler does not.
+#[derive(Clone, Default)]
+pub struct HostLoad {
+    pub prefill_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    /// Workers to shed from selection (the host's overload detector).
+    pub overloaded_workers: Option<OverloadedWorkerProvider>,
+    /// Workers the host can currently reach; others are never selected.
+    pub available_workers: Option<WorkerAvailabilityProvider>,
+}
+
+/// KV-cache knowledge outside the partition's own index.
+#[derive(Clone, Default)]
+pub struct HostCache {
     /// Queried alongside the indexer for prompts that carry `token_ids`; a
     /// failed lookup is logged and selection proceeds without shared hits.
-    pub shared_cache: Option<Arc<dyn SharedKvCache>>,
+    pub shared: Option<Arc<dyn SharedKvCache>>,
+    /// Where dequeue-time overlap refresh reads from. A host that keeps its
+    /// own index points this at that index so queued requests are re-scored
+    /// against the index that scored them.
+    pub overlap_refresh: OverlapRefreshSource,
+}
+
+/// Host-owned narrowing of the candidate set.
+#[derive(Clone, Default)]
+pub struct HostEligibility {
     /// Narrows candidates to the workers that can serve the request's LoRA
     /// adapter, strictly within the caller's `allowed_worker_ids`.
     pub lora_worker_filter: Option<Arc<dyn LoraWorkerFilter>>,
-    /// Where dequeue-time overlap refresh reads from. An embedding host that
-    /// keeps its own index and drives the scheduler directly points this at
-    /// that index so queued requests are re-scored against the index that
-    /// scored them, or disables refresh when its index cannot serve it.
-    pub overlap_refresh: OverlapRefreshSource,
+}
+
+/// Scheduler state the host consumes.
+#[derive(Clone, Default)]
+pub struct HostTelemetry {
     /// Receives each partition's scheduler-owned load snapshots (active decode
-    /// blocks and prefill tokens per worker) so the host can run overload
-    /// detection on the numbers the scheduler books against.
-    pub scheduler_load_sink: Option<Arc<dyn SchedulerLoadSink>>,
-    /// Replica sync carried by the host's own transport for partitions this
-    /// service does not mesh itself (ignored when the service runs its own
-    /// ZMQ replica sync).
-    pub replica_sync: Option<HostReplicaSyncFactory>,
+    /// blocks and prefill tokens per worker) for metrics and overload detection.
+    pub scheduler_load: Option<Arc<dyn SchedulerLoadSink>>,
+}
+
+/// Replica-sync transport the host carries for partitions this core does not
+/// mesh itself (ignored when the service runs its own ZMQ replica sync).
+#[derive(Clone, Default)]
+pub struct HostReplication {
+    pub channels: Option<HostReplicaSyncFactory>,
 }
 
 /// Source of dequeue-time overlap refreshes for partition schedulers.
@@ -236,25 +263,24 @@ impl std::fmt::Debug for OverlapRefreshSource {
     }
 }
 
-impl std::fmt::Debug for SelectionHostHooks {
+impl std::fmt::Debug for SelectionHost {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("SelectionHostHooks")
+            .debug_struct("SelectionHost")
+            .field("prefill_estimator", &self.load.prefill_estimator.is_some())
             .field(
-                "prefill_load_estimator",
-                &self.prefill_load_estimator.is_some(),
+                "overloaded_workers",
+                &self.load.overloaded_workers.is_some(),
             )
-            .field("shared_cache", &self.shared_cache.is_some())
-            .field("lora_worker_filter", &self.lora_worker_filter.is_some())
-            .field("overlap_refresh", &self.overlap_refresh)
+            .field("available_workers", &self.load.available_workers.is_some())
+            .field("shared_cache", &self.cache.shared.is_some())
+            .field("overlap_refresh", &self.cache.overlap_refresh)
             .field(
-                "overloaded_worker_provider",
-                &self.overloaded_worker_provider.is_some(),
+                "lora_worker_filter",
+                &self.eligibility.lora_worker_filter.is_some(),
             )
-            .field(
-                "available_worker_provider",
-                &self.available_worker_provider.is_some(),
-            )
+            .field("scheduler_load", &self.telemetry.scheduler_load.is_some())
+            .field("replication", &self.replication.channels.is_some())
             .finish()
     }
 }
@@ -300,7 +326,7 @@ pub struct SelectionCore {
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
-    host_hooks: SelectionHostHooks,
+    host: SelectionHost,
     worker_type: WorkerType,
     cancel_token: CancellationToken,
     replica_config: Option<ReplicaSyncConfig>,
@@ -344,7 +370,7 @@ impl SelectionCore {
             cancel_token,
             None,
             None,
-            SelectionHostHooks::default(),
+            SelectionHost::default(),
             WorkerType::Aggregated,
             true,
             cache_config,
@@ -367,7 +393,7 @@ impl SelectionCore {
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
         worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
-        host_hooks: SelectionHostHooks,
+        host: SelectionHost,
         worker_type: WorkerType,
         signal_indexer_ready: bool,
         cache_config: SelectionCacheConfig,
@@ -395,7 +421,7 @@ impl SelectionCore {
             indexer_registry,
             kv_router_config,
             worker_selection_policy_factory,
-            host_hooks,
+            host,
             worker_type,
             cancel_token,
             replica_config,
@@ -668,8 +694,9 @@ impl SelectionCore {
             .get_or_try_init(|| -> Result<Arc<SelectionEntry>, SelectionError> {
                 let (workers_tx, workers_rx) = watch::channel(HashMap::new());
                 let host_replica = self
-                    .host_hooks
-                    .replica_sync
+                    .host
+                    .replication
+                    .channels
                     .as_ref()
                     .and_then(|factory| factory(&key));
                 let scoped_replica_sync = setup_scoped_replica_sync(
@@ -682,7 +709,7 @@ impl SelectionCore {
                 let slots = Arc::new(ActiveSequencesMultiWorker::new_with_replica_worker_policy(
                     scoped_replica_sync
                         .publisher
-                        .with_load_sink(self.host_hooks.scheduler_load_sink.clone()),
+                        .with_load_sink(self.host.telemetry.scheduler_load.clone()),
                     block_size as usize,
                     HashMap::new(),
                     scoped_replica_sync.enabled,
@@ -701,7 +728,7 @@ impl SelectionCore {
                 let indexer = self
                     .indexer_registry
                     .get_or_create_indexer(key.clone(), block_size);
-                let refresh_provider = match &self.host_hooks.overlap_refresh {
+                let refresh_provider = match &self.host.cache.overlap_refresh {
                     OverlapRefreshSource::PartitionIndexer => {
                         Some(RefreshProvider::Local(Arc::new(indexer.clone())))
                     }
@@ -731,12 +758,12 @@ impl SelectionCore {
                     profile,
                     block_size,
                     selector,
-                    self.host_hooks.prefill_load_estimator.clone(),
+                    self.host.load.prefill_estimator.clone(),
                     overlap_refresh,
                     // Standalone selection has no router Client snapshot, so
                     // these stay `None` unless an embedding host injects them.
-                    self.host_hooks.overloaded_worker_provider.clone(),
-                    self.host_hooks.available_worker_provider.clone(),
+                    self.host.load.overloaded_workers.clone(),
+                    self.host.load.available_workers.clone(),
                     self.kv_router_config.router_queue_recheck_interval(),
                     self.kv_router_config.router_track_prefill_tokens,
                     self.cancel_token.child_token(),
@@ -1016,7 +1043,7 @@ impl SelectionCore {
                 track_prefill_tokens,
             )
         });
-        let allowed_worker_ids = match self.host_hooks.lora_worker_filter.as_deref() {
+        let allowed_worker_ids = match self.host.eligibility.lora_worker_filter.as_deref() {
             Some(filter) => narrow_allowed_worker_ids_by_lora(
                 filter,
                 prompt.lora_name.as_deref(),
@@ -1639,7 +1666,7 @@ impl SelectionCore {
             }
         };
         let shared_cache = query_shared_cache
-            .then_some(self.host_hooks.shared_cache.as_deref())
+            .then_some(self.host.cache.shared.as_deref())
             .flatten()
             .zip(prompt.token_ids.as_deref());
         let shared_cache_lookup = async {
@@ -1979,7 +2006,7 @@ mod tests {
                 CancellationToken::new(),
                 None,
                 None,
-                SelectionHostHooks::default(),
+                SelectionHost::default(),
                 worker_type,
                 true,
                 SelectionCacheConfig::default(),
@@ -2000,12 +2027,12 @@ mod tests {
         }
     }
 
-    fn core_with_hooks(hooks: SelectionHostHooks) -> SelectionCore {
-        core_with_hooks_and_policy(hooks, None)
+    fn core_with_host(host: SelectionHost) -> SelectionCore {
+        core_with_host_and_policy(host, None)
     }
 
-    fn core_with_hooks_and_policy(
-        hooks: SelectionHostHooks,
+    fn core_with_host_and_policy(
+        host: SelectionHost,
         policy_factory: Option<WorkerSelectionPolicyFactory>,
     ) -> SelectionCore {
         let config = test_config(false);
@@ -2019,7 +2046,7 @@ mod tests {
             CancellationToken::new(),
             None,
             policy_factory,
-            hooks,
+            host,
             WorkerType::Aggregated,
             true,
             SelectionCacheConfig::default(),
@@ -2180,7 +2207,7 @@ mod tests {
             CancellationToken::new(),
             None,
             None,
-            SelectionHostHooks::default(),
+            SelectionHost::default(),
             WorkerType::Aggregated,
             true,
             SelectionCacheConfig::default(),
@@ -2441,9 +2468,11 @@ mod tests {
 
     #[tokio::test]
     async fn injected_lora_filter_narrows_candidates() {
-        let core = core_with_hooks(SelectionHostHooks {
-            lora_worker_filter: Some(Arc::new(OnlyWorkerForLora { worker_id: 2 })),
-            ..SelectionHostHooks::default()
+        let core = core_with_host(SelectionHost {
+            eligibility: HostEligibility {
+                lora_worker_filter: Some(Arc::new(OnlyWorkerForLora { worker_id: 2 })),
+            },
+            ..SelectionHost::default()
         });
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         core.upsert_worker(worker(2)).await.expect("worker upsert");
@@ -2476,18 +2505,15 @@ mod tests {
     async fn shared_cache_hits_reach_worker_selection() {
         let calls: SharedCacheCalls = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let (factory, observed) = capturing_policy_factory();
-        let core = core_with_hooks_and_policy(
-            SelectionHostHooks {
-                prefill_load_estimator: None,
-                overloaded_worker_provider: None,
-                available_worker_provider: None,
-                shared_cache: Some(Arc::new(RecordingSharedCache {
-                    calls: Arc::clone(&calls),
-                })),
-                lora_worker_filter: None,
-                overlap_refresh: OverlapRefreshSource::default(),
-                scheduler_load_sink: None,
-                replica_sync: None,
+        let core = core_with_host_and_policy(
+            SelectionHost {
+                cache: HostCache {
+                    shared: Some(Arc::new(RecordingSharedCache {
+                        calls: Arc::clone(&calls),
+                    })),
+                    ..HostCache::default()
+                },
+                ..SelectionHost::default()
             },
             Some(factory),
         );
@@ -2537,7 +2563,7 @@ mod tests {
         use super::super::types::SelectionSessionContext;
 
         let (factory, observed) = capturing_policy_factory();
-        let core = core_with_hooks_and_policy(SelectionHostHooks::default(), Some(factory));
+        let core = core_with_host_and_policy(SelectionHost::default(), Some(factory));
         core.upsert_worker(worker(1)).await.expect("worker upsert");
 
         let mut request = select_request();
@@ -2582,15 +2608,12 @@ mod tests {
         let available: Arc<parking_lot::Mutex<Option<Arc<HashSet<WorkerId>>>>> =
             Arc::new(parking_lot::Mutex::new(None));
         let provider_state = Arc::clone(&available);
-        let core = core_with_hooks(SelectionHostHooks {
-            prefill_load_estimator: None,
-            overloaded_worker_provider: None,
-            available_worker_provider: Some(Arc::new(move || provider_state.lock().clone())),
-            shared_cache: None,
-            lora_worker_filter: None,
-            overlap_refresh: OverlapRefreshSource::default(),
-            scheduler_load_sink: None,
-            replica_sync: None,
+        let core = core_with_host(SelectionHost {
+            load: HostLoad {
+                available_workers: Some(Arc::new(move || provider_state.lock().clone())),
+                ..HostLoad::default()
+            },
+            ..SelectionHost::default()
         });
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         core.upsert_worker(worker(2)).await.expect("worker upsert");
@@ -2606,15 +2629,12 @@ mod tests {
 
     #[tokio::test]
     async fn injected_overload_provider_excludes_worker() {
-        let core = core_with_hooks(SelectionHostHooks {
-            prefill_load_estimator: None,
-            overloaded_worker_provider: Some(Arc::new(|| Some(HashSet::from([1])))),
-            available_worker_provider: None,
-            shared_cache: None,
-            lora_worker_filter: None,
-            overlap_refresh: OverlapRefreshSource::default(),
-            scheduler_load_sink: None,
-            replica_sync: None,
+        let core = core_with_host(SelectionHost {
+            load: HostLoad {
+                overloaded_workers: Some(Arc::new(|| Some(HashSet::from([1])))),
+                ..HostLoad::default()
+            },
+            ..SelectionHost::default()
         });
         core.upsert_worker(worker(1)).await.expect("worker upsert");
         core.upsert_worker(worker(2)).await.expect("worker upsert");

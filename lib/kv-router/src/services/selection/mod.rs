@@ -25,8 +25,9 @@ pub use crate::services::common::replica_sync::{
     ScopedSequencePublisher,
 };
 pub use core::{
-    OverlapRefreshSource, RefreshProvider, SelectionCore, SelectionHostHooks, SelectionPartition,
-    SelectionScheduler, SelectionServiceConfig,
+    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, OverlapRefreshSource,
+    RefreshProvider, SelectionCore, SelectionHost, SelectionPartition, SelectionScheduler,
+    SelectionServiceConfig,
 };
 pub use error::SelectionError;
 pub use input::PromptRequest;

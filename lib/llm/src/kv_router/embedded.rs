@@ -28,8 +28,9 @@ use dynamo_kv_router::scheduling::{
 };
 use dynamo_kv_router::sequences::{SequenceError, SequenceRequest};
 use dynamo_kv_router::services::selection::{
-    OverlapRefreshSource, SelectionHostHooks, SelectionPartition, SelectionService,
-    SelectionServiceBuilder, WorkerRequest, WorkerSelectionPolicyRegistry,
+    HostCache, HostEligibility, HostLoad, HostReplication, HostTelemetry, OverlapRefreshSource,
+    SelectionHost, SelectionPartition, SelectionService, SelectionServiceBuilder, WorkerRequest,
+    WorkerSelectionPolicyRegistry,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
 use dynamo_tokens::SequenceHash;
@@ -147,18 +148,26 @@ impl EmbeddedSelection {
         .worker_selection_policy_factory(args.policy_factory)
         .indexer_threads(1)
         .external_kv_events()
-        .host_hooks(SelectionHostHooks {
-            prefill_load_estimator: args.prefill_load_estimator,
-            overloaded_worker_provider: Some(args.overloaded_worker_provider),
-            available_worker_provider: Some(args.available_worker_provider),
-            shared_cache: None,
-            lora_worker_filter: None,
-            overlap_refresh: match args.overlap_refresh {
-                Some(provider) => OverlapRefreshSource::External(provider),
-                None => OverlapRefreshSource::Disabled,
+        .host(SelectionHost {
+            load: HostLoad {
+                prefill_estimator: args.prefill_load_estimator,
+                overloaded_workers: Some(args.overloaded_worker_provider),
+                available_workers: Some(args.available_worker_provider),
             },
-            scheduler_load_sink: Some(Arc::new(SenderLoadSink(args.scheduler_load))),
-            replica_sync,
+            cache: HostCache {
+                shared: None,
+                overlap_refresh: match args.overlap_refresh {
+                    Some(provider) => OverlapRefreshSource::External(provider),
+                    None => OverlapRefreshSource::Disabled,
+                },
+            },
+            eligibility: HostEligibility::default(),
+            telemetry: HostTelemetry {
+                scheduler_load: Some(Arc::new(SenderLoadSink(args.scheduler_load))),
+            },
+            replication: HostReplication {
+                channels: replica_sync,
+            },
         })
         .build()
         .await

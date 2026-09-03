@@ -16,7 +16,7 @@ use crate::services::common::replica_sync::{
 use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::TrackingHashContext;
 
-use super::core::{SelectionCore, SelectionHostHooks, SelectionPartition, SelectionServiceConfig};
+use super::core::{SelectionCore, SelectionHost, SelectionPartition, SelectionServiceConfig};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::policy_registry::WorkerSelectionPolicyRegistry;
@@ -36,7 +36,7 @@ pub struct SelectionServiceBuilder {
     selection_cache: SelectionCacheConfig,
     worker_type: WorkerType,
     worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
-    host_hooks: SelectionHostHooks,
+    host: SelectionHost,
     remote_indexer_url: Option<String>,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
     external_kv_events: bool,
@@ -77,7 +77,7 @@ impl SelectionServiceBuilder {
             selection_cache: SelectionCacheConfig::default(),
             worker_type,
             worker_selection_policy_registry,
-            host_hooks: SelectionHostHooks::default(),
+            host: SelectionHost::default(),
             remote_indexer_url: None,
             worker_selection_policy_factory: None,
             external_kv_events: false,
@@ -109,11 +109,9 @@ impl SelectionServiceBuilder {
         self
     }
 
-    /// Attach host-owned hooks (prefill-load estimator, overload exclusion
-    /// set, hard-availability set). Applied to every partition scheduler this
-    /// service creates.
-    pub fn host_hooks(mut self, hooks: SelectionHostHooks) -> Self {
-        self.host_hooks = hooks;
+    /// What the embedding host supplies to every partition this service creates.
+    pub fn host(mut self, host: SelectionHost) -> Self {
+        self.host = host;
         self
     }
 
@@ -182,7 +180,7 @@ impl SelectionServiceBuilder {
             cancel_token.clone(),
             replica_config,
             worker_selection_policy_factory,
-            self.host_hooks,
+            self.host,
             self.worker_type,
             false,
             self.selection_cache,
