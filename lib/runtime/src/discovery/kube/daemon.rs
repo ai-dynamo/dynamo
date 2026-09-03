@@ -31,19 +31,10 @@ struct CrRevision {
     uid: Option<String>,
 }
 
-/// Maintains the join of ready pods (left) and valid CRs (right).
-///
-/// An instance enters `known` only when it is present in both sides. Removals
-/// from either side immediately evict the instance from `known` without any
-/// batching or timer dependency.
 struct JoinTable {
-    /// Ready pods: cr_key → instance_id
     left: HashMap<String, u64>,
-    /// Valid CRs: cr_key → cached metadata
     right: HashMap<String, CachedCrMetadata>,
-    /// Live instances: instance_id → metadata  (left ∩ right)
     known: HashMap<u64, Arc<DiscoveryMetadata>>,
-    /// CR revision per instance for generation/UID-based change detection
     revisions: HashMap<u64, CrRevision>,
 }
 
@@ -57,11 +48,9 @@ impl JoinTable {
         }
     }
 
-    /// Apply a full readiness scan from the ES/Pod store. Returns true if `known` changed.
     fn apply_readiness_scan(&mut self, new_left: HashMap<String, u64>) -> bool {
         let mut changed = false;
 
-        // Pods that are no longer ready — remove immediately from known.
         let departed: Vec<(String, u64)> = self
             .left
             .iter()
@@ -82,7 +71,6 @@ impl JoinTable {
             }
         }
 
-        // Pods newly ready — join with right if CR is already present.
         let arrived: Vec<(String, u64)> = new_left
             .iter()
             .filter(|(k, _)| !self.left.contains_key(*k))
@@ -112,11 +100,9 @@ impl JoinTable {
         changed
     }
 
-    /// Apply a full CR store scan. Returns true if `known` changed.
     fn apply_cr_scan(&mut self, new_right: HashMap<String, CachedCrMetadata>) -> bool {
         let mut changed = false;
 
-        // CRs that disappeared — evict from known if the pod was ready.
         let removed: Vec<String> = self
             .right
             .keys()
@@ -126,20 +112,19 @@ impl JoinTable {
 
         for cr_key in removed {
             self.right.remove(&cr_key);
-            if let Some(&instance_id) = self.left.get(&cr_key) {
-                if self.known.remove(&instance_id).is_some() {
-                    self.revisions.remove(&instance_id);
-                    tracing::info!(
-                        cr_key = %cr_key,
-                        instance_id = format!("{instance_id:x}"),
-                        "CR removed, evicted from known"
-                    );
-                    changed = true;
-                }
+            if let Some(&instance_id) = self.left.get(&cr_key)
+                && self.known.remove(&instance_id).is_some()
+            {
+                self.revisions.remove(&instance_id);
+                tracing::info!(
+                    cr_key = %cr_key,
+                    instance_id = format!("{instance_id:x}"),
+                    "CR removed, evicted from known"
+                );
+                changed = true;
             }
         }
 
-        // CRs added or updated.
         for (cr_key, new_cached) in &new_right {
             let new_revision = CrRevision {
                 generation: new_cached.generation,
@@ -148,34 +133,34 @@ impl JoinTable {
             self.right.insert(cr_key.clone(), new_cached.clone());
 
             let Some(&instance_id) = self.left.get(cr_key) else {
-                // Pod not yet ready; CR is parked in right until readiness arrives.
                 continue;
             };
 
             let old_revision = self.revisions.get(&instance_id).cloned();
 
-            if self.known.contains_key(&instance_id) {
-                // Already in known — update only if revision changed (generation or UID).
-                if old_revision.as_ref() != Some(&new_revision) {
-                    self.known.insert(instance_id, new_cached.metadata.clone());
+            match self.known.entry(instance_id) {
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    if old_revision.as_ref() != Some(&new_revision) {
+                        e.insert(new_cached.metadata.clone());
+                        self.revisions.insert(instance_id, new_revision);
+                        tracing::debug!(
+                            cr_key = %cr_key,
+                            instance_id = format!("{instance_id:x}"),
+                            "CR updated for ready pod"
+                        );
+                        changed = true;
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(new_cached.metadata.clone());
                     self.revisions.insert(instance_id, new_revision);
-                    tracing::debug!(
+                    tracing::info!(
                         cr_key = %cr_key,
                         instance_id = format!("{instance_id:x}"),
-                        "CR updated for ready pod"
+                        "CR arrived for ready pod, added to known"
                     );
                     changed = true;
                 }
-            } else {
-                // Join completes: pod was ready but CR hadn't arrived yet.
-                self.known.insert(instance_id, new_cached.metadata.clone());
-                self.revisions.insert(instance_id, new_revision);
-                tracing::info!(
-                    cr_key = %cr_key,
-                    instance_id = format!("{instance_id:x}"),
-                    "CR arrived for ready pod, added to known"
-                );
-                changed = true;
             }
         }
 
@@ -196,7 +181,6 @@ impl JoinTable {
     }
 }
 
-/// Readiness data source for the discovery daemon.
 enum DiscoverySource {
     EndpointSlice(reflector::Store<EndpointSlice>),
     Pod(reflector::Store<Pod>),
@@ -271,7 +255,6 @@ impl DiscoverySource {
         }
     }
 
-    /// Returns the current set of ready entries as cr_key → instance_id.
     fn ready_entries(&self) -> HashMap<String, u64> {
         match self {
             Self::EndpointSlice(reader) => reader
@@ -311,12 +294,6 @@ impl DiscoveryDaemon {
         })
     }
 
-    /// Run the discovery daemon.
-    ///
-    /// Maintains a join table over two independent Kubernetes watch streams: the
-    /// readiness source (EndpointSlice or Pod) and DynamoWorkerMetadata CRs.
-    /// An instance enters the snapshot only when both sides are present; removal
-    /// from either side evicts the instance immediately without debouncing.
     pub async fn run(
         self,
         watch_tx: tokio::sync::watch::Sender<Arc<MetadataSnapshot>>,
@@ -339,26 +316,25 @@ impl DiscoveryDaemon {
         );
 
         let cr_notify_clone = cr_notify.clone();
-        let cr_reflector_stream =
-            reflector(cr_writer, watcher(metadata_crs, Config::default()))
-                .default_backoff()
-                .touched_objects()
-                .for_each(move |res| {
-                    match res {
-                        Ok(obj) => {
-                            tracing::debug!(
-                                cr_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
-                                "DynamoWorkerMetadata CR reflector updated"
-                            );
-                            cr_notify_clone.notify_one();
-                        }
-                        Err(e) => {
-                            tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
-                            cr_notify_clone.notify_one();
-                        }
+        let cr_reflector_stream = reflector(cr_writer, watcher(metadata_crs, Config::default()))
+            .default_backoff()
+            .touched_objects()
+            .for_each(move |res| {
+                match res {
+                    Ok(obj) => {
+                        tracing::debug!(
+                            cr_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
+                            "DynamoWorkerMetadata CR reflector updated"
+                        );
+                        cr_notify_clone.notify_one();
                     }
-                    futures::future::ready(())
-                });
+                    Err(e) => {
+                        tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
+                        cr_notify_clone.notify_one();
+                    }
+                }
+                futures::future::ready(())
+            });
         tokio::spawn(cr_reflector_stream);
 
         let mut sequence = 0u64;
@@ -402,7 +378,6 @@ impl DiscoveryDaemon {
     }
 }
 
-/// Scan the DWM CR store and return all entries with valid (or cached) metadata.
 fn scan_cr_store(
     cr_reader: &reflector::Store<DynamoWorkerMetadata>,
     valid_cr_cache: &mut HashMap<String, CachedCrMetadata>,
@@ -541,16 +516,12 @@ mod tests {
         }
     }
 
-    // Regression: a CR delete+recreate with the same generation number must still
-    // update known (UID changes even though generation stays the same).
     #[test]
     fn join_table_detects_cr_recreated_with_same_generation() {
         let mut table = JoinTable::new();
 
-        // Pod is ready
         table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
 
-        // Initial CR
         let changed = table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
             make_cached("uid-1", 1),
@@ -558,16 +529,15 @@ mod tests {
         assert!(changed);
         assert!(table.known.contains_key(&1u64));
 
-        // Same generation, different UID (pod deleted and recreated)
         let changed = table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
             make_cached("uid-2", 1),
         )]));
-        assert!(changed, "UID change must be detected even at same generation");
-        assert_eq!(
-            table.revisions[&1u64].uid.as_deref(),
-            Some("uid-2")
+        assert!(
+            changed,
+            "UID change must be detected even at same generation"
         );
+        assert_eq!(table.revisions[&1u64].uid.as_deref(), Some("uid-2"));
     }
 
     #[test]
@@ -581,7 +551,6 @@ mod tests {
         )]));
         assert!(table.known.contains_key(&1u64));
 
-        // Pod readiness removed — no timer, immediate eviction
         let changed = table.apply_readiness_scan(HashMap::new());
         assert!(changed);
         assert!(!table.known.contains_key(&1u64));
@@ -592,12 +561,10 @@ mod tests {
     fn join_table_adds_when_cr_arrives_after_pod_ready() {
         let mut table = JoinTable::new();
 
-        // Pod ready first, CR not yet present
         let changed = table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
         assert!(!changed, "no CR yet, should not enter known");
         assert!(!table.known.contains_key(&1u64));
 
-        // CR arrives — join completes
         let changed = table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
             make_cached("uid-1", 1),
@@ -632,7 +599,6 @@ mod tests {
             make_cached("uid-1", 1),
         )]));
 
-        // Same UID and generation — no change
         let changed = table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
             make_cached("uid-1", 1),
