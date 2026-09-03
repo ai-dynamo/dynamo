@@ -4,8 +4,7 @@
 from datetime import date
 
 import pytest
-
-from tests.docs.recipe_catalog_test_utils import load_catalog_validator
+from recipe_catalog_test_utils import load_catalog_validator
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 

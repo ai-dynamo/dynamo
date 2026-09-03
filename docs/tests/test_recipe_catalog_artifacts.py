@@ -9,12 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-
-from tests.docs.recipe_catalog_test_utils import (
-    CATALOG,
-    VALIDATOR_PATH,
-    load_catalog_validator,
-)
+from recipe_catalog_test_utils import CATALOG, VALIDATOR_PATH, load_catalog_validator
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -34,7 +29,10 @@ catalog_validate = load_catalog_validator("recipe_catalog_validate")
         ),
         (
             "inkling",
-            ("nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1",),
+            (
+                "nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0-inkling-dev.1",
+                "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-inkling-dev.1",
+            ),
         ),
         (
             "kimi-k2-6",
@@ -108,6 +106,11 @@ def test_recipe_specific_images_are_catalog_owned(
                     "source_kind": "github-release",
                     "release_tag": "v1.4.0-inkling-dev.1",
                     "release_state": "prerelease",
+                },
+                {
+                    "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-inkling-dev.1",
+                    "source_revision": "5e75161371dbca94ad878b7fee2904c0715d308b",
+                    "source_kind": "deploy-asset",
                 },
             ),
         ),

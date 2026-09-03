@@ -57,7 +57,8 @@ repos:
     exclude: .devcontainer
   - id: check-toml
   - id: check-yaml
-    exclude: ^.*/templates/.*\.yaml$ #ignore all yaml files in helm chart templates
+    exclude: >-
+      ^(?:deploy/helm/charts/(?:platform/templates|platform/components/operator/templates|power-agent/templates)/.*\.yaml|benchmarks/frontend/dgd/templates/(?:mocker|vllm-gpt-oss-20b|vllm)\.yaml|examples/deployments/EKS/templates/eksctl\.yaml)$
     args: ['--allow-multiple-documents']
   - id: check-shebang-scripts-are-executable
   - id: end-of-file-fixer
