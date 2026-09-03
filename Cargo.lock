@@ -2542,6 +2542,7 @@ name = "dynamo-ext-proc"
 version = "1.5.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum 0.8.4",
  "bytes",
  "dashmap",

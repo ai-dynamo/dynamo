@@ -12,6 +12,10 @@ and active-sequence accounting. Keep these implementation invariants explicit:
 - Mooncake overlap fields are raw matched-token observability. Effective
   prefill tokens use the scheduler's weighted cache credit and are not derived
   from `longest_matched`.
+- Worker membership arrives as complete snapshots through a
+  `WorkerCatalogSource`; `CatalogReconciler` owns the desired-versus-actual
+  diff (retry of not-yet-schedulable records, stale deletion). Hosts do not
+  call `upsert_worker`/`delete_worker` for discovery-driven membership.
 - Selector replicas synchronize admission, prefill-complete, and free events.
 - **NOTE:** Output-block updates remain local. They are deliberately excluded
   from replica sync because their frequency would consume disproportionate
