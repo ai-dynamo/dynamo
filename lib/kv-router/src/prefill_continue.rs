@@ -130,22 +130,17 @@ impl PrefillContinueDecision {
 #[non_exhaustive]
 pub struct PrefillContinueDecisionInput {
     /// What the chosen decode worker reports it is holding, as a fraction of
-    /// what it can hold.
+    /// what it can hold. A snapshot taken before this request is admitted, so
+    /// it contains neither this prompt nor its future output.
     ///
-    /// This is the worker's own number, not a router estimate, and it is a
-    /// snapshot taken before this request is admitted. It therefore contains
-    /// neither this prompt nor its future output. `None` means the worker has
-    /// not reported, which the policy refuses on: the router's logical
-    /// footprint is a different quantity, so substituting it would answer a
-    /// different question under the same name.
-    ///
-    /// One accessor produces this, and the sibling bypass gate reads the same
-    /// one. See `RoutePlanSignals::decode_occupancy`.
+    /// `None` means the worker has not reported, which the policy refuses on.
+    /// `RoutePlanSignals::decode_occupancy` produces it, and the sibling bypass
+    /// gate reads the same one.
     pub decode_occupancy: Option<f64>,
 
     /// Whether the prefill worker holding this request is over its busy line.
-    /// `None` means the signal was unavailable. Measures ordinary prefill work,
-    /// which the census below cannot see.
+    /// `None` means the signal was unavailable. It measures ordinary prefill
+    /// work only, so a running continuation does not appear in it.
     pub prefill_worker_busy: Option<bool>,
 
     /// The request's remaining token budget. `None` means unbounded.
@@ -357,10 +352,8 @@ impl PrefillContinuePolicy {
             }
         }
 
-        // Force is the bring-up path: it skips every decode-load test, both the
-        // threshold below and the comparison after it. On an idle deployment
-        // both pools read zero, and a comparison would refuse for want of a
-        // difference.
+        // Force is the bring-up path: it skips the decode-load threshold below,
+        // which never fires on an idle deployment.
         if self.force {
             return PrefillContinueDecision::Continue;
         }
@@ -369,12 +362,11 @@ impl PrefillContinuePolicy {
             return PrefillContinueDecision::Skip(Skip::NoTrigger);
         };
 
-        // Nothing is projected onto this reading. A projection needs the
-        // physical cost of this prompt on that engine, and no worker reports
-        // that, so adding a router estimate would mix two units.
         let Some(decode_occupancy) = input.decode_occupancy else {
             return PrefillContinueDecision::Skip(Skip::DecodeLoadUnknown);
         };
+        // Nothing is projected onto this reading: no worker reports the
+        // physical cost of this prompt, so a router estimate would mix units.
         if decode_occupancy <= threshold {
             return PrefillContinueDecision::Skip(Skip::DecodeHasRoom);
         }

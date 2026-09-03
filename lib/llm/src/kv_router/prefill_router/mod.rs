@@ -36,6 +36,7 @@ use crate::{
     discovery::{ModelManager, RuntimeConfigWatch},
     kv_router::metrics::{
         PREFILL_CONTINUE_METRICS, prefill_continue_decision, prefill_continue_demotion,
+        prefill_continue_occupancy_read,
     },
     kv_router::{RoutingHost, WorkerSelectorFactory},
     local_model::runtime_config::{ModelRuntimeConfig, PREFILL_CONTINUE_CAPABILITY},
@@ -501,12 +502,22 @@ where
         request_id: &str,
     ) -> PrefillContinueDecisionInput {
         let unknown = PrefillContinueDecisionInput::new(None);
+        // Counted on every path below, before the prefill interlock can mask
+        // the result. Without this there is no denominator for source coverage.
+        let record = |outcome: &str| {
+            PREFILL_CONTINUE_METRICS
+                .decode_occupancy_reads_total
+                .with_label_values(&[outcome])
+                .inc();
+        };
         let Some(decode_host) = self.decode_routing_host.get() else {
+            record(prefill_continue_occupancy_read::NO_KV_PLANE);
             return unknown;
         };
         // Ask the host, not the mode flag: `kv_router()` panics on a host with
         // no KV plane, and the two could otherwise disagree.
         if decode_host.kv_router_if_enabled().is_none() {
+            record(prefill_continue_occupancy_read::NO_KV_PLANE);
             return unknown;
         }
         match decode_host
@@ -520,9 +531,8 @@ where
                 match signals.decode_occupancy() {
                     Some(occupancy) => {
                         // Recorded on every read, whatever the gate then does
-                        // with it. An arm whose threshold sits above 1.0 fills
-                        // this and continues nothing, which is the calibration
-                        // control.
+                        // with it.
+                        record(prefill_continue_occupancy_read::KNOWN);
                         PREFILL_CONTINUE_METRICS.decode_occupancy.observe(occupancy);
                         // The raw pair is logged, not decided on: the gate
                         // needs one number.
@@ -539,13 +549,13 @@ where
                         PrefillContinueDecisionInput::new(Some(occupancy))
                     }
                     None => {
+                        record(prefill_continue_occupancy_read::UNREPORTED);
                         // Say this loudly once. A scheduler-only plane
                         // publishes no occupancy at all, so every request
                         // refuses and the feature is a silent no-op that looks
-                        // exactly like an idle one. The decision counters show
-                        // it after the fact; this shows it as it starts.
-                        static FIRST: std::sync::Once = std::sync::Once::new();
-                        FIRST.call_once(|| {
+                        // exactly like an idle one.
+                        static WARNED: std::sync::Once = std::sync::Once::new();
+                        WARNED.call_once(|| {
                             tracing::warn!(
                                 worker_id = signals.worker.worker_id,
                                 dp_rank = signals.worker.dp_rank,
@@ -565,6 +575,7 @@ where
                 }
             }
             Err(error) => {
+                record(prefill_continue_occupancy_read::PREVIEW_FAILED);
                 tracing::debug!(
                     request_id,
                     %error,
@@ -1106,22 +1117,6 @@ where
             continuation_permit,
         })
     }
-    /// KV blocks a continuation will hold: its prompt plus everything it is
-    /// allowed to generate. The budget is a hard bound the request carries, so
-    /// this is the worst case, not a guess.
-    fn continuation_blocks(request: &PreprocessedRequest, binding: &PrefillBinding<Sel>) -> usize {
-        let Some(kv_router) = binding.router.kv_router_if_enabled() else {
-            return 0;
-        };
-        let block_size = (kv_router.block_size() as usize).max(1);
-        let budget = request.stop_conditions.max_tokens.unwrap_or(0) as usize;
-        request
-            .token_ids
-            .len()
-            .saturating_add(budget)
-            .div_ceil(block_size)
-    }
-
     /// Take a place in the census for `worker_id`, or put the request back on
     /// today's handoff.
     ///
@@ -1171,8 +1166,7 @@ where
             demote_to_handoff(request);
             return None;
         };
-        let blocks = Self::continuation_blocks(request, binding);
-        if let Some(permit) = self.continuations.try_admit(worker_id, cap, blocks) {
+        if let Some(permit) = self.continuations.try_admit(worker_id, cap) {
             return Some(permit);
         }
 

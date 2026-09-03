@@ -364,9 +364,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, worker_id)| {
-                // A real vLLM worker publishes `total_kv_blocks`. The
-                // continuation-pressure probe divides by it, so a fixture
-                // without one has no denominator.
+                // A real vLLM worker publishes `total_kv_blocks`.
                 let mut config = ModelRuntimeConfig {
                     total_kv_blocks: Some(1_000),
                     ..Default::default()
@@ -725,7 +723,7 @@ mod tests {
             .map(|worker_id| {
                 prefill_router
                     .continuations
-                    .try_admit(*worker_id, 1, 0)
+                    .try_admit(*worker_id, 1)
                     .expect("a fresh worker has its place free")
             })
             .collect();

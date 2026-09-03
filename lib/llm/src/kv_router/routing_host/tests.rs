@@ -1775,7 +1775,6 @@ mod decode_occupancy {
             overlap_blocks: 0,
             cached_tokens: 0,
             potential_decode_blocks: 467,
-            total_kv_blocks: Some(4_168),
             authoritative_kv,
         }
     }
@@ -1787,7 +1786,10 @@ mod decode_occupancy {
 
         // The logical footprint on the same signals is 0.112. A gate at 0.2
         // answers "busy" on one and "has room" on the other, which is the bug.
-        assert!(signals(Some((1_659, 4_168))).decode_load_exceeds(0.2) == Some(true));
+        assert_eq!(
+            signals(Some((1_659, 4_168))).decode_load_exceeds(0.2),
+            Some(true)
+        );
     }
 
     #[test]

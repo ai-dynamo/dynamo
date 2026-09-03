@@ -1805,7 +1805,6 @@ class KvRouterConfig:
         conditional_disagg_decode_busy_threshold: Optional[float] = None,
         prefill_continue_enabled: bool = False,
         prefill_continue_decode_busy_threshold: Optional[float] = None,
-        prefill_continue_output_reserve_tokens: int = 0,
         prefill_continue_prefill_busy_threshold: Optional[float] = None,
         prefill_continue_max_budget_tokens: Optional[int] = None,
         prefill_continue_max_concurrent: Optional[int] = None,
@@ -1884,8 +1883,7 @@ class KvRouterConfig:
             conditional_disagg_prefill_busy_threshold: Prefill busy threshold for load-aware conditional-disagg policies. When omitted, inherits router_queue_threshold when available.
             conditional_disagg_decode_busy_threshold: Decode-busy guard threshold that disables bypass when the selected decode worker's projected decode load exceeds this fraction of KV capacity (default: None).
             prefill_continue_enabled: Let a prefill worker generate the whole response instead of handing off, when the decode pool has no room for it. Default off. Both the prefill and decode sets must be KV-routed for the load signals to exist; without them the feature stays off.
-            prefill_continue_decode_busy_threshold: Continue when the selected decode worker's projected load exceeds this fraction of its KV capacity. Required unless prefill_continue_force is set, because nothing else can trigger the feature (default: None).
-            prefill_continue_output_reserve_tokens: Tokens of output to reserve per request when judging whether decode has room, so a worker that fits the prompt but not the generation still counts as full (default: 0).
+            prefill_continue_decode_busy_threshold: Continue when the selected decode worker reports it is holding more than this fraction of its own KV capacity. The reading is the worker's own and nothing is projected onto it. Required unless prefill_continue_force is set, because nothing else can trigger the feature. Set it above 1.0 for a calibration arm that reads occupancy and continues nothing (default: None).
             prefill_continue_prefill_busy_threshold: Refuse to continue when the prefill worker is over this fraction of its own capacity, so continuing never starves the prefill queue. Required unless router_queue_threshold is set.
             prefill_continue_max_budget_tokens: Refuse requests whose remaining token budget exceeds this, so one long request cannot occupy a prefill worker indefinitely (default: None).
             prefill_continue_max_concurrent: Maximum continuations running at once on one prefill worker. Required whenever the feature is enabled: the prefill-load signal is cleared at a request's first token, so this is the only bound that can see a continuation already in flight. Use at least 2 if migration is in play; 0 is a kill switch.

@@ -221,8 +221,9 @@ pub(crate) struct RoutePlanSignals {
     pub(crate) worker: WorkerWithDpRank,
     pub(crate) overlap_blocks: u32,
     pub(crate) cached_tokens: usize,
+    /// The router's own logical footprint for the selected worker. Kept for
+    /// diagnostics only: it is not a capacity fraction and no gate reads it.
     pub(crate) potential_decode_blocks: u64,
-    pub(crate) total_kv_blocks: Option<u64>,
     /// Backend KV occupancy as the worker itself reports it, `(used, total)`.
     ///
     /// `potential_decode_blocks` above is a different quantity: the unique
@@ -242,25 +243,20 @@ impl RoutePreview {
 
 impl RoutePlanSignals {
     /// What the selected worker and rank reports it is holding, as a fraction
-    /// of what it can hold.
+    /// of what it can hold. The one source every decode-load gate reads.
     ///
-    /// This is the one source every decode-load gate reads. `None` means the
-    /// worker has not reported, and every consumer must refuse on it.
-    /// `potential_decode_blocks` is not a substitute: it is the router's unique
-    /// LOGICAL footprint after shared-prefix accounting, and on our trace it
-    /// read 0.112 where the worker reported 0.398. A threshold tuned on one is
-    /// meaningless against the other, so a silent fallback would restore that
-    /// bug under a name that claims to have fixed it.
-    ///
-    /// A worker with no capacity is unreadable, not empty, so it reports `None`
-    /// as well.
+    /// `None` when the worker has not reported, or reports no capacity. Every
+    /// consumer must refuse on it. `potential_decode_blocks` is not a fallback:
+    /// it is a logical footprint, so a threshold tuned on one is meaningless
+    /// against the other.
     pub(crate) fn decode_occupancy(self) -> Option<f64> {
         let (used, total) = self.authoritative_kv?;
         (total > 0).then(|| used as f64 / total as f64)
     }
 
     pub(crate) fn decode_load_exceeds(self, threshold: f64) -> Option<bool> {
-        Some(self.decode_occupancy()? > threshold)
+        self.decode_occupancy()
+            .map(|occupancy| occupancy > threshold)
     }
 }
 

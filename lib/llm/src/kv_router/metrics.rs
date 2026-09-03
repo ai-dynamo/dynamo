@@ -677,18 +677,17 @@ pub struct PrefillContinueMetrics {
     pub demotions_total: IntCounterVec,
     /// Continuations generating right now, summed over the prefill pool.
     pub active: IntGauge,
-    /// What the selected decode worker reported it was holding, every time the
-    /// router read it, as a fraction of that worker's capacity.
-    ///
-    /// This is how a threshold gets chosen. Run one arm with
-    /// `decode_busy_threshold` above 1.0: the router still reads occupancy and
-    /// still fills this histogram, and `decode_has_room` refuses every request,
-    /// so nothing continues. The distribution then says where the line belongs,
-    /// and it is read before the treatment arm is looked at.
-    ///
-    /// A degenerate distribution is also the readable form of a stuck
-    /// publisher, which membership alone cannot report.
+    /// What the selected decode worker reported it was holding, as a fraction
+    /// of its capacity. The calibration arm reads this to choose
+    /// `prefill_continue_decode_busy_threshold`.
     pub decode_occupancy: prometheus::Histogram,
+    /// Every attempted decode-occupancy read, by outcome.
+    ///
+    /// The histogram counts readings that succeeded, so on its own it cannot
+    /// say what share of probes had a source at all. The decision counters
+    /// cannot either: the prefill interlock is evaluated first, so a busy
+    /// prefill worker masks `decode_load_unknown`. This is the denominator.
+    pub decode_occupancy_reads_total: IntCounterVec,
 }
 
 pub static PREFILL_CONTINUE_METRICS: LazyLock<PrefillContinueMetrics> = LazyLock::new(|| {
@@ -719,16 +718,47 @@ pub static PREFILL_CONTINUE_METRICS: LazyLock<PrefillContinueMetrics> = LazyLock
         .expect("Failed to create prefill_continue_active gauge"),
         decode_occupancy: prometheus::Histogram::with_opts(
             HistogramOpts::new(
-                format!("{}_prefill_continue_decode_occupancy", name_prefix::FRONTEND),
-                "Decode KV occupancy the router read when deciding, as a fraction of the                  selected worker's capacity. Absent readings are counted as the                  decode_load_unknown decision instead",
+                format!(
+                    "{}_prefill_continue_decode_occupancy",
+                    name_prefix::FRONTEND
+                ),
+                "Decode KV occupancy the router read when deciding, as a fraction of the \
+                 selected worker's capacity. Only successful reads land here; \
+                 decode_occupancy_reads_total is the denominator",
             )
             // Occupancy is a fraction, so the range is fixed and even steps
             // read directly as a threshold sweep.
             .buckets((0..=20).map(|step| f64::from(step) * 0.05).collect()),
         )
         .expect("Failed to create prefill_continue_decode_occupancy histogram"),
+        decode_occupancy_reads_total: IntCounterVec::new(
+            Opts::new(
+                format!(
+                    "{}_prefill_continue_decode_occupancy_reads_total",
+                    name_prefix::FRONTEND
+                ),
+                "Decode-occupancy probes the router attempted, by outcome. `known` over the \
+                 sum is the source coverage the calibration arm has to establish",
+            ),
+            &["outcome"],
+        )
+        .expect("Failed to create prefill_continue_decode_occupancy_reads_total counter"),
     }
 });
+
+/// `outcome` label values for an attempted decode-occupancy read.
+pub mod prefill_continue_occupancy_read {
+    /// The worker reported, and the reading is in the histogram.
+    pub const KNOWN: &str = "known";
+    /// The route preview succeeded, but that worker has published no occupancy.
+    pub const UNREPORTED: &str = "unreported";
+    /// The route preview itself failed, including on a cancelled request.
+    pub const PREVIEW_FAILED: &str = "preview_failed";
+    /// The decode set is not KV-routed, so no preview exists to ask.
+    pub const NO_KV_PLANE: &str = "no_kv_plane";
+
+    pub const ALL: &[&str] = &[KNOWN, UNREPORTED, PREVIEW_FAILED, NO_KV_PLANE];
+}
 
 /// `decision` label values the router settles before it asks the policy.
 ///
@@ -797,6 +827,9 @@ fn materialize_prefill_continue_series(m: &PrefillContinueMetrics) {
     for reason in PREFILL_CONTINUE_DEMOTION_REASONS {
         m.demotions_total.with_label_values(&[reason]);
     }
+    for outcome in prefill_continue_occupancy_read::ALL {
+        m.decode_occupancy_reads_total.with_label_values(&[outcome]);
+    }
 }
 
 /// Register the prefill-continuation metrics with the given registry.
@@ -809,6 +842,7 @@ pub fn register_prefill_continue_metrics(
     registry.register(Box::new(m.demotions_total.clone()))?;
     registry.register(Box::new(m.active.clone()))?;
     registry.register(Box::new(m.decode_occupancy.clone()))?;
+    registry.register(Box::new(m.decode_occupancy_reads_total.clone()))?;
     Ok(())
 }
 
@@ -1921,12 +1955,7 @@ mod prefill_continue_metric_tests {
 
         assert_eq!(bounds.len(), 21);
         assert_eq!(bounds.first(), Some(&0.0));
-        assert_eq!(bounds.last(), Some(&1.0));
         // A full worker must not fall off the end into +Inf.
-        assert!(
-            bounds
-                .iter()
-                .any(|&bound| (bound - 1.0).abs() < f64::EPSILON)
-        );
+        assert_eq!(bounds.last(), Some(&1.0));
     }
 }
