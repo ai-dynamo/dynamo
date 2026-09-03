@@ -504,9 +504,7 @@ selectors would bind the same replica-sync port.
 | `DYN_EPP_MAX_NUM_BATCHED_TOKENS` | Policy-dependent | Must equal vLLM `--max-num-batched-tokens`; required when router queue thresholds are enabled. Under `disaggregated` this is the fallback for both roles. |
 | `DYN_EPP_PREFILL_MAX_NUM_BATCHED_TOKENS` | No | Prefill-worker override; defaults to `DYN_EPP_MAX_NUM_BATCHED_TOKENS`. |
 | `DYN_EPP_DECODE_MAX_NUM_BATCHED_TOKENS` | No | Decode-worker override; defaults to `DYN_EPP_MAX_NUM_BATCHED_TOKENS`. |
-| `DYN_EPP_TOTAL_KV_BLOCKS` | No | Optional per-worker total KV block hint. Under `disaggregated` this is the fallback for both roles. |
-| `DYN_EPP_PREFILL_TOTAL_KV_BLOCKS` | No | Prefill-worker override; defaults to `DYN_EPP_TOTAL_KV_BLOCKS`. |
-| `DYN_EPP_DECODE_TOTAL_KV_BLOCKS` | No | Decode-worker override; defaults to `DYN_EPP_TOTAL_KV_BLOCKS`. |
+| `DYN_EPP_TOTAL_KV_BLOCKS` | No | Optional per-worker total KV block hint. |
 | `DYN_EPP_SELECTION_INDEXER_THREADS` | No | KV indexer thread count; defaults to `4`. Under `disaggregated` it applies to the prefill selector only: the decode selector consumes no KV events, so its index is never fed and it is pinned to one thread. |
 | `DYN_EPP_TOKENIZATION_TIMEOUT_MS` | No | Render request timeout; defaults to `5000`. |
 | `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` | No | Maximum render response size; defaults to `16777216`. |
@@ -516,8 +514,8 @@ selectors would bind the same replica-sync port.
 | `POD_IP` | With peer service | EPP pod IP used to exclude the local replica from its peer set. |
 
 <Note>
-`DYN_EPP_TOPOLOGY_MODE=disaggregated` requires `DYN_EPP_MODE=standalone` and is incompatible with
-`DYN_EPP_PEER_SERVICE`; both combinations fail startup. It builds the prefill and decode worker
+`DYN_EPP_TOPOLOGY_MODE=disaggregated` is incompatible with `DYN_EPP_PEER_SERVICE`; setting both
+fails startup. It builds the prefill and decode worker
 catalogs but does not yet select a prefill/decode pair, so decode workers still perform the whole
 prefill. The end-to-end path lands with
 [#13405](https://github.com/ai-dynamo/dynamo/issues/13405) and

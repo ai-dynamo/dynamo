@@ -82,11 +82,6 @@ impl EppMode {
 }
 
 /// Serving topology inside standalone mode.
-///
-/// Parsed separately from [`EppStandaloneConfig`] because `run_inner` must reject
-/// `Disaggregated` under `DYN_EPP_MODE=dynamo` *before* the standalone config is
-/// ever read — otherwise the setting is silently ignored and every pool-selected
-/// pod, prefill included, becomes a routable gateway destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EppTopologyMode {
     /// Every eligible worker is a routable decode target. Today's behavior.
@@ -97,10 +92,6 @@ pub enum EppTopologyMode {
 }
 
 impl EppTopologyMode {
-    pub fn from_env() -> anyhow::Result<Self> {
-        Self::parse(&|k| std::env::var(k).ok())
-    }
-
     fn parse(get: &EnvGet) -> anyhow::Result<Self> {
         match trimmed(get(DYN_EPP_TOPOLOGY_MODE)).as_deref() {
             None | Some(AGGREGATED_TOPOLOGY) => Ok(Self::Aggregated),
@@ -206,14 +197,6 @@ pub struct EppStandaloneConfig {
     pub replay_port: Option<u16>,
     /// Optional per-worker total KV blocks.
     pub total_kv_blocks: Option<u64>,
-    /// Per-worker total KV blocks for prefill workers, defaulting to
-    /// [`Self::total_kv_blocks`]. Disaggregated fleets size the two roles
-    /// differently (different TP degree and GPU count), so one shared value
-    /// misdescribes at least one of them.
-    pub prefill_total_kv_blocks: Option<u64>,
-    /// Per-worker total KV blocks for decode workers, defaulting to
-    /// [`Self::total_kv_blocks`].
-    pub decode_total_kv_blocks: Option<u64>,
     /// Optional per-worker max batched tokens.
     #[validate(range(
         min = 1,
@@ -307,10 +290,6 @@ impl EppStandaloneConfig {
                 .unwrap_or(DEFAULT_KV_EVENT_PORT),
             replay_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_REPLAY_PORT")?,
             total_kv_blocks,
-            prefill_total_kv_blocks: opt_parse::<u64>(get, "DYN_EPP_PREFILL_TOTAL_KV_BLOCKS")?
-                .or(total_kv_blocks),
-            decode_total_kv_blocks: opt_parse::<u64>(get, "DYN_EPP_DECODE_TOTAL_KV_BLOCKS")?
-                .or(total_kv_blocks),
             max_num_batched_tokens,
             prefill_max_num_batched_tokens: opt_parse::<u64>(
                 get,
@@ -367,15 +346,6 @@ impl EppStandaloneConfig {
         }
     }
 
-    /// Total KV blocks to register for a worker in `role`.
-    pub fn total_kv_blocks_for(&self, role: WorkerRole) -> Option<u64> {
-        match role {
-            WorkerRole::Aggregated => self.total_kv_blocks,
-            WorkerRole::Prefill => self.prefill_total_kv_blocks,
-            WorkerRole::Decode => self.decode_total_kv_blocks,
-        }
-    }
-
     /// Env var naming the effective max-batched-tokens for `role`, for error
     /// messages that must tell an operator which knob to set.
     pub fn max_num_batched_tokens_env_for(role: WorkerRole) -> &'static str {
@@ -411,8 +381,6 @@ impl EppStandaloneConfig {
             kv_event_port: DEFAULT_KV_EVENT_PORT,
             replay_port: None,
             total_kv_blocks: None,
-            prefill_total_kv_blocks: None,
-            decode_total_kv_blocks: None,
             max_num_batched_tokens: Some(8192),
             prefill_max_num_batched_tokens: Some(8192),
             decode_max_num_batched_tokens: Some(8192),
@@ -1177,15 +1145,10 @@ mod tests {
 
     #[test]
     fn per_role_capacity_falls_back_to_the_shared_value() {
-        let cfg = cfg_with(&[
-            ("DYN_EPP_MAX_NUM_BATCHED_TOKENS", "8192"),
-            ("DYN_EPP_TOTAL_KV_BLOCKS", "1000"),
-        ])
-        .unwrap();
+        let cfg = cfg_with(&[("DYN_EPP_MAX_NUM_BATCHED_TOKENS", "8192")]).unwrap();
 
         for role in [WorkerRole::Prefill, WorkerRole::Decode] {
             assert_eq!(cfg.max_num_batched_tokens_for(role), Some(8192));
-            assert_eq!(cfg.total_kv_blocks_for(role), Some(1000));
         }
     }
 
@@ -1197,8 +1160,6 @@ mod tests {
             ("DYN_EPP_MAX_NUM_BATCHED_TOKENS", "8192"),
             ("DYN_EPP_PREFILL_MAX_NUM_BATCHED_TOKENS", "16384"),
             ("DYN_EPP_DECODE_MAX_NUM_BATCHED_TOKENS", "2048"),
-            ("DYN_EPP_TOTAL_KV_BLOCKS", "1000"),
-            ("DYN_EPP_PREFILL_TOTAL_KV_BLOCKS", "4000"),
         ])
         .unwrap();
 
@@ -1214,10 +1175,6 @@ mod tests {
             cfg.max_num_batched_tokens_for(WorkerRole::Aggregated),
             Some(8192)
         );
-
-        assert_eq!(cfg.total_kv_blocks_for(WorkerRole::Prefill), Some(4000));
-        // Not overridden: falls back to the shared value.
-        assert_eq!(cfg.total_kv_blocks_for(WorkerRole::Decode), Some(1000));
     }
 
     #[test]
@@ -1229,7 +1186,6 @@ mod tests {
             WorkerRole::Decode,
         ] {
             assert!(cfg.max_num_batched_tokens_for(role).is_none());
-            assert!(cfg.total_kv_blocks_for(role).is_none());
         }
     }
 

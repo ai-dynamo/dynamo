@@ -18,9 +18,6 @@ use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 
-use crate::epp_standalone_config::{
-    DISAGGREGATED_TOPOLOGY, DYN_EPP_MODE, DYN_EPP_TOPOLOGY_MODE, EppTopologyMode, STANDALONE_MODE,
-};
 use crate::{EppMode, EppStandaloneConfig, ExtProcServer, Router, metrics};
 
 const GRPC_PORT: u16 = 9002;
@@ -140,16 +137,15 @@ pub async fn run(policy_registry: Option<WorkerSelectionPolicyRegistry>) -> Resu
     run_inner(mode, policy_registry.unwrap_or_default()).await
 }
 
-/// A role split only exists in standalone mode; the Dynamo-runtime path has its
-/// own disaggregation story and never reads this setting.
-fn reject_disaggregated_outside_standalone(mode: EppMode, topology: EppTopologyMode) -> Result<()> {
-    if topology.is_disaggregated() && !matches!(mode, EppMode::Standalone) {
-        anyhow::bail!(
-            "{DYN_EPP_TOPOLOGY_MODE}={DISAGGREGATED_TOPOLOGY} requires \
-             {DYN_EPP_MODE}={STANDALONE_MODE}; the Dynamo-runtime EPP does not read it"
+/// The role split is a deployment-level limitation until pair selection lands:
+/// the prefill catalog is populated but nothing selects from it yet.
+fn warn_if_disaggregated_incomplete(cfg: &EppStandaloneConfig) {
+    if cfg.topology_mode.is_disaggregated() {
+        tracing::warn!(
+            "DYN_EPP_TOPOLOGY_MODE=disaggregated: prefill/decode pair selection is not implemented \
+             yet, so decode workers still perform the whole prefill"
         );
     }
-    Ok(())
 }
 
 fn init_tracing() {
@@ -209,12 +205,6 @@ impl BackgroundTasks {
 
 async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry) -> Result<()> {
     let standalone = matches!(mode, EppMode::Standalone);
-
-    // Read before the mode branch: `EppStandaloneConfig::from_env` is only
-    // reached inside it, so a disaggregated topology set alongside the default
-    // runtime mode would otherwise be silently ignored — and every pool-selected
-    // pod, prefill included, would stay a routable destination.
-    reject_disaggregated_outside_standalone(mode, EppTopologyMode::from_env()?)?;
 
     let config = Config::from_env();
 
@@ -299,6 +289,7 @@ async fn run_inner(mode: EppMode, policy_registry: WorkerSelectionPolicyRegistry
     let result = async {
         if standalone {
             let selector_cfg = EppStandaloneConfig::from_env()?;
+            warn_if_disaggregated_incomplete(&selector_cfg);
             tracing::info!(
                 inference_pool_name = %selector_cfg.inference_pool_name,
                 model_name = %selector_cfg.model_name,
@@ -555,28 +546,5 @@ mod tests {
             result.unwrap_err().to_string(),
             "linked worker-selection policies require DYN_EPP_MODE=standalone"
         );
-    }
-
-    #[test]
-    fn disaggregated_requires_standalone_mode() {
-        // The failure this guards is silent by construction: without it the
-        // setting is simply never read.
-        let error = reject_disaggregated_outside_standalone(
-            EppMode::DynamoRuntime,
-            EppTopologyMode::Disaggregated,
-        )
-        .expect_err("disaggregated must not be silently ignored under the runtime mode")
-        .to_string();
-        assert!(error.contains(DYN_EPP_MODE), "{error}");
-        assert!(error.contains(STANDALONE_MODE), "{error}");
-
-        // The other three combinations are all legitimate.
-        for (mode, topology) in [
-            (EppMode::Standalone, EppTopologyMode::Disaggregated),
-            (EppMode::Standalone, EppTopologyMode::Aggregated),
-            (EppMode::DynamoRuntime, EppTopologyMode::Aggregated),
-        ] {
-            assert!(reject_disaggregated_outside_standalone(mode, topology).is_ok());
-        }
     }
 }

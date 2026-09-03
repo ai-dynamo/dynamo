@@ -118,12 +118,6 @@ impl EppRouter {
         )
         .await?;
 
-        tracing::warn!(
-            "DYN_EPP_TOPOLOGY_MODE=disaggregated is incomplete until ai-dynamo/dynamo#13405 and \
-             #13407 land: the prefill catalog is populated but nothing selects from it yet, so \
-             decode workers still perform the whole prefill"
-        );
-
         Ok(RoleSelectors::Disaggregated {
             prefill: Arc::new(prefill),
             decode: Arc::new(decode),

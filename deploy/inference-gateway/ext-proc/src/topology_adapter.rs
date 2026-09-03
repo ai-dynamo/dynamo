@@ -39,7 +39,7 @@ impl RegistrationDefaults {
         Self {
             model_name: cfg.model_name.clone(),
             block_size: cfg.block_size,
-            total_kv_blocks: cfg.total_kv_blocks_for(role),
+            total_kv_blocks: cfg.total_kv_blocks,
             max_num_batched_tokens: cfg.max_num_batched_tokens_for(role),
         }
     }
@@ -426,17 +426,13 @@ mod tests {
         let cfg = EppStandaloneConfig {
             prefill_max_num_batched_tokens: Some(16384),
             decode_max_num_batched_tokens: Some(2048),
-            prefill_total_kv_blocks: Some(4000),
-            decode_total_kv_blocks: Some(1000),
             ..disagg_config()
         };
 
         let prefill = RegistrationDefaults::for_role(&cfg, WorkerRole::Prefill);
         assert_eq!(prefill.max_num_batched_tokens, Some(16384));
-        assert_eq!(prefill.total_kv_blocks, Some(4000));
 
         let decode = RegistrationDefaults::for_role(&cfg, WorkerRole::Decode);
         assert_eq!(decode.max_num_batched_tokens, Some(2048));
-        assert_eq!(decode.total_kv_blocks, Some(1000));
     }
 }
