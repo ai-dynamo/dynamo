@@ -43,16 +43,18 @@ CANCELLATION_MAX_TOKENS = 2048
 PREFILL_CANCELLATION_MAX_TOKENS = 128
 XPU_CANCELLATION_MAX_TOKENS = 2096
 
-# Each process already gets its own ManagedProcess startup budget and reports
-# its own health-check timeout. This only has to stay above their sum, so it
-# never fires first and hides them (DYN-4129). The three start serially:
-# 60s frontend + 300s prefill + 300s decode, plus ~210s of bounded waits,
-# metrics polling and teardown after that.
-DECODE_CANCEL_FRONTEND_STARTUP_TIMEOUT_S = 60
+# Each worker gets its own 300s ManagedProcess startup budget and fails with the
+# health-check URL that timed out. This only has to stay above their sum, so it
+# never fires first and hides them (DYN-4129): 300s prefill + 300s decode, which
+# start serially, plus ~210s of bounded waits, metrics polling and teardown.
+# The frontend is not counted: it configures no health check, so ManagedProcess
+# waits on nothing for it.
 DECODE_CANCEL_TEST_TIMEOUT_S = 900
 
 # The streaming read had no bound. STREAM_READ is the per-read socket timeout
-# between chunks; BEHAVIORAL is the wall-clock deadline across all of them.
+# between chunks; BEHAVIORAL bounds the wait for the next chunk while the
+# chunk-count goal is unmet. Neither caps total read time -- a late final chunk
+# that completes the count still counts. See read_streaming_responses.
 DECODE_CANCEL_STREAM_READ_TIMEOUT_S = 30
 DECODE_CANCEL_BEHAVIORAL_ALLOWANCE_S = 90
 
@@ -389,9 +391,7 @@ def test_request_cancellation_vllm_decode_cancel(
 ):
     """Verify that decode-side work stops after a disaggregated request is cancelled."""
 
-    with DynamoFrontendProcess(
-        request, timeout_s=DECODE_CANCEL_FRONTEND_STARTUP_TIMEOUT_S
-    ) as frontend:
+    with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
         with DynamoWorkerProcess(
