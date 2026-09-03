@@ -20,10 +20,8 @@ from tests.utils.constants import DefaultPort, DynamoPortRange
 from tests.utils.port_utils import allocate_port, deallocate_port
 from tests.utils.test_output import resolve_test_output_path
 
-# How long to wait for the `sed`/`tee` output pipeline to flush into the log
-# file after the managed process is observed dead. Bounded because a surviving
-# grandchild can hold the child's stdout pipe open indefinitely, which would
-# otherwise let a wedged pipeline hang the whole test run.
+# Bounded because a surviving grandchild can hold the child's stdout pipe open
+# indefinitely, which would otherwise let a wedged pipeline hang the test run.
 LOG_DRAIN_TIMEOUT_SECONDS = 5.0
 
 # Line budget for the log tail embedded in a raised RuntimeError. Matches the

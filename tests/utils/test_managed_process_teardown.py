@@ -358,9 +358,7 @@ class TestSigtermGracePeriod:
 
 
 # ---------------------------------------------------------------------------
-# Scenario 7: Process dies during the health-check loop — the raised error
-# must carry the process output that explains the death
-# ---------------------------------------------------------------------------
+# Scenario 7: Process dies during the health-check loop
 class TestHealthCheckFailureDiagnostics:
     def test_error_carries_process_output_and_log_path(self, tmp_path):
         """A process that prints a marker and exits 1 while the health check is
