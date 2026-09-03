@@ -591,8 +591,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "bootstrap_info is required for disaggregated decode but was not provided"
                 )
 
-            # n > 1 runs as n single-sample sub-requests, one room each,
-            # merged back by choice index (see dynamo.sglang.parallel_sampling).
             num_choices = requested_parallel_samples(sampling_params)
             bootstrap_rooms = resolve_decode_bootstrap_rooms(
                 bootstrap_info, num_choices

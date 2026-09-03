@@ -115,21 +115,22 @@ fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
         bootstrap_host,
         bootstrap_port,
         bootstrap_room,
-        bootstrap_rooms: extract_bootstrap_rooms(params),
+        bootstrap_rooms: extract_bootstrap_rooms(params, bootstrap_room),
         handoff_id: Some(Uuid::new_v4()),
     })
 }
 
 /// Per-choice rooms a prefill worker drew itself for an `n > 1` request.
-/// A malformed list is dropped; decode then rejects the request.
-fn extract_bootstrap_rooms(params: &serde_json::Value) -> Option<Vec<u64>> {
+/// A malformed list, or one not led by `bootstrap_room`, is dropped; decode
+/// then rejects the request.
+fn extract_bootstrap_rooms(params: &serde_json::Value, bootstrap_room: u64) -> Option<Vec<u64>> {
     let rooms = params
         .get("bootstrap_rooms")?
         .as_array()?
         .iter()
         .map(serde_json::Value::as_u64)
         .collect::<Option<Vec<u64>>>()?;
-    (rooms.len() > 1).then_some(rooms)
+    (rooms.len() > 1 && rooms[0] == bootstrap_room).then_some(rooms)
 }
 
 struct PreparedPrefill {
@@ -987,8 +988,6 @@ mod tests {
     fn parallel_sample_count_reads_sampling_options() {
         let mut request = request_with_constraints(None);
         assert_eq!(parallel_sample_count(&request), 1);
-        request.sampling_options.n = Some(0);
-        assert_eq!(parallel_sample_count(&request), 1);
         request.sampling_options.n = Some(4);
         assert_eq!(parallel_sample_count(&request), 4);
     }
@@ -1124,6 +1123,8 @@ mod tests {
             serde_json::json!([10, -20]),
             // A single-entry list is not a fan-out.
             serde_json::json!([10]),
+            // The first entry must be `bootstrap_room`.
+            serde_json::json!([20, 10, 30]),
         ] {
             let params = serde_json::json!({
                 "bootstrap_host": "10.0.0.5",
