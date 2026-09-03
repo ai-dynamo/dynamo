@@ -29,7 +29,7 @@ time a no-op is exercised so the misconfiguration is discoverable.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from dynamo._core import Context
 
@@ -48,7 +48,7 @@ class _NoopSpan:
     def __enter__(self) -> "_NoopSpan":
         return self
 
-    def __exit__(self, _exc_type, _exc_value, _traceback) -> bool:
+    def __exit__(self, _exc_type, _exc_value, _traceback) -> Literal[False]:
         return False
 
 
