@@ -158,6 +158,9 @@ def _merge_benchmark_rank_results(
         raise RuntimeError("No self-benchmark rank results were loaded")
 
     source_ranks = [rank for rank, _, _ in rank_data]
+    # Row-level KV seed provenance travels from each rank artifact into the
+    # merged artifact unchanged (per rank, per benchmark id).
+    regimes: dict[tuple[int, int], object] = {}
     reference_rank, reference_path, reference = rank_data[0]
     run_id = reference.get("run_id")
     grid_digest = reference.get("grid_digest")
@@ -363,6 +366,8 @@ def _merge_benchmark_rank_results(
         for result in data.get("results", []):
             point = result.get("point", {})
             benchmark_id = point.get("benchmark_id")
+            if "kv_seed_regime" in result:
+                regimes[(dp_rank, benchmark_id)] = result["kv_seed_regime"]
             if benchmark_id in results_by_id:
                 raise RuntimeError(
                     f"Self-benchmark rank {dp_rank} has duplicate "
@@ -417,7 +422,10 @@ def _merge_benchmark_rank_results(
             fpms = copy.deepcopy(rank_result["fpms"])
             point = copy.deepcopy(canonical_point)
             point["dp_rank"] = dp_rank
-            flattened_results.append({"point": point, "fpms": fpms})
+            entry: dict = {"point": point, "fpms": fpms}
+            if (dp_rank, benchmark_id) in regimes:
+                entry["kv_seed_regime"] = regimes[(dp_rank, benchmark_id)]
+            flattened_results.append(entry)
 
     merged = copy.deepcopy(reference)
     merged["artifact_type"] = "merged"
