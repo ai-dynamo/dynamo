@@ -13,7 +13,7 @@ import pytest
 from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.llm import HttpError
-from dynamo.llm.exceptions import EngineShutdown
+from dynamo.llm.exceptions import EngineShutdown, InvalidArgument
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
     native_generate_stream,
@@ -2136,11 +2136,10 @@ async def test_disagg_parallel_sampling_rejected_before_handoff(handler_type, pa
     original = deepcopy(payload)
 
     with pytest.raises(
-        HttpError, match="disaggregated serving supports only n=1"
-    ) as error:
+        InvalidArgument, match="disaggregated serving supports only n=1"
+    ):
         await anext(handler.generate(payload, context))
 
-    assert error.value.code == 400
     handler.engine.async_generate.assert_not_awaited()
     handler._generate_bootstrap_room.assert_not_called()
     handler._get_input_param.assert_not_called()

@@ -11,7 +11,8 @@ import numpy as np
 import pytest
 import torch
 
-from dynamo.llm import HttpError
+from dynamo.common.constants import DisaggregationMode
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.protocol import (
     MultiModalGroup,
     MultiModalInput,
@@ -659,6 +660,7 @@ async def test_vp9_with_software_decoder_passes_bytes_through(monkeypatch):
 async def test_multimodal_decode_rejects_parallel_sampling_before_prefill_handoff():
     """Reject multimodal n greater than one before contacting prefill."""
     handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
+    handler.serving_mode = DisaggregationMode.DECODE
     prefill_called = False
 
     class _PrefillClient:
@@ -678,11 +680,10 @@ async def test_multimodal_decode_rejects_parallel_sampling_before_prefill_handof
     )
 
     with pytest.raises(
-        HttpError, match="disaggregated serving supports only n=1"
-    ) as error:
-        await anext(handler._generate_disaggregated(request, lambda: None))
+        InvalidArgument, match="disaggregated serving supports only n=1"
+    ):
+        await anext(handler.generate(request, _FakeContext("request-id")))
 
-    assert error.value.code == 400
     assert not prefill_called
 
 

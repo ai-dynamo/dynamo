@@ -25,7 +25,7 @@ from typing import Any, Optional
 
 import sglang as sgl
 
-from dynamo.llm import HttpError
+from dynamo.llm.exceptions import InvalidArgument
 from dynamo.sglang.engine_generate import native_generate_payload
 
 # Matches the prior in-tree value. Long enough for the slowest cold-start
@@ -50,14 +50,13 @@ def validate_disagg_parallel_sampling(request: Mapping[str, Any]) -> None:
         if options is None:
             continue
         if not isinstance(options, Mapping):
-            raise HttpError(
-                400, "SGLang disaggregated sampling parameters must be an object."
+            raise InvalidArgument(
+                "SGLang disaggregated sampling parameters must be an object."
             )
         if options.get("n") not in (None, 1):
             # Prefill produces one bootstrap room. SGLang expands parallel
             # decode samples into independent transfers that cannot all finish.
-            raise HttpError(
-                400,
+            raise InvalidArgument(
                 "SGLang disaggregated serving supports only n=1. "
                 "Use aggregated serving or send separate n=1 requests.",
             )
