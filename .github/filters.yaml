@@ -15,15 +15,23 @@
 #   frontend -> frontend EPP image build, dynamo build-test
 #   benchmarks -> dynamo build-test (runs tests/benchmarks/** pytest suite)
 #   efa      -> all framework EFA runtime image builds (changes to container/templates/aws.Dockerfile)
-#   examples -> recipe-check (Kustomize recipe generation and unit tests)
-#   sidecar  -> classification only; source and proto files also match rust
+#   examples -> recipe-check (Kustomize recipe generation and docs tests)
+#   sidecar  -> unified sidecar image build, publish, and compliance checks
 #   docs     -> fern docs lint, sync, and version release (docs/ directory)
 #
 # Filters for coverage only (no CI triggered):
-#   examples, ignore, sidecar
+#   ignore
 
 all:
   - '**'
+
+# Gates four jobs in pre-merge.yml: Docs Lint, Fern Configuration Check, Docs
+# Website Composition Check, Fern Broken Links Check. Keep it to sources those
+# jobs actually read. Repo-wide catch-alls like '**/*.md' used to live here for
+# coverage classification, which meant editing any README in the repo ran all
+# four -- including the composition check, the most expensive of them -- while
+# Docs Lint scans docs/ and never looked at the file that triggered it. Those
+# patterns moved to `ignore`, which counts for coverage and gates nothing.
 
 # Fern component sources only. The docs filter matches 458 of the last 1172
 # commits on main, but only 21 of those touched a component source, so a step
@@ -43,14 +51,6 @@ docs:
   - 'docs/**'
   - 'fern/**'
   - '.github/workflows/fern-docs.yml'
-  - '**/*.md'
-  - '**/*.txt'
-  - '**/.gitignore'
-  - '**/.helmignore'
-  - '**/.gitattributes'
-  - 'LICENSE'
-  - 'CODEOWNERS'
-  - '.coveragerc'
   - '.claude/**'
   - '.agents/**'
   # Codex role configs for the optimization skill pack; agent guidance, no CI surface.
@@ -89,13 +89,26 @@ examples:
   - 'deploy/pre-deployment/**'
   - 'scripts/generate_kustomize_openapi.py'
   - 'scripts/kustomize-matrix.py'
+  - 'scripts/validate-recipe-kustomization.py'
   - 'tests/test_generate_kustomize_openapi.py'
   - 'tests/test_kustomize_matrix.py'
+  - 'docs/tests/**'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeployment.yaml'
   - 'deploy/operator/config/crd/bases/nvidia.com_dynamographdeploymentrequests.yaml'
 
 ignore:
-  # CI filter documentation does not affect any CI job.
+  # Classification-only, moved out of `docs`: these match files anywhere in the
+  # repo and must satisfy the coverage check without gating the Fern jobs.
+  - '**/*.md'
+  - '**/*.txt'
+  - '**/.gitignore'
+  - '**/.helmignore'
+  - '**/.gitattributes'
+  - 'LICENSE'
+  - 'CODEOWNERS'
+  - '.coveragerc'
+  # CI filter documentation does not affect any CI job, and `**` skips dotfile
+  # directories, so the '**/*.md' rule above misses this one.
   - '.github/FILTERS.md'
   - '.lycheeignore'
   - '.pre-commit-config.yaml'
@@ -128,11 +141,15 @@ ignore:
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
   - 'scripts/dco_check.py'
+  - 'scripts/validate_agent_instructions.py'
   - 'scripts/validate_skills.py'
   - 'scripts/check_action_pins.py'
   # CODEOWNERS generation tooling (data + scripts). Validated by its own
   # codeowners.yml workflow (triggers on '**'); no backend CI needed here.
   - '.github/codeowners/**'
+  # Excluded from `sidecar` (no image build) and from `docs` (not on the Fern site).
+  - 'lib/sidecar/**/*.md'
+  - 'lib/sidecar/**/*.rst'
 
 ci: &ci
   - '.github/workflows/**'
@@ -283,7 +300,14 @@ planner:
   - '!**/*.rst'
 
 sidecar:
+  # TODO: Expand this to every Dockerfile and composite-action input after the
+  # acceptable CI fan-out is agreed. Keep the remaining scope narrow for now.
   - 'lib/sidecar/**'
+  - '.github/workflows/shared-build-sidecar.yml'
+  # Compliance policy and baseline changes can fail the sidecar image build.
+  - 'container/compliance/**'
+  - '!**/*.md'
+  - '!**/*.rst'
 
 vllm:
   - 'container/deps/requirements.vllm.txt'
@@ -340,6 +364,13 @@ frontend:
   - 'tests/frontend/router_aic_image_smoke.py'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
+  # The frontend image is rendered from these two: render.py generates its
+  # Dockerfile, and context.yaml supplies EPP_IMAGE -- the `FROM` that the
+  # compliance stages read /sbom-rust-epp.cdx.json and /rust-licenses out of.
+  # Both live in `core:`, which frontend-build is not gated on, so without
+  # these a PR bumping only epp_image would build and test no frontend image.
+  - 'container/context.yaml'
+  - 'container/render.py'
   # Sidecars are standalone Rust binaries and are not part of the frontend
   # image or its E2E test pipeline.
   - '!lib/sidecar/**'

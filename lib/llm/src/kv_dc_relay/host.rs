@@ -24,7 +24,7 @@ use std::time::Duration;
 use std::sync::atomic::Ordering;
 
 use dynamo_kv_router::identity::PoolId;
-use dynamo_kv_router::indexer::cuckoo::CkfFailureAction;
+use dynamo_kv_router::indexer::cuckoo::{CkfConfig, CkfFailureAction};
 use dynamo_kv_router::protocols::ActiveLoad;
 use dynamo_kv_router::protocols::{DpRank, KvCacheEventError, WorkerId};
 use dynamo_runtime::component::Component;
@@ -45,10 +45,15 @@ use super::discovery::{
 };
 use super::identity::{CanonicalModelRegistration, DcPoolCatalog, DcRelayIdentity, WorkerRole};
 use super::load::PoolLoadSnapshot;
-use super::pool_registry::PoolServingFacts;
 use super::pool_registry::{
     PoolActorConfig, PoolAttachRequest, PoolAttachment, PoolRegistry, PoolRetirementMode,
     drain_faults_while,
+};
+use super::pool_registry::{PoolPublicationConfig, PoolServingFacts};
+use super::publication::{
+    DEFAULT_ACTIVE_POOL_STREAMS, DEFAULT_SNAPSHOT_ENCODING_CONCURRENCY,
+    DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT, MAX_BUCKET_COUNT, RegistryPublicationSource,
+    RelayPublicationSource,
 };
 use super::resolution::stable_dc_id;
 use super::topology::{TopologyPublisher, TopologySnapshot};
@@ -69,6 +74,21 @@ pub const DEFAULT_EXPECTED_UNIQUE_BLOCKS: usize = 1_048_576;
 const DEFAULT_RECOVERY_FETCH_CONCURRENCY: usize = 16;
 const DEFAULT_PUBLICATION_THRESHOLD: usize = 16;
 const DEFAULT_PUBLICATION_DELAY: Duration = Duration::from_millis(1);
+
+fn validate_publication_capacity(expected_unique_blocks: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        expected_unique_blocks != 0,
+        "KV DC Relay expected_unique_blocks must be positive"
+    );
+    let bucket_count = CkfConfig::new(expected_unique_blocks)
+        .bucket_count()
+        .map_err(|error| anyhow::anyhow!("invalid KV DC Relay CKF capacity: {error}"))?;
+    anyhow::ensure!(
+        bucket_count <= MAX_BUCKET_COUNT,
+        "KV DC Relay expected_unique_blocks {expected_unique_blocks} requires {bucket_count} CKF buckets, exceeding the CBI1 maximum {MAX_BUCKET_COUNT}"
+    );
+    Ok(())
+}
 
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -591,6 +611,7 @@ pub struct KvDcRelay {
     statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
     pools: Arc<PoolRegistry>,
     topology: Arc<TopologyPublisher>,
+    publication_source: Arc<RegistryPublicationSource>,
 }
 
 impl KvDcRelay {
@@ -605,10 +626,7 @@ impl KvDcRelay {
             "KV DC Relay dc_id must not contain leading or trailing whitespace"
         );
         config.discovery.validate()?;
-        anyhow::ensure!(
-            config.producer.expected_unique_blocks != 0,
-            "KV DC Relay expected_unique_blocks must be positive"
-        );
+        validate_publication_capacity(config.producer.expected_unique_blocks)?;
         anyhow::ensure!(
             config.producer.publication_threshold != 0,
             "KV DC Relay publication_threshold must be positive"
@@ -643,12 +661,26 @@ impl KvDcRelay {
             publication_threshold: publication.threshold,
             publication_delay: publication.delay,
         };
-        let pools = Arc::new(PoolRegistry::new(relay_identity, actor_config));
+        let publication_config = PoolPublicationConfig::default();
+        let pools = Arc::new(PoolRegistry::new_with_publication_config(
+            relay_identity,
+            actor_config,
+            publication_config,
+        ));
         let topology = {
             let mut initial_view = membership_rx.borrow().clone();
             reject_duplicate_live_pools(&mut initial_view, ckf_dc_id);
             Arc::new(TopologyPublisher::new(initial_view, &pools.catalog()))
         };
+        let publication_source = Arc::new(RegistryPublicationSource::new(
+            pools.clone(),
+            topology.clone(),
+            relay_identity,
+            cancel.child_token(),
+            Arc::new(Semaphore::new(DEFAULT_SNAPSHOT_ENCODING_CONCURRENCY)),
+            DEFAULT_ACTIVE_POOL_STREAMS,
+            DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT,
+        ));
         let terminal = Arc::new(HostTerminalState::default());
         let host = tokio::spawn(run_host_supervisor(
             component,
@@ -684,6 +716,7 @@ impl KvDcRelay {
             statuses,
             pools,
             topology,
+            publication_source,
         })
     }
 
@@ -713,6 +746,11 @@ impl KvDcRelay {
 
     pub fn watch_pool_load(&self) -> watch::Receiver<Vec<PoolLoadSnapshot>> {
         self.pools.watch_load()
+    }
+
+    /// Lets drivers consume Relay publication state without coupling Relay to a transport.
+    pub fn publication_source(&self) -> Arc<dyn RelayPublicationSource> {
+        self.publication_source.clone()
     }
 
     #[cfg(feature = "ckf-diagnostics")]
@@ -2440,6 +2478,15 @@ mod tests {
     use super::*;
     use crate::discovery::{KvEventSource, KvSourceMembership};
 
+    #[test]
+    fn publication_capacity_rejects_ckf_larger_than_cbi1() {
+        let maximum_expected_blocks = MAX_BUCKET_COUNT * 16 / 5;
+        validate_publication_capacity(maximum_expected_blocks).unwrap();
+
+        let error = validate_publication_capacity(maximum_expected_blocks + 1).unwrap_err();
+        assert!(error.to_string().contains("exceeding the CBI1 maximum"));
+    }
+
     fn membership(endpoint: &str, domain: KvCacheDomainKey) -> EndpointMembership {
         let endpoint = EndpointId::from(endpoint);
         let namespace = endpoint.namespace.clone();
@@ -2490,6 +2537,22 @@ mod tests {
                 publication_delay: Duration::from_millis(1),
             },
         )
+    }
+
+    fn publication_source(
+        pools: Arc<PoolRegistry>,
+        topology: Arc<TopologyPublisher>,
+        lifecycle: CancellationToken,
+    ) -> Arc<RegistryPublicationSource> {
+        Arc::new(RegistryPublicationSource::new(
+            pools,
+            topology,
+            DcRelayIdentity::new(11, 7),
+            lifecycle,
+            Arc::new(Semaphore::new(2)),
+            DEFAULT_ACTIVE_POOL_STREAMS,
+            DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT,
+        ))
     }
 
     fn actor_fault(
@@ -2878,11 +2941,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retained_publication_source_observes_relay_shutdown() {
+        let component = test_component("publication-lifecycle").await;
+        let relay = KvDcRelay::start(component, "test-dc".to_string(), KvDcRelayConfig::default())
+            .await
+            .unwrap();
+        let source = relay.publication_source();
+
+        relay.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), source.wait_for_shutdown())
+            .await
+            .expect("retained publication source must observe Relay shutdown");
+    }
+
+    #[tokio::test]
     async fn unexpected_host_return_cancels_relay_and_records_terminal_error() {
         let cancel = CancellationToken::new();
         let terminal = Arc::new(HostTerminalState::default());
         let pools = Arc::new(registry());
         let topology = test_topology();
+        let publication_source =
+            publication_source(pools.clone(), topology.clone(), cancel.child_token());
         let supervisor_complete = CancellationToken::new();
         let supervisor = spawn_host_task_supervisor(
             tokio::spawn(async { Ok(()) }),
@@ -2906,6 +2985,7 @@ mod tests {
             statuses: Arc::new(RwLock::new(HashMap::new())),
             pools,
             topology,
+            publication_source,
         };
         tokio::time::timeout(Duration::from_millis(100), relay.wait_for_shutdown())
             .await
@@ -2974,6 +3054,8 @@ mod tests {
             },
             &DcPoolCatalog::new(DcRelayIdentity::new(0, 1), 0, Vec::new()),
         ));
+        let publication_source =
+            publication_source(pools.clone(), topology.clone(), cancel.child_token());
         let supervisor_complete = CancellationToken::new();
         let supervisor = spawn_host_task_supervisor(
             host,
@@ -2996,6 +3078,7 @@ mod tests {
             statuses: Arc::new(RwLock::new(HashMap::new())),
             pools,
             topology: topology.clone(),
+            publication_source,
         };
 
         cancel.cancel();
@@ -3094,19 +3177,25 @@ mod tests {
                 })
                 .collect(),
         ));
+        let pools = Arc::new(registry());
+        let topology = test_topology();
+        let cancel = CancellationToken::new();
+        let publication_source =
+            publication_source(pools.clone(), topology.clone(), cancel.child_token());
         let relay = KvDcRelay {
             #[cfg(feature = "ckf-diagnostics")]
             dc_id: Arc::from("test-dc"),
             #[cfg(feature = "ckf-diagnostics")]
             relay_identity: DcRelayIdentity::new(11, 7),
-            cancel: CancellationToken::new(),
+            cancel,
             membership: Mutex::new(None),
             supervisor: Mutex::new(None),
             supervisor_complete: CancellationToken::new(),
             terminal: Arc::new(HostTerminalState::default()),
             statuses,
-            pools: Arc::new(registry()),
-            topology: test_topology(),
+            pools,
+            topology,
+            publication_source,
         };
 
         let health = relay.health().await;

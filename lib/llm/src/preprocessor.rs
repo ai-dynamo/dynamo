@@ -14,6 +14,8 @@
 #[cfg(feature = "mm-routing")]
 pub mod lightseek_mm;
 pub mod media;
+#[cfg(all(feature = "mm-routing", any(feature = "media-ffmpeg", test)))]
+mod mm_routing;
 pub mod prompt;
 pub mod speculative_prefill;
 pub(crate) mod structural_tag;
@@ -48,15 +50,19 @@ use std::{
     any::Any,
     collections::{HashMap, HashSet},
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
 };
 use tracing;
 
+#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
 use crate::local_model::runtime_config::{TOKEN_BUDGET_RUNTIME_KEY, TokenBudget};
 #[cfg(feature = "mm-routing")]
 use crate::model_card::ModelInfoType;
-use crate::model_card::{ModelDeploymentCard, ModelInfo};
-use crate::preprocessor::media::MediaLoader;
+use crate::model_card::{ModelDeploymentCard, ModelInfo, PromptFormatterArtifact};
+#[cfg(feature = "mm-routing")]
+use crate::preprocessor::media::MediaFetcher;
+use crate::preprocessor::media::{MediaDecoder, MediaLoader};
 use crate::protocols::common::preprocessor::{
     MultimodalData, MultimodalDataMap, MultimodalUuidMap, PreprocessedRequestBuilder, RoutingHints,
 };
@@ -77,18 +83,27 @@ use crate::protocols::{
     TokenIdType,
     common::{
         OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
-        extensions::{AgentHints, NvExtProvider, request_cache_salt, routing_constraints_to_kv},
+        extensions::{
+            AgentHints, NvExtProvider, merge_response_nvext, request_cache_salt,
+            routing_constraints_to_kv,
+        },
     },
     openai::{
         DeltaGeneratorExt,
-        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
+        chat_completions::{
+            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+            scrub_synthetic_chunk_metadata,
+        },
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
     },
 };
 use crate::tokenizers::traits::Tokenizer;
 
-use crate::preprocessor::prompt::{MediaRequestExt, prompt_formatter_from_mdc};
+use crate::preprocessor::prompt::{
+    MediaRequestExt, apply_continue_final_message, prompt_formatter_from_mdc,
+};
+use crate::protocols::openai::common_ext::CommonExtProvider;
 use dynamo_renderer::{OAIChatLikeRequest, PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
@@ -116,6 +131,70 @@ fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
         .message(message.into())
         .build()
         .into()
+}
+
+// Preserves terminal versus recoverable failures when moka shares a
+// dimension fetch among concurrent callers.
+#[cfg(feature = "mm-routing")]
+enum ImageDimFetchFailure {
+    InvalidArgument(String),
+    Recoverable(String),
+}
+
+#[cfg(feature = "mm-routing")]
+impl ImageDimFetchFailure {
+    fn from_error(error: anyhow::Error) -> Self {
+        if MediaFetcher::is_policy_rejection(&error) {
+            Self::InvalidArgument(error.to_string())
+        } else {
+            Self::Recoverable(error.to_string())
+        }
+    }
+
+    fn to_error(&self) -> anyhow::Error {
+        match self {
+            Self::InvalidArgument(message) => invalid_argument_error(message.clone()),
+            Self::Recoverable(message) => anyhow::anyhow!("fetch_image_dims failed: {message}"),
+        }
+    }
+}
+
+fn validate_legacy_jail_nvext_choice_count(
+    n: u8,
+    extra_fields: Option<&[String]>,
+    is_legacy_jail: bool,
+) -> Result<()> {
+    if n <= 1 || !is_legacy_jail {
+        return Ok(());
+    }
+
+    const CHOICE_SPECIFIC_FIELDS: [&str; 3] = ["engine_data", "routed_experts", "stop_reason"];
+    if let Some(field) = extra_fields.and_then(|fields| {
+        fields
+            .iter()
+            .find(|field| CHOICE_SPECIFIC_FIELDS.contains(&field.as_str()))
+    }) {
+        return Err(invalid_argument_error(format!(
+            "legacy tool-call parsing requires n = 1 when nvext.extra_fields requests choice-specific field `{field}`"
+        )));
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ToolProcessingRoute {
+    MuseUnified(String),
+    QwenUnified(&'static str),
+    ParserV2(String),
+    LegacyJail(Option<String>),
+    PassThrough,
+}
+
+impl ToolProcessingRoute {
+    fn uses_legacy_jail(&self) -> bool {
+        matches!(self, Self::LegacyJail(_))
+    }
 }
 
 fn tool_content_part_as_user(
@@ -222,17 +301,88 @@ fn image_content_part_url(
     part.image_url.as_ref().map(|image| image.url.as_str())
 }
 
-/// Encode a slice of `f32` values as a base64 string per the OpenAI
-/// `encoding_format=base64` spec: the raw little-endian byte
-/// representation of each `f32` is concatenated and the resulting byte
-/// buffer is base64-encoded with the standard alphabet.
-fn encode_floats_to_base64(floats: &[f32]) -> String {
+/// Decode a base64-encoded little-endian f32 byte string back into a float
+/// vector. The byte length must be a multiple of 4; trailing bytes are
+/// rejected. Shared by the tokens-path postprocessor and the HTTP embedding
+/// handler, which converts leftover Base64 payloads to Float when requested.
+pub(crate) fn decode_base64_to_floats(encoded: &str) -> Result<Vec<f32>, String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
-    let mut bytes = Vec::with_capacity(std::mem::size_of_val(floats));
-    for f in floats {
-        bytes.extend_from_slice(&f.to_le_bytes());
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() % std::mem::size_of::<f32>() != 0 {
+        return Err(format!(
+            "base64-decoded embedding byte length {} is not a multiple of 4",
+            bytes.len()
+        ));
     }
-    STANDARD.encode(&bytes)
+    Ok(bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect())
+}
+
+#[cfg(test)]
+mod embedding_base64_transport_tests {
+    use super::{OpenAIPreprocessor, decode_base64_to_floats};
+    use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
+    use crate::protocols::openai::embeddings::NvCreateEmbeddingRequest;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use dynamo_runtime::protocols::annotated::Annotated;
+    use futures::StreamExt;
+    use futures::stream;
+
+    #[test]
+    fn portable_embedding_bytes_decode() {
+        let expected = vec![0.0, 1.0, -1.0, 2.5, -42.5, 3.25, f32::MIN, f32::MAX];
+        let bytes = expected
+            .iter()
+            .flat_map(|value: &f32| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let encoded = STANDARD.encode(bytes);
+        assert_eq!(decode_base64_to_floats(&encoded).unwrap(), expected);
+    }
+
+    #[test]
+    fn portable_embedding_bytes_reject_invalid_base64() {
+        assert!(decode_base64_to_floats("not!valid!base64").is_err());
+    }
+
+    #[test]
+    fn portable_embedding_bytes_reject_partial_float() {
+        let encoded = STANDARD.encode([0_u8; 5]);
+        let error = decode_base64_to_floats(&encoded).unwrap_err();
+        assert!(error.contains("not a multiple of 4"));
+    }
+
+    #[test]
+    fn empty_embeddings_engine_output_surfaces_as_error() {
+        let request: NvCreateEmbeddingRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "input": "hello"
+        }))
+        .unwrap();
+        let output = Annotated::from_data(EmbeddingsEngineOutput {
+            embeddings: vec![],
+            prompt_tokens: 0,
+            total_tokens: 0,
+        });
+        let items = futures::executor::block_on(
+            OpenAIPreprocessor::transform_embedding_postprocessor_stream(
+                stream::iter(vec![output]),
+                request,
+            )
+            .collect::<Vec<_>>(),
+        );
+        assert_eq!(items.len(), 1);
+        let item = items.into_iter().next().unwrap();
+        assert!(item.is_error(), "empty embeddings must be a stream error");
+        let err = item.into_result().unwrap_err();
+        assert!(
+            err.to_string().contains("empty `embeddings` field"),
+            "error should name the empty embeddings field, got: {err}"
+        );
+    }
 }
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
@@ -360,40 +510,6 @@ struct ChoiceReasoningState {
     // parser had already handed over. Draining again is fine; finalizing again
     // is not.
     parser_finished: bool,
-}
-
-/// Strip every per-chunk field from a response that is being reused as the
-/// envelope for a synthetic end-of-stream chunk.
-///
-/// Both end-of-stream flushes build their chunk by cloning the last chunk they
-/// saw, because that is the only way to carry the buffered bytes out on a
-/// correctly-shaped response. The clone is not a new generation: it produced no
-/// tokens and re-channels bytes the parser was already holding. So everything
-/// describing the *original* chunk's generation has to go, or it is reported
-/// twice:
-///
-/// - `event` / `comment` — the annotation channel carries per-chunk payloads
-///   such as generated `token_ids`.
-/// - `error` — an error annotation must not be replayed on a later chunk.
-/// - `usage` / `llm_metrics` — `metrics.rs` sums `chunk_tokens` and samples an
-///   ITL point per chunk carrying `llm_metrics`.
-/// - `nvext` — per-chunk NVIDIA extensions. `merge_response_nvext` append-merges
-///   `completion_token_ids`, so a repeat turns `[42]` into `[42, 42]`, and
-///   fields it does not append (such as `prompt_logprobs`) are overwritten.
-///
-/// Kept as one function so the two call sites cannot drift apart: they already
-/// did, which is how `nvext` survived on both.
-fn scrub_synthetic_chunk_metadata(
-    response: &mut Annotated<NvCreateChatCompletionStreamResponse>,
-) -> Option<()> {
-    response.event = None;
-    response.comment = None;
-    response.error = None;
-    let data = response.data.as_mut()?;
-    data.inner.usage = None;
-    data.llm_metrics = None;
-    data.nvext = None;
-    Some(())
 }
 
 /// Estimates reasoning-token usage from the parser-classified Chat Completion stream.
@@ -632,6 +748,86 @@ pub struct MmImageEntry {
     pub height: u32,
 }
 
+/// One replacement tracked in both the worker-visible and canonical routing
+/// token spaces. vLLM includes MM metadata on every block intersecting a
+/// feature span, including timestamp/delimiter-only boundary blocks. Those
+/// blocks need the worker token form plus `block_mm_infos`; blocks with an
+/// exact placeholder/object mapping use the canonical pad-value form.
+#[cfg(feature = "mm-routing")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TrackedMmRoutingReplacement {
+    mm_hash: u64,
+    target_tokens: Vec<TokenIdType>,
+    worker_tokens: Vec<TokenIdType>,
+    routing_tokens: Vec<TokenIdType>,
+}
+
+/// Modality-aware routing payload accumulated in original message order.
+#[cfg_attr(
+    not(feature = "mm-routing"),
+    allow(
+        dead_code,
+        reason = "the default build keeps the shared media-gathering return type but emits no routing entries"
+    )
+)]
+#[derive(Debug, Clone)]
+enum MmRoutingEntry {
+    Image {
+        mm_hash: u64,
+        width: u32,
+        height: u32,
+    },
+    #[cfg_attr(
+        not(feature = "media-ffmpeg"),
+        allow(dead_code, reason = "video entries require the FFmpeg media decoder")
+    )]
+    Video {
+        mm_hash: u64,
+        placeholder_token_id: TokenIdType,
+        target_tokens: Vec<TokenIdType>,
+        replacement_tokens: Vec<TokenIdType>,
+    },
+}
+
+#[cfg(feature = "mm-routing")]
+impl MmRoutingEntry {
+    fn mm_hash(&self) -> u64 {
+        match self {
+            Self::Image { mm_hash, .. } | Self::Video { mm_hash, .. } => *mm_hash,
+        }
+    }
+}
+
+#[cfg(feature = "mm-routing")]
+fn exact_mm_routing_layout_accepts_next_entry(
+    previous_entry_was_video: &mut bool,
+    current_entry_is_video: bool,
+) -> bool {
+    // Adjacent video placeholders cannot be mapped unambiguously to vLLM KV
+    // events. Keep this transition shared by the pre-decode and final checks.
+    let accepted = !(*previous_entry_was_video && current_entry_is_video);
+    *previous_entry_was_video = current_entry_is_video;
+    accepted
+}
+
+#[cfg(feature = "mm-routing")]
+fn exact_mm_routing_entries_are_unambiguous(entries: &[MmRoutingEntry]) -> bool {
+    let mut previous_entry_was_video = false;
+    entries.iter().all(|entry| {
+        exact_mm_routing_layout_accepts_next_entry(
+            &mut previous_entry_was_video,
+            matches!(entry, MmRoutingEntry::Video { .. }),
+        )
+    })
+}
+
+#[cfg(feature = "mm-routing")]
+fn routing_bos_to_prepend(
+    configured_bos: Option<TokenIdType>,
+    has_image_entry: bool,
+) -> Option<TokenIdType> {
+    has_image_entry.then_some(configured_bos).flatten()
+}
 #[cfg(feature = "mm-routing")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RoutingImagePromptLayout {
@@ -720,6 +916,25 @@ fn append_mm_routing_replacement(
 ) -> Result<()> {
     let fill_token = dynamo_kv_router::protocols::pad_value_for_mm_hash(image.mm_hash);
 
+    append_mm_routing_replacement_with_fill(
+        expanded,
+        tokenizer,
+        layout,
+        image,
+        num_image_tokens,
+        fill_token,
+    )
+}
+
+#[cfg(feature = "mm-routing")]
+fn append_mm_routing_replacement_with_fill(
+    expanded: &mut Vec<TokenIdType>,
+    tokenizer: &dyn Tokenizer,
+    layout: RoutingImagePromptLayout,
+    image: MmImageEntry,
+    num_image_tokens: usize,
+    fill_token: TokenIdType,
+) -> Result<()> {
     match layout {
         RoutingImagePromptLayout::RepeatedPad => {
             expanded.extend(std::iter::repeat_n(fill_token, num_image_tokens));
@@ -740,6 +955,149 @@ fn append_mm_routing_replacement(
     Ok(())
 }
 
+/// Build the request-side hash representation that mirrors vLLM's event
+/// normalizer block by block.
+///
+/// Most blocks use canonical pad-value tokens. If a feature-span boundary
+/// does not contain an exact ordered placeholder/object mapping, vLLM keeps
+/// the worker tokens and hashes the block's MM metadata instead. Reproducing
+/// that fallback here keeps both sides identical without discarding the media
+/// identity carried by an ambiguous boundary block.
+#[cfg(feature = "mm-routing")]
+fn apply_tracked_mm_replacements(
+    routing_prepend_bos: Option<TokenIdType>,
+    replacements: &[TrackedMmRoutingReplacement],
+    token_ids: &[TokenIdType],
+    block_size: usize,
+    image_token_id: Option<TokenIdType>,
+    video_token_id: Option<TokenIdType>,
+) -> Result<(
+    Vec<TokenIdType>,
+    usize,
+    Vec<Option<dynamo_kv_router::protocols::BlockExtraInfo>>,
+)> {
+    use dynamo_kv_router::protocols::{BlockExtraInfo, BlockMmObjectInfo};
+    use dynamo_kv_router::zmq_wire::normalize_mm_placeholder_runs;
+
+    anyhow::ensure!(block_size > 0, "MM routing block size must be positive");
+    anyhow::ensure!(
+        replacements.iter().all(|replacement| {
+            !replacement.target_tokens.is_empty()
+                && replacement.worker_tokens.len() == replacement.routing_tokens.len()
+        }),
+        "tracked MM routing replacements must have a non-empty target and equal token lengths"
+    );
+
+    let replacement_tokens = replacements.iter().try_fold(0usize, |total, replacement| {
+        total
+            .checked_add(replacement.routing_tokens.len())
+            .context("MM routing replacement capacity overflow")
+    })?;
+    let capacity = token_ids
+        .len()
+        .checked_add(replacement_tokens)
+        .and_then(|value| value.checked_add(routing_prepend_bos.is_some() as usize))
+        .context("MM routing token capacity overflow")?;
+    let mut worker_tokens = Vec::with_capacity(capacity);
+    let mut routing_tokens = Vec::with_capacity(capacity);
+    if let Some(bos) = routing_prepend_bos {
+        worker_tokens.push(bos);
+        routing_tokens.push(bos);
+    }
+
+    // Placeholder targets are model/modality contracts, so many media objects
+    // normally share the same target. Deduplicate them once to keep the prompt
+    // scan proportional to the number of modalities rather than media objects.
+    let mut distinct_targets: Vec<&[TokenIdType]> = Vec::new();
+    for replacement in replacements {
+        let target = replacement.target_tokens.as_slice();
+        if !distinct_targets.contains(&target) {
+            distinct_targets.push(target);
+        }
+    }
+    let target_matches_at = |target: &[TokenIdType], token_index: usize| {
+        token_ids.get(token_index..token_index.saturating_add(target.len())) == Some(target)
+    };
+
+    let mut spans = Vec::with_capacity(replacements.len());
+    let mut replacement_index = 0usize;
+    let mut token_index = 0usize;
+    while token_index < token_ids.len() {
+        if let Some(replacement) = replacements.get(replacement_index)
+            && target_matches_at(&replacement.target_tokens, token_index)
+        {
+            let start = worker_tokens.len();
+            worker_tokens.extend_from_slice(&replacement.worker_tokens);
+            routing_tokens.extend_from_slice(&replacement.routing_tokens);
+            spans.push((start, worker_tokens.len(), replacement.mm_hash));
+            token_index += replacement.target_tokens.len();
+            replacement_index += 1;
+            continue;
+        }
+
+        anyhow::ensure!(
+            !distinct_targets
+                .iter()
+                .any(|target| target_matches_at(target, token_index)),
+            "multimodal placeholders do not match request order"
+        );
+        worker_tokens.push(token_ids[token_index]);
+        routing_tokens.push(token_ids[token_index]);
+        token_index += 1;
+    }
+
+    anyhow::ensure!(
+        replacement_index == replacements.len(),
+        "tokenized prompt is missing multimodal placeholders"
+    );
+    let expanded_prompt_len = routing_tokens.len();
+    let padded_len = expanded_prompt_len.div_ceil(block_size) * block_size;
+    worker_tokens.resize(padded_len, 0);
+    routing_tokens.resize(padded_len, 0);
+
+    let mut block_mm_infos = vec![None; padded_len / block_size];
+    for (block_index, block_start) in (0..padded_len).step_by(block_size).enumerate() {
+        let block_end = block_start + block_size;
+        let mm_hashes: Vec<u64> = spans
+            .iter()
+            .filter(|(start, end, _)| *start < block_end && *end > block_start)
+            .map(|(_, _, mm_hash)| *mm_hash)
+            .collect();
+        if mm_hashes.is_empty() {
+            continue;
+        }
+
+        let worker_block = &worker_tokens[block_start..block_end];
+        let routing_block = &mut routing_tokens[block_start..block_end];
+        match normalize_mm_placeholder_runs(
+            worker_block,
+            image_token_id,
+            video_token_id,
+            &mm_hashes,
+        ) {
+            Some((normalized, _)) => {
+                anyhow::ensure!(
+                    normalized == routing_block,
+                    "frontend MM replacement differs from KV-event normalization"
+                );
+            }
+            None => {
+                routing_block.copy_from_slice(worker_block);
+                block_mm_infos[block_index] = Some(BlockExtraInfo {
+                    mm_objects: mm_hashes
+                        .into_iter()
+                        .map(|mm_hash| BlockMmObjectInfo {
+                            mm_hash,
+                            offsets: Vec::new(),
+                        })
+                        .collect(),
+                });
+            }
+        }
+    }
+
+    Ok((routing_tokens, expanded_prompt_len, block_mm_infos))
+}
 /// Construct the unpadded routing sequence and return its exact logical
 /// length. Errors are routing-only: callers must discard the partial vector
 /// and fall back without failing the inference request.
@@ -854,7 +1212,7 @@ fn checked_add_image_tokens(total: Option<usize>, next: usize) -> Option<usize> 
 }
 
 #[cfg(feature = "mm-routing")]
-fn has_image_token_processor_override(value: Option<&serde_json::Value>) -> bool {
+fn has_mm_processor_override(value: Option<&serde_json::Value>) -> bool {
     value.is_some_and(|value| match value {
         serde_json::Value::Null => false,
         serde_json::Value::Object(map) => !map.is_empty(),
@@ -875,6 +1233,24 @@ fn exact_mm_routing_preconditions_met(
     // prompt expansion. Until the frontend reproduces those transformations,
     // exact routing must fail closed so router and worker cache keys agree.
     !has_user_uuid && !has_processor_override && resolved_image_count == total_image_count
+}
+
+#[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+fn should_hash_decoded_video(
+    exact_mm_routing_eligible: bool,
+    has_user_uuid: bool,
+    has_processor_override: bool,
+    has_video_routing_processor: bool,
+) -> bool {
+    exact_mm_routing_eligible
+        && !has_user_uuid
+        && !has_processor_override
+        && has_video_routing_processor
+}
+
+#[cfg(feature = "mm-routing")]
+fn exact_mm_routing_supports_modality(modality: &str, frontend_decoding: bool) -> bool {
+    modality == "image_url" || (modality == "video_url" && frontend_decoding)
 }
 
 #[cfg(feature = "mm-routing")]
@@ -930,6 +1306,79 @@ static DIM_FETCH_HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> =
 pub(crate) const PRESERVE_OMITTED_MAX_TOKENS_CONTEXT_KEY: &str =
     "dynamo.llm.preserve_omitted_max_tokens";
 
+const EMBEDDING_ADD_SPECIAL_TOKENS_ENV: &str = "DYN_EMBEDDING_TOKENIZATION_ADD_SPECIAL_TOKENS";
+
+fn parse_embedding_add_special_tokens(value: &str) -> Option<bool> {
+    parse_bool_opt(value)
+}
+
+fn embedding_add_special_tokens_env() -> Result<Option<bool>> {
+    match std::env::var(EMBEDDING_ADD_SPECIAL_TOKENS_ENV) {
+        Ok(value) => match parse_embedding_add_special_tokens(&value) {
+            Some(value) => Ok(Some(value)),
+            None => bail!(
+                "invalid value {value:?} for {EMBEDDING_ADD_SPECIAL_TOKENS_ENV}; \
+                 expected true/false/on/off/yes/no/1/0"
+            ),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => bail!(
+            "{EMBEDDING_ADD_SPECIAL_TOKENS_ENV} must be valid Unicode and one of \
+             true/false/on/off/yes/no/1/0"
+        ),
+    }
+}
+
+#[cfg(test)]
+mod embedding_add_special_tokens_env_tests {
+    use super::parse_embedding_add_special_tokens;
+
+    #[test]
+    fn parser_uses_the_documented_truth_table() {
+        for value in ["1", "true", "on", "yes", " TRUE ", "On", "Yes"] {
+            assert_eq!(parse_embedding_add_special_tokens(value), Some(true));
+        }
+        for value in ["0", "false", "off", "no", " FALSE ", "Off", "No"] {
+            assert_eq!(parse_embedding_add_special_tokens(value), Some(false));
+        }
+        for value in ["", "yes-please"] {
+            assert_eq!(parse_embedding_add_special_tokens(value), None);
+        }
+    }
+}
+
+fn embedding_chat_template_present(mdc: &ModelDeploymentCard) -> Result<bool> {
+    if mdc.chat_template_file.is_some() {
+        return Ok(true);
+    }
+
+    let Some(artifact) = mdc.prompt_formatter.as_ref() else {
+        return Ok(false);
+    };
+    let PromptFormatterArtifact::HfTokenizerConfigJson(checked_file) = artifact else {
+        return Ok(true);
+    };
+    let Some(path) = checked_file.path() else {
+        return Ok(true);
+    };
+
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("fs:read_to_string '{}'", path.display()))?;
+    let config: serde_json::Value = serde_json::from_str(&contents)
+        .with_context(|| format!("Failed to parse '{}'", path.display()))?;
+    Ok(config
+        .get("chat_template")
+        .is_some_and(|template| !template.is_null()))
+}
+
+fn embedding_prompt_formatter(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+    match prompt_formatter_from_mdc(mdc) {
+        Ok(formatter) => Ok(formatter),
+        Err(_) if !embedding_chat_template_present(mdc)? => Ok(PromptFormatter::no_op()),
+        Err(err) => Err(err),
+    }
+}
+
 fn attach_agent_context_from_context(
     request: &mut PreprocessedRequest,
     context: &PipelineContext<()>,
@@ -941,67 +1390,81 @@ fn attach_agent_context_from_context(
     }
 }
 
-/// Thin wrapper that normalizes `function.arguments` in historical tool-calls
-/// from a JSON string to an object before passing messages to a MiniJinja
-/// template.  Only used when `OpenAIPreprocessor::normalize_tool_call_args` is
-/// true (e.g. GLM-5.2); all other trait methods delegate directly to the inner
-/// request so routing, sampling, and annotation behavior is unchanged.
-struct NormalizedArgsRequest<'a, R>(&'a R);
+/// Thin wrapper that prepares messages for MiniJinja. Normalizes historical
+/// `function.arguments` when the model opts in (GLM-5.2), and appends
+/// HuggingFace's unique continue-final-message marker when that flag is set.
+/// All other trait methods delegate to the inner request.
+struct NormalizedArgsRequest<'a, R> {
+    inner: &'a R,
+    normalize_tool_call_args: bool,
+    continue_final_message: bool,
+}
 
 impl<R: OAIChatLikeRequest> OAIChatLikeRequest for NormalizedArgsRequest<'_, R> {
     fn model(&self) -> String {
-        self.0.model()
+        self.inner.model()
     }
 
     fn messages(&self) -> minijinja::value::Value {
-        let mut json =
-            serde_json::to_value(self.0.typed_messages().unwrap_or_default()).unwrap_or_default();
-        if let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json) {
+        let mut json = serde_json::to_value(self.inner.typed_messages().unwrap_or_default())
+            .unwrap_or_default();
+        if self.normalize_tool_call_args
+            && let Err(e) = crate::preprocessor::prompt::normalize_tool_call_arguments(&mut json)
+        {
             tracing::error!(
                 error = %e,
                 "tool_call arguments normalization failed; template rendering may fail \
                  if it calls .items() on a string"
             );
         }
+        if self.continue_final_message
+            && let Err(e) =
+                crate::preprocessor::prompt::append_continue_final_message_tag(&mut json)
+        {
+            tracing::debug!(
+                error = %e,
+                "continue_final_message marker not appended; truncation will reject the request"
+            );
+        }
         minijinja::value::Value::from_serialize(&json)
     }
 
     fn typed_messages(&self) -> Option<&[dynamo_protocols::types::ChatCompletionRequestMessage]> {
-        self.0.typed_messages()
+        self.inner.typed_messages()
     }
 
     fn tools(&self) -> Option<minijinja::value::Value> {
-        self.0.tools()
+        self.inner.tools()
     }
 
     fn tool_choice(&self) -> Option<minijinja::value::Value> {
-        self.0.tool_choice()
+        self.inner.tool_choice()
     }
 
     fn response_format(&self) -> Option<minijinja::value::Value> {
-        self.0.response_format()
+        self.inner.response_format()
     }
 
     fn should_add_generation_prompt(&self) -> bool {
-        self.0.should_add_generation_prompt()
+        self.inner.should_add_generation_prompt()
     }
 
     fn extract_text(&self) -> Option<TextInput> {
-        self.0.extract_text()
+        self.inner.extract_text()
     }
 
     fn chat_template_args(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
-        self.0.chat_template_args()
+        self.inner.chat_template_args()
     }
 
     fn mm_processor_kwargs(&self) -> Option<&serde_json::Value> {
-        self.0.mm_processor_kwargs()
+        self.inner.mm_processor_kwargs()
     }
 }
 
 impl<R: AnnotationsProvider> AnnotationsProvider for NormalizedArgsRequest<'_, R> {
     fn annotations(&self) -> Option<Vec<String>> {
-        self.0.annotations()
+        self.inner.annotations()
     }
 }
 
@@ -1009,33 +1472,33 @@ impl<R: SamplingOptionsProvider> SamplingOptionsProvider for NormalizedArgsReque
     fn extract_sampling_options(
         &self,
     ) -> anyhow::Result<crate::protocols::common::SamplingOptions> {
-        self.0.extract_sampling_options()
+        self.inner.extract_sampling_options()
     }
 }
 
 impl<R: StopConditionsProvider> StopConditionsProvider for NormalizedArgsRequest<'_, R> {
     fn extract_stop_conditions(&self) -> anyhow::Result<crate::protocols::common::StopConditions> {
-        self.0.extract_stop_conditions()
+        self.inner.extract_stop_conditions()
     }
 }
 
 impl<R: OutputOptionsProvider> OutputOptionsProvider for NormalizedArgsRequest<'_, R> {
     fn extract_output_options(&self) -> anyhow::Result<crate::protocols::common::OutputOptions> {
-        self.0.extract_output_options()
+        self.inner.extract_output_options()
     }
 }
 
 impl<R: NvExtProvider> NvExtProvider for NormalizedArgsRequest<'_, R> {
     fn nvext(&self) -> Option<&crate::protocols::common::extensions::NvExt> {
-        self.0.nvext()
+        self.inner.nvext()
     }
 
     fn raw_prompt(&self) -> Option<String> {
-        self.0.raw_prompt()
+        self.inner.raw_prompt()
     }
 
     fn unsupported_fields(&self) -> Option<&std::collections::HashMap<String, serde_json::Value>> {
-        self.0.unsupported_fields()
+        self.inner.unsupported_fields()
     }
 }
 
@@ -1044,10 +1507,58 @@ struct PreprocessRequestOptions {
     preserve_omitted_max_tokens: bool,
 }
 
+struct EmbeddingTokenizerState {
+    model_card: ModelDeploymentCard,
+    with_special_tokens: OnceLock<Arc<dyn Tokenizer>>,
+    without_special_tokens: OnceLock<Arc<dyn Tokenizer>>,
+    initialization_lock: Mutex<()>,
+    add_special_tokens_default: Option<bool>,
+}
+
+impl EmbeddingTokenizerState {
+    fn new(model_card: &ModelDeploymentCard) -> Result<Self> {
+        Ok(Self {
+            model_card: model_card.clone(),
+            with_special_tokens: OnceLock::new(),
+            without_special_tokens: OnceLock::new(),
+            initialization_lock: Mutex::new(()),
+            add_special_tokens_default: embedding_add_special_tokens_env()?,
+        })
+    }
+
+    fn tokenizer(&self, add_special_tokens: bool) -> Result<Arc<dyn Tokenizer>> {
+        let tokenizer = if add_special_tokens {
+            &self.with_special_tokens
+        } else {
+            &self.without_special_tokens
+        };
+        if let Some(tokenizer) = tokenizer.get() {
+            return Ok(tokenizer.clone());
+        }
+
+        let _guard = self
+            .initialization_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("embedding tokenizer initialization lock was poisoned"))?;
+        if let Some(tokenizer) = tokenizer.get() {
+            return Ok(tokenizer.clone());
+        }
+
+        let initialized = self.model_card.embedding_tokenizer_with_options(
+            crate::tokenizers::TokenizerOptions { add_special_tokens },
+        )?;
+        let initialized: Arc<dyn Tokenizer> = (*initialized).clone();
+        Ok(tokenizer.get_or_init(|| initialized).clone())
+    }
+}
+
 pub struct OpenAIPreprocessor {
     mdcsum: String,
     formatter: Arc<dyn OAIPromptFormatter>,
     tokenizer: Arc<dyn Tokenizer>,
+    /// Present only for token-input embedding pipelines. The two tokenizer
+    /// variants are initialized independently on demand.
+    embedding_tokenizers: Option<EmbeddingTokenizerState>,
     model_info: Arc<dyn ModelInfo>,
     lora_name: Option<String>,
     /// Per-model runtime configuration propagated to response generator (e.g., reasoning/tool parser)
@@ -1063,11 +1574,17 @@ pub struct OpenAIPreprocessor {
     media_loader: Option<MediaLoader>,
     /// Engine-published request-token admission policy.
     token_budget: Option<TokenBudget>,
+    /// Model context limit used by the embedding truncation contract.
+    context_length: u32,
     /// Per-image token-count engine. `None` when the feature is disabled, the
     /// model isn't covered by the registry, or `preprocessor_config.json` is
     /// unreadable.
     #[cfg(feature = "mm-routing")]
     image_token_counter: Option<lightseek_mm::LightseekMmCounter>,
+    /// Lightweight model-visible video expansion. Unlike the image counter,
+    /// this does not resize or normalize pixels in the frontend.
+    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+    video_routing_processor: Option<mm_routing::VideoRoutingProcessor>,
     /// Image-placeholder token id the routing-side sequence fills per image.
     /// Resolved from `config.json`'s `image_token_id` field when present,
     /// otherwise falls back to the `ModelProcessorSpec` registry value. This
@@ -1091,8 +1608,9 @@ pub struct OpenAIPreprocessor {
     /// BOS token id to prepend to the routing-side sequence so per-block
     /// hashes match the backend's HF processor output on models with
     /// `add_bos_token: true` (LLaVA-1.5 and other `LlamaTokenizer`
-    /// families). `None` when the model doesn't need it or `bos_token`
-    /// doesn't round-trip to a single id.
+    /// families). Applied only to requests containing images; video-only
+    /// routing starts from the frontend-tokenized prompt. `None` when the
+    /// model doesn't need it or `bos_token` doesn't round-trip to one id.
     #[cfg(feature = "mm-routing")]
     routing_prepend_bos: Option<crate::protocols::TokenIdType>,
 }
@@ -1718,10 +2236,31 @@ impl OpenAIPreprocessor {
         }
     }
 
+    /// Build the preprocessor used by token-input embedding pipelines.
+    pub fn new_for_embeddings(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
+        if !mdc.model_type.supports_embedding() {
+            anyhow::bail!("embedding preprocessor requires an embedding-capable model");
+        }
+
+        let tokenizer = mdc.tokenizer()?;
+        let PromptFormatter::OAI(formatter) = embedding_prompt_formatter(&mdc)?;
+        let embedding_tokenizers = EmbeddingTokenizerState::new(&mdc)?;
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, Some(embedding_tokenizers))
+    }
+
     pub fn new_with_parts(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
         tokenizer: crate::tokenizers::Tokenizer,
+    ) -> Result<Arc<Self>> {
+        Self::new_with_parts_inner(mdc, formatter, tokenizer, None)
+    }
+
+    fn new_with_parts_inner(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+        tokenizer: crate::tokenizers::Tokenizer,
+        embedding_tokenizers: Option<EmbeddingTokenizerState>,
     ) -> Result<Arc<Self>> {
         let mdcsum = mdc.mdcsum().to_string();
         let tokenizer: Arc<dyn Tokenizer> = (*tokenizer).clone();
@@ -1757,6 +2296,7 @@ impl OpenAIPreprocessor {
             }
         };
         let kv_cache_block_size = mdc.kv_cache_block_size as usize;
+        let context_length = mdc.effective_context_length();
 
         // Capture MM-routing inputs before mdc is partially moved into MediaLoader.
         // model_type comes from config.json (e.g. "qwen3_vl") and lets the
@@ -1780,15 +2320,14 @@ impl OpenAIPreprocessor {
             );
         }
         #[cfg(feature = "mm-routing")]
-        let image_token_inputs: Option<(String, String, std::path::PathBuf)> = {
+        let image_token_inputs: Option<(String, String, std::path::PathBuf)> =
             model_dir_for_routing.as_ref().map(|p| {
                 (
                     mdc.source_path().to_string(),
                     model_info.model_type(),
                     p.clone(),
                 )
-            })
-        };
+            });
 
         let media_loader = match mdc.media_decoder {
             Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
@@ -1801,7 +2340,7 @@ impl OpenAIPreprocessor {
             routing_image_token_id,
             routing_image_prompt_layout,
             bos_token_string,
-        ) = match image_token_inputs {
+        ) = match image_token_inputs.as_ref() {
             Some((model_id, model_type, model_dir)) => {
                 // Resolve counter + image-token id independently so the
                 // summary log can name which piece is missing.
@@ -1809,9 +2348,9 @@ impl OpenAIPreprocessor {
                     Option<lightseek_mm::LightseekMmCounter>,
                     Option<String>,
                 ) = match lightseek_mm::LightseekMmCounter::try_new(
-                    &model_id,
-                    Some(&model_type),
-                    &model_dir,
+                    model_id,
+                    Some(model_type),
+                    model_dir,
                 ) {
                     Ok(c) => (Some(c), None),
                     Err(e) => (None, Some(e.to_string())),
@@ -1822,11 +2361,8 @@ impl OpenAIPreprocessor {
                     // One-shot config/tokenizer_config read for all
                     // routing-side token info. Parsing lives next to the
                     // spec resolution in the MM-routing module.
-                    let routing_tokens = lightseek_mm::resolve_routing_tokens(
-                        &model_id,
-                        &model_dir,
-                        counter.as_ref(),
-                    );
+                    let routing_tokens =
+                        lightseek_mm::resolve_routing_tokens(model_id, model_dir, counter.as_ref());
                     let prompt_layout =
                             routing_tokens.image_prompt_kind.and_then(|kind| {
                                 match resolve_routing_image_prompt_layout(tokenizer.as_ref(), kind) {
@@ -1903,6 +2439,63 @@ impl OpenAIPreprocessor {
             }
         };
 
+        #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+        let video_routing_processor = {
+            let processor_contract = match runtime_config
+                .get_engine_specific::<mm_routing::QwenVideoProcessorContract>(
+                    VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                ) {
+                Ok(target) => target,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "mm_routing",
+                        %error,
+                        key = VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY,
+                        "invalid Qwen video processor runtime metadata; exact video routing disabled"
+                    );
+                    None
+                }
+            };
+            if fastokens_active {
+                None
+            } else {
+                match (image_token_inputs.as_ref(), processor_contract) {
+                    (Some((model_id, model_type, model_dir)), Some(processor_contract)) => {
+                        match mm_routing::VideoRoutingProcessor::try_new(
+                            model_id,
+                            model_type,
+                            model_dir,
+                            tokenizer.clone(),
+                            processor_contract,
+                        ) {
+                            Ok(processor) => processor,
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: "mm_routing",
+                                    model = %model_id,
+                                    %error,
+                                    "exact video-aware KV routing disabled for this model"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            }
+        };
+        #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+        if video_routing_processor.is_some()
+            && let Some((model_id, model_type, _)) = image_token_inputs.as_ref()
+        {
+            tracing::info!(
+                target: "mm_routing",
+                model = %model_id,
+                model_type = %model_type,
+                "exact video-aware KV routing enabled"
+            );
+        }
+
         #[cfg(feature = "mm-routing")]
         let routing_image_dimension_policy = routing_image_dimension_policy(
             &runtime_config,
@@ -1913,8 +2506,8 @@ impl OpenAIPreprocessor {
         // Force the dim-fetch HTTP client to build at startup for any
         // MM-countable or routable preprocessor, so TLS / env-var / reqwest-init
         // failures fail the deployment instead of crashing the first
-        // MM request 20 minutes in. Text-only preprocessors skip the
-        // force (both MM-routing hooks resolved to `None`) — no point
+        // image request 20 minutes in. Other preprocessors skip the
+        // force when both image-routing hooks resolve to `None` — no point
         // building a client they'll never use.
         #[cfg(feature = "mm-routing")]
         if image_token_counter.is_some() || routing_image_token_id.is_some() {
@@ -1965,6 +2558,7 @@ impl OpenAIPreprocessor {
         Ok(Arc::new(Self {
             formatter,
             tokenizer,
+            embedding_tokenizers,
             model_info,
             mdcsum,
             lora_name,
@@ -1974,8 +2568,11 @@ impl OpenAIPreprocessor {
             normalize_tool_call_args,
             media_loader,
             token_budget,
+            context_length,
             #[cfg(feature = "mm-routing")]
             image_token_counter,
+            #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+            video_routing_processor,
             #[cfg(feature = "mm-routing")]
             routing_image_token_id,
             #[cfg(feature = "mm-routing")]
@@ -2016,7 +2613,8 @@ impl OpenAIPreprocessor {
             + SamplingOptionsProvider
             + StopConditionsProvider
             + OutputOptionsProvider
-            + NvExtProvider,
+            + NvExtProvider
+            + CommonExtProvider,
     >(
         &self,
         request: &R,
@@ -2040,7 +2638,8 @@ impl OpenAIPreprocessor {
             + SamplingOptionsProvider
             + StopConditionsProvider
             + OutputOptionsProvider
-            + NvExtProvider,
+            + NvExtProvider
+            + CommonExtProvider,
     >(
         &self,
         request: &R,
@@ -2082,7 +2681,7 @@ impl OpenAIPreprocessor {
         };
         TOKENIZE_SECONDS.observe(tokenize_start.elapsed().as_secs_f64());
 
-        let (_mm_image_entries, image_tokens) = self
+        let (_mm_routing_entries, image_tokens) = self
             .gather_multi_modal_data_with_image_tokens(
                 request,
                 &mut builder,
@@ -2162,6 +2761,7 @@ impl OpenAIPreprocessor {
 
     pub fn builder<
         R: OAIChatLikeRequest
+            + MediaRequestExt
             + AnnotationsProvider
             + SamplingOptionsProvider
             + StopConditionsProvider
@@ -2176,6 +2776,7 @@ impl OpenAIPreprocessor {
 
     fn builder_with_lora<
         R: OAIChatLikeRequest
+            + MediaRequestExt
             + AnnotationsProvider
             + SamplingOptionsProvider
             + StopConditionsProvider
@@ -2326,6 +2927,13 @@ impl OpenAIPreprocessor {
         // Forward mm_processor_kwargs (e.g. use_audio_in_video) to the backend.
         builder.mm_processor_kwargs(request.mm_processor_kwargs().cloned());
 
+        // Forward media_io_kwargs untouched only when the worker owns decoding. With a
+        // media loader the frontend consumes them itself, so re-sending would risk the
+        // worker applying them a second time.
+        if self.media_loader.is_none() {
+            builder.media_io_kwargs(request.media_io_kwargs().cloned());
+        }
+
         Ok(builder)
     }
 
@@ -2423,15 +3031,31 @@ impl OpenAIPreprocessor {
             + SamplingOptionsProvider
             + StopConditionsProvider
             + OutputOptionsProvider
-            + NvExtProvider,
+            + NvExtProvider
+            + CommonExtProvider,
     >(
         &self,
         request: &R,
     ) -> Result<Option<RenderedPrompt>> {
-        if self.normalize_tool_call_args {
-            return self.apply_template_inner(&NormalizedArgsRequest(request));
+        let continue_final = request.get_continue_final_message() == Some(true);
+        let formatted_prompt = if self.normalize_tool_call_args || continue_final {
+            self.apply_template_inner(&NormalizedArgsRequest {
+                inner: request,
+                normalize_tool_call_args: self.normalize_tool_call_args,
+                continue_final_message: continue_final,
+            })?
+        } else {
+            self.apply_template_inner(request)?
+        };
+        let Some(prompt) = formatted_prompt else {
+            return Ok(None);
+        };
+        if !continue_final {
+            return Ok(Some(prompt));
         }
-        self.apply_template_inner(request)
+        apply_continue_final_message(prompt)
+            .map_err(|error| invalid_argument_error(format!("{error:#}")))
+            .map(Some)
     }
 
     fn apply_template_inner<
@@ -2536,7 +3160,21 @@ impl OpenAIPreprocessor {
                 token_ids,
             )
             .await?;
-        Ok(entries)
+        Ok(entries
+            .into_iter()
+            .filter_map(|entry| match entry {
+                MmRoutingEntry::Image {
+                    mm_hash,
+                    width,
+                    height,
+                } => Some(MmImageEntry {
+                    mm_hash,
+                    width,
+                    height,
+                }),
+                MmRoutingEntry::Video { .. } => None,
+            })
+            .collect())
     }
 
     async fn gather_multi_modal_data_with_image_tokens<
@@ -2547,7 +3185,7 @@ impl OpenAIPreprocessor {
         builder: &mut PreprocessedRequestBuilder,
         formatted_prompt: Option<&str>,
         token_ids: &[crate::protocols::TokenIdType],
-    ) -> Result<(Vec<MmImageEntry>, Option<usize>)> {
+    ) -> Result<(Vec<MmRoutingEntry>, Option<usize>)> {
         // `token_ids` is only consumed by exact MM-routing construction below.
         #[cfg(not(feature = "mm-routing"))]
         let _ = token_ids;
@@ -2558,27 +3196,31 @@ impl OpenAIPreprocessor {
         // Decoded results are written back into these reserved modality slots so
         // URL-backed and UUID-only inputs retain request order.
         let mut fetch_tasks: Vec<MediaFetchTask<'_>> = Vec::new();
-        // Per-image (mm_hash, width, height) for the MM-routing path.
-        // Accumulated in message order so we don't walk messages twice.
-        // Cleared and returned to the caller; empty for non-image / text-only requests.
         #[cfg(feature = "mm-routing")]
-        let mut mm_image_entries: Vec<MmImageEntry> = Vec::new();
+        let mut mm_routing_entries: Vec<MmRoutingEntry> = Vec::new();
         // Private per-request total for frontend metrics. `None` means the SMG
         // counter is unavailable or checked addition overflowed.
         #[cfg(feature = "mm-routing")]
         let mut image_tokens = self.image_token_counter.as_ref().map(|_| 0usize);
+        // A raw/passthrough video, unsupported decoded-video processor, or
+        // ambiguous consecutive-video layout makes exact routing unavailable.
+        // In that case the whole request falls back rather than publishing a
+        // partial routing view.
+        #[cfg(feature = "mm-routing")]
+        let mut exact_mm_routing_eligible = true;
+        #[cfg(feature = "mm-routing")]
+        let mut previous_routing_entry_was_video = false;
         // Total `image_url` content parts in the request. Bumped at every
         // image part regardless of which fetch path handles it. Used at
-        // `mm_hashes` forwarding time: if `mm_image_entries.len()` is
-        // smaller, we omit `mm_hashes` for the whole request rather than
+        // hash forwarding time: if fewer image entries were resolved, we omit
+        // exact routing hashes for the whole request rather than
         // ship a partial / misaligned UUID list to vLLM.
         //
-        // The mismatch is only reachable on the URL-passthrough path
-        // (no media_loader): each `fetch_image_dims_uncached` failure logs
-        // a warn and skips its `mm_image_entries.push`, but doesn't abort
-        // the request. The decoded path (`has_media_loader`) propagates
-        // any dim-fetch failure via `?`, so the request errors out before
-        // mm_hashes forwarding is even considered.
+        // The mismatch is only reachable on the URL-passthrough path when
+        // there is no media loader. Each recoverable `fetch_image_dims_uncached`
+        // failure logs a warning and skips its `mm_image_entries.push`.
+        // Security-policy failures remain terminal. The decoded path
+        // (`has_media_loader`) propagates any fetch failure via `?`.
         #[cfg(feature = "mm-routing")]
         let mut total_image_count: usize = 0;
         // For the URL-passthrough case (media_loader is None) we collect image
@@ -2610,6 +3252,15 @@ impl OpenAIPreprocessor {
                 #[cfg(feature = "mm-routing")]
                 if type_str == "image_url" {
                     total_image_count += 1;
+                }
+                #[cfg(feature = "mm-routing")]
+                if !exact_mm_routing_supports_modality(type_str, has_media_loader)
+                    || !exact_mm_routing_layout_accepts_next_entry(
+                        &mut previous_routing_entry_was_video,
+                        type_str == "video_url",
+                    )
+                {
+                    exact_mm_routing_eligible = false;
                 }
 
                 if uuid.as_deref().is_some_and(str::is_empty) {
@@ -2657,12 +3308,35 @@ impl OpenAIPreprocessor {
             }
         }
 
+        #[cfg(feature = "mm-routing")]
+        let has_processor_override = has_mm_processor_override(request.mm_processor_kwargs());
+        #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+        let hash_decoded_video = should_hash_decoded_video(
+            exact_mm_routing_eligible,
+            has_user_uuid,
+            has_processor_override,
+            self.video_routing_processor.is_some(),
+        );
+        #[cfg(not(all(feature = "mm-routing", feature = "media-ffmpeg")))]
+        let hash_decoded_video = false;
+
         // Execute all fetch tasks
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
-            let media_io_kwargs = request.media_io_kwargs();
+            // The frontend owns decoding here, so the opaque request kwargs are parsed
+            // into the decoder config -- borrowing the `Value`, no clone. Mapped to
+            // InvalidArgument so a malformed payload stays a 400 rather than a 500.
+            let media_io_kwargs = request
+                .media_io_kwargs()
+                .map(<MediaDecoder as serde::Deserialize>::deserialize)
+                .transpose()
+                .map_err(|e| invalid_argument_error(format!("invalid media_io_kwargs: {e}")))?;
             let results = futures::future::join_all(fetch_tasks.iter().map(|task| {
-                loader.fetch_and_decode_media_part(task.content_part.as_ref(), media_io_kwargs)
+                loader.fetch_and_decode_media_part_with_video_hash(
+                    task.content_part.as_ref(),
+                    media_io_kwargs.as_ref(),
+                    hash_decoded_video,
+                )
             }))
             .await;
 
@@ -2670,8 +3344,6 @@ impl OpenAIPreprocessor {
                 // if one item fails, errors the whole request, other items will be cleaned up by Drop
                 let rdma_descriptor = result?;
 
-                // Decoded RDMA descriptor carries shape `[H, W, C]`.
-                // Image-only; MM-routing doesn't cover audio/video.
                 #[cfg(feature = "mm-routing")]
                 if task.modality == "image_url" {
                     let shape = &rdma_descriptor.tensor_info.shape;
@@ -2711,11 +3383,67 @@ impl OpenAIPreprocessor {
                             );
                             image_tokens = checked_add_image_tokens(image_tokens, n);
                         }
-                        mm_image_entries.push(MmImageEntry {
+                        mm_routing_entries.push(MmRoutingEntry::Image {
                             mm_hash,
                             width: w,
                             height: h,
                         });
+                    }
+                } else if task.modality == "video_url" {
+                    #[cfg(feature = "media-ffmpeg")]
+                    {
+                        let video_entry = (|| -> Result<MmRoutingEntry> {
+                            let processor =
+                                self.video_routing_processor.as_ref().ok_or_else(|| {
+                                    anyhow::anyhow!("model has no exact video routing processor")
+                                })?;
+                            anyhow::ensure!(
+                                !has_processor_override,
+                                "request mm_processor_kwargs can change the video token layout"
+                            );
+                            let (frame_count, width, height) =
+                                rdma_descriptor.video_dimensions()?;
+                            let metadata = rdma_descriptor.video_metadata()?;
+                            let mm_hash = rdma_descriptor.video_content_hash()?;
+                            let routing =
+                                processor.build_replacement(&mm_routing::VideoRoutingInput {
+                                    frame_count,
+                                    width,
+                                    height,
+                                    source_fps: metadata.source_fps,
+                                    sampled_timestamps: &metadata.sampled_timestamps,
+                                })?;
+                            tracing::debug!(
+                                target: "mm_routing",
+                                n_frames = frame_count,
+                                width,
+                                height,
+                                replacement_tokens = routing.replacement_tokens.len(),
+                                mm_hash,
+                                "video routing metadata resolved"
+                            );
+                            Ok(MmRoutingEntry::Video {
+                                mm_hash,
+                                placeholder_token_id: routing.placeholder_token_id,
+                                target_tokens: routing.target_tokens,
+                                replacement_tokens: routing.replacement_tokens,
+                            })
+                        })();
+                        match video_entry {
+                            Ok(entry) => mm_routing_entries.push(entry),
+                            Err(error) => {
+                                exact_mm_routing_eligible = false;
+                                tracing::debug!(
+                                    target: "mm_routing",
+                                    %error,
+                                    "mm-routing: decoded video is not eligible for exact routing; falling back to text-prefix routing"
+                                );
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "media-ffmpeg"))]
+                    {
+                        exact_mm_routing_eligible = false;
                     }
                 }
 
@@ -2756,13 +3484,16 @@ impl OpenAIPreprocessor {
                             );
                             image_tokens = checked_add_image_tokens(image_tokens, n);
                         }
-                        mm_image_entries.push(MmImageEntry {
+                        mm_routing_entries.push(MmRoutingEntry::Image {
                             mm_hash,
                             width: w,
                             height: h,
                         });
                     }
                     Err(e) => {
+                        if MediaFetcher::is_policy_rejection(&e) {
+                            return Err(e);
+                        }
                         // Redact `data:` URIs to just the media-type prefix —
                         // the comma-separated payload is the entire (base64)
                         // image body and ships in logs would be log bloat /
@@ -2785,10 +3516,6 @@ impl OpenAIPreprocessor {
             }
         }
 
-        #[cfg(feature = "mm-routing")]
-        let has_processor_override =
-            has_image_token_processor_override(request.mm_processor_kwargs());
-
         if !media_map.is_empty() {
             builder.multi_modal_data(Some(media_map));
             if has_user_uuid {
@@ -2800,7 +3527,7 @@ impl OpenAIPreprocessor {
             // instead of routing and publishing under different cache keys.
             #[cfg(feature = "mm-routing")]
             if has_user_uuid {
-                mm_image_entries.clear();
+                mm_routing_entries.clear();
             }
 
             // Preserve original messages and formatted prompt in extra_args for multimodal
@@ -2840,43 +3567,70 @@ impl OpenAIPreprocessor {
                 extra_args_obj.extend(backend_extra_args);
             }
 
-            // Build and install routing info + worker hashes atomically. If
-            // dimensions are incomplete, processor kwargs can change feature
-            // hashing/prompt expansion, a placeholder precondition misses, or
-            // K3 dimension text cannot be encoded, neither side receives
-            // image-aware keys and the request cleanly uses text-prefix routing.
-            // Hashes use the canonical 16-char u64 form; SGLang reads it directly
-            // and vLLM pads it to its 64-char BlockStored form.
+            // Build and install routing info + worker hashes atomically. If any
+            // mixed-media precondition misses, neither side receives exact keys
+            // and the request cleanly uses text-prefix routing.
             #[cfg(feature = "mm-routing")]
-            let mm_routing_info = if exact_mm_routing_preconditions_met(
-                has_user_uuid,
-                mm_image_entries.len(),
-                total_image_count,
-                has_processor_override,
-            ) {
-                self.build_mm_exact_routing_info(&mm_image_entries, token_ids)
+            let resolved_image_count = mm_routing_entries
+                .iter()
+                .filter(|entry| matches!(entry, MmRoutingEntry::Image { .. }))
+                .count();
+            #[cfg(feature = "mm-routing")]
+            let mm_routing_info = if exact_mm_routing_eligible
+                && exact_mm_routing_preconditions_met(
+                    has_user_uuid,
+                    resolved_image_count,
+                    total_image_count,
+                    has_processor_override,
+                ) {
+                self.build_mm_exact_routing_info(&mm_routing_entries, token_ids)
             } else {
                 None
             };
             #[cfg(feature = "mm-routing")]
             if let Some(mm_routing_info) = mm_routing_info {
-                let hexes: Vec<serde_json::Value> = mm_image_entries
+                let hex = |entry: &MmRoutingEntry| {
+                    serde_json::Value::String(format!("{:016x}", entry.mm_hash()))
+                };
+                if mm_routing_entries
                     .iter()
-                    .map(|e| serde_json::Value::String(format!("{:016x}", e.mm_hash)))
-                    .collect();
-                extra_args["mm_hashes"] = serde_json::Value::Array(hexes);
+                    .all(|entry| matches!(entry, MmRoutingEntry::Image { .. }))
+                {
+                    // Preserve the legacy image-only worker protocol.
+                    extra_args["mm_hashes"] =
+                        serde_json::Value::Array(mm_routing_entries.iter().map(hex).collect());
+                } else {
+                    let mut grouped = serde_json::Map::new();
+                    let image_hashes: Vec<_> = mm_routing_entries
+                        .iter()
+                        .filter(|entry| matches!(entry, MmRoutingEntry::Image { .. }))
+                        .map(hex)
+                        .collect();
+                    let video_hashes: Vec<_> = mm_routing_entries
+                        .iter()
+                        .filter(|entry| matches!(entry, MmRoutingEntry::Video { .. }))
+                        .map(hex)
+                        .collect();
+                    if !image_hashes.is_empty() {
+                        grouped.insert("image".to_string(), serde_json::Value::Array(image_hashes));
+                    }
+                    if !video_hashes.is_empty() {
+                        grouped.insert("video".to_string(), serde_json::Value::Array(video_hashes));
+                    }
+                    extra_args["mm_hashes_by_modality"] = serde_json::Value::Object(grouped);
+                }
                 builder.mm_routing_info(Some(mm_routing_info));
             } else if has_processor_override && total_image_count > 0 {
                 tracing::debug!(
                     target: "mm_routing",
                     "mm-routing: exact MM routing disabled because mm_processor_kwargs is non-empty"
                 );
-            } else if !mm_image_entries.is_empty() && self.routing_image_token_id.is_some() {
+            } else if !mm_routing_entries.is_empty() {
                 tracing::warn!(
                     target: "mm_routing",
-                    resolved = mm_image_entries.len(),
-                    expected = total_image_count,
-                    "mm-routing: exact MM routing info not built (dim resolution or placeholder-count mismatch); skipping mm_hashes forwarding"
+                    resolved = mm_routing_entries.len(),
+                    expected_images = total_image_count,
+                    "mm-routing: exact MM routing info not built (media resolution or placeholder-order mismatch); skipping mm_hashes forwarding"
                 );
             }
 
@@ -2886,33 +3640,38 @@ impl OpenAIPreprocessor {
         #[cfg(feature = "mm-routing")]
         let image_tokens = aggregate_image_tokens(
             image_tokens,
-            mm_image_entries.len(),
+            mm_routing_entries
+                .iter()
+                .filter(|entry| matches!(entry, MmRoutingEntry::Image { .. }))
+                .count(),
             total_image_count,
             has_processor_override,
         );
         #[cfg(feature = "mm-routing")]
-        return Ok((mm_image_entries, image_tokens));
+        return Ok((mm_routing_entries, image_tokens));
         #[cfg(not(feature = "mm-routing"))]
         Ok((Vec::new(), None))
     }
 
-    /// Build `MmRoutingInfo` for exact MM-aware KV routing. The worker-bound
-    /// `token_ids` are unchanged — only the routing-side view is expanded.
-    /// Supports single-special-token placeholder families (Qwen-VL, LLaVA,
-    /// Kimi-K2.x) and Kimi-K3's dimension-bearing media wrapper.
-    /// Returns `Ok(())` with no work performed on any precondition miss or
-    /// routing-only tokenizer failure (caller falls back to text-prefix
-    /// routing). Request preprocessing must use the atomic installation in
-    /// `gather_multi_modal_data_with_image_tokens` so worker `mm_hashes` are
-    /// forwarded if and only if this routing info was built.
+    /// Build image-only exact routing info without changing the worker-bound
+    /// token IDs. Kept as the public compatibility surface; request
+    /// preprocessing uses the mixed-media builder internally.
     #[cfg(feature = "mm-routing")]
     pub fn gather_mm_exact_routing_info(
         &self,
         builder: &mut PreprocessedRequestBuilder,
-        mm_image_entries: &[MmImageEntry],
+        image_entries: &[MmImageEntry],
         token_ids: &[crate::protocols::TokenIdType],
     ) -> Result<()> {
-        if let Some(info) = self.build_mm_exact_routing_info(mm_image_entries, token_ids) {
+        let entries: Vec<_> = image_entries
+            .iter()
+            .map(|entry| MmRoutingEntry::Image {
+                mm_hash: entry.mm_hash,
+                width: entry.width,
+                height: entry.height,
+            })
+            .collect();
+        if let Some(info) = self.build_mm_exact_routing_info(&entries, token_ids) {
             builder.mm_routing_info(Some(info));
         }
         Ok(())
@@ -2921,35 +3680,46 @@ impl OpenAIPreprocessor {
     #[cfg(feature = "mm-routing")]
     fn build_mm_exact_routing_info(
         &self,
-        mm_image_entries: &[MmImageEntry],
+        entries: &[MmRoutingEntry],
         token_ids: &[crate::protocols::TokenIdType],
     ) -> Option<crate::protocols::common::preprocessor::MmRoutingInfo> {
         use crate::protocols::common::preprocessor::MmRoutingInfo;
 
-        if mm_image_entries.is_empty() {
+        if entries.is_empty() {
             return None;
         }
-        let Some(find_token_id) = self.routing_image_token_id else {
+        if !exact_mm_routing_entries_are_unambiguous(entries) {
             tracing::debug!(
                 target: "mm_routing",
-                "routing_image_token_id unresolved; skipping MM routing info"
+                "consecutive video objects cannot be mapped exactly in vLLM KV events; skipping MM routing info"
             );
             return None;
-        };
-        let Some(prompt_layout) = self.routing_image_prompt_layout else {
-            tracing::debug!(
-                target: "mm_routing",
-                "routing_image_prompt_layout unresolved; skipping MM routing info"
-            );
-            return None;
-        };
-        let Some(counter) = self.image_token_counter.as_ref() else {
+        }
+        let image_token_id = self.routing_image_token_id;
+        let image_counter_required = entries
+            .iter()
+            .any(|entry| matches!(entry, MmRoutingEntry::Image { .. }));
+        if image_counter_required && self.image_token_counter.is_none() {
             tracing::debug!(
                 target: "mm_routing",
                 "image_token_counter unavailable; skipping MM routing info"
             );
             return None;
-        };
+        }
+        if image_counter_required && image_token_id.is_none() {
+            tracing::debug!(
+                target: "mm_routing",
+                "routing_image_token_id unresolved; skipping MM routing info"
+            );
+            return None;
+        }
+        if image_counter_required && self.routing_image_prompt_layout.is_none() {
+            tracing::debug!(
+                target: "mm_routing",
+                "routing_image_prompt_layout unresolved; skipping MM routing info"
+            );
+            return None;
+        }
         let block_size = self.kv_cache_block_size;
         if block_size == 0 {
             tracing::debug!(
@@ -2958,50 +3728,180 @@ impl OpenAIPreprocessor {
             );
             return None;
         }
-
-        // Single-special-token placeholders (Qwen-VL `<|image_pad|>`, LLaVA
-        // `<image>`) emit exactly one `find_token_id` per image in the
-        // tokenized prompt. Any other shape (e.g. numbered-text placeholders
-        // that BPE-shatter) can't be aligned to images here, so we skip MM
-        // routing and let the caller fall back to text-prefix routing.
-        let placeholder_count = token_ids.iter().filter(|&&t| t == find_token_id).count();
-        if placeholder_count != mm_image_entries.len() {
-            tracing::warn!(
-                target: "mm_routing",
-                placeholder_count,
-                image_count = mm_image_entries.len(),
-                routing_image_token_id = find_token_id,
-                "placeholder token count in tokenized prompt does not match image count; \
-                 skipping MM routing info (text-prefix routing only)"
-            );
-            return None;
-        }
-        let normalized_token_ids = token_ids;
-
-        // Compute per-image N via the registry + run the expansion.
-        let n_tokens: Vec<usize> = mm_image_entries
+        let (mut expanded, expanded_prompt_len, block_mm_infos) = if entries
             .iter()
-            .map(|e| counter.count_tokens(e.width, e.height))
-            .collect();
-        // Canonical pad_value fill at image positions for ALL backends. sglang
-        // consumes pad_value natively; vLLM events are normalized to pad_value
-        // in the kv-router (see `create_stored_blocks`), so the frontend stays
-        // backend-agnostic. pad_value formula pinned by
-        // `pad_value_matches_sglang_protocol` in dynamo_kv_router.
-        //
-        // Prepend the routing-side BOS for `add_bos_token: true` models
-        // (LlamaTokenizer family, e.g. LLaVA-1.5) so per-block hashes match
-        // the backend's HF processor output.
-        let (mut expanded, expanded_prompt_len) = try_expand_mm_routing_tokens(
-            self.tokenizer.as_ref(),
-            prompt_layout,
-            self.routing_prepend_bos,
-            find_token_id,
-            mm_image_entries,
-            &n_tokens,
-            normalized_token_ids,
-            counter.model_id(),
-        )?;
+            .all(|entry| matches!(entry, MmRoutingEntry::Image { .. }))
+        {
+            let counter = self
+                .image_token_counter
+                .as_ref()
+                .expect("image counter requirement checked above");
+            let images: Vec<MmImageEntry> = entries
+                .iter()
+                .map(|entry| match entry {
+                    MmRoutingEntry::Image {
+                        mm_hash,
+                        width,
+                        height,
+                    } => MmImageEntry {
+                        mm_hash: *mm_hash,
+                        width: *width,
+                        height: *height,
+                    },
+                    MmRoutingEntry::Video { .. } => unreachable!("all entries checked as images"),
+                })
+                .collect();
+            let image_token_id = image_token_id.expect("image token requirement checked above");
+            let placeholder_count = token_ids
+                .iter()
+                .filter(|&&token_id| token_id == image_token_id)
+                .count();
+            if placeholder_count != images.len() {
+                tracing::warn!(
+                    target: "mm_routing",
+                    placeholder_count,
+                    image_count = images.len(),
+                    routing_image_token_id = image_token_id,
+                    "placeholder token count in tokenized prompt does not match image count; \
+                     skipping MM routing info (text-prefix routing only)"
+                );
+                return None;
+            }
+            let n_tokens: Vec<usize> = images
+                .iter()
+                .map(|image| counter.count_tokens(image.width, image.height))
+                .collect();
+            let (expanded, expanded_prompt_len) = try_expand_mm_routing_tokens(
+                self.tokenizer.as_ref(),
+                self.routing_image_prompt_layout
+                    .expect("image prompt layout requirement checked above"),
+                self.routing_prepend_bos,
+                image_token_id,
+                &images,
+                &n_tokens,
+                token_ids,
+                counter.model_id(),
+            )?;
+            (expanded, expanded_prompt_len, Vec::new())
+        } else {
+            let mut replacements = Vec::with_capacity(entries.len());
+            let video_token_id = entries.iter().find_map(|entry| match entry {
+                MmRoutingEntry::Video {
+                    placeholder_token_id,
+                    ..
+                } => Some(*placeholder_token_id),
+                MmRoutingEntry::Image { .. } => None,
+            });
+            for entry in entries {
+                let replacement = match entry {
+                    MmRoutingEntry::Image {
+                        mm_hash,
+                        width,
+                        height,
+                    } => {
+                        let counter = self
+                            .image_token_counter
+                            .as_ref()
+                            .expect("image counter requirement checked above");
+                        let token_count = counter.count_tokens(*width, *height);
+                        let mut routing_tokens = Vec::with_capacity(token_count);
+                        let mut worker_tokens = Vec::with_capacity(token_count);
+                        let image = MmImageEntry {
+                            mm_hash: *mm_hash,
+                            width: *width,
+                            height: *height,
+                        };
+                        let layout = self
+                            .routing_image_prompt_layout
+                            .expect("image prompt layout requirement checked above");
+                        let image_token_id =
+                            image_token_id.expect("image token requirement checked above");
+                        let result = append_mm_routing_replacement(
+                            &mut routing_tokens,
+                            self.tokenizer.as_ref(),
+                            layout,
+                            image,
+                            token_count,
+                        )
+                        .and_then(|()| {
+                            append_mm_routing_replacement_with_fill(
+                                &mut worker_tokens,
+                                self.tokenizer.as_ref(),
+                                layout,
+                                image,
+                                token_count,
+                                image_token_id,
+                            )
+                        });
+                        if let Err(error) = result {
+                            tracing::warn!(
+                                target: "mm_routing",
+                                model = counter.model_id(),
+                                %error,
+                                "routing-only image prompt expansion failed; skipping MM routing info"
+                            );
+                            return None;
+                        }
+                        TrackedMmRoutingReplacement {
+                            mm_hash: *mm_hash,
+                            target_tokens: vec![image_token_id],
+                            worker_tokens,
+                            routing_tokens,
+                        }
+                    }
+                    MmRoutingEntry::Video {
+                        mm_hash,
+                        placeholder_token_id,
+                        target_tokens,
+                        replacement_tokens,
+                    } => {
+                        let fill_token =
+                            dynamo_kv_router::protocols::pad_value_for_mm_hash(*mm_hash);
+                        TrackedMmRoutingReplacement {
+                            mm_hash: *mm_hash,
+                            target_tokens: target_tokens.clone(),
+                            worker_tokens: replacement_tokens.clone(),
+                            routing_tokens: replacement_tokens
+                                .iter()
+                                .map(|replacement_id| {
+                                    if *replacement_id == *placeholder_token_id {
+                                        fill_token
+                                    } else {
+                                        *replacement_id
+                                    }
+                                })
+                                .collect(),
+                        }
+                    }
+                };
+                replacements.push(replacement);
+            }
+
+            // Configured BOS is image-specific; video-only routing starts from
+            // the frontend-tokenized prompt.
+            let routing_bos =
+                routing_bos_to_prepend(self.routing_prepend_bos, image_counter_required);
+            match apply_tracked_mm_replacements(
+                routing_bos,
+                &replacements,
+                token_ids,
+                block_size,
+                image_token_id,
+                video_token_id,
+            ) {
+                Ok(expanded) => expanded,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "mm_routing",
+                        media_count = entries.len(),
+                        %error,
+                        "placeholder token sequence does not match multimodal content order; \
+                         skipping MM routing info (text-prefix routing only)"
+                    );
+                    return None;
+                }
+            }
+        };
 
         // Pad to a whole multiple of kv_cache_block_size. The router's
         // compute_block_hash_for_seq only hashes whole blocks, so the partial
@@ -3014,13 +3914,11 @@ impl OpenAIPreprocessor {
             expanded.resize(total_tokens, 0);
         }
 
-        // pad_value already encodes mm_hash in the routing tokens the router
-        // hashes, so block_mm_infos is always empty (the canonical scheme for
-        // both backends). The mm identity rides in the token stream, not a
-        // side channel.
+        // Exact blocks carry MM identity in pad-value tokens. Ambiguous
+        // feature-span boundaries carry the same block metadata vLLM hashes.
         tracing::debug!(
             target: "mm_routing",
-            n_images = mm_image_entries.len(),
+            n_media = entries.len(),
             block_size,
             total_tokens,
             "MmRoutingInfo built (exact, pad_value)"
@@ -3028,7 +3926,7 @@ impl OpenAIPreprocessor {
 
         Some(MmRoutingInfo {
             routing_token_ids: expanded,
-            block_mm_infos: Vec::new(),
+            block_mm_infos,
             expanded_prompt_len,
         })
     }
@@ -3054,8 +3952,8 @@ impl OpenAIPreprocessor {
     /// Header-only image dim fetch. For HTTP/HTTPS we issue a Range request
     /// for the first 64 KB (covers PNG/WebP in <1 KB and JPEG SOF in worst
     /// case). For data: URIs we decode the base64 payload locally and parse
-    /// the header. Caller treats Err as "MM routing entry unavailable for
-    /// this image" — request still proceeds with text-prefix routing.
+    /// the header. Non-policy failures make the MM routing entry unavailable.
+    /// Policy rejections remain terminal for the request.
     ///
     /// Results are cached by `(mm_hash, dimension_policy)` so repeated
     /// requests for the same image (typical of multi-turn / session workloads)
@@ -3107,10 +4005,10 @@ impl OpenAIPreprocessor {
             .try_get_with(cache_key, async move {
                 Self::fetch_image_dims_uncached(&url_owned, dimension_policy)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(ImageDimFetchFailure::from_error)
             })
             .await
-            .map_err(|e| anyhow::anyhow!("fetch_image_dims failed: {}", e))
+            .map_err(|error| error.to_error())
     }
 
     #[cfg(feature = "mm-routing")]
@@ -3170,7 +4068,10 @@ impl OpenAIPreprocessor {
                 .header("Range", format!("bytes=0-{}", range_end))
                 .timeout(DIM_FETCH_TIMEOUT)
                 .send()
-                .await?;
+                .await
+                .map_err(|error| {
+                    crate::preprocessor::media::MediaFetcher::map_fetch_error(error.into())
+                })?;
             let status = resp.status();
             // Require 206 Partial Content — if the origin ignored the
             // Range header and answered 200 OK, `.bytes()` would buffer
@@ -3357,7 +4258,25 @@ impl OpenAIPreprocessor {
             }
         }
 
+        Self::capture_prompt_token_ids(request, tracker, &tokens_out);
+
         Ok((tokens_out, annotations))
+    }
+
+    /// Retain the authoritative rendered prompt only for clients that request
+    /// the named response field. Ordinary requests do not clone the token list.
+    fn capture_prompt_token_ids<R: NvExtProvider>(
+        request: &R,
+        tracker: Option<&RequestTracker>,
+        token_ids: &[TokenIdType],
+    ) {
+        let requested = request
+            .nvext()
+            .and_then(|nvext| nvext.extra_fields.as_ref())
+            .is_some_and(|fields| fields.iter().any(|field| field == "prompt_token_ids"));
+        if requested && let Some(tracker) = tracker {
+            tracker.set_prompt_token_ids(token_ids.to_vec());
+        }
     }
 
     fn prompt_overflow_error(token_count: usize, combined_limit: usize) -> DynamoError {
@@ -3446,26 +4365,44 @@ impl OpenAIPreprocessor {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedEmbeddingRequest::builder();
 
-        let all_token_ids = match &request.inner.input {
+        let embedding_tokenizers = self.embedding_tokenizers.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "embedding tokenization is unavailable; construct the preprocessor with \
+                 OpenAIPreprocessor::new_for_embeddings"
+            )
+        })?;
+        let effective_add_special_tokens = request
+            .add_special_tokens
+            .or(embedding_tokenizers.add_special_tokens_default)
+            .unwrap_or(true);
+        let is_text_input = matches!(
+            &request.inner.input,
+            dynamo_protocols::types::EmbeddingInput::String(_)
+                | dynamo_protocols::types::EmbeddingInput::StringArray(_)
+        );
+        let truncation_limit =
+            self.embedding_truncation_limit(request.truncate_prompt_tokens, is_text_input)?;
+        let mut all_token_ids = match &request.inner.input {
             dynamo_protocols::types::EmbeddingInput::String(s) => {
-                let encoding = self.tokenizer.encode(s)?;
+                let tokenizer = embedding_tokenizers.tokenizer(effective_add_special_tokens)?;
+                let encoding = tokenizer.encode(s)?;
                 vec![encoding.token_ids().to_vec()]
             }
             dynamo_protocols::types::EmbeddingInput::StringArray(arr) => {
+                let tokenizer = embedding_tokenizers.tokenizer(effective_add_special_tokens)?;
                 let input_strs: Vec<String> = arr.to_vec();
                 let encodings = tokio::task::spawn_blocking({
-                    let tokenizer = self.tokenizer.clone();
+                    let tokenizer = tokenizer.clone();
                     let strs = input_strs.clone();
                     move || {
                         tokenizer.encode_batch(&strs.iter().map(|s| s.as_str()).collect::<Vec<_>>())
                     }
                 })
                 .await??;
-                let token_arrays: Vec<Vec<u32>> = encodings
+                encodings
                     .into_iter()
                     .map(|encoding| encoding.token_ids().to_vec())
-                    .collect();
-                token_arrays
+                    .collect()
             }
             dynamo_protocols::types::EmbeddingInput::IntegerArray(token_ids) => {
                 vec![token_ids.clone()]
@@ -3474,6 +4411,13 @@ impl OpenAIPreprocessor {
                 token_arrays.clone()
             }
         };
+        if let Some(limit) = truncation_limit {
+            for token_ids in &mut all_token_ids {
+                // This integration intentionally follows right truncation:
+                // preserve the first N tokens.
+                token_ids.truncate(limit);
+            }
+        }
 
         // Handle annotations
         if request.has_annotation(ANNOTATION_TOKEN_IDS) {
@@ -3489,12 +4433,56 @@ impl OpenAIPreprocessor {
             EncodingFormat::Float => "float".to_string(),
             EncodingFormat::Base64 => "base64".to_string(),
         }));
+        builder.truncate_prompt_tokens(request.truncate_prompt_tokens);
         builder.dimensions(request.inner.dimensions);
 
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
 
         Ok((builder.build()?, annotations))
+    }
+
+    fn embedding_truncation_limit(
+        &self,
+        requested: Option<i64>,
+        is_text_input: bool,
+    ) -> Result<Option<usize>> {
+        let Some(requested) = requested else {
+            return Ok(None);
+        };
+
+        if requested < -1 {
+            return Err(invalid_argument_error(format!(
+                "truncate_prompt_tokens must be >= -1, got {requested}"
+            )));
+        }
+
+        // Caller-supplied token IDs are already preprocessed; do not mutate them.
+        if !is_text_input {
+            return Ok(None);
+        }
+
+        let model_limit = self.context_length as usize;
+        if requested == -1 {
+            if model_limit == 0 {
+                return Err(invalid_argument_error(
+                    "truncate_prompt_tokens=-1 requires a configured model context length",
+                ));
+            }
+            return Ok(Some(model_limit));
+        }
+
+        let requested = usize::try_from(requested).map_err(|_| {
+            invalid_argument_error("truncate_prompt_tokens is too large for this platform")
+        })?;
+        if model_limit > 0 && requested > model_limit {
+            return Err(invalid_argument_error(format!(
+                "truncate_prompt_tokens={requested} cannot be greater than \
+                 max_model_len={model_limit}. Please request a smaller truncation size."
+            )));
+        }
+
+        Ok(Some(requested))
     }
 
     fn apply_unified_response_policies<S>(
@@ -3528,6 +4516,79 @@ impl OpenAIPreprocessor {
         stream
     }
 
+    fn tool_processing_route(
+        &self,
+        request: &NvCreateChatCompletionRequest,
+        guided_tool_constraint: &crate::protocols::openai::GuidedToolConstraint,
+    ) -> anyhow::Result<ToolProcessingRoute> {
+        use crate::protocols::openai::chat_completions::{tool_parser_v2, unified_parser};
+
+        let uses_tool_call_structural_tag = guided_tool_constraint.uses_structural_tag();
+        if let Some(family) = tool_parser_v2::unified_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) && !uses_tool_call_structural_tag
+            && matches!(
+                request.inner.tool_choice.as_ref(),
+                None | Some(ChatCompletionToolChoiceOption::Auto)
+                    | Some(ChatCompletionToolChoiceOption::None)
+            )
+        {
+            return Ok(ToolProcessingRoute::MuseUnified(family));
+        }
+
+        if let Some(family) = unified_parser::selected_family(
+            self.tool_call_parser.as_deref(),
+            self.runtime_config.reasoning_parser.as_deref(),
+        ) {
+            return Ok(ToolProcessingRoute::QwenUnified(family));
+        }
+
+        let effective_tool_call_parser = self.tool_call_parser.clone().or_else(|| {
+            self.runtime_config
+                .reasoning_parser
+                .as_deref()
+                .filter(|parser| matches!(*parser, "kimi_k3" | "kimi-k3"))
+                .map(str::to_string)
+        });
+        let parser_unwraps_all_kimi_k3_responses = effective_tool_call_parser
+            .as_deref()
+            .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
+        let tool_call_parsing_enabled = Self::tool_call_parsing_enabled(request);
+        let has_tools = request
+            .inner
+            .tools
+            .as_ref()
+            .is_some_and(|tools| !tools.is_empty());
+        let should_jail = if tool_call_parsing_enabled || parser_unwraps_all_kimi_k3_responses {
+            Self::should_apply_tool_jail(
+                effective_tool_call_parser.as_ref(),
+                request.inner.tool_choice.as_ref(),
+                has_tools,
+            )?
+        } else {
+            false
+        };
+
+        if !should_jail {
+            return Ok(ToolProcessingRoute::PassThrough);
+        }
+
+        if let Some(parser_name) = effective_tool_call_parser.as_deref()
+            && tool_parser_v2::enabled()
+            && tool_parser_v2::supports_family(parser_name)
+            && !uses_tool_call_structural_tag
+            && matches!(
+                request.inner.tool_choice.as_ref(),
+                None | Some(ChatCompletionToolChoiceOption::Auto)
+            )
+        {
+            Ok(ToolProcessingRoute::ParserV2(parser_name.to_string()))
+        } else {
+            Ok(ToolProcessingRoute::LegacyJail(effective_tool_call_parser))
+        }
+    }
+
     pub fn postprocessor_parsing_stream<S>(
         &self,
         stream: S,
@@ -3546,11 +4607,13 @@ impl OpenAIPreprocessor {
             self.runtime_config.reasoning_parser.as_deref(),
             uses_tool_call_structural_tag,
         )?;
+        let tool_processing_route = self.tool_processing_route(request, &guided_tool_constraint)?;
         self.postprocessor_parsing_stream_with_constraint(
             stream,
             request,
             prompt_injected_reasoning,
             guided_tool_constraint,
+            tool_processing_route,
         )
     }
 
@@ -3560,13 +4623,14 @@ impl OpenAIPreprocessor {
         request: &NvCreateChatCompletionRequest,
         prompt_injected_reasoning: bool,
         guided_tool_constraint: crate::protocols::openai::GuidedToolConstraint,
+        tool_processing_route: ToolProcessingRoute,
     ) -> anyhow::Result<
         impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     >
     where
         S: Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send + 'static,
     {
-        use crate::protocols::openai::chat_completions::unified_parser;
+        use crate::protocols::openai::chat_completions::{tool_parser_v2, unified_parser};
         let uses_tool_call_structural_tag = guided_tool_constraint.uses_structural_tag();
         let defer_reasoning_for_nonempty_content =
             Self::wants_reasoning_as_content_when_empty(request.chat_template_args.as_ref());
@@ -3601,16 +4665,7 @@ impl OpenAIPreprocessor {
         // JSON for named/required, native markup for auto/none/structural-tag), so
         // it does not need the same entry gate.
         //
-        if let Some(family) = tool_parser_v2::unified_family(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        ) && !uses_tool_call_structural_tag
-            && matches!(
-                request.inner.tool_choice.as_ref(),
-                None | Some(ChatCompletionToolChoiceOption::Auto)
-                    | Some(ChatCompletionToolChoiceOption::None)
-            )
-        {
+        if let ToolProcessingRoute::MuseUnified(family) = &tool_processing_route {
             let tool_definitions = request.inner.tools.as_ref().map(|tools| {
                 tools
                     .iter()
@@ -3621,9 +4676,13 @@ impl OpenAIPreprocessor {
                     })
                     .collect()
             });
-            let unified: Pin<Box<dyn Stream<Item = _> + Send>> = Box::pin(
-                tool_parser_v2::apply_unified_stream(stream, tool_definitions, family, true),
-            );
+            let unified: Pin<Box<dyn Stream<Item = _> + Send>> =
+                Box::pin(tool_parser_v2::apply_unified_stream(
+                    stream,
+                    tool_definitions,
+                    family.clone(),
+                    true,
+                ));
             return Ok(Self::apply_unified_response_policies(
                 unified,
                 Self::tool_call_parsing_enabled(request),
@@ -3631,10 +4690,7 @@ impl OpenAIPreprocessor {
             ));
         }
 
-        if let Some(family) = unified_parser::selected_family(
-            self.tool_call_parser.as_deref(),
-            self.runtime_config.reasoning_parser.as_deref(),
-        ) {
+        if let ToolProcessingRoute::QwenUnified(family) = &tool_processing_route {
             let tool_definitions = request.inner.tools.as_ref().map(|tools| {
                 tools
                     .iter()
@@ -3765,41 +4821,7 @@ impl OpenAIPreprocessor {
             stream
         };
 
-        // Check if tools are present and if we should apply jail
-        let has_tools = request
-            .inner
-            .tools
-            .as_ref()
-            .is_some_and(|tools| !tools.is_empty());
-
-        // K3's reasoning-only path still emits XTML response/message wrappers.
-        // vLLM strips those in its K3 reasoner when no tool parser is active;
-        // reuse the Rust K3 tool parser as the wrapper decoder so configuring
-        // only `--dyn-reasoning-parser kimi_k3` remains safe too.
-        let effective_tool_call_parser = self.tool_call_parser.clone().or_else(|| {
-            self.runtime_config
-                .reasoning_parser
-                .as_deref()
-                .filter(|parser| matches!(*parser, "kimi_k3" | "kimi-k3"))
-                .map(str::to_string)
-        });
-
-        // A parser describes model syntax, but request semantics decide whether
-        // tool calls are allowed. Keep K3's wrapper decoder active because that
-        // model wraps ordinary assistant content in XTML even without tools.
-        let parser_unwraps_all_kimi_k3_responses = effective_tool_call_parser
-            .as_deref()
-            .is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
         let tool_call_parsing_enabled = Self::tool_call_parsing_enabled(request);
-        let should_jail = if tool_call_parsing_enabled || parser_unwraps_all_kimi_k3_responses {
-            Self::should_apply_tool_jail(
-                effective_tool_call_parser.as_ref(),
-                request.inner.tool_choice.as_ref(),
-                has_tools,
-            )?
-        } else {
-            false
-        };
 
         // Convert OpenAI tools to parser ToolDefinition format before applying jail
         let tool_definitions = request.inner.tools.as_ref().map(|tools| {
@@ -3813,57 +4835,30 @@ impl OpenAIPreprocessor {
                 .collect()
         });
 
-        // When DYN_ENABLE_EXPERIMENTAL_PARSERS_V2 is set, supported families
-        // (Qwen3-Coder, DeepSeek-V4) stream through the dynamo-parsers-v2 parser
-        // instead of the jail, which is never built for them on this path.
-        // tool_choice=required/named and structural-tag still use the jail's
-        // Immediate mode, since those rely on guided-decoded JSON rather than the
-        // native markup the v2 parser reads. See tool_parser_v2::apply_stream.
-        use crate::protocols::openai::chat_completions::tool_parser_v2;
-
-        // Guided JSON does NOT go to the jail. We installed the grammar that produced
-        // this output, so the shape is already known: a named choice's payload is the
-        // argument object itself, and a required choice's is an array of
-        // `{name, parameters}`. Routing comes from the SHARED constraint predicate, not
-        // from `tool_choice`, because a Kimi K3 forced request is indistinguishable
-        // there yet installs no JSON schema at all. That predicate is read once at the
-        // top of this function, into `guided_tool_streaming`.
-
-        let parser_name = effective_tool_call_parser.as_deref();
-        let use_parsers_v2 = tool_parser_v2::enabled()
-            && parser_name.is_some_and(tool_parser_v2::supports_family)
-            && !uses_tool_call_structural_tag
-            && matches!(
-                request.inner.tool_choice.as_ref(),
-                None | Some(dynamo_protocols::types::ChatCompletionToolChoiceOption::Auto)
-            );
-
-        // Apply jail conditionally
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> =
-            if should_jail && use_parsers_v2 {
-                Box::pin(tool_parser_v2::apply_stream(
-                    stream,
-                    tool_definitions,
-                    parser_name
-                        .expect("use_parsers_v2 implies a parser name")
-                        .to_string(),
-                ))
-            } else if should_jail {
-                // A forced tool_choice installed a JSON grammar, so the jail may release
-                // calls as they arrive instead of buffering to the closing brace. The
-                // jail keeps its own native fallback, so a backend that ignores the
-                // grammar (MiniMax M2 emits XML under `required`) still parses normally.
-                // Same request-scoped decision the unified path above was given.
-                Box::pin(Self::apply_tool_calling_jail(
-                    effective_tool_call_parser,
-                    request.inner.tool_choice.clone(),
-                    tool_definitions,
-                    uses_tool_call_structural_tag,
-                    guided_tool_streaming,
-                    stream,
-                ))
-            } else {
-                Box::pin(stream)
+            match tool_processing_route {
+                ToolProcessingRoute::ParserV2(parser_name) => Box::pin(
+                    tool_parser_v2::apply_stream(stream, tool_definitions, parser_name),
+                ),
+                ToolProcessingRoute::LegacyJail(effective_tool_call_parser) => {
+                    // A forced tool_choice installed a JSON grammar, so the jail may release
+                    // calls as they arrive instead of buffering to the closing brace. The
+                    // jail keeps its own native fallback, so a backend that ignores the
+                    // grammar (MiniMax M2 emits XML under `required`) still parses normally.
+                    // Same request-scoped decision the unified path above was given.
+                    Box::pin(Self::apply_tool_calling_jail(
+                        effective_tool_call_parser,
+                        request.inner.tool_choice.clone(),
+                        tool_definitions,
+                        uses_tool_call_structural_tag,
+                        guided_tool_streaming,
+                        stream,
+                    ))
+                }
+                ToolProcessingRoute::PassThrough => Box::pin(stream),
+                ToolProcessingRoute::MuseUnified(_) | ToolProcessingRoute::QwenUnified(_) => {
+                    unreachable!("unified routes return before legacy response processing")
+                }
             };
 
         Ok(Self::apply_tool_call_response_policy(
@@ -4265,38 +5260,36 @@ impl OpenAIPreprocessor {
     where
         S: Stream<Item = Annotated<EmbeddingsEngineOutput>> + Send + 'static,
     {
-        // Honor the OpenAI `encoding_format` field. The default is `Float`;
-        // `Base64` encodes the raw little-endian f32 bytes of each
-        // per-input vector. The engine always returns floats, so the
-        // base64 path runs at the postprocessor seam where we still have
-        // the original request shape in scope.
+        // The worker always returns base64-encoded little-endian f32 bytes.
+        // Pass base64 through, or decode to floats (the public default).
         let encode_base64 = matches!(
             original_request.inner.encoding_format,
             Some(dynamo_protocols::types::EncodingFormat::Base64)
         );
         stream.map(move |output| {
             output.map_data(|engine_output| {
-                // Convert engine output to OpenAI response format
+                if engine_output.embeddings.is_empty() {
+                    return Err("embedding worker returned an empty `embeddings` field".to_string());
+                }
                 let embeddings: Vec<dynamo_protocols::types::Embedding> = engine_output
                     .embeddings
                     .into_iter()
                     .enumerate()
-                    .map(|(index, embedding)| {
-                        let floats: Vec<f32> = embedding.into_iter().map(|f| f as f32).collect();
+                    .map(|(index, encoded)| {
                         let value = if encode_base64 {
-                            dynamo_protocols::types::EmbeddingVector::Base64(
-                                encode_floats_to_base64(&floats),
-                            )
+                            dynamo_protocols::types::EmbeddingVector::Base64(encoded)
                         } else {
-                            dynamo_protocols::types::EmbeddingVector::Float(floats)
+                            dynamo_protocols::types::EmbeddingVector::Float(
+                                decode_base64_to_floats(&encoded)?,
+                            )
                         };
-                        dynamo_protocols::types::Embedding {
+                        Ok::<_, String>(dynamo_protocols::types::Embedding {
                             index: index as u32,
                             object: "embedding".to_string(),
                             embedding: value,
-                        }
+                        })
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, String>>()?;
 
                 let response = NvCreateEmbeddingResponse {
                     inner: dynamo_protocols::types::CreateEmbeddingResponse {
@@ -4387,9 +5380,9 @@ impl OpenAIPreprocessor {
     /// `Annotated<CreateChatCompletionStreamResponse>`, runs the moved jail, and
     /// re-wraps the result.
     ///
-    /// `nvext` is not populated on the streaming tool-call path (only the unary
-    /// aggregator/anthropic paths set it), so the jail never needs to preserve
-    /// it and re-wrapped chunks carry `nvext: None`.
+    /// The parser can buffer and rewrite several input chunks before it emits an
+    /// output. Completion token IDs therefore describe the ordered buffered
+    /// group, not the rewritten text in one output delta.
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_protocols::types::ChatCompletionToolChoiceOption>,
@@ -4421,12 +5414,18 @@ impl OpenAIPreprocessor {
         // and `observe_current_osl` takes the latest `output_tokens`. (The
         // annotation form on data-less usage chunks rides through untouched via
         // `event`/`comment`.)
+        //
+        // `nvext` uses the unary aggregator's merge rules: completion token IDs
+        // are appended, while the latest supplied value wins for every other
+        // top-level field. `engine_data` is replaced as one complete value.
         #[derive(Default)]
-        struct PendingMetrics {
-            template: Option<LLMMetricAnnotation>,
+        struct PendingDynamoMetadata {
+            metrics_template: Option<LLMMetricAnnotation>,
             chunk_tokens: usize,
+            nvext: Option<serde_json::Value>,
+            response_template: Option<dynamo_protocols::types::CreateChatCompletionStreamResponse>,
         }
-        let pending = Arc::new(Mutex::new(PendingMetrics::default()));
+        let pending = Arc::new(Mutex::new(PendingDynamoMetadata::default()));
         let pending_in = Arc::clone(&pending);
 
         // Per-choice recovery state — allocated only for glm47 since only that
@@ -4484,12 +5483,37 @@ impl OpenAIPreprocessor {
             std::future::ready(!is_error)
         });
 
-        // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer llm_metrics)
+        // dynamo `Annotated<Nv>` -> jail `Annotated<Create>` (buffer Dynamo metadata)
         let jail_input = stream.map(move |mut a| {
-            if let Some(metrics) = a.data.as_mut().and_then(|nv| nv.llm_metrics.take()) {
-                let mut p = pending_in.lock().expect("jail metrics buffer poisoned");
-                p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
-                p.template = Some(metrics);
+            let has_metadata = a
+                .data
+                .as_ref()
+                .is_some_and(|nv| nv.llm_metrics.is_some() || nv.nvext.is_some());
+            if has_metadata {
+                let mut p = pending_in
+                    .lock()
+                    .expect("jail Dynamo metadata buffer poisoned");
+                if let Some(nv) = a.data.as_mut() {
+                    if p.response_template.is_none() {
+                        p.response_template = Some(
+                            dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                                id: nv.inner.id.clone(),
+                                object: nv.inner.object.clone(),
+                                created: nv.inner.created,
+                                model: nv.inner.model.clone(),
+                                choices: Vec::new(),
+                                usage: None,
+                                service_tier: nv.inner.service_tier.clone(),
+                                system_fingerprint: nv.inner.system_fingerprint.clone(),
+                            },
+                        );
+                    }
+                    if let Some(metrics) = nv.llm_metrics.take() {
+                        p.chunk_tokens = p.chunk_tokens.saturating_add(metrics.chunk_tokens);
+                        p.metrics_template = Some(metrics);
+                    }
+                    merge_response_nvext(&mut p.nvext, nv.nvext.take());
+                }
             }
             // Buffer input content only for glm47 (truncation recovery).
             // Only retain from the last <tool_call> marker onward to bound
@@ -4522,16 +5546,19 @@ impl OpenAIPreprocessor {
                     }
                 }
             }
+            debug_assert!(a.error.is_none(), "terminal errors must bypass the jail");
             JailAnnotated {
                 data: a.data.map(|nv| nv.inner),
                 id: a.id,
                 event: a.event,
                 comment: a.comment,
-                error: a.error.map(|e| e.to_string()),
+                // Terminal errors were removed by `take_while` above and are
+                // chained back as the original typed Dynamo annotation below.
+                error: None,
             }
         });
 
-        // jail `Annotated<Create>` -> dynamo `Annotated<Nv>` (re-attach llm_metrics)
+        // jail `Annotated<Create>` -> dynamo `Annotated<Nv>` (re-attach Dynamo metadata)
         // The crate encodes the opt-in in WHICH entry point you call, so pick here and
         // box both arms to one type. `apply_tool_calling_jail` keeps the published
         // five-argument signature for everyone else.
@@ -4560,196 +5587,255 @@ impl OpenAIPreprocessor {
                 jail_input,
             ))
         };
-        let terminal_error_out = Arc::clone(&terminal_error);
-        jailed
-            .flat_map(move |a| {
-                // Stamp the accumulated metrics onto the next emitted data chunk;
-                // data-less/synthesized chunks carry it forward (or `None`).
-                let llm_metrics = a.data.as_ref().and_then(|_| {
-                    let mut p = pending.lock().expect("jail metrics buffer poisoned");
-                    let chunk_tokens = p.chunk_tokens;
-                    p.chunk_tokens = 0;
-                    p.template.take().map(|mut metrics| {
-                        metrics.chunk_tokens = chunk_tokens;
-                        metrics
-                    })
+        let pending_out = Arc::clone(&pending);
+        let pending_eof = Arc::clone(&pending);
+        let jailed_output = jailed.flat_map(move |a| {
+            debug_assert!(
+                a.error.is_none(),
+                "dynamo-parsers must not construct errors"
+            );
+            // Metrics can ride on payload-only usage chunks because the HTTP
+            // layer observes them before removing the chunk. Client-visible
+            // nvext must wait for a non-payload-usage output with a choice.
+            let has_choices = a.data.as_ref().is_some_and(|data| !data.choices.is_empty());
+            let is_payload_usage = a.event.as_deref() == Some(ANNOTATION_PAYLOAD_USAGE);
+            let (llm_metrics, nvext) = a.data.as_ref().map_or((None, None), |_| {
+                let mut p = pending_out
+                    .lock()
+                    .expect("jail Dynamo metadata buffer poisoned");
+                let chunk_tokens = p.chunk_tokens;
+                p.chunk_tokens = 0;
+                let metrics = p.metrics_template.take().map(|mut metrics| {
+                    metrics.chunk_tokens = chunk_tokens;
+                    metrics
                 });
-                let mut nv_chunk = Annotated {
-                    data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
-                        inner,
-                        nvext: None,
-                        llm_metrics,
-                    }),
-                    id: a.id,
-                    event: a.event,
-                    comment: a.comment,
-                    error: a.error.map(DynamoError::msg),
+                let nvext = if has_choices && !is_payload_usage {
+                    p.nvext.take()
+                } else {
+                    None
                 };
+                (metrics, nvext)
+            });
+            let mut nv_chunk = Annotated {
+                data: a.data.map(|inner| NvCreateChatCompletionStreamResponse {
+                    inner,
+                    nvext,
+                    llm_metrics,
+                }),
+                id: a.id,
+                event: a.event,
+                comment: a.comment,
+                // dynamo-parsers never constructs errors; Dynamo's original
+                // typed terminal annotation bypasses this conversion.
+                error: None,
+            };
 
-                // glm47: on finish_reason=length, recover the last incomplete
-                // <tool_call> block. rfind skips complete blocks so earlier parsed
-                // calls are never duplicated. Recovered content WILL contain raw
-                // markup — callers that require "no tool tags in content" must
-                // filter on finish_reason=length.
-                //
-                // TODO: this recovery runs inside apply_tool_calling_jail, which
-                // the v2 path bypasses (use_parsers_v2 branch above). Adding
-                // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
-                // streaming recovery while aggregator.rs keeps running. At that
-                // point hoist this above the jail/v2 branch — it only needs
-                // buffered input text + finish_reason, both available there.
-                // Pass 1 (immutable): compute the recovery tail per choice and
-                // whether the jail already released it as content on this chunk.
-                // We collect into a Vec so we can release the immutable borrow on
-                // nv_chunk before mutating it in pass 2.
-                let recoveries: Vec<PendingRecovery> =
-                    if is_glm47 {
-                        let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
-                        nv_chunk
-                            .data
-                            .iter()
-                            .flat_map(|data| data.inner.choices.iter())
-                            .filter_map(|choice| {
-                                let state = cr.entry(choice.index).or_default();
-                                if !state.recovered
-                                    && let Some(ChatCompletionMessageContent::Text(t)) =
-                                        &choice.delta.content
-                                {
-                                    state.emitted_text.push_str(t);
-                                    // Bound like input_text: retain only the suffix from
-                                    // the last marker onward — all the contains(&tail)
-                                    // check needs.
-                                    let mut keep_from =
-                                        match state.emitted_text.rfind(glm47_start.as_str()) {
-                                            Some(pos) => pos,
-                                            None => state
-                                                .emitted_text
-                                                .len()
-                                                .saturating_sub(glm47_start.len() - 1),
-                                        };
-                                    while keep_from > 0
-                                        && !state.emitted_text.is_char_boundary(keep_from)
-                                    {
-                                        keep_from -= 1;
-                                    }
-                                    state.emitted_text.drain(..keep_from);
-                                }
-                                if state.recovered
-                                    || !matches!(
-                                        choice.finish_reason,
-                                        Some(dynamo_protocols::types::FinishReason::Length)
-                                    )
-                                {
-                                    return None;
-                                }
-                                let tail = state.input_text.rfind(glm47_start.as_str()).and_then(
-                                    |pos| {
-                                        let t = &state.input_text[pos..];
-                                        if !t.contains(glm47_end.as_str()) {
-                                            Some(t.to_string())
-                                        } else {
-                                            None
-                                        }
-                                    },
-                                )?;
-                                let tail_already_emitted = state.emitted_text.contains(&tail);
-                                state.recovered = true;
-                                Some(PendingRecovery {
-                                    choice_idx: choice.index,
-                                    tail,
-                                    tail_already_emitted,
-                                })
-                            })
-                            .collect()
-                    } else {
-                        vec![]
-                    };
-
-                // Pass 2 (mutable): when the jail already released the tail verbatim,
-                // suppress the finish chunk's content entirely. The recovery chunk
-                // carries just the marker-onwards tail, matching the non-streaming
-                // path (rfind result only, no post-call prose).
-                for pr in &recoveries {
-                    if !pr.tail_already_emitted {
-                        continue;
-                    }
-                    if let Some(ref mut data) = nv_chunk.data {
-                        for rc in data
-                            .inner
-                            .choices
-                            .iter_mut()
-                            .filter(|c| c.index == pr.choice_idx)
+            // glm47: on finish_reason=length, recover the last incomplete
+            // <tool_call> block. rfind skips complete blocks so earlier parsed
+            // calls are never duplicated. Recovered content WILL contain raw
+            // markup — callers that require "no tool tags in content" must
+            // filter on finish_reason=length.
+            //
+            // TODO: this recovery runs inside apply_tool_calling_jail, which
+            // the v2 path bypasses (use_parsers_v2 branch above). Adding
+            // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
+            // streaming recovery while aggregator.rs keeps running. At that
+            // point hoist this above the jail/v2 branch — it only needs
+            // buffered input text + finish_reason, both available there.
+            // Pass 1 (immutable): compute the recovery tail per choice and
+            // whether the jail already released it as content on this chunk.
+            // We collect into a Vec so we can release the immutable borrow on
+            // nv_chunk before mutating it in pass 2.
+            let recoveries: Vec<PendingRecovery> = if is_glm47 {
+                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
+                nv_chunk
+                    .data
+                    .iter()
+                    .flat_map(|data| data.inner.choices.iter())
+                    .filter_map(|choice| {
+                        let state = cr.entry(choice.index).or_default();
+                        if !state.recovered
+                            && let Some(ChatCompletionMessageContent::Text(t)) =
+                                &choice.delta.content
                         {
-                            // The jail released the truncated block verbatim as content
-                            // on this chunk, potentially preceded by post-call prose.
-                            // glm47's parser drops post-call prose deliberately, so
-                            // suppress the whole content here and let the recovery
-                            // chunk carry just the marker-onwards tail — matching batch.
-                            rc.delta.content = None;
+                            state.emitted_text.push_str(t);
+                            // Bound like input_text: retain only the suffix from
+                            // the last marker onward — all the contains(&tail)
+                            // check needs.
+                            let mut keep_from = match state.emitted_text.rfind(glm47_start.as_str())
+                            {
+                                Some(pos) => pos,
+                                None => state
+                                    .emitted_text
+                                    .len()
+                                    .saturating_sub(glm47_start.len() - 1),
+                            };
+                            while keep_from > 0 && !state.emitted_text.is_char_boundary(keep_from) {
+                                keep_from -= 1;
+                            }
+                            state.emitted_text.drain(..keep_from);
                         }
+                        if state.recovered
+                            || !matches!(
+                                choice.finish_reason,
+                                Some(dynamo_protocols::types::FinishReason::Length)
+                            )
+                        {
+                            return None;
+                        }
+                        let tail =
+                            state
+                                .input_text
+                                .rfind(glm47_start.as_str())
+                                .and_then(|pos| {
+                                    let t = &state.input_text[pos..];
+                                    if !t.contains(glm47_end.as_str()) {
+                                        Some(t.to_string())
+                                    } else {
+                                        None
+                                    }
+                                })?;
+                        let tail_already_emitted = state.emitted_text.contains(&tail);
+                        state.recovered = true;
+                        Some(PendingRecovery {
+                            choice_idx: choice.index,
+                            tail,
+                            tail_already_emitted,
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+
+            // Pass 2 (mutable): when the jail already released the tail verbatim,
+            // suppress the finish chunk's content entirely. The recovery chunk
+            // carries just the marker-onwards tail, matching the non-streaming
+            // path (rfind result only, no post-call prose).
+            for pr in &recoveries {
+                if !pr.tail_already_emitted {
+                    continue;
+                }
+                if let Some(ref mut data) = nv_chunk.data {
+                    for rc in data
+                        .inner
+                        .choices
+                        .iter_mut()
+                        .filter(|c| c.index == pr.choice_idx)
+                    {
+                        // The jail released the truncated block verbatim as content
+                        // on this chunk, potentially preceded by post-call prose.
+                        // glm47's parser drops post-call prose deliberately, so
+                        // suppress the whole content here and let the recovery
+                        // chunk carry just the marker-onwards tail — matching batch.
+                        rc.delta.content = None;
                     }
                 }
+            }
 
-                // Pass 3: emit a recovery chunk per affected choice carrying just
-                // the truncated tail (marker onwards, no post-call prose).
-                let recovery_chunks: Vec<_> = recoveries
-                    .into_iter()
-                    .filter_map(|pr| {
-                        let PendingRecovery {
-                            choice_idx, tail, ..
-                        } = pr;
-                        tracing::warn!(
-                            choice_index = choice_idx,
-                            recovered_bytes = tail.len(),
-                            "glm47 streaming: partial <tool_call> emitted as content \
+            // Pass 3: emit a recovery chunk per affected choice carrying just
+            // the truncated tail (marker onwards, no post-call prose).
+            let recovery_chunks: Vec<_> = recoveries
+                .into_iter()
+                .filter_map(|pr| {
+                    let PendingRecovery {
+                        choice_idx, tail, ..
+                    } = pr;
+                    tracing::warn!(
+                        choice_index = choice_idx,
+                        recovered_bytes = tail.len(),
+                        "glm47 streaming: partial <tool_call> emitted as content \
                          on length finish"
-                        );
-                        let mut rec = nv_chunk.clone();
-                        rec.id = None;
-                        rec.event = None;
-                        rec.comment = None;
-                        rec.error = None;
-                        let rd = rec.data.as_mut()?;
-                        rd.inner.usage = None;
-                        rd.llm_metrics = None;
-                        rd.inner.choices.retain(|c| c.index == choice_idx);
-                        for rc in &mut rd.inner.choices {
-                            rc.delta.content =
-                                Some(ChatCompletionMessageContent::Text(tail.clone()));
-                            rc.delta.tool_calls = None;
-                            rc.finish_reason = None;
-                            rc.logprobs = None;
-                        }
-                        Some(rec)
-                    })
-                    .collect();
+                    );
+                    let mut rec = nv_chunk.clone();
+                    rec.id = None;
+                    scrub_synthetic_chunk_metadata(&mut rec);
+                    let rd = rec.data.as_mut()?;
+                    rd.inner.choices.retain(|c| c.index == choice_idx);
+                    for rc in &mut rd.inner.choices {
+                        rc.delta.content = Some(ChatCompletionMessageContent::Text(tail.clone()));
+                        rc.delta.tool_calls = None;
+                        rc.finish_reason = None;
+                        rc.logprobs = None;
+                    }
+                    Some(rec)
+                })
+                .collect();
 
-                futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
-            })
-            // See the `terminal_error` comment above: once the upstream error was
-            // latched, `take_while` drops everything the jail still emits from that
-            // point on (its finalize output has no way to know the request already
-            // failed), and `chain` substitutes the latched error as the stream's
-            // final and only item from there. When no error occurred, `terminal_error`
-            // is never populated, `take_while` never stops early, and `chain`'s
-            // `filter_map` drops the `None` it reads back — this stage is then a
-            // no-op passthrough.
-            .take_while(move |_| {
-                let stop = terminal_error_out
+            futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
+        });
+
+        // Once an upstream error is latched, drop any output the jail synthesized
+        // while it observed the shortened stream. The wrapper below then emits only
+        // the original error and discards all pending metadata and usage.
+        let terminal_error_out = Arc::clone(&terminal_error);
+        let jailed_output = jailed_output.take_while(move |_| {
+            let stop = terminal_error_out
+                .lock()
+                .expect("jail terminal error poisoned")
+                .is_some();
+            std::future::ready(!stop)
+        });
+
+        let with_eof_metadata = async_stream::stream! {
+            tokio::pin!(jailed_output);
+            while let Some(response) = jailed_output.next().await {
+                yield response;
+            }
+
+            let terminal_error = {
+                terminal_error
                     .lock()
                     .expect("jail terminal error poisoned")
-                    .is_some();
-                std::future::ready(!stop)
-            })
-            .chain(
-                stream::once(async move {
-                    terminal_error
+                    .take()
+            };
+            if let Some(error) = terminal_error {
+                {
+                    let mut p = pending_eof
                         .lock()
-                        .expect("jail terminal error poisoned")
-                        .take()
-                })
-                .filter_map(std::future::ready),
-            )
+                        .expect("jail Dynamo metadata buffer poisoned");
+                    p.metrics_template = None;
+                    p.chunk_tokens = 0;
+                    p.nvext = None;
+                    p.response_template = None;
+                }
+                yield error;
+                return;
+            }
+
+            let eof_metadata = {
+                let mut p = pending_eof
+                    .lock()
+                    .expect("jail Dynamo metadata buffer poisoned");
+                let chunk_tokens = p.chunk_tokens;
+                p.chunk_tokens = 0;
+                let llm_metrics = p.metrics_template.take().map(|mut metrics| {
+                    metrics.chunk_tokens = chunk_tokens;
+                    metrics
+                });
+                let nvext = p.nvext.take();
+                if llm_metrics.is_none() && nvext.is_none() {
+                    None
+                } else {
+                    p.response_template.take().map(|inner| Annotated {
+                        data: Some(NvCreateChatCompletionStreamResponse {
+                            inner,
+                            nvext,
+                            llm_metrics,
+                        }),
+                        id: None,
+                        event: None,
+                        comment: None,
+                        error: None,
+                    })
+                }
+            };
+            if let Some(response) = eof_metadata {
+                yield response;
+            }
+        };
+
+        Self::hold_usage_until_stream_end(with_eof_metadata)
     }
 
     /// Whether the selected tool-call or reasoning parser depends on the
@@ -5388,7 +6474,7 @@ impl OpenAIPreprocessor {
                 // See `scrub_synthetic_chunk_metadata`: this chunk produced no
                 // tokens, so every per-chunk field from the envelope it was
                 // cloned from has to be dropped rather than reported twice.
-                scrub_synthetic_chunk_metadata(&mut response)?;
+                scrub_synthetic_chunk_metadata(&mut response);
                 let data = response.data.as_mut()?;
                 // Rebuild the choice list from the flushed indices rather than
                 // reusing the envelope's own choices: with `n > 1` the last
@@ -5614,7 +6700,8 @@ impl OpenAIPreprocessor {
     /// been emitted. A truncated upstream stream can end without
     /// `finish_reason`, so reasoning recovery happens at EOF; forwarding usage
     /// immediately would put that recovered content after the chunk clients
-    /// treat as the stream trailer.
+    /// treat as the stream trailer. A transport error discards the pending
+    /// trailer because the response did not complete successfully.
     fn hold_usage_until_stream_end<S>(
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
@@ -5624,7 +6711,14 @@ impl OpenAIPreprocessor {
         async_stream::stream! {
             tokio::pin!(stream);
             let mut pending_usage = None;
+            let mut transport_failed = false;
             while let Some(response) = stream.next().await {
+                if response.error.is_some() {
+                    transport_failed = true;
+                    pending_usage = None;
+                    yield response;
+                    continue;
+                }
                 let is_usage_only = response.data.as_ref().is_some_and(|data| {
                     data.inner.choices.is_empty() && data.inner.usage.is_some()
                 });
@@ -5636,7 +6730,7 @@ impl OpenAIPreprocessor {
                     yield response;
                 }
             }
-            if let Some(usage) = pending_usage {
+            if !transport_failed && let Some(usage) = pending_usage {
                 yield usage;
             }
         }
@@ -5768,7 +6862,7 @@ impl OpenAIPreprocessor {
                     // is a clone of an already-counted chunk, so it goes through
                     // the shared scrub rather than repeating a partial copy of
                     // it here.
-                    scrub_synthetic_chunk_metadata(&mut response)?;
+                    scrub_synthetic_chunk_metadata(&mut response);
                     let data = response.data.as_mut()?;
                     let mut template = data.inner.choices.first()?.clone();
                     template.delta.role = None;
@@ -5900,6 +6994,16 @@ impl
             &mut common_request,
             prompt_injected_reasoning,
         )?;
+        let tool_processing_route =
+            self.tool_processing_route(&request, &guided_tool_constraint)?;
+        validate_legacy_jail_nvext_choice_count(
+            request.inner.n.unwrap_or(1),
+            request
+                .nvext
+                .as_ref()
+                .and_then(|nvext| nvext.extra_fields.as_deref()),
+            tool_processing_route.uses_legacy_jail(),
+        )?;
 
         tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
         let trace_state = crate::request_trace::build_request_end_trace_state(
@@ -5958,6 +7062,7 @@ impl
             &request,
             prompt_injected_reasoning,
             guided_tool_constraint,
+            tool_processing_route,
         )?;
         let transformed_stream = Self::normalize_chat_stream_roles(transformed_stream);
 
@@ -6299,6 +7404,32 @@ mod tests {
             !OpenAIPreprocessor::guided_tool_streaming_release(false, true),
             "no installed grammar means nothing to release incrementally, rollback or not"
         );
+    }
+
+    #[test]
+    fn legacy_jail_rejects_multiple_choices_for_choice_specific_nvext() {
+        let engine_data = vec!["engine_data".to_string()];
+        let request_level = vec!["timing".to_string(), "worker_id".to_string()];
+
+        assert!(validate_legacy_jail_nvext_choice_count(2, Some(&engine_data), true).is_err());
+        assert!(validate_legacy_jail_nvext_choice_count(1, Some(&engine_data), true).is_ok());
+        assert!(validate_legacy_jail_nvext_choice_count(2, Some(&request_level), true).is_ok());
+
+        for route in [
+            ToolProcessingRoute::MuseUnified("muse_glimmer".to_string()),
+            ToolProcessingRoute::QwenUnified("qwen3"),
+            ToolProcessingRoute::ParserV2("qwen3_coder".to_string()),
+            ToolProcessingRoute::PassThrough,
+        ] {
+            assert!(
+                validate_legacy_jail_nvext_choice_count(
+                    2,
+                    Some(&engine_data),
+                    route.uses_legacy_jail(),
+                )
+                .is_ok()
+            );
+        }
     }
 
     fn chat_stream_chunk(
@@ -7128,18 +8259,106 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
-    fn image_token_processor_override_is_conservative() {
-        assert!(!has_image_token_processor_override(None));
-        assert!(!has_image_token_processor_override(Some(
-            &serde_json::Value::Null
-        )));
-        assert!(!has_image_token_processor_override(Some(
-            &serde_json::json!({})
-        )));
-        assert!(has_image_token_processor_override(Some(
-            &serde_json::json!([])
-        )));
-        assert!(has_image_token_processor_override(Some(
+    fn image_expansion_applies_placeholders_in_request_order() {
+        let tokenizer = RoutingTestTokenizer {
+            atomic_controls: true,
+            fail_plain_text: false,
+        };
+        let images = [
+            MmImageEntry {
+                mm_hash: 0x1234,
+                width: 320,
+                height: 240,
+            },
+            MmImageEntry {
+                mm_hash: 0x5678,
+                width: 640,
+                height: 480,
+            },
+        ];
+        let first_fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(images[0].mm_hash);
+        let second_fill = dynamo_kv_router::protocols::pad_value_for_mm_hash(images[1].mm_hash);
+
+        let (expanded, prompt_len) = expand_mm_routing_tokens(
+            &tokenizer,
+            RoutingImagePromptLayout::RepeatedPad,
+            Some(1),
+            10,
+            &images,
+            &[2, 3],
+            &[7, 10, 8, 10, 9],
+        )
+        .unwrap();
+
+        assert_eq!(
+            expanded,
+            [
+                1,
+                7,
+                first_fill,
+                first_fill,
+                8,
+                second_fill,
+                second_fill,
+                second_fill,
+                9,
+            ]
+        );
+        assert_eq!(prompt_len, expanded.len());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn exact_routing_rejects_image_placeholder_count_mismatch() {
+        let model_dir = tempfile::tempdir().unwrap();
+        std::fs::write(model_dir.path().join("preprocessor_config.json"), "{}").unwrap();
+        let counter = lightseek_mm::LightseekMmCounter::try_new(
+            "Qwen/Qwen3-VL-2B-Instruct",
+            Some("qwen3_vl"),
+            model_dir.path(),
+        )
+        .unwrap();
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = match Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap()) {
+            Ok(preprocessor) => preprocessor,
+            Err(_) => panic!("test preprocessor unexpectedly shared"),
+        };
+        preprocessor.image_token_counter = Some(counter);
+        preprocessor.routing_image_token_id = Some(10);
+        preprocessor.routing_image_prompt_layout = Some(RoutingImagePromptLayout::RepeatedPad);
+        preprocessor.kv_cache_block_size = 16;
+        let image = [MmRoutingEntry::Image {
+            mm_hash: 0x1234,
+            width: 320,
+            height: 240,
+        }];
+
+        assert!(
+            preprocessor
+                .build_mm_exact_routing_info(&image, &[7, 8])
+                .is_none(),
+            "missing placeholder must fail closed at the production boundary"
+        );
+        assert!(
+            preprocessor
+                .build_mm_exact_routing_info(&image, &[7, 10, 10, 8])
+                .is_none(),
+            "extra placeholder must fail closed at the production boundary"
+        );
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn mm_processor_override_is_conservative() {
+        assert!(!has_mm_processor_override(None));
+        assert!(!has_mm_processor_override(Some(&serde_json::Value::Null)));
+        assert!(!has_mm_processor_override(Some(&serde_json::json!({}))));
+        assert!(has_mm_processor_override(Some(&serde_json::json!([]))));
+        assert!(has_mm_processor_override(Some(
             &serde_json::json!({"min_pixels": 64})
         )));
     }
@@ -7151,6 +8370,109 @@ mod tests {
         assert!(!exact_mm_routing_preconditions_met(false, 1, 1, true));
         assert!(!exact_mm_routing_preconditions_met(true, 1, 1, false));
         assert!(!exact_mm_routing_preconditions_met(false, 0, 1, false));
+    }
+
+    #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
+    #[test]
+    fn decoded_video_hash_requires_exact_routing_eligibility() {
+        assert!(should_hash_decoded_video(true, false, false, true));
+        assert!(!should_hash_decoded_video(false, false, false, true));
+        assert!(!should_hash_decoded_video(true, true, false, true));
+        assert!(!should_hash_decoded_video(true, false, true, true));
+        assert!(!should_hash_decoded_video(true, false, false, false));
+    }
+
+    #[cfg(all(
+        feature = "mm-routing",
+        feature = "media-ffmpeg",
+        feature = "testing-nixl"
+    ))]
+    #[tokio::test]
+    async fn adjacent_videos_reach_media_loader_with_hashing_disabled() {
+        let video_bytes = include_bytes!("../tests/data/media/240p_10.mp4");
+        let mut server = mockito::Server::new_async().await;
+        let video_mock = server
+            .mock("GET", "/video.mp4")
+            .with_status(200)
+            .with_header("content-type", "video/mp4")
+            .with_body(&video_bytes[..])
+            .expect(2)
+            .create_async()
+            .await;
+
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap())
+            .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
+        let media_decoder: MediaDecoder = serde_json::from_value(serde_json::json!({
+            "video": {"num_frames": 2}
+        }))
+        .unwrap();
+        let media_fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+        preprocessor.media_loader = Some(
+            MediaLoader::new(media_decoder, Some(media_fetcher))
+                .expect("test media loader must initialize"),
+        );
+        preprocessor.video_routing_processor = Some(mm_routing::VideoRoutingProcessor::test_stub());
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": format!("{}/video.mp4", server.url())}
+                    },
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": format!("{}/video.mp4", server.url())}
+                    }
+                ]
+            }],
+            "max_tokens": 1
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequest::builder();
+        builder
+            .model("test-model".to_string())
+            .token_ids(Vec::new())
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default());
+
+        let (routing_entries, _) = preprocessor
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
+            .await
+            .unwrap();
+        let preprocessed = builder.build().unwrap();
+        let videos = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .and_then(|media| media.get("video_url"))
+            .expect("both decoded videos must be forwarded");
+
+        assert_eq!(videos.len(), 2);
+        for video in videos {
+            let MultimodalData::Decoded(descriptor) = video else {
+                panic!("video must reach the media loader and be decoded");
+            };
+            assert!(
+                descriptor.content_hash().is_none(),
+                "adjacent videos must reach the media loader with hashing disabled"
+            );
+        }
+        assert!(routing_entries.is_empty());
+        assert!(preprocessed.mm_routing_info.is_none());
+        video_mock.assert_async().await;
     }
 
     #[test]
@@ -7667,6 +8989,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn capture_prompt_token_ids_is_exact_and_opt_in() {
+        let requested: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "nvext": {"extra_fields": ["prompt_token_ids"]}
+        }))
+        .unwrap();
+        let tracker = RequestTracker::new();
+
+        OpenAIPreprocessor::capture_prompt_token_ids(&requested, Some(&tracker), &[101, 102, 103]);
+        assert_eq!(tracker.prompt_token_ids(), Some(&[101u32, 102, 103][..]));
+
+        let ordinary: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let ordinary_tracker = RequestTracker::new();
+        OpenAIPreprocessor::capture_prompt_token_ids(
+            &ordinary,
+            Some(&ordinary_tracker),
+            &[201, 202],
+        );
+        assert!(ordinary_tracker.prompt_token_ids().is_none());
+    }
+
     fn chat_request_with_args(
         chat_template_args: Option<HashMap<String, serde_json::Value>>,
     ) -> NvCreateChatCompletionRequest {
@@ -8013,6 +9362,15 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn exact_mm_routing_rejects_backend_owned_modalities() {
+        assert!(exact_mm_routing_supports_modality("image_url", false));
+        assert!(exact_mm_routing_supports_modality("video_url", true));
+        assert!(!exact_mm_routing_supports_modality("video_url", false));
+        assert!(!exact_mm_routing_supports_modality("audio_url", true));
+    }
+
     /// Verifies SGLang's effective reasoning mode for each parser family.
     #[test]
     fn test_sglang_effective_reasoning_enabled() {
@@ -8340,17 +9698,17 @@ mod tests {
         );
     }
 
-    struct UnreachableCompletionBackend;
+    struct UnreachableBackend;
 
     #[async_trait]
     impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>
-        for UnreachableCompletionBackend
+        for UnreachableBackend
     {
         async fn generate(
             &self,
             _request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<BackendOutput>>, Error> {
-            panic!("over-budget completion must be rejected before backend dispatch")
+            panic!("request must be rejected before backend dispatch")
         }
     }
 
@@ -8382,7 +9740,7 @@ mod tests {
         };
         let next: Arc<
             dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
-        > = Arc::new(UnreachableCompletionBackend);
+        > = Arc::new(UnreachableBackend);
 
         let result =
             Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
@@ -8393,6 +9751,48 @@ mod tests {
             .downcast_ref::<DynamoError>()
             .expect("error should preserve the DynamoError type");
         assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn chat_operator_rejects_invalid_legacy_jail_request_before_dispatch() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.runtime_config.tool_call_parser = Some("hermes".to_string());
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "What is the weather?"}],
+            "n": 2,
+            "max_tokens": 4,
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            }],
+            "tool_choice": "auto",
+            "nvext": {"extra_fields": ["engine_data"]}
+        }))
+        .unwrap();
+        let next: Arc<
+            dyn AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<BackendOutput>>, Error>,
+        > = Arc::new(UnreachableBackend);
+
+        let result =
+            Operator::generate(preprocessor.as_ref(), PipelineContext::new(request), next).await;
+        let Err(err) = result else {
+            panic!("invalid legacy-jail request should fail admission");
+        };
+        let dynamo_err = err
+            .downcast_ref::<DynamoError>()
+            .expect("error should preserve the DynamoError type");
+        assert_eq!(dynamo_err.error_type(), ErrorType::InvalidArgument);
+        assert!(dynamo_err.to_string().contains("legacy tool-call parsing"));
     }
 
     fn test_prompt_formatter(template: &str) -> Arc<dyn OAIPromptFormatter> {
@@ -8480,6 +9880,228 @@ mod tests {
         let rendered = render_through_preprocessor(formatter.as_ref(), &request).unwrap();
 
         assert_eq!(rendered.as_str(), "hello");
+    }
+
+    #[test]
+    fn continue_final_message_leaves_last_assistant_open_on_llama_template() {
+        let mut mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        mdc.set_name("test-model");
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+
+        let default_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Continue this sentence"},
+                    {"role": "assistant", "content": "LLM-Native Interaction"}
+                ]
+            }))
+            .unwrap();
+        let continue_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Continue this sentence"},
+                    {"role": "assistant", "content": "LLM-Native Interaction"}
+                ],
+                "add_generation_prompt": false,
+                "continue_final_message": true
+            }))
+            .unwrap();
+
+        let default_prompt = preprocessor
+            .apply_template(&default_request)
+            .unwrap()
+            .unwrap();
+        let continue_prompt = preprocessor
+            .apply_template(&continue_request)
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            default_prompt
+                .as_str()
+                .ends_with("<|start_header_id|>assistant<|end_header_id|>\n\n"),
+            "default render should start a new assistant turn, got {:?}",
+            default_prompt.as_str()
+        );
+        assert!(
+            continue_prompt.as_str().ends_with("LLM-Native Interaction"),
+            "continue_final_message should leave the last assistant open, got {:?}",
+            continue_prompt.as_str()
+        );
+        assert!(
+            !continue_prompt.as_str().contains(
+                "LLM-Native Interaction<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+            ),
+            "continue_final_message must not close the last assistant and start a new turn, got {:?}",
+            continue_prompt.as_str()
+        );
+    }
+
+    #[test]
+    fn should_add_generation_prompt_defaults_true_and_continue_forces_false() {
+        use dynamo_renderer::OAIChatLikeRequest;
+
+        let unset: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        assert!(unset.should_add_generation_prompt());
+
+        let explicit_false: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "add_generation_prompt": false
+            }))
+            .unwrap();
+        assert!(!explicit_false.should_add_generation_prompt());
+
+        let continue_with_false: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {"role": "assistant", "content": "partial"}
+                ],
+                "add_generation_prompt": false,
+                "continue_final_message": true
+            }))
+            .unwrap();
+        assert!(!continue_with_false.should_add_generation_prompt());
+    }
+
+    /// Qwen-style templates close every turn, including the last assistant. Truncate
+    /// after render is what actually leaves the prefix open; Llama's mock template
+    /// already omits the last eot when `add_generation_prompt` is false.
+    const QWEN_STYLE_TEMPLATE: &str = "\
+{%- for message in messages -%}\
+{%- if message.role == 'user' -%}{{ '<|im_start|>user\n' + message.content + '<|im_end|>\n' }}\
+{%- elif message.role == 'assistant' -%}{{ '<|im_start|>assistant\n' + message.content + '<|im_end|>\n' }}\
+{%- endif -%}\
+{%- endfor -%}\
+{%- if add_generation_prompt -%}{{ '<|im_start|>assistant\n' }}{%- endif -%}";
+
+    fn continue_request() -> NvCreateChatCompletionRequest {
+        serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Continue this sentence"},
+                {"role": "assistant", "content": "LLM-Native Interaction"}
+            ],
+            "add_generation_prompt": false,
+            "continue_final_message": true
+        }))
+        .unwrap()
+    }
+
+    fn render_with_continue_final_message(
+        formatter: &dyn OAIPromptFormatter,
+        request: &NvCreateChatCompletionRequest,
+    ) -> RenderedPrompt {
+        use crate::protocols::openai::common_ext::CommonExtProvider;
+
+        let continue_final = request.get_continue_final_message() == Some(true);
+        let rendered = if continue_final {
+            formatter
+                .render_prompt(&NormalizedArgsRequest {
+                    inner: request,
+                    normalize_tool_call_args: false,
+                    continue_final_message: true,
+                })
+                .unwrap()
+        } else {
+            formatter.render_prompt(request).unwrap()
+        };
+        if continue_final {
+            apply_continue_final_message(rendered).unwrap()
+        } else {
+            rendered
+        }
+    }
+
+    #[test]
+    fn continue_final_message_strips_qwen_style_closing_tokens() {
+        let formatter = test_prompt_formatter(QWEN_STYLE_TEMPLATE);
+        let default_request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Continue this sentence"},
+                    {"role": "assistant", "content": "LLM-Native Interaction"}
+                ]
+            }))
+            .unwrap();
+        let closed_only: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Continue this sentence"},
+                    {"role": "assistant", "content": "LLM-Native Interaction"}
+                ],
+                "add_generation_prompt": false
+            }))
+            .unwrap();
+
+        let default_prompt =
+            render_with_continue_final_message(formatter.as_ref(), &default_request);
+        let closed_prompt = render_with_continue_final_message(formatter.as_ref(), &closed_only);
+        let continue_prompt =
+            render_with_continue_final_message(formatter.as_ref(), &continue_request());
+
+        assert!(
+            default_prompt.as_str().ends_with("<|im_start|>assistant\n"),
+            "default Qwen render should start a new assistant turn, got {:?}",
+            default_prompt.as_str()
+        );
+        assert!(
+            closed_prompt
+                .as_str()
+                .ends_with("LLM-Native Interaction<|im_end|>\n"),
+            "add_generation_prompt=false alone must still close the last assistant, got {:?}",
+            closed_prompt.as_str()
+        );
+        assert_eq!(
+            continue_prompt.as_str(),
+            "<|im_start|>user\nContinue this sentence<|im_end|>\n<|im_start|>assistant\nLLM-Native Interaction"
+        );
+    }
+
+    /// Raw turns `same / previous / same`; the template uppercases the last
+    /// turn to `SAME`. Searching rendered text for `same` would cut at the
+    /// first copy. The HuggingFace marker must keep the full conversation.
+    #[test]
+    fn continue_final_message_marker_survives_rewritten_final_turn() {
+        const TEMPLATE: &str = "\
+{%- for message in messages -%}\
+{%- if loop.last -%}{{ message.content | upper }}|{%- else -%}{{ message.content }}|{%- endif -%}\
+{%- endfor -%}closed";
+        let formatter = test_prompt_formatter(TEMPLATE);
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "same"},
+                {"role": "user", "content": "previous"},
+                {"role": "assistant", "content": "same"}
+            ],
+            "add_generation_prompt": false,
+            "continue_final_message": true
+        }))
+        .unwrap();
+
+        let prompt = render_with_continue_final_message(formatter.as_ref(), &request);
+        assert_eq!(prompt.as_str(), "same|previous|SAME");
+        assert!(
+            !prompt.as_str().contains("CONTINUE_FINAL_MESSAGE_TAG"),
+            "marker must be stripped from the prompt sent to the model, got {:?}",
+            prompt.as_str()
+        );
     }
 
     #[test]
@@ -9568,6 +11190,86 @@ mod tests {
 
     #[cfg(feature = "mm-routing")]
     #[test]
+    fn image_dim_cache_preserves_terminal_policy_classification() {
+        let terminal = ImageDimFetchFailure::from_error(invalid_argument_error(
+            "media destination rejected by SSRF policy",
+        ));
+        let terminal = terminal.to_error();
+        assert!(MediaFetcher::is_policy_rejection(&terminal));
+
+        let recoverable =
+            ImageDimFetchFailure::from_error(anyhow::anyhow!("image header was truncated"));
+        let recoverable = recoverable.to_error();
+        assert!(!MediaFetcher::is_policy_rejection(&recoverable));
+    }
+
+    /// A blocked destination on the URL-passthrough path must fail the whole
+    /// request. The IP literal is refused before DNS, so no socket is opened.
+    #[cfg(feature = "mm-routing")]
+    #[tokio::test]
+    async fn url_passthrough_policy_rejection_is_terminal() {
+        // The probe's fetcher is built from the environment. The opt-in allows
+        // this destination, so there would be nothing to assert.
+        if std::env::var("DYN_MM_ALLOW_INTERNAL").as_deref() == Ok("1") {
+            return;
+        }
+
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let preprocessor = OpenAIPreprocessor::new(mdc).unwrap();
+        assert!(preprocessor.media_loader.is_none());
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "https://169.254.169.254/latest/meta-data/private-image.png"
+                    }
+                }]
+            }]
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequest::builder();
+
+        let error = preprocessor
+            .gather_multi_modal_data(&request, &mut builder, None, &[])
+            .await
+            .expect_err("URL-passthrough must stop at the policy rejection");
+
+        assert!(MediaFetcher::is_policy_rejection(&error));
+    }
+
+    /// Object-store and file URLs are backend-owned passthrough schemes, so a
+    /// failed dimension probe must remain recoverable rather than become 4xx.
+    #[cfg(feature = "mm-routing")]
+    #[tokio::test]
+    async fn dim_fetch_declines_passthrough_schemes_without_rejecting_them() {
+        for url in [
+            "s3://bucket/private-image.png",
+            "gs://bucket/private-image.png",
+            "file:///tmp/private-image.png",
+        ] {
+            let error = OpenAIPreprocessor::fetch_image_dims_uncached(
+                url,
+                RoutingImageDimensionPolicy::Encoded,
+            )
+            .await
+            .expect_err("a non-fetchable scheme cannot yield dimensions");
+            assert!(
+                !MediaFetcher::is_policy_rejection(&error),
+                "{url} must be a skippable dim-fetch failure, not a terminal 4xx: {error:#}"
+            );
+        }
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
     fn exif_dimension_policy_is_limited_to_kimi_k3_vllm_url_passthrough() {
         use crate::local_model::runtime_config::{
             ModelRuntimeConfig, SGLANG_GENERATE_CAPABILITY, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -9710,5 +11412,217 @@ mod tests {
             s3a, s3b,
             "s3:// query params identify objects and must not collide"
         );
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_video_boundary_uses_native_metadata_only_when_needed() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let video_token_id = 100;
+        let mm_hash = 41;
+        let video_pad = pad_value_for_mm_hash(mm_hash);
+        let replacement = TrackedMmRoutingReplacement {
+            mm_hash,
+            target_tokens: vec![9],
+            worker_tokens: vec![3, 4, 5, 6, video_token_id, video_token_id],
+            routing_tokens: vec![3, 4, 5, 6, video_pad, video_pad],
+        };
+
+        let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
+            None,
+            &[replacement],
+            &[1, 9, 2],
+            4,
+            Some(99),
+            Some(video_token_id),
+        )
+        .unwrap();
+
+        assert_eq!(prompt_len, 8);
+        assert_eq!(&tokens[..4], &[1, 3, 4, 5]);
+        assert_eq!(&tokens[4..], &[6, video_pad, video_pad, 2]);
+        assert_eq!(infos[0].as_ref().unwrap().mm_objects[0].mm_hash, mm_hash);
+        assert!(infos[1].is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_mixed_boundary_preserves_worker_hash_fallback() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let image_token_id = 99;
+        let video_token_id = 100;
+        let image_hash = 41;
+        let video_hash = 42;
+        let replacements = [
+            TrackedMmRoutingReplacement {
+                mm_hash: image_hash,
+                target_tokens: vec![image_token_id],
+                worker_tokens: vec![image_token_id, image_token_id, 7],
+                routing_tokens: vec![
+                    pad_value_for_mm_hash(image_hash),
+                    pad_value_for_mm_hash(image_hash),
+                    7,
+                ],
+            },
+            TrackedMmRoutingReplacement {
+                mm_hash: video_hash,
+                target_tokens: vec![video_token_id],
+                worker_tokens: vec![8, video_token_id, video_token_id, 9],
+                routing_tokens: vec![
+                    8,
+                    pad_value_for_mm_hash(video_hash),
+                    pad_value_for_mm_hash(video_hash),
+                    9,
+                ],
+            },
+        ];
+
+        let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
+            None,
+            &replacements,
+            &[image_token_id, video_token_id],
+            4,
+            Some(image_token_id),
+            Some(video_token_id),
+        )
+        .unwrap();
+
+        assert_eq!(prompt_len, 7);
+        assert_eq!(&tokens[..4], &[image_token_id, image_token_id, 7, 8]);
+        assert_eq!(
+            &tokens[4..],
+            &[
+                pad_value_for_mm_hash(video_hash),
+                pad_value_for_mm_hash(video_hash),
+                9,
+                0
+            ]
+        );
+        assert_eq!(
+            infos[0]
+                .as_ref()
+                .unwrap()
+                .mm_objects
+                .iter()
+                .map(|object| object.mm_hash)
+                .collect::<Vec<_>>(),
+            [image_hash, video_hash]
+        );
+        assert!(infos[1].is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_replacements_preserve_image_video_image_order() {
+        use dynamo_kv_router::protocols::pad_value_for_mm_hash;
+
+        let image_token_id = 99;
+        let video_token_id = 100;
+        let replacement = |mm_hash, target_token| TrackedMmRoutingReplacement {
+            mm_hash,
+            target_tokens: vec![target_token],
+            worker_tokens: vec![target_token, target_token],
+            routing_tokens: vec![
+                pad_value_for_mm_hash(mm_hash),
+                pad_value_for_mm_hash(mm_hash),
+            ],
+        };
+        let replacements = [
+            replacement(41, image_token_id),
+            replacement(42, video_token_id),
+            replacement(43, image_token_id),
+        ];
+
+        let (tokens, prompt_len, infos) = apply_tracked_mm_replacements(
+            None,
+            &replacements,
+            &[1, image_token_id, 2, video_token_id, 3, image_token_id, 4],
+            16,
+            Some(image_token_id),
+            Some(video_token_id),
+        )
+        .unwrap();
+
+        assert_eq!(prompt_len, 10);
+        assert_eq!(
+            &tokens[..prompt_len],
+            &[
+                1,
+                pad_value_for_mm_hash(41),
+                pad_value_for_mm_hash(41),
+                2,
+                pad_value_for_mm_hash(42),
+                pad_value_for_mm_hash(42),
+                3,
+                pad_value_for_mm_hash(43),
+                pad_value_for_mm_hash(43),
+                4,
+            ]
+        );
+        assert!(infos[0].is_none());
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn tracked_replacements_reject_misordered_missing_and_extra_targets() {
+        let replacement = |mm_hash, target| TrackedMmRoutingReplacement {
+            mm_hash,
+            target_tokens: vec![target],
+            worker_tokens: vec![target],
+            routing_tokens: vec![target],
+        };
+        let replacements = [replacement(41, 10), replacement(42, 20)];
+
+        for token_ids in [&[20, 10][..], &[10][..], &[10, 20, 20][..]] {
+            assert!(
+                apply_tracked_mm_replacements(
+                    None,
+                    &replacements,
+                    token_ids,
+                    4,
+                    Some(10),
+                    Some(20),
+                )
+                .is_err(),
+                "invalid target sequence {token_ids:?} must fail closed"
+            );
+        }
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn routing_bos_preserves_image_behavior_and_skips_video_only_requests() {
+        assert_eq!(routing_bos_to_prepend(Some(1), true), Some(1));
+        assert_eq!(routing_bos_to_prepend(None, true), None);
+        assert_eq!(routing_bos_to_prepend(Some(1), false), None);
+    }
+
+    #[cfg(feature = "mm-routing")]
+    #[test]
+    fn consecutive_video_entries_are_not_exactly_routable() {
+        let video = |mm_hash| MmRoutingEntry::Video {
+            mm_hash,
+            placeholder_token_id: 3,
+            target_tokens: vec![3],
+            replacement_tokens: vec![3],
+        };
+        let image = MmRoutingEntry::Image {
+            mm_hash: 2,
+            width: 1,
+            height: 1,
+        };
+
+        assert!(exact_mm_routing_entries_are_unambiguous(&[video(1)]));
+        assert!(!exact_mm_routing_entries_are_unambiguous(&[
+            video(1),
+            video(2)
+        ]));
+        assert!(exact_mm_routing_entries_are_unambiguous(&[
+            video(1),
+            image,
+            video(2)
+        ]));
     }
 }
