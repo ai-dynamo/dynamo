@@ -41,6 +41,7 @@ import (
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
@@ -1946,6 +1947,59 @@ func renderManagedInventoryWorkerDCD(
 	)
 	require.NoError(t, err)
 	return dcds["worker"]
+}
+
+func TestManagedWorkerRolloutCreatesRecreateTargetAtZero(t *testing.T) {
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: consts.ComponentTypeWorker,
+			Replicas:      ptr.To(int32(2)),
+			Annotations: map[string]string{
+				KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
+			},
+		},
+	})
+	dgd.UID = types.UID("dgd-uid")
+	old := managedInventoryWorkerDCD(t, dgd, "old-generation")
+	setInventoryWorkerDCDReady(old)
+	reconciler := createTestReconcilerWithStatus(dgd, withObjects(old))
+
+	rollout, err := reconciler.buildManagedWorkerRollout(context.Background(), dgd)
+	require.NoError(t, err)
+	require.True(t, rollout.targetPending())
+	assert.Equal(t, int32(0), rollout.newReplicaTargetsByComponent["worker"])
+	require.Len(t, rollout.oldDCDs, 1)
+	require.Nil(t, rollout.oldDCDs[0].targetReplicas)
+
+	dcds, err := dynamo.GenerateDynamoComponentsDeployments(
+		dgd, nil, nil, rollout.targetDCDSuffix, rollout.newReplicaTargetsByComponent,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, dcds["worker"].Spec.Replicas)
+	assert.Equal(t, int32(0), *dcds["worker"].Spec.Replicas)
+
+	old.Spec.Replicas = ptr.To(int32(0))
+	old.Status.ObservedGeneration = old.Generation
+	old.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{
+		Replicas:          0,
+		ReadyReplicas:     ptr.To(int32(0)),
+		AvailableReplicas: ptr.To(int32(0)),
+	}
+	require.NoError(t, reconciler.Update(context.Background(), old))
+
+	target := managedInventoryWorkerDCD(t, dgd, rollout.targetDCDSuffix)
+	target.Spec.Replicas = ptr.To(int32(0))
+	target.Generation = 1
+	target.Status.ObservedGeneration = 1
+	target.Status.Component = &nvidiacomv1beta1.ComponentReplicaStatus{Replicas: 0}
+	require.NoError(t, reconciler.Create(context.Background(), target))
+
+	next, err := reconciler.buildManagedWorkerRollout(context.Background(), dgd)
+	require.NoError(t, err)
+	require.False(t, next.targetPending())
+	assert.Equal(t, int32(2), next.newReplicaTargetsByComponent["worker"])
+	require.NotNil(t, next.oldDCDs[0].targetReplicas)
+	assert.Equal(t, int32(0), *next.oldDCDs[0].targetReplicas)
 }
 
 func managedInventoryWorkerDCD(

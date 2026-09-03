@@ -442,6 +442,16 @@ func (r *dgdWorkerRolloutReconciler) buildManagedWorkerRollout(
 	}
 
 	if rollout.targetPending() {
+		// A Recreate target must exist at zero before old DCDs can be drained.
+		// Its desired replicas are set only after a later observation confirms
+		// that the old worker component is completely gone.
+		for i := range dgd.Spec.Components {
+			component := &dgd.Spec.Components[i]
+			if dynamo.IsWorkerComponent(string(component.ComponentType)) &&
+				deploymentStrategyFromAnnotations(dynamo.GetDGDComponentResourceAnnotations(dgd, component.ComponentName, component)) == common.DeploymentStrategyRecreate {
+				rollout.newReplicaTargetsByComponent[component.ComponentName] = 0
+			}
+		}
 		return rollout, nil
 	}
 	if len(rollout.oldDCDs) > 0 {
