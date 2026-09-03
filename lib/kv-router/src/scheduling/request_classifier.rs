@@ -150,7 +150,9 @@ impl ClassifyRequest {
     ///
     /// The router keeps final selection authority: caller constraints and worker eligibility are
     /// still enforced, and a custom worker-selection policy may fall back when the target is not
-    /// eligible. The target replaces any session-affinity target for this request only.
+    /// eligible. The target replaces any session-affinity target for this request only; a
+    /// pinned request (an explicit caller pin, a routing plan, or a disaggregation hint)
+    /// ignores it.
     pub fn set_worker_selection_target(&mut self, worker: WorkerWithDpRank) {
         self.overrides.worker_selection_target = Some(Some(worker.into()));
     }

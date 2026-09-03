@@ -323,11 +323,18 @@ pub(crate) fn request_classifier_factory(
 ) -> anyhow::Result<Option<RequestClassifierFactory>> {
     #[cfg(feature = "custom-policy")]
     {
-        Ok(REQUEST_CLASSIFIER_REGISTRY
-            .get()
-            .map(|registry| registry.resolve(config))
-            .transpose()?
-            .flatten())
+        if let Some(registry) = REQUEST_CLASSIFIER_REGISTRY.get() {
+            return Ok(registry.resolve(config)?);
+        }
+        // Reachable only outside the pymodule (rlib embedding): fail like the
+        // stock build instead of silently ignoring a configured classifier.
+        if let Some(classifier) = config.request_classifier_config()? {
+            anyhow::bail!(
+                "request-classifier type {:?} is configured, but the linked plugin catalog was never installed",
+                classifier.classifier_type()
+            );
+        }
+        Ok(None)
     }
 
     #[cfg(not(feature = "custom-policy"))]
