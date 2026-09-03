@@ -377,11 +377,7 @@ def test_request_cancellation_vllm_aggregated(
 
 
 @pytest.mark.timeout(DECODE_CANCEL_TEST_TIMEOUT_S)
-# TEMPORARY - REVERT TO @pytest.mark.nightly BEFORE MERGE.
-# Promoted so the vllm-runtime 2-GPU lane (pre_merge and vllm and gpu_2) runs
-# this test on the PR and validates the KV budget and timeout on real hardware.
-# This test belongs in nightly on main; see DYN-4129.
-@pytest.mark.pre_merge
+@pytest.mark.nightly
 @pytest.mark.gpu_2
 # Qwen3-0.6B BF16 costs 114,688 KV bytes/token, so the disaggregated workers
 # need 16384 * 114688 = 1.88 GB to hold one --max-model-len request. vLLM
