@@ -35,6 +35,9 @@ pub struct WorkerRegistration {
     pub model_name: String,
     pub endpoint: String,
     pub block_size: u32,
+    /// Data-parallel ranks served by this worker; `kv_events_endpoints` carries
+    /// one KV-event endpoint per rank.
+    pub data_parallel_size: u32,
     pub kv_events_endpoints: HashMap<u32, String>,
     pub replay_endpoint: Option<String>,
     pub total_kv_blocks: Option<u64>,
@@ -197,9 +200,8 @@ impl Selector {
             routing_group: DEFAULT_ROUTING_GROUP.to_string(),
             endpoint: Some(reg.endpoint.clone()),
             block_size: Some(reg.block_size),
-            // Data parallel size is not yet implemented.
-            // Default support for single rank DP.
-            data_parallel_size: Some(1),
+            data_parallel_start_rank: Some(0),
+            data_parallel_size: Some(reg.data_parallel_size.max(1)),
             kv_events_endpoints: reg.kv_events_endpoints.clone(),
             replay_endpoint: reg.replay_endpoint.clone(),
             total_kv_blocks: reg.total_kv_blocks,
@@ -450,6 +452,8 @@ models:
             tokenizer_max_response_bytes: 16 * 1024 * 1024,
             tokenization_timeout_ms: 5_000,
             block_size: 16,
+            data_parallel_size: 1,
+            kv_event_port_stride: 1,
             kv_event_port: 5557,
             replay_port: None,
             total_kv_blocks: None,
@@ -467,6 +471,7 @@ models:
             model_name: "test-model".to_string(),
             endpoint: "http://10.0.0.1:8000".to_string(),
             block_size: 0,
+            data_parallel_size: 1,
             kv_events_endpoints: HashMap::new(),
             replay_endpoint: None,
             total_kv_blocks: None,
@@ -488,6 +493,7 @@ models:
             model_name: "test-model".to_string(),
             endpoint: format!("http://10.0.0.{worker_id}:8000"),
             block_size: 16,
+            data_parallel_size: 1,
             kv_events_endpoints: HashMap::from([(
                 0u32,
                 format!("tcp://127.0.0.1:{}", 45_000 + worker_id),

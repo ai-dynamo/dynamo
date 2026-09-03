@@ -497,6 +497,8 @@ For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVIC
 | `DYN_KV_CACHE_BLOCK_SIZE` | Yes | Must equal vLLM `--block-size`. |
 | `DYN_EPP_KV_EVENT_PORT` | No | Per-pod vLLM KV event port; defaults to `5557`. |
 | `DYN_EPP_KV_EVENT_REPLAY_PORT` | No | Per-pod replay port for KV event gap recovery. |
+| `DYN_EPP_DATA_PARALLEL_SIZE` | No | Data-parallel ranks per pod; defaults to `1`. Rank `r` publishes KV events on `DYN_EPP_KV_EVENT_PORT + r * DYN_EPP_KV_EVENT_PORT_STRIDE`. |
+| `DYN_EPP_KV_EVENT_PORT_STRIDE` | No | Port distance between consecutive ranks' KV event ports; defaults to `1`. |
 | `DYN_EPP_MAX_NUM_BATCHED_TOKENS` | Policy-dependent | Must equal vLLM `--max-num-batched-tokens`; required when router queue thresholds are enabled. |
 | `DYN_EPP_TOTAL_KV_BLOCKS` | No | Optional per-worker total KV block hint. |
 | `DYN_EPP_SELECTION_INDEXER_THREADS` | No | KV indexer thread count; defaults to `4`. |

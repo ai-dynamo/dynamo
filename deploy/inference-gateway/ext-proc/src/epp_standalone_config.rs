@@ -140,6 +140,13 @@ pub struct EppStandaloneConfig {
     /// KV-cache block size; MUST equal the inference engine block size.
     #[validate(range(min = 1, message = "DYN_KV_CACHE_BLOCK_SIZE must be >= 1"))]
     pub block_size: u32,
+    /// Data-parallel ranks per worker pod. Each rank publishes KV events on
+    /// `kv_event_port + rank * kv_event_port_stride`.
+    #[validate(range(min = 1, message = "DYN_EPP_DATA_PARALLEL_SIZE must be >= 1"))]
+    pub data_parallel_size: u32,
+    /// Port distance between consecutive data-parallel ranks' KV event ports.
+    #[validate(range(min = 1, message = "DYN_EPP_KV_EVENT_PORT_STRIDE must be >= 1"))]
+    pub kv_event_port_stride: u16,
     /// KV zmq event port.
     #[validate(range(min = 1))]
     pub kv_event_port: u16,
@@ -216,6 +223,9 @@ impl EppStandaloneConfig {
             )?
             .unwrap_or(DEFAULT_TOKENIZER_MAX_RESPONSE_BYTES),
             block_size: opt_parse::<u32>(get, "DYN_KV_CACHE_BLOCK_SIZE")?.unwrap_or(0),
+            data_parallel_size: opt_parse::<u32>(get, "DYN_EPP_DATA_PARALLEL_SIZE")?.unwrap_or(1),
+            kv_event_port_stride: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_PORT_STRIDE")?
+                .unwrap_or(1),
             kv_event_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_PORT")?
                 .unwrap_or(DEFAULT_KV_EVENT_PORT),
             replay_port: opt_parse::<u16>(get, "DYN_EPP_KV_EVENT_REPLAY_PORT")?,

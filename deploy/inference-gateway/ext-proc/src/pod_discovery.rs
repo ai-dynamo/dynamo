@@ -32,8 +32,9 @@ pub struct RawWorker {
     pub pod_ip: String,
     /// OpenAI HTTP inference endpoint, `http://<ip>:<target_port>`.
     pub http_endpoint: String,
-    /// Inference engine KV-event ZMQ PUB endpoint, `tcp://<ip>:<kv_event_port>`.
-    pub kv_events_endpoint: String,
+    /// Inference engine KV-event ZMQ PUB endpoints by global data-parallel rank,
+    /// `tcp://<ip>:<kv_event_port + rank * stride>`.
+    pub kv_events_endpoints: HashMap<u32, String>,
     /// Optional ZMQ REQ endpoint for live-stream gap replay.
     pub replay_endpoint: Option<String>,
 }
@@ -102,6 +103,11 @@ impl PodDiscovery {
 
         let kv_event_port = cfg.kv_event_port;
         let replay_port = cfg.replay_port;
+        let kv_ports = KvEventPorts {
+            base: kv_event_port,
+            stride: cfg.kv_event_port_stride,
+            data_parallel_size: cfg.data_parallel_size,
+        };
 
         let index: Arc<RwLock<WorkerIndex>> = Arc::new(RwLock::new(WorkerIndex::new()));
 
@@ -178,7 +184,7 @@ impl PodDiscovery {
                     Delta::Rebuild => rebuild_index(
                         &store,
                         pool_rx.borrow().as_ref(),
-                        kv_event_port,
+                        kv_ports,
                         replay_port,
                         &index_task,
                     ),
@@ -186,7 +192,7 @@ impl PodDiscovery {
                         &index_task,
                         &pod,
                         pool_rx.borrow().as_ref(),
-                        kv_event_port,
+                        kv_ports,
                         replay_port,
                     ),
                     Delta::Remove(pod) => remove_pod(&index_task, &pod),
@@ -339,14 +345,14 @@ fn upsert_pod(
     index: &RwLock<WorkerIndex>,
     pod: &Pod,
     pool: Option<&PoolState>,
-    kv_event_port: u16,
+    kv_ports: KvEventPorts,
     replay_port: Option<u16>,
 ) -> bool {
     let Some(worker_id) = pod_worker_id(pod) else {
         return false;
     };
     let entry = pool
-        .and_then(|pool| raw_worker_from_pod(pod, pool, kv_event_port, replay_port))
+        .and_then(|pool| raw_worker_from_pod(pod, pool, kv_ports, replay_port))
         .map(WorkerEntry::from_raw);
     let mut index = index.write().unwrap();
     match entry {
@@ -377,14 +383,14 @@ fn remove_pod(index: &RwLock<WorkerIndex>, pod: &Pod) -> bool {
 fn rebuild_index(
     store: &kube::runtime::reflector::Store<Pod>,
     pool: Option<&PoolState>,
-    kv_event_port: u16,
+    kv_ports: KvEventPorts,
     replay_port: Option<u16>,
     index: &RwLock<WorkerIndex>,
 ) -> bool {
     let mut fresh = WorkerIndex::new();
     if let Some(pool) = pool {
         for pod in store.state().iter() {
-            if let Some(worker) = raw_worker_from_pod(pod, pool, kv_event_port, replay_port) {
+            if let Some(worker) = raw_worker_from_pod(pod, pool, kv_ports, replay_port) {
                 fresh.insert(worker.worker_id, WorkerEntry::from_raw(worker));
             }
         }
@@ -400,10 +406,31 @@ fn rebuild_index(
 
 /// Build a [`RawWorker`] from a pod, or `None` if it is not `Ready`, not
 /// pool-selected, or lacks an IP/name. Pure function — unit-testable.
+/// Per-pod KV-event port layout: rank `r` publishes on `base + r * stride`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct KvEventPorts {
+    pub base: u16,
+    pub stride: u16,
+    pub data_parallel_size: u32,
+}
+
+impl KvEventPorts {
+    fn endpoints(self, ip: IpAddr) -> HashMap<u32, String> {
+        (0..self.data_parallel_size.max(1))
+            .map(|rank| {
+                let port = self
+                    .base
+                    .saturating_add(self.stride.saturating_mul(rank as u16));
+                (rank, format!("tcp://{}", SocketAddr::new(ip, port)))
+            })
+            .collect()
+    }
+}
+
 fn raw_worker_from_pod(
     pod: &Pod,
     pool: &PoolState,
-    kv_event_port: u16,
+    kv_ports: KvEventPorts,
     replay_port: Option<u16>,
 ) -> Option<RawWorker> {
     if !pod_is_ready(pod) || !pod_matches(pod, &pool.match_labels) {
@@ -418,7 +445,7 @@ fn raw_worker_from_pod(
         pod_name: pod_name.to_string(),
         pod_ip: pod_ip.to_string(),
         http_endpoint: format!("http://{}", SocketAddr::new(ip, pool.target_port)),
-        kv_events_endpoint: format!("tcp://{}", SocketAddr::new(ip, kv_event_port)),
+        kv_events_endpoints: kv_ports.endpoints(ip),
         replay_endpoint: replay_port.map(|p| format!("tcp://{}", SocketAddr::new(ip, p))),
     })
 }
@@ -429,6 +456,42 @@ mod tests {
     use k8s_openapi::api::core::v1::{PodCondition, PodStatus};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
     use kube::api::ObjectMeta;
+
+    fn single_rank(port: u16) -> KvEventPorts {
+        KvEventPorts {
+            base: port,
+            stride: 1,
+            data_parallel_size: 1,
+        }
+    }
+
+    #[test]
+    fn data_parallel_ranks_publish_on_strided_ports() {
+        let w = raw_worker_from_pod(
+            &pod(
+                "vllm-0",
+                Some("10.0.0.1"),
+                Some(true),
+                &[("app", "vllm-qwen")],
+            ),
+            &pool(),
+            KvEventPorts {
+                base: 5557,
+                stride: 2,
+                data_parallel_size: 3,
+            },
+            None,
+        )
+        .expect("ready, selected pod should map");
+        assert_eq!(
+            w.kv_events_endpoints,
+            HashMap::from([
+                (0, "tcp://10.0.0.1:5557".to_string()),
+                (1, "tcp://10.0.0.1:5559".to_string()),
+                (2, "tcp://10.0.0.1:5561".to_string()),
+            ])
+        );
+    }
 
     fn pool() -> PoolState {
         PoolState {
@@ -474,13 +537,16 @@ mod tests {
                 &[("app", "vllm-qwen")],
             ),
             &pool(),
-            5557,
+            single_rank(5557),
             Some(5560),
         )
         .expect("ready, selected pod should map");
         assert_eq!(w.worker_id, hash_pod_name("vllm-0"));
         assert_eq!(w.http_endpoint, "http://10.0.0.1:8000");
-        assert_eq!(w.kv_events_endpoint, "tcp://10.0.0.1:5557");
+        assert_eq!(
+            w.kv_events_endpoints,
+            HashMap::from([(0, "tcp://10.0.0.1:5557".to_string())])
+        );
         assert_eq!(w.replay_endpoint.as_deref(), Some("tcp://10.0.0.1:5560"));
     }
 
@@ -494,13 +560,16 @@ mod tests {
                 &[("app", "vllm-qwen")],
             ),
             &pool(),
-            5557,
+            single_rank(5557),
             Some(5560),
         )
         .expect("ready, selected IPv6 pod should map");
         // SocketAddr brackets the IPv6 host so host and port are unambiguous.
         assert_eq!(w.http_endpoint, "http://[fd00::10]:8000");
-        assert_eq!(w.kv_events_endpoint, "tcp://[fd00::10]:5557");
+        assert_eq!(
+            w.kv_events_endpoints,
+            HashMap::from([(0, "tcp://[fd00::10]:5557".to_string())])
+        );
         assert_eq!(w.replay_endpoint.as_deref(), Some("tcp://[fd00::10]:5560"));
     }
 
@@ -515,7 +584,7 @@ mod tests {
                     &[("app", "vllm-qwen")]
                 ),
                 &pool(),
-                5557,
+                single_rank(5557),
                 None,
             )
             .is_none()
@@ -533,7 +602,7 @@ mod tests {
                     &[("app", "something-else")]
                 ),
                 &pool(),
-                5557,
+                single_rank(5557),
                 None,
             )
             .is_none()
@@ -551,7 +620,7 @@ mod tests {
                     &[("app", "vllm-qwen")]
                 ),
                 &pool(),
-                5557,
+                single_rank(5557),
                 None,
             )
             .is_none()
@@ -567,7 +636,7 @@ mod tests {
             &[("app", "vllm-qwen")],
         );
         p.metadata.deletion_timestamp = Some(Time(k8s_openapi::chrono::Utc::now()));
-        assert!(raw_worker_from_pod(&p, &pool(), 5557, None).is_none());
+        assert!(raw_worker_from_pod(&p, &pool(), single_rank(5557), None).is_none());
     }
 
     #[test]
@@ -576,7 +645,7 @@ mod tests {
             raw_worker_from_pod(
                 &pod("vllm-0", None, Some(true), &[("app", "vllm-qwen")]),
                 &pool(),
-                5557,
+                single_rank(5557),
                 None,
             )
             .is_none()
@@ -617,14 +686,14 @@ mod tests {
         assert!(rebuild_index(
             &store,
             Some(&pool()),
-            5557,
+            single_rank(5557),
             Some(5560),
             &index
         ));
         assert!(!rebuild_index(
             &store,
             Some(&pool()),
-            5557,
+            single_rank(5557),
             Some(5560),
             &index
         ));
@@ -648,7 +717,13 @@ mod tests {
             &[("app", "vllm-qwen")],
         )]);
         let index = RwLock::new(WorkerIndex::new());
-        assert!(!rebuild_index(&store, None, 5557, None, &index));
+        assert!(!rebuild_index(
+            &store,
+            None,
+            single_rank(5557),
+            None,
+            &index
+        ));
         assert!(index.read().unwrap().is_empty());
     }
 
@@ -664,8 +739,20 @@ mod tests {
         );
 
         // Ready + selected -> inserted, with a pre-stripped endpoint.
-        assert!(upsert_pod(&index, &ready, Some(&pool()), 5557, None));
-        assert!(!upsert_pod(&index, &ready, Some(&pool()), 5557, None));
+        assert!(upsert_pod(
+            &index,
+            &ready,
+            Some(&pool()),
+            single_rank(5557),
+            None
+        ));
+        assert!(!upsert_pod(
+            &index,
+            &ready,
+            Some(&pool()),
+            single_rank(5557),
+            None
+        ));
         assert_eq!(
             index.read().unwrap().get(&id).map(|e| e.endpoint.as_str()),
             Some("10.0.0.1:8000")
@@ -678,12 +765,30 @@ mod tests {
             Some(false),
             &[("app", "vllm-qwen")],
         );
-        assert!(upsert_pod(&index, &not_ready, Some(&pool()), 5557, None));
-        assert!(!upsert_pod(&index, &not_ready, Some(&pool()), 5557, None));
+        assert!(upsert_pod(
+            &index,
+            &not_ready,
+            Some(&pool()),
+            single_rank(5557),
+            None
+        ));
+        assert!(!upsert_pod(
+            &index,
+            &not_ready,
+            Some(&pool()),
+            single_rank(5557),
+            None
+        ));
         assert!(!index.read().unwrap().contains_key(&id));
 
         // Re-add, then a Delete removes it.
-        assert!(upsert_pod(&index, &ready, Some(&pool()), 5557, None));
+        assert!(upsert_pod(
+            &index,
+            &ready,
+            Some(&pool()),
+            single_rank(5557),
+            None
+        ));
         assert!(index.read().unwrap().contains_key(&id));
         assert!(remove_pod(&index, &ready));
         assert!(!remove_pod(&index, &ready));
@@ -691,7 +796,13 @@ mod tests {
 
         // An unrelated namespace pod does not change the derived worker index.
         let unselected = pod("other-0", Some("10.0.0.2"), Some(true), &[("app", "other")]);
-        assert!(!upsert_pod(&index, &unselected, Some(&pool()), 5557, None));
+        assert!(!upsert_pod(
+            &index,
+            &unselected,
+            Some(&pool()),
+            single_rank(5557),
+            None
+        ));
     }
 
     #[test]
@@ -707,11 +818,17 @@ mod tests {
             &[("app", "vllm-qwen")],
         );
 
-        assert!(upsert_pod(&index, &ready, Some(&pool()), 5557, None));
+        assert!(upsert_pod(
+            &index,
+            &ready,
+            Some(&pool()),
+            single_rank(5557),
+            None
+        ));
         assert!(index.read().unwrap().contains_key(&id));
 
-        assert!(upsert_pod(&index, &ready, None, 5557, None));
-        assert!(!upsert_pod(&index, &ready, None, 5557, None));
+        assert!(upsert_pod(&index, &ready, None, single_rank(5557), None));
+        assert!(!upsert_pod(&index, &ready, None, single_rank(5557), None));
         assert!(!index.read().unwrap().contains_key(&id));
     }
 
@@ -740,7 +857,13 @@ mod tests {
         writer.apply_watcher_event(&watcher::Event::InitApply(vllm_1.clone()));
         writer.apply_watcher_event(&watcher::Event::InitDone);
         let index = RwLock::new(WorkerIndex::new());
-        assert!(rebuild_index(&store, Some(&pool()), 5557, None, &index));
+        assert!(rebuild_index(
+            &store,
+            Some(&pool()),
+            single_rank(5557),
+            None,
+            &index
+        ));
         assert_eq!(index.read().unwrap().len(), 2);
 
         // During the next LIST, vllm-1 has disappeared. The reflector buffers
@@ -769,7 +892,7 @@ mod tests {
         assert!(rebuild_index(
             &store,
             Some(&updated_pool),
-            5557,
+            single_rank(5557),
             None,
             &index
         ));
@@ -804,7 +927,7 @@ mod tests {
                 &[("app", "vllm-qwen")],
             ),
             Some(&pool()),
-            5557,
+            single_rank(5557),
             None,
         );
         upsert_pod(
@@ -816,7 +939,7 @@ mod tests {
                 &[("app", "vllm-qwen")],
             ),
             Some(&pool()),
-            5557,
+            single_rank(5557),
             None,
         );
         assert_eq!(index.read().unwrap().len(), 2);
@@ -828,7 +951,13 @@ mod tests {
             Some(true),
             &[("app", "vllm-qwen")],
         )]);
-        assert!(rebuild_index(&store, Some(&pool()), 5557, None, &index));
+        assert!(rebuild_index(
+            &store,
+            Some(&pool()),
+            single_rank(5557),
+            None,
+            &index
+        ));
 
         let index = index.read().unwrap();
         assert_eq!(index.len(), 1);
@@ -848,7 +977,7 @@ mod tests {
                 .map_or(endpoint, |(ip, _)| ip)
                 .to_string(),
             http_endpoint: format!("http://{endpoint}"),
-            kv_events_endpoint: format!("tcp://{endpoint}"),
+            kv_events_endpoints: HashMap::from([(0, format!("tcp://{endpoint}"))]),
             replay_endpoint: None,
         }
     }

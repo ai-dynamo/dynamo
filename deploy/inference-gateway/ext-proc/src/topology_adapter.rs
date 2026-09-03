@@ -7,7 +7,6 @@
 //! resolved endpoints and configured defaults, then passes the desired worker
 //! set to the [`Selector`].
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -104,15 +103,14 @@ async fn reconcile_once(
 }
 
 fn build_registration(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerRegistration {
-    let mut kv_events_endpoints = HashMap::new();
-    kv_events_endpoints.insert(0u32, w.kv_events_endpoint);
-
+    let data_parallel_size = (w.kv_events_endpoints.len() as u32).max(1);
     WorkerRegistration {
         worker_id: w.worker_id,
         model_name: defaults.model_name.clone(),
         endpoint: w.http_endpoint,
         block_size: defaults.block_size,
-        kv_events_endpoints,
+        data_parallel_size,
+        kv_events_endpoints: w.kv_events_endpoints,
         replay_endpoint: w.replay_endpoint,
         total_kv_blocks: defaults.total_kv_blocks,
         max_num_batched_tokens: defaults.max_num_batched_tokens,
@@ -121,6 +119,7 @@ fn build_registration(w: RawWorker, defaults: &RegistrationDefaults) -> WorkerRe
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
     use super::*;
@@ -138,6 +137,8 @@ mod tests {
             tokenizer_max_response_bytes: 16 * 1024 * 1024,
             tokenization_timeout_ms: 5_000,
             block_size: 16,
+            data_parallel_size: 1,
+            kv_event_port_stride: 1,
             kv_event_port: 5557,
             replay_port: None,
             total_kv_blocks: Some(1000),
@@ -161,7 +162,7 @@ mod tests {
             pod_name: format!("vllm-{id}"),
             pod_ip: ip.to_string(),
             http_endpoint: format!("http://{ip}:8000"),
-            kv_events_endpoint: format!("tcp://{ip}:5557"),
+            kv_events_endpoints: HashMap::from([(0, format!("tcp://{ip}:5557"))]),
             replay_endpoint: None,
         }
     }
