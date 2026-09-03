@@ -26,9 +26,11 @@ Usage:
 import argparse
 import re
 import subprocess
+import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import ClassVar
 
 # Types that should be IMPORTED rather than re-emitted.
 # Maps Go type name → (Python import path, Python name, always_import).
@@ -61,7 +63,7 @@ _STRUCT_DOCSTRINGS: dict = {
 
 # Extra Python code (validators, etc.) appended after the generated field list for
 # specific structs. Cannot be expressed as Go kubebuilder markers.
-_STRUCT_EXTRAS: dict = {
+_STRUCT_EXTRAS: dict[str, str] = {
     "SLASpec": """\
     @model_validator(mode="after")
     def _validate_sla_options(self) -> "SLASpec":
@@ -83,10 +85,10 @@ _STRUCT_EXTRAS: dict = {
 
 # Per-field Python type overrides.  Maps (StructName, json_field_name) → Python type string.
 # Used when the Go type (e.g. *runtime.RawExtension) should map to a richer Python type
-# rather than the generic Dict[str, Any].
+# rather than the generic dict[str, Any].
 _FIELD_TYPE_OVERRIDES: dict[tuple[str, str], str] = {
     # FeaturesSpec.planner is opaque in Go but strongly typed in Python.
-    ("FeaturesSpec", "planner"): "Optional[PlannerConfig]",
+    ("FeaturesSpec", "planner"): "PlannerConfig",
 }
 
 _SPDX_HEADER = """\
@@ -142,7 +144,7 @@ class GoField:
     comment: str
     is_optional: bool
     is_pointer: bool
-    default: Optional[str] = field(default=None)
+    default: str | None = field(default=None)
 
 
 @dataclass
@@ -150,7 +152,7 @@ class GoStruct:
     """Represents a Go struct definition"""
 
     name: str
-    fields: List[GoField]
+    fields: list[GoField]
     comment: str
 
 
@@ -160,35 +162,34 @@ class GoEnum:
 
     name: str
     base_type: str
-    values: List[Tuple[str, str]]  # (const_name, const_value)
+    values: list[tuple[str, str]]  # (const_name, const_value)
     comment: str
 
 
 class GoToPydanticConverter:
     """Converts Go structs to Pydantic models"""
 
-    # Type mapping from Go to Python
-    # RUF012: use a plain dict (not ClassVar) — instantiated once per instance
-    TYPE_MAP: dict = {
+    # Shared type mapping from Go to Python for all converter instances
+    TYPE_MAP: ClassVar[Mapping[str, str]] = {
         "string": "str",
         "int": "int",
         "int32": "int",
         "int64": "int",
         "float64": "float",
         "bool": "bool",
-        "metav1.ObjectMeta": "Dict[str, Any]",  # Simplified
-        "metav1.TypeMeta": "Dict[str, Any]",  # Simplified
-        "metav1.Condition": "Dict[str, Any]",  # Simplified
-        "runtime.RawExtension": "Dict[str, Any]",
-        "batchv1.JobSpec": "Dict[str, Any]",
-        "corev1.ResourceRequirements": "Dict[str, Any]",
-        "corev1.Toleration": "Dict[str, Any]",
+        "metav1.ObjectMeta": "dict[str, Any]",  # Simplified
+        "metav1.TypeMeta": "dict[str, Any]",  # Simplified
+        "metav1.Condition": "dict[str, Any]",  # Simplified
+        "runtime.RawExtension": "dict[str, Any]",
+        "batchv1.JobSpec": "dict[str, Any]",
+        "corev1.ResourceRequirements": "dict[str, Any]",
+        "corev1.Toleration": "dict[str, Any]",
         "apiextensionsv1.JSON": "Any",
     }
 
     def __init__(self):
-        self.structs: List[GoStruct] = []
-        self.enums: List[GoEnum] = []
+        self.structs: list[GoStruct] = []
+        self.enums: list[GoEnum] = []
 
     def parse_go_file(self, file_path: Path) -> None:
         """Parse Go file and extract struct and enum definitions"""
@@ -230,7 +231,7 @@ class GoToPydanticConverter:
             individual_pattern = (
                 rf"(?m)^\s*{enum_name}(\w+)\s+{enum_name}\s+=\s+\"([^\"]+)\""
             )
-            values: List[Tuple[str, str]] = []
+            values: list[tuple[str, str]] = []
             for m in re.finditer(individual_pattern, content):
                 const_name = m.group(1)
                 const_value = m.group(2)
@@ -282,7 +283,7 @@ class GoToPydanticConverter:
 
             struct_body = content[start_pos : pos - 1]
 
-            # Skip List types
+            # Skip List types in golang
             if struct_name.endswith("List"):
                 continue
 
@@ -308,7 +309,7 @@ class GoToPydanticConverter:
                     break
 
             # Step 2: forward scan — collect the first paragraph, skip markers
-            comment_lines: List[str] = []
+            comment_lines: list[str] = []
             for line in lines_before[comment_start_idx:]:
                 stripped = line.strip()
                 if stripped == "//":
@@ -331,7 +332,7 @@ class GoToPydanticConverter:
                 )
             )
 
-    def _parse_struct_fields(self, struct_body: str) -> List[GoField]:
+    def _parse_struct_fields(self, struct_body: str) -> list[GoField]:
         """Parse fields from struct body"""
         fields = []
 
@@ -347,8 +348,8 @@ class GoToPydanticConverter:
                 continue
 
             # Collect consecutive comment lines (including single-line comments)
-            comment_lines: List[str] = []
-            default_value: Optional[str] = None
+            comment_lines: list[str] = []
+            default_value: str | None = None
             while line.startswith("//"):
                 # Capture kubebuilder:default (affects both Go API and Python default)
                 kb_match = re.search(r"\+kubebuilder:default=(\S+)", line)
@@ -419,9 +420,9 @@ class GoToPydanticConverter:
         if go_type.startswith("[]"):
             inner_type = go_type[2:]
             python_inner = self._go_type_to_python(inner_type, False, False)
-            result = f"List[{python_inner}]"
+            result = f"list[{python_inner}]"
             if is_optional:
-                return f"Optional[{result}]"
+                return f"{result} | None"
             return result
 
         # Handle map types
@@ -430,30 +431,30 @@ class GoToPydanticConverter:
             if map_match:
                 key_type = self.TYPE_MAP.get(map_match.group(1), "str")
                 val_type = self._go_type_to_python(map_match.group(2), False, False)
-                result = f"Dict[{key_type}, {val_type}]"
+                result = f"dict[{key_type}, {val_type}]"
                 if is_optional:
-                    return f"Optional[{result}]"
+                    return f"{result} | None"
                 return result
 
         # Check if it's a known enum
         for enum in self.enums:
             if go_type == enum.name:
                 if is_pointer or is_optional:
-                    return f"Optional[{enum.name}]"
+                    return f"{enum.name} | None"
                 return enum.name
 
         # Check if it's a struct we're defining
         struct_names = [s.name for s in self.structs]
         if go_type in struct_names:
             if is_pointer or is_optional:
-                return f"Optional[{go_type}]"
+                return f"{go_type} | None"
             return go_type
 
         # Use type map
         python_type = self.TYPE_MAP.get(go_type, go_type)
 
         if is_pointer or is_optional:
-            return f"Optional[{python_type}]"
+            return f"{python_type} | None"
 
         return python_type
 
@@ -470,8 +471,8 @@ class GoToPydanticConverter:
             "DO NOT EDIT MANUALLY - regenerate using the script.",
             '"""',
             "",
-            "from enum import Enum",
-            "from typing import Any, Dict, List, Optional",
+            "from enum import Enum  # noqa: I001",
+            "from typing import Any",
             "",
             "from pydantic import BaseModel, Field, model_validator",
             "",
@@ -538,27 +539,19 @@ class GoToPydanticConverter:
                 #   API object (e.g. +python-default is Python-layer only); callers may
                 #   explicitly pass None.
                 # - No default: follow is_optional (omitempty → Optional).
-                effective_optional = go_field.is_optional and (
-                    go_field.is_pointer or go_field.default is None
-                )
-                override_key = (struct.name, go_field.name)
-                if override_key in _FIELD_TYPE_OVERRIDES:
-                    python_type = _FIELD_TYPE_OVERRIDES[override_key]
-                    # Derive effective_optional from the override string itself so
-                    # default=None is emitted iff the type is actually Optional.
-                    effective_optional = python_type.startswith("Optional[")
-                else:
-                    python_type = self._go_type_to_python(
-                        go_field.go_type, go_field.is_pointer, effective_optional
-                    )
+                default_to_none = go_field.is_optional and go_field.default is None
+                nullable = go_field.is_pointer or default_to_none
 
+                override_key = (struct.name, go_field.name)
+                base_type = _FIELD_TYPE_OVERRIDES.get(override_key)
+
+                if base_type is None:
+                    base_type = self._go_type_to_python(go_field.go_type, False, False)
+
+                python_type = f"{base_type} | None" if nullable else base_type
                 field_def = f"    {go_field.name}: {python_type}"
 
-                if (
-                    go_field.comment
-                    or effective_optional
-                    or go_field.default is not None
-                ):
+                if go_field.comment or default_to_none or go_field.default is not None:
                     field_args = []
                     if go_field.default is not None:
                         # Emit the default from kubebuilder annotation
@@ -581,7 +574,7 @@ class GoToPydanticConverter:
                                     field_args.append(f"default={raw}")
                                 except ValueError:
                                     field_args.append(f'default="{raw}"')
-                    elif effective_optional:
+                    elif default_to_none:
                         field_args.append("default=None")
                     if go_field.comment:
                         comment_escaped = go_field.comment.replace('"', '\\"')
@@ -595,8 +588,7 @@ class GoToPydanticConverter:
             extra = _STRUCT_EXTRAS.get(struct.name)
             if extra:
                 lines.append("")
-                for extra_line in extra.splitlines():
-                    lines.append(extra_line)
+                lines.extend(extra.splitlines())
 
         return "\n".join(lines)
 
@@ -672,4 +664,4 @@ def main():
 
 
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())

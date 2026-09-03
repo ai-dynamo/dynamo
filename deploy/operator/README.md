@@ -51,7 +51,7 @@ The following tools must be installed and available in your `PATH` before runnin
 
 | Tool | Version | Purpose | Install |
 |------|---------|---------|---------|
-| [yq](https://github.com/mikefarah/yq) | v4+ | Post-processes generated CRD YAML | `make ensure-yq` or [github.com/mikefarah/yq](https://github.com/mikefarah/yq) |
+| [yq](https://github.com/mikefarah/yq) | v4+ | Post-processes generated CRD YAML | `make yq` or [github.com/mikefarah/yq](https://github.com/mikefarah/yq) |
 | [Python 3](https://www.python.org/) + [pydantic](https://docs.pydantic.dev/) | 3.x | Generates Pydantic models from Go types (`make generate`) | `pip install pydantic` |
 
 > **Tip:** Set `skip_codegen: true` in `tilt-settings.yaml` to skip CRD/code generation on every reload. This removes the yq/Python requirement and speeds up iteration when you haven't changed API types.
