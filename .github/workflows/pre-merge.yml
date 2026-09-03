@@ -114,7 +114,12 @@ jobs:
           'pyyaml>=6.0' \
           'pydantic>=2' \
           'pytest-asyncio>=1.0' \
-          'pytest-benchmark>=4'
+          'pytest-benchmark>=4' \
+          'pytest-timeout==2.4.0'
+    - name: Install qualified Kustomize renderer
+      run: |
+        go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1
+        echo "KUSTOMIZE_BIN=$(go env GOPATH)/bin/kustomize" >> "$GITHUB_ENV"
     - name: Check generated recipe manifests
       run: python3 scripts/kustomize-matrix.py check
     - name: Test recipe generators and docs artifacts
