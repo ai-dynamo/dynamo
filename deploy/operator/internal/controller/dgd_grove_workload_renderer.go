@@ -234,12 +234,13 @@ func podCliqueSetUsesGroveWorkerHashSuffix(
 // Two states are accepted as observed:
 //   - canonical: every worker clique carries the desired hash label.
 //   - unstamped: every worker clique has an empty hash label, which is valid
-//     only when the DGD has no prior hash annotation (first generation). This
-//     covers PodCliqueSets that were created before hash-suffix stamping was
-//     introduced.
+//     only when isFirstGeneration is true. This covers PodCliqueSets that were
+//     created before hash-suffix stamping was introduced, as well as genuinely
+//     new deployments whose cliques have not yet been stamped.
 func podCliqueSetObservesWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
+	isFirstGeneration bool,
 ) (bool, error) {
 	if !dgdHasWorkerComponents(dgd) {
 		return true, nil
@@ -248,7 +249,6 @@ func podCliqueSetObservesWorkerHash(
 	if err != nil {
 		return false, fmt.Errorf("compute desired Grove worker hash: %w", err)
 	}
-	isFirstGeneration := currentWorkerHashes(dgd).empty()
 	allCanonical := true
 	allUnstamped := isFirstGeneration
 	for i := range dgd.Spec.Components {

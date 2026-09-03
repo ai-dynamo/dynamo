@@ -101,20 +101,24 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
 	// A successful write only acknowledges the requested change. Project the parent
-	// hash after a later informer observation sees the target suffix on every worker clique.
-	observedWorkerHash, err := podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing)
-	if err != nil {
-		return ReconcileResult{}, failWorkloadProgram(
-			reasonRollingUpdateFailed,
-			fmt.Errorf("observe Grove worker hash before projection: %w", err),
-		)
-	}
-	if observedWorkerHash {
-		if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, true); err != nil {
+	// hash only when the transition needs a commit and a later informer observation
+	// confirms the target suffix on every worker clique.
+	var observedWorkerHash bool
+	if workerHashTransition.needsCommit() {
+		observedWorkerHash, err = podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing, workerHashTransition.isFirstGeneration)
+		if err != nil {
 			return ReconcileResult{}, failWorkloadProgram(
 				reasonRollingUpdateFailed,
-				fmt.Errorf("project observed Grove worker hash: %w", err),
+				fmt.Errorf("observe Grove worker hash before projection: %w", err),
 			)
+		}
+		if observedWorkerHash {
+			if err := r.rollout.commitUnsupportedWorkerHashTransition(ctx, dgd, workerHashTransition, true); err != nil {
+				return ReconcileResult{}, failWorkloadProgram(
+					reasonRollingUpdateFailed,
+					fmt.Errorf("project observed Grove worker hash: %w", err),
+				)
+			}
 		}
 	}
 
