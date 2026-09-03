@@ -34,10 +34,11 @@ carries no context-phase handoff.
 
 ## Run
 
-The engine image has to meet the requirements noted under
-[Deploy on Kubernetes](#deploy-on-kubernetes-quick-start) below: `--grpc` needs
-`smg-grpc-proto` installed and matched to the image's `protobuf` runtime. Start
-TensorRT-LLM with its native gRPC listener:
+`--grpc` needs `smg-grpc-proto>=0.4.14` installed in the engine image, and that
+package's generated stubs have to load against the image's own `protobuf`
+runtime. See [Deploy on Kubernetes](#deploy-on-kubernetes-quick-start) below for
+which TensorRT-LLM releases bundle the package and how the two versions
+interact. Start TensorRT-LLM with its native gRPC listener:
 
 ```bash
 python -m tensorrt_llm.commands.serve <model> --grpc --host 127.0.0.1 --port 50051
