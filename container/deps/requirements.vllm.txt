@@ -24,7 +24,7 @@ imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 # Both ship the same `mooncake` package and the generic one links
 # libcudart.so.12, so the floor has to name the CUDA 13 distribution. CUDA
 # only: stripped for the XPU and CPU images in vllm_runtime.Dockerfile.
-mooncake-transfer-engine-cuda13>=0.3.13.post1
+mooncake-transfer-engine-cuda13>=0.3.13.post1,<0.4
 # The upstream vllm-openai image bundles pillow at an older patch release;
 # floor it so the --no-deps install moves it to the current patch line.
 pillow>=12.3.0

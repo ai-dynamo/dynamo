@@ -24,7 +24,7 @@ imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive above
 # `mooncake` package, so flooring the generic name overlays the CUDA 13 build
 # with an unloadable one instead of upgrading it. CUDA only: stripped for the
 # XPU image in sglang_runtime.Dockerfile.
-mooncake-transfer-engine-cuda13>=0.3.13.post1
+mooncake-transfer-engine-cuda13>=0.3.13.post1,<0.4
 # The upstream SGLang image bundles pillow at an older patch release; floor it
 # so the install refreshes it to the current patch line.
 pillow>=12.3.0,<13  # bounded: this file installs with --force-reinstall

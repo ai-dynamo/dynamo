@@ -14,6 +14,7 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS pre_runtime
 {% endif %}
 
 ARG MODELEXPRESS_VERSION
+ARG CUDA_MAJOR
 
 WORKDIR /workspace
 
@@ -178,6 +179,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.common.txt,target=/tm
 RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tmp/requirements.sglang.txt \
     --mount=type=cache,target=/root/.cache/pip,sharing=locked \
     export PIP_CACHE_DIR=/root/.cache/pip && \
+    [ "$CUDA_MAJOR" = "13" ] || { echo "ERROR: requirements.sglang.txt hardcodes the mooncake-transfer-engine-cuda13 distribution; got CUDA_MAJOR=$CUDA_MAJOR" >&2; exit 1; } && \
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.txt
 {% else %}
@@ -186,9 +188,9 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
 # are inert on the XPU image and neither is present in its base. The patterns are
 # anchored to the line start so they cannot match inside another requirement, and
 # the checks fail the build if either package arrives by another route -- a filter
-# that silently stopped matching would otherwise look like success. The mooncake
-# check is a positive test with no `!` and no stderr redirect, so a broken
-# interpreter fails the build instead of passing it vacuously.
+# that silently stopped matching would otherwise look like success. Both checks
+# are positive tests with no `!` and no stderr redirect, so a broken interpreter
+# fails the build instead of passing it vacuously.
 #
 # Whole-RUN branches, rather than a conditional inside one RUN: a `{% raw %}{% if %}{% endraw %}` in the
 # middle of a `\`-continued command emits a blank line that ends the command
@@ -200,8 +202,9 @@ RUN --mount=type=bind,source=./container/deps/requirements.sglang.txt,target=/tm
         /tmp/requirements.sglang.txt > /tmp/requirements.sglang.nonvidia.txt && \
     pip install --break-system-packages --force-reinstall --no-deps \
         --requirement /tmp/requirements.sglang.nonvidia.txt && \
-    ! python3 -c "import PyNvVideoCodec" 2>/dev/null && \
-    python3 -c "import importlib.metadata as m; names={(d.metadata['Name'] or '').replace('_','-').lower() for d in m.distributions()}; exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
+    rm -f /tmp/requirements.sglang.nonvidia.txt && \
+    python3 -c "import importlib.util,sys; sys.exit(1 if importlib.util.find_spec('PyNvVideoCodec') else 0)" && \
+    python3 -c "import importlib.metadata as m, re; names={re.sub(r'[-_.]+', '-', d.metadata['Name']).lower() for d in m.distributions() if d.metadata is not None}; exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
 {% endif %}
 
 # Remove the codec-bearing video-DECODE components from the upstream SGLang image

@@ -394,6 +394,7 @@ RUN set -eu; \
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
     export UV_CACHE_DIR=/root/.cache/uv && \
+    [ "$CUDA_MAJOR" = "13" ] || { echo "ERROR: requirements.vllm.txt hardcodes the mooncake-transfer-engine-cuda13 distribution; got CUDA_MAJOR=$CUDA_MAJOR" >&2; exit 1; } && \
     uv pip install {{ pip_target }} \
         --reinstall-package imageio-ffmpeg --reinstall-package PyNvVideoCodec \
         --no-deps --requirement /tmp/requirements.vllm.txt && \
@@ -425,8 +426,9 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
         /tmp/requirements.vllm.txt > /tmp/requirements.vllm.nonvidia.txt && \
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.nonvidia.txt && \
+    rm -f /tmp/requirements.vllm.nonvidia.txt && \
     ! /opt/venv/bin/python -c "import PyNvVideoCodec" 2>/dev/null && \
-    /opt/venv/bin/python -c "import importlib.metadata as m; names={(d.metadata['Name'] or '').replace('_','-').lower() for d in m.distributions()}; exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
+    /opt/venv/bin/python -c "import importlib.metadata as m, re; names={re.sub(r'[-_.]+', '-', d.metadata['Name']).lower() for d in m.distributions() if d.metadata is not None}; exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)"
 {% endif %}
 
 # Remove the vLLM source tree shipped in the base image to avoid pytest

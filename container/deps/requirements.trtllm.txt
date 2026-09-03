@@ -18,9 +18,6 @@
 # Floor them so the --no-deps install refreshes the bundled copies in place to
 # the current patch releases (see also mistune/soupsieve/tornado below).
 aiohttp>=3.14.3
-# The upstream tensorrt-llm/release base bundles cryptography at the prior
-# major; floor it so the --no-deps install refreshes the bundled copy.
-cryptography>=50.0.0
 gitpython>=3.1.58
 
 # Used by the trtllm video_diffusion handler to encode generated frames to MP4.
