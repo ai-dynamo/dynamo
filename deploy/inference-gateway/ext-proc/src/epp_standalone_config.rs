@@ -245,11 +245,12 @@ impl EppStandaloneConfig {
 /// excluded from every worker index rather than just failing to fail over.
 /// Reject it at startup instead of shipping that silent malfunction.
 ///
-/// TODO(epp-standalone-container-discovery): replace `pod_discovery.rs`'s
-/// pod-aggregate `pod_is_ready()` gate with a per-named-container readiness
-/// check (mirroring dynamo mode's `pod_worker_ids`) so a `WorkerIndex` entry
-/// is keyed on an individual container's own `Ready` status, not the pod's.
-/// Once that lands, lift this rejection.
+/// Lifting this rejection is planned work, tracked by DEP #11661 (EPP Embedded
+/// SelectionService Interface): <https://github.com/ai-dynamo/dynamo/issues/11661>.
+/// It requires replacing `pod_discovery.rs`'s pod-aggregate `pod_is_ready()`
+/// gate with a per-named-container readiness check (mirroring dynamo mode's
+/// `pod_worker_ids`), so a `WorkerIndex` entry is keyed on an individual
+/// container's own `Ready` status rather than the pod's.
 fn reject_unsupported_container_discovery(get: &EnvGet) -> anyhow::Result<()> {
     match trimmed(get(DYN_KUBE_DISCOVERY_MODE)).as_deref() {
         Some("container") => anyhow::bail!(

@@ -149,42 +149,22 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Value: nativeRustEPPHome,
 		})
 
-		// Mount the model-config cache the EPP writes while downloading model
-		// configs. The path must track the container's HOME: the Rust EPP
+		// Mount the model-config cache under the pinned HOME. The Rust EPP
 		// resolves its MDC cache root from $HOME (lib/llm/src/model_card.rs), so
-		// a mount that does not match is silently inert -- no error, but the
-		// blobs land on the container's ephemeral writable layer, which grows
-		// unbounded toward node DiskPressure and fails outright under
-		// readOnlyRootFilesystem: true.
+		// a mount that does not match is silently inert and the blobs grow on
+		// the container's writable layer instead.
 		//
-		// Only the native EPP gets this mount. The legacy Go EPP does reach the
-		// same download_config -- it statically links libdynamo_llm_capi, whose
-		// create_routers -> init_preprocessor path calls it, and resolves the
-		// same $HOME-rooted cache (its image sets no ENV HOME, so the runtime
-		// derives HOME=/home/nonroot from /etc/passwd). But it runs once at
-		// startup over a fixed set of metadata files, so the cost of dropping
-		// the volume is a few MB on the writable layer and a re-fetch on
-		// restart. That is bounded, unlike the growth the native path guards
-		// against, and not worth a volume for a component being removed.
+		// Native only. The legacy Go EPP reaches the same download_config
+		// through libdynamo_llm_capi, but once at startup over a fixed file set
+		// -- a few MB and a re-fetch on restart, for a component being removed.
+		// Its HOME is not derivable here either, since eppConfig selects the
+		// contract but not the image.
 		//
-		// Its HOME cannot be derived here in any case: eppConfig selects the
-		// contract but not the image, so keying a mount path off it would put
-		// the cache where nothing reads it for a legacy component running on
-		// the frontend image (HOME=/home/dynamo).
-		//
-		// Withholding it from the legacy path re-renders every existing legacy
-		// EPP Pod, so those components roll once on an operator upgrade even
-		// though their DGD did not change. That is a deliberate exception to the
-		// rule that an operator-only upgrade must not roll unchanged workloads
-		// (deploy/operator/internal/AGENTS.md), taken on deprecation grounds:
-		// the Go EPP this was shaped for is deprecated, with its source removed
-		// in this release. The enumerated legacy Pod contract that upgrade
-		// compatibility actually promises -- CLI flags, config volume, Service
-		// selector -- is untouched.
-		//
-		// A HOME supplied through podTemplate still wins over the one set above
-		// (MergeEnvs gives user env precedence), which would re-break the
-		// pairing; that is the caller's choice, the same as overriding args.
+		// Withholding it re-renders existing legacy EPP Pods, so they roll once
+		// on an operator upgrade. That is a deliberate exception to the no-roll
+		// rule in deploy/operator/internal/AGENTS.md, taken on deprecation
+		// grounds; the promised legacy contract (CLI flags, config volume,
+		// Service selector) is untouched.
 		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 			Name:      "hf-cache",
 			MountPath: nativeRustEPPHome + "/.cache",
@@ -207,12 +187,8 @@ func (e *EPPDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, 
 		volume, _ := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
 		podSpec.Volumes = append(podSpec.Volumes, volume)
 	} else {
-		// Backs the model-config cache mounted in GetBaseContainer. Native EPP
-		// only: the legacy Go EPP's own config download is bounded and small
-		// enough not to warrant a volume, and its mount path is not derivable
-		// from the launch contract. See GetBaseContainer for both, and for why
-		// withholding it from the legacy path is a deliberate exception to the
-		// no-roll-on-operator-upgrade rule.
+		// Backs the model-config cache mounted in GetBaseContainer, which is
+		// native-only; see there for why the legacy path goes without.
 		podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
 			Name: "hf-cache",
 			VolumeSource: corev1.VolumeSource{
