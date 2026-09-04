@@ -28,54 +28,6 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 
-fn instance_matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
-    match (instance, query) {
-        (DiscoveryInstance::Endpoint(_), DiscoveryQuery::AllEndpoints) => true,
-        (DiscoveryInstance::Endpoint(i), DiscoveryQuery::NamespacedEndpoints { namespace }) => {
-            &i.namespace == namespace
-        }
-        (
-            DiscoveryInstance::Endpoint(i),
-            DiscoveryQuery::ComponentEndpoints { namespace, component },
-        ) => &i.namespace == namespace && &i.component == component,
-        (
-            DiscoveryInstance::Endpoint(i),
-            DiscoveryQuery::Endpoint { namespace, component, endpoint },
-        ) => &i.namespace == namespace && &i.component == component && &i.endpoint == endpoint,
-
-        (DiscoveryInstance::Model { .. }, DiscoveryQuery::AllModels) => true,
-        (
-            DiscoveryInstance::Model { namespace: ns, .. },
-            DiscoveryQuery::NamespacedModels { namespace },
-        ) => ns == namespace,
-        (
-            DiscoveryInstance::Model { namespace: ns, component: comp, .. },
-            DiscoveryQuery::ComponentModels { namespace, component },
-        ) => ns == namespace && comp == component,
-        (
-            DiscoveryInstance::Model { namespace: ns, component: comp, endpoint: ep, .. },
-            DiscoveryQuery::EndpointModels { namespace, component, endpoint },
-        ) => ns == namespace && comp == component && ep == endpoint,
-
-        (
-            DiscoveryInstance::EventChannel { scope, topic: t, .. },
-            DiscoveryQuery::EventChannels(q),
-        ) => {
-            q.scope.as_ref().is_none_or(|expected| expected == scope)
-                && q.topic.as_ref().is_none_or(|qt| qt == t)
-        }
-        (
-            DiscoveryInstance::EventSource { scope, topic: t, .. },
-            DiscoveryQuery::EventSources(q),
-        ) => {
-            q.scope.as_ref().is_none_or(|expected| expected == scope)
-                && q.topic.as_ref().is_none_or(|qt| qt == t)
-        }
-
-        _ => false,
-    }
-}
-
 fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
     if publisher_id > MAX_JSON_SAFE_PUBLISHER_ID {
         anyhow::bail!(
@@ -507,7 +459,7 @@ impl Discovery for KubeDiscoveryClient {
                     Ok(event) => {
                         let forward = match &event {
                             DiscoveryEvent::Added(instance) => {
-                                if instance_matches_query(instance, &query) {
+                                if instance.matches(&query) {
                                     let id = instance.id();
                                     if known.get(&id) != Some(instance) {
                                         known.insert(id, instance.clone());

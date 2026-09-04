@@ -845,6 +845,59 @@ impl DiscoveryInstance {
             }),
         }
     }
+
+    /// Returns true if this instance satisfies `query`.
+    pub fn matches(&self, query: &DiscoveryQuery) -> bool {
+        match (self, query) {
+            (Self::Endpoint(_), DiscoveryQuery::AllEndpoints) => true,
+            (Self::Endpoint(i), DiscoveryQuery::NamespacedEndpoints { namespace }) => {
+                &i.namespace == namespace
+            }
+            (
+                Self::Endpoint(i),
+                DiscoveryQuery::ComponentEndpoints { namespace, component },
+            ) => &i.namespace == namespace && &i.component == component,
+            (
+                Self::Endpoint(i),
+                DiscoveryQuery::Endpoint { namespace, component, endpoint },
+            ) => {
+                &i.namespace == namespace
+                    && &i.component == component
+                    && &i.endpoint == endpoint
+            }
+
+            (Self::Model { .. }, DiscoveryQuery::AllModels) => true,
+            (
+                Self::Model { namespace: ns, .. },
+                DiscoveryQuery::NamespacedModels { namespace },
+            ) => ns == namespace,
+            (
+                Self::Model { namespace: ns, component: comp, .. },
+                DiscoveryQuery::ComponentModels { namespace, component },
+            ) => ns == namespace && comp == component,
+            (
+                Self::Model { namespace: ns, component: comp, endpoint: ep, .. },
+                DiscoveryQuery::EndpointModels { namespace, component, endpoint },
+            ) => ns == namespace && comp == component && ep == endpoint,
+
+            (
+                Self::EventChannel { scope, topic: t, .. },
+                DiscoveryQuery::EventChannels(q),
+            ) => {
+                q.scope.as_ref().is_none_or(|expected| expected == scope)
+                    && q.topic.as_ref().is_none_or(|qt| qt == t)
+            }
+            (
+                Self::EventSource { scope, topic: t, .. },
+                DiscoveryQuery::EventSources(q),
+            ) => {
+                q.scope.as_ref().is_none_or(|expected| expected == scope)
+                    && q.topic.as_ref().is_none_or(|qt| qt == t)
+            }
+
+            _ => false,
+        }
+    }
 }
 
 /// Unique identifier for an endpoint instance
