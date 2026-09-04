@@ -5,6 +5,14 @@
 # empty workspace to exclude from top level workspace
 # excluded due to pyo3 extension module build issues
 
+# Keep runtime-wheel builds on the same reviewed frontend-crates revision as
+# the top-level workspace. This manifest is its own workspace, so patches from
+# the repository-root Cargo.toml do not apply here.
+[patch.crates-io]
+dynamo-protocols = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "fd3a9f2f6988ae48357a9983e281bb12ffa7e735" }
+dynamo-renderer = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "fd3a9f2f6988ae48357a9983e281bb12ffa7e735" }
+dynamo-tokenizers = { git = "https://github.com/ai-dynamo/frontend-crates.git", rev = "fd3a9f2f6988ae48357a9983e281bb12ffa7e735" }
+
 [package]
 name = "dynamo-py3"
 version = "1.5.0"
