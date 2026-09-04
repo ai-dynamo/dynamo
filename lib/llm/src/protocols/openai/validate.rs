@@ -7,6 +7,7 @@ use dynamo_runtime::config::{
     env_is_truthy, environment_names::llm::DYN_IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS,
 };
 
+use super::common_ext::{CommonExtProvider, extract_guided_decoding_options};
 use super::tools::{ToolChoiceError, validate_openai_tool_choice};
 
 //
@@ -865,6 +866,26 @@ pub fn validate_chat_template_args(
         && args.contains_key("chat_template")
     {
         anyhow::bail!("`chat_template` is not supported inside `chat_template_args`");
+    }
+    Ok(())
+}
+
+/// Rejects a request with conflicting or incomplete guided-decoding options.
+///
+/// The conflict rule itself lives in [`crate::protocols::common::GuidedDecodingOptions::validate`],
+/// reached here through `from_optional`, so this function adds no second copy of it. What it adds is
+/// the call at the request-validation boundary: every other field is checked here, where
+/// a failure becomes a 400 naming the problem, while guided decoding was checked only
+/// later inside `extract_sampling_options`. By that point the error is an untyped
+/// `anyhow` with nothing for the HTTP layer to branch on, so a malformed request was
+/// reported to the caller as `500 Internal Server Error`.
+///
+/// `structural_tag` has no `CommonExtProvider` getter, matching `extract_sampling_options`,
+/// which also passes `None` for it.
+pub fn validate_guided_decoding(request: &impl CommonExtProvider) -> Result<(), anyhow::Error> {
+    let result = extract_guided_decoding_options(request)?;
+    if result.options.is_none() && result.has_whitespace_pattern {
+        anyhow::bail!("guided_whitespace_pattern requires a primary guided-decoding constraint");
     }
     Ok(())
 }
