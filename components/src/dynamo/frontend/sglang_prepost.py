@@ -611,8 +611,8 @@ def build_tool_call_guided_decoding(
     # sglang/register.py, so an operator setting the mode to "off" still gets a
     # constraint on this path. prepost.py requires structural_tag_mode == "on"
     # (_should_build_tool_call_guidance) and preprocessor/structural_tag.rs
-    # requires StructuralTagMode != Off, so at the default mode ("off") the same
-    # request is unconstrained on both of those paths and constrained here.
+    # requires StructuralTagMode != Off, so with an explicit mode of "off" the
+    # same request is unconstrained on both of those paths and constrained here.
     # Also unlike them, "auto" is never gated on scope/strict, so this behaves as
     # scope="always" with no way to narrow it.
     elif tool_call_parser_name:

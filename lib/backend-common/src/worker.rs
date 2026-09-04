@@ -235,6 +235,9 @@ impl Default for WorkerConfig {
             metrics_labels: Vec::new(),
             disaggregation_mode: DisaggregationMode::Aggregated,
             health_check_payload: None,
+            // Keep the shared/wire default conservative for mixed-version and
+            // Rust-sidecar compatibility. Deployment-facing runtime arguments
+            // explicitly publish the current On/Always defaults.
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,

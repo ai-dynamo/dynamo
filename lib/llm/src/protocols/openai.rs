@@ -383,6 +383,10 @@ impl GuidedToolConstraint {
     }
 }
 
+const fn default_structural_tag_supported() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParsingOptions {
     pub tool_call_parser: Option<String>,
@@ -429,6 +433,12 @@ pub struct ParsingOptions {
     #[serde(default)]
     pub structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope,
 
+    /// Whether the selected backend transport accepts structural-tag guidance.
+    /// Defaults to true for compatibility with workers that predate capability
+    /// publication.
+    #[serde(default = "default_structural_tag_supported")]
+    pub structural_tag_supported: bool,
+
     #[serde(
         default = "crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none"
     )]
@@ -463,6 +473,7 @@ impl ParsingOptions {
             move_reasoning_to_content_when_empty: false,
             structural_tag_mode: crate::local_model::runtime_config::StructuralTagMode::default(),
             structural_tag_scope: crate::local_model::runtime_config::StructuralTagScope::default(),
+            structural_tag_supported: true,
             exclude_tools_when_tool_choice_none:
                 crate::local_model::runtime_config::default_exclude_tools_when_tool_choice_none(),
             tools: Vec::new(),

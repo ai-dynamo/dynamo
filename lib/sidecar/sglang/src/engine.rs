@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use dynamo_backend_common::{
     AsyncEngineContext, DisaggregationMode, DynamoError, EngineConfig, GenerateContext,
     KvEventSource, LLMEngine, LLMEngineOutput, LLMEngineOutputExt, LlmRegistration, ModelInput,
-    PreprocessedRequest, WorkerConfig, usage,
+    PreprocessedRequest, TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY, WorkerConfig, usage,
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig, SidecarStartupError};
 use futures::stream::BoxStream;
@@ -822,6 +822,10 @@ fn build_engine_config(
         "grpc_service".to_string(),
         Value::String("sglang.runtime.v1.SglangService".to_string()),
     );
+    runtime_data.insert(
+        TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY.to_string(),
+        Value::Bool(false),
+    );
 
     Ok(EngineConfig {
         model: discovery.model_path.clone(),
@@ -848,7 +852,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        DisaggregationMode, DiscoveredKvEventSource, Discovery, build_engine_config,
+        DisaggregationMode, DiscoveredKvEventSource, Discovery,
+        TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY, build_engine_config,
         discover_kv_event_sources, resolve_bootstrap_host_with_local,
     };
 
@@ -873,6 +878,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(host.as_deref(), Some("prefill.example"));
+    }
+
+    #[test]
+    fn native_grpc_advertises_structural_tags_as_unsupported() {
+        let config = build_engine_config(
+            &discovery(json!({})),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config
+                .runtime_data
+                .get(TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY),
+            Some(&json!(false))
+        );
     }
 
     #[test]

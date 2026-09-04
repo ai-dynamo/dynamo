@@ -39,8 +39,8 @@ class DynamoRuntimeConfig(ConfigBase):
     dyn_reasoning_parser: Optional[str] = None
     dyn_default_thinking_mode: Optional[str] = None
     exclude_tools_when_tool_choice_none: bool = True
-    dyn_enable_structural_tag: bool = False
-    dyn_structural_tag_scope: str = "auto"
+    dyn_enable_structural_tag: bool = True
+    dyn_structural_tag_scope: str = "always"
     dyn_structural_tag_schema: str = "auto"
     custom_jinja_template: Optional[str] = None
     endpoint_types: str
@@ -282,16 +282,16 @@ class DynamoRuntimeArgGroup(ArgGroup):
             g,
             flag_name="--dyn-enable-structural-tag",
             env_var="DYN_ENABLE_STRUCTURAL_TAG",
-            default=False,
-            help="Enable structural tag guided decoding for tool calls. "
-            "Named Kimi K3 tool_choice requests always activate their required "
-            "XTML structural tag even when this flag is off.",
+            default=True,
+            help="Enable structural tag guided decoding for tool calls when the configured "
+            "parser and backend support it. On the Rust frontend preprocessing path, "
+            "explicitly disabling this flag is authoritative.",
         )
         add_argument(
             g,
             flag_name="--dyn-structural-tag-scope",
             env_var="DYN_STRUCTURAL_TAG_SCOPE",
-            default="auto",
+            default="always",
             choices=["auto", "always"],
             help="Controls when structural tags are activated. "
             "'auto': for required/named tool_choice, and if any tool has strict=true "
@@ -306,9 +306,10 @@ class DynamoRuntimeArgGroup(ArgGroup):
             default="auto",
             choices=["auto", "strict"],
             help="Controls parameter schema strictness inside structural tags. "
-            "'auto': real schema only for tools with strict=true; "
-            "syntactically constrained but schema-unconstrained for all other tools. "
-            "'strict': real parameter schema for all tools.",
+            "'auto': declared parameter schema for tools with strict omitted or true; "
+            "tools with strict=false keep the native tool envelope constrained but use "
+            "schema-unconstrained arguments. "
+            "'strict': declared parameter schema for all tools, overriding strict=false.",
         )
         add_argument(
             g,

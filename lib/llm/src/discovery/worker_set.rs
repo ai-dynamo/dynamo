@@ -356,6 +356,10 @@ impl WorkerSet {
         crate::protocols::openai::ParsingOptions {
             structural_tag_mode: self.card.runtime_config.structural_tag_mode,
             structural_tag_scope: self.card.runtime_config.structural_tag_scope,
+            structural_tag_supported: self
+                .card
+                .runtime_config
+                .tool_call_structural_tag_supported(),
             exclude_tools_when_tool_choice_none: self
                 .card
                 .runtime_config

@@ -31,6 +31,7 @@ pub mod worker;
 
 pub use args::CommonArgs;
 pub use disagg::DisaggregationMode;
+pub use dynamo_llm::local_model::runtime_config::TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY;
 pub use dynamo_llm::model_type::ModelInput;
 pub use engine::{
     AsyncEngineContext, BootstrapInfo, CompletionUsage, ComponentSnapshot, EngineConfig,

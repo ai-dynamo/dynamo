@@ -44,6 +44,15 @@ pub(crate) const MAX_DATA_PARALLEL_RANKS_PER_WORKER: u32 = 4096;
 pub const TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY: &str =
     "tool_call_structural_tag_excludes_reasoning";
 
+/// Runtime-data key indicating whether the backend transport accepts structural
+/// tag guided decoding.
+///
+/// Absence means `true` for compatibility with workers that predate this
+/// capability. Backends that cannot represent structural tags must publish
+/// `false` so the frontend can preserve its legacy fallback path.
+pub const TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY: &str =
+    "tool_call_structural_tag_supported";
+
 /// Describes which request-token overflows the frontend may reject early.
 ///
 /// The combined limit already accounts for engine-reserved tokens. A false
@@ -381,6 +390,8 @@ impl Default for ModelRuntimeConfig {
             tool_call_arguments_format: ToolCallArgumentsFormat::JsonString,
             tokenizer_backend: None,
             tokenizer_fallback_enabled: None,
+            // Missing fields from older workers remain conservative. Current
+            // deployment configuration explicitly publishes On/Always.
             structural_tag_mode: StructuralTagMode::Off,
             structural_tag_scope: StructuralTagScope::Auto,
             structural_tag_schema: StructuralTagSchemaMode::Auto,
@@ -675,6 +686,23 @@ impl ModelRuntimeConfig {
             Ok(Some(serde_json::from_value(value.clone())?))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Whether the backend transport can carry structural-tag guided decoding.
+    /// Missing metadata remains enabled for compatibility with older workers.
+    pub(crate) fn tool_call_structural_tag_supported(&self) -> bool {
+        match self.get_engine_specific::<bool>(TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY) {
+            Ok(Some(supported)) => supported,
+            Ok(None) => true,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    key = TOOL_CALL_STRUCTURAL_TAG_SUPPORTED_RUNTIME_KEY,
+                    "Invalid structural-tag capability metadata; using compatibility fallback"
+                );
+                false
+            }
         }
     }
 

@@ -174,14 +174,14 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE`
 </ParamField>
 
-<ParamField path="--dyn-enable-structural-tag" type="boolean" default="false">
-  Enable structural tag guided decoding for tool calls. When enabled, configure activation scope and parameter schema strictness with `--dyn-structural-tag-scope` and `--dyn-structural-tag-schema`.
+<ParamField path="--dyn-enable-structural-tag" type="boolean" default="true">
+  Enable structural tag guided decoding for tool calls when the configured parser and backend support it. On the Rust frontend preprocessing path, explicitly setting this option to `false` is authoritative: Dynamo does not inject a structural tag and uses the parser's compatibility fallback. Legacy inline Python preprocessing paths retain their existing engine-specific constraint behavior.
 
   Environment variable: `DYN_ENABLE_STRUCTURAL_TAG`
 </ParamField>
 
-<ParamField path="--dyn-structural-tag-scope" type="string" default="auto">
-  Controls when structural tags are activated. `auto` activates them for required or named `tool_choice`, or when any tool has `strict=true` or `parallel_tool_calls` is false. `always` additionally activates them for `tool_choice=auto` without those conditions. `tool_choice=none` is unaffected by either setting. Only meaningful when `--dyn-enable-structural-tag` is set.
+<ParamField path="--dyn-structural-tag-scope" type="string" default="always">
+  Controls when structural tags are activated. `always` activates them for supported `auto`, required, and named tool requests. `auto` preserves the legacy conditional behavior: required or named `tool_choice`, or automatic tool choice when any tool has `strict=true` or `parallel_tool_calls` is false. `tool_choice=none` is unaffected by either setting. Only meaningful when `--dyn-enable-structural-tag` is set.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>always</Badge></span>
 
@@ -189,7 +189,7 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="--dyn-structural-tag-schema" type="string" default="auto">
-  Controls parameter schema strictness inside structural tags. `auto` applies the real parameter schema only to tools with `strict=true`, leaving all other tools syntactically constrained but schema-unconstrained. `strict` applies the real parameter schema to every tool. Only meaningful when `--dyn-enable-structural-tag` is set.
+  Controls parameter schema strictness inside structural tags. `auto` applies the declared parameter schema unless a tool explicitly sets `strict=false`; an omitted `strict` field is schema-enforced. `strict` applies the declared schema to every tool and overrides `strict=false`. Only meaningful when `--dyn-enable-structural-tag` is set.
 
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>auto</Badge> <Badge intent="note" minimal>strict</Badge></span>
 
