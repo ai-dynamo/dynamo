@@ -116,6 +116,7 @@ trtllm_configs = {
         directory=trtllm_dir,
         script_name="agg.sh",
         marks=[
+            pytest.mark.core,
             pytest.mark.gpu_1,
             pytest.mark.nightly,
             pytest.mark.trtllm,
