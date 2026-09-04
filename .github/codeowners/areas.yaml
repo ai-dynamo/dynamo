@@ -531,6 +531,12 @@ areas:
   - tests/router/test_router_e2e_with_vllm_xpu.py
   - tests/serve/multimodal_profiles/vllm_xpu.py
   - tests/serve/test_vllm_xpu.py
+- label: tpu
+  github_team: '@ai-dynamo/dynamo-tpu-codeowners'
+  path_globs:
+  - examples/backends/vllm/deploy/tpu/
+  - examples/backends/vllm/launch/tpu/
+  - tests/serve/test_vllm_tpu.py
 required_owners:
 - glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
   owners:
@@ -571,6 +577,7 @@ shared:
   - router
   - runtime
   - tokenspeed
+  - tpu
   - xpu
 # areas.yaml is the routing decision itself, not a generated artifact, so it
 # does not get the wide list above: nothing stops a rule here from re-routing

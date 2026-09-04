@@ -59,6 +59,13 @@ Aggregated deployment that offloads KV cache to a per-node LMCache MP DaemonSet,
 - `VllmDecodeWorker`: Single worker, `hostIPC: true` + `runAsUser: 0` (required for cross-Pod CUDA IPC with the LMCache server)
 - `LMCacheEngine` (separate CR): per-node DaemonSet that imports the worker's KV-cache IPC handles and serves cache hits over ZMQ
 
+### 8. **Deployments with Google TPU** (see [`tpu/`](./tpu/))
+
+Hardware-specific template for Google TPU using Kubernetes DRA. Aggregated serving only —
+no disaggregated prefill/decode, KVBM, or GPU Memory Service support yet.
+
+See [`tpu/README.md`](./tpu/README.md) for available templates, prerequisites, and usage.
+
 ## CRD Structure
 
 All templates use the **DynamoGraphDeployment** CRD:
