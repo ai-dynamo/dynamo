@@ -3089,6 +3089,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-trtllm-mocker"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "blake3",
+ "clap",
+ "dashmap",
+ "dynamo-backend-common",
+ "dynamo-mocker",
+ "dynamo-trtllm-sidecar",
+ "futures",
+ "prost-types 0.13.5",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.13.1",
+ "tonic-health",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "dynamo-trtllm-sidecar"
 version = "1.4.0"
 dependencies = [
