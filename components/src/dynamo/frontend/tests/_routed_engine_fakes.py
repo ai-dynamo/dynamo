@@ -4,13 +4,9 @@
 """Shared fakes for RoutedEngine in processor unit tests."""
 
 
-async def _async_iter(items, engine):
-    try:
-        for item in items:
-            engine.yielded += 1
-            yield item
-    finally:
-        engine.stream_released = True
+async def _async_iter(items):
+    for item in items:
+        yield item
 
 
 class FakeRoutedItem:
@@ -43,10 +39,8 @@ class FakeRoutedEngine:
         self.items = items
         self.requests = []
         self.kwargs = []
-        self.yielded = 0
-        self.stream_released = False
 
     async def generate(self, preprocessed, **kwargs):
         self.requests.append(preprocessed)
         self.kwargs.append(kwargs)
-        return _async_iter(self.items, self)
+        return _async_iter(self.items)
