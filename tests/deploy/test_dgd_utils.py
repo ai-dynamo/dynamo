@@ -190,3 +190,44 @@ def test_request_reraises_unexpected_port_forward_stop_error(tmp_path) -> None:
             port_forward=original_port_forward,
             request_sender=request_sender,
         )
+
+
+async def test_in_flight_restart_preserves_bounded_previous_log(tmp_path) -> None:
+    """Keep a bounded previous-instance log before Kubernetes rotates again."""
+    deployment = ManagedDeployment(
+        log_dir=str(tmp_path),
+        deployment_spec=SimpleNamespace(name="test-dgd"),
+        namespace="default",
+    )
+    terminated = SimpleNamespace(reason="Error", exit_code=1)
+    container_status = SimpleNamespace(
+        name="main",
+        restart_count=1,
+        last_state=SimpleNamespace(terminated=terminated),
+    )
+    pod = SimpleNamespace(
+        metadata=SimpleNamespace(name="worker-0"),
+        status=SimpleNamespace(container_statuses=[container_status]),
+    )
+    deployment._core_api = SimpleNamespace(
+        list_namespaced_pod=AsyncMock(return_value=SimpleNamespace(items=[pod])),
+        read_namespaced_pod_log=AsyncMock(
+            return_value="first line\nsecond line\nthird line\n"
+        ),
+    )
+
+    warnings = await deployment._dump_in_flight_restart_logs(prev_log_tail_lines=2)
+
+    assert len(warnings) == 1
+    assert "first line" not in warnings[0]
+    assert "second line" in warnings[0]
+    assert "third line" in warnings[0]
+    preserved = tmp_path / "restarts" / "worker-0.main.restart-1.previous.log"
+    assert preserved.read_text() == "first line\nsecond line\nthird line\n"
+    deployment._core_api.read_namespaced_pod_log.assert_awaited_once_with(
+        name="worker-0",
+        namespace="default",
+        container="main",
+        previous=True,
+        tail_lines=50000,
+    )
