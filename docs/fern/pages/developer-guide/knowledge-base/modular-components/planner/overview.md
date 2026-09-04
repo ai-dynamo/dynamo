@@ -49,20 +49,27 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 | Feature | Throughput-Based | Load-Based |
 |---------|:----------------:|:-------------------------:|
 | **Deployment** | | |
-| Disaggregated | Supported | Supported |
-| Aggregated | Supported | Supported |
+| Disaggregated | ✅ | ✅ |
+| Aggregated | ✅ | ✅ |
 | **LLM Framework** | | |
-| SGLang | Supported | Supported |
-| TensorRT-LLM | Supported | Supported |
-| vLLM | Supported | Supported |
+| SGLang | ✅ | ✅ |
+| TensorRT-LLM | ✅ | ✅ |
+| vLLM | ✅ | ✅ |
 | **Requires Pre-deployment Data** | No; recommended for faster warmup when native AIC is unavailable | No |
-| **Load Predictors** | ARIMA, Prophet, Kalman, Constant | N/A |
+| **Load Predictors** | ARIMA, Prophet, Kalman, Constant | — |
 | **Router** | | |
-| Any (round-robin, random, etc.) | Supported | Not supported |
-| KV Router | Supported | Supported |
+| Standard routing (round-robin, random, etc.) | ✅ | ✅ |
+| KV-aware routing | ✅ | ✅ |
+| **Inference Optimizations** | | |
+| KV cache reuse | ✅ | ✅ |
+| Speculative decoding | ✅ | ✅ |
 | **Connectors** | | |
-| KubernetesConnector | Supported | Supported |
-| VirtualConnector | Supported | Supported |
+| KubernetesConnector | ✅ | ✅ |
+| VirtualConnector | ✅ | ✅ |
+
+**Legend:** ✅ Supported; — Not applicable.
+
+Router mode does not constrain either scaling mode. Load-based scaling consumes FPM directly from the engines through the Dynamo event plane, so it does not require the KV router. When runtime metrics are available, both scaling modes account for KV cache reuse through KV hit rate and speculative decoding through accepted tokens per forward pass. The Planner uses these signals for capacity estimates; it does not enable the engine features.
 
 ## When to Use Which Mode
 
