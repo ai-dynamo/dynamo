@@ -29,18 +29,51 @@ use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 
 fn instance_matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
-    let mut meta = DiscoveryMetadata::new();
-    let ok = match instance {
-        DiscoveryInstance::Endpoint(_) => meta.register_endpoint(instance.clone()).is_ok(),
-        DiscoveryInstance::Model { .. } => meta.register_model_card(instance.clone()).is_ok(),
-        DiscoveryInstance::EventChannel { .. } => {
-            meta.register_event_channel(instance.clone()).is_ok()
+    match (instance, query) {
+        (DiscoveryInstance::Endpoint(_), DiscoveryQuery::AllEndpoints) => true,
+        (DiscoveryInstance::Endpoint(i), DiscoveryQuery::NamespacedEndpoints { namespace }) => {
+            &i.namespace == namespace
         }
-        DiscoveryInstance::EventSource { .. } => {
-            meta.register_event_source(instance.clone()).is_ok()
+        (
+            DiscoveryInstance::Endpoint(i),
+            DiscoveryQuery::ComponentEndpoints { namespace, component },
+        ) => &i.namespace == namespace && &i.component == component,
+        (
+            DiscoveryInstance::Endpoint(i),
+            DiscoveryQuery::Endpoint { namespace, component, endpoint },
+        ) => &i.namespace == namespace && &i.component == component && &i.endpoint == endpoint,
+
+        (DiscoveryInstance::Model { .. }, DiscoveryQuery::AllModels) => true,
+        (
+            DiscoveryInstance::Model { namespace: ns, .. },
+            DiscoveryQuery::NamespacedModels { namespace },
+        ) => ns == namespace,
+        (
+            DiscoveryInstance::Model { namespace: ns, component: comp, .. },
+            DiscoveryQuery::ComponentModels { namespace, component },
+        ) => ns == namespace && comp == component,
+        (
+            DiscoveryInstance::Model { namespace: ns, component: comp, endpoint: ep, .. },
+            DiscoveryQuery::EndpointModels { namespace, component, endpoint },
+        ) => ns == namespace && comp == component && ep == endpoint,
+
+        (
+            DiscoveryInstance::EventChannel { scope, topic: t, .. },
+            DiscoveryQuery::EventChannels(q),
+        ) => {
+            q.scope.as_ref().is_none_or(|expected| expected == scope)
+                && q.topic.as_ref().is_none_or(|qt| qt == t)
         }
-    };
-    ok && !meta.filter(query).is_empty()
+        (
+            DiscoveryInstance::EventSource { scope, topic: t, .. },
+            DiscoveryQuery::EventSources(q),
+        ) => {
+            q.scope.as_ref().is_none_or(|expected| expected == scope)
+                && q.topic.as_ref().is_none_or(|qt| qt == t)
+        }
+
+        _ => false,
+    }
 }
 
 fn validate_kubernetes_publisher_id(publisher_id: u64) -> Result<()> {
