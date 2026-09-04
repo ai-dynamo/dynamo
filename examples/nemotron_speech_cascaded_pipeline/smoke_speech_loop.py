@@ -37,6 +37,33 @@ def _pcm_rms(pcm: bytes) -> float:
     return math.sqrt(sum(sample * sample for sample in samples) / len(samples))
 
 
+class _RealtimeTextInput:
+    """Forward append-only ASR deltas to a Dynamo realtime LLM session."""
+
+    def __init__(self, websocket: ClientWebSocketResponse) -> None:
+        self.websocket = websocket
+        self.text = ""
+
+    async def append(self, text: str) -> None:
+        if not text:
+            return
+        await self.websocket.send_json(
+            {"type": "input_text_buffer.append", "text": text}
+        )
+        self.text += text
+
+    async def commit(self, final_text: str) -> None:
+        # Interim ASR hypotheses may be revised. Replaying the final transcript
+        # preserves correctness while retaining useful prefill before revision.
+        if final_text != self.text:
+            if self.text:
+                await self.websocket.send_json({"type": "input_text_buffer.clear"})
+                self.text = ""
+            await self.append(final_text)
+        if self.text:
+            await self.websocket.send_json({"type": "input_text_buffer.commit"})
+
+
 async def _synthesize(
     session: aiohttp.ClientSession, args: argparse.Namespace
 ) -> tuple[bytes, float]:
@@ -63,7 +90,10 @@ async def _synthesize(
 
 
 async def _transcribe(
-    session: aiohttp.ClientSession, args: argparse.Namespace, pcm: bytes
+    session: aiohttp.ClientSession,
+    args: argparse.Namespace,
+    pcm: bytes,
+    text_input: _RealtimeTextInput | None = None,
 ) -> tuple[str, float, float]:
     async with session.ws_connect(
         _websocket_url(args.base_url), max_msg_size=64 * 1024 * 1024
@@ -100,13 +130,18 @@ async def _transcribe(
                 event_type = event.get("type")
                 if event_type == "conversation.item.input_audio_transcription.delta":
                     first_transcript_at = first_transcript_at or time.perf_counter()
+                    if text_input is not None:
+                        await text_input.append(event.get("delta", ""))
                 elif event_type == (
                     "conversation.item.input_audio_transcription.completed"
                 ):
                     first_transcript_at = first_transcript_at or time.perf_counter()
                     completed_at = time.perf_counter()
+                    transcript = event.get("transcript", "")
+                    if text_input is not None:
+                        await text_input.commit(transcript)
                     return (
-                        event.get("transcript", ""),
+                        transcript,
                         first_transcript_at - started,
                         completed_at - started,
                     )
@@ -175,22 +210,11 @@ async def _open_realtime_llm(
     return websocket
 
 
-async def _complete_realtime(
+async def _generate_realtime(
     websocket: ClientWebSocketResponse,
     args: argparse.Namespace,
-    transcript: str,
 ) -> tuple[str, float, float]:
     started = time.perf_counter()
-    await websocket.send_json(
-        {
-            "type": "conversation.item.create",
-            "item": {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": transcript}],
-            },
-        }
-    )
     await websocket.send_json({"type": "response.create"})
 
     first_token_at: float | None = None
@@ -212,6 +236,25 @@ async def _complete_realtime(
     if first_token_at is None:
         raise RuntimeError("realtime LLM returned no text")
     return "".join(output), first_token_at - started, completed_at - started
+
+
+async def _complete_realtime(
+    websocket: ClientWebSocketResponse,
+    args: argparse.Namespace,
+    transcript: str,
+) -> tuple[str, float, float]:
+    """Run an atomic realtime request for comparison with incremental prefill."""
+    await websocket.send_json(
+        {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": transcript}],
+            },
+        }
+    )
+    return await _generate_realtime(websocket, args)
 
 
 async def _complete_chat(
@@ -256,7 +299,7 @@ async def run(args: argparse.Namespace) -> None:
     async with aiohttp.ClientSession(timeout=timeout) as session:
         realtime_llm = (
             await _open_realtime_llm(session, args)
-            if args.llm_transport == "realtime"
+            if args.llm_transport in {"realtime", "realtime-atomic"}
             else None
         )
         try:
@@ -264,14 +307,23 @@ async def run(args: argparse.Namespace) -> None:
             rms = _pcm_rms(pcm)
             if rms < args.min_rms:
                 raise RuntimeError(f"TTS audio is silent or invalid (RMS={rms:.1f})")
+            text_input = (
+                _RealtimeTextInput(realtime_llm)
+                if args.llm_transport == "realtime" and realtime_llm is not None
+                else None
+            )
             transcript, asr_first_transcript, asr_completed = await _transcribe(
-                session, args, pcm
+                session, args, pcm, text_input
             )
             if not transcript.strip():
                 raise RuntimeError("ASR returned an empty transcript")
             llm = None
             if realtime_llm is not None:
-                llm = await _complete_realtime(realtime_llm, args, transcript)
+                llm = (
+                    await _generate_realtime(realtime_llm, args)
+                    if text_input is not None
+                    else await _complete_realtime(realtime_llm, args, transcript)
+                )
             elif args.llm_transport == "chat":
                 llm = await _complete_chat(session, args, transcript)
         finally:
@@ -312,9 +364,9 @@ def main() -> None:
     parser.add_argument("--text", default="Dynamo speech streaming is ready.")
     parser.add_argument(
         "--llm-transport",
-        choices=("none", "chat", "realtime"),
+        choices=("none", "chat", "realtime", "realtime-atomic"),
         default="none",
-        help="Optionally continue the completed transcript through the LLM",
+        help="Optionally continue ASR output through the LLM",
     )
     parser.add_argument("--llm-model", default="nvidia/nemotron-3-nano")
     parser.add_argument(
