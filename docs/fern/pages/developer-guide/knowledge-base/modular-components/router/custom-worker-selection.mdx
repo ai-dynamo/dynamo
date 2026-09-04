@@ -26,6 +26,8 @@ flowchart LR
 
 For multiple compile-checked policies, see the [custom policy examples](https://github.com/ai-dynamo/dynamo/tree/main/examples/router/custom-policy-example). Repository contributors who use a coding agent must also provide the [worker-selection API rules](https://github.com/ai-dynamo/dynamo/blob/main/lib/kv-router/src/scheduling/CLAUDE.md).
 
+The `examples/router/custom-policy-example/cache-affinity-budget` example demonstrates lexicographic cache preference with a load-safety bound: it selects the worker with the most device-resident overlap only from candidates whose modeled load is within a configured block-cost delta of the least-loaded worker.
+
 ## Choose the Policy Stage
 
 | Stage | Input | Output | Use this stage for |

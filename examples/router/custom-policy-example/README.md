@@ -27,6 +27,7 @@ Preferred routing taints are optional candidate metadata. A filter, scorer, or p
 | Crate | Use it for |
 |---|---|
 | [`soft-pin-repin`](soft-pin-repin/README.md) | Retain a soft session-affinity target until its active-request load exceeds a threshold, then repin |
+| [`cache-affinity-budget`](cache-affinity-budget/README.md) | Prefer the most cached worker only when its modeled load is within a configured cost budget |
 | `simple-filter-score-pick` | One filter, one scorer, and one picker show the complete policy flow |
 | `disagg-filter-score-pick` | Prefill and decode workers each need the complete policy flow |
 | `simple-stacked-score-pick` | Multiple scorer costs compose before one picker runs |
@@ -178,6 +179,10 @@ worker_selection:
       type: soft-pin-repin
       parameters:
         max_active_requests: 0
+    - name: cache-affinity-budget
+      type: cache-affinity-budget
+      parameters:
+        max_load_cost_delta_blocks: 64
 ```
 
 - `type` selects a registered provider.
@@ -203,6 +208,7 @@ cargo test \
   -p dynamo-custom-policy-example-simple-filter-score-pick \
   -p dynamo-custom-policy-example-disagg-filter-score-pick \
   -p dynamo-custom-policy-example-simple-stacked-score-pick \
+  -p dynamo-custom-policy-example-cache-affinity-budget \
   -p dynamo-custom-policy-example-catalog
 cargo build -p dynamo-custom-policy-example-epp
 ```
