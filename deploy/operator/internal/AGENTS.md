@@ -96,6 +96,38 @@ reconciliation, rollout, restart, readiness, status, watches, and provider integ
 - Keep provider-native API objects at provider boundaries. Provider-neutral contracts
   and base renderers must not expose them.
 
+## Desired-resource ownership and persistence
+
+- Compose all inputs into one complete desired resource before entering persistence
+  logic. Typed inputs and opaque provider fragments may meet at the rendering or
+  serialization boundary, but their provenance must not affect reconciliation control
+  flow.
+- Keep raw or unstructured data scoped to opaque provider fragments and final wire
+  serialization. Do not turn that representation detail into a separate unstructured
+  resource lifecycle, ownership model, or reconciliation pathway.
+- A writer identity represents an independently reconciling semantic actor with an
+  explicit, disjoint field or subresource ownership domain. Multiple writers or
+  persistence protocols for one Kubernetes resource are valid only across such actors,
+  preferably separated through subresources such as `/status` or `/scale`. A scaling
+  adapter with independent `/scale` intent is such an actor; an input fragment copied
+  into another actor's desired spec is not.
+- A single reconciler must not manufacture distinct writers for inputs to the same
+  desired resource. Do not select Update, Patch, SSA, a field manager, or another
+  persistence protocol based on optional input fields, `managedFields`, or the
+  resource's reconciliation history.
+- Use one stable SSA field manager per ownership domain. Field managers identify
+  independently reconciling actors, not the source of fields within one rendering
+  pipeline. Treat `metadata.managedFields` as API-server-owned diagnostic metadata, not
+  controller state, a feature marker, or a reconciliation-mode switch.
+- Converge each rendered resource through one persistence path and at most one mutating
+  client operation per ownership domain in a reconciliation attempt. If a multi-step
+  mutation protocol is unavoidable, document the partial states and prove convergence
+  from each of them.
+- Reuse the shared resource convergence mechanism and its currentness semantics. Do not
+  add feature-specific hashes, generation markers, bookkeeping annotations, or
+  preflight protocols around a resource already governed by that mechanism; improve
+  the common mechanism when its invariants are insufficient.
+
 ## Provider behavior and runtime bindings
 
 - Keep rollout algorithms provider-owned. Capabilities may validate or select user
