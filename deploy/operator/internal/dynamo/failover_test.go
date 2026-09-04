@@ -840,14 +840,6 @@ func validAutomaticFailoverComponent() *v1beta1.DynamoComponentDeploymentSharedS
 	}
 }
 
-func vllmFlagValue(t *testing.T, args []string, flag string) string {
-	t.Helper()
-	value, _, _, found, err := tokenizedFlag(args, flag)
-	require.NoError(t, err)
-	require.True(t, found)
-	return value
-}
-
 func hasToleration(podSpec *corev1.PodSpec, key string) bool {
 	for _, t := range podSpec.Tolerations {
 		if t.Key == key {

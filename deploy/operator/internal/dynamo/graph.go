@@ -1867,7 +1867,7 @@ func GenerateBasePodSpec(
 			return nil, fmt.Errorf("failed to build failover pod: %w", err)
 		}
 		if GetCheckpoint(component) != nil {
-			configureCheckpointFailoverEngines(&podSpec, component)
+			configureCheckpointFailoverEngines(&podSpec)
 		}
 	}
 

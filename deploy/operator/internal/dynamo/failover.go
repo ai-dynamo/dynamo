@@ -509,7 +509,7 @@ func validateFailoverCheckpointProfile(
 		// DYN_VLLM_GMS_SHADOW_MODE marks a cold-start shadow engine and is unset
 		// on the snapshot path. SGLang has no equivalents.
 		for _, flag := range []string{vllmWorkerClassFlag, vllmLoadFormatFlag} {
-			if _, _, _, found, err := tokenizedFlag(main.Args, flag); err != nil {
+			if _, found, err := tokenizedFlag(main.Args, flag); err != nil {
 				violations = append(violations, err)
 			} else if found {
 				violations = append(violations, fmt.Errorf("%s is managed by the operator and must not be set", flag))
@@ -524,7 +524,7 @@ func validateFailoverCheckpointProfile(
 		violations = append(violations, errors.New("DYN_FORWARDPASS_METRIC_PORT is managed by the operator and must not be set"))
 	}
 	for _, profile := range failoverSnapshotFlagProfile(backend) {
-		value, _, _, found, err := tokenizedFlag(main.Args, profile.flag)
+		value, found, err := tokenizedFlag(main.Args, profile.flag)
 		if err != nil {
 			violations = append(violations, err)
 			continue
@@ -591,40 +591,36 @@ func PrepareVLLMSnapshotSourceContainer(container *corev1.Container) error {
 	return nil
 }
 
-func tokenizedFlag(args []string, flag string) (value string, index int, equalsForm, found bool, err error) {
-	index = -1
+func tokenizedFlag(args []string, flag string) (value string, found bool, err error) {
 	for i, arg := range args {
 		switch {
 		case arg == flag:
 			if found {
-				return "", -1, false, false, fmt.Errorf("%s must appear at most once", flag)
+				return "", false, fmt.Errorf("%s must appear at most once", flag)
 			}
 			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
-				return "", -1, false, false, fmt.Errorf("%s requires a value", flag)
+				return "", false, fmt.Errorf("%s requires a value", flag)
 			}
-			value, index, found = args[i+1], i, true
+			value, found = args[i+1], true
 		case strings.HasPrefix(arg, flag+"="):
 			if found {
-				return "", -1, false, false, fmt.Errorf("%s must appear at most once", flag)
+				return "", false, fmt.Errorf("%s must appear at most once", flag)
 			}
 			value = strings.TrimPrefix(arg, flag+"=")
 			if value == "" {
-				return "", -1, false, false, fmt.Errorf("%s requires a value", flag)
+				return "", false, fmt.Errorf("%s requires a value", flag)
 			}
-			index, equalsForm, found = i, true, true
+			found = true
 		}
 	}
-	return value, index, equalsForm, found, nil
+	return value, found, nil
 }
 
 // configureCheckpointFailoverEngines adapts failover engine containers for the
 // snapshot-backed path. Shadow mode is incompatible with failover + snapshot,
 // which runs on GMS V1: it is set unconditionally for intra-pod failover by
 // applyVLLMOverrides, so unset it here.
-func configureCheckpointFailoverEngines(
-	podSpec *corev1.PodSpec,
-	component *v1beta1.DynamoComponentDeploymentSharedSpec,
-) {
+func configureCheckpointFailoverEngines(podSpec *corev1.PodSpec) {
 	engineNames := IntraPodFailoverEngineContainerNames()
 	for i := range podSpec.Containers {
 		if slices.Contains(engineNames, podSpec.Containers[i].Name) {
