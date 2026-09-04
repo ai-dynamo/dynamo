@@ -146,8 +146,15 @@ def _build_user_mm_uuids(
     raw_uuids: Any,
     use_unified_vision_chunk: bool,
     use_audio_in_video: bool = False,
+    explicit_audio_count: int | None = None,
+    video_count: int | None = None,
 ) -> Optional[dict[str, list[str | None]]]:
     """Map Dynamo media keys to vLLM cache identities."""
+    if use_audio_in_video and (explicit_audio_count is None or video_count is None):
+        raise ValueError(
+            "explicit_audio_count and video_count are required when "
+            "use_audio_in_video is enabled"
+        )
     if raw_uuids is None:
         return None
     if not isinstance(raw_uuids, dict):
@@ -175,8 +182,17 @@ def _build_user_mm_uuids(
 
     if use_audio_in_video:
         video_uuids = mm_uuids.get("video")
-        if video_uuids:
-            mm_uuids.setdefault("audio", []).extend(video_uuids)
+        audio_uuids = mm_uuids.get("audio")
+        if video_uuids is not None or audio_uuids is not None:
+            video_uuids = (
+                video_uuids if video_uuids is not None else [None] * video_count
+            )
+            audio_uuids = (
+                audio_uuids
+                if audio_uuids is not None
+                else [None] * explicit_audio_count
+            )
+            mm_uuids["audio"] = audio_uuids + video_uuids
 
     mm_uuids = {
         modality: uuids
@@ -773,6 +789,7 @@ class VllmMultimodalRequestProcessor:
     ) -> TokensPrompt:
         """Create a TokensPrompt with stable multimodal UUIDs."""
         extra_args = request.get("extra_args") or {}
+        raw_mm_data = request.get("multi_modal_data") or {}
         mm_uuids = _build_user_mm_uuids(
             request.get("multi_modal_uuids"),
             self.use_unified_vision_chunk,
@@ -780,6 +797,8 @@ class VllmMultimodalRequestProcessor:
                 mm_processor_kwargs
                 and mm_processor_kwargs.get("use_audio_in_video", False)
             ),
+            explicit_audio_count=len(raw_mm_data.get(AUDIO_URL_KEY, [])),
+            video_count=len(raw_mm_data.get(VIDEO_URL_KEY, [])),
         )
         if mm_uuids is None:
             mm_uuids = _build_forwarded_mm_uuids(
