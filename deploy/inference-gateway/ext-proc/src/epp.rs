@@ -884,12 +884,9 @@ fn pod_endpoint_address(pod: &k8s_openapi::api::core::v1::Pod) -> Option<String>
 /// An externally supplied [`Endpoint`] rendered the way [`WorkerEndpointIndex`]
 /// stores addresses, so the two can be compared.
 ///
-/// [`Endpoint::address_port`] builds its string with `format!("{ip}:{port}")`,
-/// which leaves an IPv6 literal unbracketed (`fd00::2:8000`), while the index
-/// stores `SocketAddr`-rendered addresses (`[fd00::2]:8000`). Comparing the two
-/// forms directly matches on IPv4 and silently never matches on IPv6, so both
-/// sides go through `SocketAddr` here. Returns `None` for an address or port
-/// that does not parse, which is not a routable endpoint either way.
+/// [`Endpoint::address_port`] and the index both bracket IPv6 addresses. This
+/// helper additionally validates the address and port before comparing an
+/// externally supplied endpoint with the index.
 fn indexed_endpoint_address(endpoint: &Endpoint) -> Option<String> {
     let ip: IpAddr = endpoint.address.parse().ok()?;
     let port: u16 = endpoint.port.parse().ok()?;
@@ -1585,6 +1582,9 @@ impl EndpointPicker for Router {
             endpoint,
             fallbacks: vec![],
             headers,
+            // TODO(epp-prefill-endpoint): #13407 will resolve the selected prefill
+            // worker to a callable endpoint for authoritative sidecar injection.
+            selected_prefill_endpoint: None,
             token_ids,
             reservation_id: Some(reservation_id),
         })
@@ -2488,12 +2488,10 @@ mod tests {
         );
     }
 
-    /// `Endpoint::address_port` does not bracket IPv6, while the index stores
-    /// `SocketAddr`-rendered addresses. Comparing the raw forms matches on
-    /// IPv4 and silently never matches on IPv6, so the normalization has to
-    /// agree with what the index stores.
+    /// External endpoints and indexed pod endpoints must use the same
+    /// bracketed IPv6 representation.
     #[test]
-    fn indexed_endpoint_address_brackets_ipv6_to_match_the_index() {
+    fn indexed_endpoint_address_matches_endpoint_and_index_for_ipv6() {
         let endpoint = Endpoint {
             pod_name: "worker-0".to_string(),
             address: "fd00::2".to_string(),
@@ -2505,10 +2503,10 @@ mod tests {
             indexed_endpoint_address(&endpoint).as_deref(),
             Some("[fd00::2]:8000")
         );
-        assert_ne!(
+        assert_eq!(
             endpoint.address_port(),
             "[fd00::2]:8000",
-            "guards the reason this helper exists: the raw form is unbracketed"
+            "the public endpoint formatter must bracket IPv6"
         );
 
         let mut index = WorkerEndpointIndex::default();

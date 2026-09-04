@@ -66,6 +66,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         git-lfs \
         # compliance audit bootstraps syft over HTTPS
         curl \
+        # lets Dynamo processes opt into jemalloc via
+        # LD_PRELOAD or DYN_FRONTEND_JEMALLOC; not preloaded by default
+        libjemalloc2 \
         # Python runtime - required for virtual environment to work
         python${PYTHON_VERSION}-dev \
     && apt-get clean \
