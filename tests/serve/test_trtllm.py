@@ -50,6 +50,9 @@ class TRTLLMConfig(EngineConfig):
 trtllm_dir = os.environ.get("TRTLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/trtllm"
 )
+trtllm_test_engine_config_dir = os.path.join(
+    SERVE_TEST_DIR, "trtllm/engine_configs/qwen3"
+)
 
 # Evaluated once at collection: NVDEC needs the container's driver "video"
 # capability, which CI runners do not grant.
@@ -106,6 +109,43 @@ trtllm_configs = {
             ),
             completion_payload_default(),
             metric_payload_default(min_num_requests=6, backend="trtllm"),
+        ],
+    ),
+    "aggregated_spec_decoding": TRTLLMConfig(
+        name="aggregated_spec_decoding",
+        directory=trtllm_dir,
+        script_name="agg_metrics.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.trtllm,
+            # NGram uses no second model. This provisional value follows the
+            # 3.9 GiB aggregate baseline and must be replaced after profiling.
+            pytest.mark.profiled_vram_gib(4.0),
+            pytest.mark.requested_trtllm_kv_tokens(2592),
+            pytest.mark.timeout(650),
+        ],
+        model="Qwen/Qwen3-0.6B",
+        frontend_port=DefaultPort.FRONTEND.value,
+        delayed_start=5,
+        env={
+            "AGG_ENGINE_ARGS": os.path.join(
+                trtllm_test_engine_config_dir, "agg_ngram.yaml"
+            )
+        },
+        request_payloads=[
+            completion_payload(
+                prompt=("Paris is the capital of France. " "Paris is the capital of"),
+                repeat_count=3,
+                expected_response=[],
+                max_tokens=32,
+                temperature=0.0,
+            ),
+            metric_payload_default(
+                min_num_requests=3,
+                backend="trtllm",
+                min_spec_decode_draft_tokens=1,
+            ),
         ],
     ),
     "disaggregated": TRTLLMConfig(
