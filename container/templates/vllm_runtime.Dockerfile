@@ -180,6 +180,11 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
    Dynamo already owns there (see the /usr/local/bin/python link above). xpu and cpu
    run out of ${VIRTUAL_ENV} and prepend ${VIRTUAL_ENV}/bin to PATH. #}
 {% set vllm_rs_link = "/usr/local/bin/vllm-rs" if device == "cuda" else "${VIRTUAL_ENV}/bin/vllm-rs" %}
+{# Only cuda makes a missing vllm-rs fatal; see the comment above the link step
+   below for why. Rendered as an inline expression rather than a block tag because
+   container/render.py leaves trim_blocks off, so a block tag on its own line
+   inside the RUN would emit a blank line and break the backslash continuation. #}
+{% set vllm_rs_required = "1" if device == "cuda" else "0" %}
 
 # The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
 # requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
@@ -514,12 +519,23 @@ PY
 # it sees the final installed vllm. The existence check and the `--help` call
 # share this layer, so a base image that stops shipping the binary fails the
 # build here instead of producing an image whose launch scripts die at startup.
+# A missing binary is fatal on cuda only: cuda is the variant this repository
+# builds on every pull request, so it is the only base whose vllm-rs is proven
+# before merge, whereas xpu and cpu start from separately built upstream vLLM
+# distributions (see container/context.yaml) that no pre-merge job here builds
+# and whose contents have not been verified to carry it -- so on those the link
+# is opportunistic and its absence only warns.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
-    [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ] \
-      || { echo "ERROR: installed vllm package (${pkg}) ships no executable vllm-rs" >&2; exit 1; }; \
-    ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
-    vllm-rs --help >/dev/null
+    if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
+        ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
+        vllm-rs --help >/dev/null; \
+    elif [ "{{ vllm_rs_required }}" = "1" ]; then \
+        echo "ERROR: installed vllm package (${pkg}) ships no executable vllm-rs" >&2; \
+        exit 1; \
+    else \
+        echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not linking it onto PATH" >&2; \
+    fi
 
 USER dynamo
 
