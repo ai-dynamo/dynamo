@@ -719,9 +719,7 @@ async fn run_source(
             }
         };
         if cancel.is_cancelled() {
-            group_pool
-                .unregister(registration, publisher_id, task_generation)
-                .await;
+            registration.close().await;
             return;
         }
         retry_delay = INITIAL_BACKOFF;
@@ -759,9 +757,7 @@ async fn run_source(
             _ = registration.disconnected.cancelled() => ActivationOutcome::Disconnected,
         };
         if !matches!(activation_outcome, ActivationOutcome::Activated) {
-            group_pool
-                .unregister(registration, publisher_id, task_generation)
-                .await;
+            registration.close().await;
             if matches!(activation_outcome, ActivationOutcome::Cancelled) {
                 return;
             }
@@ -790,9 +786,7 @@ async fn run_source(
             _ = registration.disconnected.cancelled() => false,
             _ = consume_connection(publisher_id, &mut registration.receiver, &client, &metrics) => false,
         };
-        group_pool
-            .unregister(registration, publisher_id, task_generation)
-            .await;
+        registration.close().await;
         if cancelled {
             return;
         }

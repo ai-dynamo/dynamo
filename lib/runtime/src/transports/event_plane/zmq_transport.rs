@@ -19,10 +19,7 @@ use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use std::{
-    collections::HashSet,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 use tmq::{
     AsZmqSocket, Context, Message, Multipart, SocketBuilder,
@@ -294,15 +291,9 @@ pub type ZmqWireStream =
 pub struct DynamicZmqSubSocket {
     socket: Subscribe,
     expected_topic: Vec<u8>,
-    endpoints: HashSet<String>,
 }
 
 impl DynamicZmqSubSocket {
-    /// Connect a new SUB socket to its first publisher endpoint.
-    pub fn connect(endpoint: &str, topic: &str) -> Result<Self> {
-        Self::connect_with_rcvhwm(endpoint, topic, ZMQ_RCVHWM)
-    }
-
     /// Connect a new SUB socket with an explicit receive high-water mark.
     pub fn connect_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Self> {
         let socket = ZmqSubTransport::connect_socket_with_rcvhwm(endpoint, topic, rcvhwm)?;
@@ -310,27 +301,18 @@ impl DynamicZmqSubSocket {
         Ok(Self {
             socket,
             expected_topic: topic.as_bytes().to_vec(),
-            endpoints: HashSet::from([endpoint.to_string()]),
         })
     }
 
     /// Connect this SUB socket to one more publisher endpoint.
     pub fn add_endpoint(&mut self, endpoint: &str) -> Result<()> {
-        if self.endpoints.contains(endpoint) {
-            return Ok(());
-        }
         self.socket.get_socket().connect(endpoint)?;
-        self.endpoints.insert(endpoint.to_string());
         Ok(())
     }
 
     /// Stop receiving from one publisher endpoint.
     pub fn remove_endpoint(&mut self, endpoint: &str) -> Result<()> {
-        if !self.endpoints.contains(endpoint) {
-            return Ok(());
-        }
         self.socket.get_socket().disconnect(endpoint)?;
-        self.endpoints.remove(endpoint);
         Ok(())
     }
 
@@ -342,23 +324,12 @@ impl DynamicZmqSubSocket {
                 Err(error) => return Some(Err(error.into())),
             };
             match decode_multipart(frames, &self.expected_topic) {
-                Ok(message) => {
-                    return Some(Ok(ZmqWireMessage {
-                        publisher_id: message.publisher_id,
-                        sequence: message.sequence,
-                        payload: message.payload,
-                    }));
-                }
+                Ok(message) => return Some(Ok(message)),
                 Err(error) => {
                     tracing::warn!(%error, "Dropping malformed dynamic ZMQ message");
                 }
             }
         }
-    }
-
-    /// Number of publisher endpoints connected to this SUB socket.
-    pub fn endpoint_count(&self) -> usize {
-        self.endpoints.len()
     }
 }
 
@@ -566,11 +537,7 @@ impl ZmqSubTransport {
                 };
 
                 match decode_multipart(frames, &expected_topic) {
-                    Ok(message) => yield Ok(ZmqWireMessage {
-                        publisher_id: message.publisher_id,
-                        sequence: message.sequence,
-                        payload: message.payload,
-                    }),
+                    Ok(message) => yield Ok(message),
                     Err(error) => {
                         tracing::warn!(%error, "Dropping malformed ZMQ message");
                     }
@@ -663,13 +630,7 @@ impl ZmqSubTransport {
     }
 }
 
-struct DecodedZmqMessage {
-    publisher_id: u64,
-    sequence: u64,
-    payload: Bytes,
-}
-
-fn decode_multipart(mut frames: Multipart, expected_topic: &[u8]) -> Result<DecodedZmqMessage> {
+fn decode_multipart(mut frames: Multipart, expected_topic: &[u8]) -> Result<ZmqWireMessage> {
     if frames.len() != 4 {
         anyhow::bail!("unexpected ZMQ multipart frame count: {}", frames.len());
     }
@@ -702,7 +663,7 @@ fn decode_multipart(mut frames: Multipart, expected_topic: &[u8]) -> Result<Deco
     let frame_bytes = Bytes::from_owner(ZmqMessageOwner(frame_message));
     let frame = Frame::decode(frame_bytes)?;
 
-    Ok(DecodedZmqMessage {
+    Ok(ZmqWireMessage {
         publisher_id,
         sequence,
         payload: frame.payload,
@@ -746,6 +707,7 @@ impl EventTransportRx for ZmqSubTransport {
 mod tests {
     use super::*;
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
+    use std::collections::HashSet;
     use tokio::time::{Duration, timeout};
 
     #[test]
@@ -801,6 +763,44 @@ mod tests {
             .send(Multipart::from(frames))
             .await
             .unwrap();
+    }
+
+    fn encoded_event(topic: &str, publisher_id: u64, sequence: u64) -> Bytes {
+        MsgpackCodec
+            .encode_envelope(&EventEnvelope {
+                publisher_id,
+                sequence,
+                published_at: sequence,
+                topic: topic.to_string(),
+                payload: Bytes::from_static(b"payload"),
+            })
+            .unwrap()
+    }
+
+    async fn receive_publishers(
+        subscriber: &mut DynamicZmqSubSocket,
+        topic: &str,
+        sequence: u64,
+        expected: usize,
+        publications: &[(&ZmqPubTransport, &Bytes)],
+    ) -> HashSet<u64> {
+        timeout(Duration::from_secs(2), async {
+            let mut seen = HashSet::new();
+            while seen.len() < expected {
+                for (publisher, payload) in publications {
+                    publisher.publish(topic, (*payload).clone()).await.unwrap();
+                }
+                if let Ok(Some(Ok(message))) =
+                    timeout(Duration::from_millis(25), subscriber.next()).await
+                    && message.sequence == sequence
+                {
+                    seen.insert(message.publisher_id);
+                }
+            }
+            seen
+        })
+        .await
+        .expect("dynamic subscriber should receive expected publishers")
     }
 
     #[test]
@@ -1044,101 +1044,54 @@ mod tests {
         let topic = "dynamic-subscriber";
         let (publisher_a, _) = ZmqPubTransport::bind(&endpoint_a, topic).await.unwrap();
         let (publisher_b, _) = ZmqPubTransport::bind(&endpoint_b, topic).await.unwrap();
-        let mut subscriber = DynamicZmqSubSocket::connect(&endpoint_a, topic).unwrap();
+        let mut subscriber =
+            DynamicZmqSubSocket::connect_with_rcvhwm(&endpoint_a, topic, ZMQ_RCVHWM).unwrap();
         subscriber.add_endpoint(&endpoint_b).unwrap();
-        assert_eq!(subscriber.endpoint_count(), 2);
 
-        let codec = MsgpackCodec;
-        let envelope_a = EventEnvelope {
-            publisher_id: 101,
-            sequence: 1,
-            published_at: 1,
-            topic: topic.to_string(),
-            payload: Bytes::from_static(b"a"),
-        };
-        let envelope_b = EventEnvelope {
-            publisher_id: 202,
-            sequence: 1,
-            published_at: 1,
-            topic: topic.to_string(),
-            payload: Bytes::from_static(b"b"),
-        };
-        let encoded_a = codec.encode_envelope(&envelope_a).unwrap();
-        let encoded_b = codec.encode_envelope(&envelope_b).unwrap();
-
-        let seen = timeout(Duration::from_secs(2), async {
-            let mut seen = HashSet::new();
-            while seen.len() < 2 {
-                publisher_a.publish(topic, encoded_a.clone()).await.unwrap();
-                publisher_b.publish(topic, encoded_b.clone()).await.unwrap();
-                if let Ok(Some(Ok(message))) =
-                    timeout(Duration::from_millis(25), subscriber.next()).await
-                {
-                    seen.insert(message.publisher_id);
-                }
-            }
-            seen
-        })
-        .await
-        .expect("dynamic SUB socket should receive from both publishers");
+        let encoded_a = encoded_event(topic, 101, 1);
+        let encoded_b = encoded_event(topic, 202, 1);
+        let seen = receive_publishers(
+            &mut subscriber,
+            topic,
+            1,
+            2,
+            &[(&publisher_a, &encoded_a), (&publisher_b, &encoded_b)],
+        )
+        .await;
         assert_eq!(seen, HashSet::from([101, 202]));
 
         subscriber.remove_endpoint(&endpoint_a).unwrap();
-        assert_eq!(subscriber.endpoint_count(), 1);
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let envelope_a_after_removal = EventEnvelope {
-            sequence: 2,
-            ..envelope_a
-        };
-        let envelope_b_after_removal = EventEnvelope {
-            sequence: 2,
-            ..envelope_b
-        };
-        let encoded_a_after_removal = codec.encode_envelope(&envelope_a_after_removal).unwrap();
-        let encoded_b_after_removal = codec.encode_envelope(&envelope_b_after_removal).unwrap();
-        timeout(Duration::from_secs(2), async {
+        let encoded_a_after_removal = encoded_event(topic, 101, 2);
+        let encoded_b_after_removal = encoded_event(topic, 202, 2);
+        let publications = [
+            (&publisher_a, &encoded_a_after_removal),
+            (&publisher_b, &encoded_b_after_removal),
+        ];
+        assert_eq!(
+            receive_publishers(&mut subscriber, topic, 2, 1, &publications).await,
+            HashSet::from([202])
+        );
+
+        let removed_delivery = timeout(Duration::from_millis(250), async {
             loop {
                 publisher_a
                     .publish(topic, encoded_a_after_removal.clone())
                     .await
                     .unwrap();
-                publisher_b
-                    .publish(topic, encoded_b_after_removal.clone())
-                    .await
-                    .unwrap();
-                if let Ok(Some(Ok(message))) =
-                    timeout(Duration::from_millis(25), subscriber.next()).await
+                if let Some(Ok(message)) = subscriber.next().await
+                    && message.publisher_id == 101
                     && message.sequence == 2
                 {
-                    assert_ne!(
-                        message.publisher_id, 101,
-                        "removed publisher must not deliver new messages"
-                    );
-                    if message.publisher_id == 202 {
-                        break;
-                    }
+                    return;
                 }
             }
         })
-        .await
-        .expect("remaining publisher should continue after endpoint removal");
-
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
-        while tokio::time::Instant::now() < deadline {
-            publisher_a
-                .publish(topic, encoded_a_after_removal.clone())
-                .await
-                .unwrap();
-            if let Ok(Some(Ok(message))) =
-                timeout(Duration::from_millis(10), subscriber.next()).await
-                && message.sequence == 2
-            {
-                assert_ne!(
-                    message.publisher_id, 101,
-                    "removed publisher must remain disconnected"
-                );
-            }
-        }
+        .await;
+        assert!(
+            removed_delivery.is_err(),
+            "removed publisher delivered data"
+        );
     }
 
     #[tokio::test]

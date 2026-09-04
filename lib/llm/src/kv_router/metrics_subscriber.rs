@@ -11,14 +11,13 @@ use std::{
 use anyhow::Result;
 use dynamo_kv_router::protocols::{ActiveLoad, WorkerWithDpRank};
 use dynamo_runtime::{
-    DistributedRuntime,
     component::{Component, Endpoint},
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
     transports::event_plane::{Codec, EventSubscriber, TypedEventSubscriber, uses_direct_zmq},
 };
 use parking_lot::Mutex;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::KV_METRICS_SUBJECT;
@@ -41,7 +40,6 @@ enum KvMetricsSubscriberInner {
 struct DirectKvMetricsSubscriber {
     receiver: ActiveLoadReceiver,
     cancellation_token: CancellationToken,
-    _supervisor: JoinHandle<()>,
 }
 
 struct PendingActiveLoads {
@@ -185,28 +183,18 @@ impl Drop for DirectKvMetricsSubscriber {
 
 impl KvMetricsSubscriber {
     pub(crate) async fn for_endpoint(endpoint: &Endpoint) -> Result<Self> {
-        Self::new(
-            endpoint.component(),
-            endpoint.drt(),
-            endpoint.id(),
-            Some(endpoint),
-        )
-        .await
+        Self::new(endpoint.component(), endpoint.id()).await
     }
 
     pub(crate) async fn for_endpoint_id(
         component: &Component,
         endpoint: &EndpointId,
     ) -> Result<Self> {
-        Self::new(component, component.drt(), endpoint.clone(), None).await
+        Self::new(component, endpoint.clone()).await
     }
 
-    async fn new(
-        component: &Component,
-        drt: &DistributedRuntime,
-        endpoint_id: EndpointId,
-        endpoint: Option<&Endpoint>,
-    ) -> Result<Self> {
+    async fn new(component: &Component, endpoint_id: EndpointId) -> Result<Self> {
+        let drt = component.drt();
         if uses_direct_zmq(drt.default_event_transport_kind()) {
             return Ok(Self {
                 inner: KvMetricsSubscriberInner::Direct(
@@ -215,10 +203,8 @@ impl KvMetricsSubscriber {
             });
         }
 
-        let subscriber = match endpoint {
-            Some(endpoint) => EventSubscriber::for_endpoint(endpoint, KV_METRICS_SUBJECT).await?,
-            None => EventSubscriber::for_endpoint_id(drt, &endpoint_id, KV_METRICS_SUBJECT).await?,
-        };
+        let subscriber =
+            EventSubscriber::for_endpoint_id(drt, &endpoint_id, KV_METRICS_SUBJECT).await?;
         Ok(Self {
             inner: KvMetricsSubscriberInner::Standard(subscriber.typed::<ActiveLoad>()),
         })
@@ -264,11 +250,11 @@ impl DirectKvMetricsSubscriber {
             |_| {},
         )
         .await?;
+        drop(supervisor);
 
         Ok(Self {
             receiver,
             cancellation_token,
-            _supervisor: supervisor,
         })
     }
 }
@@ -301,12 +287,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn direct_metrics_mailbox_uses_fixed_distinct_key_limit() {
-        let (sender, _receiver) = active_load_mailbox();
-        assert_eq!(sender.pending.lock().capacity, MAX_PENDING_ACTIVE_LOADS);
-    }
-
     #[tokio::test]
     async fn direct_metrics_mailbox_merges_partial_updates_in_key_order() {
         let (sender, mut receiver) = active_load_mailbox_with_capacity(4);
@@ -332,6 +312,12 @@ mod tests {
 
     #[tokio::test]
     async fn direct_metrics_mailbox_bounds_distinct_keys_and_drains_on_close() {
+        let (default_sender, _receiver) = active_load_mailbox();
+        assert_eq!(
+            default_sender.pending.lock().capacity,
+            MAX_PENDING_ACTIVE_LOADS
+        );
+
         let (sender, mut receiver) = active_load_mailbox_with_capacity(1);
 
         sender.send(load(1, 0, Some(7), None, None)).unwrap();

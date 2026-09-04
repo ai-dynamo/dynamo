@@ -443,9 +443,7 @@ where
             &cancel,
         )
         .await;
-        group_pool
-            .unregister(registration, publisher_id, generation)
-            .await;
+        registration.close().await;
         if !keep_running {
             break;
         }

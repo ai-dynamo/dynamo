@@ -116,11 +116,12 @@ pub(crate) struct DirectZmqSubPool {
 
 pub(crate) struct DirectZmqSubRegistration {
     pub(crate) group_id: u64,
-    // The receiver must close before the lease queues endpoint removal. This
-    // also wakes a socket group that is waiting for publisher-lane capacity.
     pub(crate) receiver: mpsc::Receiver<DirectZmqSubItem>,
     pub(crate) disconnected: CancellationToken,
-    lease: RegistrationLease,
+    pool: DirectZmqSubPool,
+    publisher_id: u64,
+    generation: u64,
+    armed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,39 +131,29 @@ enum DispatchOutcome {
     GroupCancelled,
 }
 
-struct RegistrationLease {
-    pool: DirectZmqSubPool,
-    group_id: u64,
-    publisher_id: u64,
-    generation: u64,
-    armed: bool,
-}
-
-impl RegistrationLease {
-    fn new(pool: DirectZmqSubPool, group_id: u64, publisher_id: u64, generation: u64) -> Self {
-        Self {
-            pool,
-            group_id,
-            publisher_id,
-            generation,
-            armed: true,
+impl DirectZmqSubRegistration {
+    fn release(&mut self) -> Option<SocketGroup> {
+        if !self.armed {
+            return None;
         }
-    }
-
-    fn remove(mut self) -> Option<SocketGroup> {
+        // Wake a group task that may be waiting for this publisher before
+        // queuing the ordered endpoint removal.
+        self.receiver.close();
         self.armed = false;
         self.pool
             .remove_registration(self.group_id, self.publisher_id, self.generation)
     }
+
+    pub(crate) async fn close(mut self) {
+        if let Some(group) = self.release() {
+            stop_group(group).await;
+        }
+    }
 }
 
-impl Drop for RegistrationLease {
+impl Drop for DirectZmqSubRegistration {
     fn drop(&mut self) {
-        if self.armed
-            && let Some(group) =
-                self.pool
-                    .remove_registration(self.group_id, self.publisher_id, self.generation)
-        {
+        if let Some(group) = self.release() {
             tokio::spawn(stop_group(group));
         }
     }
@@ -196,17 +187,9 @@ impl DirectZmqSubPool {
         endpoint: &str,
         generation: u64,
     ) -> Result<DirectZmqSubRegistration> {
-        enum RegistrationStart {
-            Pending {
-                registration: DirectZmqSubRegistration,
-                completion: oneshot::Receiver<Result<()>>,
-            },
-            Ready(DirectZmqSubRegistration),
-        }
-
         let (sender, receiver) = mpsc::channel(self.rcvhwm as usize);
         let disconnected = CancellationToken::new();
-        let start = {
+        let (group_id, completion) = {
             let mut inner = self.inner.lock();
             Self::reap_failed_groups(&mut inner);
             anyhow::ensure!(!inner.closed, "direct-ZMQ socket pool is closed");
@@ -250,20 +233,7 @@ impl DirectZmqSubPool {
                     group.assignments.remove(&publisher_id);
                     anyhow::bail!("direct-ZMQ socket group stopped");
                 }
-                RegistrationStart::Pending {
-                    registration: DirectZmqSubRegistration {
-                        group_id,
-                        receiver,
-                        disconnected,
-                        lease: RegistrationLease::new(
-                            self.clone(),
-                            group_id,
-                            publisher_id,
-                            generation,
-                        ),
-                    },
-                    completion,
-                }
+                (group_id, Some(completion))
             } else {
                 // libzmq connects asynchronously. Keep group creation serialized so
                 // concurrent registrations cannot create excess transient sockets.
@@ -299,23 +269,22 @@ impl DirectZmqSubPool {
                         handle,
                     },
                 );
-                RegistrationStart::Ready(DirectZmqSubRegistration {
-                    group_id,
-                    receiver,
-                    disconnected,
-                    lease: RegistrationLease::new(self.clone(), group_id, publisher_id, generation),
-                })
+                (group_id, None)
             }
         };
-
-        let (registration, completion) = match start {
-            RegistrationStart::Pending {
-                registration,
-                completion,
-            } => (registration, completion),
-            RegistrationStart::Ready(registration) => return Ok(registration),
+        let registration = DirectZmqSubRegistration {
+            pool: self.clone(),
+            group_id,
+            publisher_id,
+            generation,
+            receiver,
+            disconnected,
+            armed: true,
         };
 
+        let Some(completion) = completion else {
+            return Ok(registration);
+        };
         completion
             .await
             .map_err(|_| anyhow::anyhow!("direct-ZMQ socket group stopped"))??;
@@ -330,31 +299,6 @@ impl DirectZmqSubPool {
         };
         anyhow::ensure!(valid, "direct-ZMQ socket group stopped");
         Ok(registration)
-    }
-
-    pub(crate) async fn unregister(
-        &self,
-        registration: DirectZmqSubRegistration,
-        publisher_id: u64,
-        generation: u64,
-    ) {
-        let DirectZmqSubRegistration {
-            receiver,
-            disconnected: _,
-            lease,
-            group_id: _,
-        } = registration;
-        // Wake a group task that may be waiting to send to this publisher before
-        // queuing the ordered socket removal below.
-        drop(receiver);
-
-        debug_assert_eq!(lease.publisher_id, publisher_id);
-        debug_assert_eq!(lease.generation, generation);
-        let group_to_stop = lease.remove();
-
-        if let Some(group) = group_to_stop {
-            stop_group(group).await;
-        }
     }
 
     fn remove_registration(
@@ -688,6 +632,20 @@ mod tests {
         DirectZmqSubPool::new(topic, endpoints_per_sub, rcvhwm, CancellationToken::new()).unwrap()
     }
 
+    fn endpoint(publisher_id: u64) -> String {
+        format!("tcp://127.0.0.1:{}", 31_000 + publisher_id)
+    }
+
+    async fn register(
+        pool: &DirectZmqSubPool,
+        publisher_id: u64,
+        generation: u64,
+    ) -> DirectZmqSubRegistration {
+        pool.register(publisher_id, &endpoint(publisher_id), generation)
+            .await
+            .unwrap()
+    }
+
     fn wire_message(topic: &str, publisher_id: u64, sequence: u64) -> ZmqWireMessage {
         let payload = Codec::default()
             .encode_envelope_parts(publisher_id, sequence, 1, topic, b"payload")
@@ -706,12 +664,14 @@ mod tests {
         }
     }
 
-    fn dispatch_on_group(
+    fn dispatch(
         pool: &DirectZmqSubPool,
         group_id: u64,
-        message: ZmqWireMessage,
+        publisher_id: u64,
+        sequence: u64,
     ) -> oneshot::Receiver<DispatchOutcome> {
         let (completed, completion) = oneshot::channel();
+        let message = wire_message(&pool.topic, publisher_id, sequence);
         pool.inner
             .lock()
             .groups
@@ -723,20 +683,63 @@ mod tests {
         completion
     }
 
+    async fn delivered(pool: &DirectZmqSubPool, group_id: u64, publisher_id: u64, sequence: u64) {
+        assert_eq!(
+            dispatch(pool, group_id, publisher_id, sequence)
+                .await
+                .unwrap(),
+            DispatchOutcome::Delivered
+        );
+    }
+
+    async fn pause_group(pool: &DirectZmqSubPool, group_id: u64) -> oneshot::Sender<()> {
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        pool.inner
+            .lock()
+            .groups
+            .get(&group_id)
+            .unwrap()
+            .command_tx
+            .send(GroupCommand::Pause {
+                started: started_tx,
+                release: release_rx,
+            })
+            .unwrap();
+        started_rx.await.unwrap();
+        release_tx
+    }
+
+    async fn wait_for_assignment(pool: &DirectZmqSubPool, group_id: u64, publisher_id: u64) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !pool
+                .inner
+                .lock()
+                .groups
+                .get(&group_id)
+                .unwrap()
+                .assignments
+                .contains_key(&publisher_id)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("registration should reserve a group slot");
+    }
+
     #[test]
     fn parses_endpoints_per_sub_configuration() {
-        assert_eq!(
-            endpoints_per_sub_from_lookup(config_lookup(None)).unwrap(),
-            DEFAULT_ENDPOINTS_PER_SUB
-        );
-        assert_eq!(
-            endpoints_per_sub_from_lookup(config_lookup(Some("1"))).unwrap(),
-            1
-        );
-        assert_eq!(
-            endpoints_per_sub_from_lookup(config_lookup(Some("128"))).unwrap(),
-            128
-        );
+        for (value, expected) in [
+            (None, DEFAULT_ENDPOINTS_PER_SUB),
+            (Some("1"), 1),
+            (Some("128"), 128),
+        ] {
+            assert_eq!(
+                endpoints_per_sub_from_lookup(config_lookup(value)).unwrap(),
+                expected
+            );
+        }
         for invalid in ["", "0", "-1", "not-a-number"] {
             assert!(endpoints_per_sub_from_lookup(config_lookup(Some(invalid))).is_err());
         }
@@ -747,12 +750,7 @@ mod tests {
         let pool = pool("kv-events", 64, 128);
         let registrations = futures::future::join_all((1..=129).map(|publisher_id| {
             let pool = pool.clone();
-            async move {
-                let endpoint = format!("tcp://127.0.0.1:{}", 30_000 + publisher_id);
-                pool.register(publisher_id, &endpoint, publisher_id)
-                    .await
-                    .unwrap()
-            }
+            async move { register(&pool, publisher_id, publisher_id).await }
         }))
         .await;
 
@@ -779,25 +777,18 @@ mod tests {
     #[tokio::test]
     async fn full_lane_backpressures_and_preserves_order() {
         let pool = pool("kv_metrics", 64, 1);
-        let mut source = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
-        let mut sibling = pool.register(2, "tcp://127.0.0.1:31002", 1).await.unwrap();
+        let mut source = register(&pool, 1, 1).await;
+        let mut sibling = register(&pool, 2, 1).await;
         assert_eq!(source.group_id, sibling.group_id);
 
-        assert_eq!(
-            dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 1, 0),)
-                .await
-                .unwrap(),
-            DispatchOutcome::Delivered
-        );
-        let mut blocked =
-            dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 1, 1));
+        delivered(&pool, source.group_id, 1, 0).await;
+        let mut blocked = dispatch(&pool, source.group_id, 1, 1);
         tokio::task::yield_now().await;
         assert!(matches!(
             blocked.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
-        let mut sibling_blocked =
-            dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 2, 0));
+        let mut sibling_blocked = dispatch(&pool, source.group_id, 2, 0);
         tokio::task::yield_now().await;
         assert!(matches!(
             sibling_blocked.try_recv(),
@@ -815,61 +806,42 @@ mod tests {
     #[tokio::test]
     async fn remove_then_add_stays_ordered_while_a_sibling_lane_is_blocked() {
         let pool = pool("kv_metrics", 64, 1);
-        let mut blocked_source = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
-        let old = pool.register(2, "tcp://127.0.0.1:31002", 1).await.unwrap();
+        let mut blocked_source = register(&pool, 1, 1).await;
+        let old = register(&pool, 2, 1).await;
         let group_id = blocked_source.group_id;
 
-        assert_eq!(
-            dispatch_on_group(&pool, group_id, wire_message("kv_metrics", 1, 0))
-                .await
-                .unwrap(),
-            DispatchOutcome::Delivered
-        );
-        let blocked = dispatch_on_group(&pool, group_id, wire_message("kv_metrics", 1, 1));
+        delivered(&pool, group_id, 1, 0).await;
+        let blocked = dispatch(&pool, group_id, 1, 1);
         tokio::task::yield_now().await;
 
         drop(old);
         let replacement_pool = pool.clone();
-        let replacement = tokio::spawn(async move {
-            replacement_pool
-                .register(2, "tcp://127.0.0.1:31002", 2)
-                .await
-        });
+        let replacement = tokio::spawn(async move { register(&replacement_pool, 2, 2).await });
         tokio::task::yield_now().await;
         assert!(!replacement.is_finished());
 
         assert_eq!(sequence(blocked_source.receiver.recv().await.unwrap()), 0);
         assert_eq!(blocked.await.unwrap(), DispatchOutcome::Delivered);
-        let mut replacement = replacement.await.unwrap().unwrap();
+        let mut replacement = replacement.await.unwrap();
         assert_eq!(replacement.group_id, group_id);
-        assert_eq!(
-            dispatch_on_group(&pool, group_id, wire_message("kv_metrics", 2, 0))
-                .await
-                .unwrap(),
-            DispatchOutcome::Delivered
-        );
+        delivered(&pool, group_id, 2, 0).await;
         assert_eq!(sequence(replacement.receiver.recv().await.unwrap()), 0);
         pool.shutdown().await;
     }
 
     #[tokio::test]
-    async fn unregister_unblocks_a_full_lane_and_keeps_the_group_alive() {
+    async fn close_unblocks_a_full_lane_and_keeps_the_group_alive() {
         let pool = pool("kv_metrics", 64, 1);
-        let source = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
-        let mut sibling = pool.register(2, "tcp://127.0.0.1:31002", 1).await.unwrap();
+        let source = register(&pool, 1, 1).await;
+        let mut sibling = register(&pool, 2, 1).await;
         let disconnected = source.disconnected.clone();
         assert_eq!(source.group_id, sibling.group_id);
 
-        assert_eq!(
-            dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 1, 0),)
-                .await
-                .unwrap(),
-            DispatchOutcome::Delivered
-        );
-        let blocked = dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 1, 1));
+        delivered(&pool, source.group_id, 1, 0).await;
+        let blocked = dispatch(&pool, source.group_id, 1, 1);
         tokio::task::yield_now().await;
 
-        tokio::time::timeout(Duration::from_secs(1), pool.unregister(source, 1, 1))
+        tokio::time::timeout(Duration::from_secs(1), source.close())
             .await
             .expect("unregister must interrupt a blocked lane send");
         assert_eq!(
@@ -881,12 +853,7 @@ mod tests {
         );
         assert!(disconnected.is_cancelled());
 
-        assert_eq!(
-            dispatch_on_group(&pool, sibling.group_id, wire_message("kv_metrics", 2, 0),)
-                .await
-                .unwrap(),
-            DispatchOutcome::Delivered
-        );
+        delivered(&pool, sibling.group_id, 2, 0).await;
         assert_eq!(sequence(sibling.receiver.recv().await.unwrap()), 0);
         pool.shutdown().await;
     }
@@ -894,16 +861,11 @@ mod tests {
     #[tokio::test]
     async fn shutdown_interrupts_a_blocked_lane_send() {
         let pool = pool("kv_metrics", 64, 1);
-        let source = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
+        let source = register(&pool, 1, 1).await;
         let disconnected = source.disconnected.clone();
 
-        assert_eq!(
-            dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 1, 0),)
-                .await
-                .unwrap(),
-            DispatchOutcome::Delivered
-        );
-        let blocked = dispatch_on_group(&pool, source.group_id, wire_message("kv_metrics", 1, 1));
+        delivered(&pool, source.group_id, 1, 0).await;
+        let blocked = dispatch(&pool, source.group_id, 1, 1);
         tokio::task::yield_now().await;
 
         tokio::time::timeout(Duration::from_secs(1), pool.shutdown())
@@ -964,9 +926,9 @@ mod tests {
     #[tokio::test]
     async fn failed_group_is_replaced_without_affecting_other_groups() {
         let pool = pool("kv_metrics", 2, 128);
-        let first = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
-        let second = pool.register(2, "tcp://127.0.0.1:31002", 1).await.unwrap();
-        let mut unaffected = pool.register(3, "tcp://127.0.0.1:31003", 1).await.unwrap();
+        let first = register(&pool, 1, 1).await;
+        let second = register(&pool, 2, 1).await;
+        let mut unaffected = register(&pool, 3, 1).await;
         assert_eq!(first.group_id, second.group_id);
         assert_ne!(first.group_id, unaffected.group_id);
         {
@@ -980,15 +942,10 @@ mod tests {
             .await
             .expect("failed group must disconnect all its publishers");
         assert!(!unaffected.disconnected.is_cancelled());
-        assert_eq!(
-            dispatch_on_group(&pool, unaffected.group_id, wire_message("kv_metrics", 3, 0),)
-                .await
-                .unwrap(),
-            DispatchOutcome::Delivered
-        );
+        delivered(&pool, unaffected.group_id, 3, 0).await;
         assert_eq!(sequence(unaffected.receiver.recv().await.unwrap()), 0);
 
-        let replacement = pool.register(1, "tcp://127.0.0.1:31001", 2).await.unwrap();
+        let replacement = register(&pool, 1, 2).await;
         assert_ne!(first.group_id, replacement.group_id);
         {
             let inner = pool.inner.lock();
@@ -1000,77 +957,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn removing_last_publisher_stops_group_and_shutdown_closes_pool() {
+    async fn registrations_clean_up_on_close_and_drop() {
         let pool = pool("kv-events", 64, 128);
-        let registration = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
+        let registration = register(&pool, 1, 1).await;
         let disconnected = registration.disconnected.clone();
 
-        pool.unregister(registration, 1, 1).await;
+        registration.close().await;
         assert!(disconnected.is_cancelled());
         assert_eq!(pool.group_count(), 0);
 
-        pool.shutdown().await;
-        assert!(pool.register(2, "tcp://127.0.0.1:31002", 2).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn dropping_an_active_registration_removes_its_assignment() {
-        let pool = pool("kv-events", 64, 128);
-        let registration = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
+        let registration = register(&pool, 1, 2).await;
         let disconnected = registration.disconnected.clone();
-
         drop(registration);
-
         assert_eq!(pool.group_count(), 0);
         tokio::time::timeout(Duration::from_secs(1), disconnected.cancelled())
             .await
             .expect("registration drop must stop its final socket group");
-        let replacement = pool.register(1, "tcp://127.0.0.1:31001", 2).await.unwrap();
+
+        let replacement = register(&pool, 1, 3).await;
         assert_eq!(pool.group_count(), 1);
         drop(replacement);
         pool.shutdown().await;
+        assert!(pool.register(2, "tcp://127.0.0.1:31002", 1).await.is_err());
     }
 
     #[tokio::test]
     async fn cancelled_registration_rolls_back_and_can_register_again() {
         let pool = pool("kv-events", 64, 128);
-        let first = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
-        let (started_tx, started_rx) = oneshot::channel();
-        let (release_tx, release_rx) = oneshot::channel();
-        pool.inner
-            .lock()
-            .groups
-            .get(&first.group_id)
-            .unwrap()
-            .command_tx
-            .send(GroupCommand::Pause {
-                started: started_tx,
-                release: release_rx,
-            })
-            .unwrap();
-        started_rx.await.unwrap();
+        let first = register(&pool, 1, 1).await;
+        let release = pause_group(&pool, first.group_id).await;
 
         let pending_pool = pool.clone();
-        let pending =
-            tokio::spawn(async move { pending_pool.register(2, "tcp://127.0.0.1:31002", 1).await });
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if pool
-                    .inner
-                    .lock()
-                    .groups
-                    .get(&first.group_id)
-                    .unwrap()
-                    .assignments
-                    .contains_key(&2)
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("registration should reserve a group slot");
+        let pending = tokio::spawn(async move { register(&pending_pool, 2, 1).await });
+        wait_for_assignment(&pool, first.group_id, 2).await;
         pending.abort();
         match pending.await {
             Err(error) => assert!(error.is_cancelled()),
@@ -1087,8 +1006,8 @@ mod tests {
                 .contains_key(&2)
         );
 
-        release_tx.send(()).unwrap();
-        let replacement = pool.register(2, "tcp://127.0.0.1:31002", 2).await.unwrap();
+        release.send(()).unwrap();
+        let replacement = register(&pool, 2, 2).await;
         assert_eq!(replacement.group_id, first.group_id);
         pool.shutdown().await;
     }
@@ -1096,43 +1015,12 @@ mod tests {
     #[tokio::test]
     async fn shutdown_rejects_an_inflight_registration() {
         let pool = pool("kv-events", 64, 128);
-        let first = pool.register(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
-        let (started_tx, started_rx) = oneshot::channel();
-        let (_release_tx, release_rx) = oneshot::channel();
-        pool.inner
-            .lock()
-            .groups
-            .get(&first.group_id)
-            .unwrap()
-            .command_tx
-            .send(GroupCommand::Pause {
-                started: started_tx,
-                release: release_rx,
-            })
-            .unwrap();
-        started_rx.await.unwrap();
+        let first = register(&pool, 1, 1).await;
+        let _release = pause_group(&pool, first.group_id).await;
 
         let pending_pool = pool.clone();
-        let pending =
-            tokio::spawn(async move { pending_pool.register(2, "tcp://127.0.0.1:31002", 1).await });
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if pool
-                    .inner
-                    .lock()
-                    .groups
-                    .get(&first.group_id)
-                    .unwrap()
-                    .assignments
-                    .contains_key(&2)
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("registration should reserve a group slot");
+        let pending = tokio::spawn(async move { pending_pool.register(2, &endpoint(2), 1).await });
+        wait_for_assignment(&pool, first.group_id, 2).await;
 
         pool.shutdown().await;
         match pending.await {
