@@ -478,8 +478,9 @@ def _mock_get_llm_engine(engine_args, *args, **kwargs):
 @pytest.mark.parametrize(
     ("publish_flags", "expected_iter_perf_stats"),
     [
-        (["--publish-kv-events"], False),
+        (["--publish-kv-events"], True),
         (["--publish-metrics"], True),
+        ([], False),
         (["--publish-kv-events", "--publish-metrics"], True),
         (["--publish-events-and-metrics"], True),
     ],
@@ -488,7 +489,8 @@ def _mock_get_llm_engine(engine_args, *args, **kwargs):
 async def test_init_llm_worker_engine_args_without_overrides(
     monkeypatch, publish_flags, expected_iter_perf_stats
 ):
-    """KV events and metrics control their respective engine paths independently."""
+    """Iteration stats follow either publishing path; the engine-level
+    return_perf_metrics default stays off regardless."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_EXTRA_ENGINE_ARGS", raising=False)

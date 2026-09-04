@@ -380,7 +380,9 @@ def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
     assert pub.fpm_publisher is not None
 
 
-def test_publisher_initialize_metrics_only_does_not_start_kv_events(monkeypatch):
+def test_publisher_initialize_metrics_only_sends_nothing_to_router(monkeypatch):
+    """The metrics thread still starts: it feeds the local Prometheus gauges,
+    not the router."""
     pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
         monkeypatch,
         attention_dp_size=1,
@@ -390,12 +392,16 @@ def test_publisher_initialize_metrics_only_does_not_start_kv_events(monkeypatch)
     )
     pub.initialize()
 
-    fake_fpm_cls.assert_called_once()
+    fake_fpm_cls.assert_not_called()
+    assert pub.metrics_publisher is None
+    assert pub.fpm_publisher is None
     pub._init_publish_metrics_thread.assert_called_once()
     pub._init_publish_kv_cache_events_thread.assert_not_called()
 
 
-def test_publisher_initialize_kv_events_only_does_not_start_metrics(monkeypatch):
+def test_publisher_initialize_kv_events_builds_router_and_planner_publishers(
+    monkeypatch,
+):
     pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
         monkeypatch,
         attention_dp_size=1,
@@ -405,9 +411,26 @@ def test_publisher_initialize_kv_events_only_does_not_start_metrics(monkeypatch)
     )
     pub.initialize()
 
-    fake_fpm_cls.assert_not_called()
-    pub._init_publish_metrics_thread.assert_not_called()
+    fake_fpm_cls.assert_called_once()
+    assert pub.metrics_publisher is not None
+    pub._init_publish_metrics_thread.assert_called_once()
     pub._init_publish_kv_cache_events_thread.assert_called_once()
+
+
+def test_publisher_initialize_without_either_flag_starts_no_threads(monkeypatch):
+    pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
+        monkeypatch,
+        attention_dp_size=1,
+        fpm_enabled=True,
+        publish_kv_events=False,
+        publish_metrics=False,
+    )
+    pub.initialize()
+
+    fake_fpm_cls.assert_not_called()
+    assert pub.metrics_publisher is None
+    pub._init_publish_metrics_thread.assert_not_called()
+    pub._init_publish_kv_cache_events_thread.assert_not_called()
 
 
 def _publisher_for_kv_event_test():
@@ -676,6 +699,100 @@ async def test_polling_loop_backs_off_without_calling_handler_for_empty_drains(
 
 
 @pytest.mark.asyncio
+async def test_stats_polling_retries_after_engine_error(monkeypatch, caplog):
+    """A non-timeout engine error is logged and polling resumes, instead of
+    reaching the request path through the thread's error queue."""
+    monkeypatch.setattr(publisher_mod, "_STATS_RETRY_MIN_SLEEP_SEC", 0.0)
+    monkeypatch.setattr(publisher_mod, "_STATS_RETRY_MAX_SLEEP_SEC", 0.0)
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    pub.engine = MagicMock()
+    pub.metrics_publisher = None
+    pub.component_gauges = MagicMock()
+    pub.metrics_collector = None
+    pub.fpm_publisher = None
+    pub._fpm_schema_checked = False
+    fetches = []
+
+    async def fetch_stats(timeout):
+        fetches.append(timeout)
+        if len(fetches) == 1:
+            raise RuntimeError("engine hiccup")
+        yield _build_fake_stat(attentionDpRank=0)
+        pub._stop_event.set()
+
+    pub.engine.llm.get_stats_async = fetch_stats
+
+    with caplog.at_level(logging.WARNING):
+        assert await pub._publish_stats_task() is True
+
+    assert len(fetches) == 2
+    pub.component_gauges.set_total_blocks.assert_called_once_with("0", 100)
+    assert any("Stats polling failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_stats_polling_propagates_handler_error(monkeypatch, caplog):
+    """A malformed stat is a bug in the handler, not a transient engine fault:
+    it propagates to the thread's error queue instead of being retried, so
+    requests fail rather than the worker serving on with stale metrics."""
+    monkeypatch.setattr(publisher_mod, "_STATS_RETRY_MIN_SLEEP_SEC", 0.0)
+    monkeypatch.setattr(publisher_mod, "_STATS_RETRY_MAX_SLEEP_SEC", 0.0)
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    pub.engine = MagicMock()
+    pub.metrics_publisher = None
+    pub.component_gauges = MagicMock()
+    pub.metrics_collector = None
+    pub.fpm_publisher = None
+    pub._fpm_schema_checked = False
+    fetches = []
+
+    async def fetch_stats(timeout):
+        fetches.append(timeout)
+        yield {"kvCacheStats": {}, "attentionDpRank": 0}
+
+    pub.engine.llm.get_stats_async = fetch_stats
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(KeyError, match="usedNumBlocks"):
+            await pub._publish_stats_task()
+
+    assert len(fetches) == 1
+    assert not any("Stats polling failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_stats_polling_updates_gauges_without_worker_load_publisher():
+    pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
+    pub._stop_event = threading.Event()
+    pub.engine = MagicMock()
+    pub.metrics_publisher = None
+    pub.component_gauges = MagicMock()
+    pub.metrics_collector = MagicMock()
+    pub.fpm_publisher = None
+    pub._fpm_schema_checked = False
+
+    async def fetch_stats(timeout):
+        yield _build_fake_stat(attentionDpRank=0)
+        yield _build_fake_stat(attentionDpRank=1)
+
+    def stop_after_both_ranks(*_args, **_kwargs):
+        if pub.component_gauges.set_gpu_cache_usage.call_count == 2:
+            pub._stop_event.set()
+
+    pub.engine.llm.get_stats_async = fetch_stats
+    pub.component_gauges.set_gpu_cache_usage.side_effect = stop_after_both_ranks
+
+    assert await pub._publish_stats_task() is True
+
+    assert [
+        call.args for call in pub.component_gauges.set_total_blocks.call_args_list
+    ] == [("0", 100), ("1", 100)]
+    assert pub.metrics_collector.log_iteration_stats.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_polling_loop_delivers_partial_drain_before_fetch_error():
     pub = publisher_mod.Publisher.__new__(publisher_mod.Publisher)
     pub._stop_event = threading.Event()
@@ -687,7 +804,9 @@ async def test_polling_loop_delivers_partial_drain_before_fetch_error():
         yield {"event_id": 1}
         raise RuntimeError("fetch failed")
 
-    with pytest.raises(RuntimeError, match="fetch failed"):
+    with pytest.raises(
+        publisher_mod._PollingFetchError, match="fetch failed"
+    ) as caught:
         await pub._polling_loop(
             fetch_events,
             batches.append,
@@ -697,6 +816,7 @@ async def test_polling_loop_delivers_partial_drain_before_fetch_error():
             batch_size_handler_fn=drained_batches.append,
         )
 
+    assert isinstance(caught.value.__cause__, RuntimeError)
     assert batches == [[{"event_id": 0}, {"event_id": 1}]]
     assert drained_batches == []
 

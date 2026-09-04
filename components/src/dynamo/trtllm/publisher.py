@@ -55,11 +55,23 @@ _KV_EVENTS_TIMEOUT_SEC = 0.0
 _PUBLISH_MIN_SLEEP_SEC = 0.01
 _PUBLISH_MAX_SLEEP_SEC = 0.1
 _PUBLISH_BACKOFF_FACTOR = 2.0
+_STATS_RETRY_MIN_SLEEP_SEC = 0.5
+_STATS_RETRY_MAX_SLEEP_SEC = 30.0
 # Keep a continuously ready TRT-LLM iterator from starving its batch handler.
 _POLLING_BATCH_MAX_ITEMS = 256
 _KV_EVENTS_MIN_SLEEP_SEC = 0.005
 _KV_EVENTS_MAX_SLEEP_SEC = 0.02
 _KV_EVENTS_BACKOFF_FACTOR = 1.5
+
+
+class _PollingFetchError(Exception):
+    """A failure raised by a ``_polling_loop`` fetch function.
+
+    Wrapping fetch failures keeps them distinguishable from batch-handler
+    failures, which are bugs in our own code and must reach the error queue
+    rather than be retried.
+    """
+
 
 # InflightBatchingStats fields the FPM publisher consumes. As of
 # NVIDIA/TensorRT-LLM#13199 (merged 2026-04-27) all 11 fields live nested
@@ -474,19 +486,21 @@ class Publisher:
         await self.metrics_publisher.create_endpoint(self.endpoint)
 
     def initialize(self) -> None:
-        if self.publish_metrics:
+        # The KV router consumes worker-load samples and the Planner consumes
+        # forward-pass metrics. Both are telemetry the control plane reads, so
+        # they belong with KV-event publishing rather than with the local
+        # Prometheus surface: scraping /metrics must not alter routing.
+        if self.publish_kv_events:
             self.metrics_publisher = WorkerMetricsPublisher()
-            self._init_publish_metrics_thread()
             task = asyncio.create_task(self._create_metrics_publisher_endpoint())
             task.add_done_callback(
                 lambda _: logging.debug("metrics publisher endpoint created")
             )
 
-        # Setup the ForwardPassMetrics publisher with one internal channel per
-        # attention-DP rank. Non-attention-DP engines report size 1. Under
-        # attention-DP, TRT-LLM emits one IterationStats row per rank and
-        # Dynamo forwards attentionDpRank as the FPM dp_rank.
-        if self.publish_metrics:
+            # One internal channel per attention-DP rank. Non-attention-DP
+            # engines report size 1. Under attention-DP, TRT-LLM emits one
+            # IterationStats row per rank and Dynamo forwards attentionDpRank
+            # as the FPM dp_rank.
             try:
                 fpm_dp_size = max(1, int(self.attention_dp_size or 1))
                 self.fpm_publisher = FpmDirectPublisher(
@@ -498,10 +512,19 @@ class Publisher:
                     f"FpmDirectPublisher initialized with dp_size={fpm_dp_size}"
                 )
             except RuntimeError as e:
+                # PyO3 surfaces all FpmDirectPublisher::new failures as
+                # PyRuntimeError (Endpoint missing, tokio runtime missing,
+                # etc.). Catch only that -- any other exception here would
+                # signal a programming error worth surfacing.
                 logging.warning(
                     f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
                 )
                 self.fpm_publisher = None
+
+        # One polling loop feeds the Prometheus gauges, the metrics collector,
+        # the worker-load publisher and FPM alike, so it runs for either path.
+        if self.publish_kv_events or self.publish_metrics:
+            self._init_publish_metrics_thread()
 
         # Setup the kv cache events publisher
         # Publisher selection based on consolidator configuration:
@@ -539,14 +562,17 @@ class Publisher:
         self._init_publish_kv_cache_events_thread()
 
     def _init_publish_metrics_thread(self):
-        # Need to publish stats once so that worker can be selected.
-        if self.metrics_publisher is None:
-            logging.error("KV metrics publisher not initialized!")
-            return
+        """Zero the per-rank gauges and build the stats thread unstarted.
 
+        Runs for the Prometheus-only configuration too, where there is no
+        worker-load publisher to seed.
+        """
         # Publish initial metrics with 0 active blocks for each attention-DP rank.
         for rank in range(self.attention_dp_size):
-            self.metrics_publisher.publish(rank, kv_used_blocks=0)
+            # Seed the router so this worker can be selected before the first
+            # iteration stats arrive. Absent when only Prometheus is enabled.
+            if self.metrics_publisher is not None:
+                self.metrics_publisher.publish(rank, kv_used_blocks=0)
             rank_label = str(rank)
             self.component_gauges.set_total_blocks(rank_label, 0)
             self.component_gauges.set_gpu_cache_usage(rank_label, 0.0)
@@ -613,7 +639,7 @@ class Publisher:
                         fetch_error.__traceback__,
                     ),
                 )
-                raise fetch_error
+                raise _PollingFetchError(str(fetch_error)) from fetch_error
 
             if batch and batch_size_handler_fn is not None:
                 batch_size_handler_fn(len(batch))
@@ -676,24 +702,19 @@ class Publisher:
         self.fpm_publisher = None
 
     async def _publish_stats_task(self):
-        """
-        Publish stats to the metrics publisher.
-        """
+        """Poll engine iteration stats into the Prometheus gauges and metrics
+        collector, plus the router and Planner publishers when enabled."""
         if self.engine is None:
             logging.error("LLM engine not initialized!")
             return
-
-        if self.metrics_publisher is None:
-            logging.error("KV metrics publisher not initialized!")
-            return False
 
         def handle_stat(stat):
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
             kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
             dp_rank = int(stat.get("attentionDpRank", 0))
             logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
-            assert self.metrics_publisher is not None
-            self.metrics_publisher.publish(dp_rank, kv_used_blocks=kv_active_blocks)
+            if self.metrics_publisher is not None:
+                self.metrics_publisher.publish(dp_rank, kv_used_blocks=kv_active_blocks)
 
             # Publish Prometheus metrics
             dp_rank_label = str(dp_rank)
@@ -792,14 +813,40 @@ class Publisher:
             for stat in stats:
                 handle_stat(stat)
 
-        await self._polling_loop(
-            lambda: self.engine.llm.get_stats_async(timeout=_STATS_TIMEOUT_SEC),
-            handle_stats,
-            _PUBLISH_MIN_SLEEP_SEC,
-            _PUBLISH_MAX_SLEEP_SEC,
-            _PUBLISH_BACKOFF_FACTOR,
-        )
+        # A transient engine fault must not fail requests, which is what happens
+        # when ManagedThread queues the error. _polling_loop already logs the
+        # traceback, so retry with backoff, resetting it after a healthy stretch.
+        # Only fetch failures are retried: a handle_stats failure is our own bug
+        # and propagates, so requests fail rather than the worker serving on with
+        # stale metrics.
+        retry_sleep_s = _STATS_RETRY_MIN_SLEEP_SEC
+        while not self._stop_event.is_set():
+            started = time.monotonic()
+            try:
+                await self._polling_loop(
+                    lambda: self.engine.llm.get_stats_async(timeout=_STATS_TIMEOUT_SEC),
+                    handle_stats,
+                    _PUBLISH_MIN_SLEEP_SEC,
+                    _PUBLISH_MAX_SLEEP_SEC,
+                    _PUBLISH_BACKOFF_FACTOR,
+                )
+            except _PollingFetchError:
+                if time.monotonic() - started > _STATS_RETRY_MAX_SLEEP_SEC:
+                    retry_sleep_s = _STATS_RETRY_MIN_SLEEP_SEC
+                logging.warning(
+                    "Stats polling failed; retrying in %.1fs", retry_sleep_s
+                )
+                await self._sleep_unless_stopped(retry_sleep_s)
+                retry_sleep_s = min(retry_sleep_s * 2, _STATS_RETRY_MAX_SLEEP_SEC)
         return True
+
+    async def _sleep_unless_stopped(self, seconds: float) -> None:
+        deadline = time.monotonic() + seconds
+        while not self._stop_event.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(_PUBLISH_MAX_SLEEP_SEC, remaining))
 
     async def _publish_kv_cache_events_task(self):
         """
