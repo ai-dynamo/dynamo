@@ -168,6 +168,7 @@ def test_scoped_dyn_log_debug_keeps_python_debug_available(monkeypatch):
         ("warning", logging.WARNING),
         ("error", logging.ERROR),
         ("critical", logging.CRITICAL),
+        ("off", logging.CRITICAL),
         ("bogus", logging.INFO),
     ],
 )
@@ -185,6 +186,17 @@ def test_log_level_mapping(level, expected):
         ("debug,dynamo_llm=trace", logging.DEBUG),
         ("dynamo_runtime=debug", logging.DEBUG),
         ("warn,dynamo_llm=error", logging.WARNING),
+        # A bare target enables TRACE for that target in Rust's env_filter.
+        ("dynamo_llm", logging.DEBUG),
+        ("dynamo_llm,warn", logging.DEBUG),
+        ("tokio=trace", logging.DEBUG),
+        ("Dynamo_LLM=Debug", logging.DEBUG),
+        ("WARN", logging.WARNING),
+        ("off", logging.CRITICAL),
+        ("error,off", logging.ERROR),
+        ("", logging.INFO),
+        ("  ", logging.INFO),
+        ("warn,,", logging.WARNING),
     ],
 )
 def test_filter_level_mapping(filters, expected):
