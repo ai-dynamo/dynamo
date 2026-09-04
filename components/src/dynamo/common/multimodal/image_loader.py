@@ -16,7 +16,13 @@ from PIL import Image
 from dynamo.common.utils import nvtx_utils as _nvtx
 from dynamo.common.utils.runtime import run_async
 
-from ..http import HttpError, HttpStatusError, HttpTimeoutError, fetch_bytes
+from ..http import (
+    HttpConnectionError,
+    HttpError,
+    HttpStatusError,
+    HttpTimeoutError,
+    fetch_bytes,
+)
 from ..http.url_validator import (
     UrlValidationError,
     UrlValidationPolicy,
@@ -141,7 +147,21 @@ class ImageLoader:
                 f"{type(e).__name__} loading image: '{image_url}' "
                 f"(timeout={self._http_timeout}s)"
             )
-            raise ValueError(f"Timeout loading image: '{image_url}'") from e
+            raise HttpStatusError(
+                408,
+                f"Timeout loading image: '{image_url}' "
+                f"(timeout={self._http_timeout}s)",
+                image_url,
+            ) from e
+        except HttpConnectionError as e:
+            # Treat a user-supplied unreachable URL as a client error (400)
+            # rather than an internal server fault.
+            logger.error("%s loading image: '%s': %s", type(e).__name__, image_url, e)
+            raise HttpStatusError(
+                400,
+                f"Connection error loading image: '{image_url}': {e}",
+                image_url,
+            ) from e
         except HttpError as e:
             logger.error(f"{type(e).__name__} loading image: '{image_url}': {e}")
             raise
@@ -285,8 +305,10 @@ class ImageLoader:
 
         Raises:
             HttpStatusError: If any image fails with an HTTP status error
-                (e.g. 415 Unsupported Media Type); the status is preserved so the
-                frontend returns the correct client-error code instead of 500.
+                (e.g. 415 Unsupported Media Type), or with a transport error
+                (timeout mapped to 408, connection error mapped to 400); the
+                status is preserved so the frontend returns the correct
+                client-error code instead of 500.
             UrlValidationError: If a media URL is rejected by the SSRF policy;
                 preserved as a ValueError so the frontend returns a 4xx, not 500.
             Exception: If any image fails to load for any other reason

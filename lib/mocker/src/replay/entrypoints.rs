@@ -17,7 +17,7 @@ use super::{
     ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat, load_agentic_mooncake};
+use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat, load_weka_trace};
 use crate::scheduler::RouterEventVisibility;
 
 /// Replay artifact KV-event timestamp visibility override.
@@ -50,12 +50,10 @@ fn load_trace_from_file(
         TraceFileFormat::Mooncake | TraceFileFormat::MooncakeDelta => {
             Trace::from_mooncake(trace_path, trace_block_size)
         }
-        TraceFileFormat::AgenticMooncake => {
-            bail!("agentic_mooncake trace format must be loaded as an agentic workload")
-        }
-        TraceFileFormat::Weka => {
-            bail!("Weka trace format must be loaded as an agentic workload")
-        }
+        TraceFileFormat::AgenticMooncake | TraceFileFormat::Weka => bail!(
+            "{} trace format must be loaded as an agentic workload",
+            trace_format.as_str()
+        ),
         TraceFileFormat::AppliedComputeAgentic => Trace::from_applied_compute_agentic(
             trace_path,
             trace_block_size,
@@ -74,12 +72,25 @@ fn load_trace_from_file(
 
 fn load_agentic_trace_from_file(
     trace_path: &Path,
-    trace_block_size: usize,
+    _trace_block_size: usize,
+    trace_format: TraceFileFormat,
     arrival_speedup_ratio: f64,
 ) -> Result<AgenticTrace> {
-    load_agentic_mooncake(trace_path, trace_block_size)?
+    let trace = match trace_format {
+        TraceFileFormat::AgenticMooncake => AgenticTrace::from_agentic_mooncake(trace_path)?,
+        TraceFileFormat::Weka => load_weka_trace(trace_path)?,
+        _ => bail!("{} is not an agentic trace format", trace_format.as_str()),
+    };
+    trace
         .normalize_starts()
         .speed_up_timing(arrival_speedup_ratio)
+}
+
+fn is_agentic_trace_format(trace_format: TraceFileFormat) -> bool {
+    matches!(
+        trace_format,
+        TraceFileFormat::AgenticMooncake | TraceFileFormat::Weka
+    )
 }
 
 fn trace_accumulates_session_deltas(trace_format: TraceFileFormat) -> bool {
@@ -523,6 +534,7 @@ pub fn simulate_trace_file_with_router_mode_and_format(
         trace_num_prefix_groups,
         record_per_request,
         max_sim_time_ms,
+        None,
         sla,
         None,
     )
@@ -544,18 +556,23 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
     trace_num_prefix_groups: usize,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_offline_replay_args(&args, num_workers, router_mode, scaling_policy.is_some())?;
-    if trace_format == TraceFileFormat::AgenticMooncake {
+    if is_agentic_trace_format(trace_format) {
         anyhow::ensure!(
             scaling_policy.is_none(),
             "scaling_policy replay only supports standard Mooncake traces"
         );
-        let trace =
-            load_agentic_trace_from_file(trace_path, trace_block_size, arrival_speedup_ratio)?;
+        let trace = load_agentic_trace_from_file(
+            trace_path,
+            trace_block_size,
+            trace_format,
+            arrival_speedup_ratio,
+        )?;
         return crate::replay::offline::simulate_agentic_trace_workload(
             args,
             router_config,
@@ -564,6 +581,8 @@ pub fn simulate_trace_file_with_router_mode_and_format_and_scaling_policy(
             num_workers,
             router_mode,
             record_per_request,
+            max_sim_time_ms,
+            agentic_lanes,
             sla,
         );
     }
@@ -683,6 +702,7 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format(
         trace_num_prefix_groups,
         record_per_request,
         max_sim_time_ms,
+        None,
         sla,
         None,
     )
@@ -703,13 +723,34 @@ pub fn simulate_trace_file_disagg_with_router_mode_and_format_and_scaling_policy
     trace_num_prefix_groups: usize,
     record_per_request: bool,
     max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn super::ReplayScalingPolicy>>,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_replay_args(&config, router_mode)?;
-    if trace_format == TraceFileFormat::AgenticMooncake {
-        bail!("agentic_mooncake trace format is not supported for disaggregated replay");
+    if is_agentic_trace_format(trace_format) {
+        anyhow::ensure!(
+            scaling_policy.is_none(),
+            "scaling_policy replay does not support agentic traces"
+        );
+        let trace = load_agentic_trace_from_file(
+            trace_path,
+            trace_block_size,
+            trace_format,
+            arrival_speedup_ratio,
+        )?;
+        return crate::replay::offline::simulate_agentic_trace_workload_disagg(
+            config,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            router_mode,
+            record_per_request,
+            max_sim_time_ms,
+            agentic_lanes,
+            sla,
+        );
     }
     if trace_format == TraceFileFormat::AppliedComputeAgentic {
         bail!(
@@ -830,6 +871,7 @@ pub fn simulate_trace_live_file_with_router_mode_and_format(
         trace_shared_prefix_ratio,
         trace_num_prefix_groups,
         false,
+        None,
         SlaThresholds::default(),
     )
 }
@@ -848,13 +890,18 @@ pub fn simulate_trace_live_file_with_router_mode_and_format_and_options(
     trace_shared_prefix_ratio: f64,
     trace_num_prefix_groups: usize,
     record_per_request: bool,
+    agentic_lanes: Option<usize>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_online_replay_args(&args, num_workers)?;
-    if trace_format == TraceFileFormat::AgenticMooncake {
-        let trace =
-            load_agentic_trace_from_file(trace_path, trace_block_size, arrival_speedup_ratio)?;
+    if is_agentic_trace_format(trace_format) {
+        let trace = load_agentic_trace_from_file(
+            trace_path,
+            trace_block_size,
+            trace_format,
+            arrival_speedup_ratio,
+        )?;
         return online::simulate_agentic_trace_workload(
             online_replay_config(
                 args,
@@ -865,6 +912,7 @@ pub fn simulate_trace_live_file_with_router_mode_and_format_and_options(
                 online_replay_options(record_per_request, sla),
             ),
             trace,
+            agentic_lanes,
         );
     }
     if trace_format == TraceFileFormat::AppliedComputeAgentic {
@@ -1216,8 +1264,11 @@ pub fn simulate_concurrency_file_with_router_mode_and_format_and_scaling_policy(
         router_mode,
         scaling_policy.is_some(),
     )?;
-    if trace_format == TraceFileFormat::AgenticMooncake {
-        bail!("agentic_mooncake trace format is not supported with replay_concurrency");
+    if is_agentic_trace_format(trace_format) {
+        bail!(
+            "{} trace format is not supported with replay_concurrency",
+            trace_format.as_str()
+        );
     }
     if trace_accumulates_session_deltas(trace_format) && scaling_policy.is_some() {
         bail!("scaling_policy replay does not support mooncake-delta traces");
@@ -1340,8 +1391,11 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format_and_scaling_
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
-    if trace_format == TraceFileFormat::AgenticMooncake {
-        bail!("agentic_mooncake trace format is not supported for disaggregated replay");
+    if is_agentic_trace_format(trace_format) {
+        bail!(
+            "{} trace format is not supported with replay_concurrency",
+            trace_format.as_str()
+        );
     }
     if trace_accumulates_session_deltas(trace_format) {
         bail!("mooncake-delta trace format is not supported for disaggregated replay");
@@ -1462,9 +1516,10 @@ pub fn simulate_concurrency_live_file_with_router_mode_and_format_and_options(
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
     validate_online_concurrency_args(&args, num_workers, max_in_flight)?;
-    if trace_format == TraceFileFormat::AgenticMooncake {
+    if is_agentic_trace_format(trace_format) {
         bail!(
-            "agentic_mooncake trace format requires online trace mode and is not supported with replay_concurrency"
+            "{} trace format requires online trace mode and is not supported with replay_concurrency",
+            trace_format.as_str()
         );
     }
     if trace_accumulates_session_deltas(trace_format) {
@@ -2129,6 +2184,8 @@ pub fn simulate_agentic_trace_workload_with_router_mode(
     num_workers: usize,
     router_mode: ReplayRouterMode,
     record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
@@ -2141,6 +2198,35 @@ pub fn simulate_agentic_trace_workload_with_router_mode(
         num_workers,
         router_mode,
         record_per_request,
+        max_sim_time_ms,
+        agentic_lanes,
+        sla,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_agentic_trace_workload_disagg_with_router_mode(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<KvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    max_sim_time_ms: Option<f64>,
+    agentic_lanes: Option<usize>,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let config = config.normalized()?;
+    validate_offline_disagg_replay_args(&config, router_mode)?;
+    crate::replay::offline::simulate_agentic_trace_workload_disagg(
+        config,
+        router_config,
+        prefill_load_estimator,
+        trace,
+        router_mode,
+        record_per_request,
+        max_sim_time_ms,
+        agentic_lanes,
         sla,
     )
 }
@@ -2154,6 +2240,7 @@ pub fn simulate_agentic_trace_live_workload_with_router_mode_and_options(
     num_workers: usize,
     router_mode: ReplayRouterMode,
     record_per_request: bool,
+    agentic_lanes: Option<usize>,
     sla: SlaThresholds,
 ) -> Result<TraceSimulationReport> {
     let args = args.normalized()?;
@@ -2168,6 +2255,7 @@ pub fn simulate_agentic_trace_live_workload_with_router_mode_and_options(
             online_replay_options(record_per_request, sla),
         ),
         trace,
+        agentic_lanes,
     )
 }
 
@@ -2502,7 +2590,7 @@ mod tests {
                 "version": 2,
                 "block_size": 4,
                 "hash_id_scope": "local",
-                "source": {"format": "test", "digest": "fixture"}
+                "source": {"format": "test", "digest": "scaled-timing"}
             })
         )
         .unwrap();
@@ -2528,7 +2616,7 @@ mod tests {
             serde_json::json!({
                 "request_id": "r2",
                 "play_id": "play",
-                "session_id": "root",
+                "session_id": "dependent",
                 "model": "model",
                 "not_before_ms": 130.0,
                 "input_length": 4,
@@ -2544,11 +2632,44 @@ mod tests {
         )
         .unwrap();
 
-        let trace = load_agentic_trace_from_file(file.path(), 4, 2.0).unwrap();
+        let trace =
+            load_agentic_trace_from_file(file.path(), 4, TraceFileFormat::AgenticMooncake, 2.0)
+                .unwrap();
 
         assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
         assert_eq!(trace.nodes()[1].not_before_ms(), 15.0);
         assert_eq!(trace.nodes()[1].dependencies()[0].delay_ms, 8.0);
+
+        for engine_type in [EngineType::Vllm, EngineType::Sglang] {
+            let mut args = replay_test_args();
+            args.engine_type = engine_type;
+            if engine_type == EngineType::Sglang {
+                args.sglang = Some(SglangArgs {
+                    page_size: Some(4),
+                    chunked_prefill_size: Some(64),
+                    ..Default::default()
+                });
+            }
+            let report = simulate_agentic_trace_workload_with_router_mode(
+                args,
+                None,
+                None,
+                trace.clone(),
+                1,
+                ReplayRouterMode::RoundRobin,
+                true,
+                None,
+                Some(1),
+                SlaThresholds::default(),
+            )
+            .unwrap();
+            assert_eq!(report.request_counts.completed_requests, 2);
+            let trajectories = report.trajectories.unwrap();
+            assert_eq!(trajectories.total, 1);
+            assert_eq!(trajectories.completed, 1);
+            assert_eq!(trajectories.incomplete, 0);
+            assert!(trajectories.e2e.max_ms > 0.0);
+        }
 
         let report = simulate_trace_live_file_with_router_mode_and_format_and_options(
             replay_test_args(),
@@ -2563,6 +2684,7 @@ mod tests {
             0.0,
             0,
             true,
+            None,
             SlaThresholds::default(),
         )
         .unwrap();

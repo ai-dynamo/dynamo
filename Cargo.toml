@@ -13,6 +13,7 @@ members = [
     "lib/mocker",
     "lib/kv-router",
     "lib/router-plugins/catalog",
+    "examples/router/custom-policy-example/soft-pin-repin",
     "examples/router/custom-policy-example/simple-filter-score-pick",
     "examples/router/custom-policy-example/catalog",
     "examples/router/custom-policy-example/disagg-filter-score-pick",
@@ -38,6 +39,7 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "deploy/inference-gateway/ext-proc",
+    "deploy/inference-gateway/sidecar",
 ]
 resolver = "3"
 
@@ -68,7 +70,7 @@ dynamo-kv-hashing = { path = "lib/kv-hashing", version = "1.5.0" }
 dynamo-memory = { path = "lib/memory", version = "1.5.0" }
 dynamo-mocker = { path = "lib/mocker", version = "1.5.0" }
 dynamo-kv-router = { path = "lib/kv-router", version = "1.5.0" }
-dynamo-protocols = { version = "=5.4.0" }
+dynamo-protocols = { version = "=5.4.1" }
 dynamo-parsers = { version = "8.1.0" }
 
 # Published on crates.io. To see all available versions:
@@ -90,7 +92,7 @@ kvbm-logical = { path = "lib/kvbm-logical", version = "1.5.0" }
 kvbm-physical = { path = "lib/kvbm-physical", version = "1.5.0" }
 
 # velo
-velo = { version = "0.4.1" }
+velo = { version = "0.12.0" }
 
 # External dependencies
 anyhow = { version = "1" }

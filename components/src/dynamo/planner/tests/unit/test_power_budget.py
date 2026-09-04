@@ -144,20 +144,21 @@ def test_apply_power_budget_rebalance_stages_scale_down_first():
     )
 
 
-def test_apply_power_budget_clamp_synthesized_rebalance_is_staged():
-    """Clamp can create an opposing rebalance even when the proposal was not one.
-
-    Current (4,1), proposal (5,5), 1000 W/replica, 5000 W budget: the
-    proportional clamp yields settled (2,3)=5000 W, but parallel actuation
-    peaks at (4,3)=7000 W. Stage by holding the decode scale-up at current
-    so this tick emits (2,1) under the ceiling instead of (2,3).
-    """
+def test_apply_power_budget_does_not_synthesize_rebalance():
+    """An in-band current allocation never donates to an up/up proposal."""
     assert apply_power_budget(5, 5, 4, 1, 1000, 1000, 5000, 1) == (
-        2,
+        4,
         1,
-        "power_rebalance_staged",
+        "power_budget_clamped",
     )
-    assert peak_parallel_watts(4, 1, 2, 1, 1000, 1000) <= 5000
+
+
+def test_apply_power_budget_preserves_capped_hold_direction():
+    assert apply_power_budget(9, 22, 1, 22, 4, 1, 26, 1) == (
+        1,
+        22,
+        "power_budget_clamped",
+    )
 
 
 def test_apply_power_budget_rebalance_staged_with_none_current_p():

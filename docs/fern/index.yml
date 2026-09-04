@@ -484,6 +484,8 @@ navigation:
                 contents:
                   - page: Overview
                     path: pages/developer-guide/knowledge-base/modular-components/planner/overview.md
+                  - page: Choose a Planner Mode
+                    path: pages/developer-guide/knowledge-base/modular-components/planner/choose-planner-mode.md
                   - page: Planner Guide
                     path: pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md
                   - page: Global Planner Guide
