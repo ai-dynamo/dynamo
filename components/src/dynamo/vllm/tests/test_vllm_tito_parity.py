@@ -377,6 +377,90 @@ class TestEngineDataAccumulation:
         assert final["engine_data"]["completion_token_ids"] == [11]
 
 
+class TestPromptLogprobsPrefixCaching:
+    @pytest.mark.parametrize("prompt_logprobs", [None, 0, 5])
+    @pytest.mark.parametrize("enable_rl", [False, True])
+    def test_prompt_logprobs_recompute_cached_prefix(
+        self, prompt_logprobs, enable_rl, monkeypatch
+    ):
+        import torch
+        from vllm import SamplingParams
+        from vllm.utils.hashing import sha256
+        from vllm.v1.core import kv_cache_utils
+        from vllm.v1.core.kv_cache_manager import KVCacheManager
+        from vllm.v1.core.kv_cache_utils import get_request_block_hasher
+        from vllm.v1.kv_cache_interface import (
+            FullAttentionSpec,
+            KVCacheConfig,
+            KVCacheGroupSpec,
+        )
+        from vllm.v1.request import Request
+
+        from dynamo.vllm.handlers import build_sampling_params
+
+        monkeypatch.setattr(kv_cache_utils, "NONE_HASH", sha256("test"), raising=False)
+        manager = KVCacheManager(
+            KVCacheConfig(
+                num_blocks=16,
+                kv_cache_tensors=[],
+                kv_cache_groups=[
+                    KVCacheGroupSpec(
+                        ["layer"],
+                        FullAttentionSpec(
+                            block_size=16,
+                            num_kv_heads=1,
+                            head_size=1,
+                            dtype=torch.float32,
+                        ),
+                    )
+                ],
+            ),
+            max_model_len=128,
+            scheduler_block_size=16,
+            hash_block_size=16,
+            enable_caching=True,
+        )
+        token_ids = [1] * 16 + [2] * 16 + [3] * 7
+
+        def make_request(request_id, params):
+            return Request(
+                request_id=request_id,
+                prompt_token_ids=token_ids,
+                sampling_params=params.clone(),
+                pooling_params=None,
+                block_hasher=get_request_block_hasher(16, sha256),
+            )
+
+        warmup = make_request("warmup", SamplingParams(max_tokens=1))
+        assert manager.allocate_slots(warmup, len(token_ids)) is not None
+        manager.free(warmup)
+
+        params = build_sampling_params(
+            {
+                "token_ids": token_ids,
+                "nvext": {"token_in": True},
+                "output_options": {"prompt_logprobs": prompt_logprobs},
+            },
+            {},
+            enable_rl=enable_rl,
+        )
+        _, cached_tokens, _ = manager.get_computed_blocks(make_request("test", params))
+        assert cached_tokens == (32 if prompt_logprobs is None else 0)
+
+    def test_explicit_prefix_cache_policy_is_preserved(self):
+        from dynamo.vllm.handlers import build_sampling_params
+
+        params = build_sampling_params(
+            {
+                "token_ids": [1, 2, 3],
+                "sampling_options": {"skip_reading_prefix_cache": False},
+                "output_options": {"prompt_logprobs": 0},
+            },
+            {},
+        )
+        assert params.skip_reading_prefix_cache is False
+
+
 class TestSkipSpecialTokens:
     """skip_special_tokens is handled by Dynamo's Rust backend (which reads it
     from the request output_options), NOT forwarded to vLLM SamplingParams: the

@@ -744,11 +744,18 @@ def build_sampling_params(
     keep generation_config defaults for Gateway/backward-compatible traffic.
     Stop-token defaults from the model config are still applied later.
     """
+    output_options = request.get("output_options", {}) or {}
+    logprobs, prompt_logprobs = _shared_logprobs.parse_logprob_options(output_options)
     if enable_rl and _is_token_in_request(request):
         # Use vLLM defaults without model generation_config overlays.
-        sampling_params = SamplingParams()
+        initial_params = {}
     else:
-        sampling_params = SamplingParams(**default_sampling_params)
+        initial_params = dict(default_sampling_params)
+    if prompt_logprobs is not None:
+        # vLLM derives skip_reading_prefix_cache in __post_init__; cached
+        # prompt tokens have no logits from which to compute prompt logprobs.
+        initial_params["prompt_logprobs"] = prompt_logprobs
+    sampling_params = SamplingParams(**initial_params)
 
     # Handle guided_decoding - convert to StructuredOutputsParams
     sampling_options = dict(request.get("sampling_options") or {})
@@ -831,8 +838,6 @@ def build_sampling_params(
             sampling_params.thinking_token_budget = value
 
     # Apply output_options (logprobs, prompt_logprobs, etc.)
-    output_options = request.get("output_options", {}) or {}
-    logprobs, prompt_logprobs = _shared_logprobs.parse_logprob_options(output_options)
     # Explicit `logprob_token_ids` replace vLLM's natural top-k selection, so the
     # requested width no longer applies. vLLM's own OpenAI adapters null `logprobs`
     # in this case and let `num_logprobs` derive the width from the id list; mirror
