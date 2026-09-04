@@ -24,9 +24,9 @@ use crate::client;
 use crate::proto as pb;
 
 /// `extra` key the OpenEngine servicer reads to select the disaggregation phase.
-pub(crate) const REQUEST_TYPE_KEY: &str = "request_type";
+pub const REQUEST_TYPE_KEY: &str = "request_type";
 /// `extra.request_type` value marking a prefill-only request.
-pub(crate) const CONTEXT_ONLY: &str = "context_only";
+pub const CONTEXT_ONLY: &str = "context_only";
 
 const ATTRIBUTES: &str = "prefill handoff attributes";
 
@@ -130,7 +130,7 @@ pub(crate) fn session_from_json(value: &Value) -> Result<pb::KvSessionRef, Dynam
 }
 
 /// `extra` payload marking a request as prefill-only.
-pub(crate) fn context_only_extra() -> prost_types::Struct {
+pub fn context_only_extra() -> prost_types::Struct {
     prost_types::Struct {
         fields: [(
             REQUEST_TYPE_KEY.to_string(),
