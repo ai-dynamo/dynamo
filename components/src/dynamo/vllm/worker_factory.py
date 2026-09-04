@@ -62,6 +62,11 @@ logger = logging.getLogger(__name__)
 # and scheduler-loop slack before failing closed.
 BENCHMARK_SOFT_TIMEOUT_GRACE_SECONDS = 90
 
+# Bound for the post-benchmark worker GC stop RPC. Restoring GC in a healthy
+# worker is sub-second; a longer wait means the engine is gone, and neither
+# serving nor error propagation may hang on it.
+WORKER_GC_STOP_TIMEOUT_SECONDS = 30.0
+
 # (engine_client, vllm_config, default_sampling_params, cleanup_resource, component_gauges)
 # component_gauges is None on the embedding-worker path: pooling engines
 # have no KV cache / scheduler gauges, so setup_vllm_engine() skips the
@@ -534,6 +539,66 @@ async def _wait_and_load_benchmark(bench_cfg: dict, vllm_config: VllmConfig) -> 
         merged_path,
     )
     return merged
+
+
+async def _stop_worker_gc_policy(engine_client: AsyncLLM) -> None:
+    """Restore worker-process GC once the self-benchmark has finished.
+
+    Model workers auto-start the FPM freeze policy when
+    ``worker_extension_cls`` resolves (importing ``dynamo.vllm.gc_policy``
+    starts it), while ``InstrumentedScheduler`` only restores the
+    engine-core process. Without this symmetric stop the workers would keep
+    serving real traffic with automatic gen2 collection disabled and the
+    freeze daemon alive, so cyclic garbage would never be reclaimed.
+    Awaiting the RPC holds serving until every worker has restored its
+    thresholds and collected the previously frozen heap; both normal
+    completion and benchmark abort funnel through the same benchmark-wait
+    call sites. A failure here must propagate: serving on a worker that is
+    not GC-equivalent to a never-benchmarked one is worse than failing
+    startup.
+    """
+    if os.environ.get("DYN_FPM_GC_POLICY", "").strip().lower() != "freeze":
+        return
+    await engine_client.collective_rpc("fpm_gc_stop")
+    logger.info("FPM GC policy stopped in all model workers")
+
+
+async def _await_benchmark_then_restore_workers(
+    bench_cfg: dict, vllm_config: VllmConfig, engine_client: AsyncLLM
+) -> dict:
+    """Wait for the self-benchmark and restore worker GC on every exit path.
+
+    The worker stop must not depend on the wait succeeding: ``_bench_abort``
+    publishes ``status="failed"`` artifacts, so an aborted benchmark makes
+    ``_wait_and_load_benchmark`` raise during validation, and the workers
+    would otherwise keep automatic gen2 collection disabled through teardown
+    or, if a caller survives the error, into serving. On the success path a
+    stop failure fails closed; on the failure path it is logged and the
+    original error propagates unchanged.
+    """
+    try:
+        results = await _wait_and_load_benchmark(bench_cfg, vllm_config)
+    except BaseException:
+        # The failure may be the engine dying; an unbounded RPC would then
+        # hang the launcher on the very path that is supposed to surface the
+        # error, so the cleanup stop is time-boxed and the original error
+        # always wins.
+        try:
+            await asyncio.wait_for(
+                _stop_worker_gc_policy(engine_client),
+                timeout=WORKER_GC_STOP_TIMEOUT_SECONDS,
+            )
+        except BaseException:
+            logger.exception(
+                "Failed to stop the FPM GC policy in model workers while "
+                "handling a self-benchmark failure"
+            )
+        raise
+    await asyncio.wait_for(
+        _stop_worker_gc_policy(engine_client),
+        timeout=WORKER_GC_STOP_TIMEOUT_SECONDS,
+    )
+    return results
 
 
 SetupVllmEngineFn = Callable[..., EngineSetupResult]
@@ -1311,8 +1376,8 @@ class WorkerFactory:
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
         if bench_cfg:
-            handler._benchmark_results = await _wait_and_load_benchmark(
-                bench_cfg, vllm_config
+            handler._benchmark_results = await _await_benchmark_then_restore_workers(
+                bench_cfg, vllm_config, handler.engine_client
             )
 
         # Model-serving-readiness role.
@@ -1589,8 +1654,8 @@ class WorkerFactory:
         # Wait for self-benchmark to complete before registering.
         bench_cfg = vllm_config.additional_config.get("benchmark")
         if bench_cfg:
-            handler._benchmark_results = await _wait_and_load_benchmark(
-                bench_cfg, vllm_config
+            handler._benchmark_results = await _await_benchmark_then_restore_workers(
+                bench_cfg, vllm_config, handler.engine_client
             )
 
         perf_endpoint = runtime.endpoint(

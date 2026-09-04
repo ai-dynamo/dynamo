@@ -46,10 +46,63 @@ const ZMQ_RCVHWM: i32 = 100_000; // Receive buffer: 100K messages
 const ZMQ_SNDTIMEOUT_MS: i32 = 0; // Send timeout: fail fast under pressure
 const ZMQ_RCVTIMEOUT_MS: i32 = 100; // Receive timeout: 100ms (avoids blocking forever)
 
+const ZMQ_SOCKET_LIMIT_GUIDANCE: &str = "ZMQ could not create another socket. The process may have reached libzmq's ZMQ_MAX_SOCKETS limit or its file-descriptor limit. Reduce direct-ZMQ peers or raise the limit with `ulimit -n`";
+const PROCESS_FD_LIMIT_GUIDANCE: &str = "The process reached its file-descriptor limit. Reduce open file descriptors or raise the limit with `ulimit -n`";
+
 use super::codec::{Codec, MsgpackCodec};
 use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
 use crate::discovery::EventTransportKind;
+
+fn socket_limit_guidance(raw_errno: Option<i32>, guidance: &'static str) -> Option<&'static str> {
+    (raw_errno == Some(libc::EMFILE)).then_some(guidance)
+}
+
+fn error_with_guidance(
+    error: impl std::error::Error + Send + Sync + 'static,
+    guidance: &str,
+) -> anyhow::Error {
+    let message = format!("{error}. {guidance}");
+    anyhow::Error::new(error).context(message)
+}
+
+fn map_socket_creation_error(error: tmq::TmqError) -> anyhow::Error {
+    let guidance = match &error {
+        tmq::TmqError::Zmq(error) => {
+            socket_limit_guidance(Some(error.to_raw()), ZMQ_SOCKET_LIMIT_GUIDANCE)
+        }
+        tmq::TmqError::Io(error) => {
+            socket_limit_guidance(error.raw_os_error(), PROCESS_FD_LIMIT_GUIDANCE)
+        }
+        tmq::TmqError::InterruptedSend => None,
+    };
+
+    match guidance {
+        Some(guidance) => error_with_guidance(error, guidance),
+        None => error.into(),
+    }
+}
+
+fn map_io_socket_creation_error(error: std::io::Error) -> anyhow::Error {
+    match socket_limit_guidance(error.raw_os_error(), PROCESS_FD_LIMIT_GUIDANCE) {
+        Some(guidance) => error_with_guidance(error, guidance),
+        None => error.into(),
+    }
+}
+
+fn bind_tmq_socket<T>(builder: SocketBuilder<T>, endpoint: &str) -> Result<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    builder.bind(endpoint).map_err(map_socket_creation_error)
+}
+
+fn connect_tmq_socket<T>(builder: SocketBuilder<T>, endpoint: &str) -> Result<T>
+where
+    T: tmq::FromZmqSocket<T>,
+{
+    builder.connect(endpoint).map_err(map_socket_creation_error)
+}
 
 fn configure_publish_builder<T>(builder: SocketBuilder<T>) -> SocketBuilder<T>
 where
@@ -104,7 +157,9 @@ impl ZmqPubTransport {
     /// Returns the transport and the actual bound endpoint.
     pub async fn bind(endpoint: &str, topic: &str) -> Result<(Self, String)> {
         let actual_endpoint = if endpoint.ends_with(":0") {
-            let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
+            let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+                .await
+                .map_err(map_io_socket_creation_error)?;
             let actual_addr = listener.local_addr()?;
             let port = actual_addr.port();
             drop(listener);
@@ -115,7 +170,7 @@ impl ZmqPubTransport {
         };
 
         let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).bind(&actual_endpoint)?;
+        let socket = bind_tmq_socket(configure_publish_builder(publish(&ctx)), &actual_endpoint)?;
 
         tracing::info!(
             endpoint = %actual_endpoint,
@@ -140,7 +195,7 @@ impl ZmqPubTransport {
     /// Connect to single broker XSUB endpoint (broker mode)
     pub async fn connect(xsub_endpoint: &str, topic: &str) -> Result<Self> {
         let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).connect(xsub_endpoint)?;
+        let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), xsub_endpoint)?;
 
         tracing::info!(
             endpoint = %xsub_endpoint,
@@ -163,7 +218,7 @@ impl ZmqPubTransport {
         };
 
         let ctx = shared_zmq_context();
-        let socket = configure_publish_builder(publish(&ctx)).connect(first_endpoint)?;
+        let socket = connect_tmq_socket(configure_publish_builder(publish(&ctx)), first_endpoint)?;
 
         for endpoint in endpoints {
             socket.get_socket().connect(endpoint)?;
@@ -339,11 +394,11 @@ impl ZmqSubTransport {
     fn connect_socket_with_rcvhwm(endpoint: &str, topic: &str, rcvhwm: i32) -> Result<Subscribe> {
         anyhow::ensure!(rcvhwm > 0, "ZMQ receive HWM must be greater than zero");
         let ctx = shared_zmq_context();
-        Ok(
-            configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm)
-                .connect(endpoint)?
-                .subscribe(topic.as_bytes())?,
-        )
+        let socket = connect_tmq_socket(
+            configure_subscribe_builder_with_hwm(subscribe(&ctx), rcvhwm),
+            endpoint,
+        )?;
+        Ok(socket.subscribe(topic.as_bytes())?)
     }
 
     /// Create a new ZMQ subscriber by connecting to a single endpoint.
@@ -467,9 +522,9 @@ impl ZmqSubTransport {
         };
 
         let ctx = shared_zmq_context();
-        let socket = configure_subscribe_builder(subscribe(&ctx))
-            .connect(first_endpoint)?
-            .subscribe(topic.as_bytes())?;
+        let socket =
+            connect_tmq_socket(configure_subscribe_builder(subscribe(&ctx)), first_endpoint)?
+                .subscribe(topic.as_bytes())?;
 
         for endpoint in endpoints_iter {
             socket.get_socket().connect(endpoint)?;
@@ -615,6 +670,51 @@ mod tests {
     use super::*;
     use crate::transports::event_plane::{EventEnvelope, MsgpackCodec};
     use tokio::time::{Duration, timeout};
+
+    #[test]
+    fn emfile_errno_selects_source_specific_guidance() {
+        assert_eq!(
+            socket_limit_guidance(Some(libc::EMFILE), ZMQ_SOCKET_LIMIT_GUIDANCE),
+            Some(ZMQ_SOCKET_LIMIT_GUIDANCE)
+        );
+        assert_eq!(
+            socket_limit_guidance(Some(libc::EMFILE), PROCESS_FD_LIMIT_GUIDANCE),
+            Some(PROCESS_FD_LIMIT_GUIDANCE)
+        );
+        assert_eq!(
+            socket_limit_guidance(Some(libc::EINVAL), ZMQ_SOCKET_LIMIT_GUIDANCE),
+            None
+        );
+    }
+
+    #[test]
+    fn tmq_io_emfile_preserves_error_and_adds_fd_guidance() {
+        let error = tmq::TmqError::Io(std::io::Error::from_raw_os_error(libc::EMFILE));
+        let original = error.to_string();
+        let message = map_socket_creation_error(error).to_string();
+
+        assert!(message.starts_with(&original));
+        assert!(message.contains(PROCESS_FD_LIMIT_GUIDANCE));
+        assert!(!message.contains("ZMQ_MAX_SOCKETS"));
+    }
+
+    #[test]
+    fn io_emfile_preserves_error_and_adds_fd_guidance() {
+        let error = std::io::Error::from_raw_os_error(libc::EMFILE);
+        let original = error.to_string();
+        let message = map_io_socket_creation_error(error).to_string();
+
+        assert!(message.starts_with(&original));
+        assert!(message.contains(PROCESS_FD_LIMIT_GUIDANCE));
+    }
+
+    #[test]
+    fn non_emfile_error_is_unchanged() {
+        let error = tmq::TmqError::Io(std::io::Error::from_raw_os_error(libc::EINVAL));
+        let original = error.to_string();
+
+        assert_eq!(map_socket_creation_error(error).to_string(), original);
+    }
 
     async fn send_raw(publisher: &ZmqPubTransport, frames: Vec<Vec<u8>>) {
         publisher

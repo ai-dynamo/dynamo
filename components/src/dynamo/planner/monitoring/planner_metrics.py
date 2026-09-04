@@ -44,6 +44,9 @@ THROUGHPUT_DECISION_STATES = [
     "held_over",
     "circuit_open",
     "rejected_by_plugin",
+    "gpu_budget_guard_hold",
+    "no_change",
+    "gpu_budget_reconcile",
 ]
 
 
