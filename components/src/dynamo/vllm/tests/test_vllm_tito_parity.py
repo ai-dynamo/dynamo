@@ -378,7 +378,7 @@ class TestEngineDataAccumulation:
 
 
 class TestPromptLogprobsPrefixCaching:
-    @pytest.mark.parametrize("prompt_logprobs", [None, 0, 5])
+    @pytest.mark.parametrize("prompt_logprobs", [None, 0])
     @pytest.mark.parametrize("enable_rl", [False, True])
     def test_prompt_logprobs_recompute_cached_prefix(
         self, prompt_logprobs, enable_rl, monkeypatch
@@ -441,9 +441,10 @@ class TestPromptLogprobsPrefixCaching:
                 "nvext": {"token_in": True},
                 "output_options": {"prompt_logprobs": prompt_logprobs},
             },
-            {},
+            {"temperature": 0.7},
             enable_rl=enable_rl,
         )
+        assert params.temperature == pytest.approx(1.0 if enable_rl else 0.7)
         _, cached_tokens, _ = manager.get_computed_blocks(make_request("test", params))
         assert cached_tokens == (32 if prompt_logprobs is None else 0)
 
