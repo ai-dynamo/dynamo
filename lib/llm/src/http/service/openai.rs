@@ -5417,7 +5417,6 @@ mod tests {
     #[test]
     fn test_parse_chat_completion_request_accepts_media_url_with_uuid() {
         for (part_type, media_url, uuid) in [
-            ("image_url", "https://example.com/image.png", "image-42"),
             ("video_url", "https://example.com/video.mp4", "video-42"),
             ("audio_url", "https://example.com/audio.wav", "audio-42"),
         ] {

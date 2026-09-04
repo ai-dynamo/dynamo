@@ -145,6 +145,7 @@ def _video_media_io_kwargs(request: dict) -> dict:
 def _build_user_mm_uuids(
     raw_uuids: Any,
     use_unified_vision_chunk: bool,
+    use_audio_in_video: bool = False,
 ) -> Optional[dict[str, list[str | None]]]:
     """Map Dynamo media keys to vLLM cache identities."""
     if raw_uuids is None:
@@ -171,6 +172,11 @@ def _build_user_mm_uuids(
             use_unified_vision_chunk,
         )
         mm_uuids.setdefault(backend_modality, []).extend(values)
+
+    if use_audio_in_video:
+        video_uuids = mm_uuids.get("video")
+        if video_uuids:
+            mm_uuids.setdefault("audio", []).extend(video_uuids)
 
     mm_uuids = {
         modality: uuids
@@ -770,6 +776,10 @@ class VllmMultimodalRequestProcessor:
         mm_uuids = _build_user_mm_uuids(
             request.get("multi_modal_uuids"),
             self.use_unified_vision_chunk,
+            use_audio_in_video=bool(
+                mm_processor_kwargs
+                and mm_processor_kwargs.get("use_audio_in_video", False)
+            ),
         )
         if mm_uuids is None:
             mm_uuids = _build_forwarded_mm_uuids(

@@ -506,6 +506,48 @@ async def test_audio_in_video_preserves_order_and_merges_standalone_audio():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("standalone_audio_uuid", ["audio-key", None])
+async def test_audio_in_video_aligns_derived_audio_uuids(standalone_audio_uuid):
+    processor = _processor()
+    video_a, video_b = object(), object()
+    standalone_audio, audio_a, audio_b = object(), object(), object()
+    processor.video_loader.load_video_batch.return_value = [video_a, video_b]
+    processor.audio_loader.load_audio_batch.return_value = [standalone_audio]
+    processor.audio_loader.load_audio.side_effect = [audio_a, audio_b]
+
+    prepared = await _prepare_prompt(
+        processor,
+        {
+            "token_ids": [1, 2],
+            "multi_modal_data": {
+                "audio_url": [{"Url": "https://example.com/audio.wav"}],
+                "video_url": [
+                    {"Url": "https://example.com/a.mp4"},
+                    {"Url": "https://example.com/b.mp4"},
+                ],
+            },
+            "multi_modal_uuids": {
+                "audio_url": [standalone_audio_uuid],
+                "video_url": ["video-key", None],
+            },
+            "mm_processor_kwargs": {"use_audio_in_video": True},
+        },
+        "request-audio-uuid-alignment",
+        None,
+        DisaggregationMode.AGGREGATED,
+    )
+
+    assert prepared.prompt["multi_modal_data"] == {
+        "video": [video_a, video_b],
+        "audio": [standalone_audio, audio_a, audio_b],
+    }
+    assert prepared.prompt["multi_modal_uuids"] == {
+        "video": ["video-key", None],
+        "audio": [standalone_audio_uuid, "video-key", None],
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("video_item", "audio_error", "message"),
     [
