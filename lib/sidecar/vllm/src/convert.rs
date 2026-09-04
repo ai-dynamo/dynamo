@@ -1437,6 +1437,7 @@ impl ResponseState {
             num_tokens,
             token_ids,
             finish_info,
+            sampling_mask,
             ..
         } = output;
 
@@ -1466,6 +1467,11 @@ impl ResponseState {
                     "received routed experts on a nonterminal response",
                 ));
             }
+            if !sampling_mask.is_empty() {
+                return Err(client::protocol_error(
+                    "received a sampling mask on a nonterminal response",
+                ));
+            }
             return if self.mode.is_prefill() || self.mode.is_encode() || num_tokens == 0 {
                 Ok(None)
             } else {
@@ -1484,6 +1490,12 @@ impl ResponseState {
                 client::protocol_error(format!("unknown finish reason {}", finish.finish_reason))
             })?;
         let completion_tokens = self.reported_completion_tokens();
+        if self.mode.is_encode() && !sampling_mask.is_empty() {
+            return Err(client::protocol_error(
+                "received a sampling mask on an encoder response",
+            ));
+        }
+        let sampling_mask = validate_sampling_mask(sampling_mask, completion_tokens)?;
         mapped.finish_reason = Some(match reason {
             pb::finish_info::FinishReason::Length => dynamo_backend_common::FinishReason::Length,
             pb::finish_info::FinishReason::Stop => dynamo_backend_common::FinishReason::Stop,
@@ -1562,20 +1574,23 @@ impl ResponseState {
             );
         }
         self.attach_prompt_data(&mut mapped);
-        if let Some(routed_experts) = routed_experts {
+        for (key, value) in [
+            ("routed_experts", routed_experts),
+            ("sampling_mask", sampling_mask),
+        ] {
+            let Some(value) = value else {
+                continue;
+            };
             let engine_data = mapped
                 .engine_data
                 .get_or_insert_with(|| serde_json::json!({}));
             let object = engine_data.as_object_mut().ok_or_else(|| {
                 client::protocol_error("response engine data is not a JSON object")
             })?;
-            if object
-                .insert("routed_experts".to_string(), routed_experts)
-                .is_some()
-            {
-                return Err(client::protocol_error(
-                    "response engine data already contains routed_experts",
-                ));
+            if object.insert(key.to_string(), value).is_some() {
+                return Err(client::protocol_error(format!(
+                    "response engine data already contains {key}"
+                )));
             }
         }
         Ok(Some(mapped))
@@ -1629,6 +1644,39 @@ impl ResponseState {
         self.prompt_info = Some(prompt);
         Ok(())
     }
+}
+
+fn validate_sampling_mask(
+    rows: Vec<pb::TokenIds>,
+    completion_tokens: u32,
+) -> Result<Option<serde_json::Value>, DynamoError> {
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let completion_tokens = usize::try_from(completion_tokens).map_err(|_| {
+        client::protocol_error("sampling-mask completion count exceeds platform limits")
+    })?;
+    if rows.len() != completion_tokens {
+        return Err(client::protocol_error(format!(
+            "sampling mask has {} rows for {completion_tokens} completion tokens",
+            rows.len()
+        )));
+    }
+    let rows = rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            if row.ids.is_empty() {
+                return Err(client::protocol_error(format!(
+                    "sampling mask row {index} is empty"
+                )));
+            }
+            Ok(row.ids)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    serde_json::to_value(rows)
+        .map(Some)
+        .map_err(|error| client::protocol_error(format!("failed to encode sampling mask: {error}")))
 }
 
 fn prompt_logprobs_to_json(prompt: pb::PromptInfo) -> serde_json::Value {

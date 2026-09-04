@@ -17,6 +17,7 @@ use dynamo_backend_common::{
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
+use prost::Message;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, oneshot};
@@ -548,6 +549,7 @@ fn sequence_response(
                 ec_transfer_params: None,
             }),
             routed_experts: None,
+            sampling_mask: Vec::new(),
         }),
     }
 }
@@ -582,6 +584,7 @@ fn encode_response(ec_transfer_params: Option<prost_types::Struct>) -> pb::Gener
                 ec_transfer_params,
             }),
             routed_experts: None,
+            sampling_mask: Vec::new(),
         }),
     }
 }
@@ -887,6 +890,9 @@ fn terminal_routed_experts_are_forwarded_with_prompt_logprobs() {
     response.outputs.as_mut().unwrap().routed_experts = Some(pb::OpaqueData {
         data: b"\x93NUMPY\x01\x00native".to_vec(),
     });
+    response.outputs.as_mut().unwrap().sampling_mask = vec![pb::TokenIds {
+        ids: vec![7, 42, 99],
+    }];
 
     let output = state
         .convert(response)
@@ -894,7 +900,35 @@ fn terminal_routed_experts_are_forwarded_with_prompt_logprobs() {
         .expect("terminal output");
     let engine_data = output.engine_data.expect("terminal engine data");
     assert_eq!(engine_data["routed_experts"], json!("k05VTVBZAQBuYXRpdmU="));
+    assert_eq!(engine_data["sampling_mask"], json!([[7, 42, 99]]));
     assert!(engine_data["prompt_logprobs"].is_array());
+}
+
+#[test]
+fn sampling_mask_uses_additive_sequence_output_tag() {
+    let output = pb::SequenceOutput {
+        sampling_mask: vec![pb::TokenIds { ids: vec![7, 42] }],
+        ..Default::default()
+    };
+    let wire = output.encode_to_vec();
+
+    assert!(
+        wire.contains(&82),
+        "field 10 must use its length-delimited tag"
+    );
+    assert_eq!(
+        pb::SequenceOutput::decode(wire.as_slice())
+            .expect("decode sequence output")
+            .sampling_mask,
+        output.sampling_mask
+    );
+}
+
+#[test]
+fn missing_sampling_mask_remains_compatible() {
+    let output = pb::SequenceOutput::decode([].as_slice()).expect("decode legacy empty output");
+
+    assert!(output.sampling_mask.is_empty());
 }
 
 #[test]
@@ -935,6 +969,45 @@ fn nonterminal_routed_experts_are_rejected() {
 }
 
 #[test]
+fn nonterminal_sampling_mask_is_rejected() {
+    let request = request();
+    let mut state =
+        ResponseState::new(&request, DisaggregationMode::Aggregated).expect("valid response state");
+    let mut response = sequence_response(false, true, None);
+    response.outputs.as_mut().unwrap().sampling_mask = vec![pb::TokenIds { ids: vec![42] }];
+
+    let error = state
+        .convert(response)
+        .expect_err("sampling masks must be terminal");
+    assert!(error.to_string().contains("nonterminal"));
+}
+
+#[test]
+fn malformed_terminal_sampling_masks_are_rejected() {
+    for rows in [
+        vec![pb::TokenIds { ids: Vec::new() }],
+        vec![
+            pb::TokenIds { ids: vec![42] },
+            pb::TokenIds { ids: vec![43] },
+        ],
+    ] {
+        let request = request();
+        let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated)
+            .expect("valid response state");
+        let mut response = sequence_response(true, true, None);
+        response.outputs.as_mut().unwrap().sampling_mask = rows;
+
+        assert!(
+            state
+                .convert(response)
+                .expect_err("malformed sampling mask must fail")
+                .to_string()
+                .contains("sampling mask")
+        );
+    }
+}
+
+#[test]
 fn encoder_routed_experts_are_rejected() {
     let request = epd_image_request();
     let mut response = encode_response(Some(
@@ -946,6 +1019,21 @@ fn encoder_routed_experts_are_rejected() {
         .expect("valid response state")
         .convert(response)
         .expect_err("encoder output cannot carry routed experts");
+    assert!(error.to_string().contains("encoder response"));
+}
+
+#[test]
+fn encoder_sampling_mask_is_rejected() {
+    let request = epd_image_request();
+    let mut response = encode_response(Some(
+        json_to_struct(encoder_handoff()).expect("encoder handoff"),
+    ));
+    response.outputs.as_mut().unwrap().sampling_mask = vec![pb::TokenIds { ids: vec![42] }];
+
+    let error = ResponseState::new(&request, DisaggregationMode::Encode)
+        .expect("valid response state")
+        .convert(response)
+        .expect_err("encoder output cannot carry a sampling mask");
     assert!(error.to_string().contains("encoder response"));
 }
 
