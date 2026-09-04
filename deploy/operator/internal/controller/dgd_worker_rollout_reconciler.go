@@ -1244,7 +1244,6 @@ func (r *dgdWorkerRolloutReconciler) dcdObservesWorkerHash(
 		return false, err
 	}
 
-	// Build a set of observed worker component names from the cache.
 	observed := make(map[string]struct{}, len(dcdList.Items))
 	for i := range dcdList.Items {
 		dcd := &dcdList.Items[i]
