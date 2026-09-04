@@ -172,6 +172,17 @@ jobs:
         # coverage.py collects nothing ("No data was collected" warnings) and TIA
         # gets no signal. Disable ITR (skips the settings API, coverage, skipping).
         DD_CIVISIBILITY_ITR_ENABLED: 'false'
+        # Datadog Test Optimization is configured here rather than through
+        # datadog/test-visibility-github-action: that action is six steps, and
+        # every step in a `container:` job on the ARC runners costs 20-40 s of
+        # exec overhead. ddtrace itself is pinned in requirements.test.txt. These
+        # are the variables the action exported (see its job log).
+        DD_API_KEY: ${{ secrets.DD_API_KEY }}
+        DD_SITE: datadoghq.com
+        DD_CIVISIBILITY_ENABLED: 'true'
+        DD_CIVISIBILITY_AGENTLESS_ENABLED: 'true'
+        DD_CIVISIBILITY_AUTO_INSTRUMENTATION_PROVIDER: github
+        PYTEST_ADDOPTS: --ddtrace
     permissions:
       contents: read
     services:
@@ -195,14 +206,6 @@ jobs:
           KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
         run: |
           echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
-      # Experimental: trialing Datadog Test Visibility. Remove if not kept.
-      - name: Configure Datadog Test Visibility
-        continue-on-error: true
-        uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
-        with:
-          languages: python
-          api_key: ${{ secrets.DD_API_KEY }}
-          site: datadoghq.com
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash
@@ -287,3 +290,33 @@ jobs:
           parallel_mode: 'none'
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'
+      # Artifacts are uploaded once per job, not once per stage: every stage
+      # writes uniquely named files into the shared test-results/ directory, and
+      # each upload step is another ~30 s container-hook round trip. Names keep
+      # the test-results-* / allure-results-* / coverage-python-* prefixes that
+      # test_report.yaml, generate-allure-report.yml, and the nightly coverage
+      # merge match on.
+      - name: Upload Test Results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        with:
+          name: test-results-${{ inputs.test_suite_name }}-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/pytest_test_report_*.xml
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Upload Allure Results
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
+        with:
+          name: allure-results-${{ inputs.test_suite_name }}-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/allure-results/
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Upload Coverage Data
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.enable_coverage == 'true' }}
+        with:
+          name: coverage-python-${{ inputs.test_suite_name }}-${{ matrix.platform }}-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/
+          include-hidden-files: true
+          retention-days: 7

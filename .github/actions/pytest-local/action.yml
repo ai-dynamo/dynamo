@@ -1,5 +1,12 @@
 name: 'Pytest'
 description: 'Run pytest on pre-built container images'
+# This action runs as ONE shell step on purpose. The test jobs execute as
+# GitHub `container:` jobs on ARC Kubernetes runners, where every step is a
+# separate exec into the job pod costing 20-40 s of fixed overhead regardless
+# of what it does. The former nine-step layout (env init, MinIO wait, GPU
+# check, pytest, result processing, three uploads) spent ~4 min per invocation
+# on that overhead alone. Artifact uploads moved to shared-test.yml so they
+# happen once per job rather than once per stage.
 inputs:
   pytest_marks:
     description: 'Pytest marks'
@@ -13,7 +20,7 @@ inputs:
     required: false
     default: 'unknown'
   framework:
-    description: 'Test framework label used in metrics env and artifact names (e.g. vllm, sglang, trtllm)'
+    description: 'Test framework label used in metrics env (e.g. vllm, sglang, trtllm)'
     required: false
     default: 'unknown'
   test_type:
@@ -70,35 +77,60 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Initialize test type env var
+    - name: Run pytest
       shell: bash
+      # Inputs are passed through env rather than interpolated into the script
+      # body (see zizmor "template-injection").
+      env:
+        PYTEST_MARKS: ${{ inputs.pytest_marks }}
+        CONTAINER_WORKSPACE: ${{ inputs.container_workspace }}
+        TEST_SUITE_NAME: ${{ inputs.test_suite_name }}
+        TEST_TYPE: ${{ inputs.test_type }}
+        PLATFORM_ARCH: ${{ inputs.platform_arch }}
+        DRY_RUN: ${{ inputs.dry_run }}
+        ENABLE_COVERAGE: ${{ inputs.enable_coverage }}
+        PARALLEL_MODE: ${{ inputs.parallel_mode }}
+        MAX_VRAM_GIB: ${{ inputs.max_vram_gib }}
+        NVME_DIR: ${{ inputs.nvme_dir }}
+        REQUESTED_HF_HOME: ${{ inputs.hf_home }}
+        GPU_TESTS: ${{ inputs.gpu_tests }}
+        RUN_ID: ${{ github.run_id }}
+        # The Datadog GitHub action used to export this; the ddtrace GitHub
+        # provider reads it to link test sessions to the job.
+        JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
+        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
+        PYTEST_XML_FILE: pytest_test_report.xml
+        HF_TOKEN: ${{ inputs.hf_token }}
+        DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
+        DYNAMO_TEST_TYPE: ${{ inputs.test_type }}
+        DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
+        DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
+        HF_XET_HIGH_PERFORMANCE: 1
+        PYTEST_DD_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
       run: |
-        STR_TEST_TYPE=$(echo '${{ inputs.test_type }}' | tr ', ' '_')
-        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
-    - name: verify minio
-      if: inputs.gpu_tests == 'true' # only gpu tests require minio
-      shell: bash
-      run: |
-        # Wait for MinIO to be ready
-        echo "⏳ Waiting for MinIO to be ready..."
-        MAX_ATTEMPTS=30
-        ATTEMPT=0
-        while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-          if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
-            echo "✅ MinIO is ready (attempt $((ATTEMPT + 1)))"
-            break
-          fi
-          ATTEMPT=$((ATTEMPT + 1))
-          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-            echo "❌ MinIO failed to start within ${MAX_ATTEMPTS}s"
-            exit 1
-          fi
-          sleep 1
-        done
-    - name: Verify GPU visibility
-      if: inputs.gpu_tests == 'true'
-      shell: python
-      run: |
+        # Sanitize test_type for filenames: remove commas and spaces.
+        STR_TEST_TYPE=$(echo "${TEST_TYPE}" | tr ', ' '_')
+
+        if [[ "${GPU_TESTS}" == "true" ]]; then
+          # Only GPU tests require MinIO (LoRA tests). Wait for the job service.
+          echo "⏳ Waiting for MinIO to be ready..."
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            if curl -sf http://localhost:9000/minio/health/live > /dev/null 2>&1; then
+              echo "✅ MinIO is ready (attempt $((ATTEMPT + 1)))"
+              break
+            fi
+            ATTEMPT=$((ATTEMPT + 1))
+            if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+              echo "❌ MinIO failed to start within ${MAX_ATTEMPTS}s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # Verify GPU visibility before spending time on collection.
+          python - <<'PY'
         import sys
         import torch
         available = torch.cuda.is_available()
@@ -110,31 +142,18 @@ runs:
         print(f"GPU Name: {name}")
         if not available:
             sys.exit("GPU tests requested but torch.cuda.is_available() is False")
+        PY
+        fi
 
-    # TRT-LLM starts MPI ranks and several runtime processes per test.
-    # Higher slot counts can starve startup even when VRAM fits.
-    # xdist resolves `-n auto` from this variable before tests/conftest.py
-    # saves the result as the GPU scheduler slot count.
-    - name: Limit TRT-LLM GPU parallelism
-      if: inputs.max_vram_gib != '' && startsWith(inputs.test_suite_name, 'trtllm')
-      shell: bash
-      run: |
-        echo "PYTEST_XDIST_AUTO_NUM_WORKERS=2" >> "$GITHUB_ENV"
-        echo "📊 TRT-LLM GPU parallelism: capping at 2 concurrent tests"
+        # TRT-LLM starts MPI ranks and several runtime processes per test.
+        # Higher slot counts can starve startup even when VRAM fits.
+        # xdist resolves `-n auto` from this variable before tests/conftest.py
+        # saves the result as the GPU scheduler slot count.
+        if [[ -n "${MAX_VRAM_GIB}" && "${TEST_SUITE_NAME}" == trtllm* ]]; then
+          export PYTEST_XDIST_AUTO_NUM_WORKERS=2
+          echo "📊 TRT-LLM GPU parallelism: capping at 2 concurrent tests"
+        fi
 
-    - name: Run pytest
-      shell: bash
-      env:
-        CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
-        PYTEST_XML_FILE: pytest_test_report.xml
-        HF_TOKEN: ${{ inputs.hf_token }}
-        DYNAMO_TEST_PLATFORM: ${{ inputs.platform_arch }}
-        DYNAMO_TEST_TYPE: ${{ inputs.test_type }}
-        DYNAMO_TEST_WORKFLOW: ${{ github.workflow }}
-        DYNAMO_TEST_FRAMEWORK: ${{ inputs.framework }}
-        HF_XET_HIGH_PERFORMANCE: 1
-        PYTEST_DD_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
-      run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
@@ -144,23 +163,22 @@ runs:
         echo "Datadog flaky retries enabled: ${DD_CIVISIBILITY_FLAKY_RETRY_ENABLED:-unset}"
 
         # Get absolute path for test-results directory and ensure it has proper permissions.
-        # Artifacts go to the GitHub Actions checkout so upload-artifact can find them.
+        # Artifacts go to the GitHub Actions checkout so the per-job upload in
+        # shared-test.yml can find them.
         TEST_RESULTS_DIR="${GITHUB_WORKSPACE}/test-results"
         mkdir -p "${TEST_RESULTS_DIR}"
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
-
-        # NVMe guard: GPU runners mount ${{ inputs.nvme_dir }}" (nvme-scratch emptyDir, NVMe-backed via
-        # instanceStorePolicy: RAID0). CPU/ARM runners have no ${{ inputs.nvme_dir }} mount.
-        if [[ -d "${{ inputs.nvme_dir }}" ]]; then
-          WORK_DIR="${{ inputs.nvme_dir }}"
+        # NVMe guard: GPU runners mount ${NVME_DIR} (nvme-scratch emptyDir, NVMe-backed via
+        # instanceStorePolicy: RAID0). CPU/ARM runners have no ${NVME_DIR} mount.
+        if [[ -d "${NVME_DIR}" ]]; then
+          WORK_DIR="${NVME_DIR}"
           echo "✅ NVMe scratch available"
         else
           WORK_DIR="/tmp"
         fi
 
-        REQUESTED_HF_HOME="${{ inputs.hf_home }}"
         FALLBACK_HF_HOME="${WORK_DIR}/.cache/huggingface"
         # Prefer the requested cache path when it is usable in this job container.
         if
@@ -188,23 +206,20 @@ runs:
         mkdir -p "${XDG_CACHE_HOME}"
         echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> $GITHUB_ENV
 
-
-        CONTAINER_WORKSPACE="${{ inputs.container_workspace }}"
         if [[ ! -d "${CONTAINER_WORKSPACE}" ]]; then
           echo "❌ container_workspace '${CONTAINER_WORKSPACE}' not found inside container"
           exit 1
         fi
         echo "📦 Running pytest from container workspace: ${CONTAINER_WORKSPACE}"
 
-        # Determine docker runtime flags and pytest command based on dry_run mode
-        if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+        # Determine pytest command based on dry_run mode
+        if [[ "${DRY_RUN}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
-          GPU_FLAGS=""
-          PYTEST_CMD="python -m pytest -v --collect-only -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="python -m pytest -v --collect-only -m \"${PYTEST_MARKS}\""
         else
           echo "🚀 Running pytest in normal mode"
           # Determine parallelization based on parallel_mode input
-          case "${{ inputs.parallel_mode }}" in
+          case "${PARALLEL_MODE}" in
             "auto")
               PARALLEL_OPTS="-n auto"
               echo "📊 Parallelization: auto (use all available cores)"
@@ -214,8 +229,8 @@ runs:
               echo "📊 Parallelization: disabled (sequential execution) for GPU runs"
               ;;
             *)
-              PARALLEL_OPTS="-n ${{ inputs.parallel_mode }}"
-              echo "📊 Parallelization: ${{ inputs.parallel_mode }} workers"
+              PARALLEL_OPTS="-n ${PARALLEL_MODE}"
+              echo "📊 Parallelization: ${PARALLEL_MODE} workers"
               ;;
           esac
 
@@ -225,10 +240,10 @@ runs:
           # consumes both, disables xdist, and runs tests as VRAM-aware
           # subprocesses. --dist=loadscope is omitted because xdist is bypassed.
           VRAM_OPTS=""
-          if [[ -n "${{ inputs.max_vram_gib }}" ]]; then
-            VRAM_OPTS="--max-vram-gib=${{ inputs.max_vram_gib }}"
+          if [[ -n "${MAX_VRAM_GIB}" ]]; then
+            VRAM_OPTS="--max-vram-gib=${MAX_VRAM_GIB}"
             DIST_OPTS=""
-            echo "🧮 GPU-parallel mode: --max-vram-gib=${{ inputs.max_vram_gib }} (xdist replaced by VRAM-aware orchestrator)"
+            echo "🧮 GPU-parallel mode: --max-vram-gib=${MAX_VRAM_GIB} (xdist replaced by VRAM-aware orchestrator)"
           else
             # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
             DIST_OPTS="--dist=loadscope"
@@ -236,14 +251,17 @@ runs:
 
           # Add coverage flags if enabled
           COVERAGE_FLAGS=""
-          if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
+          if [[ "${ENABLE_COVERAGE}" == "true" ]]; then
             echo "📊 Coverage collection enabled"
             COVERAGE_FLAGS="--cov=components/src/dynamo --cov=lib/bindings/python/src/dynamo --cov-report="
-            export COVERAGE_FILE="${TEST_RESULTS_DIR}/.coverage"
+            # Suffix the data file per stage: the job uploads test-results/ once
+            # at the end, so stages must not overwrite each other. The nightly
+            # merge globs `.coverage*` and combines whatever it finds.
+            export COVERAGE_FILE="${TEST_RESULTS_DIR}/.coverage.${STR_TEST_TYPE}"
             export PYTHONPATH="${CONTAINER_WORKSPACE}/components/src:${CONTAINER_WORKSPACE}/lib/bindings/python/src${PYTHONPATH:+:${PYTHONPATH}}"
           fi
 
-          PYTEST_CMD="python -m pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WORK_DIR}/pytest_temp -o cache_dir=${WORK_DIR}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="python -m pytest ${PARALLEL_OPTS} ${VRAM_OPTS} ${DIST_OPTS} --continue-on-collection-errors -v --tb=short --basetemp=${WORK_DIR}/pytest_temp -o cache_dir=${WORK_DIR}/.pytest_cache --junitxml=${TEST_RESULTS_DIR}/${PYTEST_XML_FILE} --alluredir=${TEST_RESULTS_DIR}/allure-results --durations=10 ${COVERAGE_FLAGS} -m \"${PYTEST_MARKS}\""
         fi
 
         echo "▶️ Executing (cwd=${CONTAINER_WORKSPACE}): ${PYTEST_CMD}"
@@ -253,78 +271,23 @@ runs:
         bash -c "${PYTEST_CMD}"
 
         TEST_EXIT_CODE=$?
-        echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
-        # Verify test results were written (only in normal mode)
-        if [[ "${{ inputs.dry_run }}" != "true" ]]; then
-          if [[ -f "${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}" ]]; then
-            echo "✅ Test results file found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
-          else
-            echo "⚠️  Test results file not found: ${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}"
-          fi
-        fi
-
-        # Always continue to results processing
-        exit 0
-
-    - name: Process Test Results
-      shell: bash
-      run: |
-
-        # Sanitize test_type for filenames (always set this for artifact upload)
-        # Remove commas and spaces from test_type for use in filenames
-        STR_TEST_TYPE=$(echo "${{ inputs.test_type }}" | tr ', ' '_')
-        echo "STR_TEST_TYPE=${STR_TEST_TYPE}" >> $GITHUB_ENV
-
-        # Check for JUnit XML file and determine test status
-        JUNIT_FILE="test-results/pytest_test_report.xml"
-
+        # Process test results. The JUnit file gets a unique per-stage name so
+        # several stages can share one test-results/ directory and one upload.
+        JUNIT_FILE="${TEST_RESULTS_DIR}/${PYTEST_XML_FILE}"
         if [[ -f "$JUNIT_FILE" ]]; then
           echo "✅ JUnit XML generated successfully"
-          # Extract basic test counts for status determination
           TOTAL_TESTS=$(grep -o 'tests="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
           FAILED_TESTS=$(grep -o 'failures="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
           ERROR_TESTS=$(grep -o 'errors="[0-9]*"' "$JUNIT_FILE" | grep -o '[0-9]*' | head -1 || echo "0")
           echo "📊 ${TOTAL_TESTS} tests completed (${FAILED_TESTS} failed, ${ERROR_TESTS} errors)"
 
-          # Rename XML file to unique name
-          JUNIT_NAME="pytest_test_report_${{ inputs.test_suite_name }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
-          mv "$JUNIT_FILE" "test-results/$JUNIT_NAME"
-          echo "📝 Renamed XML file to: $JUNIT_NAME"
-        else
+          JUNIT_NAME="pytest_test_report_${TEST_SUITE_NAME}_${STR_TEST_TYPE}_${PLATFORM_ARCH}_${RUN_ID}_${JOB_CHECK_RUN_ID}.xml"
+          mv "$JUNIT_FILE" "${TEST_RESULTS_DIR}/${JUNIT_NAME}"
+          echo "📝 Renamed XML file to: ${JUNIT_NAME}"
+        elif [[ "${DRY_RUN}" != "true" ]]; then
           echo "⚠️  JUnit XML file not found - test results may not be available for upload"
-          TOTAL_TESTS=0
-          FAILED_TESTS=1  # Treat missing XML as failure
-          ERROR_TESTS=0
         fi
 
         exit ${TEST_EXIT_CODE}
-
-
-
-    - name: Upload Test Results
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-      if: always()  # Always upload test results, even if tests failed
-      with:
-        name: test-results-${{ inputs.test_suite_name }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/pytest_test_report_${{ inputs.test_suite_name }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
-        retention-days: 7
-
-    - name: Upload Coverage Data
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-      if: always() && inputs.enable_coverage == 'true'
-      with:
-        name: coverage-python-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/
-        include-hidden-files: true
-        retention-days: 7
-
-    - name: Upload Allure Results
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-      if: always()
-      with:
-        name: allure-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ inputs.platform_arch }}-${{ github.run_id }}-${{ job.check_run_id }}
-        path: test-results/allure-results/
-        retention-days: 7
-        if-no-files-found: ignore
