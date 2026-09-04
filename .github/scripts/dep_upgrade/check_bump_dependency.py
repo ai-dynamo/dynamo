@@ -6,7 +6,12 @@ Runs the TRT-LLM bump against a temp copy of the real inputs with a synthetic
 version and asserts it rewrites exactly MAIN_TOT.trtllm in
 docs/fern/components/releases.data.ts — one line, inside the MAIN_TOT block,
 no RELEASES pin touched, and the result still parses through
-gen_llms_tables.py. Run from anywhere; exit 0 == safe to bump.
+gen_llms_tables.py.
+
+Then runs set_baseline_stem with a synthetic stem and asserts it rewrites
+exactly the baseline_sbom inside the trtllm: block of container/context.yaml,
+leaving runtime_image_tag and the vllm/sglang blocks alone. Run from anywhere;
+exit 0 == safe to bump.
 """
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ import importlib.util
 import shutil
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[3]
@@ -25,6 +31,8 @@ DATA_REL = "docs/fern/components/releases.data.ts"
 SEED_FILES = ["container/context.yaml", "pyproject.toml", DATA_REL]
 
 SYNTH = "9.9.9rc99"  # synthetic upstream TRT-LLM version, absent from real data
+SYNTH_STEM = "release@0bad0bad"  # synthetic baseline stem, absent from real data
+CTX_REL = "container/context.yaml"
 
 
 def load(name: str, path: Path):
@@ -35,8 +43,19 @@ def load(name: str, path: Path):
 
 
 def fail(msg: str) -> None:
+    """Report a failed assertion and exit non-zero (exit 0 == safe to bump)."""
     print(f"FAIL: {msg}")
     sys.exit(1)
+
+
+def fail_exc(what: str, exc: BaseException) -> None:
+    """Same, for an unexpected crash: keep the traceback for debugging.
+
+    The traceback is printed rather than propagated so the script keeps its
+    single contract -- exit 0 means safe to bump, anything else means stop.
+    """
+    traceback.print_exc()
+    fail(f"{what} raised {type(exc).__name__}: {exc}")
 
 
 def main() -> int:
@@ -62,7 +81,7 @@ def main() -> int:
         except SystemExit as exc:
             fail(f"bump apply() raised SystemExit: {exc}")
         except Exception as exc:  # noqa: BLE001 - any crash is a red result
-            fail(f"bump apply() raised {type(exc).__name__}: {exc}")
+            fail_exc("bump apply()", exc)
 
         after = data_path.read_text()
         if after == before:
@@ -116,9 +135,69 @@ def main() -> int:
         if not rel_pins:
             fail("no RELEASES trtllm pins parsed; cross-check is meaningless")
 
+        # --- baseline stem rewrite ------------------------------------------
+        # Runs against the already-bumped tree, matching the workflow's order.
+        ctx_path = root / CTX_REL
+        ctx_before = ctx_path.read_text()
+
+        try:
+            if not bump.set_baseline_stem("trtllm", SYNTH_STEM, root):
+                fail("set_baseline_stem reported no change")
+        except SystemExit as exc:
+            fail(f"set_baseline_stem raised SystemExit: {exc}")
+        except Exception as exc:  # noqa: BLE001 - any crash is a red result
+            fail_exc("set_baseline_stem", exc)
+
+        ctx_after = ctx_path.read_text()
+        cb, ca = ctx_before.splitlines(), ctx_after.splitlines()
+        if len(cb) != len(ca):
+            fail("context.yaml line count changed; expected an in-place stem edit")
+        ctx_changed = [i for i, (x, y) in enumerate(zip(cb, ca)) if x != y]
+        if len(ctx_changed) != 1:
+            fail(
+                f"expected exactly 1 changed context.yaml line, "
+                f"got {len(ctx_changed)}: {ctx_changed}"
+            )
+        stem_idx = ctx_changed[0]
+        if ca[stem_idx].strip() != f"baseline_sbom: {SYNTH_STEM}":
+            fail(f"changed line is not the baseline_sbom pin: {ca[stem_idx]!r}")
+
+        # It must sit inside the trtllm: block, not vllm/sglang earlier in the file.
+        fw_start = next(
+            (i for i, ln in enumerate(ca) if ln.rstrip() == "trtllm:"), None
+        )
+        if fw_start is None:
+            fail("no top-level 'trtllm:' block found in context.yaml")
+        fw_end = next(
+            (
+                i
+                for i in range(fw_start + 1, len(ca))
+                if ca[i][:1].strip() and not ca[i].startswith("#")
+            ),
+            len(ca),
+        )
+        if not (fw_start < stem_idx < fw_end):
+            fail(
+                f"baseline_sbom line {stem_idx} is outside the trtllm: block "
+                f"({fw_start}..{fw_end})"
+            )
+
+        # The version bump and the stem must not clobber each other.
+        if f"runtime_image_tag: {SYNTH}" not in ctx_after:
+            fail("runtime_image_tag lost its bumped value after the stem rewrite")
+        if ctx_after.count(SYNTH_STEM) != 1:
+            fail(
+                f"{SYNTH_STEM} appears {ctx_after.count(SYNTH_STEM)} times; expected 1"
+            )
+
+        # Idempotent: re-applying the same stem is a no-op, not a second edit.
+        if bump.set_baseline_stem("trtllm", SYNTH_STEM, root):
+            fail("set_baseline_stem is not idempotent")
+
     print("PASS: bump rewrote only MAIN_TOT.trtllm; RELEASES pins intact; file parses")
     print(f"  MAIN_TOT.trtllm -> {SYNTH}")
     print(f"  {len(rel_pins)} RELEASES trtllm pins left untouched")
+    print(f"PASS: baseline_sbom -> {SYNTH_STEM} (trtllm block only, idempotent)")
     return 0
 
 

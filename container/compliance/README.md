@@ -60,6 +60,15 @@ PR and on a daily cron (`.github/workflows/compliance-base-drift.yml`); it fails
 digest moved or the layer-prefix invariant no longer holds, which means a vendor silently
 switched a base image and the corpus must be re-captured.
 
+A tag bump is the other way a baseline goes stale, and the upsert key includes `from_tag`, so
+re-capturing on a new tag appends rather than replaces. Pass `--prune-superseded` to drop the
+old tag's rows and the SBOM files nothing references any more; leaving them behind eventually
+fails the drift check, which re-resolves every row against the registry.
+
+For TRT-LLM this is automated: `.github/workflows/auto-dep-upgrade-trigger.yml` re-captures both
+architectures against the new tag and commits the refreshed corpus alongside the version bump, so
+`runtime_image_tag` and `baseline_sbom` never diverge. A capture that fails pushes nothing.
+
 ## CI integration
 
 - **Inline extraction** — `.github/actions/compliance-extract` extracts `/legal` + `/sboms`
