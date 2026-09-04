@@ -93,17 +93,12 @@ For `throughput`, `latency`, and `load`, the Planner enables load-based scaling,
 
 > **Need multi-DGD coordination?** See the [Global Planner Guide](global-planner-guide.md) for shared-policy coordination across multiple DGDs and single-endpoint multi-pool deployments.
 
-## Choose a Target Without a Specific SLA
+## Choose an Optimization Target
 
-Choose the default `throughput` target for a balance of throughput and GPU use, or choose `latency` to scale up earlier and keep queues shorter. Both targets use load-based scaling automatically, with no SLA values or profiling data required.
+- **Without a specific SLA:** Choose the default `throughput` target for a balance of throughput and GPU use, or choose `latency` to scale up earlier and keep queues shorter. Both targets use load-based scaling automatically, with no SLA values or profiling data required.
+- **With a specific SLA:** Choose the `sla` target and enable throughput-based and load-based scaling together. Throughput-based scaling provides a stable capacity floor, while load-based scaling responds to bursts above that floor. Native AIC or bootstrap FPMs make the performance model ready sooner; otherwise it warms from live FPMs.
 
-For topology, target, runtime environment, and dependency decisions, see [Choose a Planner Mode](choose-planner-mode.md).
-
-## Choose a Target With a Specific SLA
-
-Choose the `sla` target and enable throughput-based and load-based scaling together. Throughput-based scaling provides a stable capacity floor, while load-based scaling responds to bursts above that floor. Native AIC or bootstrap FPMs make the performance model ready sooner; otherwise it warms from live FPMs.
-
-For the complete decision path and a recommended SLA configuration, see [Choose a Planner Mode](choose-planner-mode.md).
+For topology, target, runtime environment, dependencies, and a recommended SLA configuration, see [Choose a Planner Mode](choose-planner-mode.md).
 
 ## Quick Start
 
