@@ -741,10 +741,10 @@ func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	}
 }
 
-func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
+func TestValidateFailoverCheckpoint(t *testing.T) {
 	component := validAutomaticFailoverComponent()
 
-	t.Run("accepts DGD source and generated DCD target", func(t *testing.T) {
+	t.Run("accepts a DGD and its DCD", func(t *testing.T) {
 		require.Empty(t, ValidateFailoverCheckpointForDGD(component, string(BackendFrameworkVLLM)))
 
 		target := component.DeepCopy()
@@ -756,7 +756,7 @@ func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
 		require.Empty(t, ValidateFailoverCheckpointForDGD(twoShadows, string(BackendFrameworkVLLM)))
 	})
 
-	t.Run("rejects standalone target and incompatible runtime profile", func(t *testing.T) {
+	t.Run("rejects an incompatible runtime profile", func(t *testing.T) {
 		target := component.DeepCopy()
 		target.Experimental.Checkpoint.CheckpointRef = ptr.To("checkpoint-worker")
 		target.PodTemplate.Spec.Containers[0].Args = []string{
@@ -813,6 +813,10 @@ func TestIsIntraPodFailoverEnabled(t *testing.T) {
 	})))
 	assert.False(t, IsIntraPodFailoverEnabled(betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{})))
 	assert.False(t, IsIntraPodFailoverEnabled(nil))
+}
+
+func TestIntraPodFailoverEngineContainerNames(t *testing.T) {
+	assert.Equal(t, []string{"engine-0", "engine-1"}, IntraPodFailoverEngineContainerNames())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
