@@ -15,11 +15,62 @@ use tokio_util::sync::CancellationToken;
 use crate::identity::{RoutingPartitionId, RoutingPartitionRef};
 use crate::protocols::{ActiveSequenceEvent, WorkerWithDpRank};
 use crate::sequences::{SequencePublishQueueError, SequencePublisher, SequenceSubscriber};
-use crate::services::common::zmq::{create_bound_pub_socket, create_sub_socket, validate_endpoint};
+use crate::services::common::zmq::{
+    create_bound_pub_socket, create_sub_socket_topics, validate_endpoint,
+};
+use crate::services::selection::affinity::{AffinityReplicaSink, AffinityTarget, AffinityVersion};
 
 pub(crate) const REPLICA_EVENT_CHANNEL_CAPACITY: usize = 100_000;
 const PEER_COMMAND_CHANNEL_CAPACITY: usize = 64;
 const REPLICA_TOPIC: &[u8] = b"dynamo.slot-tracker.v1";
+/// Session-affinity bindings ride the same mesh on their own topic, so peers
+/// that do not subscribe to it never see them.
+const AFFINITY_TOPIC: &[u8] = b"dynamo.session-affinity.v1";
+const AFFINITY_EVENT_CHANNEL_CAPACITY: usize = 4_096;
+
+/// One replicated session binding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AffinityBindingEvent {
+    pub session_id: String,
+    pub worker_id: u64,
+    pub dp_rank: Option<u32>,
+    pub sequence: u64,
+    pub writer_id: u64,
+}
+
+impl AffinityBindingEvent {
+    pub(crate) fn target(&self) -> AffinityTarget {
+        AffinityTarget::new(self.worker_id, self.dp_rank)
+    }
+
+    pub(crate) fn version(&self) -> AffinityVersion {
+        AffinityVersion {
+            sequence: self.sequence,
+            writer_id: self.writer_id,
+        }
+    }
+}
+
+/// Publishes bindings from a [`super::super::selection::affinity::SessionAffinity`]
+/// into the mesh. Best effort: a full channel drops the update.
+struct AffinityMeshSink {
+    tx: mpsc::Sender<AffinityBindingEvent>,
+}
+
+impl AffinityReplicaSink for AffinityMeshSink {
+    fn publish(&self, session_id: &str, target: AffinityTarget, version: AffinityVersion) {
+        let update = AffinityBindingEvent {
+            session_id: session_id.to_string(),
+            worker_id: target.worker_id,
+            dp_rank: target.dp_rank,
+            sequence: version.sequence,
+            writer_id: version.writer_id,
+        };
+        if let Err(error) = self.tx.try_send(update) {
+            tracing::trace!(%error, "dropping best-effort session affinity replica update");
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ScopedReplicaEvent {
@@ -49,6 +100,7 @@ pub(crate) type ReplicaEventSender = mpsc::Sender<ScopedReplicaEvent>;
 pub(crate) struct ReplicaSyncConfig {
     process_id: u64,
     outbound_tx: ReplicaEventSender,
+    affinity_tx: Option<mpsc::Sender<AffinityBindingEvent>>,
     cancel_token: CancellationToken,
 }
 
@@ -96,13 +148,26 @@ impl ReplicaSyncConfig {
         Self {
             process_id,
             outbound_tx,
+            affinity_tx: None,
             cancel_token,
         }
     }
 
-    #[cfg(feature = "standalone-slot-tracker")]
+    fn with_affinity_publisher(mut self, tx: mpsc::Sender<AffinityBindingEvent>) -> Self {
+        self.affinity_tx = Some(tx);
+        self
+    }
+
     pub(crate) fn process_id(&self) -> u64 {
         self.process_id
+    }
+
+    /// Sink that publishes session bindings into the mesh, when this runtime
+    /// carries them.
+    pub(crate) fn affinity_sink(&self) -> Option<Arc<dyn AffinityReplicaSink>> {
+        self.affinity_tx
+            .clone()
+            .map(|tx| Arc::new(AffinityMeshSink { tx }) as Arc<dyn AffinityReplicaSink>)
     }
 
     pub(crate) fn is_self_event(&self, event: &ActiveSequenceEvent) -> bool {
@@ -329,10 +394,11 @@ pub(crate) fn setup_replica_sync(
 
     let bind_endpoint = replica_sync_bind_endpoint(port)?;
     let process_id = generate_process_id();
-    let (outbound_tx, publisher_task) =
+    let (outbound_tx, affinity_tx, publisher_task) =
         start_replica_publisher(&bind_endpoint, cancel_token.clone())?;
     Ok(Some(ReplicaSyncRuntime {
-        config: ReplicaSyncConfig::new(process_id, outbound_tx, cancel_token.clone()),
+        config: ReplicaSyncConfig::new(process_id, outbound_tx, cancel_token.clone())
+            .with_affinity_publisher(affinity_tx),
         cancel_token,
         publisher_task: Mutex::new(Some(publisher_task)),
     }))
@@ -382,53 +448,63 @@ pub(crate) fn setup_scoped_replica_sync(
 pub(crate) fn start_replica_publisher(
     bind_endpoint: &str,
     cancel_token: CancellationToken,
-) -> Result<(ReplicaEventSender, JoinHandle<()>)> {
+) -> Result<(
+    ReplicaEventSender,
+    mpsc::Sender<AffinityBindingEvent>,
+    JoinHandle<()>,
+)> {
     validate_endpoint(bind_endpoint)?;
     let mut socket = create_bound_pub_socket(bind_endpoint)
         .with_context(|| format!("failed to bind replica publisher to `{bind_endpoint}`"))?;
     let (tx, mut rx) = mpsc::channel::<ScopedReplicaEvent>(REPLICA_EVENT_CHANNEL_CAPACITY);
+    let (affinity_tx, mut affinity_rx) =
+        mpsc::channel::<AffinityBindingEvent>(AFFINITY_EVENT_CHANNEL_CAPACITY);
 
     let task = tokio::spawn(async move {
         loop {
-            let event = tokio::select! {
+            let frames = tokio::select! {
                 _ = cancel_token.cancelled() => break,
                 event = rx.recv() => {
                     let Some(event) = event else {
                         break;
                     };
-                    event
+                    let partition = event.partition_ref();
+                    match rmp_serde::to_vec_named(&event) {
+                        Ok(payload) => vec![REPLICA_TOPIC.to_vec(), payload],
+                        Err(error) => {
+                            tracing::error!(
+                                model_name = %partition.model_name,
+                                routing_group = %partition.routing_group,
+                                request_id = %event.event.request_id,
+                                "Failed to encode active-sequence replica event: {error}"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                binding = affinity_rx.recv() => {
+                    let Some(binding) = binding else {
+                        break;
+                    };
+                    match rmp_serde::to_vec_named(&binding) {
+                        Ok(payload) => vec![AFFINITY_TOPIC.to_vec(), payload],
+                        Err(error) => {
+                            tracing::error!(
+                                session_id = %binding.session_id,
+                                "Failed to encode session affinity replica event: {error}"
+                            );
+                            continue;
+                        }
+                    }
                 }
             };
-
-            let request_id = event.event.request_id.clone();
-            let partition = event.partition_ref();
-            let payload = match rmp_serde::to_vec_named(&event) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    tracing::error!(
-                        model_name = %partition.model_name,
-                        routing_group = %partition.routing_group,
-                        request_id = %request_id,
-                        "Failed to encode active-sequence replica event: {error}"
-                    );
-                    continue;
-                }
-            };
-            if let Err(error) = socket
-                .send_multipart(vec![REPLICA_TOPIC.to_vec(), payload])
-                .await
-            {
-                tracing::error!(
-                    model_name = %partition.model_name,
-                    routing_group = %partition.routing_group,
-                    request_id = %request_id,
-                    "Failed to publish active-sequence replica event: {error}"
-                );
+            if let Err(error) = socket.send_multipart(frames).await {
+                tracing::error!("Failed to publish replica event: {error}");
             }
         }
     });
 
-    Ok((tx, task))
+    Ok((tx, affinity_tx, task))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -466,6 +542,7 @@ enum PeerCommand {
 }
 
 impl PeerManager {
+    #[cfg_attr(not(feature = "standalone-slot-tracker"), allow(dead_code))]
     pub(crate) fn start<F>(
         initial_peers: Vec<String>,
         cancel_token: CancellationToken,
@@ -474,7 +551,32 @@ impl PeerManager {
     where
         F: Fn(ScopedReplicaEvent) + Send + Sync + 'static,
     {
-        let mut socket = create_sub_socket(REPLICA_TOPIC)?;
+        Self::start_with_affinity(
+            initial_peers,
+            cancel_token,
+            handle_event,
+            None::<fn(AffinityBindingEvent)>,
+        )
+    }
+
+    /// Like [`Self::start`], also subscribing to session-affinity bindings
+    /// when `handle_affinity` is given.
+    pub(crate) fn start_with_affinity<F, A>(
+        initial_peers: Vec<String>,
+        cancel_token: CancellationToken,
+        handle_event: F,
+        handle_affinity: Option<A>,
+    ) -> Result<Self>
+    where
+        F: Fn(ScopedReplicaEvent) + Send + Sync + 'static,
+        A: Fn(AffinityBindingEvent) + Send + Sync + 'static,
+    {
+        let topics: &[&[u8]] = if handle_affinity.is_some() {
+            &[REPLICA_TOPIC, AFFINITY_TOPIC]
+        } else {
+            &[REPLICA_TOPIC]
+        };
+        let mut socket = create_sub_socket_topics(topics)?;
         let mut configured_peers = HashSet::new();
         for endpoint in initial_peers {
             validate_endpoint(&endpoint)
@@ -502,7 +604,7 @@ impl PeerManager {
                     }
                     message = socket.recv_multipart() => {
                         match message {
-                            Ok(frames) => handle_replica_message(&handle_event, frames),
+                            Ok(frames) => handle_replica_message(&handle_event, handle_affinity.as_ref(), frames),
                             Err(error) => {
                                 tracing::error!("Failed to receive active-sequence replica event: {error}");
                             }
@@ -615,31 +717,40 @@ fn handle_peer_command(
     }
 }
 
-fn handle_replica_message<F>(
+fn handle_replica_message<F, A>(
     handle_event: &F,
+    handle_affinity: Option<&A>,
     frames: crate::services::common::zmq::MultipartMessage,
 ) where
     F: Fn(ScopedReplicaEvent),
+    A: Fn(AffinityBindingEvent),
 {
     let [topic, payload] = frames.as_slice() else {
         tracing::debug!(
             frame_count = frames.len(),
-            "Dropping malformed active-sequence replica message"
+            "Dropping malformed replica message"
         );
         return;
     };
-    if topic.as_slice() != REPLICA_TOPIC {
-        tracing::debug!("Dropping active-sequence replica message with unexpected topic");
-        return;
+    match topic.as_slice() {
+        REPLICA_TOPIC => match rmp_serde::from_slice::<ScopedReplicaEvent>(payload) {
+            Ok(event) => handle_event(event),
+            Err(error) => {
+                tracing::debug!("Dropping malformed active-sequence replica payload: {error}");
+            }
+        },
+        AFFINITY_TOPIC => match (
+            handle_affinity,
+            rmp_serde::from_slice::<AffinityBindingEvent>(payload),
+        ) {
+            (Some(handle_affinity), Ok(event)) => handle_affinity(event),
+            (None, _) => {}
+            (_, Err(error)) => {
+                tracing::debug!("Dropping malformed session affinity replica payload: {error}");
+            }
+        },
+        _ => tracing::debug!("Dropping replica message with unexpected topic"),
     }
-    let event: ScopedReplicaEvent = match rmp_serde::from_slice(payload) {
-        Ok(event) => event,
-        Err(error) => {
-            tracing::debug!("Dropping malformed active-sequence replica payload: {error}");
-            return;
-        }
-    };
-    handle_event(event);
 }
 
 #[cfg(test)]
@@ -786,7 +897,7 @@ mod tests {
     async fn dynamic_peer_registration_controls_delivery() {
         let endpoint = reserve_tcp_endpoint();
         let cancel_token = CancellationToken::new();
-        let (outbound, publisher_task) =
+        let (outbound, _affinity, publisher_task) =
             start_replica_publisher(&endpoint, cancel_token.child_token()).expect("publisher");
         let (received_tx, mut received_rx) = mpsc::channel(16);
         let manager = PeerManager::start(Vec::new(), cancel_token.child_token(), move |event| {
@@ -834,9 +945,9 @@ mod tests {
         let endpoint_a = reserve_tcp_endpoint();
         let endpoint_b = reserve_tcp_endpoint();
         let cancel_token = CancellationToken::new();
-        let (outbound_a, publisher_a) =
+        let (outbound_a, _affinity_a, publisher_a) =
             start_replica_publisher(&endpoint_a, cancel_token.child_token()).unwrap();
-        let (outbound_b, publisher_b) =
+        let (outbound_b, _affinity_b, publisher_b) =
             start_replica_publisher(&endpoint_b, cancel_token.child_token()).unwrap();
         let registry_a = Arc::new(SlotTrackerRegistry::new_with_replica_sync(
             cancel_token.clone(),

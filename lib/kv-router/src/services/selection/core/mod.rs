@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dynamo_tokens::SequenceHash;
 use once_cell::sync::OnceCell;
@@ -44,6 +44,7 @@ use crate::services::indexer::registry::WorkerRegistry;
 use crate::services::overlap::MooncakeOverlapSummary;
 use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 
+use super::affinity::{Acquired, AffinityInitialization, AffinityLease, SessionAffinity};
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
 use super::ingress::{KvEventIngress, ZmqDirectIngress};
@@ -57,6 +58,7 @@ use super::types::{
 };
 use crate::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
+use crate::services::common::replica_sync::AffinityBindingEvent;
 
 /// Source of dequeue-time overlap refreshes for a partition scheduler: the
 /// partition's index.
@@ -294,6 +296,8 @@ pub struct SelectionServiceConfig {
     pub replica_sync_peers: Vec<String>,
     pub kv_router_config: crate::config::KvRouterConfig,
     pub selection_cache: SelectionCacheConfig,
+    /// Session stickiness TTL; `None` disables session affinity.
+    pub session_affinity_ttl: Option<Duration>,
 }
 
 type SelectionEntries = RwLock<HashMap<RoutingPartitionId, Arc<OnceCell<Arc<SelectionEntry>>>>>;
@@ -330,6 +334,30 @@ pub struct SelectionCore {
     /// `create_reservation` can replay them without re-sending the prompt.
     selection_cache: SelectionCache,
     tracking_hash: Arc<TrackingHashContext>,
+    /// Session stickiness for request-shaped hosts; `None` when not configured.
+    session_affinity: Option<SessionAffinity>,
+    /// Leases held by booked selections, released with the booking.
+    affinity_leases: parking_lot::Mutex<HashMap<String, AffinityLease>>,
+}
+
+/// What a booked selection holds on its session until the worker is known.
+enum AffinityHold {
+    Initialize(AffinityInitialization),
+    Bound {
+        target: SessionTarget,
+        lease: AffinityLease,
+    },
+}
+
+type SessionTarget = super::affinity::AffinityTarget;
+
+fn affinity_error(error: super::affinity::AffinityError) -> SelectionError {
+    use super::affinity::AffinityError;
+    match error {
+        AffinityError::InvalidArgument(message) => SelectionError::BadRequest(message),
+        AffinityError::ResourceExhausted(message) => SelectionError::NotReady(message),
+        AffinityError::Dropped => SelectionError::Internal(error.to_string()),
+    }
 }
 
 impl SelectionCore {
@@ -372,6 +400,7 @@ impl SelectionCore {
             cache_config,
             tracking_hash,
             indexer_policy,
+            None,
         ))
     }
 
@@ -394,8 +423,28 @@ impl SelectionCore {
         cache_config: SelectionCacheConfig,
         tracking_hash: Arc<TrackingHashContext>,
         indexer_policy: IndexerPolicy,
+        session_affinity_ttl: Option<Duration>,
     ) -> Self {
         let cancel_token = cancel_token.child_token();
+        let session_affinity = match session_affinity_ttl {
+            Some(ttl) => match SessionAffinity::new(ttl) {
+                Ok(table) => {
+                    if let Some(sink) = replica_config.as_ref().and_then(|c| c.affinity_sink()) {
+                        let process_id = replica_config
+                            .as_ref()
+                            .map(|c| c.process_id())
+                            .unwrap_or_default();
+                        table.enable_replication(process_id, sink);
+                    }
+                    Some(table)
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "session affinity disabled");
+                    None
+                }
+            },
+            None => None,
+        };
         let indexer_registry = Arc::new(WorkerRegistry::new_with_cancel_token(
             indexer_threads,
             cancel_token.clone(),
@@ -420,6 +469,8 @@ impl SelectionCore {
             replica_config,
             selection_cache: SelectionCache::new(&cache_config),
             tracking_hash,
+            session_affinity,
+            affinity_leases: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -940,6 +991,40 @@ impl SelectionCore {
         }
 
         let entry = self.ready_entry(&key)?;
+
+        // Session stickiness: a bound session steers selection (exclusive for
+        // the default selector); a new session is bound to the worker chosen.
+        // An explicit affinity target or pin from the caller wins.
+        let session_id = self
+            .session_affinity
+            .as_ref()
+            .and(session_context.as_ref())
+            .filter(|_| affinity_target.is_none() && pinned_worker.is_none())
+            .map(|context| context.session_id().to_string());
+        let mut affinity_hold = None;
+        let affinity_target = match (session_id.as_deref(), self.session_affinity.as_ref()) {
+            (Some(session_id), Some(table)) if book => {
+                match table
+                    .acquire(session_id, None)
+                    .await
+                    .map_err(affinity_error)?
+                {
+                    Acquired::Initialize(init) => {
+                        affinity_hold = Some(AffinityHold::Initialize(init));
+                        None
+                    }
+                    Acquired::Bound { target, lease } => {
+                        affinity_hold = Some(AffinityHold::Bound { target, lease });
+                        Some(WorkerAffinityTarget::new(target.worker_id, target.dp_rank))
+                    }
+                }
+            }
+            (Some(session_id), Some(table)) => table
+                .query_target(session_id, None)
+                .map_err(affinity_error)?
+                .map(|target| WorkerAffinityTarget::new(target.worker_id, target.dp_rank)),
+            _ => affinity_target,
+        };
         // Router hints are attached to bookings only, and only when a worker in
         // this partition can consume them and the indexer can retain the
         // matched chain (local, event-driven, no approximate writes).
@@ -1051,6 +1136,13 @@ impl SelectionCore {
                 }
             } => result?,
         };
+        if let (Some(hold), Some(session_id), Some(selection_id)) = (
+            affinity_hold.take(),
+            session_id.as_deref(),
+            selection_id.as_deref(),
+        ) {
+            self.bind_session(hold, session_id, selection_id, response.best_worker);
+        }
         let endpoint = self
             .catalog
             .schedulable_endpoint(response.best_worker.worker_id, &key)
@@ -1376,6 +1468,77 @@ impl SelectionCore {
 
     fn forget_reservation(&self, selection_id: &str) {
         self.reservation_index.write().remove(selection_id);
+        self.affinity_leases.lock().remove(selection_id);
+    }
+
+    /// Bind (or confirm) `session_id` to the worker a booking landed on and
+    /// keep the lease with the booking. A bound session whose worker was not
+    /// selected (it left) is invalidated and rebound.
+    fn bind_session(
+        &self,
+        hold: AffinityHold,
+        session_id: &str,
+        selection_id: &str,
+        worker: WorkerWithDpRank,
+    ) {
+        let Some(table) = self.session_affinity.as_ref() else {
+            return;
+        };
+        let selected = SessionTarget::new(worker.worker_id, Some(worker.dp_rank));
+        let lease = match hold {
+            AffinityHold::Initialize(init) => init.commit(selected).ok(),
+            AffinityHold::Bound { target, lease }
+                if target.worker_id == selected.worker_id
+                    && target.dp_rank.is_none_or(|rank| rank == worker.dp_rank) =>
+            {
+                lease.publish(target);
+                return self.hold_lease(selection_id, lease);
+            }
+            AffinityHold::Bound { mut lease, .. } => {
+                lease.invalidate();
+                match table.try_acquire(session_id, None) {
+                    Ok(super::affinity::AcquireStep::Initialize(init)) => {
+                        init.commit(selected).ok()
+                    }
+                    _ => None,
+                }
+            }
+        };
+        if let Some(lease) = lease {
+            lease.publish(selected);
+            self.hold_lease(selection_id, lease);
+        }
+    }
+
+    fn hold_lease(&self, selection_id: &str, lease: AffinityLease) {
+        self.affinity_leases
+            .lock()
+            .insert(selection_id.to_string(), lease);
+    }
+
+    /// Apply a session binding a replica published.
+    pub(crate) fn dispatch_affinity_event(&self, event: AffinityBindingEvent) {
+        let Some(table) = self.session_affinity.as_ref() else {
+            return;
+        };
+        if self
+            .replica_config
+            .as_ref()
+            .is_some_and(|config| config.process_id() == event.writer_id)
+        {
+            return;
+        }
+        table.observe_replica_sequence(event.sequence);
+        if self.catalog.get(event.worker_id).is_none() {
+            return;
+        }
+        let (target, version, worker_id) = (event.target(), event.version(), event.worker_id);
+        let outcome = table.apply_replica_update(event.session_id, target, version);
+        tracing::trace!(
+            worker_id,
+            ?outcome,
+            "applied session affinity replica update"
+        );
     }
 
     /// Record a booked routing decision into the partition's approximate
@@ -1959,6 +2122,7 @@ mod tests {
                 SelectionCacheConfig::default(),
                 tracking_hash,
                 IndexerPolicy::from_router_config(&test_config(false)).expect("indexer policy"),
+                None,
             );
 
             core.upsert_worker(worker(1)).await.expect("worker upsert");
@@ -1998,6 +2162,7 @@ mod tests {
             SelectionCacheConfig::default(),
             tracking_hash,
             indexer_policy,
+            None,
         )
     }
 
@@ -2158,6 +2323,7 @@ mod tests {
             SelectionCacheConfig::default(),
             tracking_hash,
             indexer_policy,
+            None,
         );
         assert!(!core.listens_for_kv_events);
         for worker_id in [1, 2] {
@@ -3122,5 +3288,84 @@ mod tests {
         assert_eq!(response.overlap.cpu, 8);
         assert_eq!(response.overlap.disk, 8);
         assert_eq!(response.overlap.dp, HashMap::from([("0".to_string(), 8)]));
+    }
+
+    fn core_with_session_affinity() -> SelectionCore {
+        let config = test_config(false);
+        let tracking_hash = Arc::new(
+            TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
+        );
+        let indexer_policy = IndexerPolicy::from_router_config(&config).expect("indexer policy");
+        SelectionCore::new_inner(
+            config,
+            1,
+            CancellationToken::new(),
+            None,
+            None,
+            SelectionHost::default(),
+            WorkerType::Aggregated,
+            true,
+            SelectionCacheConfig::default(),
+            tracking_hash,
+            indexer_policy,
+            Some(Duration::from_secs(10)),
+        )
+    }
+
+    fn session_reservation(selection_id: &str, session_id: &str) -> SelectAndReserveRequest {
+        let mut request = reserve_request(selection_id);
+        request.session_id = Some(session_id.to_string());
+        request
+    }
+
+    #[tokio::test]
+    async fn session_stays_on_its_first_worker_across_bookings() {
+        let core = core_with_session_affinity();
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.upsert_worker(worker(2)).await.expect("worker upsert");
+
+        let first = core
+            .select_and_reserve(session_reservation("r1", "chat-a"))
+            .await
+            .expect("first booking");
+        for index in 0..4 {
+            let response = core
+                .select_and_reserve(session_reservation(&format!("r-{index}"), "chat-a"))
+                .await
+                .expect("booking");
+            assert_eq!(response.worker_id, first.worker_id, "session must stay put");
+            core.free_reservation(&format!("r-{index}"))
+                .await
+                .expect("free");
+        }
+        // A read-only select sees the binding too.
+        let mut advisory = select_request();
+        advisory.session_id = Some("chat-a".to_string());
+        let response = core.select(advisory).await.expect("select");
+        assert_eq!(response.worker_id, first.worker_id);
+        core.free_reservation("r1").await.expect("free");
+    }
+
+    #[tokio::test]
+    async fn replicated_binding_steers_a_new_session_and_frees_with_the_booking() {
+        let core = core_with_session_affinity();
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.upsert_worker(worker(2)).await.expect("worker upsert");
+
+        core.dispatch_affinity_event(AffinityBindingEvent {
+            session_id: "chat-b".to_string(),
+            worker_id: 2,
+            dp_rank: Some(0),
+            sequence: 1,
+            writer_id: 99,
+        });
+        let response = core
+            .select_and_reserve(session_reservation("r2", "chat-b"))
+            .await
+            .expect("booking");
+        assert_eq!(response.worker_id, 2);
+        assert!(core.affinity_leases.lock().contains_key("r2"));
+        core.free_reservation("r2").await.expect("free");
+        assert!(core.affinity_leases.lock().is_empty());
     }
 }

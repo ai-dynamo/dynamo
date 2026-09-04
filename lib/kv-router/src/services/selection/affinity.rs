@@ -142,6 +142,17 @@ impl WeakSessionAffinity {
     }
 }
 
+/// A session acquired for one request.
+pub enum Acquired {
+    /// New (or expired) session: select a worker, then `commit` it.
+    Initialize(AffinityInitialization),
+    /// Bound session: route to `target`; the lease releases on drop.
+    Bound {
+        target: AffinityTarget,
+        lease: AffinityLease,
+    },
+}
+
 /// One step of acquiring a session.
 pub enum AcquireStep {
     /// New (or expired) session: select a worker, then `commit` it.
@@ -356,11 +367,14 @@ impl SessionAffinity {
         &self,
         session_id: &str,
         requested_target: Option<AffinityTarget>,
-    ) -> Result<AcquireStep, AffinityError> {
+    ) -> Result<Acquired, AffinityError> {
         loop {
             match self.try_acquire(session_id, requested_target)? {
                 AcquireStep::Wait(notified) => notified.await,
-                step => return Ok(step),
+                AcquireStep::Initialize(init) => return Ok(Acquired::Initialize(init)),
+                AcquireStep::Bound { target, lease } => {
+                    return Ok(Acquired::Bound { target, lease });
+                }
             }
         }
     }

@@ -207,9 +207,15 @@ where
 }
 
 pub(crate) fn create_sub_socket(topic: &[u8]) -> Result<ZmqSocket> {
+    create_sub_socket_topics(&[topic])
+}
+
+pub(crate) fn create_sub_socket_topics(topics: &[&[u8]]) -> Result<ZmqSocket> {
     build_socket(zmq::SUB, |socket| {
         configure_receive_socket(socket)?;
-        socket.set_subscribe(topic)?;
+        for topic in topics {
+            socket.set_subscribe(topic)?;
+        }
         Ok(())
     })
 }
