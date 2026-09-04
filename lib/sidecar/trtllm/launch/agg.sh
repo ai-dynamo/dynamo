@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated serving through TensorRT-LLM's native gRPC server (1 GPU).
+# Aggregated serving through TensorRT-LLM's OpenEngine gRPC server (1 GPU).
 
 set -e
 
@@ -89,19 +89,14 @@ if [[ -n "$TRTLLM_CONTEXT_LENGTH" ]]; then
     TRTLLM_CONTEXT_LENGTH_ARGS=(--context-length "$TRTLLM_CONTEXT_LENGTH")
 fi
 
-# `--grpc` needs `smg-grpc-proto`. Pinned to the exact version
-# lib/sidecar/trtllm/proto/trtllm_service.proto was vendored from (see
-# proto/README.md's checksum) -- 0.4.2 lacks the include_stop_token_in_output
-# field (added by 0.4.14) our proto and Rust code both expect, which makes
-# every request fail with "'GenerateRequest' object has no attribute
-# 'include_stop_token_in_output'". Check the resolved version, not just
-# importability: an image whose TRT-LLM install already pulled an older
-# smg-grpc-proto (e.g. via its own grpc-smg extra) would otherwise satisfy a
-# bare `import` check and skip straight past this pin. sys.exit, not assert:
-# `assert` is stripped entirely under `python -O`/`PYTHONOPTIMIZE`, which
-# would make this check fail open (exit 0) even with the package missing.
-if ! "$TRTLLM_PYTHON" -c "import importlib.metadata as m, sys; sys.exit(0 if m.version('smg-grpc-proto') == '0.4.14' else 1)" >/dev/null 2>&1; then
-    "$TRTLLM_PYTHON" -m pip install --no-cache-dir "smg-grpc-proto==0.4.14"
+# `--grpc-protocol openengine` needs the OpenEngine bindings, which resolve only
+# from a custom index and which TRT-LLM keeps behind its optional `openengine`
+# extra. Constraints copied from that extra so we resolve what upstream does.
+if ! "$TRTLLM_PYTHON" -c "import openengine.v1" >/dev/null 2>&1; then
+    "$TRTLLM_PYTHON" -m pip install --no-cache-dir \
+        --extra-index-url https://buf.build/gen/python \
+        "openengine-openengine-grpc-python" \
+        "openengine-openengine-protocolbuffers-python"
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -113,16 +108,17 @@ if [[ -n "$GPU_MEM_ARGS" ]]; then
     TRTLLM_GPU_MEM_ARGS=(--extra_llm_api_options "$TRTLLM_EXTRA_CONFIG")
 fi
 
-print_launch_banner "Launching TensorRT-LLM Native-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
+print_launch_banner "Launching TensorRT-LLM OpenEngine-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
     "TensorRT-LLM gRPC: 127.0.0.1:${TRTLLM_GRPC_PORT}" \
     "Context length:    ${TRTLLM_CONTEXT_LENGTH:-from engine report}"
 
 python3 -m dynamo.frontend &
 
-# TensorRT-LLM's native gRPC listener is unauthenticated; keep it on loopback.
+# TensorRT-LLM's OpenEngine gRPC listener is unauthenticated; keep it on loopback.
 CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
 "$TRTLLM_PYTHON" -m tensorrt_llm.commands.serve "$MODEL" \
     --grpc \
+    --grpc-protocol openengine \
     --host 127.0.0.1 \
     --port "$TRTLLM_GRPC_PORT" \
     "${TRTLLM_MAX_SEQ_LEN_ARGS[@]}" \
