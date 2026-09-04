@@ -1,0 +1,184 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Minimal SGLang disaggregated deployment for the EFA verification deploy test
+# (tests/deploy/test_deploy_efa_sglang.py). Companion to disagg-efa.yaml, which
+# does the same for vLLM; the two differ only where the frameworks do.
+#
+# Deliberately NOT under examples/backends/*/deploy/, so the auto-discovered
+# deploy-test matrix (tests/deploy/conftest.py) never picks it up. It only runs
+# on an EFA-capable cluster, via the framework_with_efa marker.
+#
+# Kept small: Qwen3-0.6B and TP=1 per worker, which still exercises the whole
+# EFA path -- a disaggregated completion cannot succeed without a prefill->decode
+# KV transfer, and with the NIXL/LIBFABRIC settings below that transfer rides
+# NIXL -> LIBFABRIC -> EFA.
+#
+# How SGLang selects the backend, versus vLLM:
+#
+#   * --disaggregation-transfer-backend nixl picks NIXL over SGLang's default
+#     Mooncake transfer engine.
+#   * SGLANG_DISAGGREGATION_NIXL_BACKEND=LIBFABRIC is what pins NIXL to the
+#     LIBFABRIC plugin. SGLang has no equivalent of vLLM's --kv-transfer-config
+#     kv_connector_extra_config.backends list; without this variable SGLang asks
+#     NIXL for UCX, which on EFA hardware silently falls back to TCP.
+#
+# Two things are intentionally absent, for the same reasons as in disagg-efa.yaml:
+#
+#   * No tolerations or nodeSelector. On the CI clusters the Kyverno policy
+#     deploy-test-pod-policy injects them for any pod requesting a GPU in the
+#     dynamo-deploy-test namespace, and what it injects differs per cluster
+#     (an H100 ci-pool label on aws-dev-02, a GB200 gpu.product label on
+#     aws-dev-01). Hardcoding either one here would break the other.
+#
+#   * No LD_LIBRARY_PATH or PATH override. The -efa image sets up its own NIXL
+#     and libfabric paths (container/templates/aws.Dockerfile), and those paths
+#     are arch-dependent. Overriding them here would mask exactly the packaging
+#     regression tests/container/test_efa_image.py exists to catch.
+#
+# The image: fields are placeholders; the test overrides every one of them via
+# DeploymentSpec.set_image(--image) with the -efa image under test.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: sglang-disagg-efa
+spec:
+  components:
+  - name: Frontend
+    replicas: 1
+    type: frontend
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:efa
+  - name: prefill
+    replicas: 1
+    type: prefill
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:efa
+          workingDir: /workspace/examples/backends/sglang
+          command: [python3, -m, dynamo.sglang]
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --page-size
+          - "16"
+          - --tp
+          - "1"
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --disaggregation-mode
+          - prefill
+          - --disaggregation-transfer-backend
+          - nixl
+          - --disaggregation-bootstrap-port
+          - "12345"
+          - --host
+          - 0.0.0.0
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          env:
+          # Pins NIXL to the LIBFABRIC plugin. Without it SGLang requests UCX.
+          - { name: SGLANG_DISAGGREGATION_NIXL_BACKEND, value: LIBFABRIC }
+          - { name: FI_PROVIDER, value: efa }
+          # FI_LOG_LEVEL=info is what surfaces the libfabric:...:efa:mr: memory
+          # registration lines the test greps for as proof of the LIBFABRIC path.
+          - { name: FI_LOG_LEVEL, value: info }
+          - { name: FI_EFA_USE_DEVICE_RDMA, value: "1" }
+          - { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" }
+          # SGLang pushes KV from prefill to decode (NIXL WRITE), so it is the
+          # prefill agent's tx counter that grows -- the mirror image of vLLM.
+          - { name: NIXL_TELEMETRY_ENABLE, value: "y" }
+          - { name: NIXL_TELEMETRY_EXPORTER, value: prometheus }
+          - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK", "SYS_PTRACE"]
+          resources:
+            # nvidia.com/gpu is set on BOTH requests and limits on purpose: the
+            # Kyverno rule that injects the node targeting keys off
+            # spec.containers[].resources.requests."nvidia.com/gpu" > 0, so
+            # relying on requests being defaulted from limits would make the
+            # injection depend on admission ordering.
+            requests:
+              nvidia.com/gpu: "1"
+              # 1 EFA NIC per GPU. p5.48xlarge exposes 32 NICs for 8 GPUs, but a
+              # TP=1 transport smoke test only needs one device per worker.
+              vpc.amazonaws.com/efa: "1"
+              ephemeral-storage: 8Gi
+            limits:
+              nvidia.com/gpu: "1"
+              vpc.amazonaws.com/efa: "1"
+  - name: decode
+    replicas: 1
+    type: decode
+    podTemplate:
+      spec:
+        # Force prefill and decode onto different hosts. Without this they are
+        # routinely co-scheduled, and a same-node transfer can be served without
+        # the traffic ever crossing the fabric -- which would make every EFA
+        # assertion pass on a deployment that never exercised EFA.
+        # The label values are the operator's own (`prefill`/`decode`); the
+        # plausible-looking `dynamo-component-type: worker` matches nothing.
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  nvidia.com/dynamo-graph-deployment-name: sglang-disagg-efa
+                  nvidia.com/dynamo-component-type: prefill
+        containers:
+        - name: main
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:efa
+          workingDir: /workspace/examples/backends/sglang
+          command: [python3, -m, dynamo.sglang]
+          args:
+          - --model-path
+          - Qwen/Qwen3-0.6B
+          - --served-model-name
+          - Qwen/Qwen3-0.6B
+          - --page-size
+          - "16"
+          - --tp
+          - "1"
+          - --trust-remote-code
+          - --skip-tokenizer-init
+          - --disaggregation-mode
+          - decode
+          - --disaggregation-transfer-backend
+          - nixl
+          - --disaggregation-bootstrap-port
+          - "12345"
+          - --host
+          - 0.0.0.0
+          envFrom:
+          - secretRef:
+              name: hf-token-secret
+          env:
+          - { name: SGLANG_DISAGGREGATION_NIXL_BACKEND, value: LIBFABRIC }
+          - { name: FI_PROVIDER, value: efa }
+          - { name: FI_LOG_LEVEL, value: info }
+          - { name: FI_EFA_USE_DEVICE_RDMA, value: "1" }
+          - { name: FI_EFA_ENABLE_SHM_TRANSFER, value: "0" }
+          - { name: NIXL_TELEMETRY_ENABLE, value: "y" }
+          - { name: NIXL_TELEMETRY_EXPORTER, value: prometheus }
+          - { name: NIXL_TELEMETRY_PROMETHEUS_PORT, value: "19090" }
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK", "SYS_PTRACE"]
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              vpc.amazonaws.com/efa: "1"
+              ephemeral-storage: 8Gi
+            limits:
+              nvidia.com/gpu: "1"
+              vpc.amazonaws.com/efa: "1"
