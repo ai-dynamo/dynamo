@@ -412,7 +412,7 @@ const (
 	vllmModuleName                         = "dynamo.vllm"
 	vllmLoadFormatFlag                     = "--load-format"
 	vllmWorkerClassFlag                    = "--worker-cls"
-	checkpointFailoverCompatibilityMessage = "Snapshot with active/passive failover requires an operator-managed automatic single-node vLLM Worker checkpoint"
+	checkpointFailoverCompatibilityMessage = "Snapshot with active/passive failover requires an operator-managed automatic single-node Worker checkpoint"
 )
 
 // ValidateAutomaticFailoverCheckpointSource validates the DGD component that
@@ -473,8 +473,9 @@ func validateFailoverCheckpointProfile(
 	if config.TargetContainerName != "" && config.TargetContainerName != commonconsts.MainContainerName {
 		violations = append(violations, errors.New("targetContainerName must be main"))
 	}
-	if BackendFramework(backendFramework) != BackendFrameworkVLLM {
-		violations = append(violations, errors.New("backendFramework must be vllm"))
+	backend := BackendFramework(backendFramework)
+	if backend != BackendFrameworkVLLM && backend != BackendFrameworkSGLang {
+		violations = append(violations, errors.New("backendFramework must be vllm or sglang"))
 	}
 	if component.ComponentType != v1beta1.ComponentTypeWorker {
 		violations = append(violations, errors.New("component type must be Worker"))
@@ -504,7 +505,7 @@ func validateFailoverCheckpointProfile(
 	// The operator derives these from DYN_GMS_USE_V1, which it injects when a
 	// checkpoint is configured. A user value is either ignored or contradicts
 	// the operator's selection, so reject it rather than silently rewriting it.
-	for _, flag := range []string{vllmWorkerClassFlag, vllmLoadFormatFlag} {
+	for _, flag := range vllmOperatorManagedFlags(backend) {
 		if _, _, _, found, err := tokenizedVLLMFlag(main.Args, flag); err != nil {
 			violations = append(violations, err)
 		} else if found {
@@ -518,18 +519,7 @@ func validateFailoverCheckpointProfile(
 			violations = append(violations, fmt.Errorf("%s is managed by the operator and must not be set", name))
 		}
 	}
-	for _, profile := range []struct {
-		flag         string
-		defaultValue string
-		want         string
-		description  string
-	}{
-		{flag: "--disaggregation-mode", defaultValue: "agg", want: "agg", description: "disaggregation mode must be aggregated"},
-		{flag: "--request-plane", defaultValue: "tcp", want: "tcp", description: "request plane must be tcp"},
-		{flag: tensorParallelSizeFlag, defaultValue: "1", want: "1", description: "tensor parallel size must be 1"},
-		{flag: pipelineParallelSizeFlag, defaultValue: "1", want: "1", description: "pipeline parallel size must be 1"},
-		{flag: dataParallelSizeFlag, defaultValue: "1", want: "1", description: "data parallel size must be 1"},
-	} {
+	for _, profile := range failoverSnapshotFlagProfile(backend) {
 		value, _, _, found, err := tokenizedVLLMFlag(main.Args, profile.flag)
 		if err != nil {
 			violations = append(violations, err)
@@ -543,6 +533,47 @@ func validateFailoverCheckpointProfile(
 		}
 	}
 	return violations
+}
+
+type failoverSnapshotFlag struct {
+	flag         string
+	defaultValue string
+	want         string
+	description  string
+}
+
+// failoverSnapshotFlagProfile returns the engine arguments that must resolve to a
+// single-rank aggregated worker. The two engines share one GPU, so any form of
+// parallelism or disaggregation is unsupported. vLLM and SGLang spell the
+// parallelism flags differently.
+func failoverSnapshotFlagProfile(backend BackendFramework) []failoverSnapshotFlag {
+	shared := []failoverSnapshotFlag{
+		{flag: "--disaggregation-mode", defaultValue: "agg", want: "agg", description: "disaggregation mode must be aggregated"},
+		{flag: "--request-plane", defaultValue: "tcp", want: "tcp", description: "request plane must be tcp"},
+	}
+	switch backend {
+	case BackendFrameworkSGLang:
+		return append(shared,
+			failoverSnapshotFlag{flag: "--tp", defaultValue: "1", want: "1", description: "tensor parallel size must be 1"},
+			failoverSnapshotFlag{flag: "--dp-size", defaultValue: "1", want: "1", description: "data parallel size must be 1"},
+			failoverSnapshotFlag{flag: "--pp-size", defaultValue: "1", want: "1", description: "pipeline parallel size must be 1"},
+		)
+	default:
+		return append(shared,
+			failoverSnapshotFlag{flag: tensorParallelSizeFlag, defaultValue: "1", want: "1", description: "tensor parallel size must be 1"},
+			failoverSnapshotFlag{flag: pipelineParallelSizeFlag, defaultValue: "1", want: "1", description: "pipeline parallel size must be 1"},
+			failoverSnapshotFlag{flag: dataParallelSizeFlag, defaultValue: "1", want: "1", description: "data parallel size must be 1"},
+		)
+	}
+}
+
+// vllmOperatorManagedFlags lists engine arguments the operator derives from
+// DYN_GMS_USE_V1. SGLang has no equivalent user-facing flags.
+func vllmOperatorManagedFlags(backend BackendFramework) []string {
+	if backend != BackendFrameworkVLLM {
+		return nil
+	}
+	return []string{vllmWorkerClassFlag, vllmLoadFormatFlag}
 }
 
 func wrapFailoverCompatibilityViolations(violations []error) []error {
@@ -658,8 +689,11 @@ func buildFailoverPod(
 	switch backendFramework {
 	case BackendFrameworkVLLM:
 		applyVLLMOverrides(updated, numberOfNodes)
+	case BackendFrameworkSGLang:
+		// SGLang needs only the backend-agnostic engine identity, health and
+		// lock wiring applied above; there are no per-engine ports to stagger.
 	default:
-		return fmt.Errorf("failover is currently supported only for vLLM (detected: %s)", backendFramework)
+		return fmt.Errorf("failover is currently supported only for vLLM and SGLang (detected: %s)", backendFramework)
 	}
 
 	*podSpec = *updated

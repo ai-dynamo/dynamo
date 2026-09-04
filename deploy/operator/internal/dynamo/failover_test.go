@@ -615,11 +615,24 @@ func TestBuildFailoverPod_EmptyContainers(t *testing.T) {
 	assert.Contains(t, err.Error(), "at least one container")
 }
 
-func TestBuildFailoverPod_RejectsNonVLLM(t *testing.T) {
+func TestBuildFailoverPod_AcceptsSGLang(t *testing.T) {
 	ps := intraPodFailoverPodSpec()
-	err := buildFailoverPod(&ps, 1, BackendFrameworkSGLang)
+	require.NoError(t, buildFailoverPod(&ps, 1, BackendFrameworkSGLang))
+	require.Len(t, ps.Containers, failoverEngineCount+1)
+	names := make([]string, 0, len(ps.Containers))
+	for _, c := range ps.Containers {
+		names = append(names, c.Name)
+	}
+	for _, want := range IntraPodFailoverEngineContainerNames() {
+		assert.Contains(t, names, want)
+	}
+}
+
+func TestBuildFailoverPod_RejectsUnsupportedBackend(t *testing.T) {
+	ps := intraPodFailoverPodSpec()
+	err := buildFailoverPod(&ps, 1, BackendFrameworkTRTLLM)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "currently supported only for vLLM")
+	assert.Contains(t, err.Error(), "currently supported only for vLLM and SGLang")
 }
 
 func TestBuildFailoverPod_EngineEnvVars(t *testing.T) {
