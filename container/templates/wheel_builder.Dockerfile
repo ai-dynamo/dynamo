@@ -601,6 +601,8 @@ RUN --mount=type=secret,id=aws-web-identity-token,target=/run/secrets/aws-token 
     # media-enabled wheel is intentionally image-only and non-self-contained.
 {% if device == "xpu" %}        ARCH_ALT=x86_64 && \
     MANYLINUX_POLICY=manylinux_2_39_x86_64 && \
+{% elif device == "cpu" %}        ARCH_ALT=x86_64 && \
+    MANYLINUX_POLICY=manylinux_2_35_x86_64 && \
 {% else %}
         case "${TARGETARCH}" in \
             amd64) ARCH_ALT=x86_64 ;; \
