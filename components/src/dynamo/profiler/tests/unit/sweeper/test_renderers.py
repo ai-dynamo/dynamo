@@ -1,0 +1,406 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import json
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import pytest
+import yaml
+
+from dynamo.profiler.sweeper.renderers import (
+    CandidateMaterializationError,
+    DGDGenerationOptions,
+)
+from dynamo.profiler.sweeper.renderers import base as base_module
+from dynamo.profiler.sweeper.renderers import render_dgd
+from dynamo.profiler.sweeper.renderers.aic import renderer as aic_renderer
+from dynamo.profiler.sweeper.renderers.direct import renderer as direct_renderer
+
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.planner,
+    pytest.mark.parallel,
+]
+
+
+@pytest.mark.timeout(60)
+def test_renderer_contract_import_does_not_load_runtime_modifiers() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import dynamo.profiler.sweeper.renderers.base; "
+            "assert 'dynamo.profiler.utils.dgd_materialization' not in sys.modules; "
+            "assert 'dynamo.planner' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def _candidate(**overrides):
+    config = {
+        "backend": "vllm",
+        "backend_version": "0.20.1",
+    }
+    config.update(overrides)
+    return SimpleNamespace(config=config)
+
+
+def _options(**overrides) -> DGDGenerationOptions:
+    values = {
+        "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+        "namespace": "demo",
+        "num_gpus_per_node": 8,
+    }
+    values.update(overrides)
+    return DGDGenerationOptions(**values)
+
+
+def test_materialize_uses_official_candidate_bridge(monkeypatch) -> None:
+    captured = {}
+
+    def fake_from_sweeper_candidate(
+        candidate, *, workload, deployment_target, generator_overrides
+    ):
+        captured.update(
+            candidate=candidate,
+            workload=workload,
+            deployment_target=deployment_target,
+            generator_overrides=generator_overrides,
+        )
+        return "request"
+
+    def fake_generate_from_request(request):
+        captured["request"] = request
+        return {
+            "k8s_deploy.yaml": """
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated-name
+spec:
+  components:
+  - name: Frontend
+  - name: VllmDecodeWorker
+"""
+        }
+
+    monkeypatch.setattr(
+        aic_renderer,
+        "_load_generator_api",
+        lambda: (fake_from_sweeper_candidate, fake_generate_from_request),
+    )
+    candidate = _candidate()
+    workload = SimpleNamespace(isl=4000, osl=1000)
+
+    rendered = render_dgd(
+        candidate,
+        workload,
+        _options(),
+        dgd_name="sweeper-dgd",
+    )
+
+    assert captured == {
+        "candidate": candidate,
+        "workload": workload,
+        "deployment_target": "dynamo-python",
+        "generator_overrides": {
+            "generator_dynamo_version": "1.5.0",
+            "K8sConfig": {
+                "k8s_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+                "k8s_namespace": "demo",
+                "name_prefix": "sweeper-dgd",
+            },
+            "NodeConfig": {"num_gpus_per_node": 8},
+        },
+        "request": "request",
+    }
+    dgd = yaml.safe_load(rendered)
+    assert dgd["metadata"] == {
+        "name": "sweeper-dgd",
+        "namespace": "demo",
+    }
+    assert all(
+        "runtimeVersionOverride" not in component
+        for component in dgd["spec"]["components"]
+    )
+
+
+def test_installed_aic_renders_real_disaggregated_candidate(monkeypatch) -> None:
+    from aiconfigurator.generator.request.schema import ModelFacts
+
+    from dynamo.profiler.utils.config_modifiers import vllm
+
+    # Keep this package-boundary test deterministic and offline. Model facts
+    # are part of the request; the runtime finalizer is covered separately.
+    monkeypatch.setattr(vllm, "get_model_context_length", lambda _model: None)
+    monkeypatch.setattr(vllm, "get_mamba_cache_align_block_size", lambda _model: None)
+    candidate = {
+        "config": {
+            "deployment_mode": "disagg",
+            "backend": "vllm",
+            "backend_version": "0.20.1",
+            "model_name": "Qwen/Qwen3-32B",
+            "hardware_sku": "h200_sxm",
+            "prefill_tp": 2,
+            "prefill_pp": 1,
+            "prefill_attention_dp": 1,
+            "prefill_moe_tp": 1,
+            "prefill_moe_ep": 1,
+            "prefill_replicas": 1,
+            "prefill_max_num_batched_tokens": 4096,
+            "prefill_max_num_seqs": 64,
+            "prefill_block_size": 64,
+            "prefill_gpu_memory_utilization": 0.9,
+            "prefill_enable_prefix_caching": True,
+            "decode_tp": 2,
+            "decode_pp": 1,
+            "decode_attention_dp": 1,
+            "decode_moe_tp": 1,
+            "decode_moe_ep": 1,
+            "decode_replicas": 1,
+            "decode_max_num_batched_tokens": 4096,
+            "decode_max_num_seqs": 128,
+            "decode_block_size": 64,
+            "decode_gpu_memory_utilization": 0.9,
+            "decode_enable_prefix_caching": False,
+        },
+        "used_gpus": 4,
+    }
+    from_candidate, generate = aic_renderer._load_generator_api()
+    request = from_candidate(
+        candidate,
+        workload={"isl": 1024, "osl": 256},
+        deployment_target="dynamo-python",
+        generator_overrides={
+            "generator_dynamo_version": "1.5.0",
+            "K8sConfig": {
+                "k8s_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+                "name_prefix": "sweeper-dgd",
+            },
+            "NodeConfig": {"num_gpus_per_node": 8},
+        },
+        model_facts=ModelFacts(is_moe=False, architecture="Qwen3ForCausalLM"),
+    )
+
+    rendered = yaml.safe_load(generate(request)["k8s_deploy.yaml"])
+
+    assert rendered["kind"] == "DynamoGraphDeployment"
+    workers = {
+        component["name"]: component
+        for component in rendered["spec"]["components"]
+        if component["name"] in {"VllmPrefillWorker", "VllmDecodeWorker"}
+    }
+    assert workers["VllmPrefillWorker"]["replicas"] == 1
+    assert workers["VllmDecodeWorker"]["replicas"] == 1
+
+
+def test_materialize_direct_uses_config_modifiers(monkeypatch) -> None:
+    captured = {}
+
+    class FakeMaterializationError(Exception):
+        pass
+
+    class FakeResult:
+        def __init__(self) -> None:
+            self.dgd = {
+                "apiVersion": "nvidia.com/v1beta1",
+                "kind": "DynamoGraphDeployment",
+                "metadata": {"name": "direct"},
+                "spec": {"components": [{"name": "Worker"}]},
+            }
+            self.experimental = {
+                "concurrency": 64,
+                "hardware_sku": "h200_sxm",
+            }
+
+    def fake_materialize(config, *, image, num_gpus_per_node):
+        captured.update(
+            config=config,
+            image=image,
+            num_gpus_per_node=num_gpus_per_node,
+        )
+        return FakeResult()
+
+    monkeypatch.setattr(
+        direct_renderer,
+        "_load_materializer",
+        lambda: (FakeMaterializationError, fake_materialize),
+    )
+
+    candidate = _candidate(deployment_mode="agg")
+    rendered = render_dgd(
+        candidate,
+        SimpleNamespace(isl=4000, osl=1000),
+        _options(),
+        dgd_name="sweeper-dgd",
+        renderer="direct",
+    )
+
+    assert captured == {
+        "config": candidate.config,
+        "image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+        "num_gpus_per_node": 8,
+    }
+    dgd = yaml.safe_load(rendered)
+    metadata = dgd["metadata"]
+    evaluation_context = metadata.pop("annotations")[
+        "nvidia.com/sweeper-evaluation-context"
+    ]
+    assert json.loads(evaluation_context) == {
+        "concurrency": 64,
+        "hardware_sku": "h200_sxm",
+    }
+    assert metadata == {
+        "name": "sweeper-dgd",
+        "namespace": "demo",
+    }
+    assert "runtimeVersionOverride" not in dgd["spec"]["components"][0]
+
+
+@pytest.mark.parametrize(
+    ("candidate", "message"),
+    [
+        (_candidate(backend="unknown"), "candidate backend must be one of"),
+        (_candidate(backend_version=""), "candidate backend_version must be"),
+    ],
+)
+def test_materialize_requires_renderer_candidate_fields(candidate, message) -> None:
+    with pytest.raises(CandidateMaterializationError, match=message):
+        render_dgd(
+            candidate,
+            SimpleNamespace(isl=4000, osl=1000),
+            _options(),
+            dgd_name="sweeper-dgd",
+        )
+
+
+def test_patch_manifest_preserves_non_dgd_documents() -> None:
+    rendered = """
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: engine-config
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components: []
+"""
+
+    patched = base_module.patch_dgd_manifest(
+        rendered,
+        _candidate(),
+        _options(),
+        dgd_name="sweeper-dgd",
+    )
+
+    documents = list(yaml.safe_load_all(patched))
+    assert [document["kind"] for document in documents] == [
+        "ConfigMap",
+        "DynamoGraphDeployment",
+    ]
+    assert documents[1]["metadata"]["name"] == "sweeper-dgd"
+
+
+def test_patch_manifest_applies_shared_legacy_finalization(monkeypatch) -> None:
+    calls = []
+
+    def fake_materialize(dgd, *, purpose, runtime_backend, model_name_or_path):
+        calls.append((purpose, runtime_backend, model_name_or_path))
+        return dgd
+
+    monkeypatch.setattr(base_module, "_materialize_dgd", fake_materialize)
+
+    patched = base_module.patch_dgd_manifest(
+        """
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components:
+  - name: TRTLLMWorker
+    type: worker
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          args: []
+""",
+        _candidate(backend="trtllm", model_name="Qwen/Qwen3-32B"),
+        _options(),
+        dgd_name="sweeper-dgd",
+    )
+
+    dgd = yaml.safe_load(patched)
+    args = dgd["spec"]["components"][0]["podTemplate"]["spec"]["containers"][0]["args"]
+    index = args.index("--trtllm.enable_chunked_prefill")
+    assert args[index + 1] == "true"
+    assert len(calls) == 1
+    assert calls[0][0].value == "final output"
+    assert calls[0][1:] == ("trtllm", "Qwen/Qwen3-32B")
+
+
+def test_runtime_version_override_is_only_written_when_explicit() -> None:
+    rendered = """
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: generated
+spec:
+  components:
+  - name: Worker
+"""
+
+    patched = base_module.patch_dgd_manifest(
+        rendered,
+        _candidate(),
+        _options(runtime_version_override="1.4.2"),
+        dgd_name="sweeper-dgd",
+    )
+
+    component = yaml.safe_load(patched)["spec"]["components"][0]
+    assert component["runtimeVersionOverride"] == "1.4.2"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("runtime_image", "", "runtime_image must not be empty"),
+        ("num_gpus_per_node", 0, "num_gpus_per_node must be positive"),
+        (
+            "runtime_version_override",
+            "1.5",
+            "runtime_version_override must be a canonical",
+        ),
+    ],
+)
+def test_generation_options_validate_inputs(
+    field: str, value: object, message: str
+) -> None:
+    values = {
+        "runtime_image": "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0",
+        "num_gpus_per_node": 8,
+    }
+    values[field] = value
+    with pytest.raises(ValueError, match=message):
+        DGDGenerationOptions(**values)
+
+
+def test_generation_options_require_semver_image_without_override() -> None:
+    with pytest.raises(ValueError, match="runtime_image must have a canonical"):
+        DGDGenerationOptions(
+            runtime_image="nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest",
+            num_gpus_per_node=8,
+        )
