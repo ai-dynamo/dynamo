@@ -70,7 +70,10 @@ impl EppMode {
 /// Wire protocol exposed by the configured tokenizer service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenizerProtocol {
+    /// vLLM's `/v1/chat/completions/render` endpoint; response shape `{"token_ids": [...]}`.
     VllmRender,
+    /// SGLang renderer's `/v1/chat/completions/render` endpoint; response shape `{"input_ids": [...]}`.
+    SglangRenderer,
 }
 
 impl std::str::FromStr for TokenizerProtocol {
@@ -79,9 +82,10 @@ impl std::str::FromStr for TokenizerProtocol {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "vllm-render" => Ok(Self::VllmRender),
+            "sglang-renderer" => Ok(Self::SglangRenderer),
             other => anyhow::bail!(
                 "DYN_EPP_TOKENIZER_PROTOCOL has invalid value {other:?}; \
-                 expected \"vllm-render\""
+                 expected \"vllm-render\" or \"sglang-renderer\""
             ),
         }
     }
@@ -725,5 +729,22 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn sglang_renderer_protocol_is_accepted() {
+        let cfg = parse_cfg(&[
+            ("DYN_EPP_INFERENCE_POOL_NAME", "sglang-qwen-pool"),
+            ("POD_NAMESPACE", "inference"),
+            ("DYN_MODEL_NAME", "Qwen/Qwen3-0.6B"),
+            (
+                "DYN_EPP_TOKENIZER_SERVICE_URL",
+                "http://sglang-renderer:30000",
+            ),
+            ("DYN_EPP_TOKENIZER_PROTOCOL", "sglang-renderer"),
+            ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
+        ])
+        .expect("sglang-renderer protocol should be accepted");
+        assert_eq!(cfg.tokenizer_protocol, TokenizerProtocol::SglangRenderer);
     }
 }
