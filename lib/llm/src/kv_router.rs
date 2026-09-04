@@ -1296,6 +1296,55 @@ where
         .await
     }
 
+    /// Select and admit only from the supplied exact worker/rank pairs.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn find_best_match_details_for_workers(
+        &self,
+        request_id: &str,
+        tokens: &[u32],
+        block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+        router_config_override: Option<&RouterConfigOverride>,
+        lora_name: Option<String>,
+        cache_namespace: Option<String>,
+        priority_jump: f64,
+        strict_priority: u32,
+        expected_output_tokens: Option<u32>,
+        allowed_workers: HashSet<WorkerWithDpRank>,
+        routing_constraints: RoutingConstraints,
+    ) -> anyhow::Result<AdmittedFindBestMatchOutcome> {
+        match self
+            .find_best_match_details_with_policy_class_inner(
+                Some(request_id),
+                tokens,
+                block_mm_infos,
+                router_config_override,
+                true,
+                false,
+                lora_name,
+                cache_namespace,
+                priority_jump,
+                strict_priority,
+                None,
+                None,
+                expected_output_tokens,
+                None,
+                None,
+                None,
+                Some(allowed_workers),
+                routing_constraints,
+                FindBestMatchAdmission::WithAdmission {
+                    track_lifecycle: true,
+                },
+            )
+            .await?
+        {
+            FindBestMatchInnerOutcome::WithAdmission(outcome) => Ok(outcome),
+            FindBestMatchInnerOutcome::WithoutAdmission(_) => {
+                unreachable!("with-admission routing returned advisory outcome")
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn find_best_match_details_with_policy_class(
         &self,
@@ -1390,6 +1439,7 @@ where
                 None,
                 pinned_worker,
                 allowed_worker_ids,
+                None,
                 routing_constraints,
                 FindBestMatchAdmission::WithAdmission {
                     track_lifecycle: false,
@@ -1442,6 +1492,7 @@ where
                 affinity_target,
                 pinned_worker,
                 allowed_worker_ids,
+                None,
                 routing_constraints,
                 FindBestMatchAdmission::WithoutAdmission,
             )
@@ -1473,6 +1524,7 @@ where
         affinity_target: Option<dynamo_kv_router::protocols::WorkerAffinityTarget>,
         pinned_worker: Option<WorkerWithDpRank>,
         allowed_worker_ids: Option<HashSet<WorkerId>>,
+        allowed_workers: Option<HashSet<WorkerWithDpRank>>,
         routing_constraints: RoutingConstraints,
         admission: FindBestMatchAdmission,
     ) -> anyhow::Result<FindBestMatchInnerOutcome> {
@@ -1617,41 +1669,52 @@ where
             shared_cache_hits,
         };
         let (response, attempt, selected_worker_load) = match admission {
-            FindBestMatchAdmission::WithAdmission { .. } => match self
-                .scheduler
-                .schedule_request_admitted(schedule_request)
-                .instrument(tracing::info_span!("kv_router.schedule"))
-                .await
-            {
-                Ok(admitted) => (admitted.response, admitted.attempt, None),
-                Err(KvSchedulerError::QueueRejected(rejection)) => {
-                    return Ok(FindBestMatchInnerOutcome::WithAdmission(
-                        AdmittedFindBestMatchOutcome {
-                            outcome: FindBestMatchOutcome::QueueRejected { rejection },
-                            attempt: AdmissionAttempt::Untracked,
-                        },
-                    ));
+            FindBestMatchAdmission::WithAdmission { .. } => {
+                let scheduled = if let Some(allowed_workers) = allowed_workers {
+                    self.scheduler
+                        .schedule_request_for_workers(schedule_request, allowed_workers)
+                        .instrument(tracing::info_span!("kv_router.schedule"))
+                        .await
+                } else {
+                    self.scheduler
+                        .schedule_request_admitted(schedule_request)
+                        .instrument(tracing::info_span!("kv_router.schedule"))
+                        .await
+                };
+                match scheduled {
+                    Ok(admitted) => (admitted.response, admitted.attempt, None),
+                    Err(KvSchedulerError::QueueRejected(rejection)) => {
+                        return Ok(FindBestMatchInnerOutcome::WithAdmission(
+                            AdmittedFindBestMatchOutcome {
+                                outcome: FindBestMatchOutcome::QueueRejected { rejection },
+                                attempt: AdmissionAttempt::Untracked,
+                            },
+                        ));
+                    }
+                    Err(error) => return Err(map_scheduler_error(error)),
                 }
-                Err(error) => return Err(map_scheduler_error(error)),
-            },
-            FindBestMatchAdmission::WithoutAdmission => match self
-                .scheduler
-                .select_without_admission(schedule_request)
-                .instrument(tracing::info_span!("kv_router.select_without_admission"))
-                .await
-            {
-                Ok(advisory) => (
-                    advisory.response,
-                    AdmissionAttempt::Untracked,
-                    Some(advisory.selected_worker_load),
-                ),
-                Err(KvSchedulerError::QueueRejected(rejection)) => {
-                    return Ok(FindBestMatchInnerOutcome::WithoutAdmission(
-                        FindBestMatchAdvisoryOutcome::QueueRejected { rejection },
-                    ));
+            }
+            FindBestMatchAdmission::WithoutAdmission => {
+                debug_assert!(allowed_workers.is_none());
+                match self
+                    .scheduler
+                    .select_without_admission(schedule_request)
+                    .instrument(tracing::info_span!("kv_router.select_without_admission"))
+                    .await
+                {
+                    Ok(advisory) => (
+                        advisory.response,
+                        AdmissionAttempt::Untracked,
+                        Some(advisory.selected_worker_load),
+                    ),
+                    Err(KvSchedulerError::QueueRejected(rejection)) => {
+                        return Ok(FindBestMatchInnerOutcome::WithoutAdmission(
+                            FindBestMatchAdvisoryOutcome::QueueRejected { rejection },
+                        ));
+                    }
+                    Err(error) => return Err(map_scheduler_error(error)),
                 }
-                Err(error) => return Err(map_scheduler_error(error)),
-            },
+            }
         };
         let router_hint = if is_admitted_routing {
             self.router_hint_for_selection(
@@ -1874,6 +1937,22 @@ where
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
         self.scheduler.free_if_worker(request_id, worker).await
+    }
+
+    pub(crate) async fn free_if_booking(
+        &self,
+        request_id: &str,
+        worker: WorkerWithDpRank,
+        attempt_id: AttemptId,
+    ) -> Result<(), SequenceError> {
+        self.scheduler
+            .booking_cleanup()
+            .enqueue_and_wait(scheduler::SchedulerBookingDescriptor {
+                request_id: request_id.to_string(),
+                worker,
+                attempt_id,
+            })
+            .await
     }
 
     pub(crate) fn request_lease_manager(&self) -> &request_lease::RequestLeaseManager {
@@ -3172,6 +3251,57 @@ mod tests {
             err.to_string()
                 .contains("all eligible workers are overloaded")
         );
+    }
+
+    #[tokio::test]
+    async fn exact_worker_rank_candidates_flow_through_kv_admission() {
+        let selected = WorkerWithDpRank::new(7, 1);
+        let runtime_config = ModelRuntimeConfig {
+            data_parallel_size: 2,
+            ..Default::default()
+        };
+        let router = make_test_router_with_workers(
+            dynamo_kv_router::DefaultWorkerSelector::new(
+                Some(KvRouterConfig {
+                    router_temperature: 0.0,
+                    ..Default::default()
+                }),
+                "test",
+            ),
+            None,
+            HashMap::from([(7, runtime_config)]),
+        )
+        .await;
+
+        let admitted = router
+            .find_best_match_details_for_workers(
+                "exact-rank-request",
+                &[11, 12],
+                None,
+                None,
+                None,
+                None,
+                0.0,
+                0,
+                None,
+                HashSet::from([selected]),
+                RoutingConstraints::default(),
+            )
+            .await
+            .unwrap();
+        let (outcome, attempt) = admitted.into_parts();
+        let FindBestMatchOutcome::Routed { worker, .. } = outcome else {
+            panic!("expected exact-rank request to be routed");
+        };
+        let AdmissionAttempt::Tracked(attempt_id) = attempt else {
+            panic!("expected exact-rank request to own a tracked booking");
+        };
+
+        assert_eq!(worker, selected);
+        router
+            .free_if_booking("exact-rank-request", selected, attempt_id)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ pub mod discovery;
 pub mod endpoint_type;
 pub mod engines;
 pub mod entrypoint;
+pub mod external_speculation;
 pub mod first_token;
 pub mod fpm_publisher;
 pub mod fpm_trace;
@@ -44,6 +45,7 @@ pub use dynamo_tokenizers::{file_json_field, log_json_err};
 pub mod tokens;
 pub mod types;
 pub mod utils;
+pub mod worker_role;
 pub mod worker_type;
 
 #[cfg(feature = "block-manager")]

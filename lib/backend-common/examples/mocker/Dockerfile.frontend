@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         git \
         libclang-dev \
+        libprotobuf-dev \
         libssl-dev \
         pkg-config \
         protobuf-compiler \
@@ -52,11 +53,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /tmp/wheels /tmp/wheels
 COPY --from=builder /build/pyproject.toml /build/hatch_build.py /build/README.md /build/LICENSE /app/
 COPY --from=builder /build/components /app/components
+COPY --from=builder /build/lib/llm/tests/data/sample-models/mock-llama-3.1-8b-instruct /opt/dynamo/tokenizer
 
 WORKDIR /app
 
 RUN pip install --no-cache-dir /tmp/wheels/*.whl \
-    && pip install --no-cache-dir . \
+    && pip install --no-cache-dir --no-deps . \
+    && python -m dynamo.frontend --help >/dev/null \
     && rm -rf /tmp/wheels
 
 ENTRYPOINT ["python", "-m", "dynamo.frontend"]

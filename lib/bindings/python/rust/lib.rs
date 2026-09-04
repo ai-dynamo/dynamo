@@ -266,6 +266,7 @@ fn register_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
     m.add_class::<WorkerType>()?;
+    m.add_class::<PyWorkerRole>()?;
     m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::kv_dc_relay::KvDcRelay>()?;
     m.add_class::<llm::kv_state_agent::KvStateAgentHost>()?;
@@ -470,7 +471,7 @@ fn resolve_routing_image_token_id(model_id: &str, model_dir: &str) -> Option<u32
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, kv_cache_block_size=None, router_config=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, worker_type=None, needs=None, self_host_metadata=None, *, tensor_model_config=None, ignore_weights=false, max_gpu_lora_count=None, model_aliases=None, worker_role=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_model<'p>(
     py: Python<'p>,
@@ -495,6 +496,7 @@ fn register_model<'p>(
     ignore_weights: bool,
     max_gpu_lora_count: Option<u32>,
     model_aliases: Option<Vec<String>>,
+    worker_role: Option<PyWorkerRole>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Every worker registers with an explicit `worker_type`. Reject `None`
     // outright — a missing role would produce a card whose readiness math
@@ -600,6 +602,7 @@ fn register_model<'p>(
     // fall back to the frontend-level global router config via the watcher.
     let explicit_router_config: Option<RouterConfig> = router_config.map(|rc| rc.into());
     let model_aliases = model_aliases.unwrap_or_default();
+    let worker_role = worker_role.map(|role| role.inner).unwrap_or_default();
 
     // Early validation of custom template path
     let custom_template_path_owned = custom_template_path
@@ -670,6 +673,7 @@ fn register_model<'p>(
             card.model_type = model_type_obj;
             card.model_input = model_input;
             card.worker_type = worker_type_value;
+            card.worker_role = worker_role.clone();
             card.needs = needs_value.clone();
             card.user_data = user_data_json;
             // Aliases are only honored on the LLM surfaces (their handlers
@@ -744,6 +748,7 @@ fn register_model<'p>(
         }
 
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
+        local_model.set_worker_role(worker_role);
 
         // Convert lora_identifier (Option<String>) to Option<LoraInfo>
         let lora_info = lora_identifier
@@ -1101,6 +1106,58 @@ pub enum WorkerType {
     Decode = 2,
     Encode = 3,
     Aggregated = 4,
+}
+
+#[pyclass(name = "WorkerRole")]
+#[derive(Clone, Debug)]
+pub struct PyWorkerRole {
+    inner: llm_rs::worker_role::WorkerRole,
+}
+
+#[pymethods]
+impl PyWorkerRole {
+    #[staticmethod]
+    fn standard() -> Self {
+        Self {
+            inner: llm_rs::worker_role::WorkerRole::Standard,
+        }
+    }
+
+    #[staticmethod]
+    fn speculative_draft() -> Self {
+        Self {
+            inner: llm_rs::worker_role::WorkerRole::SpeculativeDraft,
+        }
+    }
+
+    #[staticmethod]
+    #[pyo3(signature = (draft_endpoint, protocol, router_hint_schema_version=1))]
+    fn speculative_target(
+        draft_endpoint: &str,
+        protocol: String,
+        router_hint_schema_version: u16,
+    ) -> PyResult<Self> {
+        let binding = llm_rs::worker_role::ExternalDraftBinding {
+            endpoint: dynamo_runtime::protocols::EndpointId::from(draft_endpoint),
+            protocol,
+            router_hint_schema_version,
+        };
+        binding
+            .validate()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        Ok(Self {
+            inner: llm_rs::worker_role::WorkerRole::SpeculativeTarget(binding),
+        })
+    }
+
+    #[getter]
+    fn role(&self) -> &'static str {
+        self.inner.as_str()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("WorkerRole.{}", self.inner.as_str())
+    }
 }
 
 #[pymethods]

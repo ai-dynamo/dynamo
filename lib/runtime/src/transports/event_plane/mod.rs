@@ -262,7 +262,7 @@ impl Stream for DeduplicatingStream {
 
 /// Keep publisher IDs exactly representable in float64-backed JSON metadata.
 fn discovery_safe_publisher_id(random_id: u64) -> u64 {
-    random_id & MAX_JSON_SAFE_PUBLISHER_ID
+    (random_id & MAX_JSON_SAFE_PUBLISHER_ID).max(1)
 }
 
 /// Event publisher for a specific topic.
@@ -966,8 +966,8 @@ mod tests {
         for random_id in [0, 1, u64::MAX, unsafe_id, 6_633_287_539_119_378] {
             let publisher_id = discovery_safe_publisher_id(random_id);
             assert!(
-                publisher_id <= MAX_JSON_SAFE_PUBLISHER_ID,
-                "publisher ID {publisher_id} exceeds the JSON-safe integer range"
+                (1..=MAX_JSON_SAFE_PUBLISHER_ID).contains(&publisher_id),
+                "publisher ID {publisher_id} is not a positive JSON-safe integer"
             );
             assert_eq!(
                 publisher_id as f64 as u64, publisher_id,

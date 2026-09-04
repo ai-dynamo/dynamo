@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Notify, mpsc::Sender};
+use tokio::sync::{Notify, mpsc::Sender, watch};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -30,9 +30,11 @@ use crate::{
     backend::Backend,
     discovery::{LoadThresholdHandle, WORKER_TYPE_DECODE, WorkerSet},
     entrypoint::{self, ChatEngineFactoryCallback, RouterConfig},
+    external_speculation::{KvSpeculationChooser, PolicySpeculationChooser, SpeculationPool},
     http::service::metrics::Metrics,
     kv_router::{
-        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingLoadContext, WorkerSelectorFactory,
+        EncoderRouter, PrefillRouter, RouterLoadSource, RoutingHost, RoutingLoadContext,
+        WorkerSelectorFactory,
     },
     local_model::runtime_config::{
         ModelRuntimeConfig, TokenizerBackend, VLLM_INFERENCE_V1_GENERATE_CAPABILITY,
@@ -43,7 +45,10 @@ use crate::{
         OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::prompt_formatter_from_mdc,
     },
     protocols::{
-        common::llm_backend::EmbeddingsEngineOutput,
+        common::{
+            llm_backend::{EmbeddingsEngineOutput, LLMEngineOutput},
+            preprocessor::PreprocessedRequest,
+        },
         openai::{
             audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
             chat_completions::{
@@ -84,21 +89,42 @@ use tokio_util::sync::CancellationToken;
 /// serving-readiness fields on the MDC are still optional at the type
 /// level; the compat shim renders missing values via
 /// [`effective_worker_type`] so legacy cards bucket and route correctly.
+#[cfg(test)]
 fn worker_set_key(
     endpoint_id: &EndpointId,
     model_type: ModelType,
     worker_type: Option<WorkerType>,
 ) -> String {
+    worker_set_key_for_role(
+        endpoint_id,
+        model_type,
+        worker_type,
+        &crate::worker_role::WorkerRole::Standard,
+    )
+}
+
+fn worker_set_key_for_role(
+    endpoint_id: &EndpointId,
+    model_type: ModelType,
+    worker_type: Option<WorkerType>,
+    worker_role: &crate::worker_role::WorkerRole,
+) -> String {
     let mt = model_type.as_vec().join("|");
     let wt = effective_worker_type(worker_type, model_type);
-    serde_json::to_string(&(
+    let standard_key = serde_json::to_string(&(
         &endpoint_id.namespace,
         &endpoint_id.component,
         &endpoint_id.name,
         mt,
         wt.as_str(),
     ))
-    .expect("serializing WorkerSet key strings cannot fail")
+    .expect("serializing WorkerSet key strings cannot fail");
+    if worker_role.is_standard() {
+        standard_key
+    } else {
+        serde_json::to_string(&(standard_key, worker_role))
+            .expect("serializing non-standard WorkerSet key cannot fail")
+    }
 }
 
 fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
@@ -107,6 +133,19 @@ fn model_card_endpoint_id(mcid: &ModelCardInstanceId) -> EndpointId {
         component: mcid.component.clone(),
         name: mcid.endpoint.clone(),
     }
+}
+
+async fn wait_for_endpoint_instance(
+    instances: &mut watch::Receiver<Vec<u64>>,
+    instance_id: u64,
+) -> anyhow::Result<()> {
+    while !instances.borrow().contains(&instance_id) {
+        instances
+            .changed()
+            .await
+            .context("endpoint availability watcher closed")?;
+    }
+    Ok(())
 }
 
 fn model_card_instance_id(instance: &DiscoveryInstance) -> anyhow::Result<ModelCardInstanceId> {
@@ -466,10 +505,21 @@ where
             .namespace(&mcid.namespace)?
             .component(&mcid.component)?;
         let endpoint = component.endpoint(&mcid.endpoint);
-        let client = endpoint
-            .client()
-            .await?
-            .with_admitted_instances_and_cancellation(admitted_ids, cancellation.clone());
+        let client = endpoint.client().await?;
+        if !card.worker_role.is_standard() {
+            let mut endpoint_instances = client.instance_avail_watcher();
+            wait_for_endpoint_instance(&mut endpoint_instances, mcid.instance_id)
+                .await
+                .with_context(|| {
+                    format!(
+                        "wait for external-speculation instance {} on {}",
+                        mcid.instance_id,
+                        model_card_endpoint_id(mcid)
+                    )
+                })?;
+        }
+        let client =
+            client.with_admitted_instances_and_cancellation(admitted_ids, cancellation.clone());
         let instance_watcher = client.instance_avail_watcher();
         tracing::debug!(
             model_name = card.name(),
@@ -484,6 +534,99 @@ where
         worker_set.set_lifecycle_cancellation(cancellation.clone());
         worker_set.set_topology_endpoint(endpoint.clone());
         worker_set.set_instance_watcher(instance_watcher);
+
+        let speculation_pool = match card.worker_role {
+            crate::worker_role::WorkerRole::SpeculativeTarget(_) => Some(SpeculationPool::Target),
+            crate::worker_role::WorkerRole::SpeculativeDraft => Some(SpeculationPool::Draft),
+            crate::worker_role::WorkerRole::Standard => None,
+        };
+        anyhow::ensure!(
+            speculation_pool.is_none() || router_config.router_mode != RouterMode::Direct,
+            "Direct routing cannot choose an external speculative draft"
+        );
+        let speculation_load_context = if speculation_pool.is_some() {
+            let load_thresholds =
+                LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+            let load_context = RoutingLoadContext::start(
+                client.clone(),
+                RouterLoadSource::from_worker_type(effective_worker_type(
+                    card.worker_type,
+                    card.model_type,
+                )),
+                load_thresholds.clone(),
+                &cancellation,
+                Some(allocator_trim.clone()),
+            )
+            .await?;
+            worker_set.load_thresholds = Some(load_thresholds);
+            worker_set.set_load_context(load_context.clone());
+            Some(load_context)
+        } else {
+            None
+        };
+        if let Some(pool) = speculation_pool {
+            let load_context = speculation_load_context
+                .as_ref()
+                .expect("speculative worker must have a routing load context");
+            if router_config.router_mode == RouterMode::KV {
+                let selector = DefaultWorkerSelector::new(
+                    Some(router_config.kv_router_config.clone()),
+                    match pool {
+                        SpeculationPool::Target => "speculative_target",
+                        SpeculationPool::Draft => "speculative_draft",
+                    },
+                );
+                let mut chooser = self
+                    .manager
+                    .kv_chooser_for_with_selector_and_client(
+                        load_context.client().clone(),
+                        card.kv_cache_block_size,
+                        selector,
+                        Some(router_config.kv_router_config.clone()),
+                        self.prefill_load_estimator.clone(),
+                        card.worker_type,
+                        WORKER_TYPE_DECODE,
+                        Some(card.display_name.clone()),
+                        card.runtime_config.enable_eagle,
+                        load_context.scheduler_load_sender(),
+                        load_context.cancellation_token(),
+                    )
+                    .await?;
+                Arc::get_mut(&mut chooser)
+                    .expect("new speculative KV chooser must have one owner")
+                    .set_teardown_task_guard(allocator_trim.clone());
+                worker_set
+                    .set_speculation_chooser(Arc::new(KvSpeculationChooser::new(chooser, pool)));
+            } else {
+                let router = PushRouter::<
+                    PreprocessedRequest,
+                    Annotated<LLMEngineOutput>,
+                >::from_client_with_monitor(
+                    load_context.client().clone(),
+                    router_config.router_mode,
+                    None,
+                )
+                .await?;
+                let host = RoutingHost::<DefaultWorkerSelector>::new_builtin_with_coordinator(
+                    router,
+                    load_context.clone(),
+                    None,
+                    router_config.session_affinity_mode,
+                )?;
+                worker_set
+                    .set_speculation_chooser(Arc::new(PolicySpeculationChooser::new(host, pool)));
+            }
+        }
+
+        // Speculative drafts are private proposal endpoints. Discovery tracks
+        // their exact ranks and descriptors, but the frontend never builds or
+        // publishes an OpenAI/prefill pipeline for them.
+        if matches!(
+            card.worker_role,
+            crate::worker_role::WorkerRole::SpeculativeDraft
+        ) {
+            return Ok(PreparedWorkerSet::new(worker_set, card.clone()));
+        }
 
         // A surface-less Encode worker is reached only through EncoderRouter.
         // Register it for serving readiness, publish its endpoint to any
@@ -566,24 +709,33 @@ where
                 supports_enabled_engine_generate(card, &self.generate_engine_capabilities);
             let needs_preprocessed_routing =
                 needs_factory_chat_pipeline || tokenizer.is_some() || needs_generate_pipeline;
+            let external_speculation_target = speculation_pool == Some(SpeculationPool::Target);
 
-            let load_thresholds =
-                LoadThresholdHandle::new(router_config.load_threshold_config.clone());
+            let load_thresholds = speculation_load_context
+                .as_ref()
+                .map(|context| context.load_thresholds())
+                .unwrap_or_else(|| {
+                    LoadThresholdHandle::new(router_config.load_threshold_config.clone())
+                });
             let load_context = if needs_preprocessed_routing {
-                let source = RouterLoadSource::from_worker_type(effective_worker_type(
-                    card.worker_type,
-                    card.model_type,
-                ));
-                Some(
-                    RoutingLoadContext::start(
-                        client.clone(),
-                        source,
-                        load_thresholds.clone(),
-                        &cancellation,
-                        Some(allocator_trim.clone()),
+                if let Some(load_context) = &speculation_load_context {
+                    Some(load_context.clone())
+                } else {
+                    let source = RouterLoadSource::from_worker_type(effective_worker_type(
+                        card.worker_type,
+                        card.model_type,
+                    ));
+                    Some(
+                        RoutingLoadContext::start(
+                            client.clone(),
+                            source,
+                            load_thresholds.clone(),
+                            &cancellation,
+                            Some(allocator_trim.clone()),
+                        )
+                        .await?,
                     )
-                    .await?,
-                )
+                }
             } else {
                 None
             };
@@ -591,52 +743,55 @@ where
             // Create the KV router whenever any routed pipeline will be built.
             // Python chat factories receive a Rust-routed engine, so they also
             // need the shared chooser in KV mode.
-            let kv_chooser =
-                if router_config.router_mode == RouterMode::KV && needs_preprocessed_routing {
-                    let selector = (self.worker_selector_factory)(
-                        &router_config.kv_router_config,
-                        effective_worker_type(card.worker_type, card.model_type),
-                        RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
-                    );
-                    let mut chooser = self
-                        .manager
-                        .kv_chooser_for_with_selector_and_client(
-                            load_context
-                                .as_ref()
-                                .expect("routing load context must exist")
-                                .client()
-                                .clone(),
-                            card.kv_cache_block_size,
-                            selector,
-                            Some(router_config.kv_router_config.clone()),
-                            self.prefill_load_estimator.clone(),
-                            card.worker_type,
-                            WORKER_TYPE_DECODE, // This is the decode router
-                            Some(card.display_name.clone()),
-                            card.runtime_config.enable_eagle,
-                            load_context
-                                .as_ref()
-                                .expect("routing load context must exist")
-                                .scheduler_load_sender(),
-                            load_context
-                                .as_ref()
-                                .expect("routing load context must exist")
-                                .cancellation_token(),
-                        )
-                        .await?;
-                    Arc::get_mut(&mut chooser)
-                        .expect("new KV chooser must have one owner")
-                        .set_teardown_task_guard(allocator_trim.clone());
-                    Some(chooser)
-                } else {
-                    None
-                };
+            let kv_chooser = if router_config.router_mode == RouterMode::KV
+                && needs_preprocessed_routing
+                && speculation_pool.is_none()
+            {
+                let selector = (self.worker_selector_factory)(
+                    &router_config.kv_router_config,
+                    effective_worker_type(card.worker_type, card.model_type),
+                    RoutingPartitionRef::new(&card.display_name, DEFAULT_ROUTING_GROUP),
+                );
+                let mut chooser = self
+                    .manager
+                    .kv_chooser_for_with_selector_and_client(
+                        load_context
+                            .as_ref()
+                            .expect("routing load context must exist")
+                            .client()
+                            .clone(),
+                        card.kv_cache_block_size,
+                        selector,
+                        Some(router_config.kv_router_config.clone()),
+                        self.prefill_load_estimator.clone(),
+                        card.worker_type,
+                        WORKER_TYPE_DECODE, // This is the decode router
+                        Some(card.display_name.clone()),
+                        card.runtime_config.enable_eagle,
+                        load_context
+                            .as_ref()
+                            .expect("routing load context must exist")
+                            .scheduler_load_sender(),
+                        load_context
+                            .as_ref()
+                            .expect("routing load context must exist")
+                            .cancellation_token(),
+                    )
+                    .await?;
+                Arc::get_mut(&mut chooser)
+                    .expect("new KV chooser must have one owner")
+                    .set_teardown_task_guard(allocator_trim.clone());
+                Some(chooser)
+            } else {
+                None
+            };
 
             // Only a typed Decode endpoint participates in the namespace-level
             // P/D rendezvous. Aggregated and Encode endpoints are independent
             // serving leaves and must not claim or perturb that pairing.
             let model_name = card.name().to_string();
             let prefill_chooser = if needs_preprocessed_routing
+                && !external_speculation_target
                 && effective_worker_type(card.worker_type, card.model_type) == WorkerType::Decode
             {
                 let mut prefill_config = router_config.kv_router_config.clone();
@@ -664,7 +819,7 @@ where
                 None
             };
 
-            let encoder_chooser = if needs_preprocessed_routing {
+            let encoder_chooser = if needs_preprocessed_routing && !external_speculation_target {
                 Some(EncoderRouter::new_with_task_guard(
                     model_name.clone(),
                     namespace.clone(),
@@ -682,24 +837,38 @@ where
             worker_set.encoder_router = encoder_chooser.clone();
 
             let preprocessed_routing = if needs_preprocessed_routing {
-                Some(
-                    entrypoint::input::build_preprocessed_routing_with_selector(
-                        &client,
-                        self.manager.clone(),
-                        router_config.router_mode,
-                        load_context
-                            .clone()
-                            .expect("routing load context must exist"),
-                        kv_chooser.clone(),
-                        prefill_chooser.clone(),
-                        encoder_chooser.clone(),
-                        uses_multimodal_cache_routing(card),
-                        router_config.session_affinity_ttl_secs,
-                        router_config.session_affinity_mode,
+                if external_speculation_target {
+                    let routing =
+                        entrypoint::input::build_external_speculation_routing_with_selector(
+                            &client,
+                            self.manager.clone(),
+                            worker_set.speculation_composition_cell(),
+                            cancellation.clone(),
+                        )
+                        .await
+                        .context("build_external_speculation_routing")?;
+                    worker_set.mark_external_speculation_router_active();
+                    Some(routing)
+                } else {
+                    Some(
+                        entrypoint::input::build_preprocessed_routing_with_selector(
+                            &client,
+                            self.manager.clone(),
+                            router_config.router_mode,
+                            load_context
+                                .clone()
+                                .expect("routing load context must exist"),
+                            kv_chooser.clone(),
+                            prefill_chooser.clone(),
+                            encoder_chooser.clone(),
+                            uses_multimodal_cache_routing(card),
+                            router_config.session_affinity_ttl_secs,
+                            router_config.session_affinity_mode,
+                        )
+                        .await
+                        .context("build_preprocessed_routing")?,
                     )
-                    .await
-                    .context("build_preprocessed_routing")?,
-                )
+                }
             } else {
                 None
             };
@@ -1029,6 +1198,23 @@ where
             let _ = dispatch.send(update);
         }
     }
+
+    fn emit_external_publication_changes(&self, before: HashMap<String, ModelDeploymentCard>) {
+        let after = self.manager.committed_discovery_cards();
+        for (group_id, card) in &after {
+            if !before.contains_key(group_id) {
+                self.emit_update(ModelUpdate::Added(card.clone()));
+                if card.model_type.supports_chat() {
+                    self.notify_on_model.notify_waiters();
+                }
+            }
+        }
+        for (group_id, card) in before {
+            if !after.contains_key(&group_id) {
+                self.emit_update(ModelUpdate::Removed(card));
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -1051,15 +1237,20 @@ where
         let mut card = instance.deserialize_model::<ModelDeploymentCard>()?;
         normalize_legacy_prefill_topology(&mut card);
         self.apply_tokenizer_overrides(&mut card);
-        validate_card_shape(&card)?;
+        let endpoint_id = model_card_endpoint_id(&mcid);
+        validate_card_shape(&card, &endpoint_id)?;
         anyhow::ensure!(
             mcid.model_suffix.is_some() == card.lora.is_some(),
             "LoRA discovery identity and card metadata disagree"
         );
-        let endpoint_id = model_card_endpoint_id(&mcid);
         let group_key = GroupKey {
             model_name: card.name().to_string(),
-            worker_set_key: worker_set_key(&endpoint_id, card.model_type, card.worker_type),
+            worker_set_key: worker_set_key_for_role(
+                &endpoint_id,
+                card.model_type,
+                card.worker_type,
+                &card.worker_role,
+            ),
         };
         let fingerprint = materialization_fingerprint(&card, &self.router_config)?;
         let projection_fingerprint = lora_projection_fingerprint(&card)?;
@@ -1091,6 +1282,8 @@ where
         members: &[DesiredInstance],
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()> {
+        let is_external = !prepared.card.worker_role.is_standard();
+        let external_publications = is_external.then(|| self.manager.committed_discovery_cards());
         let adapter_was_available = adapters
             .iter()
             .map(|adapter| {
@@ -1126,7 +1319,11 @@ where
                 .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
                 .collect(),
         )?;
-        self.emit_update(ModelUpdate::Added(prepared.card.clone()));
+        if let Some(before) = external_publications {
+            self.emit_external_publication_changes(before);
+        } else {
+            self.emit_update(ModelUpdate::Added(prepared.card.clone()));
+        }
         let mut adapter_names = HashSet::new();
         for adapter in adapters {
             if adapter_names.insert(adapter.card.name().to_string())
@@ -1138,7 +1335,7 @@ where
                 self.emit_update(ModelUpdate::Added(adapter.card.clone()));
             }
         }
-        if prepared.card.model_type.supports_chat() {
+        if !is_external && prepared.card.model_type.supports_chat() {
             self.notify_on_model.notify_waiters();
         }
         tracing::info!(
@@ -1157,6 +1354,10 @@ where
         adapters: &[DesiredInstance],
     ) -> anyhow::Result<()> {
         let group_id = key.id();
+        let is_external = members
+            .first()
+            .is_some_and(|member| !member.card.worker_role.is_standard());
+        let external_publications = is_external.then(|| self.manager.committed_discovery_cards());
         let previous = self
             .manager
             .discovery_group_adapter_cards(&group_id)
@@ -1188,6 +1389,10 @@ where
                 .map(|adapter| (adapter.key.clone(), adapter.card.clone()))
                 .collect(),
         )?;
+        if let Some(before) = external_publications {
+            self.emit_external_publication_changes(before);
+            return Ok(());
+        }
         for (name, card) in &desired {
             if !was_available.get(name).copied().unwrap_or(false)
                 && self.manager.get_committed_model(name).is_some()
@@ -1206,9 +1411,20 @@ where
     }
 
     fn remove_group(&self, key: &GroupKey) {
+        let external_publications = self.manager.committed_discovery_cards();
         let Some(removed) = self.manager.remove_discovery_group(&key.id()) else {
             return;
         };
+        if !removed.representative.worker_role.is_standard() {
+            self.emit_external_publication_changes(external_publications);
+            tracing::info!(
+                model_name = removed.representative.name(),
+                group = %key.id(),
+                members = removed.cards.len(),
+                "Removed external-speculation discovery group"
+            );
+            return;
+        }
         let removed_members = removed.cards.len();
         let mut removed_adapter_names = HashSet::new();
         for removed_card in &removed.cards {
@@ -1243,8 +1459,9 @@ where
     }
 }
 
-fn validate_card_shape(card: &ModelDeploymentCard) -> anyhow::Result<()> {
+fn validate_card_shape(card: &ModelDeploymentCard, endpoint: &EndpointId) -> anyhow::Result<()> {
     anyhow::ensure!(!card.name().is_empty(), "model name cannot be empty");
+    card.validate_worker_role(Some(endpoint))?;
     let worker_type = effective_worker_type(card.worker_type, card.model_type);
     if worker_type == WorkerType::Prefill {
         anyhow::ensure!(
@@ -1377,6 +1594,22 @@ mod tests {
             component: "workers".to_string(),
             name: name.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn endpoint_instance_waits_for_the_representative_worker() {
+        let (instances_tx, mut instances_rx) = watch::channel(vec![7]);
+        let wait =
+            tokio::spawn(async move { wait_for_endpoint_instance(&mut instances_rx, 42).await });
+
+        tokio::task::yield_now().await;
+        assert!(!wait.is_finished());
+        instances_tx.send_replace(vec![7, 42]);
+        tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .expect("representative worker wait timed out")
+            .expect("representative worker wait task failed")
+            .expect("representative worker wait returned an error");
     }
 
     #[test]
@@ -1980,6 +2213,36 @@ mod tests {
             legacy,
             r#"["ns1","workers","generate","chat|completions","aggregated"]"#
         );
+    }
+
+    #[test]
+    fn ws_key_preserves_standard_shape_and_separates_nonstandard_roles() {
+        use crate::worker_role::{ExternalDraftBinding, WorkerRole};
+
+        let endpoint = test_endpoint_id("generate");
+        let standard = worker_set_key_for_role(
+            &endpoint,
+            ModelType::Chat,
+            Some(WorkerType::Aggregated),
+            &WorkerRole::Standard,
+        );
+        assert_eq!(
+            standard,
+            worker_set_key(&endpoint, ModelType::Chat, Some(WorkerType::Aggregated))
+        );
+
+        let target = worker_set_key_for_role(
+            &endpoint,
+            ModelType::Chat,
+            Some(WorkerType::Aggregated),
+            &WorkerRole::SpeculativeTarget(ExternalDraftBinding {
+                endpoint: EndpointId::from("specdec/draft/generate"),
+                protocol: "mock-specdec-zmq-v1".into(),
+                router_hint_schema_version: 1,
+            }),
+        );
+        assert_ne!(target, standard);
+        assert!(target.contains("speculative_target"));
     }
 
     #[test]

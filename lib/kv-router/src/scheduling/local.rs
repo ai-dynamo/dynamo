@@ -328,6 +328,25 @@ where
         &self,
         request: ScheduleRequest,
     ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
+        self.schedule_request_admitted_inner(request, None).await
+    }
+
+    /// Schedule and admit while restricting selection to exact worker/rank pairs.
+    #[doc(hidden)]
+    pub async fn schedule_request_for_workers(
+        &self,
+        request: ScheduleRequest,
+        allowed_workers: HashSet<WorkerWithDpRank>,
+    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
+        self.schedule_request_admitted_inner(request, Some(allowed_workers))
+            .await
+    }
+
+    async fn schedule_request_admitted_inner(
+        &self,
+        request: ScheduleRequest,
+        allowed_workers: Option<HashSet<WorkerWithDpRank>>,
+    ) -> Result<AdmittedSchedulingResponse, KvSchedulerError> {
         let tracked = request.mode.is_tracked();
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
@@ -341,6 +360,7 @@ where
             .enqueue_admitted_with_block_hashes_and_lease(
                 request,
                 block_hashes,
+                allowed_workers,
                 lifecycle_lease,
                 tracked.then_some(attempt_tx),
             )
@@ -595,12 +615,12 @@ where
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
         let request_id = request_id.to_string();
-        let outcome = self
-            .slots
+        self.slots
             .free_if_worker(&request_id, worker, Instant::now())?;
-        if outcome.is_applied() {
-            self.queue.update_worker(worker).await;
-        }
+        // Always notify the admission actor. If an earlier release removed the
+        // booking but its bounded-channel send was cancelled, an idempotent
+        // retry observes `NoChange` and must still restore that notification.
+        self.queue.update_worker(worker).await;
         Ok(())
     }
 
@@ -871,7 +891,11 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::future::Future;
+    use std::sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::time::Duration;
 
     use tokio::sync::{mpsc, watch};
@@ -879,7 +903,7 @@ mod tests {
     use super::*;
     use crate::protocols::{ActiveSequenceEvent, ActiveSequenceEventData};
     use crate::scheduling::PrefillLoadEstimator;
-    use crate::scheduling::selector::DefaultWorkerSelector;
+    use crate::scheduling::selector::{DefaultWorkerSelector, WorkerInputs, WorkerSelectionInput};
     use crate::sequences::SequenceSubscriber;
     use crate::test_utils::{NoopSequencePublisher, SimpleWorkerConfig};
 
@@ -905,6 +929,69 @@ mod tests {
             _prefix: usize,
         ) -> anyhow::Result<Duration> {
             Ok(self.duration)
+        }
+    }
+
+    #[derive(Default)]
+    struct SelectorBlock {
+        armed: AtomicBool,
+        started: AtomicBool,
+        released: Mutex<bool>,
+        wake: Condvar,
+    }
+
+    impl SelectorBlock {
+        fn arm(&self) {
+            *self.released.lock().unwrap() = false;
+            self.started.store(false, Ordering::Release);
+            self.armed.store(true, Ordering::Release);
+        }
+
+        async fn wait_until_started(&self) {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !self.started.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("selector did not reach the blocking point");
+        }
+
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.wake.notify_one();
+        }
+
+        fn block_if_armed(&self) {
+            if !self.armed.swap(false, Ordering::AcqRel) {
+                return;
+            }
+            self.started.store(true, Ordering::Release);
+            let mut released = self.released.lock().unwrap();
+            while !*released {
+                released = self.wake.wait(released).unwrap();
+            }
+        }
+    }
+
+    struct BlockingSelector {
+        inner: DefaultWorkerSelector,
+        block: Arc<SelectorBlock>,
+    }
+
+    impl WorkerSelector<SimpleWorkerConfig> for BlockingSelector {
+        fn required_worker_inputs(&self) -> WorkerInputs {
+            <DefaultWorkerSelector as WorkerSelector<SimpleWorkerConfig>>::required_worker_inputs(
+                &self.inner,
+            )
+        }
+
+        fn select_worker(
+            &self,
+            input: WorkerSelectionInput<'_, SimpleWorkerConfig>,
+        ) -> Result<crate::protocols::WorkerSelectionResult, KvSchedulerError> {
+            self.block.block_if_armed();
+            self.inner.select_worker(input)
         }
     }
 
@@ -998,6 +1085,29 @@ mod tests {
         .unwrap();
     }
 
+    async fn wait_for_booking(
+        slots: &ActiveSequencesMultiWorker<NoopSequencePublisher>,
+        request_id: &str,
+        booked: bool,
+    ) {
+        let request_id = request_id.to_string();
+        tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                if slots.request_worker(&request_id).is_some() == booked {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> std::task::Poll<F::Output> {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        future.poll(&mut context)
+    }
+
     fn request(mode: ScheduleMode) -> ScheduleRequest {
         ScheduleRequest {
             mode,
@@ -1053,6 +1163,179 @@ mod tests {
         assert_eq!(worker_load.active_requests, 1);
 
         cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn lifecycle_handoff_cleans_immediate_booking_when_selection_is_dropped() {
+        let workers = HashMap::from([(0, SimpleWorkerConfig::default())]);
+        let (scheduler, slots, _cfg_tx, cancel_token) = make_scheduler(workers, None, true, None);
+        let request_id = "cancelled-immediate";
+        let mut scheduling = Box::pin(scheduler.schedule_request(request(
+            ScheduleMode::TrackedWithLifecycle {
+                request_id: request_id.to_string(),
+            },
+        )));
+
+        assert!(poll_once(scheduling.as_mut()).is_pending());
+        wait_for_booking(&slots, request_id, true).await;
+        drop(scheduling);
+        wait_for_booking(&slots, request_id, false).await;
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test]
+    async fn lifecycle_handoff_cleans_queued_booking_when_selection_is_dropped() {
+        let workers = HashMap::from([(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        )]);
+        let (scheduler, slots, _cfg_tx, cancel_token) =
+            make_scheduler(workers, Some(0.0), true, None);
+        scheduler
+            .schedule_request(request(ScheduleMode::Tracked {
+                request_id: "occupying".to_string(),
+            }))
+            .await
+            .unwrap();
+
+        let request_id = "cancelled-queued";
+        let mut scheduling = Box::pin(scheduler.schedule_request(request(
+            ScheduleMode::TrackedWithLifecycle {
+                request_id: request_id.to_string(),
+            },
+        )));
+        assert!(poll_once(scheduling.as_mut()).is_pending());
+        wait_for_pending_count(&scheduler, 1).await;
+
+        scheduler.free("occupying").await.unwrap();
+        wait_for_booking(&slots, request_id, true).await;
+        drop(scheduling);
+        wait_for_booking(&slots, request_id, false).await;
+
+        cancel_token.cancel();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_exact_release_retry_restores_scheduler_notification() {
+        let workers = HashMap::from([(
+            0,
+            SimpleWorkerConfig {
+                max_num_batched_tokens: Some(64),
+                ..Default::default()
+            },
+        )]);
+        let slots = Arc::new(ActiveSequencesMultiWorker::new(
+            NoopSequencePublisher,
+            64,
+            HashMap::from([(0, (0, 1))]),
+            false,
+            0,
+            "test",
+        ));
+        let (_cfg_tx, cfg_rx) = watch::channel(workers);
+        let selector_block = Arc::new(SelectorBlock::default());
+        let queue = Arc::new(
+            SchedulerQueue::new_with_policy_profile_and_capacity(
+                Arc::clone(&slots),
+                cfg_rx,
+                PolicyProfile::synthetic(Some(0.0), RouterQueuePolicy::Fcfs),
+                64,
+                BlockingSelector {
+                    inner: DefaultWorkerSelector::new(None, "test"),
+                    block: Arc::clone(&selector_block),
+                },
+                None,
+                None::<Arc<NoopOverlapScoresRefresh>>,
+                None,
+                None,
+                1,
+            )
+            .unwrap(),
+        );
+        let (queue_updates, _) = watch::channel(());
+        let scheduler = Arc::new(LocalScheduler {
+            slots: Arc::clone(&slots),
+            queue: Arc::clone(&queue),
+            queue_updates,
+            track_prefill_tokens_default: true,
+            worker_type: "test",
+        });
+
+        let target = scheduler
+            .schedule_request(request(ScheduleMode::Tracked {
+                request_id: "target".to_string(),
+            }))
+            .await
+            .unwrap()
+            .best_worker;
+        let waiting = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move {
+                scheduler
+                    .schedule_request(request(ScheduleMode::Tracked {
+                        request_id: "waiting".to_string(),
+                    }))
+                    .await
+            })
+        };
+        while scheduler.pending_count() != 1 {
+            tokio::task::yield_now().await;
+        }
+
+        selector_block.arm();
+        let blocked_advisory = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move {
+                scheduler
+                    .select_without_admission(request(ScheduleMode::QueryOnly {
+                        request_id: Some("blocked-advisory".to_string()),
+                    }))
+                    .await
+            })
+        };
+        selector_block.wait_until_started().await;
+        let trailing_advisory = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move {
+                scheduler
+                    .select_without_admission(request(ScheduleMode::QueryOnly {
+                        request_id: Some("trailing-advisory".to_string()),
+                    }))
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while queue.admission_capacity() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("trailing advisory did not saturate the actor channel");
+
+        let first_release = {
+            let scheduler = Arc::clone(&scheduler);
+            tokio::spawn(async move { scheduler.free_if_worker("target", target).await })
+        };
+        wait_for_booking(&slots, "target", false).await;
+        assert!(!first_release.is_finished());
+        first_release.abort();
+        assert!(first_release.await.unwrap_err().is_cancelled());
+
+        selector_block.release();
+        blocked_advisory.await.unwrap().unwrap();
+        trailing_advisory.await.unwrap().unwrap();
+        assert_eq!(scheduler.pending_count(), 1);
+
+        scheduler.free_if_worker("target", target).await.unwrap();
+        waiting.await.unwrap().unwrap();
+        assert_eq!(scheduler.pending_count(), 0);
+
+        slots.free(&"waiting".to_string(), Instant::now()).unwrap();
+        slots.assert_completely_drained(Instant::now());
     }
 
     #[tokio::test]

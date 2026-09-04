@@ -124,6 +124,7 @@ where
                 args.affinity_target,
                 args.pinned_worker,
                 args.allowed_worker_ids,
+                None,
                 args.routing_constraints,
                 args.admission,
             )

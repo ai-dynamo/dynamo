@@ -449,9 +449,17 @@ pub struct SchedulingContext<'a, C> {
 
 impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
     pub fn new(request: &'a SchedulingRequest, workers: &'a HashMap<WorkerId, C>) -> Self {
+        Self::with_eligibility(request, workers, request.eligibility())
+    }
+
+    pub(crate) fn with_eligibility(
+        request: &'a SchedulingRequest,
+        workers: &'a HashMap<WorkerId, C>,
+        eligibility: RoutingEligibility<'a>,
+    ) -> Self {
         Self {
             request,
-            eligibility: request.eligibility(),
+            eligibility,
             workers,
         }
     }
@@ -475,6 +483,7 @@ impl<'a, C: WorkerConfigLike> SchedulingContext<'a, C> {
                 .filter(|(worker, _)| {
                     self.workers.get(&worker.worker_id).is_some_and(|config| {
                         self.eligibility.allows_worker(worker.worker_id, config)
+                            && self.eligibility.caller_allows_worker(**worker)
                     })
                 })
                 .map(|(_, cached_tokens)| *cached_tokens)
@@ -609,6 +618,36 @@ mod tests {
             worker_loads,
             resp_tx: None,
         }
+    }
+
+    #[test]
+    fn best_cached_tokens_ignores_disallowed_rank() {
+        let selected = WorkerWithDpRank::new(7, 1);
+        let excluded = WorkerWithDpRank::new(7, 0);
+        let mut request = request_with_decode_load(64, None, 0, 0, selected);
+        request.allowed_worker_ids = Some(HashSet::from([7]));
+        let allowed_workers = HashSet::from([selected]);
+        request.overlap.effective_cached_tokens =
+            HashMap::from([(excluded, 1_600), (selected, 16)]);
+        let workers = HashMap::from([(
+            7,
+            crate::test_utils::SimpleWorkerConfig {
+                data_parallel_size: 2,
+                ..Default::default()
+            },
+        )]);
+
+        assert_eq!(
+            SchedulingContext::with_eligibility(
+                &request,
+                &workers,
+                request
+                    .eligibility()
+                    .with_allowed_workers(Some(&allowed_workers)),
+            )
+            .best_cached_tokens(),
+            16
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod agents;
 pub mod anthropic;
 pub mod codec;
 pub mod common;
+pub mod external_speculation;
 pub mod openai;
 pub mod sglang;
 pub mod tensor;

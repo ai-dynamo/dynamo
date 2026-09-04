@@ -34,6 +34,7 @@ impl HostedOccupancy {
         router: &PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         selector: &BuiltinWorkerSelector,
         pinned_worker: Option<u64>,
+        candidate_worker_ids: Option<&[u64]>,
     ) -> Result<HostedOccupancySelection> {
         if let Some(worker_id) = pinned_worker {
             router.ensure_routable(worker_id)?;
@@ -46,13 +47,20 @@ impl HostedOccupancy {
             });
         }
 
-        let candidates = router.selectable_worker_ids()?;
+        let discovered_candidates;
+        let candidates = match candidate_worker_ids {
+            Some(candidates) => candidates,
+            None => {
+                discovered_candidates = router.selectable_worker_ids()?;
+                &discovered_candidates
+            }
+        };
         let selection = self
             .state
-            .select_and_reserve_with(&candidates, |occupancy| {
+            .select_and_reserve_with(candidates, |occupancy| {
                 selector
                     .select_worker(WorkerSelectionInput::<ModelRuntimeConfig>::hosted(
-                        &candidates,
+                        candidates,
                         Some(occupancy),
                     ))
                     .map(|selection| selection.worker.worker_id)

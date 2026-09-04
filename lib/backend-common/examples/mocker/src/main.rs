@@ -5,9 +5,9 @@
 
 use std::sync::Arc;
 
-mod engine;
+use dynamo_mocker_backend::engine::MockerBackend;
 
 fn main() -> anyhow::Result<()> {
-    let (engine, config) = engine::MockerBackend::from_args(None)?;
+    let (engine, config) = MockerBackend::from_args(None)?;
     dynamo_backend_common::run(Arc::new(engine), config)
 }

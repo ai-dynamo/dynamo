@@ -920,6 +920,17 @@ class ModelRuntimeConfig:
         """Set the disaggregated endpoint for the model"""
         ...
 
+    def add_external_draft_transport(
+        self,
+        dp_rank: int,
+        protocol: str,
+        address: str,
+        orphan_cleanup_timeout_ms: int,
+        draft_incarnation_id: int | None = None,
+    ) -> int:
+        """Advertise one immutable per-rank draft transport and return its incarnation."""
+        ...
+
 class RoutingConstraints:
     """
     Request-side routing constraints.
@@ -2228,6 +2239,27 @@ class WorkerType:
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
 
+class WorkerRole:
+    """Serving behavior layered on top of WorkerType."""
+
+    @staticmethod
+    def standard() -> "WorkerRole": ...
+
+    @staticmethod
+    def speculative_draft() -> "WorkerRole": ...
+
+    @staticmethod
+    def speculative_target(
+        draft_endpoint: str,
+        protocol: str,
+        router_hint_schema_version: int = 1,
+    ) -> "WorkerRole": ...
+
+    @property
+    def role(self) -> str: ...
+
+    def __repr__(self) -> str: ...
+
 async def register_model(
     model_input: ModelInput,
     model_type: ModelType,
@@ -2251,6 +2283,7 @@ async def register_model(
     ignore_weights: bool = False,
     max_gpu_lora_count: Optional[int] = None,
     model_aliases: Optional[List[str]] = None,
+    worker_role: Optional[WorkerRole] = None,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.

@@ -525,6 +525,7 @@
 /tests/gpu_memory_service/common/                                                                       @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/src/block_manager/layout/                                                                      @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/pool.rs                                                                      @ai-dynamo/dynamo-kv-memory-codeowners
+/lib/llm/src/external_speculation/                                                                      @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/preprocessor/media.rs                                                                      @ai-dynamo/dynamo-multimodal-codeowners
 /components/src/dynamo/common/http/                                                                     @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/block_manager/block.rs                                                                     @ai-dynamo/dynamo-kv-memory-codeowners

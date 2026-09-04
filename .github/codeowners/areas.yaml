@@ -64,6 +64,7 @@ areas:
   - lib/llm/src/kv_router/indexer/
   - lib/llm/src/kv_router/prefill_router/
   - lib/llm/src/kv_router/publisher/
+  - lib/llm/src/external_speculation/
   - tests/router/
   - tests/router/configs/
   - lib/router-plugins/

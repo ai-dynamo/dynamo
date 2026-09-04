@@ -466,6 +466,8 @@ pub async fn register_model_card(
     endpoint: &Endpoint,
     card: &ModelDeploymentCard,
 ) -> anyhow::Result<()> {
+    let endpoint_id = endpoint.id();
+    card.validate_worker_role(Some(&endpoint_id))?;
     let lora_name = card.lora.as_ref().map(|info| info.name.as_str());
     let model_suffix = derive_lora_suffix(lora_name);
 
@@ -516,6 +518,10 @@ impl LocalModel {
 
     pub fn card(&self) -> &ModelDeploymentCard {
         &self.card
+    }
+
+    pub fn set_worker_role(&mut self, worker_role: crate::worker_role::WorkerRole) {
+        self.card.worker_role = worker_role;
     }
 
     pub fn path(&self) -> &Path {

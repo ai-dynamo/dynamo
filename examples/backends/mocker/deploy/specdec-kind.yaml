@@ -1,0 +1,275 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: etcd
+spec:
+  selector:
+    app: specdec-etcd
+  ports:
+  - name: client
+    port: 2379
+    targetPort: 2379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: etcd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: specdec-etcd
+  template:
+    metadata:
+      labels:
+        app: specdec-etcd
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+      - name: etcd
+        image: DYNAMO_SPECDEC_ETCD_IMAGE
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: ALLOW_NONE_AUTHENTICATION
+          value: "yes"
+        - name: ETCD_ADVERTISE_CLIENT_URLS
+          value: http://etcd:2379
+        - name: ETCD_LISTEN_CLIENT_URLS
+          value: http://0.0.0.0:2379
+        ports:
+        - name: client
+          containerPort: 2379
+        readinessProbe:
+          tcpSocket:
+            port: client
+          periodSeconds: 1
+          timeoutSeconds: 1
+          failureThreshold: 30
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: "1"
+            memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+spec:
+  selector:
+    app: specdec-frontend
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: specdec-frontend
+  template:
+    metadata:
+      labels:
+        app: specdec-frontend
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+      - name: frontend
+        image: DYNAMO_SPECDEC_FRONTEND_IMAGE
+        imagePullPolicy: IfNotPresent
+        args:
+        - --http-port
+        - "8000"
+        - --namespace
+        - specdec-kind
+        env:
+        - name: DYN_DISCOVERY_BACKEND
+          value: etcd
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+        - name: DYN_EVENT_PLANE
+          value: zmq
+        - name: ETCD_ENDPOINTS
+          value: http://etcd:2379
+        - name: DYN_TCP_RPC_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: DYN_LOGGING_CONSOLE_FORMAT
+          value: jsonl
+        - name: RUST_LOG
+          value: info
+        ports:
+        - name: http
+          containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /v1/models
+            port: http
+          periodSeconds: 2
+          timeoutSeconds: 1
+          failureThreshold: 60
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: "2"
+            memory: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: target
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: specdec-target
+  template:
+    metadata:
+      labels:
+        app: specdec-target
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+      - name: target
+        image: DYNAMO_SPECDEC_WORKER_IMAGE
+        imagePullPolicy: IfNotPresent
+        command:
+        - /usr/local/bin/mock-target-specdec-worker
+        args:
+        - --namespace
+        - specdec-kind
+        - --component
+        - target
+        - --endpoint
+        - generate
+        - --model-name
+        - mock-specdec-model
+        - --model-path
+        - /opt/dynamo/tokenizer
+        - --draft-endpoint
+        - specdec-kind/draft/generate
+        - --target-prefill-ms
+        - "3000"
+        - --target-token-interval-ms
+        - "1"
+        - --transport-hwm
+        - "512"
+        - --transport-queue-capacity
+        - "512"
+        env:
+        - name: DYN_DISCOVERY_BACKEND
+          value: etcd
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+        - name: DYN_EVENT_PLANE
+          value: zmq
+        - name: ETCD_ENDPOINTS
+          value: http://etcd:2379
+        - name: DYN_TCP_RPC_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: DYN_SYSTEM_PORT
+          value: "-1"
+        - name: DYN_LOGGING_CONSOLE_FORMAT
+          value: jsonl
+        - name: RUST_LOG
+          value: info
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: "2"
+            memory: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: draft
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: specdec-draft
+  template:
+    metadata:
+      labels:
+        app: specdec-draft
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+      - name: draft
+        image: DYNAMO_SPECDEC_WORKER_IMAGE
+        imagePullPolicy: IfNotPresent
+        command:
+        - /usr/local/bin/mock-draft-spec-dec-worker
+        args:
+        - --namespace
+        - specdec-kind
+        - --component
+        - draft
+        - --endpoint
+        - generate
+        - --model-name
+        - mock-specdec-model
+        - --draft-bind-address
+        - tcp://0.0.0.0:5560
+        - --draft-advertise-address
+        - tcp://$(POD_IP):5560
+        - --draft-prefill-ms
+        - "20"
+        - --draft-token-interval-ms
+        - "1"
+        - --orphan-cleanup-timeout-ms
+        - "1000"
+        - --transport-hwm
+        - "512"
+        - --transport-queue-capacity
+        - "512"
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: DYN_DISCOVERY_BACKEND
+          value: etcd
+        - name: DYN_REQUEST_PLANE
+          value: tcp
+        - name: DYN_EVENT_PLANE
+          value: zmq
+        - name: ETCD_ENDPOINTS
+          value: http://etcd:2379
+        - name: DYN_TCP_RPC_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: DYN_SYSTEM_PORT
+          value: "-1"
+        - name: DYN_LOGGING_CONSOLE_FORMAT
+          value: jsonl
+        - name: RUST_LOG
+          value: info
+        ports:
+        - name: zmq
+          containerPort: 5560
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: "2"
+            memory: 1Gi
