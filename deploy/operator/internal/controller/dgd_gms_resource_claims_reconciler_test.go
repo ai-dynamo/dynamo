@@ -22,13 +22,12 @@ import (
 	"testing"
 
 	configv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/config/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dra"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
+	snapshotv1alpha1 "github.com/ai-dynamo/snapshot/api/v1alpha1"
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -186,16 +185,12 @@ func TestDGDGMSResourceClaimsReconciler_CleansStaleNonGMSResourceClaimTemplate(t
 	}
 }
 
-func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteCheckpointTemplate(t *testing.T) {
-	t.Log("Build a DGD with a checkpoint-owned GMS ResourceClaimTemplate")
+func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteSnapshotJobTemplate(t *testing.T) {
+	t.Log("Build a DGD with a SnapshotJob-owned GMS ResourceClaimTemplate")
 	ctx := context.Background()
 	s := newDynamoGraphDeploymentControllerTestScheme(t)
-	identity := v1alpha1.DynamoCheckpointIdentity{
-		Model:            "meta-llama/Llama-2-7b-hf",
-		BackendFramework: "vllm",
-	}
-	hash, err := checkpoint.ComputeIdentityHash(identity)
-	require.NoError(t, err)
+	require.NoError(t, snapshotv1alpha1.AddToScheme(s))
+	checkpointID := "snapshot-job-checkpoint"
 
 	dgd := &v1beta1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd", Namespace: "default"},
@@ -221,45 +216,21 @@ func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteCheckpointTemplate(t *testi
 						GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{},
 						Checkpoint: &v1beta1.ComponentCheckpointConfig{
 							Enabled: true,
-							Mode:    v1beta1.CheckpointModeAuto,
-							Identity: &v1beta1.DynamoCheckpointIdentity{
-								Model:            identity.Model,
-								BackendFramework: identity.BackendFramework,
-							},
 						},
 					},
 				},
 			},
 		},
 	}
-	existingCheckpoint := &v1alpha1.DynamoCheckpoint{
-		ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-" + hash, Namespace: "default"},
-		Spec: v1alpha1.DynamoCheckpointSpec{
-			Identity: identity,
-			Job: v1alpha1.DynamoCheckpointJobConfig{
-				TargetContainerName: commonconsts.MainContainerName,
-				PodTemplateSpec: corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{
-							Name: commonconsts.MainContainerName,
-							Resources: corev1.ResourceRequirements{
-								Claims: []corev1.ResourceClaim{{Name: dra.ClaimName}},
-							},
-						}},
-					},
-				},
-			},
-		},
-		Status: v1alpha1.DynamoCheckpointStatus{
-			IdentityHash: hash,
-		},
+	snapshotJob := &snapshotv1alpha1.SnapshotJob{
+		ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-" + checkpointID, Namespace: "default"},
 	}
 	checkpointTemplate := &resourcev1.ResourceClaimTemplate{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      checkpointGMSResourceClaimTemplateName(hash),
+			Name:      checkpointGMSResourceClaimTemplateName(checkpointID),
 			Namespace: "default",
 			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(existingCheckpoint, v1alpha1.GroupVersion.WithKind("DynamoCheckpoint")),
+				*metav1.NewControllerRef(snapshotJob, snapshotv1alpha1.GroupVersion.WithKind("SnapshotJob")),
 			},
 		},
 		Spec: resourcev1.ResourceClaimTemplateSpec{
@@ -280,7 +251,7 @@ func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteCheckpointTemplate(t *testi
 	deviceClass := &resourcev1.DeviceClass{ObjectMeta: metav1.ObjectMeta{Name: dra.DefaultDeviceClassName}}
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(dgd, existingCheckpoint, checkpointTemplate, deviceClass).
+		WithObjects(dgd, snapshotJob, checkpointTemplate, deviceClass).
 		Build()
 	r := &DynamoGraphDeploymentReconciler{
 		Client:        cl,
@@ -292,10 +263,10 @@ func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteCheckpointTemplate(t *testi
 	t.Log("Reconcile GMS ResourceClaimTemplates")
 	require.NoError(t, newDGDGMSResourceClaimsReconciler(newTestDGDResourceSyncer(r), r.RuntimeConfig.Gate).Reconcile(ctx, dgd))
 
-	t.Log("Verify the checkpoint-owned template remains unchanged")
+	t.Log("Verify the SnapshotJob-owned template remains unchanged")
 	template := &resourcev1.ResourceClaimTemplate{}
 	require.NoError(t, cl.Get(ctx, client.ObjectKey{
-		Name:      checkpointGMSResourceClaimTemplateName(hash),
+		Name:      checkpointGMSResourceClaimTemplateName(checkpointID),
 		Namespace: "default",
 	}, template))
 	require.Len(t, template.Spec.Spec.Devices.Requests, 1)
@@ -305,6 +276,6 @@ func TestDGDGMSResourceClaimsReconciler_DoesNotDeleteCheckpointTemplate(t *testi
 	assert.Equal(t, dra.DefaultDeviceClassName, request.Exactly.DeviceClassName)
 	controllerRef := metav1.GetControllerOf(template)
 	require.NotNil(t, controllerRef)
-	assert.Equal(t, "DynamoCheckpoint", controllerRef.Kind)
-	assert.Equal(t, existingCheckpoint.Name, controllerRef.Name)
+	assert.Equal(t, "SnapshotJob", controllerRef.Kind)
+	assert.Equal(t, snapshotJob.Name, controllerRef.Name)
 }
