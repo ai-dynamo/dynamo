@@ -528,50 +528,51 @@ func TestPodCliqueSetObservesWorkerHash(t *testing.T) {
 	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
 	require.NoError(t, err)
 
+	unstampedPCS := &grovev1alpha1.PodCliqueSet{Spec: grovev1alpha1.PodCliqueSetSpec{
+		Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+				Labels: map[string]string{consts.KubeLabelDynamoComponent: "prefill"},
+			}},
+		},
+	}}
+	stampedPCS := unstampedPCS.DeepCopy()
+	stampedPCS.Spec.Template.Cliques[0].Labels[consts.KubeLabelDynamoWorkerHash] = wantHash
+
 	tests := []struct {
 		name               string
+		pcs                *grovev1alpha1.PodCliqueSet
 		acceptAllUnstamped bool
-		cliqueHash         string
 		want               bool
 	}{
 		{
-			name:               "unstamped cliques accepted for legacy unsuffixed PCS",
+			name:               "nil PCS is never observed",
+			pcs:                nil,
 			acceptAllUnstamped: true,
-			cliqueHash:         "",
+			want:               false,
+		},
+		{
+			name:               "unstamped cliques accepted for legacy unsuffixed PCS",
+			pcs:                unstampedPCS,
+			acceptAllUnstamped: true,
 			want:               true,
 		},
 		{
 			name:               "unstamped cliques rejected for new PCS requiring canonical hash",
+			pcs:                unstampedPCS,
 			acceptAllUnstamped: false,
-			cliqueHash:         "",
 			want:               false,
 		},
 		{
 			name:               "cliques bearing target hash accepted regardless of acceptAllUnstamped",
+			pcs:                stampedPCS,
 			acceptAllUnstamped: false,
-			cliqueHash:         wantHash,
 			want:               true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pcs := &grovev1alpha1.PodCliqueSet{
-				Spec: grovev1alpha1.PodCliqueSetSpec{
-					Template: grovev1alpha1.PodCliqueSetTemplateSpec{
-						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
-							Labels: map[string]string{
-								consts.KubeLabelDynamoComponent: "prefill",
-							},
-						}},
-					},
-				},
-			}
-			if tt.cliqueHash != "" {
-				pcs.Spec.Template.Cliques[0].Labels[consts.KubeLabelDynamoWorkerHash] = tt.cliqueHash
-			}
-
-			got, err := podCliqueSetObservesWorkerHash(dgd, pcs, tt.acceptAllUnstamped)
+			got, err := podCliqueSetObservesWorkerHash(dgd, tt.pcs, tt.acceptAllUnstamped)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})
@@ -639,6 +640,97 @@ func TestGroveWorkloadsReconciler_SkipsHashObservationWhenHashIsCurrent(t *testi
 	require.NoError(t, err)
 
 	assert.Zero(t, dgdUpdateCalls, "DGD must not be updated when the hash annotation is already current")
+}
+
+func TestGroveWorkloadsReconciler_DefersHashCommitUntilPCSWriteObserved(t *testing.T) {
+	dgd := createTestDGD("graph", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"prefill": {
+			ComponentType: consts.ComponentTypePrefill,
+			Envs:          []corev1.EnvVar{{Name: "WORKER_VERSION", Value: "v1"}},
+		},
+	})
+	wantHash, err := dynamo.ComputeDGDWorkersSpecHash(dgd)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		existingPCS *grovev1alpha1.PodCliqueSet
+	}{
+		{
+			name:        "new PCS — create defers commit, second reconcile commits",
+			existingPCS: nil,
+		},
+		{
+			name: "legacy unsuffixed PCS — bookkeeping write defers commit, second reconcile commits",
+			existingPCS: &grovev1alpha1.PodCliqueSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
+					Namespace: dgd.Namespace,
+					OwnerReferences: []metav1.OwnerReference{
+						*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
+					},
+				},
+				Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
+					Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{{
+						Labels: map[string]string{consts.KubeLabelDynamoComponent: "prefill"},
+					}},
+				}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgdUpdateCalls := 0
+			builder := fake.NewClientBuilder().
+				WithScheme(newDynamoGraphDeploymentControllerTestScheme(t)).
+				WithObjects(dgd).
+				WithStatusSubresource(dgd).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Update: func(
+						ctx context.Context,
+						writer client.WithWatch,
+						object client.Object,
+						opts ...client.UpdateOption,
+					) error {
+						if _, ok := object.(*nvidiacomv1beta1.DynamoGraphDeployment); ok {
+							dgdUpdateCalls++
+						}
+						return writer.Update(ctx, object, opts...)
+					},
+				})
+			if tt.existingPCS != nil {
+				builder.WithObjects(tt.existingPCS)
+			}
+			kubeClient := builder.Build()
+			workloads := newGroveWorkloadsReconciler(
+				kubeClient,
+				events.NewFakeRecorder(10),
+				newDGDWorkerRolloutReconciler(kubeClient, nil),
+				&configv1alpha1.OperatorConfiguration{},
+				&commoncontroller.RuntimeConfig{},
+				&mockDockerSecretRetriever{GetSecretsFunc: func(string, string) ([]string, error) { return nil, nil }},
+			)
+
+			t.Log("First reconcile writes the PCS; commit must be deferred")
+			observedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
+			require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), observedDGD))
+			_, err = workloads.Reconcile(context.Background(), observedDGD, nil, nil)
+			require.NoError(t, err)
+			assert.Zero(t, dgdUpdateCalls, "hash annotation must not be committed on the reconcile that writes the PCS")
+
+			t.Log("Second reconcile is a no-op PCS sync; commit must proceed")
+			freshDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
+			require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), freshDGD))
+			_, err = workloads.Reconcile(context.Background(), freshDGD, nil, nil)
+			require.NoError(t, err)
+			assert.Equal(t, 1, dgdUpdateCalls, "hash annotation must be committed once the PCS write is observed")
+
+			storedDGD := &nvidiacomv1beta1.DynamoGraphDeployment{}
+			require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(dgd), storedDGD))
+			assert.Equal(t, wantHash, storedDGD.Annotations[consts.AnnotationCurrentWorkerHashV2])
+		})
+	}
 }
 
 func isGrovePodCliqueSetObject(object client.Object) bool {

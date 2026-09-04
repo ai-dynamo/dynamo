@@ -227,11 +227,8 @@ func podCliqueSetUsesGroveWorkerHashSuffix(
 	return true
 }
 
-// podCliqueSetObservesWorkerHash reports whether every worker clique carries a
-// coherent hash. Accepts all-canonical (desired hash on every clique) always, or
-// all-unstamped (no clique has a hash) when acceptAllUnstamped is true. The
-// all-unstamped path is only valid for a pre-existing legacy PCS that was never
-// suffixed; a newly created PCS must carry the canonical hash label.
+// podCliqueSetObservesWorkerHash reports whether every worker clique in pcs carries the
+// computed DGD worker hash, or, for a pre-existing legacy PCS, that no clique is stamped.
 func podCliqueSetObservesWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,

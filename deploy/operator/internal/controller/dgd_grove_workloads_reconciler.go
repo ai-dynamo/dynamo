@@ -97,13 +97,10 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
-	// Project the hash only once the informer cache reflects the target suffix on every worker clique.
-	// If we wrote the PCS this reconcile, the informer has not yet caught up with that write; defer
-	// the commit to the next watch-driven reconcile, where pcsWasWritten will be false.
+	// Defer commit if the PCS was written this reconcile; the informer hasn't caught up yet.
 	if workerHashTransition.needsCommit() && !pcsWasWritten {
-		// allUnstamped is valid only for a pre-existing legacy PCS that was never suffixed.
-		// A newly created PCS must carry the canonical hash label, so require allCanonical.
-		isLegacyUnsuffixed := workerHashTransition.isFirstGeneration &&
+		// Pre-existing legacy PCS without a suffix is the only case where unstamped is valid.
+		isLegacyUnsuffixed := workerHashTransition.noCurrentAnnotation &&
 			renderedPodCliqueSet.existing != nil &&
 			!podCliqueSetUsesGroveWorkerHashSuffix(dgd, renderedPodCliqueSet.existing)
 		observed, err := podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing, isLegacyUnsuffixed)

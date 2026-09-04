@@ -48,13 +48,13 @@ type workerGenerationHashes struct {
 // callers commit it only after they have reconciled the workload carrying the
 // corresponding generation.
 type unsupportedWorkerHashTransition struct {
-	next              workerGenerationHashes
-	isFirstGeneration bool // no prior hash annotation; child workload may not be stamped yet
-	hashChanged       bool // hash annotation exists but does not match desired
+	next                workerGenerationHashes
+	noCurrentAnnotation bool // DGD carries no current worker hash annotation
+	hashChanged         bool // hash annotation exists but does not match desired
 }
 
 func (t unsupportedWorkerHashTransition) needsCommit() bool {
-	return t.isFirstGeneration || t.hashChanged
+	return t.noCurrentAnnotation || t.hashChanged
 }
 
 // dgdWorkerRolloutReconciler owns worker-generation metadata and the managed
@@ -85,8 +85,8 @@ func (r *dgdWorkerRolloutReconciler) planUnsupportedWorkerHashTransition(
 	current := r.currentWorkerHashes(dgd)
 	if current.empty() {
 		return unsupportedWorkerHashTransition{
-			next:              workerHashesForCompletedGeneration(desired.v2, desired),
-			isFirstGeneration: true,
+			next:                workerHashesForCompletedGeneration(desired.v2, desired),
+			noCurrentAnnotation: true,
 		}, nil
 	}
 	if currentWorkerHashesMatchDesired(current, desired) {
