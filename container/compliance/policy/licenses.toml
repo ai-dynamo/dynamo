@@ -771,7 +771,7 @@ reason = "Mere aggregation; system component"
 [[exceptions]]
 type = "dpkg"
 name = "ca-certificates"
-allow = ["GPL-2.0-or-later"]
+allow = ["GPL-2.0-only", "GPL-2.0-or-later"]
 reason = "Mere aggregation; system component"
 
 [[exceptions]]
@@ -2820,4 +2820,3 @@ type = "native"
 name = "CRIU"
 allow = ["GPL-2.0-only"]
 reason = "Mere aggregation: standalone checkpoint/restore binary the snapshot-agent execs as a subprocess, not linked into Dynamo's Apache-2.0 code. COPYING ships at /legal/CRIU/COPYING; source available via the OSRB archive."
-

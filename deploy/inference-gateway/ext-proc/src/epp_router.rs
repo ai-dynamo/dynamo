@@ -26,7 +26,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::Semaphore;
 
-use dynamo_kv_router::services::selection::SelectionService;
+use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
@@ -62,59 +62,24 @@ pub struct EppRouter {
 
 impl EppRouter {
     /// Assemble the standalone runtime from the validated selector config.
-    pub async fn from_selector(cfg: EppStandaloneConfig) -> Result<Self> {
-        let selector = Selector::new(&cfg).await?;
-        Self::from_built_selector(cfg, selector).await
-    }
-
-    pub(crate) async fn from_built_selector(
+    pub async fn from_selector(
         cfg: EppStandaloneConfig,
-        selector: Selector,
+        policy_registry: WorkerSelectionPolicyRegistry,
     ) -> Result<Self> {
-        let selector = Arc::new(selector);
-        let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
-        Self::from_selector_parts(cfg, renderer, reflector, reflector_ready, selector).await
-    }
-
-    /// Assemble a custom EPP image around a prebuilt selection service.
-    pub async fn from_selection_service(
-        cfg: EppStandaloneConfig,
-        service: SelectionService,
-    ) -> Result<Self> {
-        let selector = Arc::new(Selector::from_service(&cfg, service).await?);
-        let (renderer, reflector, reflector_ready) = Self::dependencies(&cfg).await?;
-        Self::from_selector_parts(cfg, renderer, reflector, reflector_ready, selector).await
-    }
-
-    async fn dependencies(
-        cfg: &EppStandaloneConfig,
-    ) -> Result<(VllmRenderClient, Arc<PodDiscovery>, Arc<AtomicBool>)> {
+        let selector = Arc::new(Selector::new(&cfg, policy_registry).await?);
         let renderer = VllmRenderClient::new(
             &cfg.tokenizer_service_url,
             Duration::from_millis(cfg.tokenization_timeout_ms),
             cfg.tokenizer_max_response_bytes,
         )?;
-
-        let (reflector, reflector_ready) = PodDiscovery::spawn(cfg).await?;
+        let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
-
-        Ok((renderer, reflector, reflector_ready))
-    }
-
-    async fn from_selector_parts(
-        cfg: EppStandaloneConfig,
-        renderer: VllmRenderClient,
-        reflector: Arc<PodDiscovery>,
-        reflector_ready: Arc<AtomicBool>,
-        selector: Arc<Selector>,
-    ) -> Result<Self> {
         let peer_ready = selector.peer_ready();
         let recovery_required = selector.peer_recovery_required();
 
         if recovery_required {
             reflector.wait_until_ready().await?;
         }
-
         let defaults = RegistrationDefaults::from_config(&cfg);
         let mut adapter =
             TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
@@ -128,9 +93,10 @@ impl EppRouter {
             selector.start_peer_recovery().await?;
         }
 
-        // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
-        // we do not block startup on a schedulable worker. A valid, empty pool is
-        // ready immediately and returns 503 per-request until capacity appears.
+        // Readiness requires a synchronized worker view and, in replicated mode,
+        // completed peer discovery plus KV-index recovery/bootstrap. It does not
+        // require a schedulable worker: a valid empty pool returns 503 per request
+        // until capacity appears.
         Ok(Self {
             renderer,
             reflector,
@@ -148,7 +114,9 @@ impl EppRouter {
     pub fn is_ready(&self) -> bool {
         compute_ready(
             self.reflector_ready.load(Ordering::Acquire),
-            self.peer_ready.as_ref().map(|p| p.load(Ordering::Acquire)),
+            self.peer_ready
+                .as_ref()
+                .map(|ready| ready.load(Ordering::Acquire)),
         )
     }
 
@@ -205,7 +173,13 @@ fn compute_ready(pod_ready: bool, peer_ready: Option<bool>) -> bool {
 
 /// True if a scheme-less `ip:port` endpoint is covered by an Envoy subset,
 /// matching either the full `ip:port` or the bare `ip`.
-fn endpoint_in_subset(
+///
+/// Matches the bare-IP case via `IpAddr`, never `endpoint.split(':')`: a
+/// bracketed IPv6 endpoint (`[fd00::2]:8000`) splits into garbage on `:`,
+/// silently never matching a bare `fd00::2` candidate. Shared with
+/// [`crate::epp::Router::subset_to_worker_ids`], the other Envoy
+/// candidate_subset matcher in this crate.
+pub(crate) fn endpoint_in_subset(
     endpoint: &str,
     candidates: &HashSet<&str>,
     candidate_ips: &HashSet<IpAddr>,
@@ -556,18 +530,6 @@ mod tests {
             map(StatusCode::SERVICE_UNAVAILABLE),
             PickError::TokenizerUnavailable
         ));
-    }
-
-    #[test]
-    fn compute_ready_gates_on_pod_and_peer() {
-        // No replication (peer_ready = None): readiness == pod readiness.
-        assert!(compute_ready(true, None));
-        assert!(!compute_ready(false, None));
-        // Replicated: both must be ready. A pod that is worker-ready but hasn't
-        // finished its initial peer sync stays NOT_SERVING.
-        assert!(compute_ready(true, Some(true)));
-        assert!(!compute_ready(true, Some(false)));
-        assert!(!compute_ready(false, Some(true)));
     }
 
     #[test]

@@ -401,6 +401,8 @@ class Publisher:
         metrics_collector: Any = None,
         kv_state_endpoint: Optional[str] = None,
         image_token_id: Optional[int] = None,
+        publish_kv_events: bool = True,
+        publish_metrics: bool = True,
     ) -> None:
         self.endpoint = endpoint
         self.engine = engine
@@ -416,6 +418,8 @@ class Publisher:
         self.metrics_collector = metrics_collector
         self.kv_state_endpoint = kv_state_endpoint
         self.image_token_id = image_token_id
+        self.publish_kv_events = publish_kv_events
+        self.publish_metrics = publish_metrics
         self.attention_dp_size = engine.get_attention_dp_size()
 
         # The first few kv events from the model engine are always "created" type events.
@@ -450,7 +454,7 @@ class Publisher:
         self._last_engine_event_id_by_rank: dict[int, int] = {}
 
         # Initialize ZMQ publisher if endpoint is provided (consolidator enabled)
-        if zmq_endpoint:
+        if zmq_endpoint and self.publish_kv_events:
             logging.info(
                 f"TensorRT-LLM: Initializing ZMQ KV event publisher with endpoint={zmq_endpoint}"
             )
@@ -470,35 +474,34 @@ class Publisher:
         await self.metrics_publisher.create_endpoint(self.endpoint)
 
     def initialize(self) -> None:
-        # Setup the metrics publisher
-        self.metrics_publisher = WorkerMetricsPublisher()
-        self._init_publish_metrics_thread()
-        task = asyncio.create_task(self._create_metrics_publisher_endpoint())
-        task.add_done_callback(
-            lambda _: logging.debug("metrics publisher endpoint created")
-        )
+        if self.publish_metrics:
+            self.metrics_publisher = WorkerMetricsPublisher()
+            self._init_publish_metrics_thread()
+            task = asyncio.create_task(self._create_metrics_publisher_endpoint())
+            task.add_done_callback(
+                lambda _: logging.debug("metrics publisher endpoint created")
+            )
 
         # Setup the ForwardPassMetrics publisher with one internal channel per
         # attention-DP rank. Non-attention-DP engines report size 1. Under
         # attention-DP, TRT-LLM emits one IterationStats row per rank and
         # Dynamo forwards attentionDpRank as the FPM dp_rank.
-        try:
-            fpm_dp_size = max(1, int(self.attention_dp_size or 1))
-            self.fpm_publisher = FpmDirectPublisher(
-                endpoint=self.endpoint,
-                worker_id=str(self.worker_id),
-                dp_size=fpm_dp_size,
-            )
-            logging.info(f"FpmDirectPublisher initialized with dp_size={fpm_dp_size}")
-        except RuntimeError as e:
-            # PyO3 surfaces all FpmDirectPublisher::new failures as
-            # PyRuntimeError (Endpoint missing, tokio runtime missing,
-            # etc.). Catch only that — any other exception here would
-            # signal a programming error worth surfacing.
-            logging.warning(
-                f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
-            )
-            self.fpm_publisher = None
+        if self.publish_metrics:
+            try:
+                fpm_dp_size = max(1, int(self.attention_dp_size or 1))
+                self.fpm_publisher = FpmDirectPublisher(
+                    endpoint=self.endpoint,
+                    worker_id=str(self.worker_id),
+                    dp_size=fpm_dp_size,
+                )
+                logging.info(
+                    f"FpmDirectPublisher initialized with dp_size={fpm_dp_size}"
+                )
+            except RuntimeError as e:
+                logging.warning(
+                    f"Failed to initialize FpmDirectPublisher; FPM emission disabled: {e}"
+                )
+                self.fpm_publisher = None
 
         # Setup the kv cache events publisher
         # Publisher selection based on consolidator configuration:
@@ -506,6 +509,8 @@ class Publisher:
         # - Without consolidator: Use KvEventPublisher → NATS → Router (direct)
         # Note: The worker-side KvEventPublisher (from dynamo.llm) that subscribes from
         # consolidator and publishes to NATS is created separately in main.py, not here.
+        if not self.publish_kv_events:
+            return
         if self.zmq_kv_event_publisher:
             logging.info(
                 "KV Event Consolidator enabled - using ZMQ publisher only. "
@@ -1148,6 +1153,8 @@ async def get_publisher(
     metrics_collector: Any = None,
     kv_state_endpoint: Optional[str] = None,
     image_token_id: Optional[int] = None,
+    publish_kv_events: bool = True,
+    publish_metrics: bool = True,
 ) -> AsyncGenerator[Publisher, None]:
     publisher = Publisher(
         endpoint,
@@ -1163,6 +1170,8 @@ async def get_publisher(
         metrics_collector=metrics_collector,
         kv_state_endpoint=kv_state_endpoint,
         image_token_id=image_token_id,
+        publish_kv_events=publish_kv_events,
+        publish_metrics=publish_metrics,
     )
     try:
         publisher.initialize()

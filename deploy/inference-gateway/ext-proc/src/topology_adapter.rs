@@ -148,11 +148,12 @@ mod tests {
 
     use super::*;
     use crate::epp_standalone_config::TokenizerProtocol;
+    use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
 
     fn config() -> EppStandaloneConfig {
         EppStandaloneConfig {
             selector_threads: 1,
-            peer_service: None,
+            peer_replication: None,
             inference_pool_name: "test-pool".to_string(),
             namespace: "test-ns".to_string(),
             model_name: "Qwen/Qwen3-0.6B".to_string(),
@@ -206,9 +207,12 @@ mod tests {
     #[tokio::test]
     async fn channel_close_clears_selector_topology() {
         let selector = Arc::new(
-            Selector::new(&config())
-                .await
-                .expect("selector should build"),
+            Selector::new(
+                &config(),
+                dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry::default(),
+            )
+            .await
+            .expect("selector should build"),
         );
         let (discovery, changes_tx) = PodDiscovery::for_test(vec![worker(7, "10.0.0.1")]);
         let mut adapter = TopologyAdapter::spawn(discovery, selector.clone(), defaults());
@@ -242,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn initial_reconcile_completes_for_empty_topology() {
         let selector = Arc::new(
-            Selector::new(&config())
+            Selector::new(&config(), WorkerSelectionPolicyRegistry::default())
                 .await
                 .expect("selector should build"),
         );

@@ -14,7 +14,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::{Endpoint, EndpointSlice};
+use kube::{Api, Client};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -23,164 +25,24 @@ use dynamo_kv_router::services::selection::SelectionService;
 /// Label Kubernetes sets on every EndpointSlice pointing back to its Service.
 const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 
-/// Named Service/EndpointSlice port used for aggregated replica synchronization.
-pub const REPLICA_AGG_PORT_NAME: &str = "replica-agg";
-
-/// Named Service/EndpointSlice port used for startup KV-index recovery.
-pub const SELECTION_HTTP_PORT_NAME: &str = "selection-http";
-
 const INITIAL_RECOVERY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_RECOVERY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(30);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PeerPorts {
-    pub(crate) replica_sync: u16,
-    /// `None` when the Service does not declare the `selection-http` port (an
-    /// image-only upgrade from a deployment that predates the dump endpoint).
-    /// Peer KV-index recovery is then disabled; peer discovery and
-    /// replica-load synchronization continue normally.
-    pub(crate) selection_http: Option<u16>,
-}
 
 type Store = kube::runtime::reflector::Store<EndpointSlice>;
 type RecoveryAttempt<'a> = Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>>;
 
-/// Resolve both peer-plane ports from one authoritative EndpointSlice snapshot.
-pub(crate) async fn resolve_peer_ports(namespace: &str, service_name: &str) -> Result<PeerPorts> {
-    use kube::{Api, Client, api::ListParams};
-
-    let client = Client::try_default()
+/// Verifies the peer Service exists before enabling replica synchronization.
+pub(crate) async fn ensure_peer_service_exists(
+    client: Client,
+    namespace: &str,
+    service_name: &str,
+) -> Result<()> {
+    let services: Api<Service> = Api::namespaced(client, namespace);
+    services
+        .get(service_name)
         .await
-        .context("building Kubernetes client for EPP peer port resolution")?;
-    let slices: Api<EndpointSlice> = Api::namespaced(client, namespace);
-    let list = slices
-        .list(&ListParams::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}")))
-        .await
-        .with_context(|| {
-            format!("listing EndpointSlices for EPP peer Service {namespace}/{service_name}")
-        })?;
-
-    peer_ports(list.items.iter())
-        .with_context(|| format!("resolving peer ports for EPP Service {namespace}/{service_name}"))
-}
-
-fn peer_ports<'a>(slices: impl Iterator<Item = &'a EndpointSlice>) -> Result<PeerPorts> {
-    let slices: Vec<_> = slices.collect();
-    Ok(PeerPorts {
-        replica_sync: named_tcp_port(&slices, REPLICA_AGG_PORT_NAME)?,
-        // `selection-http` is optional: a deployment upgraded before the dump
-        // endpoint existed declares only `replica-agg`. A missing dump port
-        // degrades to "no recovery" (bootstrap empty) instead of failing.
-        selection_http: optional_named_tcp_port(&slices, SELECTION_HTTP_PORT_NAME)?,
-    })
-}
-
-/// Like [`named_tcp_port`], but returns `Ok(None)` when no EndpointSlice
-/// exposes the named port. Slices that omit the port are skipped; conflicting
-/// values or invalid ports still error.
-fn optional_named_tcp_port(slices: &[&EndpointSlice], port_name: &str) -> Result<Option<u16>> {
-    let mut resolved = BTreeSet::new();
-
-    for slice in slices {
-        let slice_name = slice.metadata.name.as_deref().unwrap_or("<unnamed>");
-        let mut matches = slice
-            .ports
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .filter(|port| port.name.as_deref() == Some(port_name));
-        let Some(endpoint_port) = matches.next() else {
-            continue;
-        };
-        anyhow::ensure!(
-            matches.next().is_none(),
-            "EndpointSlice {slice_name} exposes named port {port_name:?} more than once"
-        );
-        anyhow::ensure!(
-            endpoint_port
-                .protocol
-                .as_deref()
-                .is_none_or(|protocol| protocol.eq_ignore_ascii_case("TCP")),
-            "EndpointSlice {slice_name} named port {port_name:?} must use TCP"
-        );
-        let raw_port = endpoint_port.port.with_context(|| {
-            format!("EndpointSlice {slice_name} named port {port_name:?} has no port number")
-        })?;
-        let port = u16::try_from(raw_port).with_context(|| {
-            format!(
-                "EndpointSlice {slice_name} named port {port_name:?} has invalid port {raw_port}"
-            )
-        })?;
-        anyhow::ensure!(
-            port > 0,
-            "named port {port_name:?} must be greater than zero"
-        );
-        resolved.insert(port);
-    }
-
-    anyhow::ensure!(!slices.is_empty(), "peer Service has no EndpointSlices");
-    if resolved.is_empty() {
-        return Ok(None);
-    }
-    anyhow::ensure!(
-        resolved.len() == 1,
-        "named port {port_name:?} resolves to inconsistent ports {resolved:?}"
-    );
-    Ok(resolved.first().copied())
-}
-
-fn named_tcp_port(slices: &[&EndpointSlice], port_name: &str) -> Result<u16> {
-    let mut resolved = BTreeSet::new();
-
-    for slice in slices {
-        let slice_name = slice.metadata.name.as_deref().unwrap_or("<unnamed>");
-        let mut matches = slice
-            .ports
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .filter(|port| port.name.as_deref() == Some(port_name));
-        let endpoint_port = matches.next().with_context(|| {
-            format!(
-                "EndpointSlice {slice_name} does not expose named port \
-                 {port_name:?}"
-            )
-        })?;
-        anyhow::ensure!(
-            matches.next().is_none(),
-            "EndpointSlice {slice_name} exposes named port {port_name:?} more than once"
-        );
-        anyhow::ensure!(
-            endpoint_port
-                .protocol
-                .as_deref()
-                .is_none_or(|protocol| protocol.eq_ignore_ascii_case("TCP")),
-            "EndpointSlice {slice_name} named port {port_name:?} must use TCP"
-        );
-        let raw_port = endpoint_port.port.with_context(|| {
-            format!("EndpointSlice {slice_name} named port {port_name:?} has no port number")
-        })?;
-        let port = u16::try_from(raw_port).with_context(|| {
-            format!(
-                "EndpointSlice {slice_name} named port {port_name:?} has invalid port {raw_port}"
-            )
-        })?;
-        anyhow::ensure!(
-            port > 0,
-            "named port {port_name:?} must be greater than zero"
-        );
-        resolved.insert(port);
-    }
-
-    anyhow::ensure!(!slices.is_empty(), "peer Service has no EndpointSlices");
-    anyhow::ensure!(
-        resolved.len() == 1,
-        "named port {port_name:?} resolves to inconsistent ports {resolved:?}"
-    );
-    resolved
-        .first()
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!("named port {port_name:?} did not resolve"))
+        .with_context(|| format!("getting EPP peer Service {namespace}/{service_name}"))?;
+    Ok(())
 }
 
 /// Starts peer discovery for the EPP's own Kubernetes Service, keeping
@@ -192,6 +54,7 @@ fn named_tcp_port(slices: &[&EndpointSlice], port_name: &str) -> Result<u16> {
 /// when recovery is enabled.
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn(
+    client: Client,
     service: Arc<SelectionService>,
     namespace: &str,
     service_name: &str,
@@ -201,11 +64,7 @@ pub async fn spawn(
     cancel: CancellationToken,
 ) -> Result<()> {
     use futures::StreamExt;
-    use kube::{Api, Client, runtime::WatchStreamExt, runtime::reflector, runtime::watcher};
-
-    let client = Client::try_default()
-        .await
-        .context("building Kubernetes client for EPP peer discovery")?;
+    use kube::runtime::{WatchStreamExt, reflector, watcher};
     let slices: Api<EndpointSlice> = Api::namespaced(client, namespace);
     let cfg_watch =
         watcher::Config::default().labels(&format!("{SERVICE_NAME_LABEL}={service_name}"));
@@ -464,23 +323,28 @@ where
 
         // The current eligible set is exhausted (or emptied by churn): back off,
         // then start a fresh cycle with a fresh shuffle.
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                anyhow::bail!("EPP peer discovery cancelled during KV-index recovery")
-            }
-            changed = changes_rx.changed() => {
-                changed.context("EPP peer EndpointSlice watch ended during KV-index recovery")?;
-                // Only a genuine candidate-set change earns an immediate retry
-                // with the initial backoff. Unrelated churn (readiness flips,
-                // metadata/zone updates) must not reset the backoff either:
-                // under a rolling update it would keep the retry loop hot at
-                // the initial backoff instead of letting it grow.
-                if recovery_peer_set(store, self_ip, selection_http_port) != eligible {
-                    backoff = initial_backoff;
+        let delay = tokio::time::sleep(backoff);
+        tokio::pin!(delay);
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    anyhow::bail!("EPP peer discovery cancelled during KV-index recovery")
                 }
-            }
-            _ = tokio::time::sleep(backoff) => {
-                backoff = backoff.saturating_mul(2).min(max_backoff);
+                changed = changes_rx.changed() => {
+                    changed.context("EPP peer EndpointSlice watch ended during KV-index recovery")?;
+                    // Only a genuine candidate-set change earns an immediate retry
+                    // with the initial backoff. Keep waiting on the same timer for
+                    // metadata-only churn; otherwise a noisy rolling update can
+                    // bypass the retry delay entirely.
+                    if recovery_peer_set(store, self_ip, selection_http_port) != eligible {
+                        backoff = initial_backoff;
+                        break;
+                    }
+                }
+                _ = &mut delay => {
+                    backoff = backoff.saturating_mul(2).min(max_backoff);
+                    break;
+                }
             }
         }
     }
@@ -644,7 +508,9 @@ mod tests {
 
     use super::*;
     use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
-    use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions, EndpointPort};
+    use dynamo_kv_router::WorkerType;
+    use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+    use k8s_openapi::api::discovery::v1::{Endpoint, EndpointConditions};
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
     use tokio::net::TcpListener;
@@ -666,40 +532,6 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
-    }
-
-    fn slice_with_replica_port(port: Option<i32>) -> EndpointSlice {
-        let mut slice = slice_with(&["10.0.0.1"], false, "IPv4");
-        slice.metadata.name = Some("epp-peers-abc".to_string());
-        slice.ports = Some(vec![EndpointPort {
-            name: Some(REPLICA_AGG_PORT_NAME.to_string()),
-            port,
-            ..Default::default()
-        }]);
-        slice
-    }
-
-    fn slice_with_peer_ports(replica_sync: i32, selection_http: i32) -> EndpointSlice {
-        let mut slice = slice_with(&["10.0.0.1"], false, "IPv4");
-        slice.metadata.name = Some("epp-peers-abc".to_string());
-        slice.ports = Some(vec![
-            EndpointPort {
-                name: Some(REPLICA_AGG_PORT_NAME.to_string()),
-                port: Some(replica_sync),
-                ..Default::default()
-            },
-            EndpointPort {
-                name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
-                port: Some(selection_http),
-                ..Default::default()
-            },
-        ]);
-        slice
-    }
-
-    fn parse_named_port(slices: &[EndpointSlice], port_name: &str) -> Result<u16> {
-        let slices: Vec<_> = slices.iter().collect();
-        named_tcp_port(&slices, port_name)
     }
 
     #[test]
@@ -780,177 +612,6 @@ mod tests {
         assert_eq!(authority("fd00::1", 9092), "[fd00::1]:9092");
     }
 
-    #[test]
-    fn resolves_replica_agg_named_port() {
-        let slices = [
-            slice_with_replica_port(Some(9092)),
-            slice_with_replica_port(Some(9092)),
-        ];
-        assert_eq!(
-            parse_named_port(&slices, REPLICA_AGG_PORT_NAME).unwrap(),
-            9092
-        );
-    }
-
-    #[test]
-    fn resolves_selection_http_named_port() {
-        let slices = [
-            slice_with_peer_ports(9092, 9093),
-            slice_with_peer_ports(9092, 9093),
-        ];
-        assert_eq!(
-            peer_ports(slices.iter()).unwrap(),
-            PeerPorts {
-                replica_sync: 9092,
-                selection_http: Some(9093),
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_missing_replica_agg_named_port() {
-        let slices = [slice_with(&["10.0.0.1"], false, "IPv4")];
-        let error = parse_named_port(&slices, REPLICA_AGG_PORT_NAME)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(REPLICA_AGG_PORT_NAME));
-    }
-
-    #[test]
-    fn rejects_inconsistent_replica_agg_named_ports() {
-        let slices = [
-            slice_with_replica_port(Some(9092)),
-            slice_with_replica_port(Some(9093)),
-        ];
-        let error = parse_named_port(&slices, REPLICA_AGG_PORT_NAME)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("inconsistent ports"));
-    }
-
-    fn slice_with_replica_port_protocol(protocol: Option<&str>) -> EndpointSlice {
-        let mut slice = slice_with(&["10.0.0.1"], false, "IPv4");
-        slice.metadata.name = Some("epp-peers-proto".to_string());
-        slice.ports = Some(vec![EndpointPort {
-            name: Some(REPLICA_AGG_PORT_NAME.to_string()),
-            port: Some(9092),
-            protocol: protocol.map(str::to_string),
-            ..Default::default()
-        }]);
-        slice
-    }
-
-    #[test]
-    fn accepts_absent_or_tcp_replica_agg_protocol() {
-        // Absent protocol defaults to TCP in Kubernetes; explicit TCP is fine.
-        assert_eq!(
-            parse_named_port(
-                &[slice_with_replica_port_protocol(None)],
-                REPLICA_AGG_PORT_NAME
-            )
-            .unwrap(),
-            9092
-        );
-        assert_eq!(
-            parse_named_port(
-                &[slice_with_replica_port_protocol(Some("TCP"))],
-                REPLICA_AGG_PORT_NAME
-            )
-            .unwrap(),
-            9092
-        );
-    }
-
-    #[test]
-    fn rejects_non_tcp_replica_agg_port() {
-        // A UDP `replica-agg` port must not resolve: the replica plane dials
-        // tcp://, so treating it as valid would be a silent transport mismatch.
-        // With no TCP match left, resolution fails with the "does not expose"
-        // error naming the port.
-        let error = parse_named_port(
-            &[slice_with_replica_port_protocol(Some("UDP"))],
-            REPLICA_AGG_PORT_NAME,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains(REPLICA_AGG_PORT_NAME));
-    }
-
-    #[test]
-    fn rejects_invalid_named_tcp_ports() {
-        let cases = [
-            (
-                "missing number",
-                vec![EndpointPort {
-                    name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
-                    port: None,
-                    ..Default::default()
-                }],
-            ),
-            (
-                "zero",
-                vec![EndpointPort {
-                    name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
-                    port: Some(0),
-                    ..Default::default()
-                }],
-            ),
-            (
-                "out of range",
-                vec![EndpointPort {
-                    name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
-                    port: Some(65_536),
-                    ..Default::default()
-                }],
-            ),
-            (
-                "udp",
-                vec![EndpointPort {
-                    name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
-                    port: Some(9093),
-                    protocol: Some("UDP".to_string()),
-                    ..Default::default()
-                }],
-            ),
-            (
-                "duplicate",
-                vec![
-                    EndpointPort {
-                        name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
-                        port: Some(9093),
-                        ..Default::default()
-                    },
-                    EndpointPort {
-                        name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
-                        port: Some(9094),
-                        ..Default::default()
-                    },
-                ],
-            ),
-        ];
-
-        for (name, ports) in cases {
-            let mut slice = slice_with(&["10.0.0.1"], false, "IPv4");
-            slice.metadata.name = Some(name.to_string());
-            slice.ports = Some(ports);
-            assert!(
-                parse_named_port(&[slice], SELECTION_HTTP_PORT_NAME).is_err(),
-                "case {name} must fail"
-            );
-        }
-
-        let slices = [
-            slice_with_peer_ports(9092, 9093),
-            slice_with_peer_ports(9092, 9094),
-        ];
-        assert!(
-            parse_named_port(&slices, SELECTION_HTTP_PORT_NAME)
-                .unwrap_err()
-                .to_string()
-                .contains("inconsistent ports")
-        );
-    }
-
     fn free_tcp_port() -> u16 {
         std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -987,18 +648,6 @@ mod tests {
                 }),
                 ..Default::default()
             }],
-            ports: Some(vec![
-                EndpointPort {
-                    name: Some(REPLICA_AGG_PORT_NAME.to_string()),
-                    port: Some(9092),
-                    ..Default::default()
-                },
-                EndpointPort {
-                    name: Some(SELECTION_HTTP_PORT_NAME.to_string()),
-                    port: Some(9093),
-                    ..Default::default()
-                },
-            ]),
             ..Default::default()
         }
     }
@@ -1056,11 +705,15 @@ mod tests {
         use dynamo_kv_router::services::selection::SelectionServiceBuilder;
 
         Arc::new(
-            SelectionServiceBuilder::new(KvRouterConfig::default())
-                .indexer_threads(1)
-                .build()
-                .await
-                .expect("build selection service"),
+            SelectionServiceBuilder::new(
+                KvRouterConfig::default(),
+                WorkerType::Aggregated,
+                WorkerSelectionPolicyRegistry::default(),
+            )
+            .indexer_threads(1)
+            .build()
+            .await
+            .expect("build selection service"),
         )
     }
 
@@ -1121,7 +774,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn recovery_uses_selection_http_port_from_endpoint_slice() {
+    async fn recovery_uses_configured_selection_http_port() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
@@ -1134,24 +787,16 @@ mod tests {
             )
             .await
         });
-        let mut slice = recovery_slice("127.0.0.1", Some(true), Some(true));
-        slice.ports.as_mut().unwrap()[1].port = Some(i32::from(port));
-        let ports = peer_ports([&slice].into_iter()).expect("resolve peer ports");
+        let slice = recovery_slice("127.0.0.1", Some(true), Some(true));
         let (store, _writer) = store_and_writer(vec![slice]);
         let (_changes_tx, changes_rx) = watch::channel(0u64);
         let service = recovery_service().await;
         let cancel = CancellationToken::new();
 
-        start_recovery(
-            service.clone(),
-            store,
-            ports.selection_http.unwrap(),
-            changes_rx,
-            cancel.clone(),
-        )
-        .await
-        .expect("recovery task joins")
-        .expect("recovery must use the EndpointSlice HTTP port");
+        start_recovery(service.clone(), store, port, changes_rx, cancel.clone())
+            .await
+            .expect("recovery task joins")
+            .expect("recovery must use the configured HTTP port");
 
         cancel.cancel();
         server.abort();
@@ -1274,8 +919,8 @@ mod tests {
                         &mut known,
                         &mut changes_rx,
                         &cancel,
-                        Duration::from_millis(10),
-                        Duration::from_millis(40),
+                        Duration::from_millis(100),
+                        Duration::from_millis(400),
                         move |_service, peers| {
                             let peers = peers.to_vec();
                             attempts.lock().unwrap().push(peers.clone());
@@ -1385,6 +1030,34 @@ mod tests {
             vec![vec![format!("http://192.0.2.10:{port}")]],
             "unrelated churn must not restart the attempt"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unchanged_churn_does_not_bypass_retry_backoff() {
+        let port = 9093;
+        let harness = ChurnHarness::start(&["192.0.2.10"], port, false).await;
+        tokio::time::timeout(Duration::from_secs(1), harness.first_started.notified())
+            .await
+            .expect("first recovery attempt must start");
+
+        harness.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), harness.first_dropped.notified())
+            .await
+            .expect("first recovery attempt must finish");
+
+        // A watch event with the same eligible set must leave the original
+        // 100 ms retry timer intact instead of triggering an immediate retry.
+        harness.changes_tx.send(1).unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(
+            harness.attempts.lock().unwrap().len(),
+            1,
+            "metadata-only churn must not bypass recovery backoff"
+        );
+
+        let attempts = harness.attempts.clone();
+        harness.finish().await;
+        assert_eq!(attempts.lock().unwrap().len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1595,27 +1268,21 @@ mod tests {
         assert!(recovery_peer_set(&store, "10.0.0.9", 9093).is_empty());
     }
 
-    #[test]
-    fn selection_http_port_is_optional() {
-        // A Service without `selection-http` (a deployment predating the dump
-        // endpoint) resolves with selection_http=None instead of failing.
-        let slice = slice_with_replica_port(Some(9092));
-        let ports = peer_ports([&slice].into_iter()).expect("resolve ports");
-        assert_eq!(ports.replica_sync, 9092);
-        assert_eq!(ports.selection_http, None);
-    }
-
     #[tokio::test]
     async fn missing_selection_http_still_registers_replica_peer() {
         use dynamo_kv_router::config::KvRouterConfig;
         use dynamo_kv_router::services::selection::SelectionServiceBuilder;
 
-        let service = SelectionServiceBuilder::new(KvRouterConfig::default())
-            .indexer_threads(1)
-            .replica_sync(free_tcp_port(), Vec::new())
-            .build()
-            .await
-            .expect("build replica-sync selection service");
+        let service = SelectionServiceBuilder::new(
+            KvRouterConfig::default(),
+            WorkerType::Aggregated,
+            WorkerSelectionPolicyRegistry::default(),
+        )
+        .indexer_threads(1)
+        .replica_sync(free_tcp_port(), Vec::new())
+        .build()
+        .await
+        .expect("build replica-sync selection service");
         let peer = "10.0.0.2";
         let sync_port = 9092;
         let store = store_from_slices(vec![slice_with(&[peer], false, "IPv4")]);
@@ -1682,12 +1349,16 @@ mod tests {
         // ZMQ connect, so no live sibling is needed — we assert only the peer set
         // that reconcile maintains via `list_replica_peers`.
         let service = Arc::new(
-            SelectionServiceBuilder::new(kv_router_config_from_dynamo_env())
-                .indexer_threads(1)
-                .replica_sync(free_tcp_port(), Vec::new())
-                .build()
-                .await
-                .expect("build replica-sync selection service"),
+            SelectionServiceBuilder::new(
+                kv_router_config_from_dynamo_env(),
+                WorkerType::Aggregated,
+                WorkerSelectionPolicyRegistry::default(),
+            )
+            .indexer_threads(1)
+            .replica_sync(free_tcp_port(), Vec::new())
+            .build()
+            .await
+            .expect("build replica-sync selection service"),
         );
 
         let self_ip = "10.0.0.1";

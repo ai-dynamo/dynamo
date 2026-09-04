@@ -17,14 +17,13 @@ For the user-facing walkthrough, start with
 
 This on-ramp is available for aggregated serving only at this time.
 
-The aggregated on-ramp uses the upstream `vllm/vllm-openai:v0.27.1` image. Replace it with the vLLM
+The aggregated on-ramp uses the upstream `vllm/vllm-openai:v0.28.0` image. Replace it with the vLLM
 image your platform standardizes on if you need another pinned or internally mirrored image.
 KV-aware selection is provided by the runtime-free
 [selection service](../../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/router/standalone-selection.md),
 which the EPP runs **in-process**: the EPP and the selection service are compiled into one binary,
 so there is no separate selector Deployment and no HTTP hop. The EPP can run single-replica, or
-**replicated** with cross-replica active-load sync and startup KV-index recovery between EPP pods
-(see
+**replicated** with cross-replica active-load sync and startup KV-index recovery between EPP pods. See
 [Replicated mode](../../../../../docs/fern/pages/kubernetes/kv-aware-routing/vanilla-vllm-onramp.mdx#epp-replication)).
 
 Whether the EPP uses the Dynamo runtime or not is controlled with the `DYN_EPP_MODE` environment
@@ -34,7 +33,7 @@ release containing standalone mode has not been published yet, build the EPP fro
 revision and push it to a registry that every cluster node can pull from:
 
 ```bash
-export EPP_IMAGE=registry.example.com/your-project/dynamo-rust-epp:standalone
+export EPP_IMAGE=registry.example.com/your-project/dynamo-epp:standalone
 
 make -C ../.. IMAGE_TAG="$EPP_IMAGE" image-push
 ```
@@ -67,9 +66,10 @@ flowchart LR
 - Operator-managed lifecycle for Workers, Services, `InferencePool`, and EPP resources.
 - Request migration, rejection, cancellation - overall admission control
 - Data parallelism (The standalone mode which targets DP=1.)
-- Active-reservation or load-state snapshots. Replica lifecycle events converge only after a replica
-  joins.
-- An atomic KV-index snapshot plus live-event handoff or event-cursor protocol.
+- Historical active-reservation reconstruction. Replica lifecycle events converge only after a
+  replica joins.
+- A durable KV-event cursor across peer recovery. Startup recovery currently buffers live events in
+  the ZMQ receive queue while applying the peer snapshot.
 - Per-tenant KV cache isolation with x-tenant-id / cache_salt. This requires per-engine support and as such is not supported in the Standalone mode.
 - Management of Transient disconnects. In the Dynamo mode the KV-cache updates the worker sent during the gap are recovered from the worker's **replay** socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is set (and the vLLM worker exposes one); otherwise the index refreshes from new traffic.
 - Dropped events / gaps management. The `SelectionCore` indexer does seq-watermark gap detection and replays missed events from the worker's replay socket when `DYN_EPP_KV_EVENT_REPLAY_PORT` is configured. Without a replay socket, gaps are dropped and the index re-warms from new traffic.

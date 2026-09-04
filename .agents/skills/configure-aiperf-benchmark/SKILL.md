@@ -15,6 +15,11 @@ metadata:
 
 # Configure AIPerf Benchmark
 
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 Create a reproducible benchmark that answers the current performance question without changing the deployed candidate.
 Freeze semantics only for runs used in the same direct comparison.
 

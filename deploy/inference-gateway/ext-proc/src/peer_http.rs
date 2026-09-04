@@ -9,12 +9,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use axum::{
-    Json, Router,
-    extract::State,
-    http::StatusCode,
+    Router,
+    extract::{Query, State},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
 };
+use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -24,6 +25,12 @@ use dynamo_kv_router::services::selection::SelectionService;
 struct AppState {
     service: Arc<SelectionService>,
     recovered: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DumpQuery {
+    /// Receiver-advertised body budget. Zero or absence means unlimited.
+    max_bytes: Option<u64>,
 }
 
 /// Bind the dump listener before returning so peer recovery cannot race server startup.
@@ -59,7 +66,7 @@ fn listener_addr(pod_ip: IpAddr, port: u16) -> SocketAddr {
     }
 }
 
-async fn dump(State(state): State<AppState>) -> Response {
+async fn dump(Query(query): Query<DumpQuery>, State(state): State<AppState>) -> Response {
     // Do not serve a snapshot until local recovery/bootstrap has finished: the
     // index is empty during recovery, and an early /dump could let a sibling
     // latch onto an empty index while a warm one exists elsewhere.
@@ -89,22 +96,56 @@ async fn dump(State(state): State<AppState>) -> Response {
             .into_response();
     }
 
-    (StatusCode::OK, Json(snapshot)).into_response()
+    let body = match serde_json::to_vec(&snapshot) {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(%error, "failed to serialize peer KV-index snapshot");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "peer KV-index snapshot serialization failed",
+            )
+                .into_response();
+        }
+    };
+    if query
+        .max_bytes
+        .is_some_and(|max_bytes| max_bytes > 0 && body.len() as u64 > max_bytes)
+    {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "peer KV-index snapshot exceeds requested max_bytes",
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_kv_router::WorkerType;
     use dynamo_kv_router::config::KvRouterConfig;
-    use dynamo_kv_router::services::selection::SelectionServiceBuilder;
+    use dynamo_kv_router::services::selection::{
+        SelectionServiceBuilder, WorkerSelectionPolicyRegistry,
+    };
 
     async fn service() -> Arc<SelectionService> {
         Arc::new(
-            SelectionServiceBuilder::new(KvRouterConfig::default())
-                .indexer_threads(1)
-                .build()
-                .await
-                .expect("build selection service"),
+            SelectionServiceBuilder::new(
+                KvRouterConfig::default(),
+                WorkerType::Aggregated,
+                WorkerSelectionPolicyRegistry::default(),
+            )
+            .indexer_threads(1)
+            .build()
+            .await
+            .expect("build selection service"),
         )
     }
 
@@ -197,6 +238,30 @@ mod tests {
             .await
             .expect("request dump");
         assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        cancel.cancel();
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dump_honors_receiver_body_budget() {
+        let service = service().await;
+        let cancel = CancellationToken::new();
+        let port = free_tcp_port();
+        spawn(
+            service.clone(),
+            port,
+            "127.0.0.1".parse().unwrap(),
+            cancel.clone(),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .await
+        .expect("spawn peer HTTP server");
+
+        let resp = reqwest::get(format!("http://127.0.0.1:{port}/dump?max_bytes=1"))
+            .await
+            .expect("request bounded dump");
+        assert_eq!(resp.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
 
         cancel.cancel();
         service.shutdown().await;

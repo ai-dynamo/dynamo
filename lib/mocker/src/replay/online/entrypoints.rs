@@ -180,7 +180,7 @@ pub(crate) fn simulate_agentic_trace_workload(
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     let engine_block_size = config.args.block_size;
-    let total_turns = trace.turns.len();
+    let total_turns = trace.node_count();
     let (report, _) = run_live_workload_runtime(
         config,
         trace.into_trace_driver_with_block_size(engine_block_size)?,
