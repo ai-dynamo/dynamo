@@ -1,175 +1,139 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# AIPerf closed-loop concurrency sweep for the A.X-K2 recipes.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 #
-# Reproduces the three synthetic workloads of the 32-GPU H200 study in
-# ../README.md#performance. Every request is 16,384 input tokens and 1,024
-# output tokens; the workloads differ only in how much of the input is a
-# shared prefix:
+# http://www.apache.org/licenses/LICENSE-2.0
 #
-#   w1  32 shared 10,240-token prefixes + 6,144 unique tokens per request
-#       (the "few-shot prompt" production shape; KV routing has to pick the
-#       worker that holds the matching prefix)
-#   w2  16,384 unique tokens per request (cold; no cache reuse)
-#   w3  1 shared 10,240-token prefix + 6,144 unique tokens (cache upper bound)
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 #
-# Deploy a recipe first, then:
+# AIPerf 0.12.0 benchmark for the A.X-K2 recipes.
+#
+# Deploy a recipe and populate the shared-model-cache PVC before creating this
+# Job. The default endpoint targets vllm/disagg-h200 and the default W1 workload
+# uses 32 shared 10,240-token prefixes, 6,144 unique input tokens, and 1,024
+# output tokens at concurrency 8. Edit the endpoint or workload arguments below
+# to benchmark another recipe or operating point.
+#
+# Create the Job in the deployment namespace:
 #   kubectl apply -f perf/perf.yaml -n ${NAMESPACE}
-# Edit ENDPOINT, WORKLOAD, and CONCURRENCIES in the env block below.
+#
+# Raw artifacts persist under
+# /shared-model-cache/perf/axk2/aiperf-0.12.0-w1-c8 on the PVC.
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: axk2-bench
+  labels:
+    app.kubernetes.io/name: axk2-bench
+    app.kubernetes.io/part-of: axk2
 spec:
-  backoffLimit: 1
-  activeDeadlineSeconds: 14400 # 4h hard cap on the Job (the default 5-cell sweep takes about an hour)
+  backoffLimit: 0
+  activeDeadlineSeconds: 2400
   completions: 1
   parallelism: 1
   template:
     metadata:
       labels:
-        app: axk2-bench
+        app.kubernetes.io/name: axk2-bench
+        app.kubernetes.io/part-of: axk2
     spec:
       restartPolicy: Never
       securityContext:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: perf
-          image: python:3.12-slim
+        - name: aiperf
+          image: nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0
           imagePullPolicy: IfNotPresent
           securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
             allowPrivilegeEscalation: false
-          workingDir: /workspace
+            capabilities:
+              drop:
+                - ALL
           env:
-            # --- Edit these to target the DGD and workload you want to benchmark ---
-            # <DGD name>-frontend:8000, e.g. axk2-vllm-agg-h200-frontend:8000
-            - name: ENDPOINT
-              value: axk2-vllm-disagg-h200-frontend:8000
-            # w1 | w2 | w3 (see the header comment)
-            - name: WORKLOAD
-              value: w1
-            # Each value runs as its own aiperf profile with its own artifact
-            # subdirectory. 256 saturates the decode KV cache of the 2P2D
-            # recipe on cold prompts; see ../README.md#known-issues.
-            - name: CONCURRENCIES
-              value: "8 16 32 64 128"
-            # --- The remainder is shared across all variants ---
-            - name: TARGET_MODEL
-              value: A.X-K2
-            # Tokenizer is read from the model cache (offline).
-            - name: TOKENIZER
-              value: skt/A.X-K2
             - name: HF_HOME
               value: /shared-model-cache
             - name: HF_HUB_OFFLINE
               value: "1"
-            - name: ARTIFACT_ROOT
-              value: /shared-model-cache/perf/axk2
-            - name: RANDOM_SEED
-              value: "42"
+            - name: AIPERF_HTTP_CONNECTION_LIMIT
+              value: "200"
+            - name: AIPERF_HTTP_SO_RCVTIMEO
+              value: "120"
+            - name: AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT
+              value: "600"
+            - name: AIPERF_DATASET_CONFIGURATION_TIMEOUT
+              value: "600"
             - name: PYTHONUNBUFFERED
               value: "1"
             - name: COLUMNS
               value: "200"
           command:
-            - /bin/bash
-            - -c
-            - |
-              set -euo pipefail
-              ulimit -n 600000 || echo "WARNING: could not raise the open-file limit; using $(ulimit -n)"
-              apt-get update && apt-get install -y --no-install-recommends curl jq && apt-get clean
-              pip install -q "aiperf==0.10.0" "transformers==4.57.3" "tokenizers==0.22.2"
-
-              case "${WORKLOAD}" in
-                w1) PREFIX_LEN=10240; NUM_PREFIXES=32; UNIQUE_ISL=6144 ;;
-                w2) PREFIX_LEN=0;     NUM_PREFIXES=0;  UNIQUE_ISL=16384 ;;
-                w3) PREFIX_LEN=10240; NUM_PREFIXES=1;  UNIQUE_ISL=6144 ;;
-                *) echo "ERROR: WORKLOAD must be w1, w2, or w3 (got '${WORKLOAD}')"; exit 1 ;;
-              esac
-              OSL=1024
-
-              echo "Waiting for model '${TARGET_MODEL}' at http://${ENDPOINT}/v1/models ..."
-              attempt=0
-              until curl -sf "http://${ENDPOINT}/v1/models" | jq -e --arg m "${TARGET_MODEL}" '.data[]? | select(.id == $m)' >/dev/null 2>&1; do
-                attempt=$((attempt + 1))
-                if [ "${attempt}" -ge 720 ]; then
-                  echo "ERROR: model '${TARGET_MODEL}' not ready after 1h. Aborting."
-                  exit 1
-                fi
-                echo "[$(date '+%H:%M:%S')] not ready (attempt ${attempt}/720), sleeping 5s"
-                sleep 5
-              done
-              curl -s "http://${ENDPOINT}/v1/models" | jq .
-
-              ROOT_DIR="${ARTIFACT_ROOT}/$(date +%Y%m%d-%H%M%S)_${WORKLOAD}_${ENDPOINT%%:*}"
-              mkdir -p "${ROOT_DIR}"
-              echo "=============================================="
-              echo "A.X-K2 closed-loop sweep (aiperf)"
-              echo "=============================================="
-              echo "Endpoint:      http://${ENDPOINT}"
-              echo "Model:         ${TARGET_MODEL}"
-              echo "Workload:      ${WORKLOAD} (prefix ${PREFIX_LEN} x ${NUM_PREFIXES} pool + ${UNIQUE_ISL} unique -> ${OSL} out)"
-              echo "Concurrencies: ${CONCURRENCIES}"
-              echo "Artifact root: ${ROOT_DIR}"
-              echo "=============================================="
-
-              PREFIX_FLAGS=""
-              if [ "${NUM_PREFIXES}" -gt 0 ]; then
-                PREFIX_FLAGS="--prefix-prompt-length ${PREFIX_LEN} --num-prefix-prompts ${NUM_PREFIXES}"
-              fi
-
-              for c in ${CONCURRENCIES}; do
-                # 12 requests per concurrency slot (minimum 48) keeps every cell
-                # in steady state for roughly 6-12 minutes at 16K/1K.
-                REQUESTS=$(( c * 12 < 48 ? 48 : c * 12 ))
-                RUN_DIR="${ROOT_DIR}/c${c}"
-                mkdir -p "${RUN_DIR}"
-                echo ""
-                echo "================================================================"
-                echo " concurrency=${c}   requests=${REQUESTS}   artifact=${RUN_DIR}"
-                echo "================================================================"
-                # 90-minute guard per cell: a decode KV-saturation stall otherwise
-                # holds the Job until activeDeadlineSeconds. A failed or timed-out
-                # cell is reported and the sweep continues with the next one.
-                # shellcheck disable=SC2086
-                if ! timeout 90m aiperf profile \
-                  --model "${TARGET_MODEL}" \
-                  --tokenizer "${TOKENIZER}" \
-                  --tokenizer-trust-remote-code \
-                  --endpoint-type chat \
-                  --endpoint /v1/chat/completions \
-                  --streaming \
-                  --url "http://${ENDPOINT}" \
-                  --synthetic-input-tokens-mean "${UNIQUE_ISL}" \
-                  --synthetic-input-tokens-stddev 0 \
-                  ${PREFIX_FLAGS} \
-                  --output-tokens-mean "${OSL}" \
-                  --output-tokens-stddev 0 \
-                  --extra-inputs "max_tokens:${OSL}" \
-                  --extra-inputs "min_tokens:${OSL}" \
-                  --extra-inputs "ignore_eos:true" \
-                  --concurrency "${c}" \
-                  --request-count "${REQUESTS}" \
-                  --warmup-request-count 32 \
-                  --num-dataset-entries "${REQUESTS}" \
-                  --random-seed "${RANDOM_SEED}" \
-                  --request-timeout-seconds 1800 \
-                  --ui simple \
-                  --artifact-dir "${RUN_DIR}"; then
-                  echo "WARNING: concurrency ${c} failed or timed out; continuing sweep"
-                else
-                  echo "Concurrency ${c} complete; artifacts in ${RUN_DIR}"
-                fi
-                # Let in-flight decode drain and KV usage settle between cells.
-                sleep 60
-              done
-
-              echo ""
-              echo "Sweep complete. Root: ${ROOT_DIR}"
-              echo "Total tok/s (input+output) = request_throughput x (${PREFIX_LEN} + ${UNIQUE_ISL} + ${OSL}); per-GPU = / GPUs in the DGD (32 for the shipped recipes)"
-              ls -la "${ROOT_DIR}"
+            - aiperf
+          args:
+            - profile
+            - --model
+            - A.X-K2
+            - --tokenizer
+            - skt/A.X-K2
+            - --tokenizer-trust-remote-code
+            - --endpoint-type
+            - chat
+            - --endpoint
+            - /v1/chat/completions
+            - --streaming
+            - --url
+            - http://axk2-vllm-disagg-h200-frontend:8000
+            # W1: 10,240 shared-prefix + 6,144 unique input tokens.
+            - --synthetic-input-tokens-mean
+            - "6144"
+            - --synthetic-input-tokens-stddev
+            - "0"
+            - --prefix-prompt-length
+            - "10240"
+            - --num-prefix-prompts
+            - "32"
+            - --output-tokens-mean
+            - "1024"
+            - --output-tokens-stddev
+            - "0"
+            - --extra-inputs
+            - max_tokens:1024
+            - --extra-inputs
+            - min_tokens:1024
+            - --extra-inputs
+            - ignore_eos:true
+            - --concurrency
+            - "8"
+            - --request-count
+            - "32"
+            - --warmup-request-count
+            - "32"
+            - --num-dataset-entries
+            - "32"
+            - --no-allow-dataset-wrap
+            - --use-server-token-count
+            - --no-server-metrics
+            - --workers-max
+            - "8"
+            - --random-seed
+            - "42"
+            - --request-timeout-seconds
+            - "1800"
+            - --ui
+            - simple
+            - --output-artifact-dir
+            - /shared-model-cache/perf/axk2/aiperf-0.12.0-w1-c8
           resources:
             requests:
               cpu: "8"

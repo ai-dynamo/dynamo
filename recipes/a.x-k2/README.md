@@ -89,17 +89,18 @@ disable it per request.
 
 ## Benchmark
 
-[`perf/perf.yaml`](perf/perf.yaml) runs an AIPerf closed-loop concurrency sweep at 16,384 input /
-1,024 output tokens. Set `ENDPOINT`, `WORKLOAD` (`w1` shared prefix, `w2` cold, `w3` single prefix),
-and `CONCURRENCIES` in its `env` block:
+[`perf/perf.yaml`](perf/perf.yaml) runs AIPerf 0.12.0 directly from the official container image.
+Its default W1 point uses concurrency 8, 32 shared 10,240-token prefixes, 6,144 unique input
+tokens, and 1,024 output tokens. Edit `--url` and the workload or concurrency arguments in the Job
+to target another recipe or operating point:
 
 ```bash
 kubectl apply -f perf/perf.yaml -n ${NAMESPACE}
 kubectl logs -f job/axk2-bench -n ${NAMESPACE}
 ```
 
-Artifacts land under `/shared-model-cache/perf/axk2/`. Keep cold-workload concurrency at or below
-128 on `disagg-h200` (see [Known issues](#known-issues)).
+Artifacts land under `/shared-model-cache/perf/axk2/aiperf-0.12.0-w1-c8`. Keep cold-workload
+concurrency at or below 128 on `disagg-h200` (see [Known issues](#known-issues)).
 
 ## Performance
 
