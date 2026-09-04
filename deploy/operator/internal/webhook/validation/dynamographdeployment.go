@@ -328,6 +328,15 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				workloadProvider:                  opts.workloadProvider,
 			},
 		)...)
+		for _, err := range dynamo.ValidateAutomaticFailoverCheckpointSource(
+			component,
+			spec.BackendFramework,
+		) {
+			allErrs = append(allErrs, field.Forbidden(
+				componentPath.Child("experimental", "checkpoint"),
+				err.Error(),
+			))
+		}
 	}
 
 	if spec.Restart != nil {

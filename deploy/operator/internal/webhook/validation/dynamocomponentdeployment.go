@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -57,6 +58,14 @@ func (v *DynamoComponentDeploymentValidator) validate(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 	runtimeVersionSource runtimeVersionValidationSource,
 ) (admission.Warnings, error) {
+	return v.validateInternal(ctx, dcd, runtimeVersionSource)
+}
+
+func (v *DynamoComponentDeploymentValidator) validateInternal(
+	ctx context.Context,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+) (admission.Warnings, error) {
 	validation := &dynamoComponentDeploymentValidation{
 		sharedValidation: sharedValidation{
 			ctx:                                ctx,
@@ -80,6 +89,15 @@ func (v *DynamoComponentDeploymentValidator) validate(
 // compares its state with the previous object.
 // ctx, oldDCD, and newDCD must not be nil. runtimeVersionSource identifies the request's source API.
 func (v *DynamoComponentDeploymentValidator) ValidateUpdate(
+	ctx context.Context,
+	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
+	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
+	runtimeVersionSource runtimeVersionValidationSource,
+) (admission.Warnings, error) {
+	return v.validateUpdateInternal(ctx, oldDCD, newDCD, runtimeVersionSource)
+}
+
+func (v *DynamoComponentDeploymentValidator) validateUpdateInternal(
 	ctx context.Context,
 	oldDCD *nvidiacomv1beta1.DynamoComponentDeployment,
 	newDCD *nvidiacomv1beta1.DynamoComponentDeployment,
@@ -162,7 +180,19 @@ func (v *dynamoComponentDeploymentValidation) validateWorkerClassCheckpointRefOw
 func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
 ) field.ErrorList {
-	return v.validateDynamoComponentDeploymentSpec(&dcd.Spec, field.NewPath("spec"))
+	fldPath := field.NewPath("spec")
+	allErrs := v.validateDynamoComponentDeploymentSpec(&dcd.Spec, fldPath)
+	for _, err := range dynamo.ValidateAutomaticFailoverCheckpointTarget(
+		&dcd.Spec.DynamoComponentDeploymentSharedSpec,
+		dcd.Spec.BackendFramework,
+		dynamo.IsDGDControlled(dcd),
+	) {
+		allErrs = append(allErrs, field.Forbidden(
+			fldPath.Child("experimental", "checkpoint"),
+			err.Error(),
+		))
+	}
+	return allErrs
 }
 
 // validateDynamoComponentDeploymentSpec validates spec. spec and fldPath must not be nil.

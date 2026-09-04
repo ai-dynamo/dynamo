@@ -32,8 +32,11 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/utils/ptr"
 )
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -727,6 +730,116 @@ func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	}
 }
 
+
+
+
+
+func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
+	component := validAutomaticFailoverComponent()
+
+	t.Run("accepts DGD source and generated DCD target", func(t *testing.T) {
+		require.Empty(t, ValidateAutomaticFailoverCheckpointSource(component, string(BackendFrameworkVLLM)))
+
+		target := component.DeepCopy()
+		target.Experimental.Checkpoint.CheckpointRef = ptr.To("checkpoint-worker")
+		require.Empty(t, ValidateAutomaticFailoverCheckpointTarget(target, string(BackendFrameworkVLLM), true))
+
+		twoShadows := component.DeepCopy()
+		twoShadows.Experimental.Failover.NumShadows = 2
+		require.Empty(t, ValidateAutomaticFailoverCheckpointSource(twoShadows, string(BackendFrameworkVLLM)))
+	})
+
+	t.Run("rejects standalone target and incompatible runtime profile", func(t *testing.T) {
+		target := component.DeepCopy()
+		target.Experimental.Checkpoint.CheckpointRef = ptr.To("checkpoint-worker")
+		target.PodTemplate.Spec.Containers[0].Args = []string{
+			"-m", vllmModuleName,
+			"--disaggregation-mode", "decode",
+			"--request-plane=nats",
+			"--tensor-parallel-size", "2",
+			"--pipeline-parallel-size=2",
+			"--data-parallel-size", "2",
+		}
+
+		violations := ValidateAutomaticFailoverCheckpointTarget(target, string(BackendFrameworkVLLM), false)
+		require.Len(t, violations, 1)
+		for _, message := range []string{
+			"only supported for an operator-generated DCD",
+			"disaggregation mode must be aggregated",
+			"request plane must be tcp",
+			"tensor parallel size must be 1",
+			"pipeline parallel size must be 1",
+			"data parallel size must be 1",
+		} {
+			assert.ErrorContains(t, violations[0], message)
+		}
+	})
+
+	t.Run("rejects a referenced DGD source", func(t *testing.T) {
+		source := component.DeepCopy()
+		source.Experimental.Checkpoint.CheckpointRef = ptr.To("foreign")
+		violations := ValidateAutomaticFailoverCheckpointSource(source, string(BackendFrameworkVLLM))
+		require.Len(t, violations, 1)
+		assert.ErrorContains(t, violations[0], "checkpointRef must be omitted")
+	})
+}
+
+func TestPrepareVLLMAutomaticFailoverSnapshotSource(t *testing.T) {
+	t.Run("shapes only the source load profile and listeners", func(t *testing.T) {
+		container := validAutomaticFailoverComponent().PodTemplate.Spec.Containers[0]
+		container.Env = []corev1.EnvVar{
+			{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "9100"},
+			{Name: "KEEP_ME", Value: "yes"},
+			{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
+		}
+
+		require.NoError(t, PrepareVLLMAutomaticFailoverSnapshotSource(&container))
+		env := envToMap(container.Env)
+		assert.NotContains(t, env, "DYN_FORWARDPASS_METRIC_PORT")
+		assert.Equal(t, "false", env["DYN_VLLM_GMS_SHADOW_MODE"])
+		assert.Equal(t, "agg", env["DYN_VLLM_DISAGGREGATION_MODE"])
+		assert.Equal(t, "tcp", env["DYN_REQUEST_PLANE"])
+		assert.Equal(t, "yes", env["KEEP_ME"])
+		assert.Equal(t, "gms", vllmFlagValue(t, container.Args, vllmLoadFormatFlag))
+	})
+
+	t.Run("leaves the source unchanged on an unsupported worker", func(t *testing.T) {
+		container := validAutomaticFailoverComponent().PodTemplate.Spec.Containers[0]
+		container.Args = append(container.Args, vllmWorkerClassFlag, "unsupported.Worker")
+		original := container.DeepCopy()
+
+		require.Error(t, PrepareVLLMAutomaticFailoverSnapshotSource(&container))
+		assert.Equal(t, *original, container)
+	})
+
+	t.Run("preserves the GMS V1 automatic load format", func(t *testing.T) {
+		container := validAutomaticFailoverComponent().PodTemplate.Spec.Containers[0]
+		container.Args = append(
+			container.Args,
+			vllmWorkerClassFlag, gmsV1VLLMWorkerClass,
+			vllmLoadFormatFlag, "auto",
+		)
+
+		require.NoError(t, PrepareVLLMAutomaticFailoverSnapshotSource(&container))
+		assert.Equal(t, "auto", vllmFlagValue(t, container.Args, vllmLoadFormatFlag))
+	})
+}
+
+func TestIsDGDControlled(t *testing.T) {
+	dgd := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "graph", UID: types.UID("graph-uid")},
+	}
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
+		}},
+	}
+	assert.True(t, IsDGDControlled(dcd))
+
+	dcd.OwnerReferences[0].UID = ""
+	assert.False(t, IsDGDControlled(dcd))
+}
+
 // --- IsIntraPodFailoverEnabled ---
 
 func TestIsIntraPodFailoverEnabled(t *testing.T) {
@@ -743,13 +856,39 @@ func TestIsIntraPodFailoverEnabled(t *testing.T) {
 	assert.False(t, IsIntraPodFailoverEnabled(nil))
 }
 
-func TestIntraPodFailoverEngineContainerNames(t *testing.T) {
-	assert.Equal(t, []string{"engine-0", "engine-1"}, IntraPodFailoverEngineContainerNames())
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+func validAutomaticFailoverComponent() *v1beta1.DynamoComponentDeploymentSharedSpec {
+	return &v1beta1.DynamoComponentDeploymentSharedSpec{
+		ComponentType: v1beta1.ComponentTypeWorker,
+		PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:    commonconsts.MainContainerName,
+				Command: []string{"python3"},
+				Args:    []string{"-m", vllmModuleName},
+				Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{
+					corev1.ResourceName("nvidia.com/gpu"): k8sresource.MustParse("1"),
+				}},
+			}},
+		}},
+		Experimental: &v1beta1.ExperimentalSpec{
+			Checkpoint:       &v1beta1.ComponentCheckpointConfig{Enabled: true},
+			GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
+			Failover:         &v1beta1.FailoverSpec{Mode: v1beta1.GMSModeIntraPod, NumShadows: 1},
+		},
+	}
+}
+
+func vllmFlagValue(t *testing.T, args []string, flag string) string {
+	t.Helper()
+	value, _, _, found, err := tokenizedVLLMFlag(args, flag)
+	require.NoError(t, err)
+	require.True(t, found)
+	return value
+}
 
 func hasToleration(podSpec *corev1.PodSpec, key string) bool {
 	for _, t := range podSpec.Tolerations {
