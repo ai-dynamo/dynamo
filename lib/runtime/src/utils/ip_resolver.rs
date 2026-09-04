@@ -5,9 +5,9 @@
 
 use anyhow::{Result, bail};
 use local_ip_address::{Error, list_afinet_netifas, local_ip, local_ipv6};
-use std::net::{IpAddr, Ipv4Addr};
+use std::{collections::HashMap, ffi::OsString, net::IpAddr};
 
-const FALLBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+const FALLBACK: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 
 /// IP address resolution interface used by networking components and tests.
 pub trait IpResolver {
@@ -45,60 +45,65 @@ pub fn tcp_rpc_host_from_env() -> String {
     std::env::var("DYN_TCP_RPC_HOST").unwrap_or_else(|_| local_ip_for_advertise())
 }
 
-/// Resolve an explicit advertised host as a dialable IPv4 address.
+/// Read and normalize a host override from the environment.
+pub(crate) fn host_override_from_env(name: &str) -> Result<Option<String>> {
+    host_override_from_lookup(name, |key| std::env::var_os(key))
+}
+
+fn host_override_from_lookup(
+    name: &str,
+    mut get_env: impl FnMut(&str) -> Option<OsString>,
+) -> Result<Option<String>> {
+    let Some(value) = get_env(name) else {
+        return Ok(None);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("{name} must contain valid Unicode"))?;
+    let value = value.trim();
+    Ok((!value.is_empty()).then(|| value.to_string()))
+}
+
+/// Resolve a configured host as an IP literal or exact network interface name.
 ///
-/// The input can be an IPv4 literal or a network interface name. Interfaces
-/// with multiple IPv4 addresses select the lowest address deterministically.
-pub(crate) fn resolve_advertised_ipv4<R: IpResolver>(
+/// Interface lookup preserves the existing TCP response-stream behavior: when
+/// an interface name occurs more than once, the last enumerated address wins.
+pub(crate) fn resolve_host_or_interface<R: IpResolver>(
     host_or_interface: &str,
     resolver: &R,
-) -> Result<Ipv4Addr> {
+) -> Result<IpAddr> {
+    let host_or_interface = host_or_interface.trim();
     if let Ok(ip) = host_or_interface.parse::<IpAddr>() {
-        return match ip {
-            IpAddr::V4(ip) if ip.is_unspecified() => {
-                bail!("unspecified IPv4 addresses cannot be advertised")
-            }
-            IpAddr::V4(ip) => Ok(ip),
-            IpAddr::V6(_) => bail!("IPv6 addresses are not supported for advertised hosts"),
-        };
-    }
-
-    let interfaces = resolver.list_afinet_netifas()?;
-    let interface_found = interfaces.iter().any(|(name, _)| name == host_or_interface);
-    let mut ipv4_addresses: Vec<_> = interfaces
-        .into_iter()
-        .filter_map(|(name, ip)| match ip {
-            IpAddr::V4(ip) if name == host_or_interface && !ip.is_unspecified() => Some(ip),
-            _ => None,
-        })
-        .collect();
-    ipv4_addresses.sort_unstable();
-
-    ipv4_addresses.into_iter().next().ok_or_else(|| {
-        if interface_found {
-            anyhow::anyhow!("Interface has no usable IPv4 address: {host_or_interface}")
-        } else {
-            anyhow::anyhow!("Interface not found: {host_or_interface}")
+        if ip.is_unspecified() {
+            bail!("unspecified IP addresses cannot be advertised");
         }
-    })
-}
-
-/// Resolve the IPv4 address used by IPv4-only advertised transports.
-pub(crate) fn local_ipv4_for_advertise<R: IpResolver>(resolver: &R) -> Ipv4Addr {
-    match resolver.local_ip() {
-        Ok(IpAddr::V4(ip)) if !ip.is_unspecified() => ip,
-        _ => Ipv4Addr::LOCALHOST,
+        return Ok(ip);
     }
+
+    let interfaces: HashMap<String, IpAddr> = resolver.list_afinet_netifas()?.into_iter().collect();
+    let ip = interfaces.get(host_or_interface).copied().ok_or_else(|| {
+        anyhow::anyhow!(
+            "'{host_or_interface}' is not a valid IP address and no network interface with that name was found"
+        )
+    })?;
+    if ip.is_unspecified() {
+        bail!("unspecified IP addresses cannot be advertised");
+    }
+    Ok(ip)
 }
 
-fn resolve<R: IpResolver>(resolver: R) -> String {
-    let ip = resolver
+pub(crate) fn resolve_local_host<R: IpResolver>(resolver: &R) -> IpAddr {
+    resolver
         .local_ip()
         .or_else(|err| match err {
             Error::LocalIpAddressNotFound => resolver.local_ipv6(),
             _ => Err(err),
         })
-        .unwrap_or(FALLBACK);
+        .unwrap_or(FALLBACK)
+}
+
+fn resolve<R: IpResolver>(resolver: R) -> String {
+    let ip = resolve_local_host(&resolver);
 
     match ip {
         IpAddr::V6(_) => format!("[{ip}]"),
@@ -167,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_ipv4_literal_is_used_directly() {
+    fn explicit_ip_literals_are_used_directly_and_trimmed() {
         let resolver = MockIpResolver {
             v4: Err(Error::LocalIpAddressNotFound),
             v6: Err(Error::LocalIpAddressNotFound),
@@ -175,86 +180,111 @@ mod tests {
         };
 
         assert_eq!(
-            resolve_advertised_ipv4("172.16.0.87", &resolver).unwrap(),
-            Ipv4Addr::new(172, 16, 0, 87)
+            resolve_host_or_interface(" 172.16.0.87 ", &resolver).unwrap(),
+            "172.16.0.87".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            resolve_host_or_interface("2001:db8::1", &resolver).unwrap(),
+            "2001:db8::1".parse::<IpAddr>().unwrap()
         );
     }
 
     #[test]
-    fn explicit_host_rejects_ipv6_and_unspecified_addresses() {
+    fn explicit_host_rejects_unspecified_addresses() {
         let resolver = MockIpResolver {
             v4: Err(Error::LocalIpAddressNotFound),
             v6: Err(Error::LocalIpAddressNotFound),
             interfaces: Vec::new(),
         };
 
-        assert_eq!(
-            resolve_advertised_ipv4("2001:db8::1", &resolver)
-                .unwrap_err()
-                .to_string(),
-            "IPv6 addresses are not supported for advertised hosts"
-        );
-        assert_eq!(
-            resolve_advertised_ipv4("0.0.0.0", &resolver)
-                .unwrap_err()
-                .to_string(),
-            "unspecified IPv4 addresses cannot be advertised"
-        );
+        for host in ["0.0.0.0", "::"] {
+            assert_eq!(
+                resolve_host_or_interface(host, &resolver)
+                    .unwrap_err()
+                    .to_string(),
+                "unspecified IP addresses cannot be advertised"
+            );
+        }
     }
 
     #[test]
-    fn interface_selects_ipv4_deterministically() {
+    fn exact_interface_name_supports_ipv4_and_ipv6() {
         let resolver = MockIpResolver {
             v4: Err(Error::LocalIpAddressNotFound),
             v6: Err(Error::LocalIpAddressNotFound),
             interfaces: vec![
-                ("ib0".to_string(), "fe80::1".parse().unwrap()),
-                ("ib0".to_string(), "172.16.96.87".parse().unwrap()),
-                ("eth0".to_string(), "10.52.1.2".parse().unwrap()),
-                ("ib0".to_string(), "0.0.0.0".parse().unwrap()),
                 ("ib0".to_string(), "172.16.0.87".parse().unwrap()),
+                ("eth0".to_string(), "2001:db8::20".parse().unwrap()),
             ],
         };
 
         assert_eq!(
-            resolve_advertised_ipv4("ib0", &resolver).unwrap(),
-            Ipv4Addr::new(172, 16, 0, 87)
+            resolve_host_or_interface(" ib0 ", &resolver).unwrap(),
+            "172.16.0.87".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            resolve_host_or_interface("eth0", &resolver).unwrap(),
+            "2001:db8::20".parse::<IpAddr>().unwrap()
         );
     }
 
     #[test]
-    fn interface_requires_usable_ipv4_address() {
+    fn interface_lookup_preserves_existing_last_address_behavior() {
         let resolver = MockIpResolver {
             v4: Err(Error::LocalIpAddressNotFound),
             v6: Err(Error::LocalIpAddressNotFound),
             interfaces: vec![
-                ("ib0".to_string(), "fe80::1".parse().unwrap()),
-                ("ib0".to_string(), "0.0.0.0".parse().unwrap()),
+                ("ib0".to_string(), "172.16.0.10".parse().unwrap()),
+                ("ib0".to_string(), "172.16.0.20".parse().unwrap()),
             ],
         };
 
         assert_eq!(
-            resolve_advertised_ipv4("ib0", &resolver)
-                .unwrap_err()
-                .to_string(),
-            "Interface has no usable IPv4 address: ib0"
-        );
-        assert_eq!(
-            resolve_advertised_ipv4("missing0", &resolver)
-                .unwrap_err()
-                .to_string(),
-            "Interface not found: missing0"
+            resolve_host_or_interface("ib0", &resolver).unwrap(),
+            "172.16.0.20".parse::<IpAddr>().unwrap()
         );
     }
 
     #[test]
-    fn ipv4_only_advertise_falls_back_from_ipv6() {
+    fn missing_interface_reports_the_accepted_input_forms() {
         let resolver = MockIpResolver {
-            v4: Ok(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
-            v6: Ok(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)),
+            v4: Err(Error::LocalIpAddressNotFound),
+            v6: Err(Error::LocalIpAddressNotFound),
             interfaces: Vec::new(),
         };
 
-        assert_eq!(local_ipv4_for_advertise(&resolver), Ipv4Addr::LOCALHOST);
+        assert_eq!(
+            resolve_host_or_interface("missing0", &resolver)
+                .unwrap_err()
+                .to_string(),
+            "'missing0' is not a valid IP address and no network interface with that name was found"
+        );
+    }
+
+    #[test]
+    fn host_override_is_trimmed_and_empty_is_unset() {
+        assert_eq!(
+            host_override_from_lookup("TEST_HOST", |_| Some(OsString::from(" ib0 "))).unwrap(),
+            Some("ib0".to_string())
+        );
+        assert_eq!(
+            host_override_from_lookup("TEST_HOST", |_| Some(OsString::from(" \t"))).unwrap(),
+            None
+        );
+        assert_eq!(
+            host_override_from_lookup("TEST_HOST", |_| None).unwrap(),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_host_override_is_rejected() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let error =
+            host_override_from_lookup("TEST_HOST", |_| Some(OsString::from_vec(vec![0xff])))
+                .unwrap_err();
+        assert_eq!(error.to_string(), "TEST_HOST must contain valid Unicode");
     }
 }

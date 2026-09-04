@@ -401,9 +401,10 @@ impl DistributedRuntime {
                     })?,
                     Err(_) => 0,
                 };
-                let interface = std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST)
-                    .ok()
-                    .filter(|h| !h.is_empty());
+                let interface = crate::utils::ip_resolver::host_override_from_env(
+                    tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+                )
+                .map_err(|error| PipelineError::Generic(error.to_string()))?;
 
                 let host_suffix = interface
                     .as_ref()

@@ -132,9 +132,10 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected local address">
-  IPv4 address or network interface name used to bind and advertise the TCP response stream server.
-  An interface name resolves to its lowest usable IPv4 address. Dynamo rejects explicit IPv6 and
-  unspecified addresses such as `0.0.0.0`.
+  IPv4 or IPv6 address, or exact network interface name, used to bind and advertise the TCP response
+  stream server. If an interface name occurs more than once in the operating system's interface
+  list, Dynamo uses the last address. Dynamo trims whitespace and treats an empty value as unset.
+  Unspecified addresses such as `0.0.0.0` and `::` are invalid.
 </ParamField>
 
 <ParamField path="DYN_TCP_RESPONSE_STREAM_PORT" type="integer" default="0">
@@ -151,10 +152,15 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   Environment variable: `DYN_EVENT_PLANE`
 </ParamField>
 
-<ParamField path="DYN_EVENT_PLANE_HOST" type="string" default="auto-detected local IPv4 address">
-  IPv4 address or network interface name advertised by direct ZMQ event publishers. An interface
-  name resolves to its lowest usable IPv4 address. Dynamo rejects IPv6 and unspecified addresses
-  such as `0.0.0.0`. This variable does not affect NATS or ZMQ broker mode.
+<ParamField path="DYN_EVENT_PLANE_HOST" type="string" default="auto-detected local address">
+  IPv4 or IPv6 address, or exact network interface name, advertised by direct ZMQ event publishers.
+  If an interface name occurs more than once in the operating system's interface list, Dynamo uses
+  the last address. Dynamo trims whitespace and treats an empty value as unset. Unspecified addresses
+  such as `0.0.0.0` and `::` are invalid.
+
+  This variable changes the discovery address, not the listener address. Direct ZMQ continues to bind
+  an IPv4 wildcard, so an IPv6 value does not enable IPv6 listening. This variable does not affect
+  NATS or ZMQ broker mode.
 </ParamField>
 
 <ParamField path="--connector" type="string" default="null">

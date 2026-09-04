@@ -47,7 +47,7 @@ use crate::pipeline::{
         tcp::StreamType,
     },
 };
-use crate::utils::ip_resolver::resolve_advertised_ipv4;
+use crate::utils::ip_resolver::resolve_host_or_interface;
 use anyhow::{Context, Result, anyhow as error};
 
 pub use crate::utils::ip_resolver::{DefaultIpResolver, IpResolver};
@@ -170,10 +170,11 @@ impl TcpStreamServer {
         resolver: R,
     ) -> Result<Arc<Self>, PipelineError> {
         let local_ip = match options.interface.as_deref() {
-            Some(host) => IpAddr::V4(
-                resolve_advertised_ipv4(host, &resolver)
-                    .map_err(|error| PipelineError::Generic(error.to_string()))?,
-            ),
+            Some(host) => resolve_host_or_interface(host, &resolver).map_err(|error| {
+                PipelineError::Generic(format!(
+                    "Failed to resolve configured TCP host '{host}': {error}"
+                ))
+            })?,
             None => {
                 let resolved_ip = resolver.local_ip().or_else(|err| match err {
                     Error::LocalIpAddressNotFound => resolver.local_ipv6(),
@@ -1570,6 +1571,44 @@ mod tests {
 
         // The server should work with the fallback IP
         assert!(socket_addr.port() > 0, "Server should have a valid port");
+    }
+
+    #[tokio::test]
+    async fn configured_ip_literals_bind_and_format_addresses() {
+        for (host, expected_ip) in [
+            ("127.0.0.1", "127.0.0.1".parse::<IpAddr>().unwrap()),
+            ("::1", "::1".parse::<IpAddr>().unwrap()),
+        ] {
+            let server = TcpStreamServer::new_with_resolver(
+                ServerOptions {
+                    port: 0,
+                    interface: Some(host.to_string()),
+                },
+                FailingIpResolver,
+            )
+            .await
+            .unwrap();
+            let context = Context::new(());
+            let pending = server
+                .register(
+                    StreamOptions::builder()
+                        .context(context.context())
+                        .enable_request_stream(false)
+                        .enable_response_stream(true)
+                        .build()
+                        .unwrap(),
+                )
+                .await;
+            let connection_info = pending.recv_stream.unwrap().connection_info;
+            let tcp_info: TcpStreamConnectionInfo = connection_info.try_into().unwrap();
+            let address = tcp_info.address.parse::<SocketAddr>().unwrap();
+
+            assert_eq!(address.ip(), expected_ip);
+            assert_ne!(address.port(), 0);
+            if expected_ip.is_ipv6() {
+                assert!(tcp_info.address.starts_with('['));
+            }
+        }
     }
 
     /// Create a test server using the failing IP resolver (falls back to loopback).
