@@ -17,7 +17,7 @@ use dynamo_runtime::{
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::{Codec, EventScope},
+    transports::event_plane::{Codec, EventScope, ValidatedZmqSource, ValidatedZmqSourceError},
 };
 use futures::StreamExt;
 use tokio::{
@@ -36,8 +36,8 @@ use super::{
 };
 use crate::{
     direct_zmq_sub_pool::{
-        DirectZmqSubItem, DirectZmqSubPool, ENDPOINTS_PER_SUB_ENV, KV_ZMQ_RCVHWM,
-        endpoints_per_sub_from_env,
+        DirectZmqSubConnection, DirectZmqSubItem, DirectZmqSubPool, ENDPOINTS_PER_SUB_ENV,
+        KV_ZMQ_RCVHWM, endpoints_per_sub_from_env,
     },
     discovery::{KvSourceId, KvSourceMembershipView, KvSourceMembershipWatch},
     kv_router::metrics::{KvZmqIngressMetrics, RouterWorkerStatusMetrics},
@@ -58,11 +58,13 @@ enum SourceSignal {
     Ready {
         publisher_id: u64,
         task_generation: u64,
+        group_id: Option<u64>,
         activate: oneshot::Sender<()>,
     },
     Disconnected {
         publisher_id: u64,
         task_generation: u64,
+        group_id: Option<u64>,
     },
 }
 
@@ -72,6 +74,7 @@ struct SourceTask {
     cancel: CancellationToken,
     handle: JoinHandle<()>,
     state: SourceState,
+    group_id: Option<u64>,
 }
 
 enum SourceState {
@@ -318,13 +321,14 @@ async fn consume_scope(
                     break;
                 };
                 match signal {
-                    SourceSignal::Ready { publisher_id, task_generation, activate } => {
+                    SourceSignal::Ready { publisher_id, task_generation, group_id, activate } => {
                         let Some(source) = sources.get_mut(&publisher_id) else {
                             continue;
                         };
                         if source.task_generation != task_generation {
                             continue;
                         }
+                        source.group_id = group_id;
                         transition_source_state(
                             source,
                             SourceState::Preconnected { activate },
@@ -343,16 +347,27 @@ async fn consume_scope(
                             &mut next_task_generation,
                         ).await;
                     }
-                    SourceSignal::Disconnected { publisher_id, task_generation } => {
-                        let Some(source) = sources.get_mut(&publisher_id) else {
-                            continue;
-                        };
-                        if source.task_generation != task_generation {
+                    SourceSignal::Disconnected { publisher_id, task_generation, group_id } => {
+                        let affected = affected_source_ids(
+                            &sources,
+                            publisher_id,
+                            task_generation,
+                            group_id,
+                        );
+                        if affected.is_empty() {
                             continue;
                         }
-                        transition_source_state(source, SourceState::Fenced, ingress_metrics);
-                        ingress_metrics.increment_lifecycle("reconnect");
-                        client.fence_transport(publisher_id).await;
+                        for publisher_id in &affected {
+                            let source = sources
+                                .get_mut(publisher_id)
+                                .expect("affected source must exist");
+                            source.group_id = None;
+                            transition_source_state(source, SourceState::Fenced, ingress_metrics);
+                            ingress_metrics.increment_lifecycle("reconnect");
+                        }
+                        for publisher_id in affected {
+                            client.fence_transport(publisher_id).await;
+                        }
                         let view = membership_watch.borrow().clone();
                         reconcile_sources(
                             client,
@@ -484,6 +499,29 @@ async fn consume_scope(
         .sync_membership_with_ready_sources(&HashSet::new())
         .await;
     exit
+}
+
+fn affected_source_ids(
+    sources: &HashMap<u64, SourceTask>,
+    publisher_id: u64,
+    task_generation: u64,
+    group_id: Option<u64>,
+) -> Vec<u64> {
+    let Some(source) = sources.get(&publisher_id) else {
+        return Vec::new();
+    };
+    if source.task_generation != task_generation || source.group_id != group_id {
+        return Vec::new();
+    }
+    match group_id {
+        Some(group_id) => sources
+            .iter()
+            .filter_map(|(publisher_id, source)| {
+                (source.group_id == Some(group_id)).then_some(*publisher_id)
+            })
+            .collect(),
+        None => vec![publisher_id],
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -674,6 +712,7 @@ fn spawn_source(
         cancel,
         handle,
         state: SourceState::Connecting,
+        group_id: None,
     }
 }
 
@@ -690,20 +729,21 @@ async fn run_source(
 ) {
     let mut retry_delay = INITIAL_BACKOFF;
     loop {
-        let registration = tokio::select! {
+        let connection = tokio::select! {
             biased;
             _ = cancel.cancelled() => return,
-            registration = group_pool.register(publisher_id, &endpoint, task_generation) => registration,
+            connection = group_pool.connect(publisher_id, &endpoint, task_generation) => connection,
         };
-        let mut registration = match registration {
-            Ok(registration) => registration,
+        let mut connection = match connection {
+            Ok(connection) => connection,
             Err(error) => {
-                tracing::warn!(%error, publisher_id, %endpoint, "Failed to register direct-ZMQ KV source with a socket group");
+                tracing::warn!(%error, publisher_id, %endpoint, "Failed to connect direct-ZMQ KV source");
                 if !send_source_signal(
                     &signal_tx,
                     SourceSignal::Disconnected {
                         publisher_id,
                         task_generation,
+                        group_id: None,
                     },
                     &cancel,
                 )
@@ -719,10 +759,12 @@ async fn run_source(
             }
         };
         if cancel.is_cancelled() {
-            registration.close().await;
+            connection.close().await;
             return;
         }
         retry_delay = INITIAL_BACKOFF;
+        let group_id = connection.group_id();
+        let disconnected = connection.disconnected();
 
         let (activate, activation) = oneshot::channel();
         if !send_source_signal(
@@ -730,6 +772,7 @@ async fn run_source(
             SourceSignal::Ready {
                 publisher_id,
                 task_generation,
+                group_id,
                 activate,
             },
             &cancel,
@@ -754,10 +797,10 @@ async fn run_source(
                     ActivationOutcome::Cancelled
                 }
             },
-            _ = registration.disconnected.cancelled() => ActivationOutcome::Disconnected,
+            _ = wait_for_disconnect(disconnected.clone()) => ActivationOutcome::Disconnected,
         };
         if !matches!(activation_outcome, ActivationOutcome::Activated) {
-            registration.close().await;
+            connection.close().await;
             if matches!(activation_outcome, ActivationOutcome::Cancelled) {
                 return;
             }
@@ -766,6 +809,7 @@ async fn run_source(
                 SourceSignal::Disconnected {
                     publisher_id,
                     task_generation,
+                    group_id,
                 },
                 &cancel,
             )
@@ -783,10 +827,10 @@ async fn run_source(
         let cancelled = tokio::select! {
             biased;
             _ = cancel.cancelled() => true,
-            _ = registration.disconnected.cancelled() => false,
-            _ = consume_connection(publisher_id, &mut registration.receiver, &client, &metrics) => false,
+            _ = wait_for_disconnect(disconnected) => false,
+            _ = consume_connection(publisher_id, &mut connection, &client, &metrics) => false,
         };
-        registration.close().await;
+        connection.close().await;
         if cancelled {
             return;
         }
@@ -795,6 +839,7 @@ async fn run_source(
             SourceSignal::Disconnected {
                 publisher_id,
                 task_generation,
+                group_id,
             },
             &cancel,
         )
@@ -806,6 +851,13 @@ async fn run_source(
             return;
         }
         retry_delay = (retry_delay * 2).min(MAX_BACKOFF);
+    }
+}
+
+async fn wait_for_disconnect(disconnected: Option<CancellationToken>) {
+    match disconnected {
+        Some(disconnected) => disconnected.cancelled().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -823,6 +875,23 @@ async fn send_source_signal(
 
 async fn consume_connection(
     publisher_id: u64,
+    connection: &mut DirectZmqSubConnection,
+    client: &Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
+    metrics: &KvZmqIngressMetrics,
+) {
+    match connection {
+        DirectZmqSubConnection::Dedicated(source) => {
+            consume_dedicated_connection(publisher_id, source, client, metrics).await
+        }
+        DirectZmqSubConnection::Grouped(registration) => {
+            consume_grouped_connection(publisher_id, &mut registration.receiver, client, metrics)
+                .await
+        }
+    }
+}
+
+async fn consume_grouped_connection(
+    publisher_id: u64,
     receiver: &mut mpsc::Receiver<DirectZmqSubItem>,
     client: &Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
     metrics: &KvZmqIngressMetrics,
@@ -836,6 +905,47 @@ async fn consume_connection(
                 continue;
             }
             DirectZmqSubItem::IdentityMismatch => {
+                metrics.increment_lifecycle("identity_mismatch");
+                continue;
+            }
+        };
+        let events = match codec.decode_payload::<Vec<RouterEvent>>(&envelope.payload) {
+            Ok(events) => events,
+            Err(error) => {
+                tracing::warn!(%error, publisher_id, "Failed to decode direct-ZMQ KV payload");
+                metrics.increment_lifecycle("payload_decode_error");
+                continue;
+            }
+        };
+        client.handle_live_batch(publisher_id, events).await;
+        metrics.increment_batch();
+    }
+}
+
+async fn consume_dedicated_connection(
+    publisher_id: u64,
+    source: &mut ValidatedZmqSource,
+    client: &Arc<WorkerQueryClient<IndexerRecoveryTarget>>,
+    metrics: &KvZmqIngressMetrics,
+) {
+    let codec = Codec::default();
+    loop {
+        let Some(result) = source.next().await else {
+            return;
+        };
+        let envelope = match result {
+            Ok(envelope) => envelope,
+            Err(ValidatedZmqSourceError::Receive(error)) => {
+                tracing::warn!(%error, publisher_id, "Direct-ZMQ KV source stream failed");
+                return;
+            }
+            Err(ValidatedZmqSourceError::EnvelopeDecode(error)) => {
+                tracing::warn!(%error, publisher_id, "Failed to decode direct-ZMQ KV envelope");
+                metrics.increment_lifecycle("envelope_decode_error");
+                continue;
+            }
+            Err(error @ ValidatedZmqSourceError::IdentityMismatch { .. }) => {
+                tracing::warn!(%error, publisher_id, "Dropping direct-ZMQ KV envelope with inconsistent attribution");
                 metrics.increment_lifecycle("identity_mismatch");
                 continue;
             }
@@ -924,6 +1034,39 @@ async fn sleep_or_cancel(delay: Duration, cancellation_token: &CancellationToken
 mod tests {
     use super::*;
 
+    fn test_source(task_generation: u64, group_id: Option<u64>) -> SourceTask {
+        SourceTask {
+            endpoint: "tcp://127.0.0.1:1".to_string(),
+            task_generation,
+            cancel: CancellationToken::new(),
+            handle: tokio::spawn(std::future::pending()),
+            state: SourceState::Connecting,
+            group_id,
+        }
+    }
+
+    #[tokio::test]
+    async fn grouped_disconnect_selects_its_failure_domain_once() {
+        let mut sources = HashMap::from([
+            (1, test_source(10, Some(7))),
+            (2, test_source(20, Some(7))),
+            (3, test_source(30, Some(8))),
+        ]);
+
+        let affected = affected_source_ids(&sources, 1, 10, Some(7))
+            .into_iter()
+            .collect::<HashSet<_>>();
+        assert_eq!(affected, HashSet::from([1, 2]));
+        for publisher_id in affected {
+            sources.get_mut(&publisher_id).unwrap().group_id = None;
+        }
+        assert!(affected_source_ids(&sources, 2, 20, Some(7)).is_empty());
+
+        for source in sources.into_values() {
+            source.handle.abort();
+        }
+    }
+
     #[tokio::test]
     async fn full_source_status_channel_does_not_delay_shutdown() {
         let (signal_tx, _signal_rx) = mpsc::channel(1);
@@ -931,6 +1074,7 @@ mod tests {
             .send(SourceSignal::Disconnected {
                 publisher_id: 1,
                 task_generation: 1,
+                group_id: None,
             })
             .await
             .unwrap();
@@ -944,6 +1088,7 @@ mod tests {
                 SourceSignal::Disconnected {
                     publisher_id: 2,
                     task_generation: 1,
+                    group_id: None,
                 },
                 &cancel,
             ),

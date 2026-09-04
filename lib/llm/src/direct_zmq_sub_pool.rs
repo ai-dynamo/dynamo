@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::Result;
 use dynamo_runtime::transports::event_plane::{
-    Codec, DynamicZmqSubSocket, ValidatedEnvelope, ZmqWireMessage,
+    Codec, DynamicZmqSubSocket, ValidatedEnvelope, ValidatedZmqSource, ZmqWireMessage,
 };
 use parking_lot::Mutex;
 use tokio::{
@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 const GROUP_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) const ENDPOINTS_PER_SUB_ENV: &str = "DYN_ROUTER_ZMQ_ENDPOINTS_PER_SUB";
-pub(crate) const DEFAULT_ENDPOINTS_PER_SUB: usize = 64;
+pub(crate) const DEFAULT_ENDPOINTS_PER_SUB: usize = 1;
 pub(crate) const KV_ZMQ_RCVHWM: i32 = 100_000;
 
 pub(crate) fn endpoints_per_sub_from_env() -> Result<usize> {
@@ -124,6 +124,11 @@ pub(crate) struct DirectZmqSubRegistration {
     armed: bool,
 }
 
+pub(crate) enum DirectZmqSubConnection {
+    Dedicated(ValidatedZmqSource),
+    Grouped(DirectZmqSubRegistration),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DispatchOutcome {
     Delivered,
@@ -147,6 +152,28 @@ impl DirectZmqSubRegistration {
     pub(crate) async fn close(mut self) {
         if let Some(group) = self.release() {
             stop_group(group).await;
+        }
+    }
+}
+
+impl DirectZmqSubConnection {
+    pub(crate) fn group_id(&self) -> Option<u64> {
+        match self {
+            Self::Dedicated(_) => None,
+            Self::Grouped(registration) => Some(registration.group_id),
+        }
+    }
+
+    pub(crate) fn disconnected(&self) -> Option<CancellationToken> {
+        match self {
+            Self::Dedicated(_) => None,
+            Self::Grouped(registration) => Some(registration.disconnected.clone()),
+        }
+    }
+
+    pub(crate) async fn close(self) {
+        if let Self::Grouped(registration) = self {
+            registration.close().await;
         }
     }
 }
@@ -181,7 +208,33 @@ impl DirectZmqSubPool {
         })
     }
 
-    pub(crate) async fn register(
+    pub(crate) async fn connect(
+        &self,
+        publisher_id: u64,
+        endpoint: &str,
+        generation: u64,
+    ) -> Result<DirectZmqSubConnection> {
+        if self.endpoints_per_sub == 1 {
+            anyhow::ensure!(
+                !self.inner.lock().closed,
+                "direct-ZMQ socket pool is closed"
+            );
+            let source =
+                ValidatedZmqSource::connect(endpoint, &self.topic, publisher_id, self.rcvhwm)
+                    .await?;
+            anyhow::ensure!(
+                !self.inner.lock().closed,
+                "direct-ZMQ socket pool is closed"
+            );
+            return Ok(DirectZmqSubConnection::Dedicated(source));
+        }
+
+        self.register_grouped(publisher_id, endpoint, generation)
+            .await
+            .map(DirectZmqSubConnection::Grouped)
+    }
+
+    async fn register_grouped(
         &self,
         publisher_id: u64,
         endpoint: &str,
@@ -641,7 +694,7 @@ mod tests {
         publisher_id: u64,
         generation: u64,
     ) -> DirectZmqSubRegistration {
-        pool.register(publisher_id, &endpoint(publisher_id), generation)
+        pool.register_grouped(publisher_id, &endpoint(publisher_id), generation)
             .await
             .unwrap()
     }
@@ -730,11 +783,8 @@ mod tests {
 
     #[test]
     fn parses_endpoints_per_sub_configuration() {
-        for (value, expected) in [
-            (None, DEFAULT_ENDPOINTS_PER_SUB),
-            (Some("1"), 1),
-            (Some("128"), 128),
-        ] {
+        assert_eq!(DEFAULT_ENDPOINTS_PER_SUB, 1);
+        for (value, expected) in [(None, 1), (Some("1"), 1), (Some("128"), 128)] {
             assert_eq!(
                 endpoints_per_sub_from_lookup(config_lookup(value)).unwrap(),
                 expected
@@ -743,6 +793,16 @@ mod tests {
         for invalid in ["", "0", "-1", "not-a-number"] {
             assert!(endpoints_per_sub_from_lookup(config_lookup(Some(invalid))).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn one_endpoint_uses_dedicated_source_without_a_group() {
+        let pool = pool("kv-events", 1, 128);
+        let connection = pool.connect(1, "tcp://127.0.0.1:31001", 1).await.unwrap();
+
+        assert!(matches!(connection, DirectZmqSubConnection::Dedicated(_)));
+        assert_eq!(pool.group_count(), 0);
+        connection.close().await;
     }
 
     #[tokio::test]
@@ -874,7 +934,11 @@ mod tests {
         assert_eq!(blocked.await.unwrap(), DispatchOutcome::GroupCancelled);
         assert!(disconnected.is_cancelled());
         assert_eq!(pool.group_count(), 0);
-        assert!(pool.register(2, "tcp://127.0.0.1:31002", 1).await.is_err());
+        assert!(
+            pool.register_grouped(2, "tcp://127.0.0.1:31002", 1)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -978,7 +1042,11 @@ mod tests {
         assert_eq!(pool.group_count(), 1);
         drop(replacement);
         pool.shutdown().await;
-        assert!(pool.register(2, "tcp://127.0.0.1:31002", 1).await.is_err());
+        assert!(
+            pool.register_grouped(2, "tcp://127.0.0.1:31002", 1)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1019,7 +1087,8 @@ mod tests {
         let _release = pause_group(&pool, first.group_id).await;
 
         let pending_pool = pool.clone();
-        let pending = tokio::spawn(async move { pending_pool.register(2, &endpoint(2), 1).await });
+        let pending =
+            tokio::spawn(async move { pending_pool.register_grouped(2, &endpoint(2), 1).await });
         wait_for_assignment(&pool, first.group_id, 2).await;
 
         pool.shutdown().await;

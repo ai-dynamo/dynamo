@@ -22,7 +22,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::KV_METRICS_SUBJECT;
 use crate::{
-    direct_zmq_fan_in::{ContinuityMode, start_direct_zmq_fan_in_for_endpoint_id},
+    direct_zmq_fan_in::{
+        ContinuityMode, FanInEvent, FanInObservation, start_direct_zmq_fan_in_for_endpoint_id,
+    },
     direct_zmq_sub_pool::KV_ZMQ_RCVHWM,
 };
 
@@ -46,6 +48,31 @@ struct PendingActiveLoads {
     capacity: usize,
     order: VecDeque<WorkerWithDpRank>,
     values: HashMap<WorkerWithDpRank, ActiveLoad>,
+    fault: Option<DirectKvMetricsFault>,
+}
+
+#[derive(Clone, Copy, Debug, thiserror::Error, PartialEq, Eq)]
+enum DirectKvMetricsFault {
+    #[error("direct-ZMQ KV metrics payload decode failed")]
+    PayloadDecode,
+    #[error("direct-ZMQ KV metrics envelope decode failed")]
+    EnvelopeDecode,
+    #[error("direct-ZMQ KV metrics publisher identity mismatch")]
+    IdentityMismatch,
+    #[error("direct-ZMQ KV metrics transport disconnected")]
+    Disconnected,
+    #[error("direct-ZMQ KV metrics discovery watch reset")]
+    DiscoveryReset,
+}
+
+fn fault_for_event(event: FanInEvent) -> Option<DirectKvMetricsFault> {
+    match event {
+        FanInEvent::EnvelopeDecodeError => Some(DirectKvMetricsFault::EnvelopeDecode),
+        FanInEvent::IdentityMismatch => Some(DirectKvMetricsFault::IdentityMismatch),
+        FanInEvent::Disconnected => Some(DirectKvMetricsFault::Disconnected),
+        FanInEvent::DiscoveryReset => Some(DirectKvMetricsFault::DiscoveryReset),
+        _ => None,
+    }
 }
 
 impl PendingActiveLoads {
@@ -58,6 +85,7 @@ impl PendingActiveLoads {
             capacity,
             order: VecDeque::new(),
             values: HashMap::new(),
+            fault: None,
         }
     }
 
@@ -86,19 +114,26 @@ impl PendingActiveLoads {
             return PushOutcome::Full;
         }
 
-        let should_wake = self.values.is_empty();
+        let should_wake = self.values.is_empty() && self.fault.is_none();
         self.order.push_back(worker);
         self.values.insert(worker, load);
         PushOutcome::Accepted { should_wake }
     }
 
-    fn pop(&mut self) -> Option<ActiveLoad> {
+    fn push_fault(&mut self, fault: DirectKvMetricsFault) {
+        self.order.clear();
+        self.values.clear();
+        self.fault = Some(fault);
+    }
+
+    fn pop(&mut self) -> Option<Result<ActiveLoad>> {
+        if let Some(fault) = self.fault.take() {
+            return Some(Err(fault.into()));
+        }
         let worker = self.order.pop_front()?;
-        Some(
-            self.values
-                .remove(&worker)
-                .expect("active-load order and values must stay synchronized"),
-        )
+        Some(Ok(self.values.remove(&worker).expect(
+            "active-load order and values must stay synchronized",
+        )))
     }
 }
 
@@ -141,6 +176,19 @@ impl ActiveLoadSender {
             },
         }
     }
+
+    fn send_fault(&self, fault: DirectKvMetricsFault) -> Result<()> {
+        if self.wake_tx.is_closed() {
+            anyhow::bail!("direct-ZMQ KV metrics consumer closed");
+        }
+        self.pending.lock().push_fault(fault);
+        match self.wake_tx.try_send(()) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(())) => Ok(()),
+            Err(mpsc::error::TrySendError::Closed(())) => {
+                anyhow::bail!("direct-ZMQ KV metrics consumer closed")
+            }
+        }
+    }
 }
 
 struct ActiveLoadReceiver {
@@ -149,7 +197,7 @@ struct ActiveLoadReceiver {
 }
 
 impl ActiveLoadReceiver {
-    async fn recv(&mut self) -> Option<ActiveLoad> {
+    async fn recv(&mut self) -> Option<Result<ActiveLoad>> {
         loop {
             if let Some(load) = self.pending.lock().pop() {
                 return Some(load);
@@ -216,9 +264,7 @@ impl KvMetricsSubscriber {
                 .next()
                 .await
                 .map(|result| result.map(|(_envelope, load)| load)),
-            KvMetricsSubscriberInner::Direct(subscriber) => {
-                subscriber.receiver.recv().await.map(Ok)
-            }
+            KvMetricsSubscriberInner::Direct(subscriber) => subscriber.receiver.recv().await,
         }
     }
 }
@@ -229,15 +275,27 @@ impl DirectKvMetricsSubscriber {
         let (sender, receiver) = active_load_mailbox();
         let handler_cancel = cancellation_token.clone();
         let codec = Codec::default();
+        let handler_sender = sender.clone();
         let handler =
             move |envelope: dynamo_runtime::transports::event_plane::ValidatedEnvelope| {
-                let load = codec.decode_payload::<ActiveLoad>(&envelope.payload)?;
-                if let Err(error) = sender.send(load) {
+                let load = match codec.decode_payload::<ActiveLoad>(&envelope.payload) {
+                    Ok(load) => load,
+                    Err(error) => {
+                        let _ = handler_sender.send_fault(DirectKvMetricsFault::PayloadDecode);
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = handler_sender.send(load) {
                     handler_cancel.cancel();
                     return Err(error);
                 }
                 Ok(())
             };
+        let observer = move |observation: FanInObservation| {
+            if let Some(fault) = fault_for_event(observation.event) {
+                let _ = sender.send_fault(fault);
+            }
+        };
         let supervisor = start_direct_zmq_fan_in_for_endpoint_id(
             component.clone(),
             endpoint_id,
@@ -247,7 +305,7 @@ impl DirectKvMetricsSubscriber {
             ContinuityMode::Disabled,
             cancellation_token.clone(),
             handler,
-            |_| {},
+            observer,
         )
         .await?;
         drop(supervisor);
@@ -298,16 +356,22 @@ mod tests {
         sender.send(load(1, 1, None, None, Some(13))).unwrap();
 
         assert_eq!(
-            receiver.recv().await,
-            Some(load(1, 0, Some(0), Some(11), Some(5)))
+            receiver.recv().await.unwrap().unwrap(),
+            load(1, 0, Some(0), Some(11), Some(5))
         );
         sender.send(load(1, 0, None, None, Some(6))).unwrap();
-        assert_eq!(receiver.recv().await, Some(load(2, 0, None, None, Some(9))));
         assert_eq!(
-            receiver.recv().await,
-            Some(load(1, 1, None, None, Some(13)))
+            receiver.recv().await.unwrap().unwrap(),
+            load(2, 0, None, None, Some(9))
         );
-        assert_eq!(receiver.recv().await, Some(load(1, 0, None, None, Some(6))));
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap(),
+            load(1, 1, None, None, Some(13))
+        );
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap(),
+            load(1, 0, None, None, Some(6))
+        );
     }
 
     #[tokio::test]
@@ -325,16 +389,16 @@ mod tests {
         sender.send(load(2, 0, None, None, Some(9))).unwrap();
 
         assert_eq!(
-            receiver.recv().await,
-            Some(load(1, 0, Some(7), None, Some(8)))
+            receiver.recv().await.unwrap().unwrap(),
+            load(1, 0, Some(7), None, Some(8))
         );
         sender.send(load(2, 0, None, None, Some(10))).unwrap();
         drop(sender);
         assert_eq!(
-            receiver.recv().await,
-            Some(load(2, 0, None, None, Some(10)))
+            receiver.recv().await.unwrap().unwrap(),
+            load(2, 0, None, None, Some(10))
         );
-        assert_eq!(receiver.recv().await, None);
+        assert!(receiver.recv().await.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -351,10 +415,42 @@ mod tests {
             .await
             .expect("waiting receiver must wake")
             .unwrap();
-        assert_eq!(received, Some(load(1, 0, None, None, Some(3))));
+        assert_eq!(received.unwrap().unwrap(), load(1, 0, None, None, Some(3)));
 
         drop(receiver);
         assert!(sender.send(load(1, 0, None, None, Some(4))).is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_metrics_fault_discards_stale_loads_before_later_updates() {
+        let (sender, mut receiver) = active_load_mailbox_with_capacity(4);
+
+        sender.send(load(1, 0, None, None, Some(3))).unwrap();
+        sender
+            .send_fault(DirectKvMetricsFault::Disconnected)
+            .unwrap();
+        sender.send(load(2, 0, None, None, Some(4))).unwrap();
+
+        let error = receiver.recv().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("transport disconnected"));
+        assert_eq!(
+            receiver.recv().await.unwrap().unwrap(),
+            load(2, 0, None, None, Some(4))
+        );
+
+        assert_eq!(
+            fault_for_event(FanInEvent::EnvelopeDecodeError),
+            Some(DirectKvMetricsFault::EnvelopeDecode)
+        );
+        assert_eq!(
+            fault_for_event(FanInEvent::IdentityMismatch),
+            Some(DirectKvMetricsFault::IdentityMismatch)
+        );
+        assert_eq!(
+            fault_for_event(FanInEvent::DiscoveryReset),
+            Some(DirectKvMetricsFault::DiscoveryReset)
+        );
+        assert_eq!(fault_for_event(FanInEvent::SourceStarted), None);
     }
 
     #[tokio::test]

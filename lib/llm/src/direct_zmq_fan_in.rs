@@ -12,13 +12,15 @@ use dynamo_runtime::{
     },
     protocols::EndpointId,
     traits::DistributedRuntimeProvider,
-    transports::event_plane::ValidatedEnvelope,
+    transports::event_plane::{ValidatedEnvelope, ValidatedZmqSource, ValidatedZmqSourceError},
 };
 use futures::StreamExt;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use crate::direct_zmq_sub_pool::{DirectZmqSubItem, DirectZmqSubPool, endpoints_per_sub_from_env};
+use crate::direct_zmq_sub_pool::{
+    DirectZmqSubConnection, DirectZmqSubItem, DirectZmqSubPool, endpoints_per_sub_from_env,
+};
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
@@ -34,6 +36,8 @@ pub(crate) enum ContinuityMode {
 pub(crate) enum FanInEvent {
     SourceStarted,
     SourceStopped,
+    Disconnected,
+    DiscoveryReset,
     Reconnect,
     Replacement,
     EnvelopeDecodeError,
@@ -328,6 +332,16 @@ async fn run_supervisor<H, O>(
         }
 
         watch_cancel.cancel();
+        if restart_watch {
+            for source in sources.values() {
+                observe(
+                    &observer,
+                    source.publisher_id,
+                    source.generation,
+                    FanInEvent::DiscoveryReset,
+                );
+            }
+        }
         for (publisher_id, high_watermark) in stop_sources(sources, &observer).await {
             resume_cursors.insert(publisher_id, high_watermark);
         }
@@ -410,14 +424,14 @@ where
     let mut connected_once = false;
 
     loop {
-        let registration = tokio::select! {
+        let connection = tokio::select! {
             _ = cancel.cancelled() => break,
-            registration = group_pool.register(publisher_id, &endpoint, generation) => registration,
+            connection = group_pool.connect(publisher_id, &endpoint, generation) => connection,
         };
-        let mut registration = match registration {
-            Ok(registration) => registration,
+        let mut connection = match connection {
+            Ok(connection) => connection,
             Err(error) => {
-                tracing::warn!(%error, publisher_id, generation, %endpoint, "failed to register direct-ZMQ source");
+                tracing::warn!(%error, publisher_id, generation, %endpoint, "failed to connect direct-ZMQ source");
                 observe(&observer, publisher_id, generation, FanInEvent::Reconnect);
                 if !sleep_or_cancel(retry_delay, &cancel).await {
                     break;
@@ -432,18 +446,42 @@ where
         connected_once = true;
         retry_delay = INITIAL_BACKOFF;
 
-        let keep_running = consume_connection(
-            publisher_id,
-            generation,
-            &mut registration.receiver,
-            &registration.disconnected,
-            &mut cursor,
-            &handler,
-            &observer,
-            &cancel,
-        )
-        .await;
-        registration.close().await;
+        let keep_running = match &mut connection {
+            DirectZmqSubConnection::Dedicated(source) => {
+                consume_dedicated_connection(
+                    publisher_id,
+                    generation,
+                    source,
+                    &mut cursor,
+                    &handler,
+                    &observer,
+                    &cancel,
+                )
+                .await
+            }
+            DirectZmqSubConnection::Grouped(registration) => {
+                consume_grouped_connection(
+                    publisher_id,
+                    generation,
+                    &mut registration.receiver,
+                    &registration.disconnected,
+                    &mut cursor,
+                    &handler,
+                    &observer,
+                    &cancel,
+                )
+                .await
+            }
+        };
+        if keep_running {
+            observe(
+                &observer,
+                publisher_id,
+                generation,
+                FanInEvent::Disconnected,
+            );
+        }
+        connection.close().await;
         if !keep_running {
             break;
         }
@@ -457,7 +495,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn consume_connection<H, O>(
+async fn consume_grouped_connection<H, O>(
     publisher_id: u64,
     generation: u64,
     receiver: &mut mpsc::Receiver<DirectZmqSubItem>,
@@ -519,6 +557,75 @@ where
         if let Err(error) = handler(envelope) {
             tracing::warn!(%error, publisher_id, generation, "direct-ZMQ source handler rejected an envelope");
         }
+    }
+}
+
+async fn consume_dedicated_connection<H, O>(
+    publisher_id: u64,
+    generation: u64,
+    source: &mut ValidatedZmqSource,
+    cursor: &mut SequenceCursor,
+    handler: &H,
+    observer: &O,
+    cancel: &CancellationToken,
+) -> bool
+where
+    H: Fn(ValidatedEnvelope) -> Result<()> + Send + Sync,
+    O: Fn(FanInObservation) + Send + Sync,
+{
+    loop {
+        let envelope = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return false,
+            envelope = source.next() => envelope,
+        };
+        let Some(envelope) = envelope else {
+            return true;
+        };
+        let envelope = match envelope {
+            Ok(envelope) => envelope,
+            Err(ValidatedZmqSourceError::Receive(error)) => {
+                tracing::warn!(%error, publisher_id, generation, "direct-ZMQ source receive failed");
+                return true;
+            }
+            Err(ValidatedZmqSourceError::EnvelopeDecode(error)) => {
+                tracing::warn!(%error, publisher_id, generation, "dropping malformed direct-ZMQ envelope");
+                observe(
+                    observer,
+                    publisher_id,
+                    generation,
+                    FanInEvent::EnvelopeDecodeError,
+                );
+                continue;
+            }
+            Err(error @ ValidatedZmqSourceError::IdentityMismatch { .. }) => {
+                tracing::warn!(%error, publisher_id, generation, "dropping misattributed direct-ZMQ envelope");
+                observe(
+                    observer,
+                    publisher_id,
+                    generation,
+                    FanInEvent::IdentityMismatch,
+                );
+                continue;
+            }
+        };
+
+        match cursor.observe(envelope.sequence) {
+            None | Some(Continuity::InOrder) => {}
+            Some(Continuity::Gap(missing)) => observe(
+                observer,
+                publisher_id,
+                generation,
+                FanInEvent::SequenceGap { missing },
+            ),
+            Some(Continuity::OutOfOrder) => {
+                observe(observer, publisher_id, generation, FanInEvent::OutOfOrder)
+            }
+        }
+        if let Err(error) = handler(envelope) {
+            tracing::warn!(%error, publisher_id, generation, "direct-ZMQ source handler rejected an envelope");
+        }
+        tokio::task::consume_budget().await;
     }
 }
 
@@ -691,7 +798,7 @@ mod tests {
         let mut cursor = SequenceCursor::new(ContinuityMode::Disabled, None);
 
         assert!(
-            consume_connection(
+            consume_grouped_connection(
                 1,
                 1,
                 &mut receiver,
