@@ -5512,6 +5512,25 @@ impl OpenAIPreprocessor {
                             );
                             state.emitted_text.clear();
                         }
+                        // Text the client already holds cannot change what terminal
+                        // recovery emits, so drop it and keep the buffer proportional
+                        // to what is still pending. Without this the buffer grows for
+                        // the whole response and every chunk rescans all of it.
+                        //
+                        // A quote character is the exception: the marker scanner reads
+                        // `"<tool_call>"` as prose, and it can only know that from the
+                        // quote to its left. Dropping a quote-free prefix cannot change
+                        // any later verdict, so that is the only prefix dropped here.
+                        // A response that quotes on every chunk keeps the old growth.
+                        if !state.emitted_text.is_empty()
+                            && !state.emitted_text.contains(['"', '\'', '`'])
+                            && crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47").is_none()
+                            && let Some(unemitted) =
+                                state.input_text.strip_prefix(state.emitted_text.as_str())
+                        {
+                            state.input_text = unemitted.to_string();
+                            state.emitted_text.clear();
+                        }
                     }
                 }
             }
@@ -7645,6 +7664,32 @@ mod tests {
             let output = apply_glm47_streaming_length(&[&input[..split], &input[split..]]).await;
             assert_glm47_streaming_length_output(&output, "I can help. ", split);
         }
+    }
+
+    /// A prose-only answer never completes a call, so nothing drains the recovery
+    /// buffer through the marker path. The buffer must still stay proportional to the
+    /// unemitted tail, or every chunk rescans the whole response.
+    #[tokio::test]
+    async fn glm47_streaming_prose_only_round_trips_without_retaining_the_response() {
+        let chunk_text = "the quick brown fox ";
+        let chunks: Vec<&str> = std::iter::repeat_n(chunk_text, 400).collect();
+        let output = apply_glm47_streaming_length(&chunks).await;
+
+        assert_eq!(stream_content(&output), chunk_text.repeat(400));
+    }
+
+    /// The recovery buffer holds only what the client has not seen yet, so a long
+    /// prose answer must still arrive whole. Without the compaction this text is
+    /// retained and rescanned in full on every chunk.
+    #[tokio::test]
+    async fn glm47_streaming_long_prose_survives_buffer_compaction() {
+        let chunks: Vec<String> = (0..400).map(|i| format!("chunk {i} of prose. ")).collect();
+        let expected: String = chunks.concat();
+        let borrowed: Vec<&str> = chunks.iter().map(String::as_str).collect();
+
+        let output = apply_glm47_streaming_length(&borrowed).await;
+
+        assert_eq!(stream_content(&output), expected);
     }
 
     #[tokio::test]

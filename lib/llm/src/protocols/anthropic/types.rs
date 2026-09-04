@@ -575,8 +575,11 @@ pub(super) fn tool_use_input(
     arguments: &str,
     truncated: bool,
 ) -> Option<serde_json::Value> {
+    // No argument bytes at all is the MOST truncated shape when the limit ended
+    // generation: it landed after the name and before the first argument token.
+    // Only a call the model finished may report an empty object.
     if arguments.is_empty() {
-        return Some(serde_json::json!({}));
+        return (!truncated).then(|| serde_json::json!({}));
     }
 
     let error = match serde_json::from_str::<serde_json::Value>(arguments) {
@@ -746,6 +749,22 @@ pub fn chat_completion_to_anthropic_response(
                     input,
                 });
             }
+        }
+
+        // `stop_reason: tool_use` is an instruction to run a tool. Suppressing every
+        // call above leaves nothing to run, and Anthropic rejects that turn when the
+        // client sends it back, so the conversation cannot continue. Report the turn
+        // as ended instead. `max_tokens` and `refusal` already explain themselves and
+        // stay as they are.
+        if stop_reason == Some(AnthropicStopReason::ToolUse)
+            && !content
+                .iter()
+                .any(|block| matches!(block, AnthropicResponseContentBlock::ToolUse { .. }))
+        {
+            tracing::warn!(
+                "every tool_use block was suppressed; reporting end_turn instead of tool_use"
+            );
+            stop_reason = Some(AnthropicStopReason::EndTurn);
         }
 
         // Extract reasoning content (from --dyn-reasoning-parser, e.g. qwen3).
@@ -2554,6 +2573,39 @@ mod anthropic_types_tests {
         );
         assert_eq!(inputs.len(), 1);
         assert_eq!(inputs[0], serde_json::json!({"label": "customer-eof"}));
+    }
+
+    /// A call cut off before its first argument token has no argument bytes. Reporting
+    /// it as an empty object hands the client a runnable zero-argument call.
+    #[test]
+    fn conversion_drops_a_length_call_with_no_argument_bytes() {
+        let inputs =
+            converted_tool_use_inputs(dynamo_protocols::types::FinishReason::Length, &[""]);
+        assert!(inputs.is_empty(), "unexpected tool block: {inputs:?}");
+        assert_eq!(tool_use_input("get_weather", "", true), None);
+        // A call the model finished still reports the empty object.
+        assert_eq!(
+            tool_use_input("get_weather", "", false),
+            Some(serde_json::json!({}))
+        );
+    }
+
+    /// `tool_use` tells the client to run a tool. With every call suppressed there is
+    /// nothing to run, and Anthropic rejects the turn when the client sends it back.
+    #[test]
+    fn conversion_reports_end_turn_when_every_tool_block_is_suppressed() {
+        let response = converted_tool_use_response_for(
+            dynamo_protocols::types::FinishReason::ToolCalls,
+            &[r#"{"label": "cut""#],
+        );
+        assert!(
+            !response
+                .content
+                .iter()
+                .any(|block| matches!(block, AnthropicResponseContentBlock::ToolUse { .. })),
+            "the malformed call must not be emitted"
+        );
+        assert_eq!(response.stop_reason, Some(AnthropicStopReason::EndTurn));
     }
 
     #[test]

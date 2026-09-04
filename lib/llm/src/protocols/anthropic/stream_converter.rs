@@ -261,6 +261,17 @@ impl AnthropicStreamConverter {
             block_index += 1;
         }
 
+        // Mirrors `chat_completion_to_anthropic_response`: telling the client to run a
+        // tool while emitting no `tool_use` block leaves a turn it cannot send back.
+        if block_index == self.next_block_index
+            && self.stop_reason == Some(AnthropicStopReason::ToolUse)
+        {
+            tracing::warn!(
+                "every tool_use block was suppressed; reporting end_turn instead of tool_use"
+            );
+            self.stop_reason = Some(AnthropicStopReason::EndTurn);
+        }
+
         self.next_block_index = block_index;
         events
     }
@@ -1543,6 +1554,38 @@ mod tests {
                 "malformed {reason:?} arguments must not create an executable tool block"
             );
         }
+    }
+
+    /// `tool_use` is an instruction to run a tool. With every call suppressed the
+    /// client has nothing to run, and Anthropic rejects the turn when it is sent back.
+    #[test]
+    fn test_stream_reports_end_turn_when_every_tool_block_is_suppressed() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("record_literal"),
+            Some(r#"{"label": "cut""#),
+        ));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::ToolCalls));
+        events.extend(conv.emit_end_events_tagged());
+
+        assert!(events.iter().all(|event| !matches!(
+            &event.data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                ..
+            }
+        )));
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.data,
+                AnthropicStreamEvent::MessageDelta { delta, .. }
+                    if delta.stop_reason == Some(AnthropicStopReason::EndTurn)
+            )),
+            "a turn with no tool_use block must not report tool_use"
+        );
     }
 
     #[test]
