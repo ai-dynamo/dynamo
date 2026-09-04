@@ -29,7 +29,7 @@ static IGNORED_RESIDENCY_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 /// `event_type` label — replacing the former `get_event_type()` helper.
 #[derive(Debug, Clone, Copy)]
 pub enum EventKind {
-    Stored { block_count: u64 },
+    Stored,
     Removed,
     Cleared,
 }
@@ -37,17 +37,22 @@ pub enum EventKind {
 impl EventKind {
     pub fn of(data: &KvCacheEventData) -> Self {
         match data {
-            KvCacheEventData::Stored(store) => Self::Stored {
-                block_count: store.blocks.len() as u64,
-            },
+            KvCacheEventData::Stored(_) => Self::Stored,
             KvCacheEventData::Removed(_) => Self::Removed,
             KvCacheEventData::Cleared => Self::Cleared,
         }
     }
 
+    pub(crate) fn stored_block_count(data: &KvCacheEventData) -> Option<u64> {
+        match data {
+            KvCacheEventData::Stored(store) => Some(store.blocks.len() as u64),
+            _ => None,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
-            Self::Stored { .. } => METRIC_EVENT_STORED,
+            Self::Stored => METRIC_EVENT_STORED,
             Self::Removed => METRIC_EVENT_REMOVED,
             Self::Cleared => METRIC_EVENT_CLEARED,
         }
@@ -556,23 +561,30 @@ impl PreBoundEventCounters {
         #[cfg(feature = "metrics")]
         {
             let counters = match kind {
-                EventKind::Stored { .. } => &self.inner.stored,
+                EventKind::Stored => &self.inner.stored,
                 EventKind::Removed => &self.inner.removed,
                 EventKind::Cleared => &self.inner.cleared,
             };
             counters.for_result(result).inc();
-            if let (
-                EventKind::Stored { block_count },
-                Err(KvCacheEventError::ParentBlockNotFound),
-            ) = (kind, result)
-            {
-                self.inner
-                    .rejected_parent_not_found_blocks
-                    .inc_by(block_count);
-            }
         }
         #[cfg(not(feature = "metrics"))]
         let _ = (self, kind, result);
+    }
+
+    /// Record rejected stored blocks without changing the public [`EventKind`] shape.
+    pub(crate) fn inc_stored_parent_not_found_blocks(
+        &self,
+        block_count: u64,
+        result: &Result<(), KvCacheEventError>,
+    ) {
+        #[cfg(feature = "metrics")]
+        if matches!(result, Err(KvCacheEventError::ParentBlockNotFound)) {
+            self.inner
+                .rejected_parent_not_found_blocks
+                .inc_by(block_count);
+        }
+        #[cfg(not(feature = "metrics"))]
+        let _ = (self, block_count, result);
     }
 
     pub fn inc_warning(&self, kind: EventWarningKind) {

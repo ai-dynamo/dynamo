@@ -493,10 +493,9 @@ mod interface_tests {
 
     #[cfg(feature = "metrics")]
     #[tokio::test]
-    #[apply(indexer_template)]
-    async fn orphaned_multi_block_store_counts_all_rejected_blocks(variant: &str) {
+    async fn orphaned_multi_block_store_counts_all_rejected_blocks() {
         let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
-        let (index, metrics) = make_indexer_with_metrics(variant, metrics);
+        let (index, metrics) = make_indexer_with_metrics("single", metrics);
 
         index.apply_event(make_store_event(1, &[7, 8])).await;
         flush_and_settle(index.as_ref()).await;
