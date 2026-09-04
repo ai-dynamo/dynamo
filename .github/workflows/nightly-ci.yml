@@ -34,6 +34,7 @@ permissions:
 
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:

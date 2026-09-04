@@ -28,6 +28,9 @@ on:
       SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL:
         required: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   notify-slack:
     name: Notify Slack

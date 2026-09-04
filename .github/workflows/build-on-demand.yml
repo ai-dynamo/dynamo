@@ -22,31 +22,12 @@ on:
         description: 'Build and push operator image, tagged with branch name'
         type: boolean
         default: false
-      test_node24_actions:
-        description: 'Verify Node 20 actions are forced onto Node 24'
-        type: boolean
-        default: false
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}-${{ github.run_attempt }}
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
-
-  node24-action-runtime-canary:
-    if: inputs.test_node24_actions
-    runs-on: prod-tester-amd-v2
-    container:
-      image: ubuntu:24.04
-    steps:
-      - name: Verify forced JavaScript action runtime
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
-        with:
-          script: |
-            core.info(`JavaScript action runtime: ${process.version}`)
-            if (!process.version.startsWith('v24.')) {
-              core.setFailed(`Expected Node 24, got ${process.version}`)
-            }
 
   init:
     runs-on: ubuntu-slim

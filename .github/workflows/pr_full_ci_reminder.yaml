@@ -17,6 +17,9 @@ name: PR Reminder Full CI Comment Bot
 on:
   pull_request_target:
     types: [opened]
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   pr_reminder:
     if: ${{ github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name }}

@@ -8,6 +8,9 @@ on:
       - synchronize
       - reopened
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   conventional-commits:
     name: Validate PR title and add label

@@ -50,6 +50,7 @@ on:
         default: ''
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   FRAMEWORK: ${{ inputs.framework || 'vllm' }}
   TARGET: ${{ inputs.target || 'runtime' }}
   DEVICE: xpu

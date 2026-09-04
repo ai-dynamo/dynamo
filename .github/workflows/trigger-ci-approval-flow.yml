@@ -63,6 +63,9 @@ permissions:
   issues: write
   pull-requests: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   ok-to-test:
     if: github.event.pull_request.head.repo.fork
