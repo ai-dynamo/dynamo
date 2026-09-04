@@ -769,7 +769,25 @@ fn kv_event_connect_host(
     Ok(bare_host.to_string())
 }
 
-fn hicache_native_offloading_capacity(server_info: &Value) -> Option<u64> {
+fn is_deepseek_v4_arch(model_info: &Value) -> bool {
+    model_info
+        .get("architectures")
+        .and_then(Value::as_array)
+        .is_some_and(|architectures| {
+            architectures.iter().any(|architecture| {
+                matches!(
+                    architecture.as_str(),
+                    Some(
+                        "DeepseekV4ForCausalLM"
+                            | "DeepseekV4ForCausalLMNextN"
+                            | "DeepseekV4ForCausalLMDSpark"
+                    )
+                )
+            })
+        })
+}
+
+fn hicache_native_offloading_capacity(server_info: &Value, model_info: &Value) -> Option<u64> {
     let device_tokens = server_info
         .get("max_total_num_tokens")?
         .as_u64()
@@ -782,10 +800,11 @@ fn hicache_native_offloading_capacity(server_info: &Value) -> Option<u64> {
     let host_tokens = match server_info.get("hicache_host_total_tokens") {
         Some(value) => value.as_u64().filter(|tokens| *tokens > 0)?,
         None => {
-            if server_info
-                .get("enable_hierarchical_cache")
-                .and_then(Value::as_bool)
-                != Some(true)
+            if is_deepseek_v4_arch(model_info)
+                || server_info
+                    .get("enable_hierarchical_cache")
+                    .and_then(Value::as_bool)
+                    != Some(true)
                 || server_info.get("hicache_size").and_then(Value::as_u64) != Some(0)
                 || client::json_u64(server_info, "dcp_size")
                     .unwrap_or(1)
@@ -876,7 +895,9 @@ fn build_engine_config(
         "grpc_service".to_string(),
         Value::String("sglang.runtime.v1.SglangService".to_string()),
     );
-    if let Some(total_tokens) = hicache_native_offloading_capacity(&discovery.server_info) {
+    if let Some(total_tokens) =
+        hicache_native_offloading_capacity(&discovery.server_info, &discovery.model_info)
+    {
         runtime_data.insert(
             "native_offloading_capacity".to_string(),
             serde_json::json!({"total_tokens": total_tokens}),
@@ -913,12 +934,19 @@ mod tests {
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
+        discovery_with_model_info(server_info, json!({}))
+    }
+
+    fn discovery_with_model_info(
+        server_info: serde_json::Value,
+        model_info: serde_json::Value,
+    ) -> Discovery {
         Discovery {
             model_path: "model".to_string(),
             tokenizer_path: "tokenizer".to_string(),
             served_model_name: None,
             max_model_len: None,
-            model_info: json!({}),
+            model_info,
             server_info,
         }
     }
@@ -1077,15 +1105,18 @@ mod tests {
     #[test]
     fn authoritative_hicache_capacity_takes_precedence() {
         let config = build_engine_config(
-            &discovery(json!({
-                "enable_hierarchical_cache": true,
-                "hicache_host_total_tokens": 300,
-                "hicache_size": 0,
-                "hicache_ratio": 3.0,
-                "hicache_write_policy": "write_back",
-                "page_size": 16,
-                "max_total_num_tokens": 100,
-            })),
+            &discovery_with_model_info(
+                json!({
+                    "enable_hierarchical_cache": true,
+                    "hicache_host_total_tokens": 300,
+                    "hicache_size": 0,
+                    "hicache_ratio": 3.0,
+                    "hicache_write_policy": "write_back",
+                    "page_size": 16,
+                    "max_total_num_tokens": 100,
+                }),
+                json!({"architectures": ["DeepseekV4ForCausalLM"]}),
+            ),
             DisaggregationMode::Decode,
             None,
             None,
@@ -1096,6 +1127,39 @@ mod tests {
             config.runtime_data.get("native_offloading_capacity"),
             Some(&json!({"total_tokens": 300}))
         );
+    }
+
+    #[test]
+    fn does_not_derive_ratio_based_capacity_for_deepseek_v4() {
+        for architecture in [
+            "DeepseekV4ForCausalLM",
+            "DeepseekV4ForCausalLMNextN",
+            "DeepseekV4ForCausalLMDSpark",
+        ] {
+            let config = build_engine_config(
+                &discovery_with_model_info(
+                    json!({
+                        "enable_hierarchical_cache": true,
+                        "hicache_size": 0,
+                        "hicache_ratio": 2.0,
+                        "hicache_write_policy": "write_back",
+                        "page_size": 256,
+                        "max_total_num_tokens": 8192,
+                    }),
+                    json!({"architectures": [architecture]}),
+                ),
+                DisaggregationMode::Decode,
+                None,
+                None,
+            )
+            .unwrap();
+
+            assert!(
+                !config
+                    .runtime_data
+                    .contains_key("native_offloading_capacity")
+            );
+        }
     }
 
     #[test]
