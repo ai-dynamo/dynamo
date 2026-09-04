@@ -660,6 +660,11 @@ pub struct OutputOptions {
     pub return_tokens_as_token_ids: Option<bool>,
 }
 
+impl OutputOptions {
+    /// Requests log probabilities for every token in the vocabulary.
+    pub const ALL_LOGPROBS: u32 = u32::MAX;
+}
+
 // Struct for log probability information
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatCompletionLogprobs {

@@ -37,7 +37,6 @@ use super::{RouteDoc, service_v2};
 use crate::local_model::runtime_config::VLLM_INFERENCE_V1_GENERATE_CAPABILITY;
 use crate::protocols::common::preprocessor::{MmRoutingInfo, PreprocessedRequest};
 use crate::protocols::common::timing::RequestTracker;
-use crate::protocols::common::{SamplingOptions, StopConditions};
 use crate::protocols::openai::generate::{
     GenerateRequest, GenerateResponse, GenerateResponseOptions, SamplingParams, StreamOptions,
 };
@@ -244,6 +243,28 @@ impl<'a> VllmTitoEnvelope<'a> {
             kv_transfer_params: kv_transfer_params.as_ref(),
             passthrough,
         }
+    }
+}
+
+fn canonical_generate_cache_salt(request: &GenerateRequest) -> anyhow::Result<Option<String>> {
+    let nested = match request
+        .sampling_params
+        .as_value()
+        .as_object()
+        .and_then(|sampling| sampling.get("cache_salt"))
+    {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => Some(value.as_str()),
+        Some(_) => anyhow::bail!("sampling_params.cache_salt must be a string or null"),
+    };
+
+    match (request.cache_salt.as_deref(), nested) {
+        (Some(top_level), Some(nested)) if top_level != nested => {
+            anyhow::bail!("cache_salt conflicts with sampling_params.cache_salt")
+        }
+        (Some(top_level), _) => Ok(Some(top_level.to_string())),
+        (None, Some(nested)) => Ok(Some(nested.to_string())),
+        (None, None) => Ok(None),
     }
 }
 
@@ -566,9 +587,15 @@ fn preprocessed_from_generate_with_tracker(
         lora_name,
     } = routing_metadata;
     let sampling = &request.sampling_params;
+    let cache_salt = canonical_generate_cache_salt(&request)?;
     let max_tokens = sampling.max_tokens();
-    let min_tokens = sampling.min_tokens();
-    let ignore_eos = sampling.ignore_eos();
+    let stop_conditions = sampling.project_stop_conditions();
+    let sampling_options = sampling
+        .project_sampling_options()
+        .map_err(anyhow::Error::msg)?;
+    let output_options = sampling
+        .project_output_options()
+        .map_err(anyhow::Error::msg)?;
     let routing_priority = dynamo_routing_priority(request.priority);
     // With vLLM's default `enable_tower_connector_lora=false`, MM identifiers
     // are adapter-invariant and `lora_name` separately salts LM KV hashes. When
@@ -603,26 +630,14 @@ fn preprocessed_from_generate_with_tracker(
         );
     }
     let mm_routing_info = mm_routing.map(|projection| projection.info);
-    let GenerateRequest {
-        token_ids,
-        cache_salt,
-        ..
-    } = request;
+    let GenerateRequest { token_ids, .. } = request;
 
     PreprocessedRequest::builder()
         .model(model.to_string())
         .token_ids(token_ids)
-        .stop_conditions(StopConditions {
-            max_tokens,
-            min_tokens,
-            ignore_eos: Some(ignore_eos),
-            ..Default::default()
-        })
-        .sampling_options(SamplingOptions {
-            n: Some(1),
-            ..Default::default()
-        })
-        .output_options(Default::default())
+        .stop_conditions(stop_conditions)
+        .sampling_options(sampling_options)
+        .output_options(output_options)
         .mm_routing_info(mm_routing_info)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
@@ -1786,6 +1801,62 @@ mod tests {
     }
 
     #[test]
+    fn sampling_params_cache_salt_becomes_canonical_routing_salt() {
+        let raw = serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {"cache_salt": "policy-7"}
+        });
+        let request: GenerateRequest =
+            serde_json::from_value(raw.clone()).expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+
+        assert_eq!(
+            preprocessed
+                .routing
+                .as_ref()
+                .and_then(|routing| routing.cache_namespace.as_deref()),
+            Some("policy-7")
+        );
+        assert_eq!(
+            preprocessed
+                .extra_args
+                .as_ref()
+                .and_then(|extra| extra.get("vllm_tito"))
+                .expect("vllm_tito envelope")["sampling_params"]["cache_salt"],
+            raw["sampling_params"]["cache_salt"]
+        );
+    }
+
+    #[test]
+    fn conflicting_cache_salt_spellings_are_rejected_before_routing() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "cache_salt": "policy-7",
+            "sampling_params": {"cache_salt": "policy-8"}
+        }))
+        .expect("deserialize request");
+
+        let error = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect_err("conflicting cache salts must fail");
+
+        assert!(error.to_string().contains("cache_salt"));
+    }
+
+    #[test]
     fn multimodal_routing_matches_worker_events_and_preserves_execution_payload() {
         let hash_a = "a".repeat(64);
         let hash_b = "b".repeat(64);
@@ -2194,6 +2265,58 @@ mod tests {
         )
         .expect("build request");
         assert_eq!(preprocessed.stop_conditions.min_tokens, Some(0));
+    }
+
+    #[test]
+    fn generate_projects_training_text_controls() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {
+                "temperature": 0.25,
+                "top_p": 0.9,
+                "top_k": 17,
+                "min_p": 0.05,
+                "seed": 23,
+                "max_tokens": 8,
+                "min_tokens": 2,
+                "presence_penalty": 0.1,
+                "frequency_penalty": 0.2,
+                "repetition_penalty": 1.1,
+                "stop_token_ids": [7, 8],
+                "ignore_eos": true,
+                "logprobs": 1,
+                "skip_special_tokens": false
+            },
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+
+        assert_eq!(preprocessed.sampling_options.temperature, Some(0.25));
+        assert_eq!(preprocessed.sampling_options.top_p, Some(0.9));
+        assert_eq!(preprocessed.sampling_options.top_k, Some(17));
+        assert_eq!(preprocessed.sampling_options.min_p, Some(0.05));
+        assert_eq!(preprocessed.sampling_options.seed, Some(23));
+        assert_eq!(preprocessed.sampling_options.presence_penalty, Some(0.1));
+        assert_eq!(preprocessed.sampling_options.frequency_penalty, Some(0.2));
+        assert_eq!(preprocessed.sampling_options.repetition_penalty, Some(1.1));
+        assert_eq!(preprocessed.stop_conditions.max_tokens, Some(8));
+        assert_eq!(preprocessed.stop_conditions.min_tokens, Some(2));
+        assert_eq!(
+            preprocessed.stop_conditions.stop_token_ids.as_deref(),
+            Some(&[7, 8][..])
+        );
+        assert_eq!(preprocessed.stop_conditions.ignore_eos, Some(true));
+        assert_eq!(preprocessed.output_options.logprobs, Some(1));
+        assert_eq!(preprocessed.output_options.skip_special_tokens, Some(false));
     }
 
     #[test]

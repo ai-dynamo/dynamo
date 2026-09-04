@@ -9,6 +9,7 @@ use crate::client;
 use crate::proto as pb;
 
 const SUPPORTED_API_VERSION: &str = "vllm";
+const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ModelIdentity {
@@ -106,6 +107,7 @@ impl DiscoveredModel {
     pub(crate) fn rl_worker_metadata(
         &self,
         admin_base_url: Option<RlAdminBaseUrl>,
+        fallback_world_size: Option<u32>,
     ) -> Result<RlWorkerMetadata, DynamoError> {
         let parallelism = self.server.parallelism.as_ref().ok_or_else(|| {
             client::protocol_error("RL discovery requires vLLM parallelism metadata")
@@ -116,23 +118,48 @@ impl DiscoveredModel {
             nonzero(parallelism.pipeline_parallel_size).ok_or_else(|| {
                 client::protocol_error("vLLM reports a pipeline-parallel size of zero")
             })?;
-        let engine_world_size = u32::try_from(parallelism.world_size)
-            .ok()
-            .and_then(nonzero)
-            .ok_or_else(|| client::protocol_error("vLLM reports an invalid engine world size"))?;
         let expected_minimum_world_size = tensor_parallel_size
             .checked_mul(pipeline_parallel_size)
             .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
-        if engine_world_size % expected_minimum_world_size != 0 {
-            return Err(client::protocol_error(
-                "vLLM reports an engine world size that is not divisible by TP * PP",
-            ));
-        }
-        let world_size = engine_world_size
-            .checked_mul(parallelism.data_parallel_size)
-            .ok_or_else(|| client::protocol_error("vLLM reports an invalid RL world size"))?;
+        let world_size = match u32::try_from(parallelism.world_size).ok().and_then(nonzero) {
+            Some(engine_world_size) => {
+                if engine_world_size % expected_minimum_world_size != 0 {
+                    return Err(client::protocol_error(
+                        "vLLM reports an engine world size that is not divisible by TP * PP",
+                    ));
+                }
+                engine_world_size
+                    .checked_mul(parallelism.data_parallel_size)
+                    .ok_or_else(|| {
+                        client::protocol_error("vLLM reports an invalid RL world size")
+                    })?
+            }
+            None => {
+                let world_size = fallback_world_size.ok_or_else(|| {
+                    client::protocol_error("vLLM reports an invalid engine world size")
+                })?;
+                let expected_total_world_size = expected_minimum_world_size
+                    .checked_mul(parallelism.data_parallel_size)
+                    .ok_or_else(|| {
+                        client::protocol_error("vLLM reports an invalid RL world size")
+                    })?;
+                if world_size % expected_total_world_size != 0 {
+                    return Err(client::protocol_error(
+                        "vLLM reports an RL world size that is not divisible by TP * PP * DP",
+                    ));
+                }
+                world_size
+            }
+        };
         RlWorkerMetadata::new(world_size, admin_base_url)
             .map_err(|error| client::protocol_error(error.to_string()))
+    }
+
+    pub(crate) fn requires_world_size_fallback(&self) -> bool {
+        self.server
+            .parallelism
+            .as_ref()
+            .is_some_and(|parallelism| parallelism.world_size == 0)
     }
 
     pub(crate) fn engine_config(&self) -> EngineConfig {
@@ -141,7 +168,11 @@ impl DiscoveredModel {
             model: self.source.clone(),
             served_model_name: Some(self.served_name.clone()),
             model_aliases: self.identity.aliases.clone(),
-            runtime_data: Default::default(),
+            runtime_data: [(
+                VLLM_INFERENCE_V1_GENERATE_CAPABILITY.to_string(),
+                serde_json::Value::Bool(true),
+            )]
+            .into(),
             llm: Some(LlmRegistration {
                 context_length: nonzero(self.server.max_model_len),
                 kv_cache_block_size: nonzero(self.server.kv_block_size),
