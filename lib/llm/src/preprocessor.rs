@@ -2219,6 +2219,36 @@ impl OpenAIPreprocessor {
         );
     }
 
+    /// The Kimi K3 template reads the grade as `thinking_effort` (`low|high|max`),
+    /// not the OpenAI `reasoning_effort` key the request normalizer writes.
+    fn normalize_kimi_k3_reasoning_effort(
+        request: &mut NvCreateChatCompletionRequest,
+        tool_call_parser: Option<&str>,
+    ) {
+        let uses_kimi_k3_parser =
+            tool_call_parser.is_some_and(|parser| matches!(parser, "kimi_k3" | "kimi-k3"));
+        if !uses_kimi_k3_parser {
+            return;
+        }
+        let Some(args) = request.chat_template_args.as_mut() else {
+            return;
+        };
+        if args.contains_key("thinking_effort") {
+            return;
+        }
+        let Some(effort) = args
+            .get("reasoning_effort")
+            .and_then(serde_json::Value::as_str)
+            .filter(|effort| matches!(*effort, "low" | "high" | "max"))
+        else {
+            return;
+        };
+        args.insert(
+            "thinking_effort".to_string(),
+            serde_json::Value::String(effort.to_string()),
+        );
+    }
+
     fn mistral_reasoning_enabled(
         chat_template_args: Option<&std::collections::HashMap<String, serde_json::Value>>,
     ) -> bool {
@@ -6963,6 +6993,7 @@ impl
             thinking_control_from_client,
         );
         Self::normalize_kimi_k3_named_tool_choice(&mut request, self.tool_call_parser.as_deref());
+        Self::normalize_kimi_k3_reasoning_effort(&mut request, self.tool_call_parser.as_deref());
 
         // create a response generator
         let response_generator = request.response_generator(context.id().to_string());
@@ -10276,6 +10307,66 @@ mod tests {
                 Some(args)
             ));
         }
+    }
+
+    #[test]
+    fn test_kimi_k3_reasoning_effort_maps_to_thinking_effort() {
+        for (body, expected) in [
+            (
+                serde_json::json!({"reasoning_effort": "high"}),
+                Some("high"),
+            ),
+            (
+                serde_json::json!({"thinking": {"type": "enabled", "effort": "max"}}),
+                Some("max"),
+            ),
+            (
+                serde_json::json!({
+                    "reasoning_effort": "low",
+                    "chat_template_args": {"thinking_effort": "max"}
+                }),
+                Some("max"),
+            ),
+            (serde_json::json!({"reasoning_effort": "medium"}), None),
+        ] {
+            let mut request_json = serde_json::json!({
+                "model": "moonshotai/Kimi-K3",
+                "messages": [{"role": "user", "content": "Hello"}]
+            });
+            request_json
+                .as_object_mut()
+                .unwrap()
+                .extend(body.as_object().unwrap().clone());
+            let mut request: NvCreateChatCompletionRequest =
+                serde_json::from_value(request_json).unwrap();
+            request.normalize_reasoning_template_args().unwrap();
+            OpenAIPreprocessor::normalize_kimi_k3_reasoning_effort(&mut request, Some("kimi_k3"));
+
+            let args = request.chat_template_args.as_ref().unwrap();
+            assert_eq!(
+                args.get("thinking_effort")
+                    .and_then(serde_json::Value::as_str),
+                expected,
+                "body {body}"
+            );
+        }
+
+        let mut request: NvCreateChatCompletionRequest =
+            serde_json::from_value(serde_json::json!({
+                "model": "test",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "reasoning_effort": "high"
+            }))
+            .unwrap();
+        request.normalize_reasoning_template_args().unwrap();
+        OpenAIPreprocessor::normalize_kimi_k3_reasoning_effort(&mut request, Some("hermes"));
+        assert!(
+            !request
+                .chat_template_args
+                .as_ref()
+                .unwrap()
+                .contains_key("thinking_effort")
+        );
     }
 
     #[test]

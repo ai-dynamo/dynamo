@@ -139,12 +139,20 @@ impl NvCreateChatCompletionRequest {
             .map(openai_thinking_mode)
             .transpose()?
             .flatten();
+        let thinking_object = self.thinking.as_ref().and_then(|value| value.as_object());
         // vLLM's order: an explicit top-level grade wins, else the nested one.
+        // Kimi Code sends the grade as `thinking.effort` rather than `reasoning_effort`.
         let reasoning_effort = self
             .inner
             .reasoning_effort
             .as_ref()
             .and_then(|effort| serde_json::to_value(effort).ok())
+            .or_else(|| {
+                thinking_object
+                    .and_then(|object| object.get("effort"))
+                    .filter(|effort| effort.is_string())
+                    .cloned()
+            })
             .or_else(|| {
                 self.chat_template_args
                     .as_ref()
@@ -153,12 +161,22 @@ impl NvCreateChatCompletionRequest {
                     .filter(|effort| !effort.is_null())
                     .cloned()
             });
+        // Moonshot `thinking.keep: "all"` retains prior-turn reasoning in the
+        // prompt; the Kimi templates read it as `preserve_thinking`.
+        let preserve_thinking = thinking_object
+            .and_then(|object| object.get("keep"))
+            .filter(|keep| !keep.is_null())
+            .map(|keep| keep.as_str() == Some("all"));
 
         let has_template_control = self
             .chat_template_args
             .as_ref()
             .is_some_and(|args| THINKING_KEYS.iter().any(|key| args.contains_key(*key)));
-        if thinking_mode.is_none() && reasoning_effort.is_none() && !has_template_control {
+        if thinking_mode.is_none()
+            && reasoning_effort.is_none()
+            && preserve_thinking.is_none()
+            && !has_template_control
+        {
             return Ok(());
         }
 
@@ -206,6 +224,12 @@ impl NvCreateChatCompletionRequest {
         }
         if let Some(effort) = reasoning_effort {
             args.insert("reasoning_effort".to_string(), effort);
+        }
+        if let Some(preserve) = preserve_thinking {
+            args.insert(
+                "preserve_thinking".to_string(),
+                serde_json::Value::Bool(preserve),
+            );
         }
 
         // The raw `thinking` payload has been folded into `chat_template_args`;
@@ -1410,6 +1434,53 @@ mod tests {
         assert_eq!(args.get("thinking_mode"), Some(&json!("adaptive")));
         assert_eq!(args.get("thinking"), None);
         assert!(request.thinking.is_none());
+    }
+
+    #[test]
+    fn test_nested_thinking_effort_and_keep_normalize_to_template_args() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "enabled", "effort": "high", "keep": "all"}
+        }))
+        .unwrap();
+        request.normalize_reasoning_template_args().unwrap();
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&json!(true)));
+        assert_eq!(args.get("reasoning_effort"), Some(&json!("high")));
+        assert_eq!(args.get("preserve_thinking"), Some(&json!(true)));
+        assert!(request.thinking.is_none());
+    }
+
+    #[test]
+    fn test_top_level_reasoning_effort_outranks_nested_thinking_effort() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "low",
+            "thinking": {"type": "enabled", "effort": "max"}
+        }))
+        .unwrap();
+        request.normalize_reasoning_template_args().unwrap();
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("reasoning_effort"), Some(&json!("low")));
+        assert_eq!(args.get("preserve_thinking"), None);
+    }
+
+    #[test]
+    fn test_thinking_keep_null_is_not_preserve() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K2.6",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "enabled", "keep": null}
+        }))
+        .unwrap();
+        request.normalize_reasoning_template_args().unwrap();
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("preserve_thinking"), None);
     }
 
     #[test]
