@@ -1,12 +1,8 @@
 name: 'Pytest'
 description: 'Run pytest on pre-built container images'
-# This action runs as ONE shell step on purpose. The test jobs execute as
-# GitHub `container:` jobs on ARC Kubernetes runners, where every step is a
-# separate exec into the job pod costing 20-40 s of fixed overhead regardless
-# of what it does. The former nine-step layout (env init, MinIO wait, GPU
-# check, pytest, result processing, three uploads) spent ~4 min per invocation
-# on that overhead alone. Artifact uploads moved to shared-test.yml so they
-# happen once per job rather than once per stage.
+# Keep this a single shell step: each step in a `container:` job is a separate
+# exec into the job pod with significant fixed overhead. Artifact uploads live
+# in shared-test.yml so they happen once per job.
 inputs:
   pytest_marks:
     description: 'Pytest marks'
@@ -95,8 +91,7 @@ runs:
         REQUESTED_HF_HOME: ${{ inputs.hf_home }}
         GPU_TESTS: ${{ inputs.gpu_tests }}
         RUN_ID: ${{ github.run_id }}
-        # The Datadog GitHub action used to export this; the ddtrace GitHub
-        # provider reads it to link test sessions to the job.
+        # Required by the ddtrace GitHub provider to link test sessions to the job.
         JOB_CHECK_RUN_ID: ${{ job.check_run_id }}
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
         PYTEST_XML_FILE: pytest_test_report.xml

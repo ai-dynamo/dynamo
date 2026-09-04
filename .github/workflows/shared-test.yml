@@ -172,11 +172,9 @@ jobs:
         # coverage.py collects nothing ("No data was collected" warnings) and TIA
         # gets no signal. Disable ITR (skips the settings API, coverage, skipping).
         DD_CIVISIBILITY_ITR_ENABLED: 'false'
-        # Datadog Test Optimization is configured here rather than through
-        # datadog/test-visibility-github-action: that action is six steps, and
-        # every step in a `container:` job on the ARC runners costs 20-40 s of
-        # exec overhead. ddtrace itself is pinned in requirements.test.txt. These
-        # are the variables the action exported (see its job log).
+        # Datadog Test Optimization is configured through ddtrace environment
+        # variables (ddtrace is pinned in requirements.test.txt) to avoid extra
+        # container-job hook steps.
         DD_API_KEY: ${{ secrets.DD_API_KEY }}
         DD_SITE: datadoghq.com
         DD_CIVISIBILITY_ENABLED: 'true'
@@ -290,12 +288,8 @@ jobs:
           parallel_mode: 'none'
           enable_coverage: ${{ inputs.enable_coverage }}
           gpu_tests: 'true'
-      # Artifacts are uploaded once per job, not once per stage: every stage
-      # writes uniquely named files into the shared test-results/ directory, and
-      # each upload step is another ~30 s container-hook round trip. Names keep
-      # the test-results-* / allure-results-* / coverage-python-* prefixes that
-      # test_report.yaml, generate-allure-report.yml, and the nightly coverage
-      # merge match on.
+      # Artifact names must keep the test-results-* / allure-results-* /
+      # coverage-python-* prefixes consumed by the report and coverage workflows.
       - name: Upload Test Results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
