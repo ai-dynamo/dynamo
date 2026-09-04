@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2026 NVIDIA Corporation -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 600" width="780" height="600">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5"
+            markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#555" stroke-width="1.5"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="780" height="600" fill="#ffffff"/>
+
+  <!-- Title -->
+  <text x="390" y="36" text-anchor="middle"
+        font-family="sans-serif" font-size="16" font-weight="600" fill="#1a1a1a">
+    Dynamo Planner — Control Loop
+  </text>
+  <text x="390" y="56" text-anchor="middle"
+        font-family="sans-serif" font-size="12" fill="#666">
+    one tick per adjustment interval
+  </text>
+
+  <!-- ── INPUT BOXES (left column) ── -->
+  <!-- Traffic metrics -->
+  <rect x="20" y="110" width="150" height="48" rx="8"
+        fill="#f1efe8" stroke="#b4b2a9" stroke-width="1"/>
+  <text x="95" y="131" text-anchor="middle"
+        font-family="sans-serif" font-size="13" font-weight="600" fill="#2c2c2a">
+    Traffic metrics
+  </text>
+  <text x="95" y="149" text-anchor="middle"
+        font-family="sans-serif" font-size="11" fill="#5f5e5a">
+    request rate, ISL, OSL
+  </text>
+
+  <!-- Forward pass metrics -->
+  <rect x="20" y="188" width="150" height="48" rx="8"
+        fill="#f1efe8" stroke="#b4b2a9" stroke-width="1"/>
+  <text x="95" y="209" text-anchor="middle"
+        font-family="sans-serif" font-size="13" font-weight="600" fill="#2c2c2a">
+    Forward pass metrics
+  </text>
+  <text x="95" y="227" text-anchor="middle"
+        font-family="sans-serif" font-size="11" fill="#5f5e5a">
+    wall time, token counts
+  </text>
+
+  <!-- Worker counts -->
+  <rect x="20" y="266" width="150" height="48" rx="8"
+        fill="#f1efe8" stroke="#b4b2a9" stroke-width="1"/>
+  <text x="95" y="287" text-anchor="middle"
+        font-family="sans-serif" font-size="13" font-weight="600" fill="#2c2c2a">
+    Worker counts
+  </text>
+  <text x="95" y="305" text-anchor="middle"
+        font-family="sans-serif" font-size="11" fill="#5f5e5a">
+    prefill, decode replicas
+  </text>
+
+  <!-- Profiling data -->
+  <rect x="20" y="344" width="150" height="48" rx="8"
+        fill="#f1efe8" stroke="#b4b2a9" stroke-width="1"/>
+  <text x="95" y="365" text-anchor="middle"
+        font-family="sans-serif" font-size="13" font-weight="600" fill="#2c2c2a">
+    Profiling data
+  </text>
+  <text x="95" y="383" text-anchor="middle"
+        font-family="sans-serif" font-size="11" fill="#5f5e5a">
+    TTFT / ITL lookup tables
+  </text>
+
+  <!-- ── PHASE BOXES (centre column) ── -->
+  <!-- 1. OBSERVE -->
+  <rect x="250" y="100" width="180" height="60" rx="8"
+        fill="#eeedfe" stroke="#534ab7" stroke-width="1.5"/>
+  <text x="340" y="126" text-anchor="middle"
+        font-family="sans-serif" font-size="14" font-weight="700" fill="#3c3489">
+    1 · Observe
+  </text>
+  <text x="340" y="147" text-anchor="middle"
+        font-family="sans-serif" font-size="11" fill="#534ab7">
+    collect metrics into context
+  </text>
+
+  <!-- 2. PREDICT -->
+  <rect x="250" y="210" width="180" height="60" rx="8"
+        fill="#e1f5ee" stroke="#0f6e56" stroke-width="1.5"/>
+  <text x="340" y="236" text-anchor="middle"
+        font-family="sans-serif" font-size="14" font-weight="700" fill="#085041">
+    2 · Predict
+  </text>
+  <text x="340" y="257" text-anchor="middle"
+        font-family="sans-serif" font-size="11" fill="#0f6e56">
+    forecast next interval load
+  </text>
+
+  <!-- 3. PLAN -->
+  <rect x="250" y="320" width="180" height="60" rx="8"
+        fill="#faeeda" stroke="#854f0b" stroke-width="1.5"/>
+  <text x="340" y="346" text-anchor="middle"
+        font-family="sans-serif" font-size="14" font-weight="700" fill="#633806">
+    3 · Plan
+  </text>
+  <text x="340" y="367" text-anchor="middle"
+        font-family="sans-serif" font-size="11" fill="#854f0b">
+    compute prefill / decode targets
+  </text>
+
+  <!-- 4. EXECUTE -->
+  <rect x="250" y="430" width="180" height="60" rx="8"
+        fill="#faece7" stroke="#993c1d" stroke-width="1.5"/>
+  <text x="340" y="456" text-anchor="middle"
+        font-family="sans-serif" font-size="14" font-weight="700" fill="#712b13">
+    4 · Execute
+  </text>
+  <text x="340" y="477" text-anchor="middle"
+        font-family="sans-serif" font-size="11" fill="#993c1d">
+    apply scaling via connector
+  </text>
+
+  <!-- ── RIGHT COLUMN BOXES ── -->
+  <!-- Throughput mode -->
+  <rect x="490" y="195" width="190" height="60" rx="8"
+        fill="#e1f5ee" stroke="#0f6e56" stroke-width="1"/>
+  <text x="585" y="221" text-anchor="middle"
+        font-family="sans-serif" font-size="13" font-weight="600" fill="#085041">
+    Throughput mode
+  </text>
+  <text x="585" y="241" text-anchor="middle"
+        font-family="sans-serif" font-size="11" fill="#0f6e56">
+    ARIMA / Kalman forecast
+  </text>
+
+  <!-- Load mode -->
+  <rect x="490" y="305" width="190" height="60" rx="8"
+        fill="#faeeda" stroke="#854f0b" stroke-width="1"/>
+  <text x="585" y="331" text-anchor="middle"
+        font-family="sans-serif" font-size="13" font-weight="600" fill="#633806">
+    Load mode
+  </text>
+  <text x="585" y="351" text-anchor="middle"
+        font-family="sans-serif" font-size="11" fill="#854f0b">
+    FPM online regression
+  </text>
+
+  <!-- Scaling decision -->
+  <rect x="490" y="425" width="190" height="60" rx="8"
+        fill="#faece7" stroke="#993c1d" stroke-width="1"/>
+  <text x="585" y="451" text-anchor="middle"
+        font-family="sans-serif" font-size="13" font-weight="600" fill="#712b13">
+    Scaling decision
+  </text>
+  <text x="585" y="471" text-anchor="middle"
+        font-family="sans-serif" font-size="11" fill="#993c1d">
+    num_prefill / num_decode
+  </text>
+
+  <!-- ── ARROWS: inputs → OBSERVE ── -->
+  <line x1="170" y1="134" x2="250" y2="124"
+        stroke="#888" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="170" y1="212" x2="250" y2="128"
+        stroke="#888" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="170" y1="290" x2="250" y2="133"
+        stroke="#888" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- Profiling data → PLAN -->
+  <path d="M170 368 L215 368 L215 350 L250 350"
+        fill="none" stroke="#888" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- ── ARROWS: phase to phase ── -->
+  <line x1="340" y1="160" x2="340" y2="210"
+        stroke="#444" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="340" y1="270" x2="340" y2="320"
+        stroke="#444" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="340" y1="380" x2="340" y2="430"
+        stroke="#444" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- ── ARROWS: phases → right column ── -->
+  <line x1="430" y1="240" x2="490" y2="225"
+        stroke="#888" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="430" y1="350" x2="490" y2="335"
+        stroke="#888" stroke-width="1" marker-end="url(#arrow)"/>
+  <line x1="430" y1="460" x2="490" y2="455"
+        stroke="#888" stroke-width="1" marker-end="url(#arrow)"/>
+
+  <!-- ── FEEDBACK ARROW: Execute → back to Observe ── -->
+  <path d="M340 490 L340 545 L145 545 L145 100 L250 100"
+        fill="none" stroke="#aaa" stroke-width="1.2"
+        stroke-dasharray="6 4" marker-end="url(#arrow)"/>
+  <text x="240" y="562" text-anchor="middle"
+        font-family="sans-serif" font-size="11" fill="#888">
+    next tick
+  </text>
+
+  <!-- ── LEGEND ── -->
+  <rect x="250" y="515" width="12" height="12" rx="2" fill="#eeedfe" stroke="#534ab7"/>
+  <text x="268" y="526" font-family="sans-serif" font-size="11" fill="#444">Observe</text>
+  <rect x="320" y="515" width="12" height="12" rx="2" fill="#e1f5ee" stroke="#0f6e56"/>
+  <text x="338" y="526" font-family="sans-serif" font-size="11" fill="#444">Predict</text>
+  <rect x="390" y="515" width="12" height="12" rx="2" fill="#faeeda" stroke="#854f0b"/>
+  <text x="408" y="526" font-family="sans-serif" font-size="11" fill="#444">Plan</text>
+  <rect x="448" y="515" width="12" height="12" rx="2" fill="#faece7" stroke="#993c1d"/>
+  <text x="466" y="526" font-family="sans-serif" font-size="11" fill="#444">Execute</text>
+  <rect x="516" y="515" width="12" height="12" rx="2" fill="#f1efe8" stroke="#b4b2a9"/>
+  <text x="534" y="526" font-family="sans-serif" font-size="11" fill="#444">Input</text>
+</svg>
