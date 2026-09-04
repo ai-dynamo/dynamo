@@ -800,11 +800,10 @@ fn hicache_native_offloading_capacity(server_info: &Value, model_info: &Value) -
     let host_tokens = match server_info.get("hicache_host_total_tokens") {
         Some(value) => value.as_u64().filter(|tokens| *tokens > 0)?,
         None => {
-            if is_deepseek_v4_arch(model_info)
-                || server_info
-                    .get("enable_hierarchical_cache")
-                    .and_then(Value::as_bool)
-                    != Some(true)
+            if server_info
+                .get("enable_hierarchical_cache")
+                .and_then(Value::as_bool)
+                != Some(true)
                 || server_info.get("hicache_size").and_then(Value::as_u64) != Some(0)
                 || client::json_u64(server_info, "dcp_size")
                     .unwrap_or(1)
@@ -819,16 +818,32 @@ fn hicache_native_offloading_capacity(server_info: &Value, model_info: &Value) -
                 .get("hicache_ratio")?
                 .as_f64()
                 .filter(|ratio| ratio.is_finite() && *ratio > 0.0)?;
-            let unaligned_tokens = device_tokens as f64 * ratio;
-            if !unaligned_tokens.is_finite() || unaligned_tokens >= u64::MAX as f64 {
-                return None;
+            if is_deepseek_v4_arch(model_info) {
+                // Compatibility with SGLang's current DSV4 host allocator. Prefer the
+                // authoritative field above once SGLang exposes realized capacity.
+                let device_pages = device_tokens
+                    .checked_add(page_size.checked_sub(1)?)?
+                    .checked_div(page_size)?;
+                let host_pages = device_pages as f64 * ratio;
+                if !host_pages.is_finite() || host_pages >= u64::MAX as f64 {
+                    return None;
+                }
+                (host_pages as u64).checked_mul(page_size)?
+            } else {
+                let unaligned_tokens = device_tokens as f64 * ratio;
+                if !unaligned_tokens.is_finite() || unaligned_tokens >= u64::MAX as f64 {
+                    return None;
+                }
+                (unaligned_tokens as u64)
+                    .checked_div(page_size)?
+                    .checked_add(1)?
+                    .checked_mul(page_size)?
             }
-            (unaligned_tokens as u64)
-                .checked_div(page_size)?
-                .checked_add(1)?
-                .checked_mul(page_size)?
         }
     };
+    if host_tokens == 0 {
+        return None;
+    }
 
     match policy {
         "write_back" => Some(host_tokens),
@@ -1074,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_v4_capacity_requires_authoritative_total() {
+    fn supports_deepseek_v4_hicache_capacity() {
         let mut server_info = json!({
             "enable_hierarchical_cache": true,
             "hicache_size": 0,
@@ -1093,17 +1108,17 @@ mod tests {
                     &server_info,
                     &json!({"architectures": [architecture]}),
                 ),
-                None
+                Some(16384)
             );
         }
 
-        server_info["hicache_host_total_tokens"] = json!(16384);
+        server_info["hicache_host_total_tokens"] = json!(16640);
         assert_eq!(
             hicache_native_offloading_capacity(
                 &server_info,
                 &json!({"architectures": ["DeepseekV4ForCausalLM"]}),
             ),
-            Some(16384)
+            Some(16640)
         );
     }
 
