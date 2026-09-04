@@ -9,13 +9,13 @@
 # that would push the total GPU count across its managed DGDs above MAX_TOTAL_GPUS.
 #
 # The budget applies only to DGDs managed by this GlobalPlanner (see
-# --managed-namespaces), not to every DGD in the cluster. In this example the
-# ctrl DGD runs in implicit mode (no --managed-namespaces), so all DGDs in the
+# managed_namespaces), not to every DGD in the cluster. In this example the
+# ctrl DGD runs in implicit mode (no managed_namespaces), so all DGDs in the
 # same K8s namespace count toward the budget. To limit the budget to specific
-# DGDs, pass --managed-namespaces with their Dynamo namespaces.
+# DGDs, set managed_namespaces in --config with their Dynamo namespaces.
 #
 # Architecture:
-#   DGD gp-ctrl:    GlobalPlanner (--max-total-gpus)
+#   DGD gp-ctrl:    GlobalPlanner (--config with max_total_gpus)
 #   DGD model-a:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_A)
 #   DGD model-b:    Frontend + VllmPrefillWorker + VllmDecodeWorker + Planner  (MODEL_B)
 #
@@ -66,8 +66,8 @@ spec:
       spec:
         containers:
         - args:
-          - --max-total-gpus
-          - "${MAX_TOTAL_GPUS}"
+          - --config
+          - '{"max_total_gpus": ${MAX_TOTAL_GPUS}}'
           command:
           - python3
           - -m
