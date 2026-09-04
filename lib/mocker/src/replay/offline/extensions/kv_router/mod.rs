@@ -378,6 +378,7 @@ impl KvRouterPlacement {
                 best_available_overlap_blocks: admission.best_available_overlap_blocks,
                 isl_blocks: admission.isl_blocks,
             }),
+            placement_replica_id: None,
         }
     }
 
@@ -931,6 +932,15 @@ impl OfflineReplayRouter {
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
         let scheduling_request = request.scheduling_request(self.block_size as usize, worker_loads);
+        let best_available_overlap_blocks = u32::try_from(
+            dynamo_kv_router::scheduling::SchedulingContext::new(
+                &scheduling_request,
+                &self.workers_with_configs,
+            )
+            .best_cached_tokens()
+                / self.block_size as usize,
+        )
+        .unwrap_or(u32::MAX);
         let eligibility = scheduling_request.eligibility();
         let best_available_overlap_blocks = request
             .overlaps
@@ -1191,6 +1201,7 @@ mod tests {
             uuid: Some(Uuid::from_u128(uuid)),
             dp_rank: 0,
             preferred_dp_rank: None,
+            preferred_prefill_dp_rank: None,
             arrival_timestamp_ms: Some(0.0),
             priority,
             strict_priority,
