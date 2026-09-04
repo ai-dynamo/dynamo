@@ -37,7 +37,9 @@ from dynamo.sglang.protocol import (
 )
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 from dynamo.sglang.request_handlers.llm.prefill_handler import PrefillWorkerHandler
-from dynamo.sglang.request_handlers.multimodal.worker_handler import SglangUtils
+from dynamo.sglang.request_handlers.multimodal.worker_handler import (
+    MultimodalWorkerHandler,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -85,7 +87,6 @@ def test_choice_request_ids_keeps_sglang_ids_unique_per_choice():
 
 def test_decode_rooms_single_sample_uses_bootstrap_room():
     assert resolve_decode_bootstrap_rooms({"bootstrap_room": 7}, 1) == [7]
-    # Extra rooms are ignored for n == 1.
     assert resolve_decode_bootstrap_rooms(
         {"bootstrap_room": 7, BOOTSTRAP_ROOMS_KEY: [7, 9]}, 1
     ) == [7]
@@ -160,21 +161,20 @@ def test_raise_if_disagg_parallel_sampling_only_rejects_multiple_samples():
     assert "n=2" in excinfo.value.message
 
 
-def test_multimodal_disagg_sampling_params_reject_parallel_sampling():
-    def request(n: int | None) -> SglangMultimodalRequest:
-        return SglangMultimodalRequest(
-            request=PreprocessedRequest(
-                token_ids=[1, 2, 3],
-                stop_conditions=StopConditions(max_tokens=8),
-                sampling_options=SamplingOptions(n=n),
-            )
+@pytest.mark.asyncio
+async def test_multimodal_decode_rejects_parallel_sampling_before_dispatch():
+    handler = MultimodalWorkerHandler.__new__(MultimodalWorkerHandler)
+    handler.serving_mode = DisaggregationMode.DECODE
+    request = SglangMultimodalRequest(
+        request=PreprocessedRequest(
+            token_ids=[1, 2, 3],
+            stop_conditions=StopConditions(max_tokens=8),
+            sampling_options=SamplingOptions(n=2),
         )
-
-    raise_if_disagg_parallel_sampling(SglangUtils.build_sampling_params(request(None)))
-    raise_if_disagg_parallel_sampling(SglangUtils.build_sampling_params(request(1)))
+    )
 
     with pytest.raises(HttpError) as excinfo:
-        raise_if_disagg_parallel_sampling(SglangUtils.build_sampling_params(request(2)))
+        await _collect(handler.generate(request, _context()))
 
     assert excinfo.value.code == 400
 
@@ -270,7 +270,6 @@ async def test_merge_choice_streams_close_cancels_every_sibling():
     assert first[1] in (0, 1)
     await merged.aclose()
 
-    # Both sub-requests were submitted (iterated), aborted, and torn down.
     assert all(event.is_set() for event in started)
     assert sorted(aborted) == [0, 1]
     assert all(event.is_set() for event in closed)
@@ -546,7 +545,6 @@ async def test_decode_rejects_parallel_sampling_from_older_frontend():
         await _collect(handler.generate(_token_request(2, bootstrap_info), _context()))
 
     assert excinfo.value.code == 400
-    # Rejected before any engine work.
     assert engine.calls == []
 
 
