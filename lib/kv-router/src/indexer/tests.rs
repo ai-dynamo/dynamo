@@ -392,6 +392,15 @@ fn warning_metric_value(metrics: &KvIndexerMetrics, warning_kind: &'static str) 
 }
 
 #[cfg(feature = "metrics")]
+fn rejected_parent_block_count(metrics: &KvIndexerMetrics) -> u64 {
+    metrics
+        .kv_cache_rejected_blocks
+        .get_metric_with_label_values(&[METRIC_REJECTED_BLOCKS_PARENT_NOT_FOUND])
+        .unwrap()
+        .get()
+}
+
+#[cfg(feature = "metrics")]
 fn assert_no_event_errors(metrics: &KvIndexerMetrics) {
     let invalid_count = [
         (METRIC_EVENT_STORED, METRIC_STATUS_PARENT_NOT_FOUND),
@@ -480,6 +489,33 @@ mod interface_tests {
         .await;
         assert_no_event_errors(metrics.as_ref());
         assert_no_event_warnings(metrics.as_ref());
+    }
+
+    #[cfg(feature = "metrics")]
+    #[tokio::test]
+    #[apply(indexer_template)]
+    async fn orphaned_multi_block_store_counts_all_rejected_blocks(variant: &str) {
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let (index, metrics) = make_indexer_with_metrics(variant, metrics);
+
+        index.apply_event(make_store_event(1, &[7, 8])).await;
+        flush_and_settle(index.as_ref()).await;
+        assert_eq!(rejected_parent_block_count(metrics.as_ref()), 0);
+
+        index
+            .apply_event(make_store_event_with_parent(0, &[1, 2, 3], &[4, 5, 6]))
+            .await;
+        flush_and_settle(index.as_ref()).await;
+
+        assert_eq!(
+            event_metric_value(
+                metrics.as_ref(),
+                METRIC_EVENT_STORED,
+                METRIC_STATUS_PARENT_NOT_FOUND,
+            ),
+            1
+        );
+        assert_eq!(rejected_parent_block_count(metrics.as_ref()), 3);
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@ static IGNORED_RESIDENCY_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 /// `event_type` label — replacing the former `get_event_type()` helper.
 #[derive(Debug, Clone, Copy)]
 pub enum EventKind {
-    Stored,
+    Stored { block_count: u64 },
     Removed,
     Cleared,
 }
@@ -37,7 +37,9 @@ pub enum EventKind {
 impl EventKind {
     pub fn of(data: &KvCacheEventData) -> Self {
         match data {
-            KvCacheEventData::Stored(_) => Self::Stored,
+            KvCacheEventData::Stored(store) => Self::Stored {
+                block_count: store.blocks.len() as u64,
+            },
             KvCacheEventData::Removed(_) => Self::Removed,
             KvCacheEventData::Cleared => Self::Cleared,
         }
@@ -45,7 +47,7 @@ impl EventKind {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Stored => METRIC_EVENT_STORED,
+            Self::Stored { .. } => METRIC_EVENT_STORED,
             Self::Removed => METRIC_EVENT_REMOVED,
             Self::Cleared => METRIC_EVENT_CLEARED,
         }
@@ -178,6 +180,9 @@ pub struct KvIndexerMetrics {
     /// Counters for CKF mutation outcomes that are finer-grained than event status.
     #[cfg(feature = "metrics")]
     pub ckf_mutation: IntCounterVec,
+    /// Counter of blocks rejected because their parent was absent from the index.
+    #[cfg(feature = "metrics")]
+    pub kv_cache_rejected_blocks: IntCounterVec,
 }
 
 /// Metric status labels.
@@ -229,6 +234,16 @@ const CKF_MUTATION_NAME: &str = "dynamo_kvrouter_ckf_mutation_total";
 const CKF_MUTATION_HELP: &str = "Total number of CKF block-level mutation outcomes";
 #[cfg(feature = "metrics")]
 const CKF_MUTATION_LABELS: &[&str] = &["outcome"];
+#[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
+const KV_CACHE_REJECTED_BLOCKS_SUFFIX: &str = "kv_cache_rejected_blocks_total";
+#[cfg(feature = "metrics")]
+const KV_CACHE_REJECTED_BLOCKS_NAME: &str = "dynamo_kvrouter_kv_cache_rejected_blocks_total";
+#[cfg(feature = "metrics")]
+const KV_CACHE_REJECTED_BLOCKS_HELP: &str = "Total KV cache blocks rejected by the router indexer";
+#[cfg(feature = "metrics")]
+const KV_CACHE_REJECTED_BLOCKS_LABELS: &[&str] = &["reason"];
+#[cfg(feature = "metrics")]
+pub const METRIC_REJECTED_BLOCKS_PARENT_NOT_FOUND: &str = "parent_block_not_found";
 
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
@@ -239,11 +254,13 @@ impl KvIndexerMetrics {
         kv_cache_events_applied: IntCounterVec,
         kv_cache_event_warnings: IntCounterVec,
         ckf_mutation: IntCounterVec,
+        kv_cache_rejected_blocks: IntCounterVec,
     ) -> Self {
         Self {
             kv_cache_events_applied,
             kv_cache_event_warnings,
             ckf_mutation,
+            kv_cache_rejected_blocks,
         }
     }
 
@@ -262,6 +279,10 @@ impl KvIndexerMetrics {
                 Opts::new(CKF_MUTATION_NAME, CKF_MUTATION_HELP),
                 CKF_MUTATION_LABELS,
             )?,
+            IntCounterVec::new(
+                Opts::new(KV_CACHE_REJECTED_BLOCKS_NAME, KV_CACHE_REJECTED_BLOCKS_HELP),
+                KV_CACHE_REJECTED_BLOCKS_LABELS,
+            )?,
         ))
     }
 
@@ -272,6 +293,7 @@ impl KvIndexerMetrics {
         registry.register(Box::new(metrics.kv_cache_events_applied.clone()))?;
         registry.register(Box::new(metrics.kv_cache_event_warnings.clone()))?;
         registry.register(Box::new(metrics.ckf_mutation.clone()))?;
+        registry.register(Box::new(metrics.kv_cache_rejected_blocks.clone()))?;
         Ok(metrics)
     }
 
@@ -302,17 +324,28 @@ impl KvIndexerMetrics {
                             CKF_MUTATION_LABELS,
                             &[],
                         ),
+                        component.metrics().create_intcountervec(
+                            KV_CACHE_REJECTED_BLOCKS_SUFFIX,
+                            KV_CACHE_REJECTED_BLOCKS_HELP,
+                            KV_CACHE_REJECTED_BLOCKS_LABELS,
+                            &[],
+                        ),
                     ) {
                         (
                             Ok(kv_cache_events_applied),
                             Ok(kv_cache_event_warnings),
                             Ok(ckf_mutation),
+                            Ok(kv_cache_rejected_blocks),
                         ) => Arc::new(Self::new(
                             kv_cache_events_applied,
                             kv_cache_event_warnings,
                             ckf_mutation,
+                            kv_cache_rejected_blocks,
                         )),
-                        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                        (Err(e), _, _, _)
+                        | (_, Err(e), _, _)
+                        | (_, _, Err(e), _)
+                        | (_, _, _, Err(e)) => {
                             tracing::warn!("Failed to create kv indexer metrics from component: {}. Using unregistered metrics as fallback.", e);
                             Arc::new(Self::new_unregistered())
                         }
@@ -418,6 +451,7 @@ struct PreBoundMetricCounters {
     cleared: ResultCounters,
     duplicate_store_warning: IntCounter,
     ckf_mutation: CkfMutationCounters,
+    rejected_parent_not_found_blocks: IntCounter,
 }
 
 #[cfg(feature = "metrics")]
@@ -500,6 +534,9 @@ impl PreBoundEventCounters {
                             .ckf_mutation
                             .with_label_values(&[METRIC_CKF_MUTATION_CAPACITY_EXHAUSTED]),
                     },
+                    rejected_parent_not_found_blocks: metrics
+                        .kv_cache_rejected_blocks
+                        .with_label_values(&[METRIC_REJECTED_BLOCKS_PARENT_NOT_FOUND]),
                 },
             }
         }
@@ -519,11 +556,20 @@ impl PreBoundEventCounters {
         #[cfg(feature = "metrics")]
         {
             let counters = match kind {
-                EventKind::Stored => &self.inner.stored,
+                EventKind::Stored { .. } => &self.inner.stored,
                 EventKind::Removed => &self.inner.removed,
                 EventKind::Cleared => &self.inner.cleared,
             };
             counters.for_result(result).inc();
+            if let (
+                EventKind::Stored { block_count },
+                Err(KvCacheEventError::ParentBlockNotFound),
+            ) = (kind, result)
+            {
+                self.inner
+                    .rejected_parent_not_found_blocks
+                    .inc_by(block_count);
+            }
         }
         #[cfg(not(feature = "metrics"))]
         let _ = (self, kind, result);
