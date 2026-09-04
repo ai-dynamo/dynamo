@@ -389,6 +389,23 @@ def test_effective_cpu_budget_caps_num_cpus_at_detected_quota(monkeypatch):
     assert vram_utils.effective_cpu_budget() == 2
 
 
+def test_xdist_auto_workers_uses_visible_gpu_vram(request, monkeypatch):
+    monkeypatch.setattr(request.config.option, "max_vram_gib", 10.0)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+    monkeypatch.setattr(
+        vram_utils,
+        "detect_gpus",
+        lambda: [
+            {"index": 0, "name": "GPU 0", "total_mib": 24 * 1024},
+            {"index": 1, "name": "GPU 1", "total_mib": 24 * 1024},
+        ],
+    )
+
+    workers = request.config.hook.pytest_xdist_auto_num_workers(config=request.config)
+
+    assert workers == 2
+
+
 @pytest.mark.parametrize("invalid_budget", ["bogus", "inf", "1e309", "0", "-1"])
 def test_effective_cpu_budget_warns_for_invalid_num_cpus(
     monkeypatch, caplog, invalid_budget
