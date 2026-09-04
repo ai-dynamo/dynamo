@@ -2525,6 +2525,7 @@ dependencies = [
  "anyhow",
  "axum 0.8.4",
  "bytes",
+ "dashmap",
  "dynamo-kv-router",
  "dynamo-llm",
  "dynamo-protocols",
