@@ -284,11 +284,16 @@ where
             .collect::<Vec<String>>()
     );
 
-    http_service
-        .run(distributed_runtime.primary_token())
-        .await?;
+    let run_result = http_service.run(distributed_runtime.primary_token()).await;
 
-    distributed_runtime.shutdown(); // Cancel primary token
+    // The watcher tasks spawned by `run_watcher` hold clones of the
+    // distributed runtime and stay alive until the primary token is
+    // cancelled. `shutdown` cancels it, so it must run on every return path
+    // after the watcher has spawned — including a bind error from `run`,
+    // which otherwise leaves the model-discovery tasks running.
+    distributed_runtime.shutdown();
+
+    run_result?;
     Ok(())
 }
 
