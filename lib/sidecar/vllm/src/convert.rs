@@ -7,8 +7,8 @@ use dynamo_backend_common::{
 };
 
 use crate::client;
-use crate::json::{json_to_struct, struct_to_json};
 use crate::proto as pb;
+use dynamo_sidecar_common::{json_to_struct, struct_to_json};
 
 const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
 const MULTIMODAL_PROMPT_TOKEN_IDS_KEY: &str = "_dynamo_sidecar_multimodal_prompt_token_ids";
@@ -559,8 +559,12 @@ fn build_kv_parameters(
         cache_salt: cache_salt
             .map(|cache_salt| format!("{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"))
             .unwrap_or_default(),
-        kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
-        ec_transfer_params: ec_transfer_params.map(json_to_struct).transpose()?,
+        kv_transfer_params: kv_transfer_params
+            .map(|value| json_to_struct(value, "kv_transfer_params"))
+            .transpose()?,
+        ec_transfer_params: ec_transfer_params
+            .map(|value| json_to_struct(value, "ec_transfer_params"))
+            .transpose()?,
     })
 }
 
@@ -863,7 +867,7 @@ impl ResponseState {
             }
             let params = finish
                 .ec_transfer_params
-                .map(struct_to_json)
+                .map(|value| struct_to_json(value, "vLLM", "ec_transfer_params"))
                 .transpose()?
                 .and_then(|value| value.as_object().cloned())
                 .ok_or_else(|| {
@@ -871,7 +875,10 @@ impl ResponseState {
                 })?;
             return Ok(Some(LLMEngineOutput::encode_terminal(params)));
         }
-        mapped.disaggregated_params = finish.kv_transfer_params.map(struct_to_json).transpose()?;
+        mapped.disaggregated_params = finish
+            .kv_transfer_params
+            .map(|value| struct_to_json(value, "vLLM", "kv_transfer_params"))
+            .transpose()?;
         if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
                 "prefill terminal is missing kv_transfer_params",

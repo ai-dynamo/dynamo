@@ -33,7 +33,7 @@ pub use dynamo_llm::protocols::common::preprocessor::{
 pub use dynamo_llm::protocols::common::{
     FinishReason, GuidedDecodingOptions, OutputOptions, SamplingOptions, StopConditions,
 };
-pub use dynamo_protocols::types::{CompletionUsage, StopReason};
+pub use dynamo_protocols::types::{CompletionUsage, PromptTokensDetails, StopReason};
 pub use dynamo_runtime::engine::AsyncEngineContext;
 
 /// Per-request handle wrapping the runtime context. `Deref`s to
