@@ -33,6 +33,7 @@ It is a standalone Rust executable and is also compiled into
 - Image, video, and audio URL and data-URI inputs; cache UUIDs remain image-only
 - Opaque encoder-cache handoff through vLLM `ec_transfer_params`
 - Inline preprocessed multimodal features from the native vLLM TITO envelope
+- Opaque routed-expert output with prompt-prefix offsets
 
 Audio and video gRPC inputs are not available in vLLM `0.28.0`. They require a later vLLM release.
 

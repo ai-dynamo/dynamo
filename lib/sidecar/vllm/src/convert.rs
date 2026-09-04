@@ -42,6 +42,13 @@ struct VllmTitoPlaceholder {
     is_embed: Option<Vec<bool>>,
 }
 
+#[derive(Default)]
+struct VllmTitoProjection {
+    features: Option<VllmTitoFeatures>,
+    routed_experts_prompt_start: Option<u32>,
+    skip_special_tokens: Option<bool>,
+}
+
 fn request_has_raw_media(request: &PreprocessedRequest) -> bool {
     request
         .multi_modal_data
@@ -139,7 +146,16 @@ pub(crate) fn build_generate_request(
     let stop_conditions = request.stop_conditions;
     let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
-    let (features, skip_special_tokens) = consume_vllm_tito(&mut extra_args, skip_special_tokens)?;
+    let VllmTitoProjection {
+        features,
+        routed_experts_prompt_start,
+        skip_special_tokens,
+    } = consume_vllm_tito(&mut extra_args, skip_special_tokens)?;
+    if routed_experts_prompt_start.is_some_and(|start| start as usize >= prompt_token_count) {
+        return Err(client::invalid_argument(format!(
+            "extra_args.vllm_tito.sampling_params.routed_experts_prompt_start must be less than the request token count {prompt_token_count}"
+        )));
+    }
     let media = if let Some(features) = features {
         build_preprocessed_media(features, prompt_token_count)?
     } else {
@@ -205,6 +221,7 @@ pub(crate) fn build_generate_request(
             output_logprobs: output_logprobs.is_some(),
             output_candidates: output_logprobs.map(top_n_candidates).transpose()?,
             skip_special_tokens,
+            routed_experts_prompt_start,
         }),
         kv: Some(kv),
         truncate_prompt_tokens: 0,
@@ -229,12 +246,18 @@ pub(crate) fn data_parallel_rank(
 fn consume_vllm_tito(
     extra_args: &mut Option<serde_json::Value>,
     canonical_skip_special_tokens: Option<bool>,
-) -> Result<(Option<VllmTitoFeatures>, Option<bool>), DynamoError> {
+) -> Result<VllmTitoProjection, DynamoError> {
     let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
-        return Ok((None, canonical_skip_special_tokens));
+        return Ok(VllmTitoProjection {
+            skip_special_tokens: canonical_skip_special_tokens,
+            ..Default::default()
+        });
     };
     let Some(envelope) = extra.remove("vllm_tito") else {
-        return Ok((None, canonical_skip_special_tokens));
+        return Ok(VllmTitoProjection {
+            skip_special_tokens: canonical_skip_special_tokens,
+            ..Default::default()
+        });
     };
     let serde_json::Value::Object(envelope) = envelope else {
         return Err(client::invalid_argument(
@@ -301,6 +324,7 @@ fn consume_vllm_tito(
                 | "skip_reading_prefix_cache"
                 | "skip_special_tokens"
                 | "return_token_ids"
+                | "routed_experts_prompt_start"
         ) {
             return Err(client::invalid_argument(format!(
                 "extra_args.vllm_tito.sampling_params.{key} is not supported by vLLM gRPC"
@@ -331,7 +355,24 @@ fn consume_vllm_tito(
             "extra_args.vllm_tito.sampling_params.return_token_ids must be true",
         ));
     }
-    Ok((features, skip_special_tokens))
+    let routed_experts_prompt_start = match sampling.get("routed_experts_prompt_start") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    client::invalid_argument(
+                        "extra_args.vllm_tito.sampling_params.routed_experts_prompt_start must be an unsigned 32-bit integer",
+                    )
+                })?,
+        ),
+    };
+    Ok(VllmTitoProjection {
+        features,
+        routed_experts_prompt_start,
+        skip_special_tokens,
+    })
 }
 
 fn consume_redundant_nvext(
@@ -1126,6 +1167,10 @@ impl ResponseState {
         } else {
             None
         };
+        let routed_experts = output
+            .routed_experts
+            .as_ref()
+            .map(|payload| serde_json::Value::String(BASE64_STANDARD.encode(&payload.data)));
         let pb::SequenceOutput {
             text,
             num_tokens,
@@ -1155,6 +1200,11 @@ impl ResponseState {
         }
 
         let Some(finish) = finish_info else {
+            if routed_experts.is_some() {
+                return Err(client::protocol_error(
+                    "received routed experts on a nonterminal response",
+                ));
+            }
             return if self.mode.is_prefill() || self.mode.is_encode() || num_tokens == 0 {
                 Ok(None)
             } else {
@@ -1192,6 +1242,11 @@ impl ResponseState {
         });
         mapped.completion_usage = Some(usage(self.prompt_tokens, completion_tokens));
         if self.mode.is_encode() {
+            if routed_experts.is_some() {
+                return Err(client::protocol_error(
+                    "received routed experts on an encoder response",
+                ));
+            }
             if matches!(
                 mapped.finish_reason,
                 Some(dynamo_backend_common::FinishReason::Cancelled)
@@ -1246,6 +1301,22 @@ impl ResponseState {
             );
         }
         self.attach_prompt_data(&mut mapped);
+        if let Some(routed_experts) = routed_experts {
+            let engine_data = mapped
+                .engine_data
+                .get_or_insert_with(|| serde_json::json!({}));
+            let object = engine_data.as_object_mut().ok_or_else(|| {
+                client::protocol_error("response engine data is not a JSON object")
+            })?;
+            if object
+                .insert("routed_experts".to_string(), routed_experts)
+                .is_some()
+            {
+                return Err(client::protocol_error(
+                    "response engine data already contains routed_experts",
+                ));
+            }
+        }
         Ok(Some(mapped))
     }
 
