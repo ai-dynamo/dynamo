@@ -467,9 +467,6 @@ func validateFailoverCheckpointProfile(
 	if config.Mode != "" && config.Mode != v1beta1.CheckpointModeAuto {
 		violations = append(violations, errors.New("checkpoint mode must be automatic"))
 	}
-	if config.DeletionPolicy != "" && config.DeletionPolicy != v1beta1.CheckpointDeletionPolicyDelete {
-		violations = append(violations, errors.New("deletionPolicy must be Delete"))
-	}
 	if config.TargetContainerName != "" && config.TargetContainerName != commonconsts.MainContainerName {
 		violations = append(violations, errors.New("targetContainerName must be main"))
 	}
