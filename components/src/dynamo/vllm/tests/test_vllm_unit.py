@@ -94,6 +94,82 @@ def test_base_model_lora_capacity(enable_lora, model_type, expected):
     assert _load_vllm_main()._base_model_lora_capacity(config, model_type) == expected
 
 
+def test_engine_metric_prefixes_include_external_connector_prefixes():
+    config = SimpleNamespace(
+        connector_metric_prefixes=["external_connector_", "custom:", "vllm:"],
+        engine_args=SimpleNamespace(ec_transfer_config=None),
+    )
+
+    assert _load_vllm_main()._get_engine_metric_prefixes(config) == [
+        "vllm:",
+        "lmcache:",
+        "external_connector_",
+        "custom:",
+    ]
+
+
+def test_engine_metric_prefixes_support_omni_config_without_external_prefixes():
+    config = SimpleNamespace(
+        engine_args=SimpleNamespace(ec_transfer_config=None),
+    )
+
+    assert _load_vllm_main()._get_engine_metric_prefixes(config) == [
+        "vllm:",
+        "lmcache:",
+    ]
+
+
+def test_external_connector_prefixes_are_read_from_global_registry():
+    config = SimpleNamespace(
+        connector_metric_prefixes=["external_connector_"],
+        engine_args=SimpleNamespace(ec_transfer_config=None),
+    )
+    main = _load_vllm_main()
+
+    assert main._get_in_process_metric_prefixes(config) == [
+        "vllm:",
+        "external_connector_",
+    ]
+    assert main._get_multiprocess_only_metric_prefixes(config) == ["lmcache:"]
+
+
+def test_metrics_fallback_exposes_external_prefixes_without_duplicates(
+    tmp_path, monkeypatch
+):
+    main = _load_vllm_main()
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+    config = SimpleNamespace(
+        connector_metric_prefixes=["external_connector_"],
+        engine_args=SimpleNamespace(
+            disable_log_stats=False,
+            ec_transfer_config=None,
+        ),
+        namespace="test-namespace",
+        component="backend",
+        endpoint="generate",
+    )
+
+    with (
+        patch.object(main, "get_metrics_model_name", return_value="test-model"),
+        patch.object(main, "register_engine_metrics_callback") as register,
+        patch.object(
+            main.multiprocess,
+            "MultiProcessCollector",
+            side_effect=[ValueError("already registered"), None],
+        ),
+    ):
+        main.setup_metrics_collection(config, SimpleNamespace(), logging.getLogger())
+
+    assert register.call_args_list[1].kwargs["metric_prefix_filters"] == [
+        "vllm:",
+        "external_connector_",
+    ]
+    assert register.call_args_list[2].kwargs["metric_prefix_filters"] == [
+        "vllm:",
+        "lmcache:",
+    ]
+
+
 def test_kv_event_block_size_prefers_cached_main_attention_value():
     """LoRA MDC registration relies on this: the cached main-attention block
     size (configured at engine setup) wins over cache_config.block_size, so
