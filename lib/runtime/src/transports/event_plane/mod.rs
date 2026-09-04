@@ -17,8 +17,8 @@ pub use frame::{FRAME_HEADER_SIZE, FRAME_VERSION, Frame, FrameError, FrameHeader
 pub use traits::{EventEnvelope, EventStream, TypedEventStream};
 pub use transport::{EventTransportRx, EventTransportTx, WireStream};
 pub use zmq_transport::{
-    ValidatedEnvelope, ValidatedZmqSource, ValidatedZmqSourceError, ZmqPubTransport,
-    ZmqSubTransport,
+    DynamicZmqSubSocket, ValidatedEnvelope, ValidatedZmqSource, ValidatedZmqSourceError,
+    ZmqPubTransport, ZmqSubTransport, ZmqWireMessage,
 };
 
 // Re-export transport kind from discovery for convenience
