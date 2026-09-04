@@ -284,6 +284,7 @@ class DynamoReplayRunner:
         trace_format = spec.workload.get("trace_format", "mooncake")
         if not isinstance(trace_format, str):
             raise TypeError("trace workload requires a string trace_format")
+        agentic_lanes = spec.workload.get("agentic_lanes")
         if deployment.deployment_mode == "agg":
             return run_trace_replay(
                 trace_files=trace_files,
@@ -292,6 +293,7 @@ class DynamoReplayRunner:
                     "trace_block_size", self.trace_block_size
                 ),
                 max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
+                agentic_lanes=agentic_lanes,
                 extra_engine_args=self._engine_args(deployment.agg_engine_args),
                 num_workers=deployment.num_workers,
                 **common,
@@ -303,6 +305,7 @@ class DynamoReplayRunner:
                 "trace_block_size", self.trace_block_size
             ),
             max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
+            agentic_lanes=agentic_lanes,
             prefill_engine_args=self._engine_args(deployment.prefill_engine_args),
             decode_engine_args=self._engine_args(deployment.decode_engine_args),
             num_prefill_workers=deployment.num_prefill_workers,

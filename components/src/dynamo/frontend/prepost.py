@@ -36,6 +36,7 @@ from dynamo.common.utils.guided_json import admits_only_empty_object
 from dynamo.llm.exceptions import InvalidArgument
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
+from .utils import legacy_guided_decoding
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -318,38 +319,14 @@ def _build_assistant_guided_decoding(
     )
 
     request_extra = request.model_extra or {}
-    # Pick a single legacy guided_* constraint by precedence rather than merging
-    # several keys into one dict, because guided_decoding carries exactly one
-    # constraint and the elif chain above already honors that for
-    # structured_outputs.
-    #
-    # TODO: first-match-wins silently discards the other constraints the caller
-    # explicitly set, with no error and no annotation.
-    # GuidedDecodingOptions::validate in protocols/common.rs rejects the same
-    # request outright, so `guided_json` + `guided_regex` is a 400 through the Rust
-    # frontend and a silent single-constraint request here. Rejecting is the
-    # correct behavior; it is left as-is only to avoid adding a second new 400 to
-    # this change. Note that validate() also counts whitespace_pattern toward its
-    # exclusivity limit, so the {"json": ..., "whitespace_pattern": ...} pair built
-    # below is accepted here and rejected there -- whitespace_pattern modifies a
-    # grammar rather than being one, so that counter is the side that is wrong.
-    legacy_guidance: dict[str, Any] = {}
-    for key, value in (
-        ("json", request_extra.get("guided_json")),
-        ("regex", request_extra.get("guided_regex")),
-        ("grammar", request_extra.get("guided_grammar")),
-        ("choice", request_extra.get("guided_choice") or None),
-    ):
-        if value is not None:
-            legacy_guidance = {key: value}
-            break
+    # Match GuidedDecodingOptions::validate: modifiers are allowed alongside one
+    # constraint, but multiple legacy constraints must not be silently discarded.
+    legacy_guidance = legacy_guided_decoding(request_extra)
     if legacy_guidance:
         # Legacy guided_* takes precedence over structured_outputs (prior
         # behavior), but as a single constraint.
+        # legacy_guided_decoding already carried whitespace_pattern across.
         guided_decoding = legacy_guidance
-        whitespace_pattern = request_extra.get("guided_whitespace_pattern")
-        if whitespace_pattern is not None:
-            guided_decoding["whitespace_pattern"] = whitespace_pattern
     return guided_decoding
 
 

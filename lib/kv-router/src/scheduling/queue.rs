@@ -1439,6 +1439,9 @@ impl<
                             .max_num_batched_tokens()
                             .unwrap_or(DEFAULT_MAX_BATCHED_TOKENS)
                             as usize,
+                        // TODO(rank-aware-kv-capacity): resolve the selected DP rank and preserve
+                        // capacity quality. Estimated fallbacks must not authorize load-based
+                        // admission/bypass decisions that require an exact or conservative bound.
                         total_kv_blocks: config.total_kv_blocks().map(|blocks| blocks as usize),
                     };
                     SelectedWorkerForRequest {
