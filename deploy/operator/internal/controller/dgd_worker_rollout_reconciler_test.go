@@ -75,9 +75,6 @@ var testScheme = func() *runtime.Scheme {
 	return s
 }()
 
-// createTestDCD converts src to v1beta1, stamps dgd as its controller owner,
-// and returns the result. Use this instead of betaDCD when the DCD should be
-// owned by dgd so that IsControlledBy checks in production code pass.
 func createTestDCD(t testing.TB, dgd *nvidiacomv1beta1.DynamoGraphDeployment, src *nvidiacomv1alpha1.DynamoComponentDeployment) *nvidiacomv1beta1.DynamoComponentDeployment {
 	t.Helper()
 	dcd := betaDCD(t, src)

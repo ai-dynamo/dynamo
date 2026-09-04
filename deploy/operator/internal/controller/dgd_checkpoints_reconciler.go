@@ -908,9 +908,7 @@ func checkpointWorkerHashForComponent(dgd *nvidiacomv1beta1.DynamoGraphDeploymen
 	if component == nil || !dynamo.IsWorkerComponent(string(component.ComponentType)) {
 		return "", nil
 	}
-	// Checkpoint reconciliation must wait for a committed generation; return
-	// empty until the active hash is recorded on the DGD so that SnapshotJobs
-	// are never created for an uncommitted generation.
+	// Pend until a generation is committed; avoids SnapshotJobs for an uncommitted hash.
 	if currentWorkerHashes(dgd).empty() {
 		return "", nil
 	}
