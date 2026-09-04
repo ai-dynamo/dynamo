@@ -214,6 +214,31 @@ The default model is `Qwen/Qwen3-0.6B`. The script declares a GPU requirement of
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg.sh)
 </Accordion>
+<Accordion title="Disaggregated Data-Parallel Attention">
+
+Runs one prefill worker and one decode worker with two data-parallel attention ranks on the same two
+GPUs. The small default model keeps this topology suitable for functional testing.
+
+The default model is `silence09/DeepSeek-R1-Small-2layers`. The script declares a GPU requirement
+of 2.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_DISAGG_BOOTSTRAP_PORT` | `12345` | Bootstrap port used to establish the prefill/decode connection. |
+| `SGLANG_PREFILL_DIST_INIT_ADDR` | `127.0.0.1:29500` | Base address for the prefill data-parallel process group. |
+| `SGLANG_DECODE_DIST_INIT_ADDR` | `127.0.0.1:29510` | Base address for the decode data-parallel process group. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
+**Command-line flags:** `--model` sets the model identifier or path.
+
+```bash
+./launch/disagg_dp_attn.sh
+```
+
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/launch/disagg_dp_attn.sh)
+</Accordion>
 <Accordion title="Independent Prefill and Decode Pools">
 
 Starts two prefill and two decode workers with KV-aware routing across both pools. Use this four-GPU

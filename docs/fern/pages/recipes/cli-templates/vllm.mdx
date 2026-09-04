@@ -974,6 +974,57 @@ The default model is `Qwen/Qwen3-0.6B`.
 </Accordion>
 </AccordionGroup>
 
+## Realtime Audio
+
+<AccordionGroup>
+<Accordion title="Realtime Speech-to-Speech">
+
+Starts a vLLM-Omni realtime worker and exposes the bidirectional `/v1/realtime` WebSocket endpoint.
+The default model is `Qwen/Qwen3-Omni-30B-A3B-Instruct`. The launcher starts one worker and requires
+enough GPU memory for the selected model.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP and WebSocket port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | Worker system and metrics port. |
+
+**Command-line flags:** `--model` sets the model identifier or path. Additional arguments are
+forwarded to `dynamo.vllm.omni`.
+
+```bash
+./launch/agg_omni_realtime.sh
+```
+
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_omni_realtime.sh)
+The script uses the
+[realtime audio client](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/realtime_audio_client.py)
+to exercise the WebSocket endpoint.
+</Accordion>
+<Accordion title="Realtime Audio Transcription">
+
+Starts one vLLM realtime transcription worker. The default model is
+`mistralai/Voxtral-Mini-4B-Realtime-2602`, and the default topology uses one GPU.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_HTTP_PORT` | `8000` | HTTP and WebSocket port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | Worker system and metrics port. |
+
+**Command-line flags:** `--model` sets the model identifier or path. Additional arguments are
+forwarded to `dynamo.vllm`.
+
+```bash
+./launch/agg_realtime_transcription.sh
+```
+
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_realtime_transcription.sh)
+</Accordion>
+</AccordionGroup>
+
 ## vLLM-Omni
 
 ### Aggregated
@@ -1131,6 +1182,33 @@ sets the diffusion stage-configuration file.
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_omni_glm_image.sh)
 </Accordion>
+<Accordion title="Cross-Node GLM-Image with NIXL">
+
+Runs the autoregressive and diffusion stages on separate hosts or accelerator types and transfers
+intermediate tensors through NIXL. Start the script once with `ROLE=ar` and once with `ROLE=dit`. The
+default model is `zai-org/GLM-Image`; each role uses one accelerator by default, and `AR_TP` or
+`DIT_TP` increases tensor parallelism.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `ROLE` | Required | Starts the `ar` stage with the router and frontend, or the `dit` stage. |
+| `AR_DEVICE_TYPE` | `cuda` | Accelerator type for the autoregressive stage. |
+| `DIT_DEVICE_TYPE` | `xpu` | Accelerator type for the diffusion stage. |
+| `NATS_SERVER` | `nats://127.0.0.1:4222` | Shared NATS endpoint reachable from both hosts. |
+| `ETCD_ENDPOINTS` | `http://127.0.0.1:2379` | Shared etcd endpoint reachable from both hosts. |
+| `STAGE_CONFIG` | `launch/stage_configs/glm_image_nixl.yaml` | Pipeline and NIXL connector configuration. |
+
+```bash
+ROLE=ar ./launch/disagg_omni_glm_image_nixl.sh
+ROLE=dit ./launch/disagg_omni_glm_image_nixl.sh
+```
+
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/disagg_omni_glm_image_nixl.sh)
+
+<Code src="../../../../../examples/backends/vllm/launch/stage_configs/glm_image_nixl.yaml" title="glm_image_nixl.yaml" language="yaml" maxLines={0} />
+</Accordion>
 </AccordionGroup>
 
 ## LoRA
@@ -1162,6 +1240,28 @@ The default model is `Qwen/Qwen3-0.6B`.
 ```
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/agg_lora.sh)
+</Accordion>
+<Accordion title="LoRA Adapter from Hugging Face">
+
+Starts one LoRA-enabled vLLM worker and loads an adapter directly from Hugging Face through the
+worker system API. The default base model is `Qwen/Qwen3-0.6B`, the default adapter is
+`codelion/Qwen3-0.6B-accuracy-recovery-lora`, and the script declares a GPU requirement of 1.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MODEL` | `Qwen/Qwen3-0.6B` | Base model loaded by vLLM. |
+| `HF_LORA_REPO` | `codelion/Qwen3-0.6B-accuracy-recovery-lora` | Hugging Face adapter repository. |
+| `LORA_URI` | `hf://$HF_LORA_REPO` | Adapter URI sent to the worker. |
+| `DYN_SYSTEM_PORT` | `8081` | Worker system API used to load the adapter. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+
+```bash
+./launch/lora/agg_lora_hf.sh
+```
+
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/agg_lora_hf.sh)
 </Accordion>
 <Accordion title="LoRA Adapters with KV-Aware Routing">
 
@@ -1214,6 +1314,27 @@ The default model is `Qwen/Qwen3-VL-2B-Instruct`.
 ```
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/multimodal/lora_agg.sh)
+</Accordion>
+<Accordion title="vLLM-Omni Image Generation with LoRA">
+
+Starts one vLLM-Omni image worker with dynamic LoRA loading enabled. The default model is
+`stabilityai/stable-diffusion-xl-base-1.0`, and tensor parallelism defaults to one GPU.
+
+**Configuration**
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DYN_MODEL_NAME` | `stabilityai/stable-diffusion-xl-base-1.0` | Base image model. |
+| `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |
+| `DYN_SYSTEM_PORT` | `8081` | Worker system API used to load and unload adapters. |
+| `DYN_TENSOR_PARALLEL_SIZE` | `1` | Number of accelerators assigned to the worker. |
+| `DYN_MEDIA_OUTPUT_FS_URL` | `file:///tmp/dynamo_media` | Output location for generated media. |
+
+```bash
+./launch/lora/omni/omni_lora_agg.sh
+```
+
+[View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/lora/omni/omni_lora_agg.sh)
 </Accordion>
 </AccordionGroup>
 
@@ -1574,6 +1695,25 @@ The default model is `Qwen/Qwen3-0.6B`.
 ```
 
 [View the launch script.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/disagg_router_xpu_gdr.sh)
+</Accordion>
+<Accordion title="Heterogeneous XPU Prefill and CPU Decode">
+
+Splits one `Qwen/Qwen3-0.6B` deployment across an Intel XPU prefill worker and a CPU decode worker.
+Run both scripts with shared discovery endpoints. KV blocks move through NIXL over TCP using CPU
+buffers for cross-device compatibility. The default topology uses one XPU and one CPU worker.
+
+Run the two commands in separate shells on their respective hosts:
+
+```bash
+# XPU host
+./launch/xpu/disagg_hetero_xpu_prefill.sh
+
+# CPU host
+./launch/xpu/disagg_hetero_cpu_decode.sh
+```
+
+[View the XPU prefill launcher.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/disagg_hetero_xpu_prefill.sh)
+[View the CPU decode launcher.](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/xpu/disagg_hetero_cpu_decode.sh)
 </Accordion>
 </AccordionGroup>
 

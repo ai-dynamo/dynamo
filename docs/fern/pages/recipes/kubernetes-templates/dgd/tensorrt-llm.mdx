@@ -52,6 +52,25 @@ deployment. Apply the whole file — every document in it is part of the example
 </Accordion>
 </AccordionGroup>
 
+## Snapshot Restore
+
+<Warning>
+Dynamo Snapshot restore is experimental. Replace the placeholder images, create the required
+`model-cache` PersistentVolumeClaim, and verify the host supports the checkpoint requirements before
+applying this manifest.
+</Warning>
+
+<AccordionGroup>
+<Accordion title="snapshot-restore.yaml · Restore a TensorRT-LLM worker from a checkpoint">
+<Code src="../../../../../../examples/backends/trtllm/deploy/snapshot-restore.yaml" title="snapshot-restore.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="qwen3/snapshot.yaml · Conservative checkpoint engine configuration">
+The deployment references this TensorRT-LLM engine configuration.
+
+<Code src="../../../../../../examples/backends/trtllm/engine_configs/qwen3/snapshot.yaml" title="snapshot.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
 ## Source
 
 All templates live in
