@@ -87,6 +87,7 @@ setup(
         "gpu_memory_service.v1.server",
         "gpu_memory_service.v1.snapshot",
         "gpu_memory_service.v1.integrations",
+        "gpu_memory_service.v1.integrations.sglang",
         "gpu_memory_service.v1.integrations.vllm",
     ],
     package_dir={
@@ -117,7 +118,10 @@ setup(
         "console_scripts": [
             "gpu-memory-service=gpu_memory_service.cli.runner:main",
             "gms-storage-client=gpu_memory_service.cli.storage_runner:main",
-        ]
+        ],
+        "sglang.srt.plugins": [
+            "gms-v1=gpu_memory_service.v1.integrations.sglang.plugin:register_gms_v1_plugin",
+        ],
     },
     ext_modules=_create_ext_modules(),
     cmdclass={"build_ext": BuildExtension},

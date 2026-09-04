@@ -171,6 +171,9 @@ pub mod frontend_service {
     /// Environment variable that overrides the default metric prefix
     pub const METRICS_PREFIX_ENV: &str = "DYN_METRICS_PREFIX";
 
+    /// Whether the frontend can route at least one inference request for a model
+    pub const MODEL_READY: &str = "model_ready";
+
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
@@ -722,6 +725,7 @@ pub mod tokio_perf {
     pub const WORKER_LOCAL_QUEUE_DEPTH: &str = "worker_local_queue_depth";
     pub const WORKER_STEAL_COUNT_TOTAL: &str = "worker_steal_count_total";
     pub const WORKER_OVERFLOW_COUNT_TOTAL: &str = "worker_overflow_count_total";
+    pub const QUEUE_OVERLOAD_WARNINGS_TOTAL: &str = "queue_overload_warnings_total";
     pub const BLOCKING_THREADS: &str = "blocking_threads";
     pub const BLOCKING_IDLE_THREADS: &str = "blocking_idle_threads";
     pub const BLOCKING_QUEUE_DEPTH: &str = "blocking_queue_depth";

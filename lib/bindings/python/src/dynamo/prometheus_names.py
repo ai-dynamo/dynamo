@@ -91,6 +91,8 @@ class frontend_service:
 
     # Environment variable that overrides the default metric prefix
     METRICS_PREFIX_ENV = "DYN_METRICS_PREFIX"
+    # Whether the frontend can route at least one inference request for a model
+    MODEL_READY = "model_ready"
     # Total number of LLM requests processed
     REQUESTS_TOTAL = "requests_total"
     # Total number of LLM requests accepted by the frontend handler
@@ -531,6 +533,7 @@ class tokio_perf:
     WORKER_LOCAL_QUEUE_DEPTH = "worker_local_queue_depth"
     WORKER_STEAL_COUNT_TOTAL = "worker_steal_count_total"
     WORKER_OVERFLOW_COUNT_TOTAL = "worker_overflow_count_total"
+    QUEUE_OVERLOAD_WARNINGS_TOTAL = "queue_overload_warnings_total"
     BLOCKING_THREADS = "blocking_threads"
     BLOCKING_IDLE_THREADS = "blocking_idle_threads"
     BLOCKING_QUEUE_DEPTH = "blocking_queue_depth"

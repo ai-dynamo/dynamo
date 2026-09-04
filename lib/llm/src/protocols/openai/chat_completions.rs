@@ -9,7 +9,6 @@ use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::engines::ValidateRequest;
-use crate::preprocessor::media::MediaDecoder;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
@@ -23,6 +22,7 @@ use crate::protocols::common::extensions::{
 pub mod aggregator;
 mod delta;
 pub mod tool_parser_v2;
+pub(crate) mod unified_parser;
 
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
@@ -111,11 +111,12 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<serde_json::Value>,
 
-    /// Runtime media decoding parameters.
-    /// When provided, these override the MDC defaults
+    /// Runtime media decoding parameters, forwarded verbatim to the worker when the
+    /// worker owns decoding. When the frontend decodes, these override the MDC defaults.
+    /// Kept opaque so options the frontend does not own pass through untouched.
     /// Example: `{"video": {"num_frames": 16}}`
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_io_kwargs: Option<MediaDecoder>,
+    pub media_io_kwargs: Option<serde_json::Value>,
 
     /// When true, logprob token fields are returned as "token_id:`<id>`" instead
     /// of decoded text.
@@ -284,6 +285,21 @@ pub struct NvCreateChatCompletionStreamResponse {
     pub llm_metrics: Option<crate::protocols::common::metrics::LLMMetricAnnotation>,
 }
 
+/// Synthetic chunks reuse a real response envelope but consume no backend data.
+/// Clear copied transport and per-chunk fields so clients do not count them twice.
+pub(crate) fn scrub_synthetic_chunk_metadata(
+    response: &mut Annotated<NvCreateChatCompletionStreamResponse>,
+) -> Option<()> {
+    response.event = None;
+    response.comment = None;
+    response.error = None;
+    let data = response.data.as_mut()?;
+    data.inner.usage = None;
+    data.llm_metrics = None;
+    data.nvext = None;
+    Some(())
+}
+
 /// Build one synthetic stream choice from an existing response template.
 ///
 /// Both streaming tool-call paths use this constructor when an engine omits a
@@ -298,8 +314,6 @@ pub(super) fn stream_choice_chunk_from_template(
     finish_reason: Option<FinishReason>,
 ) -> Annotated<NvCreateChatCompletionStreamResponse> {
     let mut response = template.clone();
-    response.inner.usage = None;
-    response.llm_metrics = None;
     #[allow(deprecated)]
     let choice = ChatChoiceStream {
         index,
@@ -315,13 +329,15 @@ pub(super) fn stream_choice_chunk_from_template(
         logprobs: None,
     };
     response.inner.choices = vec![choice];
-    Annotated {
+    let mut chunk = Annotated {
         data: Some(response),
         id: None,
         event: None,
         comment: None,
         error: None,
-    }
+    };
+    scrub_synthetic_chunk_metadata(&mut chunk);
+    chunk
 }
 
 /// Implements `NvExtProvider` for `NvCreateChatCompletionRequest`,
@@ -619,6 +635,10 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_top_k(self.get_top_k())?;
         // Cross-field validation
         validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
+        validate::validate_continue_final_message(
+            self.common.add_generation_prompt,
+            self.common.continue_final_message,
+        )?;
 
         Ok(())
     }
@@ -629,10 +649,121 @@ mod tests {
     use super::*;
     use crate::engines::ValidateRequest;
     use crate::protocols::common::{
-        OutputOptionsProvider, SamplingOptionsProvider, StopConditionsProvider,
+        GuidedDecodingOptions, OutputOptionsProvider, SamplingOptionsProvider,
+        StopConditionsProvider,
     };
     use dynamo_protocols::types::{ChatCompletionTool, ChatCompletionToolType, FunctionObject};
     use serde_json::json;
+
+    /// Builds a minimal chat request and merges `extra` into its top-level fields.
+    fn chat_request_with(extra: &serde_json::Value) -> NvCreateChatCompletionRequest {
+        let mut body = json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 20
+        });
+        for (key, value) in extra.as_object().expect("fixture is an object") {
+            body[key] = value.clone();
+        }
+        serde_json::from_value(body).expect("Failed to deserialize request")
+    }
+
+    /// Extracts sampling options for `extra` and returns the guided-decoding options it
+    /// produced, failing if extraction rejected the request or engaged nothing.
+    fn guided_for(extra: &serde_json::Value) -> GuidedDecodingOptions {
+        chat_request_with(extra)
+            .extract_sampling_options()
+            .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"))
+            .guided_decoding
+            .unwrap_or_else(|| panic!("{extra} must produce guided decoding options"))
+    }
+
+    #[test]
+    fn test_conflicting_guided_decoding_options_return_invalid_argument() {
+        // Each pair is two constraints set at once; every one of them must be rejected.
+        let conflicts = [
+            json!({"guided_json": {"type": "object"}, "guided_regex": "a+"}),
+            json!({"guided_regex": "a+", "guided_choice": ["x", "y"]}),
+            json!({"guided_grammar": "root ::= \"a\"", "guided_json": {"type": "object"}}),
+        ];
+
+        for extra in conflicts {
+            let error = chat_request_with(&extra)
+                .extract_sampling_options()
+                .unwrap_err();
+            let dynamo_error = error
+                .downcast_ref::<dynamo_runtime::error::DynamoError>()
+                .expect("sampling extraction must preserve the HTTP error type");
+            assert_eq!(
+                dynamo_error.error_type(),
+                dynamo_runtime::error::ErrorType::InvalidArgument,
+                "guided-decoding conflicts must map to HTTP 400",
+            );
+        }
+    }
+
+    /// The guard for the above: a legal request must keep validating, so the conflict
+    /// check cannot be satisfied by rejecting guided decoding outright.
+    ///
+    /// `whitespace_pattern` is a modifier, not a constraint -- it changes how a JSON
+    /// grammar is applied. `GuidedDecodingOptions::validate` used to count it toward the
+    /// exclusivity limit, which rejected `guided_json` + `guided_whitespace_pattern` even
+    /// though the error text never named `whitespace_pattern` and the Python frontend
+    /// (`components/src/dynamo/frontend/prepost.py`) builds that exact pair. Every case
+    /// asserts the resulting options, not merely that extraction returned `Ok`.
+    #[test]
+    fn test_guided_decoding_constraint_with_modifier_stays_valid() {
+        let json_only = guided_for(&json!({"guided_json": {"type": "object"}}));
+        assert!(json_only.json.is_some());
+
+        let regex_only = guided_for(&json!({"guided_regex": "a+"}));
+        assert_eq!(regex_only.regex.as_deref(), Some("a+"));
+
+        let choice_only = guided_for(&json!({"guided_choice": ["x", "y"]}));
+        assert_eq!(
+            choice_only.choice,
+            Some(vec!["x".to_string(), "y".to_string()])
+        );
+
+        // The companion pair: whitespace_pattern modifies the JSON grammar rather than
+        // being a second grammar, so setting both is one constraint, not two.
+        let json_with_modifier = guided_for(
+            &json!({"guided_json": {"type": "object"}, "guided_whitespace_pattern": "[\n ]?"}),
+        );
+        assert!(json_with_modifier.json.is_some());
+        assert_eq!(
+            json_with_modifier.whitespace_pattern.as_deref(),
+            Some("[\n ]?")
+        );
+
+        let regex_with_modifier =
+            guided_for(&json!({"guided_regex": "a+", "guided_whitespace_pattern": "[\n ]?"}));
+        assert_eq!(regex_with_modifier.regex.as_deref(), Some("a+"));
+        assert_eq!(
+            regex_with_modifier.whitespace_pattern.as_deref(),
+            Some("[\n ]?")
+        );
+    }
+
+    /// A modifier on its own describes how to apply a constraint that was never supplied.
+    /// It must engage no guided decoding at all: emitting a constraint-less
+    /// `GuidedDecodingOptions` makes vLLM raise `ValueError` on the worker and disables
+    /// request migration, for a request the caller never meant as structured output.
+    #[test]
+    fn test_guided_decoding_modifier_alone_engages_nothing() {
+        for extra in [
+            json!({"guided_whitespace_pattern": "[\n ]?"}),
+            json!({"guided_decoding_backend": "xgrammar"}),
+        ] {
+            let sampling = chat_request_with(&extra)
+                .extract_sampling_options()
+                .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"));
+            assert!(
+                sampling.guided_decoding.is_none(),
+                "{extra} sets no constraint, so guided decoding must not be engaged",
+            );
+        }
+    }
 
     #[test]
     fn test_top_k_sentinel_contract() {
@@ -1146,6 +1277,82 @@ mod tests {
                 "unexpected error for {arguments:?}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn test_validate_continue_final_message_rejects_both_true() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Continue this sentence"},
+                {"role": "assistant", "content": "LLM-Native Interaction"}
+            ],
+            "add_generation_prompt": true,
+            "continue_final_message": true
+        }))
+        .expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request)
+            .expect_err("continue_final_message and add_generation_prompt cannot both be true");
+        assert!(
+            err.to_string()
+                .contains("Cannot set both `continue_final_message` and `add_generation_prompt`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_continue_final_message_accepts_last_user() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "add_generation_prompt": false,
+            "continue_final_message": true
+        }))
+        .expect("Failed to deserialize request");
+
+        ValidateRequest::validate(&request)
+            .expect("continue_final_message must accept a final user message");
+    }
+
+    #[test]
+    fn test_validate_continue_final_message_omitted_add_generation_prompt_rejected() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Continue this sentence"},
+                {"role": "assistant", "content": "LLM-Native Interaction"}
+            ],
+            "continue_final_message": true
+        }))
+        .expect("Failed to deserialize request");
+
+        let err = ValidateRequest::validate(&request).expect_err(
+            "omitted add_generation_prompt defaults to true and conflicts with continue_final_message",
+        );
+        assert!(
+            err.to_string()
+                .contains("Cannot set both `continue_final_message` and `add_generation_prompt`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_continue_final_message_with_explicit_false_add_generation_prompt() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Continue this sentence"},
+                {"role": "assistant", "content": "LLM-Native Interaction"}
+            ],
+            "add_generation_prompt": false,
+            "continue_final_message": true
+        }))
+        .expect("Failed to deserialize request");
+
+        ValidateRequest::validate(&request).expect(
+            "add_generation_prompt=false with continue_final_message=true must be accepted",
+        );
     }
 
     #[test]

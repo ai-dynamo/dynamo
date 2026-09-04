@@ -1213,7 +1213,16 @@ impl ModelDeploymentCard {
                     }
                 }
 
-                // TODO: Do we want any of user_data or runtime_config?
+                // Tower/connector LoRA changes vLLM's multimodal cache identity.
+                // Isolate such workers from the default/missing=false WorkerSet
+                // without changing checksums for existing deployments.
+                if self.runtime_config.runtime_flag_enabled(
+                    crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY,
+                ) {
+                    bytes_to_hash.extend_from_slice(b"\0vllm_enable_tower_connector_lora\0true");
+                }
+
+                // TODO: Do we want any other user_data or runtime_config?
 
                 blake3::hash(&bytes_to_hash).to_string()
             })
@@ -1244,7 +1253,26 @@ impl ModelDeploymentCard {
     ///   per-turn tokenization cost flat instead of growing with history. Set to `0` to
     ///   fall back to the original hit-without-insert behavior.
     pub fn tokenizer(&self) -> anyhow::Result<crate::tokenizers::Tokenizer> {
-        let tokenizer_backend = self.runtime_config.effective_tokenizer_backend();
+        self.tokenizer_with_options(Default::default(), false)
+    }
+
+    pub(crate) fn embedding_tokenizer_with_options(
+        &self,
+        options: crate::tokenizers::TokenizerOptions,
+    ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        self.tokenizer_with_options(options, options.add_special_tokens)
+    }
+
+    fn tokenizer_with_options(
+        &self,
+        options: crate::tokenizers::TokenizerOptions,
+        force_hugging_face: bool,
+    ) -> anyhow::Result<crate::tokenizers::Tokenizer> {
+        let tokenizer_backend = if force_hugging_face {
+            TokenizerBackend::Default
+        } else {
+            self.runtime_config.effective_tokenizer_backend()
+        };
         let is_fallback_enabled = self.runtime_config.is_tokenizer_fallback_enabled()?;
 
         let cache_enabled =
@@ -1321,9 +1349,13 @@ impl ModelDeploymentCard {
                     Vec::new()
                 };
 
-                // Merge already applied above; just wrap.
-                let wrap_hf =
-                    |hf: HfTokenizer| crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
+                // Merge already applied above; just wrap. Embedding
+                // tokenizers use the HF post-processor to apply BOS/EOS when
+                // requested; normal tokenizers keep their existing defaults.
+                let wrap_hf = |hf: HfTokenizer| {
+                    let tokenizer = crate::tokenizers::HuggingFaceTokenizer::from_tokenizer(hf);
+                    crate::tokenizers::traits::Tokenizer::with_options(tokenizer, options)
+                };
 
                 // Pick the inner backend.
                 let raw: Arc<dyn crate::tokenizers::traits::Tokenizer> = match tokenizer_backend {
@@ -1398,7 +1430,7 @@ impl ModelDeploymentCard {
                     }
                 };
 
-                if cache_enabled {
+                if cache_enabled && !options.add_special_tokens {
                     tracing::info!(
                         cache_bytes,
                         cache_extend,
@@ -1413,6 +1445,10 @@ impl ModelDeploymentCard {
                         self.name(),
                     )?
                 } else {
+                    // The prefix cache encodes text in boundary-delimited
+                    // segments. Applying the HF post-processor to every segment
+                    // could add BOS/EOS more than once, so embedding special-token
+                    // mode bypasses that cache.
                     raw
                 }
             }
@@ -3143,6 +3179,26 @@ mod ownership_tests {
         enabled.runtime_config.kv_event_publishing_enabled = Some(true);
 
         assert_eq!(disabled.mdcsum(), enabled.mdcsum());
+    }
+
+    #[test]
+    fn tower_connector_lora_runtime_flag_isolates_worker_sets() {
+        use crate::local_model::runtime_config::VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY;
+
+        let missing = ModelDeploymentCard::with_name_only("model");
+        let mut disabled = ModelDeploymentCard::with_name_only("model");
+        disabled.runtime_config.runtime_data.insert(
+            VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            false.into(),
+        );
+        let mut enabled = ModelDeploymentCard::with_name_only("model");
+        enabled.runtime_config.runtime_data.insert(
+            VLLM_ENABLE_TOWER_CONNECTOR_LORA_RUNTIME_KEY.to_string(),
+            true.into(),
+        );
+
+        assert_eq!(missing.mdcsum(), disabled.mdcsum());
+        assert_ne!(missing.mdcsum(), enabled.mdcsum());
     }
 }
 

@@ -194,6 +194,8 @@ pub struct WorkerConfig {
     pub route_to_encoder: bool,
     /// Publish the worker's engine routes through an auxiliary RL discovery endpoint.
     pub enable_rl: bool,
+    /// Optional RL topology and weight-transfer metadata published by the worker.
+    pub rl_metadata: Option<crate::RlWorkerMetadata>,
     /// Optional frontend media decoding and fetch policy advertised on the
     /// model deployment card.
     pub media_decoder: Option<MediaDecoder>,
@@ -239,6 +241,7 @@ impl Default for WorkerConfig {
             runtime: RuntimeConfig::default(),
             route_to_encoder: false,
             enable_rl: false,
+            rl_metadata: None,
             media_decoder: None,
             media_fetcher: None,
             default_thinking_mode: None,
@@ -935,12 +938,16 @@ impl Worker {
         let model_type = resolve_model_type(&self.config)?;
         let (worker_type, needs) = resolve_worker_type_and_needs(&self.config);
         let rl_config = if self.config.enable_rl {
-            Some(crate::rl::prepare_endpoint(&endpoint).map_err(|error| {
-                err(
-                    ErrorType::Backend(BackendError::InvalidArgument),
-                    format!("RL endpoint configuration: {error}"),
-                )
-            })?)
+            Some(
+                crate::rl::prepare_endpoint(&endpoint, self.config.rl_metadata.clone()).map_err(
+                    |error| {
+                        err(
+                            ErrorType::Backend(BackendError::InvalidArgument),
+                            format!("RL endpoint configuration: {error}"),
+                        )
+                    },
+                )?,
+            )
         } else {
             None
         };
@@ -2026,6 +2033,12 @@ async fn build_local_model(
     };
 
     let mut runtime_data = engine_config.runtime_data.clone();
+    if config.route_to_encoder {
+        runtime_data.insert(
+            "encoder_result_handoff".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
     if let Some(default_thinking_mode) = config.default_thinking_mode.as_deref() {
         runtime_data.insert(
             "default_thinking_mode".to_string(),
@@ -2379,6 +2392,7 @@ mod tests {
             exclude_tools_when_tool_choice_none: false,
             enable_local_indexer: false,
             kv_state_endpoint: Some(EndpointId::from("dynamo/kv-state/events")),
+            route_to_encoder: true,
             ..WorkerConfig::default()
         };
         let engine_config = EngineConfig {
@@ -2415,6 +2429,13 @@ mod tests {
                 .get("default_thinking_mode")
                 .and_then(|value| value.as_str()),
             Some("disabled")
+        );
+        assert_eq!(
+            runtime_config
+                .runtime_data
+                .get("encoder_result_handoff")
+                .and_then(|value| value.as_bool()),
+            Some(true)
         );
         assert!(!runtime_config.exclude_tools_when_tool_choice_none);
         assert!(!runtime_config.enable_local_indexer);
