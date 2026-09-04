@@ -14,10 +14,11 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use anyhow::Result;
+use dashmap::DashMap;
 use dynamo_kv_router::config::{RouterConfigOverride, try_kv_router_config_from_dynamo_env};
 use dynamo_kv_router::protocols::{RoutingConstraints, WorkerWithDpRank};
 use dynamo_llm::discovery::{ModelManager, WORKER_TYPE_DECODE};
-use dynamo_llm::kv_router::prefill_router::PrefillQueryOutcome;
+use dynamo_llm::kv_router::prefill_router::PrefillReservation;
 use dynamo_llm::kv_router::{ManagedKvRouter, PrefillRouter};
 use dynamo_llm::model_card::ModelDeploymentCard;
 use dynamo_llm::preprocessor::OpenAIPreprocessor;
@@ -32,6 +33,7 @@ use dynamo_runtime::discovery::{
 };
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
+use uuid::Uuid;
 
 use crate::epp_router::endpoint_in_subset;
 use crate::picker::{Endpoint, EndpointPicker, PickError, PickResult, RequestInfo, ResponseUsage};
@@ -108,6 +110,7 @@ const DYNAMO_CONTAINER_PORT_NAME: &str = "http";
 /// without the `block_on` / unsafe FFI overhead.
 pub struct Router {
     prefill_router: Arc<PrefillRouter>,
+    prefill_bookings: DashMap<String, PrefillReservation>,
     decode_router: ManagedKvRouter,
     preprocessor: Arc<OpenAIPreprocessor>,
     runtime: Runtime,
@@ -116,6 +119,23 @@ pub struct Router {
     served_model: String,
 }
 
+/// Remove and release a booking once. Both response lifecycle callbacks use
+/// this helper so terminal completion before first output and duplicate signals
+/// have identical behavior.
+async fn release_prefill_booking(
+    prefill_bookings: &DashMap<String, PrefillReservation>,
+    booking_id: &str,
+) {
+    if let Some((_, reservation)) = prefill_bookings.remove(booking_id)
+        && let Err(error) = reservation.release().await
+    {
+        tracing::debug!(
+            reservation_id = booking_id,
+            %error,
+            "Failed to release native EPP prefill reservation"
+        );
+    }
+}
 impl Router {
     /// Initialize the router from discovery.
     ///
@@ -218,6 +238,7 @@ impl Router {
         // does not tear down any background work.
         Ok(Self {
             prefill_router,
+            prefill_bookings: DashMap::new(),
             decode_router,
             preprocessor: bootstrap.preprocessor,
             runtime,
@@ -434,31 +455,31 @@ impl Router {
             .collect()
     }
 
-    /// Route a prefill request. Returns (worker_id, dp_rank).
+    /// Atomically select and reserve a prefill worker.
     ///
     /// Queue priorities are forwarded to the prefill scheduler. `priority_jump`
     /// adjusts the policy score, while `strict_priority` selects the primary
     /// tier. `routing_constraints` carries the request's required/preferred
     /// taints (lifted from `nvext.routing_constraints`); a hard `required_taints`
     /// mismatch excludes a worker from selection.
+    #[expect(clippy::too_many_arguments)]
     pub async fn route_prefill(
         &self,
+        reservation_id: &str,
         tokens: &[u32],
         cache_namespace: Option<String>,
         priority_jump: f64,
         strict_priority: u32,
         allowed_worker_ids: Option<HashSet<u64>>,
         routing_constraints: RoutingConstraints,
-    ) -> Result<(u64, Option<u32>)> {
+    ) -> Result<PrefillReservation> {
         if let Some(ref ids) = allowed_worker_ids {
             self.prefill_router.register_workers(ids);
         }
 
-        // TODO(epp-prefill-booking): Atomically reserve the selected prefill worker
-        // and release it on first output, cancellation, or routing failure.
-        let outcome = self
-            .prefill_router
-            .query_prefill_worker(
+        self.prefill_router
+            .reserve_prefill_worker(
+                reservation_id,
                 tokens,
                 None,
                 None,
@@ -469,19 +490,7 @@ impl Router {
                 routing_constraints,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Prefill query failed: {:?}", e))?;
-
-        match outcome {
-            // Advisory only: the gateway owns dispatch and lifecycle state.
-            PrefillQueryOutcome::Routed { worker_id, dp_rank } => Ok((worker_id, dp_rank)),
-            PrefillQueryOutcome::QueueRejected { rejection } => Err(anyhow::anyhow!(
-                "Prefill router policy-class queue rejection: policy_class={}, limit_kind={}, current={}, limit={}",
-                rejection.policy_class,
-                rejection.limit_kind,
-                rejection.current,
-                rejection.limit
-            )),
-        }
+            .map_err(|e| anyhow::anyhow!("Prefill reservation failed: {e}"))
     }
 
     /// Route a decode request. Returns (WorkerWithDpRank, overlap_blocks).
@@ -1419,13 +1428,15 @@ impl EndpointPicker for Router {
             .map_err(|e| PickError::TokenizationFailed(e.to_string()))?;
         let cache_namespace =
             cache_namespace_with_header_override(&req.headers, body_cache_namespace);
+        let reservation_id = Uuid::new_v4().to_string();
 
         // Try prefill routing first (disaggregated mode).
         //
         // If the prefill router is not activated (no prefill workers discovered yet, or the inner
         // router has been deactivated), fall back to aggregated routing.
-        let prefill_result = self
+        let prefill_booking = self
             .route_prefill(
+                &format!("epp-prefill/{reservation_id}"),
                 &tokens,
                 cache_namespace.clone(),
                 priority_jump,
@@ -1435,7 +1446,7 @@ impl EndpointPicker for Router {
             )
             .await;
 
-        let is_disaggregated = match &prefill_result {
+        let is_disaggregated = match &prefill_booking {
             Ok(_) => true,
             Err(e) => {
                 tracing::debug!(
@@ -1446,10 +1457,6 @@ impl EndpointPicker for Router {
             }
         };
 
-        // TODO(epp-atomic-admission): Replace query-only selection plus add_request
-        // with one tracked operation. Propagate booking failures, use an internal
-        // booking ID independent of x-request-id, handle cancellation races, roll
-        // back endpoint-resolution failures, and never forward to an unbooked fallback.
         let (decode_worker, _overlap) = self
             .route_decode(
                 &tokens,
@@ -1489,23 +1496,31 @@ impl EndpointPicker for Router {
         };
 
         // Register the request with the router for bookkeeping (load tracking).
-        if !req.request_id.is_empty()
-            && let Err(e) = self
-                .add_request(
-                    &req.request_id,
-                    &tokens,
-                    decode_worker.worker_id,
-                    decode_worker.dp_rank,
-                    is_disaggregated,
-                    cache_namespace,
-                )
-                .await
+        if let Err(e) = self
+            .add_request(
+                &reservation_id,
+                &tokens,
+                decode_worker.worker_id,
+                decode_worker.dp_rank,
+                is_disaggregated,
+                cache_namespace,
+            )
+            .await
         {
             tracing::warn!(
                 request_id = %req.request_id,
                 error = %e,
                 "Failed to register request with router bookkeeping"
             );
+        }
+
+        let prefill_worker = prefill_booking
+            .as_ref()
+            .ok()
+            .map(|booking| (booking.worker_id(), booking.dp_rank()));
+        if let Ok(booking) = prefill_booking {
+            self.prefill_bookings
+                .insert(reservation_id.clone(), booking);
         }
 
         // Build routing headers: x-dynamo-worker-instance-id, x-dynamo-dp-rank,
@@ -1521,7 +1536,7 @@ impl EndpointPicker for Router {
             ),
         ];
 
-        if let Ok((prefill_worker_id, prefill_dp_rank)) = &prefill_result {
+        if let Some((prefill_worker_id, prefill_dp_rank)) = prefill_worker {
             headers.push((
                 "x-dynamo-routing-mode".to_string(),
                 "disaggregated".to_string(),
@@ -1530,8 +1545,11 @@ impl EndpointPicker for Router {
                 "x-dynamo-prefill-instance-id".to_string(),
                 format!("{}", prefill_worker_id),
             ));
-            if let Some(rank) = prefill_dp_rank {
-                headers.push(("x-dynamo-prefill-dp-rank".to_string(), rank.to_string()));
+            if let Some(prefill_dp_rank) = prefill_dp_rank {
+                headers.push((
+                    "x-dynamo-prefill-dp-rank".to_string(),
+                    prefill_dp_rank.to_string(),
+                ));
             }
         } else {
             headers.push((
@@ -1568,30 +1586,31 @@ impl EndpointPicker for Router {
             fallbacks: vec![],
             headers,
             token_ids,
-            reservation_id: None,
+            reservation_id: Some(reservation_id),
         })
     }
 
-    async fn on_prefill_complete(&self, request_id: &str) {
-        if request_id.is_empty() {
+    async fn on_prefill_complete(&self, booking_id: &str) {
+        if booking_id.is_empty() {
             return;
         }
-        if let Err(e) = self.mark_prefill_complete(request_id).await {
+        release_prefill_booking(&self.prefill_bookings, booking_id).await;
+        if let Err(e) = self.mark_prefill_complete(booking_id).await {
             tracing::debug!(
-                request_id,
+                reservation_id = booking_id,
                 error = %e,
                 "Failed to mark prefill complete in router bookkeeping"
             );
         }
     }
 
-    async fn on_request_complete_with_usage(&self, request_id: &str, usage: Option<ResponseUsage>) {
-        if request_id.is_empty() {
+    async fn on_request_complete_with_usage(&self, booking_id: &str, usage: Option<ResponseUsage>) {
+        if booking_id.is_empty() {
             return;
         }
         if let Some(usage) = usage {
             tracing::debug!(
-                request_id,
+                reservation_id = booking_id,
                 prompt_tokens = ?usage.prompt_tokens,
                 completion_tokens = ?usage.completion_tokens,
                 total_tokens = ?usage.total_tokens,
@@ -1599,9 +1618,10 @@ impl EndpointPicker for Router {
                 "Request complete with usage"
             );
         }
-        if let Err(e) = self.free_request(request_id).await {
+        release_prefill_booking(&self.prefill_bookings, booking_id).await;
+        if let Err(e) = self.free_request(booking_id).await {
             tracing::debug!(
-                request_id,
+                reservation_id = booking_id,
                 error = %e,
                 "Failed to free request from router bookkeeping"
             );
@@ -1613,6 +1633,8 @@ impl EndpointPicker for Router {
 mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::Pod;
+
+    use std::sync::{Arc, atomic::Ordering};
 
     #[test]
     fn tenant_header_overrides_body_cache_namespace() {

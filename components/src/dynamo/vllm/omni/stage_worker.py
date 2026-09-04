@@ -320,6 +320,9 @@ class OmniStageWorker:
             prompt=tokens_prompt,
             params=params,
         )
+        # The token request factory omits duplex-only fields, while the output
+        # processor expects session_id to exist for every registered request.
+        prompt.session_id = None
         # Pre-built EngineCoreRequests skip the output processor registration
         # in _build_add_request_message (the isinstance(prompt, EngineCoreRequest)
         # branch bypasses that block).  Register manually so that the engine's

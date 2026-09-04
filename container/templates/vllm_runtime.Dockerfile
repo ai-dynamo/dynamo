@@ -349,12 +349,14 @@ RUN set -eux; \
 # (CPU-only) so a missing compiler aborts the build instead of shipping.
 RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.py,target=/tmp/validate_torch_compile_smoke.py,readonly \
     python3 /tmp/validate_torch_compile_smoke.py
+{% endif %}
 
 # Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
 # libsw*.so*) + libvpx + the LGPL CLI binary that imageio/diffusers target via
-# IMAGEIO_FFMPEG_EXE. Ungated by enable_media_ffmpeg because the base GPL ffmpeg
-# was just purged, so the LGPL CLI must always be present for the omni
-# video-export path to have something to encode with.
+# IMAGEIO_FFMPEG_EXE. This remains ungated by enable_media_ffmpeg so the
+# media-enabled runtime wheel and the omni video-export path always have their
+# required shared libraries and CLI available.
+{% if device == "cuda" or device == "xpu" %}
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \
