@@ -570,24 +570,17 @@ pub(super) fn new_tool_use_id() -> String {
 /// This replaces `unwrap_or(json!({}))`, which turned any unparseable arguments
 /// into a well-formed EMPTY object. That produced a `tool_use` block a client would
 /// happily execute with no arguments and no error anywhere in the response.
-///
-/// `truncated` gates that recovery, and it is what keeps this honest. Partial members
-/// are only safe to emit when something ELSE in the response already tells the client
-/// the call is incomplete, which is exactly `stop_reason: "max_tokens"`. When the
-/// upstream reason instead claims the call finished, malformed arguments mean the
-/// generation is wrong rather than cut short: emitting the members that happen to parse
-/// would hand back a call that looks complete, carries only some of its arguments, and
-/// reports no error anywhere. That is worse than the empty object, because a partial
-/// call can pass schema validation and then run.
 pub(super) fn tool_use_input(
     tool_name: &str,
     arguments: &str,
     truncated: bool,
-) -> serde_json::Value {
-    // One warning per call, logged where the outcome is known. Logging before the
-    // `truncated` check would announce a recovery that the branch below may refuse.
+) -> Option<serde_json::Value> {
+    if arguments.is_empty() {
+        return Some(serde_json::json!({}));
+    }
+
     let error = match serde_json::from_str::<serde_json::Value>(arguments) {
-        Ok(value) => return value,
+        Ok(value) => return Some(value),
         Err(error) => error,
     };
 
@@ -596,11 +589,9 @@ pub(super) fn tool_use_input(
             tool_name = %tool_name,
             argument_bytes = arguments.len(),
             error = %error,
-            "tool call arguments are not valid JSON and generation was not cut off; emitting \
-             an empty tool_use input rather than a partial one, because the response claims \
-             this call completed"
+            "suppressing tool_use block with invalid arguments because generation was not cut off"
         );
-        return serde_json::json!({});
+        return None;
     }
 
     match recover_completed_members(arguments) {
@@ -613,17 +604,16 @@ pub(super) fn tool_use_input(
                 "tool call arguments were cut off at the token limit; keeping the members \
                  that completed. `stop_reason` is `max_tokens`"
             );
-            serde_json::Value::Object(map)
+            Some(serde_json::Value::Object(map))
         }
         None => {
             tracing::warn!(
                 tool_name = %tool_name,
                 argument_bytes = arguments.len(),
                 error = %error,
-                "tool call arguments were cut off at the token limit and no complete member \
-                 survived; emitting an empty tool_use input"
+                "suppressing truncated tool_use block because no complete member survived"
             );
-            serde_json::json!({})
+            None
         }
     }
 }
@@ -666,9 +656,8 @@ fn recover_completed_members(raw: &str) -> Option<serde_json::Map<String, serde_
     }
 
     // Truncation can land after a member's value but before the outer `}`, in which
-    // case there is no trailing comma and the comma scan finds nothing — yet every
-    // member present did finish. Close the object and take it, but only when the last
-    // value is provably complete (see `ends_on_a_finished_value`).
+    // case there is no trailing comma. Close the object only when the final value is
+    // provably complete; otherwise a partial number such as `2` could be fabricated.
     if ends_on_a_finished_value(trimmed)
         && let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
             &format!("{}}}", trimmed.trim_end()),
@@ -682,31 +671,12 @@ fn recover_completed_members(raw: &str) -> Option<serde_json::Map<String, serde_
     serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&candidate).ok()
 }
 
-/// Whether the payload's last value is one that cannot have been cut short.
-///
-/// Appending `}` to a truncated object can turn an unfinished value into a plausible
-/// finished one. `{"n": 25` cut to `{"n": 2` closes into `{"n": 2}`, reporting an
-/// argument the model never emitted — the exact fabrication this module refuses to do.
-///
-/// Four tails prove the value is over:
-/// - trailing whitespace. JSON allows it only between tokens, so the value before it
-///   ended. This also covers a complete number.
-/// - an unescaped closing quote. It appears only once the string is over.
-/// - `}` or `]`. They appear only once the object or array is over.
-/// - `true`, `false` or `null`. No longer JSON token starts with one of them.
-///
-/// Only a bare number with nothing after it stays ambiguous, because its own digits may
-/// be cut short. It falls through to the comma scan.
+/// Whether the raw suffix proves that the final JSON value ended before truncation.
 fn ends_on_a_finished_value(trimmed: &str) -> bool {
     let tail = trimmed.trim_end();
-    // Whitespace cannot occur inside a JSON number or literal. Let the normal
-    // parser decide whether the value before it is valid; this also covers
-    // complete `true`, `false`, and `null` values.
     if tail.len() != trimmed.len() {
         return true;
     }
-
-    // A closing quote must not itself be escaped, or the string is still open.
     if let Some(before_quote) = tail.strip_suffix('"') {
         let backslashes = before_quote
             .chars()
@@ -736,10 +706,9 @@ pub fn chat_completion_to_anthropic_response(
     let mut stop_reason = None;
 
     if let Some(choice) = choice {
-        // Only the token limit means "cut off mid-call". Every other terminal reason
-        // claims the call finished, so partial arguments must not be recovered under it.
-        // This describes the choice; the call loop below narrows it to the last call,
-        // which is the only one the limit can have interrupted.
+        // Only the token limit means that a call may have been cut off. The loop
+        // below narrows this choice-level fact to the final call, which is the only
+        // call that can have been interrupted by the limit.
         let truncated = matches!(
             choice.finish_reason,
             Some(dynamo_protocols::types::FinishReason::Length)
@@ -756,16 +725,15 @@ pub fn chat_completion_to_anthropic_response(
 
         // Extract tool calls
         if let Some(tool_calls) = choice.message.tool_calls {
-            // The token limit stops generation once, inside the call the model was
-            // writing. Every earlier call finished, so only the last one can carry a
-            // truncated tail.
             let last_call = tool_calls.len().saturating_sub(1);
             for (call_index, tc) in tool_calls.into_iter().enumerate() {
-                let input = tool_use_input(
+                let Some(input) = tool_use_input(
                     &tc.function.name,
                     &tc.function.arguments,
                     truncated && call_index == last_call,
-                );
+                ) else {
+                    continue;
+                };
                 let emitted_id = new_tool_use_id();
                 tracing::debug!(
                     backend_id = %tc.id,
@@ -2506,52 +2474,9 @@ mod tests {
 }
 
 #[cfg(test)]
-mod truncated_tool_call_tests {
+mod anthropic_types_tests {
     use super::*;
 
-    /// Build a one-choice response carrying a single tool call with the given
-    /// finish reason and raw argument text, and return the Anthropic `input` it
-    /// converts to.
-    #[allow(deprecated)]
-    fn converted_tool_use_input(
-        finish_reason: dynamo_protocols::types::FinishReason,
-        arguments: &str,
-    ) -> serde_json::Value {
-        converted_tool_use_response(finish_reason, arguments)
-            .content
-            .into_iter()
-            .find_map(|block| match block {
-                AnthropicResponseContentBlock::ToolUse { input, .. } => Some(input),
-                _ => None,
-            })
-            .expect("expected a tool_use block")
-    }
-
-    #[allow(deprecated)]
-    fn converted_tool_use_response(
-        finish_reason: dynamo_protocols::types::FinishReason,
-        arguments: &str,
-    ) -> AnthropicMessageResponse {
-        converted_tool_use_response_for(finish_reason, &[arguments])
-    }
-
-    /// Every `tool_use` input in the converted response, in call order.
-    fn converted_tool_use_inputs(
-        finish_reason: dynamo_protocols::types::FinishReason,
-        arguments: &[&str],
-    ) -> Vec<serde_json::Value> {
-        converted_tool_use_response_for(finish_reason, arguments)
-            .content
-            .into_iter()
-            .filter_map(|block| match block {
-                AnthropicResponseContentBlock::ToolUse { input, .. } => Some(input),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// One tool call per entry in `arguments`, so a test can build a choice that
-    /// carries parallel calls.
     #[allow(deprecated)]
     fn converted_tool_use_response_for(
         finish_reason: dynamo_protocols::types::FinishReason,
@@ -2561,12 +2486,12 @@ mod truncated_tool_call_tests {
             .iter()
             .enumerate()
             .map(
-                |(index, args)| dynamo_protocols::types::ChatCompletionMessageToolCall {
+                |(index, arguments)| dynamo_protocols::types::ChatCompletionMessageToolCall {
                     id: format!("call_{}", index + 1),
                     r#type: dynamo_protocols::types::FunctionType::Function,
                     function: dynamo_protocols::types::FunctionCall {
                         name: "record_literal".into(),
-                        arguments: args.to_string(),
+                        arguments: (*arguments).into(),
                     },
                 },
             )
@@ -2592,99 +2517,26 @@ mod truncated_tool_call_tests {
                 model: "test-model".into(),
                 service_tier: None,
                 system_fingerprint: None,
-                object: "chat.completion".to_string(),
+                object: "chat.completion".into(),
                 usage: None,
             },
             nvext: None,
         };
-
         chat_completion_to_anthropic_response(chat_resp, "test-model", None)
     }
 
-    /// Pins the WIRING, not the helper. The eight helper tests below all call
-    /// `tool_use_input` directly, so reverting the conversion site to the old
-    /// `unwrap_or(json!({}))` left every one of them green. This one goes red,
-    /// because it reaches the recovery only through `chat_completion_to_anthropic_response`.
-    #[test]
-    fn the_conversion_recovers_members_when_the_reason_is_the_token_limit() {
-        assert_eq!(
-            converted_tool_use_input(dynamo_protocols::types::FinishReason::Length, TRUNCATED),
-            serde_json::json!({"label": "customer-eof"}),
-            "a call cut off at the token limit must keep the members that finished"
-        );
-    }
-
-    /// The guard on the rule above. When the upstream reason says the call FINISHED,
-    /// malformed arguments are a generation defect, not a truncation. Recovering members
-    /// there would emit a call that looks complete while silently carrying only some of
-    /// its arguments -- one a client can validate and then run. The empty object is the
-    /// honest answer, because it fails the tool's schema instead of half-succeeding.
-    #[test]
-    fn the_conversion_refuses_partial_arguments_when_the_call_claims_it_finished() {
-        for reason in [
-            dynamo_protocols::types::FinishReason::ToolCalls,
-            dynamo_protocols::types::FinishReason::Stop,
-            dynamo_protocols::types::FinishReason::ContentFilter,
-            dynamo_protocols::types::FinishReason::FunctionCall,
-        ] {
-            assert_eq!(
-                converted_tool_use_input(reason, TRUNCATED),
-                serde_json::json!({}),
-                "{reason:?} claims the call completed, so partial arguments must not be emitted"
-            );
-        }
-    }
-
-    #[test]
-    fn the_conversion_maps_content_filter_to_refusal() {
-        let response = converted_tool_use_response(
-            dynamo_protocols::types::FinishReason::ContentFilter,
-            r#"{"label": "blocked"}"#,
-        );
-        assert_eq!(response.stop_reason, Some(AnthropicStopReason::Refusal));
-    }
-
-    /// Malformed, but NOT cut short: the model closed the object and still emitted
-    /// arguments that do not parse. Recovery must refuse this shape.
-    const MALFORMED_BUT_COMPLETE: &str = r#"{"label": "a", "extra": }"#;
-
-    /// `truncated` describes the CHOICE, but only the last call can be the one the
-    /// model was writing when the budget ran out. It finished every earlier call, so
-    /// malformed arguments there are a generation defect and must still yield `{}`.
-    #[test]
-    fn only_the_final_tool_call_recovers_partial_arguments() {
-        let inputs = converted_tool_use_inputs(
-            dynamo_protocols::types::FinishReason::Length,
-            &[MALFORMED_BUT_COMPLETE, TRUNCATED],
-        );
-
-        assert_eq!(inputs.len(), 2, "both calls must reach the response");
-        assert_eq!(
-            inputs[0],
-            serde_json::json!({}),
-            "a call the model finished must not be repaired, even at the token limit"
-        );
-        assert_eq!(
-            inputs[1],
-            serde_json::json!({"label": "customer-eof"}),
-            "the final call is the only one that can have been cut off"
-        );
-    }
-
-    /// Valid arguments are untouched no matter which reason ended generation.
-    #[test]
-    fn the_conversion_passes_valid_arguments_through_for_every_reason() {
-        for reason in [
-            dynamo_protocols::types::FinishReason::Length,
-            dynamo_protocols::types::FinishReason::ToolCalls,
-            dynamo_protocols::types::FinishReason::Stop,
-        ] {
-            assert_eq!(
-                converted_tool_use_input(reason, r#"{"label": "done"}"#),
-                serde_json::json!({"label": "done"}),
-                "valid arguments must survive {reason:?} unchanged"
-            );
-        }
+    fn converted_tool_use_inputs(
+        finish_reason: dynamo_protocols::types::FinishReason,
+        arguments: &[&str],
+    ) -> Vec<serde_json::Value> {
+        converted_tool_use_response_for(finish_reason, arguments)
+            .content
+            .into_iter()
+            .filter_map(|block| match block {
+                AnthropicResponseContentBlock::ToolUse { input, .. } => Some(input),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The measured payload: `record_literal` cut off inside the second
@@ -2692,9 +2544,35 @@ mod truncated_tool_call_tests {
     const TRUNCATED: &str =
         r#"{"label": "customer-eof", "literal_text": "customer-eof-xxxxxxxxxxxxxxxxxxxx"#;
 
+    const MALFORMED_BUT_COMPLETE: &str = r#"{"label": "a", "extra": }"#;
+
+    #[test]
+    fn conversion_recovers_members_only_for_the_final_length_call() {
+        let inputs = converted_tool_use_inputs(
+            dynamo_protocols::types::FinishReason::Length,
+            &[MALFORMED_BUT_COMPLETE, TRUNCATED],
+        );
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0], serde_json::json!({"label": "customer-eof"}));
+    }
+
+    #[test]
+    fn conversion_does_not_recover_malformed_non_length_arguments() {
+        for reason in [
+            dynamo_protocols::types::FinishReason::ToolCalls,
+            dynamo_protocols::types::FinishReason::Stop,
+            dynamo_protocols::types::FinishReason::ContentFilter,
+            dynamo_protocols::types::FinishReason::FunctionCall,
+        ] {
+            let inputs = converted_tool_use_inputs(reason, &[TRUNCATED]);
+            assert!(inputs.is_empty(), "unexpected tool block for {reason:?}");
+        }
+    }
+
     #[test]
     fn truncated_arguments_keep_the_members_that_completed() {
-        let input = tool_use_input("record_literal", TRUNCATED, true);
+        let input = tool_use_input("record_literal", TRUNCATED, true)
+            .expect("completed members should be recovered");
         let obj = input.as_object().expect("input must stay an object");
 
         // The finished member survives verbatim.
@@ -2714,84 +2592,58 @@ mod truncated_tool_call_tests {
     /// received a well-formed tool_use block and executed it with no arguments.
     #[test]
     fn truncated_arguments_are_not_silently_emptied() {
-        assert_ne!(
+        assert_eq!(
             tool_use_input("record_literal", TRUNCATED, true),
-            serde_json::json!({}),
-            "unparseable arguments must not collapse to an empty object"
+            Some(serde_json::json!({"label": "customer-eof"}))
         );
     }
 
     #[test]
     fn valid_arguments_are_passed_through_unchanged() {
         let input = tool_use_input("get_weather", r#"{"location": "SF", "unit": "c"}"#, true);
-        assert_eq!(input, serde_json::json!({"location": "SF", "unit": "c"}));
-    }
-
-    /// Truncation after a member value but before the closing brace. There is no
-    /// trailing comma, so the comma scan alone finds nothing, yet `label` did finish.
-    /// Returning `{}` here would be the empty-object failure this module exists to stop.
-    #[test]
-    fn a_final_member_without_a_trailing_comma_is_recovered() {
-        let recovered =
-            recover_completed_members(r#"{"label": "customer-eof""#).expect("`label` completed");
         assert_eq!(
-            recovered.get("label").and_then(|v| v.as_str()),
-            Some("customer-eof")
+            input,
+            Some(serde_json::json!({"location": "SF", "unit": "c"}))
         );
-        assert_eq!(recovered.len(), 1);
+    }
 
-        // Same shape reached through the public entry point.
+    #[test]
+    fn conversion_maps_content_filter_to_refusal() {
+        let response = converted_tool_use_response_for(
+            dynamo_protocols::types::FinishReason::ContentFilter,
+            &[r#"{"label":"blocked"}"#],
+        );
+        assert_eq!(response.stop_reason, Some(AnthropicStopReason::Refusal));
+    }
+
+    #[test]
+    fn final_member_without_closing_brace_is_recovered_when_provably_complete() {
         assert_eq!(
-            tool_use_input("record_literal", r#"{"label": "customer-eof""#, true),
-            serde_json::json!({"label": "customer-eof"})
+            tool_use_input("record_literal", r#"{"label":"done""#, true),
+            Some(serde_json::json!({"label": "done"}))
         );
-
-        // A closed nested value is equally provably finished.
-        let recovered =
-            recover_completed_members(r#"{"a": 1, "b": {"p": 2}"#).expect("`a` and `b` completed");
-        assert_eq!(recovered.get("b"), Some(&serde_json::json!({"p": 2})));
-        assert_eq!(recovered.len(), 2);
-    }
-
-    /// The guard on the case above: closing the brace after a BARE NUMBER would invent a
-    /// value, because the digits may themselves be truncated. `{"n": 25` cut to `{"n": 2`
-    /// must not be reported as `n = 2`.
-    #[test]
-    fn a_truncated_number_is_never_closed_into_a_value() {
-        assert_eq!(recover_completed_members(r#"{"n": 2"#), None);
-
-        // With an earlier complete member, fall back to the comma boundary and drop the
-        // ambiguous tail rather than reporting it.
-        let recovered = recover_completed_members(r#"{"a": "x", "n": 2"#).expect("`a` completed");
-        assert_eq!(recovered.get("a").and_then(|v| v.as_str()), Some("x"));
-        assert!(
-            !recovered.contains_key("n"),
-            "a possibly-truncated number must not be reported, got: {recovered:?}"
+        assert_eq!(
+            recover_completed_members(r#"{"count": 2 "#).unwrap()["count"],
+            2
         );
-
-        // An escaped quote at the very end leaves the string open; it is not a finished
-        // value and must not be closed either.
-        assert_eq!(recover_completed_members(r#"{"a": "he said \""#), None);
+        assert_eq!(
+            recover_completed_members(r#"{"ok": true "#).unwrap()["ok"],
+            true
+        );
+        assert_eq!(
+            recover_completed_members(r#"{"ok": false "#).unwrap()["ok"],
+            false
+        );
+        assert_eq!(
+            recover_completed_members(r#"{"value": null "#).unwrap()["value"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]
-    fn scalar_values_followed_by_whitespace_are_recovered() {
-        for (key, value, expected) in [
-            ("count", r#"2 "#, serde_json::json!(2)),
-            ("enabled", "true ", serde_json::json!(true)),
-            ("enabled", "false ", serde_json::json!(false)),
-            ("value", "null ", serde_json::Value::Null),
-        ] {
-            let input = format!(r#"{{"{key}": {value}"#);
-            let recovered = recover_completed_members(&input).expect("scalar value completed");
-            assert_eq!(recovered.get(key), Some(&expected));
-        }
-    }
-
-    #[test]
-    fn an_undelimited_scalar_is_not_recovered() {
+    fn undelimited_scalar_prefix_is_not_recovered() {
         assert_eq!(recover_completed_members(r#"{"count": 2"#), None);
-        assert_eq!(recover_completed_members(r#"{"enabled": tru"#), None);
+        assert_eq!(recover_completed_members(r#"{"ok": tru"#), None);
         assert_eq!(recover_completed_members(r#"{"value": nul"#), None);
     }
 

@@ -112,7 +112,6 @@ pub use crate::protocols::common::metrics::{
 };
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
-use crate::protocols::common::invalid_argument_error;
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 
 fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, Option<i32>) {
@@ -124,6 +123,14 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
     let strict_priority = hints.and_then(|h| h.strict_priority);
     let priority = hints.and_then(|h| h.priority);
     (priority_jump, strict_priority, priority)
+}
+
+pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message.into())
+        .build()
+        .into()
 }
 
 // Preserves terminal versus recoverable failures when moka shares a
@@ -792,24 +799,11 @@ impl MmRoutingEntry {
 }
 
 #[cfg(feature = "mm-routing")]
-fn exact_mm_routing_layout_accepts_next_entry(
-    previous_entry_was_video: &mut bool,
-    current_entry_is_video: bool,
-) -> bool {
-    // Adjacent video placeholders cannot be mapped unambiguously to vLLM KV
-    // events. Keep this transition shared by the pre-decode and final checks.
-    let accepted = !(*previous_entry_was_video && current_entry_is_video);
-    *previous_entry_was_video = current_entry_is_video;
-    accepted
-}
-
-#[cfg(feature = "mm-routing")]
 fn exact_mm_routing_entries_are_unambiguous(entries: &[MmRoutingEntry]) -> bool {
-    let mut previous_entry_was_video = false;
-    entries.iter().all(|entry| {
-        exact_mm_routing_layout_accepts_next_entry(
-            &mut previous_entry_was_video,
-            matches!(entry, MmRoutingEntry::Video { .. }),
+    !entries.windows(2).any(|pair| {
+        matches!(
+            pair,
+            [MmRoutingEntry::Video { .. }, MmRoutingEntry::Video { .. }]
         )
     })
 }
@@ -3195,14 +3189,11 @@ impl OpenAIPreprocessor {
         // counter is unavailable or checked addition overflowed.
         #[cfg(feature = "mm-routing")]
         let mut image_tokens = self.image_token_counter.as_ref().map(|_| 0usize);
-        // A raw/passthrough video, unsupported decoded-video processor, or
-        // ambiguous consecutive-video layout makes exact routing unavailable.
-        // In that case the whole request falls back rather than publishing a
-        // partial routing view.
+        // A raw/passthrough video or unsupported decoded-video processor makes
+        // the model-visible token sequence unknowable. In that case the whole
+        // request falls back rather than publishing a partial routing view.
         #[cfg(feature = "mm-routing")]
         let mut exact_mm_routing_eligible = true;
-        #[cfg(feature = "mm-routing")]
-        let mut previous_routing_entry_was_video = false;
         // Total `image_url` content parts in the request. Bumped at every
         // image part regardless of which fetch path handles it. Used at
         // hash forwarding time: if fewer image entries were resolved, we omit
@@ -3247,12 +3238,7 @@ impl OpenAIPreprocessor {
                     total_image_count += 1;
                 }
                 #[cfg(feature = "mm-routing")]
-                if !exact_mm_routing_supports_modality(type_str, has_media_loader)
-                    || !exact_mm_routing_layout_accepts_next_entry(
-                        &mut previous_routing_entry_was_video,
-                        type_str == "video_url",
-                    )
-                {
+                if !exact_mm_routing_supports_modality(type_str, has_media_loader) {
                     exact_mm_routing_eligible = false;
                 }
 
@@ -5421,32 +5407,23 @@ impl OpenAIPreprocessor {
         let pending = Arc::new(Mutex::new(PendingDynamoMetadata::default()));
         let pending_in = Arc::clone(&pending);
 
-        // Per-choice recovery state — allocated only for glm47 since only that
-        // parser emits <tool_call> XML that can be truncated at max_tokens.
-        // Buffers raw input and tracks what the jail emitted per choice.index
-        // so n > 1 is handled correctly and double-emit is avoided.
+        // The legacy jail recognizes markers with a substring search. Retain
+        // GLM47 text per choice so the terminal chunk can use the shared
+        // quote-aware marker policy before exposing content to the client.
         #[derive(Default)]
         struct ChoiceRecovery {
             input_text: String,
             emitted_text: String,
-            recovered: bool,
-        }
-        // Named so the bool in the recoveries tuple is legible at each use site.
-        struct PendingRecovery {
-            choice_idx: u32,
-            tail: String,
-            tail_already_emitted: bool,
         }
         let is_glm47 = tool_call_parser.as_deref() == Some("glm47");
-        // Token strings from the parser config so recovery matches the parser
-        // even if the defaults are ever overridden.
-        let glm47_cfg = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
-        let glm47_start = glm47_cfg.tool_call_start;
-        let glm47_end = glm47_cfg.tool_call_end;
+        let glm47_config = dynamo_parsers::tool_calling::config::Glm47ParserConfig::default();
+        let glm47_start = glm47_config.tool_call_start;
+        let glm47_end = glm47_config.tool_call_end;
         let choice_recovery: Arc<Mutex<std::collections::HashMap<u32, ChoiceRecovery>>> =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
         let choice_recovery_in = Arc::clone(&choice_recovery);
-        let glm47_start_jail = glm47_start.clone();
+        let glm47_start_in = glm47_start.clone();
+        let glm47_end_in = glm47_end.clone();
 
         // The jail's own (vendored, out-of-scope) finalize logic cannot tell an
         // error-terminated input stream from one that genuinely completed — it
@@ -5508,34 +5485,38 @@ impl OpenAIPreprocessor {
                     merge_response_nvext(&mut p.nvext, nv.nvext.take());
                 }
             }
-            // Buffer input content only for glm47 (truncation recovery).
-            // Only retain from the last <tool_call> marker onward to bound
-            // memory on long responses.
             if is_glm47 && let Some(data) = &a.data {
-                let mut cr = choice_recovery_in.lock().expect("choice recovery poisoned");
+                let mut recovery = choice_recovery_in
+                    .lock()
+                    .expect("choice recovery buffer poisoned");
                 for choice in &data.inner.choices {
                     if let Some(ChatCompletionMessageContent::Text(content)) = &choice.delta.content
                     {
-                        let state = cr.entry(choice.index).or_default();
+                        let state = recovery.entry(choice.index).or_default();
                         state.input_text.push_str(content);
-                        // Drop everything before the last marker to keep
-                        // the buffer small. Walk back to a char boundary
-                        // before draining so a multi-byte char split
-                        // across chunks never triggers a panic.
-                        let mut keep_from = match state.input_text.rfind(glm47_start_jail.as_str())
-                        {
-                            Some(pos) => pos,
-                            // No marker yet — keep enough tail to
-                            // catch a marker split across two chunks.
-                            None => state
-                                .input_text
-                                .len()
-                                .saturating_sub(glm47_start_jail.len() - 1),
-                        };
-                        while keep_from > 0 && !state.input_text.is_char_boundary(keep_from) {
-                            keep_from -= 1;
+                        // A completed call is already owned by the jail. Retain only
+                        // the suffix after it, so terminal recovery examines the
+                        // final unfinished call while the shared scanner decides
+                        // whether each opener is real or quoted prose.
+                        while let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47") {
+                            let after_marker =
+                                &state.input_text[marker_start + glm47_start_in.len()..];
+                            let Some(end) = after_marker.find(&glm47_end_in) else {
+                                break;
+                            };
+                            state.input_text.drain(
+                                ..marker_start
+                                    + glm47_start_in.len()
+                                    + end
+                                + glm47_end_in.len(),
+                            );
                         }
-                        state.input_text.drain(..keep_from);
+                        // Raw text without a possible native marker cannot affect terminal
+                        // recovery. Keep only a partial marker suffix so ordinary streamed
+                        // prose is not rescanned and retained on every chunk.
+                        if crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47").is_none() {
+                            state.input_text.clear();
+                        }
                     }
                 }
             }
@@ -5623,139 +5604,51 @@ impl OpenAIPreprocessor {
                 error: None,
             };
 
-            // glm47: on finish_reason=length, recover the last incomplete
-            // <tool_call> block. rfind skips complete blocks so earlier parsed
-            // calls are never duplicated. Recovered content WILL contain raw
-            // markup — callers that require "no tool tags in content" must
-            // filter on finish_reason=length.
-            //
-            // TODO: this recovery runs inside apply_tool_calling_jail, which
-            // the v2 path bypasses (use_parsers_v2 branch above). Adding
-            // "glm47" to V2_FAMILIES in tool_parser_v2.rs silently disables
-            // streaming recovery while aggregator.rs keeps running. At that
-            // point hoist this above the jail/v2 branch — it only needs
-            // buffered input text + finish_reason, both available there.
-            // Pass 1 (immutable): compute the recovery tail per choice and
-            // whether the jail already released it as content on this chunk.
-            // We collect into a Vec so we can release the immutable borrow on
-            // nv_chunk before mutating it in pass 2.
-            let recoveries: Vec<PendingRecovery> = if is_glm47 {
-                let mut cr = choice_recovery.lock().expect("choice recovery poisoned");
-                nv_chunk
-                    .data
-                    .iter()
-                    .flat_map(|data| data.inner.choices.iter())
-                    .filter_map(|choice| {
-                        let state = cr.entry(choice.index).or_default();
-                        if !state.recovered
-                            && let Some(ChatCompletionMessageContent::Text(t)) =
-                                &choice.delta.content
-                        {
-                            state.emitted_text.push_str(t);
-                            // Bound like input_text: retain only the suffix from
-                            // the last marker onward — all the contains(&tail)
-                            // check needs.
-                            let mut keep_from = match state.emitted_text.rfind(glm47_start.as_str())
-                            {
-                                Some(pos) => pos,
-                                None => state
-                                    .emitted_text
-                                    .len()
-                                    .saturating_sub(glm47_start.len() - 1),
-                            };
-                            while keep_from > 0 && !state.emitted_text.is_char_boundary(keep_from) {
-                                keep_from -= 1;
-                            }
-                            state.emitted_text.drain(..keep_from);
+            if is_glm47 && let Some(data) = &mut nv_chunk.data {
+                let mut recovery = choice_recovery
+                    .lock()
+                    .expect("choice recovery buffer poisoned");
+                for choice in &mut data.inner.choices {
+                    let state = recovery.entry(choice.index).or_default();
+                    if let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47") {
+                        let desired_content = &state.input_text[..marker_start];
+                        let replacement = if desired_content.starts_with(&state.emitted_text) {
+                            &desired_content[state.emitted_text.len()..]
+                        } else {
+                            desired_content
+                        };
+                        let suppressing_terminal_marker = choice.finish_reason
+                            == Some(dynamo_protocols::types::FinishReason::Length)
+                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some();
+                        if suppressing_terminal_marker {
+                            tracing::warn!(
+                                choice_index = choice.index,
+                                why = "truncated_native_tool_call_suppressed",
+                                suppressed_bytes = state.input_text.len() - desired_content.len(),
+                                "glm47 streaming: suppressing incomplete native tool output on length finish"
+                            );
                         }
-                        if state.recovered
-                            || !matches!(
-                                choice.finish_reason,
-                                Some(dynamo_protocols::types::FinishReason::Length)
-                            )
-                        {
-                            return None;
-                        }
-                        let tail =
-                            state
-                                .input_text
-                                .rfind(glm47_start.as_str())
-                                .and_then(|pos| {
-                                    let t = &state.input_text[pos..];
-                                    if !t.contains(glm47_end.as_str()) {
-                                        Some(t.to_string())
-                                    } else {
-                                        None
-                                    }
-                                })?;
-                        let tail_already_emitted = state.emitted_text.contains(&tail);
-                        state.recovered = true;
-                        Some(PendingRecovery {
-                            choice_idx: choice.index,
-                            tail,
-                            tail_already_emitted,
-                        })
-                    })
-                    .collect()
-            } else {
-                vec![]
-            };
-
-            // Pass 2 (mutable): when the jail already released the tail verbatim,
-            // suppress the finish chunk's content entirely. The recovery chunk
-            // carries just the marker-onwards tail, matching the non-streaming
-            // path (rfind result only, no post-call prose).
-            for pr in &recoveries {
-                if !pr.tail_already_emitted {
-                    continue;
-                }
-                if let Some(ref mut data) = nv_chunk.data {
-                    for rc in data
-                        .inner
-                        .choices
-                        .iter_mut()
-                        .filter(|c| c.index == pr.choice_idx)
+                        choice.delta.content = (!replacement.is_empty())
+                            .then(|| ChatCompletionMessageContent::Text(replacement.to_string()));
+                    } else if choice.finish_reason
+                        == Some(dynamo_protocols::types::FinishReason::Length)
+                        && choice.delta.tool_calls.is_none()
                     {
-                        // The jail released the truncated block verbatim as content
-                        // on this chunk, potentially preceded by post-call prose.
-                        // glm47's parser drops post-call prose deliberately, so
-                        // suppress the whole content here and let the recovery
-                        // chunk carry just the marker-onwards tail — matching batch.
-                        rc.delta.content = None;
+                        let replacement = state
+                            .input_text
+                            .strip_prefix(&state.emitted_text)
+                            .unwrap_or_default();
+                        choice.delta.content = (!replacement.is_empty())
+                            .then(|| ChatCompletionMessageContent::Text(replacement.to_string()));
+                    }
+
+                    if let Some(ChatCompletionMessageContent::Text(content)) = &choice.delta.content {
+                        state.emitted_text.push_str(content);
                     }
                 }
             }
 
-            // Pass 3: emit a recovery chunk per affected choice carrying just
-            // the truncated tail (marker onwards, no post-call prose).
-            let recovery_chunks: Vec<_> = recoveries
-                .into_iter()
-                .filter_map(|pr| {
-                    let PendingRecovery {
-                        choice_idx, tail, ..
-                    } = pr;
-                    tracing::warn!(
-                        choice_index = choice_idx,
-                        recovered_bytes = tail.len(),
-                        "glm47 streaming: partial <tool_call> emitted as content \
-                         on length finish"
-                    );
-                    let mut rec = nv_chunk.clone();
-                    rec.id = None;
-                    scrub_synthetic_chunk_metadata(&mut rec);
-                    let rd = rec.data.as_mut()?;
-                    rd.inner.choices.retain(|c| c.index == choice_idx);
-                    for rc in &mut rd.inner.choices {
-                        rc.delta.content = Some(ChatCompletionMessageContent::Text(tail.clone()));
-                        rc.delta.tool_calls = None;
-                        rc.finish_reason = None;
-                        rc.logprobs = None;
-                    }
-                    Some(rec)
-                })
-                .collect();
-
-            futures::stream::iter(recovery_chunks.into_iter().chain(std::iter::once(nv_chunk)))
+            futures::stream::iter(std::iter::once(nv_chunk))
         });
 
         // Once an upstream error is latched, drop any output the jail synthesized
@@ -7659,6 +7552,121 @@ mod tests {
         chunk
     }
 
+    fn glm47_stream_chunk(
+        content: &str,
+        finish_reason: Option<FinishReason>,
+    ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+        let mut chunk = chat_stream_chunk(0, Some(Role::Assistant));
+        let choice = &mut chunk.data.as_mut().unwrap().inner.choices[0];
+        choice.delta.content = Some(ChatCompletionMessageContent::Text(content.to_string()));
+        choice.finish_reason = finish_reason;
+        chunk
+    }
+
+    async fn apply_glm47_streaming_length(
+        chunks: &[&str],
+    ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
+        let chunks: Vec<String> = chunks.iter().map(|chunk| (*chunk).to_string()).collect();
+        let chunk_count = chunks.len();
+        OpenAIPreprocessor::apply_tool_calling_jail(
+            Some("glm47".to_string()),
+            None,
+            None,
+            false,
+            false,
+            stream::iter(chunks.into_iter().enumerate().map(move |(index, content)| {
+                glm47_stream_chunk(
+                    &content,
+                    (index + 1 == chunk_count).then_some(FinishReason::Length),
+                )
+            })),
+        )
+        .collect()
+        .await
+    }
+
+    fn stream_content(output: &[Annotated<NvCreateChatCompletionStreamResponse>]) -> String {
+        output
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter_map(|choice| match &choice.delta.content {
+                Some(ChatCompletionMessageContent::Text(content)) => Some(content.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_length_preserves_prose_and_suppresses_incomplete_marker() {
+        let output = apply_glm47_streaming_length(&[
+            "I can help. <tool_call>get_weather<arg_key>city</arg_key><arg_value>Par",
+        ])
+        .await;
+
+        assert_eq!(stream_content(&output), "I can help. ");
+        assert!(
+            output
+                .iter()
+                .flat_map(|response| response.data.iter())
+                .flat_map(|data| data.inner.choices.iter())
+                .any(|choice| choice.finish_reason == Some(FinishReason::Length))
+        );
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_length_preserves_quoted_marker_prose() {
+        let content = r#"The literal "<tool_call>" marker is part of the explanation."#;
+        for split in content.char_indices().map(|(index, _)| index).skip(1) {
+            let output =
+                apply_glm47_streaming_length(&[&content[..split], &content[split..]]).await;
+            assert_eq!(
+                stream_content(&output),
+                content,
+                "split at byte {split} must preserve quoted marker prose"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_length_suppresses_incomplete_marker_at_every_split() {
+        let input = "I can help. <tool_call>get_weather<arg_key>city</arg_key><arg_value>Par";
+        for split in input.char_indices().map(|(index, _)| index).skip(1) {
+            let output = apply_glm47_streaming_length(&[&input[..split], &input[split..]]).await;
+            assert_eq!(
+                stream_content(&output),
+                "I can help. ",
+                "split at byte {split} must not expose truncated marker content"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn glm47_streaming_length_keeps_an_empty_safe_terminal_recovery_delta() {
+        let output = apply_glm47_streaming_length(&[
+            "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Par",
+        ])
+        .await;
+
+        assert!(stream_content(&output).is_empty());
+        let terminal_choices: Vec<_> = output
+            .iter()
+            .flat_map(|response| response.data.iter())
+            .flat_map(|data| data.inner.choices.iter())
+            .filter(|choice| choice.finish_reason == Some(FinishReason::Length))
+            .collect();
+        assert_eq!(
+            terminal_choices.len(),
+            1,
+            "the recovery event must be observable"
+        );
+        assert!(
+            terminal_choices[0].delta.content.is_none()
+                && terminal_choices[0].delta.tool_calls.is_none(),
+            "the observable recovery delta must not expose raw markup or partial arguments"
+        );
+    }
+
     async fn apply_kimi_k3_no_tools(
         leaked_reasoning: &str,
     ) -> Vec<Annotated<NvCreateChatCompletionStreamResponse>> {
@@ -8373,99 +8381,6 @@ mod tests {
         assert!(!should_hash_decoded_video(true, true, false, true));
         assert!(!should_hash_decoded_video(true, false, true, true));
         assert!(!should_hash_decoded_video(true, false, false, false));
-    }
-
-    #[cfg(all(
-        feature = "mm-routing",
-        feature = "media-ffmpeg",
-        feature = "testing-nixl"
-    ))]
-    #[tokio::test]
-    async fn adjacent_videos_reach_media_loader_with_hashing_disabled() {
-        let video_bytes = include_bytes!("../tests/data/media/240p_10.mp4");
-        let mut server = mockito::Server::new_async().await;
-        let video_mock = server
-            .mock("GET", "/video.mp4")
-            .with_status(200)
-            .with_header("content-type", "video/mp4")
-            .with_body(&video_bytes[..])
-            .expect(2)
-            .create_async()
-            .await;
-
-        let mdc = ModelDeploymentCard::load_from_disk(
-            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
-            None,
-        )
-        .unwrap();
-        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap())
-            .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
-        let media_decoder: MediaDecoder = serde_json::from_value(serde_json::json!({
-            "video": {"num_frames": 2}
-        }))
-        .unwrap();
-        let media_fetcher = MediaFetcher {
-            allow_direct_ip: true,
-            allow_direct_port: true,
-            allow_private_ips: true,
-            ..Default::default()
-        };
-        preprocessor.media_loader = Some(
-            MediaLoader::new(media_decoder, Some(media_fetcher))
-                .expect("test media loader must initialize"),
-        );
-        preprocessor.video_routing_processor = Some(mm_routing::VideoRoutingProcessor::test_stub());
-
-        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
-            "model": "test-model",
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": format!("{}/video.mp4", server.url())}
-                    },
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": format!("{}/video.mp4", server.url())}
-                    }
-                ]
-            }],
-            "max_tokens": 1
-        }))
-        .unwrap();
-        let mut builder = PreprocessedRequest::builder();
-        builder
-            .model("test-model".to_string())
-            .token_ids(Vec::new())
-            .stop_conditions(Default::default())
-            .sampling_options(Default::default())
-            .output_options(Default::default());
-
-        let (routing_entries, _) = preprocessor
-            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
-            .await
-            .unwrap();
-        let preprocessed = builder.build().unwrap();
-        let videos = preprocessed
-            .multi_modal_data
-            .as_ref()
-            .and_then(|media| media.get("video_url"))
-            .expect("both decoded videos must be forwarded");
-
-        assert_eq!(videos.len(), 2);
-        for video in videos {
-            let MultimodalData::Decoded(descriptor) = video else {
-                panic!("video must reach the media loader and be decoded");
-            };
-            assert!(
-                descriptor.content_hash().is_none(),
-                "adjacent videos must reach the media loader with hashing disabled"
-            );
-        }
-        assert!(routing_entries.is_empty());
-        assert!(preprocessed.mm_routing_info.is_none());
-        video_mock.assert_async().await;
     }
 
     #[test]

@@ -591,6 +591,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
         validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
+        validate::validate_guided_decoding(self)?;
         validate::validate_chat_template_args(self.chat_template_args.as_ref())?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
@@ -688,16 +689,13 @@ mod tests {
         ];
 
         for extra in conflicts {
-            let error = chat_request_with(&extra)
-                .extract_sampling_options()
-                .unwrap_err();
-            let dynamo_error = error
-                .downcast_ref::<dynamo_runtime::error::DynamoError>()
-                .expect("sampling extraction must preserve the HTTP error type");
-            assert_eq!(
-                dynamo_error.error_type(),
-                dynamo_runtime::error::ErrorType::InvalidArgument,
-                "guided-decoding conflicts must map to HTTP 400",
+            let request = chat_request_with(&extra);
+            let error = ValidateRequest::validate(&request).expect_err("constraints conflict");
+            assert!(
+                error
+                    .to_string()
+                    .contains("Only one guided-decoding constraint"),
+                "validation error should name the conflict, got: {error}"
             );
         }
     }
