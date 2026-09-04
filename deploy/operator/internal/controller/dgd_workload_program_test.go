@@ -659,7 +659,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 		require.NoError(t, err)
 
 		t.Log("Seed the fake cache with a worker DCD carrying the target hash")
-		targetDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		targetDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-worker-" + desired.v2,
 				Namespace: dgd.Namespace,
@@ -677,7 +677,6 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 			},
 		})
 		reconciler := createTestDGDReconcilerWithStatus(dgd, withObjects(targetDCD))
-		adoptTestDCDs(dgd, reconciler.Client)
 		program := reconciler.newComponentProgram()
 		status := dgd.DeepCopy().Status
 
@@ -1029,7 +1028,7 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 	}
 
 	t.Log("Seed the fake cache with old-gen DCDs for both prefill and decode carrying the old hash")
-	prefillOldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	prefillOldDCD := createTestDCD(t, reducedDGD, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd-prefill-" + oldHash, Namespace: "default"},
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1043,7 +1042,7 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 			},
 		},
 	})
-	decodeOldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	decodeOldDCD := createTestDCD(t, reducedDGD, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd-decode-" + oldHash, Namespace: "default"},
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -1059,7 +1058,6 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 	})
 
 	r := createTestDGDReconcilerWithStatus(reducedDGD, withObjects(prefillOldDCD, decodeOldDCD))
-	adoptTestDCDs(reducedDGD, r.Client)
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
 	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
 

@@ -66,6 +66,27 @@ func createTestDGD(name string, services map[string]*nvidiacomv1alpha1.DynamoCom
 	})
 }
 
+// testScheme registers the v1beta1 types once for use in createTestDCD.
+var testScheme = func() *runtime.Scheme {
+	s := runtime.NewScheme()
+	if err := nvidiacomv1beta1.AddToScheme(s); err != nil {
+		panic(err)
+	}
+	return s
+}()
+
+// createTestDCD converts src to v1beta1, stamps dgd as its controller owner,
+// and returns the result. Use this instead of betaDCD when the DCD should be
+// owned by dgd so that IsControlledBy checks in production code pass.
+func createTestDCD(t testing.TB, dgd *nvidiacomv1beta1.DynamoGraphDeployment, src *nvidiacomv1alpha1.DynamoComponentDeployment) *nvidiacomv1beta1.DynamoComponentDeployment {
+	t.Helper()
+	dcd := betaDCD(t, src)
+	if err := ctrl.SetControllerReference(dgd, dcd, testScheme); err != nil {
+		t.Fatalf("set controller reference on test DCD: %v", err)
+	}
+	return dcd
+}
+
 type testReconcilerOption func(*fake.ClientBuilder)
 
 // withObjects seeds the rollout test client with runtime objects beyond the DGD.
@@ -112,38 +133,12 @@ func createTestDGDReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployme
 	}
 }
 
-// adoptTestDCDs sets dgd as the controller owner on all DCDs in r's cache
-// that carry dgd's name label but lack an owner reference. Unit tests use
-// label-only fixtures, so this establishes the ownership that production code
-// now requires via metav1.IsControlledBy.
-func adoptTestDCDs(dgd *nvidiacomv1beta1.DynamoGraphDeployment, r client.Client) {
-	scheme := runtime.NewScheme()
-	_ = nvidiacomv1beta1.AddToScheme(scheme)
-	ctx := context.Background()
-	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
-	if err := r.List(ctx, dcdList, client.MatchingLabels{
-		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-	}); err != nil {
-		return
-	}
-	for i := range dcdList.Items {
-		dcd := &dcdList.Items[i]
-		if !metav1.IsControlledBy(dcd, dgd) {
-			if ctrl.SetControllerReference(dgd, dcd, scheme) == nil {
-				_ = r.Update(ctx, dcd)
-			}
-		}
-	}
-}
-
 func createTestReconcilerWithStatus(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	opts ...testReconcilerOption,
 ) *dgdWorkerRolloutReconciler {
 	reconciler := createTestDGDReconcilerWithStatus(dgd, opts...)
-	r := newDGDWorkerRolloutReconciler(reconciler.Client, reconciler.Recorder)
-	adoptTestDCDs(dgd, r.Client)
-	return r
+	return newDGDWorkerRolloutReconciler(reconciler.Client, reconciler.Recorder)
 }
 
 func newTestComponentWorkloadsReconciler(
@@ -577,7 +572,7 @@ func TestActiveV1OnlyRolloutRerollsUnderV2(t *testing.T) {
 			dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{Phase: tt.phase}
 			desiredV2 := betaDGDWorkersSpecHash(t, dgd)
 
-			targetDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+			targetDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd-worker-target-v1",
 					Namespace: dgd.Namespace,
@@ -1121,7 +1116,7 @@ func TestDeleteOldWorkerDCDs(t *testing.T) {
 	})
 
 	// Create DCD with old worker hash
-	oldDCD1 := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	oldDCD1 := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-oldhash1",
 			UID:       types.UID("observed-old-generation"),
@@ -1139,7 +1134,7 @@ func TestDeleteOldWorkerDCDs(t *testing.T) {
 	})
 
 	// Create DCD with new worker hash (should not be deleted)
-	newDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	newDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-newhash2",
 			Namespace: "default",
@@ -1222,8 +1217,13 @@ func TestDCDObservesWorkerHash(t *testing.T) {
 		}
 	}
 
+	// DCDs are constructed before dgd exists in the table loop; use a fixed-name DGD
+	// (empty UID matches all test DGDs) so IsControlledBy passes inside the loop.
+	ownerDGD := createTestDGD("test-dgd", nil)
 	prefillDCD := betaDCD(t, makeDCD("test-dgd-prefill-"+targetHash, "prefill", string(consts.ComponentTypePrefill), targetHash))
+	require.NoError(t, ctrl.SetControllerReference(ownerDGD, prefillDCD, testScheme))
 	decodeDCD := betaDCD(t, makeDCD("test-dgd-decode-"+targetHash, "decode", string(consts.ComponentTypeDecode), targetHash))
+	require.NoError(t, ctrl.SetControllerReference(ownerDGD, decodeDCD, testScheme))
 
 	tests := []struct {
 		name     string
@@ -1301,7 +1301,7 @@ func TestContinueRollingUpdate_UpdatedComponentsPartialCompletion(t *testing.T) 
 	}
 
 	// New DCDs: prefill fully ready, decode not ready yet
-	newPrefillDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	newPrefillDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-prefill-" + newWorkerHash[:8],
 			Namespace: "default",
@@ -1324,7 +1324,7 @@ func TestContinueRollingUpdate_UpdatedComponentsPartialCompletion(t *testing.T) 
 		},
 	})
 
-	newDecodeDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	newDecodeDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-decode-" + newWorkerHash[:8],
 			Namespace: "default",
@@ -1348,7 +1348,7 @@ func TestContinueRollingUpdate_UpdatedComponentsPartialCompletion(t *testing.T) 
 	})
 
 	// Old DCDs: prefill gone, decode still has replicas
-	oldDecodeDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	oldDecodeDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-decode-" + oldWorkerHash[:8],
 			Namespace: "default",
@@ -1408,7 +1408,7 @@ func TestContinueRollingUpdate_AggregateReadyButPerServiceNot(t *testing.T) {
 	// New DCDs: prefill has excess ready replicas (5), decode has 0
 	// Aggregate: 5 total new ready >= 5 desired, 0 old ready == 0
 	// Per-service: prefill ready (5 >= 2), decode NOT ready (0 < 3)
-	newPrefillDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	newPrefillDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-prefill-" + newWorkerHash[:8],
 			Namespace: "default",
@@ -1431,7 +1431,7 @@ func TestContinueRollingUpdate_AggregateReadyButPerServiceNot(t *testing.T) {
 		},
 	})
 
-	newDecodeDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	newDecodeDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-decode-" + newWorkerHash[:8],
 			Namespace: "default",
@@ -1555,7 +1555,7 @@ func TestContinueRollingUpdate_AllServicesUpdated(t *testing.T) {
 	}
 
 	// All new DCDs fully ready
-	newPrefillDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	newPrefillDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-prefill-" + newWorkerHash[:8],
 			Namespace: "default",
@@ -1578,7 +1578,7 @@ func TestContinueRollingUpdate_AllServicesUpdated(t *testing.T) {
 		},
 	})
 
-	newDecodeDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	newDecodeDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-decode-" + newWorkerHash[:8],
 			Namespace: "default",
@@ -1629,7 +1629,7 @@ func TestContinueRollingUpdate_AllWorkersRemoved(t *testing.T) {
 	}
 
 	t.Log("Seed an old worker DCD that has been drained to zero replicas and all pods terminated")
-	oldWorkerDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	oldWorkerDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-" + oldWorkerHash[:8],
 			Namespace: "default",
@@ -1707,7 +1707,7 @@ func TestReconcileRollingUpdate_RecreateAtZeroWaitsForOldPodTermination(t *testi
 			require.NotEqual(t, oldWorkerHash, newWorkerHash)
 
 			makeZeroReplicaDCD := func(name, workerHash string) *nvidiacomv1beta1.DynamoComponentDeployment {
-				return &nvidiacomv1beta1.DynamoComponentDeployment{
+				dcd := &nvidiacomv1beta1.DynamoComponentDeployment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       name,
 						Namespace:  dgd.Namespace,
@@ -1732,6 +1732,10 @@ func TestReconcileRollingUpdate_RecreateAtZeroWaitsForOldPodTermination(t *testi
 						},
 					},
 				}
+				if err := ctrl.SetControllerReference(dgd, dcd, testScheme); err != nil {
+					t.Fatalf("set controller reference: %v", err)
+				}
+				return dcd
 			}
 			oldDCD := makeZeroReplicaDCD(
 				dynamo.GetDCDResourceName(dgd, "worker", oldWorkerHash),
@@ -1808,7 +1812,7 @@ func TestGetWorkerInfoForWorkerHash(t *testing.T) {
 	})
 
 	// Create DCDs for prefill and decode with different ready counts
-	prefillDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	prefillDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-prefill-hash1234",
 			Namespace: "default",
@@ -1831,7 +1835,7 @@ func TestGetWorkerInfoForWorkerHash(t *testing.T) {
 		},
 	})
 
-	decodeDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	decodeDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-decode-hash1234",
 			Namespace: "default",
@@ -2043,7 +2047,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 			},
 		})
 
-		oldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		oldDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-prefill-oldhash1",
 				Namespace: "default",
@@ -2102,7 +2106,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 		now := metav1.Now()
 		earlier := metav1.NewTime(now.Add(-1 * 60 * 1e9))
 
-		oldestDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		oldestDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "test-dgd-worker-hashaaaa",
 				Namespace:         "default",
@@ -2130,7 +2134,7 @@ func TestAggregateOldWorkerServiceStatuses(t *testing.T) {
 			},
 		})
 
-		newerOldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		newerOldDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "test-dgd-worker-hashbbbb",
 				Namespace:         "default",
@@ -2225,7 +2229,7 @@ func TestComponentWorkloadsReconciler_GetExistingRestartAnnotationsDCD(t *testin
 			consts.AnnotationCurrentWorkerHashV2: "oldhash",
 		}
 
-		frontendDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		frontendDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-frontend",
 				Namespace: "default",
@@ -2239,7 +2243,7 @@ func TestComponentWorkloadsReconciler_GetExistingRestartAnnotationsDCD(t *testin
 			},
 		})
 
-		workerDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		workerDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-worker-" + computedHash,
 				Namespace: "default",
@@ -2276,7 +2280,7 @@ func TestComponentWorkloadsReconciler_GetExistingRestartAnnotationsDCD(t *testin
 			consts.AnnotationCurrentWorkerHashV2: v2Hash,
 		}
 
-		workerDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		workerDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-worker-" + v2Hash,
 				Namespace: "default",
@@ -2312,7 +2316,7 @@ func TestComponentWorkloadsReconciler_GetExistingRestartAnnotationsDCD(t *testin
 			consts.AnnotationCurrentWorkerHash: testOldWorkerHash,
 		}
 
-		frontendDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		frontendDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-frontend",
 				Namespace: "default",
@@ -2347,7 +2351,7 @@ func TestComponentWorkloadsReconciler_GetExistingRestartAnnotationsDCD(t *testin
 			consts.AnnotationCurrentWorkerHash: testOldWorkerHash,
 		}
 
-		frontendDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		frontendDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-frontend",
 				Namespace: "default",
@@ -2383,7 +2387,7 @@ func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.
 			consts.AnnotationCurrentWorkerHash: workerHash,
 		}
 
-		workerDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		workerDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:       "test-dgd-worker-" + workerHash,
 				Namespace:  "default",
@@ -2421,7 +2425,7 @@ func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.
 			consts.AnnotationCurrentWorkerHashV2: v2Hash,
 		}
 
-		workerDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		workerDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:       "test-dgd-worker-" + v2Hash,
 				Namespace:  "default",
@@ -2453,7 +2457,7 @@ func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.
 			},
 		})
 
-		frontendDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		frontendDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:       "test-dgd-frontend",
 				Namespace:  "default",
@@ -2486,7 +2490,7 @@ func TestComponentRestartProgressResolver_CheckComponentFullyUpdated(t *testing.
 		})
 		// No worker hash annotation
 
-		workerDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		workerDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:       "test-dgd-worker",
 				Namespace:  "default",
@@ -2522,7 +2526,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyDCDsMigration(t *testing.T) {
 
 	// Create a legacy worker DCD: has DGD name label but NO worker hash label.
 	// This simulates a DCD created by a pre-rolling-update operator version.
-	legacyWorkerDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	legacyWorkerDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker",
 			Namespace: "default",
@@ -2575,7 +2579,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyMultipleWorkers(t *testing.T) {
 	})
 
 	// Legacy worker DCDs (no hash label)
-	legacyPrefillDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	legacyPrefillDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-prefill",
 			Namespace: "default",
@@ -2591,7 +2595,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyMultipleWorkers(t *testing.T) {
 		},
 	})
 
-	legacyDecodeDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	legacyDecodeDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-decode",
 			Namespace: "default",
@@ -2608,7 +2612,7 @@ func TestInitializeWorkerHashIfNeeded_LegacyMultipleWorkers(t *testing.T) {
 	})
 
 	// Frontend DCD (not a worker, should not be touched)
-	frontendDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	frontendDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-frontend",
 			Namespace: "default",
@@ -2656,7 +2660,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 			"worker": {ComponentType: consts.ComponentTypeWorker},
 		})
 
-		legacyDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		legacyDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-worker",
 				Namespace: "default",
@@ -2685,7 +2689,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 			"frontend": {ComponentType: consts.ComponentTypeFrontend},
 		})
 
-		frontendDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		frontendDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-frontend",
 				Namespace: "default",
@@ -2713,7 +2717,7 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 			"worker": {ComponentType: consts.ComponentTypeWorker},
 		})
 
-		hashedDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		hashedDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-worker-abc12345",
 				Namespace: "default",
@@ -2853,7 +2857,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 		})
 
 		// Legacy DCD with backfilled "legacy" hash label
-		legacyDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		legacyDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-worker",
 				Namespace: "default",
@@ -2884,7 +2888,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 			"worker": {ComponentType: consts.ComponentTypeWorker},
 		})
 
-		currentDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		currentDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-worker-abc12345",
 				Namespace: "default",
@@ -2916,7 +2920,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 		})
 
 		// A frontend DCD with non-matching hash (should be excluded as non-worker)
-		frontendDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		frontendDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-frontend",
 				Namespace: "default",
@@ -2933,7 +2937,7 @@ func TestListOldWorkerDCDs(t *testing.T) {
 			},
 		})
 
-		workerDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		workerDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-worker-oldhash1",
 				Namespace: "default",
@@ -2970,7 +2974,7 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 		})
 
 		// Legacy DCD with backfilled hash label but old-style name (no hash suffix)
-		legacyDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		legacyDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-worker",
 				Namespace: "default",
@@ -3036,7 +3040,7 @@ func TestScaleOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 			},
 		})
 
-		legacyDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		legacyDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-worker",
 				Namespace: "default",
@@ -3085,7 +3089,7 @@ func TestAggregateOldWorkerServiceStatuses_LegacyDCDs(t *testing.T) {
 		})
 
 		// Legacy DCD with old-style name but backfilled hash label
-		legacyDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		legacyDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-dgd-worker",
 				Namespace: "default",
@@ -3157,7 +3161,7 @@ func TestDeleteOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 	})
 
 	// Legacy DCD with backfilled hash label
-	legacyDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	legacyDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker",
 			Namespace: "default",
@@ -3174,7 +3178,7 @@ func TestDeleteOldWorkerDCDs_LegacyDCDs(t *testing.T) {
 	})
 
 	// New DCD with real hash (should NOT be deleted)
-	newDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	newDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-abc12345",
 			Namespace: "default",
@@ -3211,7 +3215,7 @@ func TestDeleteOldWorkerDCDs_MultipleGenerations(t *testing.T) {
 	})
 
 	// Generation A (legacy)
-	legacyDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	legacyDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker",
 			Namespace: "default",
@@ -3228,7 +3232,7 @@ func TestDeleteOldWorkerDCDs_MultipleGenerations(t *testing.T) {
 	})
 
 	// Generation B (intermediate)
-	genBDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genBDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-hashbbbb",
 			Namespace: "default",
@@ -3245,7 +3249,7 @@ func TestDeleteOldWorkerDCDs_MultipleGenerations(t *testing.T) {
 	})
 
 	// Generation C (current)
-	currentDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	currentDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-hashcccc",
 			Namespace: "default",
@@ -3282,7 +3286,7 @@ func TestListOldWorkerDCDs_ExcludesCurrentHash(t *testing.T) {
 	})
 
 	// Generation A
-	genADCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genADCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-hashaaaa",
 			Namespace: "default",
@@ -3300,7 +3304,7 @@ func TestListOldWorkerDCDs_ExcludesCurrentHash(t *testing.T) {
 	})
 
 	// Generation B
-	genBDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genBDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-hashbbbb",
 			Namespace: "default",
@@ -3318,7 +3322,7 @@ func TestListOldWorkerDCDs_ExcludesCurrentHash(t *testing.T) {
 	})
 
 	// Generation C (current)
-	genCDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genCDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-hashcccc",
 			Namespace: "default",
@@ -3359,7 +3363,7 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerations(t *testing.T) {
 	earlier := metav1.NewTime(now.Add(-1 * 60 * 1e9)) // 1 minute earlier
 
 	// Generation A (oldest)
-	genADCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genADCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "test-dgd-worker-hashaaaa",
 			Namespace:         "default",
@@ -3379,7 +3383,7 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerations(t *testing.T) {
 	})
 
 	// Generation B (newer old)
-	genBDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genBDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "test-dgd-worker-hashbbbb",
 			Namespace:         "default",
@@ -3516,7 +3520,7 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerationsPreservesAvailableReplicas(t *
 	earlier := metav1.NewTime(now.Add(-1 * 60 * 1e9)) // 1 minute earlier
 
 	// Generation A (oldest): healthy and serving the minAvailable budget.
-	genADCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genADCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "test-dgd-worker-hashaaaa",
 			Namespace:         "default",
@@ -3542,7 +3546,7 @@ func TestScaleOldWorkerDCDs_MultipleOldGenerationsPreservesAvailableReplicas(t *
 	})
 
 	// Generation B (newer old): spec consumes rollout budget but has no serving replicas.
-	genBDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genBDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "test-dgd-worker-hashbbbb",
 			Namespace:         "default",
@@ -3604,7 +3608,7 @@ func TestAggregateOldWorkerServiceStatuses_MultipleOldGenerations(t *testing.T) 
 	})
 
 	// Generation A
-	genADCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genADCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-hashaaaa",
 			Namespace: "default",
@@ -3631,7 +3635,7 @@ func TestAggregateOldWorkerServiceStatuses_MultipleOldGenerations(t *testing.T) 
 	})
 
 	// Generation B
-	genBDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genBDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-hashbbbb",
 			Namespace: "default",
@@ -3696,7 +3700,7 @@ func TestContinueRollingUpdate_CascadingSpecChange(t *testing.T) {
 	}
 
 	// Generation A (old)
-	genADCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genADCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-hashaaaa",
 			Namespace: "default",
@@ -3720,7 +3724,7 @@ func TestContinueRollingUpdate_CascadingSpecChange(t *testing.T) {
 	})
 
 	// Generation B (intermediate, now also old)
-	genBDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genBDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-hashbbbb",
 			Namespace: "default",
@@ -3744,7 +3748,7 @@ func TestContinueRollingUpdate_CascadingSpecChange(t *testing.T) {
 	})
 
 	// Generation C (new, not yet ready)
-	genCDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	genCDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-" + newWorkerHash[:8],
 			Namespace: "default",
@@ -4298,7 +4302,7 @@ func TestReconcileRollingUpdate_NewRollingUpdate(t *testing.T) {
 	}
 
 	// Create a DCD with the new hash that has ready replicas — stale annotation scenario
-	newDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	newDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-" + newHash,
 			Namespace: "default",
@@ -4341,7 +4345,7 @@ func TestReconcileRollingUpdate_StaleAnnotationRequiresAllNewWorkersReady(t *tes
 	newHash := betaDGDWorkersSpecHash(t, dgd)
 	require.NotEqual(t, testOldWorkerHash, newHash)
 
-	newPrefillDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	newPrefillDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dynamo.GetDCDResourceName(dgd, "prefill", newHash),
 			Namespace: "default",
@@ -4384,7 +4388,7 @@ func TestReconcileRollingUpdate_StaleAnnotationUpdatesAfterAllNewWorkersReady(t 
 	require.NotEqual(t, testOldWorkerHash, newHash)
 
 	makeReadyDCD := func(componentName, componentType string) *nvidiacomv1beta1.DynamoComponentDeployment {
-		return betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		return createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      dynamo.GetDCDResourceName(dgd, componentName, newHash),
 				Namespace: "default",
@@ -4469,11 +4473,11 @@ func TestReconcileRollingUpdate_InProgressAwaitsTargetDCDCacheObservation(t *tes
 }
 
 func TestBuildRollingUpdateContext(t *testing.T) {
-	makeOldDCD := func(dgdName, serviceName, componentType, workerHash string, specReplicas, statusReplicas, availableReplicas int32) *nvidiacomv1beta1.DynamoComponentDeployment {
+	makeOldDCD := func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, dgdName, serviceName, componentType, workerHash string, specReplicas, statusReplicas, availableReplicas int32) *nvidiacomv1beta1.DynamoComponentDeployment {
 		if workerHash == "" {
 			workerHash = testOldWorkerHash
 		}
-		return betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		return createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      dgdName + "-" + serviceName + "-" + workerHash[:8],
 				Namespace: "default",
@@ -4498,8 +4502,8 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 		})
 	}
 
-	makeNewDCD := func(dgdName, serviceName, componentType, workerHash string, specReplicas, statusReplicas, availableReplicas int32) *nvidiacomv1beta1.DynamoComponentDeployment {
-		return betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	makeNewDCD := func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, dgdName, serviceName, componentType, workerHash string, specReplicas, statusReplicas, availableReplicas int32) *nvidiacomv1beta1.DynamoComponentDeployment {
+		return createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      dgdName + "-" + serviceName + "-" + workerHash[:8],
 				Namespace: "default",
@@ -4539,8 +4543,8 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			Status: corev1.PodStatus{Phase: phase},
 		}
 	}
-	makeDefaultReplicaOldDCD := func(dgdName, serviceName, componentType, workerHash string, statusReplicas, availableReplicas int32) *nvidiacomv1beta1.DynamoComponentDeployment {
-		dcd := makeOldDCD(dgdName, serviceName, componentType, workerHash, 1, statusReplicas, availableReplicas)
+	makeDefaultReplicaOldDCD := func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, dgdName, serviceName, componentType, workerHash string, statusReplicas, availableReplicas int32) *nvidiacomv1beta1.DynamoComponentDeployment {
+		dcd := makeOldDCD(dgd, dgdName, serviceName, componentType, workerHash, 1, statusReplicas, availableReplicas)
 		dcd.Spec.Replicas = nil
 		return dcd
 	}
@@ -4550,8 +4554,8 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 		services                       map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
 		dgdSpecAnnotations             map[string]string
 		preserveAlphaComponentMetadata bool
-		oldDCDs                        func(newHash string) []runtime.Object
-		newDCDs                        func(newHash string) []runtime.Object
+		oldDCDs                        func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object
+		newDCDs                        func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object
 		pods                           func(newHash string) []runtime.Object
 		expectedOld                    map[string]int32
 		expectedNew                    map[string]int32
@@ -4570,12 +4574,12 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					},
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 10, 10, 10),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 10, 10, 10),
 				}
 			},
-			newDCDs:     func(_ string) []runtime.Object { return nil },
+			newDCDs:     func(_ *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object { return nil },
 			expectedOld: map[string]int32{"worker": 8},
 			expectedNew: map[string]int32{"worker": 0}, // can't surge yet, need to wait for old replicas to be terminated
 		},
@@ -4590,12 +4594,12 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					},
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeDefaultReplicaOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 1, 1),
+					makeDefaultReplicaOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 1, 1),
 				}
 			},
-			newDCDs:     func(_ string) []runtime.Object { return nil },
+			newDCDs:     func(_ *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object { return nil },
 			expectedOld: map[string]int32{"worker": 1},
 			expectedNew: map[string]int32{"worker": 1},
 		},
@@ -4614,12 +4618,12 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					},
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 8, 9, 8),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 8, 9, 8),
 				}
 			},
-			newDCDs:     func(_ string) []runtime.Object { return nil },
+			newDCDs:     func(_ *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object { return nil },
 			expectedOld: map[string]int32{"worker": 8},
 			expectedNew: map[string]int32{"worker": 2}, // budget from Spec: 10+0-8-0=2
 		},
@@ -4634,14 +4638,14 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					// Default annotations: 25% surge, 25% unavailable
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 8, 8, 4),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 8, 8, 4),
 				}
 			},
-			newDCDs: func(newHash string) []runtime.Object {
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
 				return []runtime.Object{
-					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 3, 3, 3),
+					makeNewDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, newHash, 3, 3, 3),
 				}
 			},
 			expectedOld: map[string]int32{"worker": 5},
@@ -4657,12 +4661,12 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					Replicas:      ptr.To(int32(10)),
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 10, 10, 6),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 10, 10, 6),
 				}
 			},
-			newDCDs:     func(_ string) []runtime.Object { return nil },
+			newDCDs:     func(_ *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object { return nil },
 			expectedOld: map[string]int32{"worker": 8},
 			expectedNew: map[string]int32{"worker": 3},
 		},
@@ -4679,14 +4683,14 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					Replicas:      ptr.To(int32(10)),
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 5, 8, 5),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 5, 8, 5),
 				}
 			},
-			newDCDs: func(newHash string) []runtime.Object {
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
 				return []runtime.Object{
-					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 5, 5, 5),
+					makeNewDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, newHash, 5, 5, 5),
 				}
 			},
 			expectedOld: map[string]int32{"worker": 3},
@@ -4708,16 +4712,16 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					Replicas:      ptr.To(int32(8)),
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "prefill", consts.ComponentTypePrefill, "", 0, 0, 0),
-					makeOldDCD("test-dgd", "decode", consts.ComponentTypeDecode, "", 6, 6, 6),
+					makeOldDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, "", 0, 0, 0),
+					makeOldDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, "", 6, 6, 6),
 				}
 			},
-			newDCDs: func(newHash string) []runtime.Object {
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
 				return []runtime.Object{
-					makeNewDCD("test-dgd", "prefill", consts.ComponentTypePrefill, newHash, 4, 4, 4),
-					makeNewDCD("test-dgd", "decode", consts.ComponentTypeDecode, newHash, 2, 2, 0),
+					makeNewDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, newHash, 4, 4, 4),
+					makeNewDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, newHash, 2, 2, 0),
 				}
 			},
 			expectedOld: map[string]int32{"prefill": 0, "decode": 6},
@@ -4733,14 +4737,14 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					Replicas:      ptr.To(int32(10)),
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 10, 10, 6),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 10, 10, 6),
 				}
 			},
-			newDCDs: func(newHash string) []runtime.Object {
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
 				return []runtime.Object{
-					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 4, 4, 0),
+					makeNewDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, newHash, 4, 4, 0),
 				}
 			},
 			expectedOld: map[string]int32{"worker": 8}, // newUnavailable shrinks scale-down budget; hold unhealthy old
@@ -4756,15 +4760,15 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					Replicas:      ptr.To(int32(10)),
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "oldhash0", 4, 4, 4),
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, testOldWorkerHash, 4, 4, 4),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "oldhash0", 4, 4, 4),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, testOldWorkerHash, 4, 4, 4),
 				}
 			},
-			newDCDs: func(newHash string) []runtime.Object {
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
 				return []runtime.Object{
-					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 2, 2, 2),
+					makeNewDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, newHash, 2, 2, 2),
 				}
 			},
 			expectedOld: map[string]int32{"worker": 6}, // aggregated across both old gens
@@ -4783,14 +4787,14 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					},
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 3, 3, 3),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 3, 3, 3),
 				}
 			},
-			newDCDs: func(newHash string) []runtime.Object {
+			newDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, newHash string) []runtime.Object {
 				return []runtime.Object{
-					makeNewDCD("test-dgd", "worker", consts.ComponentTypeWorker, newHash, 2, 2, 2),
+					makeNewDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, newHash, 2, 2, 2),
 				}
 			},
 			expectedOld: map[string]int32{"worker": 0},
@@ -4807,12 +4811,12 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					},
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 0, 0, 0),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 0, 0, 0),
 				}
 			},
-			newDCDs:     func(_ string) []runtime.Object { return nil },
+			newDCDs:     func(_ *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object { return nil },
 			expectedOld: map[string]int32{"worker": 0},
 			expectedNew: map[string]int32{"worker": 3},
 		},
@@ -4827,9 +4831,9 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					},
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 0, 0, 0),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 0, 0, 0),
 				}
 			},
 			pods: func(_ string) []runtime.Object {
@@ -4846,7 +4850,7 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 				pod.Finalizers = []string{"test.example/finalizer"}
 				return []runtime.Object{pod}
 			},
-			newDCDs:     func(_ string) []runtime.Object { return nil },
+			newDCDs:     func(_ *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object { return nil },
 			expectedOld: map[string]int32{"worker": 0},
 			expectedNew: map[string]int32{"worker": 0},
 		},
@@ -4861,12 +4865,12 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			dgdSpecAnnotations: map[string]string{
 				KubeAnnotationDeploymentStrategy: string(common.DeploymentStrategyRecreate),
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 3, 3, 3),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 3, 3, 3),
 				}
 			},
-			newDCDs:     func(_ string) []runtime.Object { return nil },
+			newDCDs:     func(_ *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object { return nil },
 			expectedOld: map[string]int32{"worker": 0},
 			expectedNew: map[string]int32{"worker": 0},
 		},
@@ -4882,12 +4886,12 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 				},
 			},
 			preserveAlphaComponentMetadata: true,
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "worker", consts.ComponentTypeWorker, "", 3, 3, 3),
+					makeOldDCD(dgd, "test-dgd", "worker", consts.ComponentTypeWorker, "", 3, 3, 3),
 				}
 			},
-			newDCDs:     func(_ string) []runtime.Object { return nil },
+			newDCDs:     func(_ *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object { return nil },
 			expectedOld: map[string]int32{"worker": 0},
 			expectedNew: map[string]int32{"worker": 0},
 		},
@@ -4906,13 +4910,13 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 					Replicas:      ptr.To(int32(4)),
 				},
 			},
-			oldDCDs: func(_ string) []runtime.Object {
+			oldDCDs: func(dgd *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object {
 				return []runtime.Object{
-					makeOldDCD("test-dgd", "prefill", consts.ComponentTypePrefill, "", 2, 2, 2),
-					makeOldDCD("test-dgd", "decode", consts.ComponentTypeDecode, "", 4, 4, 4),
+					makeOldDCD(dgd, "test-dgd", "prefill", consts.ComponentTypePrefill, "", 2, 2, 2),
+					makeOldDCD(dgd, "test-dgd", "decode", consts.ComponentTypeDecode, "", 4, 4, 4),
 				}
 			},
-			newDCDs:     func(_ string) []runtime.Object { return nil },
+			newDCDs:     func(_ *nvidiacomv1beta1.DynamoGraphDeployment, _ string) []runtime.Object { return nil },
 			expectedOld: map[string]int32{"prefill": 0, "decode": 3},
 			expectedNew: map[string]int32{"prefill": 0, "decode": 1},
 		},
@@ -4950,10 +4954,10 @@ func TestBuildRollingUpdateContext(t *testing.T) {
 			// Collect all mock objects
 			var objs []runtime.Object
 			if tt.oldDCDs != nil {
-				objs = append(objs, tt.oldDCDs(newHash)...)
+				objs = append(objs, tt.oldDCDs(dgd, newHash)...)
 			}
 			if tt.newDCDs != nil {
-				objs = append(objs, tt.newDCDs(newHash)...)
+				objs = append(objs, tt.newDCDs(dgd, newHash)...)
 			}
 			if tt.pods != nil {
 				objs = append(objs, tt.pods(newHash)...)
@@ -4989,7 +4993,7 @@ func TestBuildRollingUpdateContext_NoNewDCDExists(t *testing.T) {
 		consts.AnnotationCurrentWorkerHashV2: testOldWorkerHash,
 	}
 
-	oldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	oldDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-" + testOldWorkerHash[:8],
 			Namespace: "default",
@@ -5042,7 +5046,7 @@ func TestBuildRollingUpdateContext_RollbackToSameHash(t *testing.T) {
 	}
 
 	t.Log("Seed an orphaned B-gen DCD left over from the aborted A→B rollout")
-	orphanedDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	orphanedDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-bbbbbbbb",
 			Namespace: "default",
@@ -5124,7 +5128,7 @@ func TestBuildRollingUpdateContext_ListPodsError(t *testing.T) {
 	dgd.Annotations = map[string]string{
 		consts.AnnotationCurrentWorkerHashV2: testOldWorkerHash,
 	}
-	oldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	oldDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dgd-worker-" + testOldWorkerHash[:8],
 			Namespace: "default",
@@ -5178,7 +5182,7 @@ func TestBuildRollingUpdateContext_GetNewDCDError(t *testing.T) {
 		"test setup: annotation must differ from computed hash so getNewWorkerDCDsByComponent looks up the new-gen DCD")
 
 	t.Log("Seed an old-gen worker DCD so the loop body executes and reaches the new-DCD Get")
-	oldDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+	oldDCD := createTestDCD(t, dgd, &nvidiacomv1alpha1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-dgd-worker-" + testOldWorkerHash, Namespace: dgd.Namespace},
 		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
 			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
