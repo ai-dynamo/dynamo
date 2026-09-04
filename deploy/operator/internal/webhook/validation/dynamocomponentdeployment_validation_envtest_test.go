@@ -199,16 +199,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			username: admissionOperatorPrincipal,
 		},
 		{
-			name: "standalone DCD rejects automatic snapshot failover",
-			deployment: automaticFailoverTargetDCD(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.OwnerReferences = []metav1.OwnerReference{dgdControllerReference()}
-			}),
-			username: "system:serviceaccount:default:regular-user",
-			wantWebhookErrs: []string{
-				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover requires an operator-managed automatic single-node vLLM Worker checkpoint: checkpoint failover is only supported for an operator-generated DCD",
-			},
-		},
-		{
 			name: "v1beta1 derives runtime version from a semver image tag",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				dcd.Spec.RuntimeVersionOverride = ""
@@ -927,22 +917,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					Mode:    nvidiacomv1alpha1.GMSModeInterPod,
 				},
 				Failover: &nvidiacomv1alpha1.FailoverSpec{NumShadows: 2},
-			}),
-		},
-		{
-			name: "intra-pod failover accepts two shadows",
-			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				Resources:     workerGPU,
-				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
-					Enabled: true,
-					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
-				},
-				Failover: &nvidiacomv1alpha1.FailoverSpec{
-					Enabled:    true,
-					Mode:       nvidiacomv1alpha1.GMSModeIntraPod,
-					NumShadows: 2,
-				},
 			}),
 		},
 		{

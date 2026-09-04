@@ -502,25 +502,29 @@ func validateFailoverCheckpointProfile(
 	} else if gpuCount != 1 {
 		violations = append(violations, errors.New("main container must request exactly one GPU"))
 	}
-	// The operator derives these from DYN_GMS_USE_V1, which it injects when a
-	// checkpoint is configured. A user value is either ignored or contradicts
-	// the operator's selection, so reject it rather than silently rewriting it.
-	for _, flag := range vllmOperatorManagedFlags(backend) {
-		if _, _, _, found, err := tokenizedVLLMFlag(main.Args, flag); err != nil {
-			violations = append(violations, err)
-		} else if found {
-			violations = append(violations, fmt.Errorf("%s is managed by the operator and must not be set", flag))
+	if backend == BackendFrameworkVLLM {
+		// The operator derives these from DYN_GMS_USE_V1, which it injects when a
+		// checkpoint is configured. A user value is either ignored or contradicts
+		// the operator's selection, so reject it rather than silently rewriting it.
+		// DYN_VLLM_GMS_SHADOW_MODE marks a cold-start shadow engine and is unset
+		// on the snapshot path. SGLang has no equivalents.
+		for _, flag := range []string{vllmWorkerClassFlag, vllmLoadFormatFlag} {
+			if _, _, _, found, err := tokenizedFlag(main.Args, flag); err != nil {
+				violations = append(violations, err)
+			} else if found {
+				violations = append(violations, fmt.Errorf("%s is managed by the operator and must not be set", flag))
+			}
+		}
+		if containerHasEnvVar(main, "DYN_VLLM_GMS_SHADOW_MODE") {
+			violations = append(violations, errors.New("DYN_VLLM_GMS_SHADOW_MODE is managed by the operator and must not be set"))
 		}
 	}
-	// Operator-managed environment. DYN_VLLM_GMS_SHADOW_MODE marks a cold-start
-	// shadow engine; DYN_FORWARDPASS_METRIC_PORT is assigned per engine.
-	for _, name := range []string{"DYN_VLLM_GMS_SHADOW_MODE", "DYN_FORWARDPASS_METRIC_PORT"} {
-		if containerHasEnvVar(main, name) {
-			violations = append(violations, fmt.Errorf("%s is managed by the operator and must not be set", name))
-		}
+	// Assigned per engine container by the operator, for every backend.
+	if containerHasEnvVar(main, "DYN_FORWARDPASS_METRIC_PORT") {
+		violations = append(violations, errors.New("DYN_FORWARDPASS_METRIC_PORT is managed by the operator and must not be set"))
 	}
 	for _, profile := range failoverSnapshotFlagProfile(backend) {
-		value, _, _, found, err := tokenizedVLLMFlag(main.Args, profile.flag)
+		value, _, _, found, err := tokenizedFlag(main.Args, profile.flag)
 		if err != nil {
 			violations = append(violations, err)
 			continue
@@ -567,15 +571,6 @@ func failoverSnapshotFlagProfile(backend BackendFramework) []failoverSnapshotFla
 	}
 }
 
-// vllmOperatorManagedFlags lists engine arguments the operator derives from
-// DYN_GMS_USE_V1. SGLang has no equivalent user-facing flags.
-func vllmOperatorManagedFlags(backend BackendFramework) []string {
-	if backend != BackendFrameworkVLLM {
-		return nil
-	}
-	return []string{vllmWorkerClassFlag, vllmLoadFormatFlag}
-}
-
 func wrapFailoverCompatibilityViolations(violations []error) []error {
 	if len(violations) == 0 {
 		return nil
@@ -596,7 +591,7 @@ func PrepareVLLMSnapshotSourceContainer(container *corev1.Container) error {
 	return nil
 }
 
-func tokenizedVLLMFlag(args []string, flag string) (value string, index int, equalsForm, found bool, err error) {
+func tokenizedFlag(args []string, flag string) (value string, index int, equalsForm, found bool, err error) {
 	index = -1
 	for i, arg := range args {
 		switch {

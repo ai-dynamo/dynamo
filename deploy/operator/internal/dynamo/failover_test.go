@@ -741,10 +741,6 @@ func TestBuildFailoverPod_SingleNodeNoNNODES(t *testing.T) {
 	}
 }
 
-
-
-
-
 func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
 	component := validAutomaticFailoverComponent()
 
@@ -775,7 +771,7 @@ func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
 		violations := ValidateFailoverCheckpointForDCD(target, string(BackendFrameworkVLLM))
 		require.Len(t, violations, 1)
 		for _, message := range []string{
-				"disaggregation mode must be aggregated",
+			"disaggregation mode must be aggregated",
 			"request plane must be tcp",
 			"tensor parallel size must be 1",
 			"pipeline parallel size must be 1",
@@ -803,7 +799,6 @@ func TestPrepareVLLMSnapshotSourceContainer(t *testing.T) {
 	require.Error(t, PrepareVLLMSnapshotSourceContainer(nil))
 }
 
-
 // --- IsIntraPodFailoverEnabled ---
 
 func TestIsIntraPodFailoverEnabled(t *testing.T) {
@@ -819,7 +814,6 @@ func TestIsIntraPodFailoverEnabled(t *testing.T) {
 	assert.False(t, IsIntraPodFailoverEnabled(betaComponent(t, &v1alpha1.DynamoComponentDeploymentSharedSpec{})))
 	assert.False(t, IsIntraPodFailoverEnabled(nil))
 }
-
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -848,7 +842,7 @@ func validAutomaticFailoverComponent() *v1beta1.DynamoComponentDeploymentSharedS
 
 func vllmFlagValue(t *testing.T, args []string, flag string) string {
 	t.Helper()
-	value, _, _, found, err := tokenizedVLLMFlag(args, flag)
+	value, _, _, found, err := tokenizedFlag(args, flag)
 	require.NoError(t, err)
 	require.True(t, found)
 	return value

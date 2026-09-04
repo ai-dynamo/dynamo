@@ -168,7 +168,6 @@ func TestDynamoComponentDeploymentReconcileFinalizesDeletingStoredCheckpointInco
 	}
 }
 
-
 func normalizeLeaderWorkerSetForCompare(lws *leaderworkersetv1.LeaderWorkerSet) *leaderworkersetv1.LeaderWorkerSet {
 	if lws == nil {
 		return nil

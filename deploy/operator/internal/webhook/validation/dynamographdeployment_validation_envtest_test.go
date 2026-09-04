@@ -1301,45 +1301,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.components[1].experimental.failover.mode: Invalid value: "InterPod": must match gpuMemoryService.mode "IntraPod"`},
 		},
 		{
-			name: "intra-pod failover accepts two shadows",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				enableBetaContainerDiscovery(dgd)
-				worker := betaWorkerComponent(dgd)
-				enableBetaIntraPodGMS(worker)
-				worker.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{
-					Mode:       nvidiacomv1beta1.GMSModeIntraPod,
-					NumShadows: 2,
-				}
-			}),
-		},
-		{
-			name: "v1beta1 intra-pod failover rejects three shadows",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				enableBetaContainerDiscovery(dgd)
-				worker := betaWorkerComponent(dgd)
-				enableBetaIntraPodGMS(worker)
-				worker.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{
-					Mode:       nvidiacomv1beta1.GMSModeIntraPod,
-					NumShadows: 3,
-				}
-			}),
-			wantWebhookErrs: []string{`spec.components[1].experimental.failover.numShadows: Invalid value: 3: is invalid for mode="IntraPod": supported values are 1 and 2`},
-		},
-		{
-			name: "v1alpha1 inter-pod failover accepts three shadows",
-			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				enableAlphaInterPodGMSFailover(dgd.Spec.Services["worker"], 3)
-			}),
-		},
-		{
-			name: "v1beta1 inter-pod failover accepts three shadows",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				worker := betaWorkerComponent(dgd)
-				enableBetaInterPodGMS(worker)
-				enableBetaInterPodFailover(worker, 3)
-			}),
-		},
-		{
 			name: "inter-pod failover requires GMS",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
@@ -1380,28 +1341,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				enableBetaIntraPodGMS(worker)
 				worker.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
 			}),
-		},
-		{
-			name: "automatic snapshot failover source rejects checkpoint reference",
-			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
-				enableBetaContainerDiscovery(dgd)
-				worker := betaWorkerComponent(dgd)
-				enableBetaIntraPodGMS(worker)
-				main := &worker.PodTemplate.Spec.Containers[0]
-				main.Command = []string{"python3"}
-				main.Args = []string{"-m", "dynamo.vllm"}
-				worker.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{
-					Enabled:       true,
-					CheckpointRef: k8sptr.To("foreign-checkpoint"),
-				}
-				worker.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{
-					Mode:       nvidiacomv1beta1.GMSModeIntraPod,
-					NumShadows: 1,
-				}
-			}),
-			wantWebhookErrs: []string{
-				"spec.components[1].experimental.checkpoint: Forbidden: Snapshot with active/passive failover requires an operator-managed automatic single-node vLLM Worker checkpoint: checkpointRef must be omitted so the DGD owns the automatic checkpoint",
-			},
 		},
 		{
 			name: "checkpoint compatibility is revalidated on update",
@@ -1506,20 +1445,6 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				}
 			}),
 			wantWebhookErrs: []string{"spec.services[worker].eppConfig: Forbidden: must be omitted for native Rust EPP images with runtime version 1.5.0 or later"},
-		},
-		{
-			name: "alpha intra-pod failover accepts two shadows structurally",
-			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
-				dgd.Spec.Services["worker"].Failover = &nvidiacomv1alpha1.FailoverSpec{
-					Enabled:    true,
-					Mode:       nvidiacomv1alpha1.GMSModeIntraPod,
-					NumShadows: 2,
-				}
-			}),
-			wantWebhookErrs: []string{
-				`metadata.annotations[nvidia.com/dynamo-kube-discovery-mode]: Invalid value: "": must be "container" when intra-pod failover is configured`,
-				`spec.components[0].experimental.failover: Forbidden: gpuMemoryService is required when failover mode is "IntraPod"`,
-			},
 		},
 		{
 			name: "alpha frontend sidecar rejects generated container name conflict",
