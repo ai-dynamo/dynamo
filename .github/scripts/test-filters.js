@@ -110,6 +110,11 @@ const testCases = [
     desc: 'any docs/tests descendant triggers recipe check without core'
   },
   {
+    file: 'deploy/operator/config/crd/bases/nvidia.com_dynamomodels.yaml',
+    expect: { core: false, docs: false, examples: true, operator: true },
+    desc: 'every operator CRD base triggers generated recipe OpenAPI checks'
+  },
+  {
     file: 'components/src/dynamo/vllm/worker.py',
     expect: { core: false, vllm: true },
     desc: 'vllm component triggers only vllm'
@@ -160,18 +165,18 @@ const testCases = [
   // Doc files should be excluded from core (negation patterns)
   {
     file: 'lib/README.md',
-    expect: { core: false, vllm: false, docs: true },
-    desc: 'lib README excluded from core, matches docs'
+    expect: { core: false, vllm: false, docs: false, ignore: true },
+    desc: 'lib README is classification-only and excluded from core'
   },
   {
     file: 'tests/README.md',
-    expect: { core: false, docs: true },
-    desc: 'tests README excluded from core'
+    expect: { core: false, docs: false, ignore: true },
+    desc: 'tests README is classification-only and excluded from core'
   },
   {
     file: 'lib/docs/guide.txt',
-    expect: { core: false, docs: true },
-    desc: 'txt file excluded from core'
+    expect: { core: false, docs: false, ignore: true },
+    desc: 'txt file is classification-only and excluded from core'
   },
   {
     file: 'docs/guide.md',
@@ -307,7 +312,7 @@ const testCases = [
     desc: 'Operator CRD changes trigger snapshot contract tests'
   },
   {
-    file: 'deploy/operator/config/rbac/role.yaml',
+    file: 'deploy/helm/charts/platform/components/operator/files/role.yaml',
     expect: { snapshot: true, operator: true },
     desc: 'Operator RBAC changes trigger snapshot contract tests'
   },

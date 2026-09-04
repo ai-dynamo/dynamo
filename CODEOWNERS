@@ -326,7 +326,6 @@
 /deploy/operator/cmd/                                                                                   @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/docs/                                                                                  @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/hack/                                                                                  @ai-dynamo/dynamo-operator-codeowners
-/deploy/operator/test/                                                                                  @ai-dynamo/dynamo-operator-codeowners
 /examples/deployments/                                                                                  @ai-dynamo/dynamo-operator-codeowners
 /deploy/CONTRIBUTING.md                                                                                 @ai-dynamo/dynamo-operator-codeowners
 /deploy/pre-deployment/                                                                                 @ai-dynamo/dynamo-operator-codeowners
@@ -334,30 +333,23 @@
 /deploy/utils/manifests/                                                                                @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/samples/                                                                               @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/                                                                              @ai-dynamo/dynamo-operator-codeowners
-/deploy/operator/test/e2e/                                                                              @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/api/config/                                                                            @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/config/crd/                                                                            @ai-dynamo/dynamo-operator-codeowners
-/deploy/operator/test/utils/                                                                            @ai-dynamo/dynamo-operator-codeowners
 /deploy/helm/charts/platform/                                                                           @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/api/scripts/                                                                           @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/api/v1beta1/                                                                           @ai-dynamo/dynamo-operator-codeowners
-/deploy/operator/config/rbac/                                                                           @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/api/v1alpha1/                                                                          @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/dra/                                                                          @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/gpu/                                                                          @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/cmd/crd-apply/                                                                         @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/cert/                                                                         @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/rbac/                                                                         @ai-dynamo/dynamo-operator-codeowners
-/deploy/operator/config/default/                                                                        @ai-dynamo/dynamo-operator-codeowners
-/deploy/operator/config/manager/                                                                        @ai-dynamo/dynamo-operator-codeowners
-/deploy/operator/config/samples/                                                                        @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/common/                                                                       @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/consts/                                                                       @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/dynamo/                                                                       @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/secret/                                                                       @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/secrets/                                                                      @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/webhook/                                                                      @ai-dynamo/dynamo-operator-codeowners
-/deploy/operator/config/prometheus/                                                                     @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/discovery/                                                                    @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/controller/                                                                   @ai-dynamo/dynamo-operator-codeowners
 /deploy/operator/internal/modelendpoint/                                                                @ai-dynamo/dynamo-operator-codeowners
@@ -698,7 +690,6 @@
 /components/src/dynamo/trtllm/engine_monitor.py                                                         @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-observability-codeowners
 /components/src/dynamo/trtllm/tests/*diffusion*                                                         @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-diffusion-codeowners
 /components/src/dynamo/trtllm/tests/multimodal/                                                         @ai-dynamo/dynamo-backend-trtllm-codeowners @ai-dynamo/dynamo-multimodal-codeowners
-/deploy/operator/config/prometheus/monitor.yaml                                                         @ai-dynamo/dynamo-operator-codeowners @ai-dynamo/dynamo-observability-codeowners
 /dev/observability/grafana_dashboards/kvbm.json                                                         @ai-dynamo/dynamo-observability-codeowners @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/backend-common/examples/mocker/Dockerfile*                                                         @ai-dynamo/dynamo-performance-codeowners @ai-dynamo/dynamo-ops-codeowners
 /lib/bindings/python/tests/test_mm_kv_router.py                                                         @ai-dynamo/dynamo-runtime-codeowners @ai-dynamo/dynamo-router-codeowners @ai-dynamo/dynamo-multimodal-codeowners
