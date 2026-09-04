@@ -4,7 +4,8 @@
 # Stage Release RC: stage (or re-stage) an EXISTING release branch at a chosen rc
 # round via release.yml, then trigger the GitLab pipeline. Run once per rc round.
 # The branch + version stamp are created by "Cut Release Branch"; this workflow is
-# read-only on the tree. Dispatch restricted to the ai-dynamo/devops team.
+# read-only on the tree. The devops ops gate and the reviewer approval that guard
+# the publish live in release.yml, so they bind this and every other caller.
 
 name: Stage Release RC
 
@@ -59,57 +60,12 @@ permissions:
   contents: read
 
 jobs:
-  # OPS GATE (fast-fail) — reject a non-ai-dynamo/devops dispatch before the ECR
-  # wait. Fail-closed: a missing app Members:read permission or any API error denies.
-  # Checks BOTH github.actor and github.triggering_actor (actor does not re-resolve
-  # on re-runs). The authoritative ops + approval gate for the publish path lives in
-  # release.yml (invoke-release), so it also binds direct and rogue callers.
-  authorize:
-    name: Verify release-ops membership
-    runs-on: prod-default-small-v2
-    environment: automated-release
-    permissions:
-      contents: read
-    steps:
-      - name: Mint app token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-      - name: Require release-ops team membership
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          ORG: ${{ github.repository_owner }}
-          TEAM: devops
-          ACTOR: ${{ github.actor }}
-          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
-        run: |
-          set -euo pipefail
-          # TEMPORARY(1.5.0-rc2): the push test loop has no dispatching actor to check. REVERT.
-          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
-            echo "TEMPORARY: push loop — skipping the ops gate"
-            exit 0
-          fi
-          for USER in $(printf '%s\n%s\n' "${ACTOR}" "${TRIGGERING_ACTOR}" | sort -u); do
-            HTTP=$(curl -sS -o "${RUNNER_TEMP}/membership.json" -w '%{http_code}' \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/orgs/${ORG}/teams/${TEAM}/memberships/${USER}")
-            STATE=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('state',''))" \
-              "${RUNNER_TEMP}/membership.json" 2>/dev/null || echo "")
-            if [ "${HTTP}" != "200" ] || [ "${STATE}" != "active" ]; then
-              echo "::error::@${USER} is not an active member of ${ORG}/${TEAM} (HTTP ${HTTP}); only release ops may run this workflow."
-              exit 1
-            fi
-            echo "@${USER} authorized via ${ORG}/${TEAM}"
-          done
-
   # RESOLVE TARGET (read-only) — validate inputs; resolve the branch tip SHA (the
   # commit whose post-merge images this rc stages), the rc round, and the subsets.
+  # No ops gate here: the authoritative devops + approval gate for the publish path
+  # lives in release.yml (reached via invoke-release), which binds every caller.
   resolve-target:
     name: Resolve staging target
-    needs: [authorize]
     runs-on: prod-default-small-v2
     environment: automated-release
     permissions:
