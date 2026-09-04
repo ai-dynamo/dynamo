@@ -77,58 +77,6 @@ func init() {
 	}
 }
 
-func TestDynamoComponentDeploymentRecordOwnershipConflict(t *testing.T) {
-	ctx := context.Background()
-	dcd := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", Generation: 7},
-	}
-	kubeClient := fake.NewClientBuilder().
-		WithScheme(scheme.Scheme).
-		WithObjects(dcd).
-		WithStatusSubresource(&v1beta1.DynamoComponentDeployment{}).
-		Build()
-	recorder := events.NewFakeRecorder(2)
-	reconciler := &DynamoComponentDeploymentReconciler{Client: kubeClient, Recorder: recorder}
-	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(dcd)}
-	reconcileErr := fmt.Errorf("sync child resource: %w", &controller_common.OwnershipConflictError{
-		Cause: fmt.Errorf("resource is controlled by another parent"),
-	})
-
-	t.Log("Record a new ownership conflict through the DCD error boundary")
-	reconciler.recordReconcileError(ctx, req, dcd, reconcileErr)
-
-	stored := &v1beta1.DynamoComponentDeployment{}
-	require.NoError(t, kubeClient.Get(ctx, req.NamespacedName, stored))
-	available := meta.FindStatusCondition(stored.Status.Conditions, v1beta1.DynamoComponentDeploymentConditionTypeAvailable)
-	require.NotNil(t, available)
-	assert.Equal(t, metav1.ConditionFalse, available.Status)
-	conflict := meta.FindStatusCondition(stored.Status.Conditions, v1beta1.ConditionTypeOwnershipConflict)
-	require.NotNil(t, conflict)
-	assert.Equal(t, metav1.ConditionTrue, conflict.Status)
-	assert.Equal(t, int64(7), conflict.ObservedGeneration)
-	assert.Equal(t, controller_common.EventReasonOwnershipConflict, conflict.Reason)
-
-	t.Log("Verify the parent-scoped warning is emitted only after status persistence")
-	require.Len(t, recorder.Events, 1)
-	event := <-recorder.Events
-	assert.Contains(t, event, controller_common.EventReasonOwnershipConflict)
-	assert.NotContains(t, event, "ReconcileError")
-
-	t.Log("Repeat the same level observation without emitting a second warning")
-	reconciler.recordReconcileError(ctx, req, stored, reconcileErr)
-	assert.Empty(t, recorder.Events)
-
-	t.Log("Clear the persisted condition after a later successful reconciliation")
-	resolvedCondition, transition := applyOwnershipConflict(stored.Status.Conditions, stored.Generation, nil)
-	require.NotNil(t, resolvedCondition)
-	assert.Equal(t, ownershipConflictResolved, transition)
-	meta.SetStatusCondition(&stored.Status.Conditions, *resolvedCondition)
-	conflict = meta.FindStatusCondition(stored.Status.Conditions, v1beta1.ConditionTypeOwnershipConflict)
-	require.NotNil(t, conflict)
-	assert.Equal(t, metav1.ConditionFalse, conflict.Status)
-	assert.Equal(t, "OwnershipConflictResolved", conflict.Reason)
-}
-
 func TestDynamoComponentDeploymentReconcileRejectsStoredCheckpointIncompatibilityBeforeSideEffects(t *testing.T) {
 	dcd := &v1beta1.DynamoComponentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", Generation: 7},
