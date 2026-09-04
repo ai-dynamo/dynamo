@@ -1459,6 +1459,104 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 
 class TestRoutedEnginePath:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "n,other_request",
+        [(1, False), (2, False), (1, True)],
+        ids=["single-choice", "parallel-choices", "concurrent-request"],
+    )
+    async def test_local_stop_releases_only_the_completed_request(
+        self, tokenizer, n, other_request
+    ):
+        import dynamo.frontend.vllm_processor as module
+
+        sampling_params = SamplingParams(
+            n=n, stop=["STOP"], output_kind=module.RequestOutputKind.DELTA
+        )
+        vllm_request = module.EngineCoreRequest(
+            request_id="local-stop",
+            external_req_id="local-stop",
+            prompt_token_ids=[1],
+            mm_features=None,
+            sampling_params=sampling_params,
+            pooling_params=None,
+            arrival_time=0.0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+        )
+        # Split the stop string across token chunks, as it arrives from a
+        # tokenizer-free worker that leaves string stopping to the frontend.
+        stop_tokens = tokenizer.encode("hello ST", add_special_tokens=False)
+        stop_tokens += tokenizer.encode("OP", add_special_tokens=False)
+        items = [{"token_ids": [token], "index": 0} for token in stop_tokens]
+        if n > 1:
+            items.append(
+                {
+                    "token_ids": tokenizer.encode(
+                        "other answer", add_special_tokens=False
+                    ),
+                    "index": 1,
+                    "finish_reason": "length",
+                }
+            )
+        expected_chunks = len(items)
+        expected_tokens = sum(len(item["token_ids"]) for item in items)
+        items.append({"token_ids": [42], "index": 0})
+        routed_engine = _FakeRoutedEngine(items)
+        processor = _make_processor(module, routed_engine)
+        processor.output_processor = module.OutputProcessor(tokenizer, log_stats=False)
+        if other_request:
+            processor.output_processor.add_request(
+                module.msgspec_replace(
+                    vllm_request, request_id="unrelated", external_req_id="unrelated"
+                ),
+                None,
+            )
+
+        request = prepost_module.ChatCompletionRequest(
+            model=MODEL, messages=[{"role": "user", "content": "hi"}]
+        )
+        posts = {
+            index: StreamingPostProcessor(
+                tokenizer=tokenizer,
+                request_for_sampling=request,
+                sampling_params=sampling_params,
+                prompt_token_ids=[1],
+                tool_parser=None,
+                reasoning_parser_class=None,
+                chat_template_kwargs={},
+            )
+            for index in range(n)
+        }
+        chunks = [
+            chunk
+            async for chunk in processor._generate_and_stream(
+                "local-stop", {"model": MODEL}, {}, [1], vllm_request, posts
+            )
+        ]
+
+        assert routed_engine.yielded == expected_chunks
+        data = [chunk["data"] for chunk in chunks if "data" in chunk]
+        choices = [choice for frame in data for choice in frame["choices"]]
+        assert {
+            index: "".join(
+                choice["delta"].get("content", "")
+                for choice in choices
+                if choice["index"] == index
+            )
+            for index in range(n)
+        } == ({0: "hello ", 1: "other answer"} if n > 1 else {0: "hello "})
+        assert {
+            choice["index"]: choice["finish_reason"]
+            for choice in choices
+            if choice["finish_reason"]
+        } == ({0: "stop", 1: "length"} if n > 1 else {0: "stop"})
+        assert data[-1]["usage"]["completion_tokens"] == expected_tokens
+        assert set(processor.output_processor.request_states) == (
+            {"unrelated"} if other_request else set()
+        )
+
+    @pytest.mark.asyncio
     async def test_backend_rejection_keeps_the_backend_status(
         self, vllm_processor_module
     ):
