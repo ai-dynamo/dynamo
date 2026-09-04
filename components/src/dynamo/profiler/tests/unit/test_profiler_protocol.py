@@ -211,7 +211,6 @@ def test_convert_aggregate_template_preserves_single_worker(
 
 
 def test_convert_vllm_disagg_decode_removes_disaggregation_role() -> None:
-    """A standalone decode candidate must not retain a disaggregated role."""
     modifier = CONFIG_MODIFIERS["vllm"]
     config = modifier.load_default_config("disagg")
     decode_args = _main_container(_component_by_type(config, "decode"))["args"]
@@ -405,6 +404,21 @@ def test_sglang_prefill_dp_limits_leave_safe_args_unchanged(
     prefill_args: list[str],
 ) -> None:
     assert _normalize_prefill_dp_limits(prefill_args) == prefill_args
+
+
+def test_sglang_prefill_dp_limits_normalize_shell_joined_args() -> None:
+    args = [
+        "--dp 2",
+        "--enable-dp-attention",
+        "--max-running-requests 1",
+    ]
+
+    normalized = _normalize_prefill_dp_limits(args)
+
+    assert "--max-running-requests 1" not in normalized
+    assert normalized.count("--max-running-requests") == 1
+    assert normalized[normalized.index("--max-running-requests") + 1] == "2"
+    assert normalized[normalized.index("--cuda-graph-bs") + 1] == "2"
 
 
 @pytest.mark.parametrize(

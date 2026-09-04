@@ -148,7 +148,9 @@ def _normalize_prefill_dp_limits(args: list[str]) -> list[str]:
         max_running_requests_int,
         dp_size,
     )
-    return set_unique_argument_value(args, "--max-running-requests", str(dp_size))
+    return set_unique_argument_value(
+        parsed_args, "--max-running-requests", str(dp_size)
+    )
 
 
 class SGLangConfigModifier(BaseConfigModifier):
