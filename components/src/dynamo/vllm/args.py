@@ -204,6 +204,15 @@ def update_dynamo_config_with_engine(
     served_names = split_served_model_names(engine_config.served_model_name)
     dynamo_config.served_model_name = served_names[0] if served_names else None
     dynamo_config.served_model_aliases = served_names[1:]
+    if served_names[1:]:
+        # Each worker in a disaggregated launch is its own process with its own
+        # --served-model-name. Stating what this one parsed is how an operator
+        # compares the prefill and decode command lines against each other.
+        logger.info(
+            "Multi-name registration: primary=%r, aliases=%s",
+            served_names[0],
+            served_names[1:],
+        )
 
     # Capture user-provided --endpoint before defaults overwrite it
     user_endpoint = dynamo_config.endpoint

@@ -1141,10 +1141,19 @@ where
         if prepared.card.model_type.supports_chat() {
             self.notify_on_model.notify_waiters();
         }
+        // Same filter `commit_discovery_group` applies, so a log scrape of a
+        // disaggregated frontend shows per group exactly which names that group claimed.
+        let group_aliases = prepared
+            .card
+            .aliases
+            .iter()
+            .filter(|alias| alias.as_str() != prepared.card.name())
+            .collect::<Vec<_>>();
         tracing::info!(
             model_name = prepared.card.name(),
             group = %spec.key.id(),
             members = members.len(),
+            aliases = ?group_aliases,
             "Committed discovered model group"
         );
         Ok(())
