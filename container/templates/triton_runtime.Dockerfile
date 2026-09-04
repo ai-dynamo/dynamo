@@ -33,8 +33,8 @@ COPY --chmod=664 ATTRIBUTION* LICENSE /workspace_src/
 FROM scratch AS dynamo_base_export
 COPY --from=dynamo_base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=dynamo_base /usr/local/bin/etcd/ /usr/local/bin/etcd/
-COPY --from=dynamo_base /bin/uv /usr/bin/uv
-COPY --from=dynamo_base /bin/uvx /usr/bin/uvx
+COPY --from=dynamo_base /opt/uv/bin/uv /usr/bin/uv
+COPY --from=dynamo_base /opt/uv/bin/uvx /usr/bin/uvx
 
 # The runtime image is the upstream Triton release with the Dynamo wheels and
 # launch assets overlaid directly on top. Building in place (rather than
