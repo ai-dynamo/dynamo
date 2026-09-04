@@ -75,6 +75,9 @@ CANONICAL_COMPONENT_ORDER = (
     "network-interface",
     "placement",
 )
+_NETWORK_ROOT_CONCERNS = frozenset(
+    {"network-generic", "network-provider", "network-private"}
+)
 CONTAINER_COLLECTIONS = frozenset(
     {"containers", "initContainers", "ephemeralContainers"}
 )
@@ -363,8 +366,8 @@ def _load_patch(
     root: Path,
     *,
     is_component: bool,
-    root_component: Optional[_RootComponent],
     index: int,
+    root_component: Optional[_RootComponent],
 ) -> _PatchLayer:
     owner_label = _relative_label(owner, root)
     provisional_label = "%s#patches[%d]" % (owner_label, index - 1)
@@ -434,6 +437,42 @@ def _load_patch(
         is_component=is_component,
         root_component=root_component,
     )
+
+
+def _classify_root_component(reference: str) -> Optional[Tuple[str, str]]:
+    segments = reference.split("/")
+    if (
+        len(segments) == 3
+        and segments[0] == "components"
+        and segments[1] in CANONICAL_COMPONENT_ORDER
+        and segments[2] in ("agg", "disagg")
+    ):
+        concern = (
+            "network-generic" if segments[1] == "network-interface" else segments[1]
+        )
+        return concern, segments[2]
+    if (
+        len(segments) == 4
+        and segments[0] == "components"
+        and segments[1] == "provider-networking"
+        and segments[2]
+        and segments[3] in ("agg", "disagg")
+    ):
+        return "network-provider", segments[3]
+    if (
+        len(segments) == 3
+        and segments[0] == "components"
+        and segments[1] == "networking"
+        and segments[2] in ("agg", "disagg")
+    ):
+        return "network-private", segments[2]
+    return None
+
+
+def _canonical_root_concern(concern: str) -> str:
+    if concern in _NETWORK_ROOT_CONCERNS:
+        return "network-interface"
+    return concern
 
 
 def _component_layers(
@@ -515,29 +554,36 @@ def _validate_root_contract(
     }
     root_components: List[_RootComponent] = []
     for index, reference in enumerate(document.get("components", [])):
-        segments = reference.split("/")
-        if (
-            len(segments) != 3
-            or segments[0] != "components"
-            or segments[1] not in rank_by_concern
-            or segments[2] not in ("agg", "disagg")
-        ):
+        classified = _classify_root_component(reference)
+        if classified is None:
             raise ValidationError(
                 "unsupported-manifest",
-                "root Component path must be exactly "
-                "components/<canonical-concern>/<agg|disagg>",
+                "root Component path must be a canonical concern, a qualified "
+                "provider-networking concern, or a private networking concern",
                 actual=reference,
             )
+        concern, topology = classified
         root_components.append(
             _RootComponent(
                 index=index,
                 reference=reference,
                 resolved=(kustomization.parent / reference).resolve(),
-                concern=segments[1],
-                topology=segments[2],
+                concern=concern,
+                topology=topology,
             )
         )
 
+    networking_components = [
+        component
+        for component in root_components
+        if component.concern in _NETWORK_ROOT_CONCERNS
+    ]
+    if len(networking_components) > 1:
+        raise ValidationError(
+            "networking-slot",
+            "select at most one generic, provider, or private networking Component",
+            actual=[component.reference for component in networking_components],
+        )
     for placement in root_components:
         if placement.concern != "placement":
             continue
@@ -563,11 +609,32 @@ def _validate_root_contract(
                 ),
             )
 
+    if networking_components:
+        networking = networking_components[0]
+        scheduling_indices = [
+            component.index
+            for component in root_components
+            if component.concern == "scheduling"
+        ]
+        placement_indices = [
+            component.index
+            for component in root_components
+            if component.concern == "placement"
+        ]
+        if (scheduling_indices and networking.index <= max(scheduling_indices)) or (
+            placement_indices and networking.index >= min(placement_indices)
+        ):
+            raise ValidationError(
+                "networking-slot",
+                "networking must follow scheduling and precede placement",
+                actual=networking.reference,
+            )
+
     previous: Optional[_RootComponent] = None
     for current in root_components:
         if previous is not None:
-            previous_rank = rank_by_concern[previous.concern]
-            current_rank = rank_by_concern[current.concern]
+            previous_rank = rank_by_concern[_canonical_root_concern(previous.concern)]
+            current_rank = rank_by_concern[_canonical_root_concern(current.concern)]
             if current_rank <= previous_rank:
                 raise ValidationError(
                     "component-order",
@@ -1099,6 +1166,358 @@ def _validate_guards(layer: _PatchLayer) -> None:
         }
 
 
+_NETWORK_ENV_NAMES = frozenset(
+    {
+        "NCCL_SOCKET_IFNAME",
+        "GLOO_SOCKET_IFNAME",
+        "NCCL_CROSS_NIC",
+        "UCX_NET_DEVICES",
+    }
+)
+_NETWORK_ANNOTATION_KEYS = frozenset(
+    {
+        "networking.gke.io/default-interface",
+        "networking.gke.io/interfaces",
+    }
+)
+
+
+def _source_has_networking_path(layer: _PatchLayer) -> bool:
+    normalized = layer.source.resolve().as_posix()
+    return bool(
+        re.search(
+            r"/components/(?:network-interface/(?:agg|disagg)|"
+            r"provider-networking/[^/]+/(?:agg|disagg)|"
+            r"networking/(?:agg|disagg))(?:/|$)",
+            normalized,
+        )
+    )
+
+
+def _preceding_env_name_test(
+    layer: _PatchLayer, op_index: int, tokens: Tuple[str, ...]
+) -> Optional[str]:
+    name_path = tokens[:-1] + ("name",)
+    observed: Optional[str] = None
+    for earlier_index, earlier in enumerate(layer.operations[: op_index - 1], start=1):
+        if earlier["op"] != "test":
+            continue
+        earlier_tokens = _pointer_tokens(
+            earlier["path"], layer=layer.label, op_index=earlier_index
+        )
+        if earlier_tokens == name_path and isinstance(earlier["value"], str):
+            observed = earlier["value"]
+    return observed
+
+
+def _network_operation_kind(
+    layer: _PatchLayer,
+    op_index: int,
+    operation: Mapping[str, Any],
+) -> Optional[str]:
+    tokens = _pointer_tokens(operation["path"], layer=layer.label, op_index=op_index)
+    if len(tokens) < 4 or tokens[:2] != ("spec", "components"):
+        return None
+    component_index = tokens[2]
+    pod_prefix = ("spec", "components", component_index, "podTemplate")
+    main_prefix = pod_prefix + ("spec", "containers", "0")
+
+    if len(tokens) == 7 and tokens[:6] == pod_prefix + (
+        "metadata",
+        "annotations",
+    ):
+        if tokens[6] in _NETWORK_ANNOTATION_KEYS and isinstance(
+            operation.get("value"), str
+        ):
+            return "annotation"
+        return None
+
+    if tokens == main_prefix + ("env", "-"):
+        value = operation.get("value")
+        if (
+            isinstance(value, dict)
+            and set(value) == {"name", "value"}
+            and value.get("name") in _NETWORK_ENV_NAMES
+            and isinstance(value.get("value"), str)
+        ):
+            return "env-append"
+        return None
+
+    if (
+        len(tokens) == len(main_prefix) + 3
+        and tokens[: len(main_prefix)] == main_prefix
+        and tokens[len(main_prefix)] == "env"
+        and re.fullmatch(r"0|[1-9][0-9]*", tokens[-2])
+        and tokens[-1] == "value"
+        and _preceding_env_name_test(layer, op_index, tokens) in _NETWORK_ENV_NAMES
+    ):
+        return "env-override"
+
+    resource_prefix = main_prefix + ("resources",)
+    if (
+        len(tokens) >= len(resource_prefix) + 1
+        and tokens[: len(resource_prefix)] == resource_prefix
+        and tokens[len(resource_prefix)] in ("requests", "limits")
+    ):
+        if (
+            len(tokens) != len(resource_prefix) + 2
+            or "/" not in tokens[-1]
+            or tokens[-1].startswith("/")
+            or tokens[-1].endswith("/")
+        ):
+            return "resource-invalid"
+        return "resource"
+
+    if tokens == main_prefix + ("volumeMounts", "-"):
+        value = operation.get("value")
+        if (
+            isinstance(value, dict)
+            and set(value) == {"name", "mountPath"}
+            and isinstance(value.get("name"), str)
+            and value["name"]
+            and value.get("mountPath") == "/dev/infiniband"
+        ):
+            return "infiniband-mount"
+        return None
+
+    if tokens == pod_prefix + ("spec", "volumes", "-"):
+        value = operation.get("value")
+        if (
+            isinstance(value, dict)
+            and set(value) == {"name", "hostPath"}
+            and isinstance(value.get("name"), str)
+            and value["name"]
+            and value.get("hostPath") == {"path": "/dev/infiniband"}
+        ):
+            return "infiniband-volume"
+        return None
+    return None
+
+
+def _networking_error(
+    layer: _PatchLayer,
+    op_index: int,
+    operation: Mapping[str, Any],
+    message: str,
+) -> ValidationError:
+    return ValidationError(
+        "networking-delta",
+        message,
+        layer=layer.label,
+        op_index=op_index,
+        path=operation["path"],
+    )
+
+
+def _validate_networking_contract(
+    layers: Sequence[_PatchLayer], root_components: Sequence[_RootComponent]
+) -> None:
+    network_roots = [
+        root for root in root_components if root.concern in _NETWORK_ROOT_CONCERNS
+    ]
+    if len(network_roots) > 1:
+        raise ValidationError(
+            "networking-slot",
+            "select at most one generic, provider, or private networking Component",
+            actual=[root.reference for root in network_roots],
+        )
+
+    network_root = network_roots[0] if network_roots else None
+    if network_root is not None:
+        scheduling_indices = [
+            root.index for root in root_components if root.concern == "scheduling"
+        ]
+        placement_indices = [
+            root.index for root in root_components if root.concern == "placement"
+        ]
+        if (scheduling_indices and network_root.index <= max(scheduling_indices)) or (
+            placement_indices and network_root.index >= min(placement_indices)
+        ):
+            raise ValidationError(
+                "networking-slot",
+                "networking must follow scheduling and precede placement",
+                actual=network_root.reference,
+            )
+
+    resource_values: Dict[Tuple[str, str, str], Any] = {}
+    mounts: Dict[Tuple[str, str], int] = {}
+    volumes: Dict[Tuple[str, str], int] = {}
+    component_env_entries: Set[Tuple[str, str]] = set()
+    for component_layer in layers:
+        if not (
+            component_layer.root_component is not None
+            and component_layer.root_component.concern in _NETWORK_ROOT_CONCERNS
+        ):
+            continue
+        for component_op_index, component_operation in enumerate(
+            component_layer.operations, start=1
+        ):
+            if component_operation["op"] != "add":
+                continue
+            component_tokens = _pointer_tokens(
+                component_operation["path"],
+                layer=component_layer.label,
+                op_index=component_op_index,
+            )
+            component_value = component_operation.get("value")
+            if (
+                len(component_tokens) >= 3
+                and component_tokens[-2:] == ("env", "-")
+                and isinstance(component_value, dict)
+                and isinstance(component_value.get("name"), str)
+            ):
+                component_env_entries.add(
+                    (component_tokens[2], component_value["name"])
+                )
+
+    for layer in layers:
+        owner_is_network = bool(
+            layer.root_component is not None
+            and layer.root_component.concern in _NETWORK_ROOT_CONCERNS
+        )
+        source_has_networking_path = _source_has_networking_path(layer)
+        for op_index, operation in enumerate(layer.operations, start=1):
+            if operation["op"] == "test":
+                continue
+            tokens = _pointer_tokens(
+                operation["path"], layer=layer.label, op_index=op_index
+            )
+            kind = _network_operation_kind(layer, op_index, operation)
+            if (
+                kind is not None
+                and len(tokens) >= 3
+                and tokens[:2] == ("spec", "components")
+                and tokens[2] not in {"1", "2"}
+            ):
+                raise _networking_error(
+                    layer,
+                    op_index,
+                    operation,
+                    "networking may mutate only canonical worker positions",
+                )
+
+            if owner_is_network:
+                if (
+                    len(tokens) >= 3
+                    and tokens[:2] == ("spec", "components")
+                    and (tokens[2] not in {"1", "2"})
+                ):
+                    raise _networking_error(
+                        layer,
+                        op_index,
+                        operation,
+                        "networking may mutate only canonical worker positions",
+                    )
+                if kind == "resource-invalid":
+                    raise ValidationError(
+                        "networking-resource-pair",
+                        "network resource paths require one RFC 6901-encoded extended-resource key",
+                        layer=layer.label,
+                        op_index=op_index,
+                        path=operation["path"],
+                    )
+                if kind is None:
+                    raise _networking_error(
+                        layer,
+                        op_index,
+                        operation,
+                        "networking Component mutates a field outside its concern",
+                    )
+                if operation["op"] != "add" or kind == "env-override":
+                    raise _networking_error(
+                        layer,
+                        op_index,
+                        operation,
+                        "networking Components may only add approved worker fields",
+                    )
+            elif layer.root_component is not None:
+                if kind is not None or source_has_networking_path:
+                    raise _networking_error(
+                        layer,
+                        op_index,
+                        operation,
+                        "networking delta is nested under an unrelated root concern",
+                    )
+                continue
+            else:
+                if kind is None and not source_has_networking_path:
+                    continue
+                if network_root is None:
+                    raise _networking_error(
+                        layer,
+                        op_index,
+                        operation,
+                        "root patch cannot serve as the networking slot",
+                    )
+                if kind == "resource-invalid":
+                    raise ValidationError(
+                        "networking-resource-pair",
+                        "network resource paths require one RFC 6901-encoded extended-resource key",
+                        layer=layer.label,
+                        op_index=op_index,
+                        path=operation["path"],
+                    )
+                root_append_name = (
+                    operation.get("value", {}).get("name")
+                    if isinstance(operation.get("value"), dict)
+                    else None
+                )
+                replaces_approved_value = (
+                    kind in {"annotation", "env-override", "resource"}
+                    and operation["op"] == "replace"
+                )
+                repeats_component_env = (
+                    kind == "env-append"
+                    and operation["op"] == "add"
+                    and (tokens[2], root_append_name) in component_env_entries
+                )
+                if not replaces_approved_value and not repeats_component_env:
+                    raise _networking_error(
+                        layer,
+                        op_index,
+                        operation,
+                        "root networking patches may only replace approved values",
+                    )
+
+            if kind == "resource":
+                component_index = tokens[2]
+                scope = tokens[-2]
+                resource_key = tokens[-1]
+                resource_values[(component_index, resource_key, scope)] = operation[
+                    "value"
+                ]
+            elif kind in {"infiniband-mount", "infiniband-volume"}:
+                component_index = tokens[2]
+                value = operation["value"]
+                key = (component_index, value["name"])
+                collection = mounts if kind == "infiniband-mount" else volumes
+                collection[key] = collection.get(key, 0) + 1
+
+    resource_pairs = {(index, key) for index, key, _ in resource_values}
+    for component_index, resource_key in sorted(resource_pairs):
+        request = resource_values.get((component_index, resource_key, "requests"))
+        limit = resource_values.get((component_index, resource_key, "limits"))
+        if request is None or limit is None or not _json_equal(request, limit):
+            raise ValidationError(
+                "networking-resource-pair",
+                "network resource request and limit keys and quantities must match",
+                path=(
+                    "/spec/components/%s/podTemplate/spec/containers/0/resources"
+                    % component_index
+                ),
+                expected=request,
+                actual=limit,
+            )
+
+    if mounts != volumes:
+        raise ValidationError(
+            "networking-delta",
+            "/dev/infiniband mount and host volume blocks must be complete and name-matched",
+            expected=mounts,
+            actual=volumes,
+        )
+
+
 def _walk_env_entries(
     value: Any, tokens: Tuple[str, ...] = ()
 ) -> Iterable[Tuple[str, Mapping[str, Any]]]:
@@ -1570,9 +1989,10 @@ def validate_case(
         )
     dgd_index = _require_one_beta_dgd(base_documents, "base")
     _validate_canonical_components(base_documents[dgd_index])
-    layers, _root_components = _collect_layers(base, kustomization)
+    layers, root_components = _collect_layers(base, kustomization)
     for layer in layers:
         _validate_guards(layer)
+    _validate_networking_contract(layers, root_components)
     _validate_base_ownership(base_documents, dgd_index, layers)
 
     _require_kustomize_version(executable)

@@ -114,10 +114,15 @@ fill the local network Component according to the provider's documentation.
    their own cluster workflow rather than adding them to this validated case.
 3. Retain the aggregate, disaggregated, or both topology sets that this cluster
    configuration will support. Delete unselected topology and concern
-   directories from the private copy.
-4. Replace every placeholder in every retained YAML file with discovered
-   cluster values. Delete unselected hook snippets. The copied tree must not
-   retain dormant, unfilled YAML that the preflight scan would report.
+   directories from the private copy. For disaggregated provider networking,
+   retain at most one of `provider-networking/gke-roce` or
+   `provider-networking/ib` and delete the other provider source.
+4. Select exactly one networking concern: the generic `network-interface`
+   Component, one copied provider-networking Component, or a private
+   `components/networking/<topology>` leaf. Replace every placeholder in every
+   retained YAML file with discovered cluster values. Delete the unselected
+   networking directories and hook snippets. The copied tree must not retain
+   dormant, unfilled YAML that the preflight scan would report.
 5. Add only the guarded case-local patches required by that recipe.
 6. Run the placeholder scan, validator, render inspection, server-side dry run,
    and apply commands in this README.
@@ -154,10 +159,12 @@ Each Component owns one concern:
 | `probes` | Optionally replaces the operator's worker startup allowance with one cluster-wide policy. It is not selected by default. |
 | `scheduling` | Adds node selection, tolerations, affinity, scheduler, runtime class, and priority to the canonical components. |
 | `network-interface` | The checked-in generic scaffold illustrates cluster-owned `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME` environment variables and the site RDMA extended-resource request. Use a qualified provider Component instead when one owns the required mechanism. |
+| `provider-networking/gke-roce` | Copy-and-fill source for guarded GKE multi-network annotations, socket settings, and four explicit network-resource slots on disaggregated workers. |
+| `provider-networking/ib` | Copy-and-fill source for one guarded IB resource pair plus optional socket, fixed-device, and `/dev/infiniband` blocks on disaggregated workers. |
 | `placement` | Optionally extends the worker affinity with a topology or clique constraint. It depends on `scheduling` having already created `affinity`. |
 
 Physical networking environment variables remain forbidden in portable bases.
-Qualified provider `network-interface` operations are the carrier for
+Qualified provider-networking Component operations are the carrier for
 `UCX_NET_DEVICES`, `NCCL_SOCKET_IFNAME`, and `GLOO_SOCKET_IFNAME`; the checked-in
 generic scaffold illustrates only the names that its operations actually
 carry. A site that needs `NCCL_IB_HCA` must qualify a provider operation and
@@ -183,10 +190,11 @@ Within `scheduling`, remove a complete `add` operation for an unused policy
 field instead of inventing a value. Keep its `affinity` operation whenever
 `placement` is selected. A cluster that relies entirely on default scheduling
 may deselect both `scheduling` and `placement`.
-Within `network-interface`, remove the complete environment-variable or
-extended-resource `add` operations that the provider does not require. Keep
-each extended-resource request and limit pair together with the same key and
-quantity.
+Within the selected networking Component, remove the complete
+environment-variable or extended-resource `add` operations that the provider
+does not require. Keep each extended-resource request and limit pair together
+with the same decoded key and quantity. Never select generic
+`network-interface` together with provider or private networking.
 
 List Components in this exact order:
 
@@ -194,7 +202,8 @@ List Components in this exact order:
 2. `registry-credentials`
 3. `probes`, when required
 4. `scheduling`
-5. `network-interface`
+5. exactly one generic `network-interface`, provider-networking, or private
+   networking Component
 6. `placement`, when required
 
 The order is part of the contract. In particular, never place `placement`
@@ -208,6 +217,9 @@ Aggregate placement requires Kubernetes 1.33+ with
 `MatchLabelKeysInPodAffinity` enabled. A cluster that disables this feature
 must omit the aggregate placement Component or use a separately qualified
 alternative.
+
+The one networking slot must follow `scheduling` and precede `placement`; a
+root `patches:` entry cannot replace that Component slot.
 
 ### Root aggregate example
 
@@ -254,6 +266,43 @@ or mount name. They guard the worker position and the first volume's
 `persistentVolumeClaim.claimName: shared-model-cache`, then replace only the
 claim name. This allows a copied recipe to rename its logical volume and mount
 without weakening the physical-claim precondition.
+
+### Provider networking copy-and-fill sources
+
+The checked-in GKE RoCE and IB directories are provider mechanisms, not usable
+cluster profiles. Copy one retained source with the scaffold, fill every
+role-qualified placeholder from current cluster evidence, and select its
+`components/provider-networking/<provider>/disagg` path in the networking slot.
+Do not add provider directories to the checked-in root example, and do not put
+real interface names, network names, resource keys, quantities, or device lists
+back into the upstream source.
+
+For GKE RoCE, fill the independent PrefillWorker and DecodeWorker values for:
+
+- the default interface and the four explicit RDMA interface/network slots;
+- `NCCL_SOCKET_IFNAME` and `GLOO_SOCKET_IFNAME`;
+- each `networking.gke.io.networks/<network>` request/limit quantity; and
+- the `NCCL_CROSS_NIC` and matching `.IP` request/limit operations only when
+  qualification requires them.
+
+Delete an unused GKE attachment as a complete request/limit pair. Delete each
+unused `.IP` request/limit pair completely, and delete the complete
+`NCCL_CROSS_NIC` environment operation when it is not qualified. Do not infer
+an attachment count or reuse PrefillWorker values for DecodeWorker.
+
+For generic IB, fill one RFC 6901-encoded extended-resource key and one matching
+request/limit quantity for each worker. The `NCCL_SOCKET_IFNAME`,
+`GLOO_SOCKET_IFNAME`, and fixed `UCX_NET_DEVICES` operations are individually
+optional; delete each complete environment operation that current evidence does
+not support. Dynamic device discovery means omitting `UCX_NET_DEVICES`, not
+inventing a placeholder value. Keep or delete the `/dev/infiniband`
+`volumeMounts/-` and `volumes/-` operations as one name-matched block. This
+networking source must not add `/dev/shm`, scheduling, privilege, telemetry, or
+serving-command policy.
+
+For either provider, retain the identity `test` operations and add annotations
+only through their individual RFC 6901-encoded keys. Do not replace the whole
+worker annotation map. A filled provider profile must leave Frontend unchanged.
 
 ### Cacheless and optional components
 
@@ -359,10 +408,14 @@ python3 scripts/validate-recipe-kustomization.py \
 The validator checks that the build targets exactly one beta DGD, verifies the
 canonical component positions, rejects base-owned cluster fields and duplicate
 environment names, replays the selected Component and case patch operations in
-order, and compares that replay with the Kustomize render. Its supported patch
-target is deliberately limited to exact `group`, `version`, and `kind` fields;
-name, namespace, label, annotation, and other selectors are rejected instead
-of approximating Kustomize's selector semantics.
+order, and compares that replay with the Kustomize render. It also enforces the
+single ordered networking slot, worker-only networking deltas, approved
+annotation and environment fields, and decoded request/limit equality. Failures
+use stable diagnostics including `networking-slot`, `networking-delta`, and
+`networking-resource-pair`. Its supported patch target is deliberately limited
+to exact `group`, `version`, and `kind` fields; name, namespace, label,
+annotation, and other selectors are rejected instead of approximating
+Kustomize's selector semantics.
 
 Inspect and server-side dry-run the pinned render before applying it:
 
