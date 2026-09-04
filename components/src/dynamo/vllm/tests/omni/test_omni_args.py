@@ -281,6 +281,35 @@ def test_stage_worker_still_requires_an_accelerator(monkeypatch, tmp_path):
         parse_omni_args()
 
 
+def test_stage_router_ignores_stage_id_after_end_of_options(monkeypatch, tmp_path):
+    # Argparse never reads --stage-id past a bare --, so neither may the role
+    # pre-scan: treating it as a stage worker would build the engine parser
+    # this host cannot resolve a device for.
+    monkeypatch.setattr(
+        sys, "argv", _router_argv(tmp_path, "--omni-router", "--", "--stage-id", "0")
+    )
+
+    with _no_accelerator():
+        config = parse_omni_args()
+
+    assert config.omni_router is True
+    assert config.stage_id is None
+    assert config.model == "test-model"
+
+
+def test_stage_router_ignores_negated_flag_after_end_of_options(monkeypatch, tmp_path):
+    # Same delimiter rule for the precedence scan: --no-omni-router past -- is a
+    # positional, so the environment still selects the router.
+    monkeypatch.setenv("DYN_OMNI_ROUTER", "true")
+    monkeypatch.setattr(sys, "argv", _router_argv(tmp_path, "--", "--no-omni-router"))
+
+    with _no_accelerator():
+        config = parse_omni_args()
+
+    assert config.omni_router is True
+    assert config.model == "test-model"
+
+
 def test_parse_rejects_stage_id_combined_with_omni_router(monkeypatch, tmp_path):
     # The role pre-scan must not swallow the existing mutual-exclusion check.
     # No _no_accelerator here: --stage-id keeps this argv on the full parser.

@@ -481,10 +481,19 @@ def _wants_stage_router(argv: list[str]) -> bool:
     which keeps the full engine parser even when ``--omni-router`` is also
     present: that combination is rejected by :meth:`OmniConfig.validate`, and
     the stage worker's argument handling must not change on the way there.
+
+    Both scans stop at the first bare ``--``. Argparse treats that token as the
+    end-of-options delimiter and everything after it as positional, so
+    ``--omni-router -- --stage-id 0`` leaves ``stage_id`` unset. A scan that read
+    all of ``argv`` would still see the token and send the router to the engine
+    parser it cannot build on a host with no accelerator.
     """
-    if any(token == "--stage-id" or token.startswith("--stage-id=") for token in argv):
+    options = argv[: argv.index("--")] if "--" in argv else argv
+    if any(
+        token == "--stage-id" or token.startswith("--stage-id=") for token in options
+    ):
         return False
-    for token in reversed(argv):
+    for token in reversed(options):
         if token == "--omni-router":
             return True
         if token == "--no-omni-router":
