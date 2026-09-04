@@ -1081,7 +1081,8 @@ pub struct WorkerSelectionResult {
     pub potential_decode_blocks: usize,
 
     /// Opt-in, request-scoped explanation of the router choice. This is absent
-    /// unless `DYN_ROUTER_DECISION_TRACE_ENABLED=true`.
+    /// unless `DYN_ROUTER_DECISION_TRACE_ENABLED=true`; an unset sampling rate
+    /// then defaults to 1.0, while an explicit 0.0 disables sampling.
     pub decision_trace: Option<RoutingDecisionTrace>,
 }
 

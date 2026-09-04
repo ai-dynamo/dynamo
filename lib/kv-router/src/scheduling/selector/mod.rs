@@ -40,7 +40,7 @@ pub(crate) fn router_decision_trace_enabled() -> bool {
 pub(crate) fn router_decision_trace_sample_rate() -> f64 {
     static SAMPLE_RATE: LazyLock<f64> = LazyLock::new(|| {
         let Some(value) = std::env::var_os("DYN_ROUTER_DECISION_TRACE_SAMPLE_RATE") else {
-            return 0.0;
+            return 1.0;
         };
         let value = value.to_string_lossy();
         match value.parse::<f64>() {
