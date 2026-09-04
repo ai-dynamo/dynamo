@@ -338,6 +338,9 @@ pub struct WorkerPatchRequest {
 
 impl WorkerCatalogRecord {
     pub(super) fn apply_patch(&mut self, patch: WorkerPatchRequest) {
+        // TODO(rank-aware-kv-capacity): when the rank map is added, treat rank range, map,
+        // scalar fallback, and provenance as one replace-only snapshot. A legacy scalar/range
+        // patch must clear stale exact data rather than leave it winning lookup precedence.
         if patch.endpoint.is_some() {
             self.endpoint = patch.endpoint;
         }

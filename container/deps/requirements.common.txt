@@ -12,7 +12,6 @@
 --no-binary imageio-ffmpeg
 
 aiohttp>=3.14.3,<4.0
-fastapi==0.120.1
 grpcio-tools<=1.76.0  # May have platform-specific builds; pins grpcio ecosystem version
 httpx==0.28.1
 
