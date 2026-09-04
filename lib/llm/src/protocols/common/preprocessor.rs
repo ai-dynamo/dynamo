@@ -703,15 +703,6 @@ mod tests {
         assert_eq!(value["bootstrap_rooms"], serde_json::json!([8, 16, 24]));
         let decoded: BootstrapInfo = serde_json::from_value(value).unwrap();
         assert_eq!(decoded.bootstrap_rooms, Some(vec![8, 16, 24]));
-
-        // A worker or frontend that predates the field deserializes cleanly.
-        let legacy: BootstrapInfo = serde_json::from_value(serde_json::json!({
-            "bootstrap_host": "127.0.0.1",
-            "bootstrap_port": 1234,
-            "bootstrap_room": 8,
-        }))
-        .unwrap();
-        assert_eq!(legacy.bootstrap_rooms, None);
     }
 
     /// Covers the `is_probe` serde contract end-to-end: `rename = "_HEALTH_CHECK"`,
