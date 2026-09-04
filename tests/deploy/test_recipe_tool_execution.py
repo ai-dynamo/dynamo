@@ -34,12 +34,14 @@ Two gates decide whether this module can say anything at all about a recipe:
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import pytest
 import requests
+import yaml
 
 from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
 from tests.utils.client import wait_for_model_availability
@@ -58,25 +60,62 @@ logger = logging.getLogger(__name__)
 # frontend picks it up from the runtime config registered at discovery time.
 _TOOL_PARSER_FLAGS = ("--dyn-tool-call-parser", "--tool-call-parser")
 
+# Matches the flag whether it is a discrete argv token (`["--dyn-tool-call-parser",
+# "qwen25"]`), an `=`-joined token, or embedded in a shell-style command string
+# (`sh -c "python3 -m dynamo.vllm --dyn-tool-call-parser deepseek_v4 \\ ..."`).
+# The last form is not exotic: 34 of the 101 parser-bearing recipe manifests use
+# it, disproportionately the `-agentic` profiles this module exists to exercise.
+# Scanning argv tokens alone reported those as having no parser at all.
+_TOOL_PARSER_RE = re.compile(
+    r"(?:{})[=\s]+([^\s\\'\"]+)".format("|".join(_TOOL_PARSER_FLAGS))
+)
 
-def _declared_tool_call_parser(spec: DeploymentSpec) -> Optional[str]:
-    """Return the tool-call parser a manifest configures, or None.
 
-    Scans every service's args, since which component carries the flag differs
-    between the frontend-parser and worker-declared topologies.
+class ParserScan(NamedTuple):
+    """Outcome of looking for a tool-call parser in a manifest.
+
+    Three-valued on purpose. "No parser configured" and "could not read this
+    manifest's arguments" are different claims, and collapsing them produces a
+    skip message that asserts something false about the recipe.
     """
+
+    parser: Optional[str]
+    unreadable: tuple[str, ...]  # services whose args could not be parsed
+
+    @property
+    def undetermined(self) -> bool:
+        return self.parser is None and bool(self.unreadable)
+
+
+def _declared_tool_call_parser(spec: DeploymentSpec) -> ParserScan:
+    """Find the tool-call parser a manifest configures.
+
+    Scans every service, since which component carries the flag differs between
+    the frontend-parser and worker-declared topologies. Matches both argv-token
+    and shell-string forms -- see ``_TOOL_PARSER_RE``.
+
+    ``ServiceSpec._get_args()`` shlex-splits the container command and raises on
+    manifests with unbalanced quotes, which real recipes contain. Rather than
+    dropping such a service (and then reporting the recipe as having no parser),
+    fall back to scanning that service's raw container spec, and record the
+    service as unreadable so the caller can say "undetermined" instead of "absent".
+    """
+    unreadable: list[str] = []
     for service in spec.services:
+        name = getattr(service, "name", "<unnamed>")
         try:
-            args = service._get_args() or []
-        except Exception:  # noqa: BLE001 - a malformed service must not abort the scan
-            continue
-        for i, arg in enumerate(args):
-            for flag in _TOOL_PARSER_FLAGS:
-                if arg == flag and i + 1 < len(args):
-                    return args[i + 1]
-                if arg.startswith(f"{flag}="):
-                    return arg.split("=", 1)[1]
-    return None
+            haystack = " ".join(str(arg) for arg in (service._get_args() or []))
+        except Exception:  # noqa: BLE001 - unbalanced quotes are real
+            # Degrade to the raw container spec rather than dropping the service.
+            unreadable.append(name)
+            try:
+                haystack = str(service._main_container() or "")
+            except Exception:  # noqa: BLE001
+                continue
+        match = _TOOL_PARSER_RE.search(haystack)
+        if match:
+            return ParserScan(match.group(1), tuple(unreadable))
+    return ParserScan(None, tuple(unreadable))
 
 
 def _served_model(spec: DeploymentSpec) -> Optional[str]:
@@ -139,14 +178,22 @@ async def test_recipe_executes_tools_end_to_end(
 
     deployment_spec = DeploymentSpec(recipe)
 
-    parser = _declared_tool_call_parser(deployment_spec)
-    if parser is None:
+    scan = _declared_tool_call_parser(deployment_spec)
+    if scan.undetermined:
+        pytest.skip(
+            f"could not determine whether {recipe} configures a tool-call "
+            f"parser: the arguments of service(s) {', '.join(scan.unreadable)} "
+            "could not be parsed. Skipping without claiming the recipe lacks a "
+            "parser -- pass --recipe-model and re-run, or fix the manifest."
+        )
+    if scan.parser is None:
         pytest.skip(
             f"{recipe} configures no tool-call parser "
             f"(looked for {' / '.join(_TOOL_PARSER_FLAGS)}), so the frontend "
             "cannot emit tool_calls. This is a deployment precondition, not a "
             "defect -- re-run against a recipe that enables tool calling."
         )
+    parser = scan.parser
 
     model_hint = request.config.getoption("--recipe-model") or _served_model(
         deployment_spec
@@ -226,3 +273,109 @@ async def test_recipe_executes_tools_end_to_end(
                 "chained-tool execution: NOT SUPPORTED by %s -- %s", model, exc
             )
         record_property("chained_tool_capability", chained)
+
+
+# ---------------------------------------------------------------------------
+# Unit coverage for the precondition scan (no cluster required)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        (["--model", "m", "--dyn-tool-call-parser", "qwen25"], "qwen25"),
+        (["--dyn-tool-call-parser=qwen25"], "qwen25"),
+        (["--tool-call-parser", "hermes"], "hermes"),
+        # Shell-style: the whole command is one token. 34 of 101 parser-bearing
+        # recipe manifests look like this; scanning argv tokens alone missed them.
+        (
+            ["python3 -m dynamo.vllm --model m --dyn-tool-call-parser deepseek_v4 \\"],
+            "deepseek_v4",
+        ),
+        (["--model", "m"], None),
+        ([], None),
+    ],
+)
+def test_tool_call_parser_scan_matches_argv_and_shell_forms(tmp_path, args, expected):
+    """The scan must see the flag in argv-token, `=`-joined and shell-string form."""
+    manifest = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "scan-test"},
+        "spec": {
+            "components": [
+                {
+                    "name": "VllmDecodeWorker",
+                    "type": "worker",
+                    "podTemplate": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "image": "img",
+                                    "command": ["python3"],
+                                    "args": list(args),
+                                }
+                            ]
+                        }
+                    },
+                }
+            ]
+        },
+    }
+    path = tmp_path / "deploy.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+
+    scan = _declared_tool_call_parser(DeploymentSpec(str(path)))
+
+    assert scan.parser == expected
+    assert not scan.undetermined
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_unparseable_args_report_undetermined_not_absent(tmp_path):
+    """An unparseable service must not be reported as "configures no parser".
+
+    `ServiceSpec._get_args()` shlex-splits and raises on unbalanced quotes, which
+    real recipes contain. Claiming absence there asserts something false about
+    the recipe -- the exact false-green this module's precondition exists to avoid.
+    """
+    manifest = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "metadata": {"name": "unparseable"},
+        "spec": {
+            "components": [
+                {
+                    "name": "VllmDecodeWorker",
+                    "type": "worker",
+                    "podTemplate": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "main",
+                                    "image": "img",
+                                    "command": ["sh", "-c"],
+                                    # Unbalanced quote, and no parser anywhere.
+                                    "args": ['python3 -m dynamo.vllm --model "m'],
+                                }
+                            ]
+                        }
+                    },
+                }
+            ]
+        },
+    }
+    path = tmp_path / "deploy.yaml"
+    path.write_text(yaml.safe_dump(manifest))
+
+    scan = _declared_tool_call_parser(DeploymentSpec(str(path)))
+
+    assert scan.parser is None
+    assert scan.undetermined, "must say 'undetermined', not 'no parser configured'"
+    assert "VllmDecodeWorker" in scan.unreadable
