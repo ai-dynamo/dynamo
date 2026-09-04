@@ -830,6 +830,8 @@ mod tests {
                 [] => "",
                 [101] => "Okay",
                 [102] => " Okay",
+                [103] => "<|user|>",
+                [101, 103] => "Okay<|user|>",
                 _ => anyhow::bail!("unexpected token IDs: {token_ids:?}"),
             };
             Ok(traits::DecodeResult::Complete(token.to_string()))
@@ -840,6 +842,35 @@ mod tests {
 
     struct SyntheticSglangEngine {
         engine_decodes_text: bool,
+    }
+
+    struct SyntheticSglangStopEngine;
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+        for SyntheticSglangStopEngine
+    {
+        async fn generate(
+            &self,
+            request: SingleIn<PreprocessedRequest>,
+        ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+            let output = LLMEngineOutput {
+                // SGLang's output_ids_through_stop() includes the matched stop
+                // position. The frontend must hide its text without mutating
+                // this raw token sequence.
+                token_ids: vec![101, 103],
+                finish_reason: Some(FinishReason::Stop),
+                index: Some(0),
+                ..Default::default()
+            };
+
+            Ok(ResponseStream::new(
+                Box::pin(futures::stream::once(async move {
+                    Annotated::from_data(output)
+                })),
+                request.context(),
+            ))
+        }
     }
 
     #[async_trait]
@@ -980,6 +1011,65 @@ mod tests {
     #[tokio::test]
     async fn test_sglang_top_logprobs_are_decoded_before_engine_text_fast_path() {
         assert_sglang_top_logprobs_are_decoded_in_openai_response(true).await;
+    }
+
+    #[tokio::test]
+    async fn test_sglang_hidden_stop_text_is_suppressed_without_mutating_tito_ids() {
+        use crate::protocols::common::extensions::NvExt;
+
+        let tokenizer: Arc<dyn traits::Tokenizer> = Arc::new(CandidateDecoder);
+        let backend = Backend::from_tokenizer(Tokenizer::from(tokenizer));
+        let request = PreprocessedRequest::builder()
+            .model("test-model".to_string())
+            .token_ids(vec![])
+            .stop_conditions(StopConditions {
+                stop_token_ids_hidden: Some(vec![103]),
+                ..Default::default()
+            })
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .build()
+            .expect("valid preprocessed request");
+        let engine: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            Arc::new(SyntheticSglangStopEngine);
+
+        let mut stream = Operator::generate(backend.as_ref(), SingleIn::new(request), engine)
+            .await
+            .expect("backend generation succeeds");
+        let output = stream
+            .next()
+            .await
+            .expect("backend emits a response")
+            .data
+            .expect("response contains backend output");
+
+        assert_eq!(output.text.as_deref(), Some("Okay"));
+        assert_eq!(output.tokens, vec![Some("Okay".to_string()), None]);
+        assert_eq!(output.token_ids, vec![101, 103]);
+        assert_eq!(output.finish_reason, Some(FinishReason::Stop));
+
+        let nvext = NvExt::builder()
+            .extra_fields(vec!["completion_token_ids".to_string()])
+            .build()
+            .expect("valid nvext selection");
+        let options = DeltaGeneratorOptions::new(None, None, false, Some(&nvext));
+        let mut generator = DeltaGenerator::new(
+            "test-model".to_string(),
+            options,
+            "test-request".to_string(),
+        );
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("OpenAI response conversion succeeds");
+
+        assert_eq!(
+            response
+                .nvext
+                .as_ref()
+                .and_then(|fields| fields.get("completion_token_ids")),
+            Some(&serde_json::json!([101, 103]))
+        );
+        assert_eq!(generator.get_usage().completion_tokens, 2);
     }
 
     /// When the tokenizer's decode() returns Err, Decoder::process_token_ids()
