@@ -23,7 +23,6 @@ import (
 	"fmt"
 
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
-	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -135,45 +134,6 @@ func (r *workloadProgramResult) Fail(generation int64, reason Reason, err error)
 		Reason:             string(reason),
 		Message:            err.Error(),
 	})
-}
-
-func (r *workloadProgramResult) applyOwnershipConflict(generation int64, reconcileErr error) {
-	condition := meta.FindStatusCondition(r.Status.Conditions, nvidiacomv1beta1.ConditionTypeOwnershipConflict)
-
-	if condition == nil {
-		return
-	}
-
-	var ownershipConflict *commoncontroller.OwnershipConflictError
-	if !errors.As(reconcileErr, &ownershipConflict) {
-		if reconcileErr == nil && condition.Status == metav1.ConditionTrue {
-			meta.SetStatusCondition(&r.Status.Conditions, metav1.Condition{
-				Type:               nvidiacomv1beta1.ConditionTypeOwnershipConflict,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: generation,
-				Reason:             "OwnershipConflictResolved",
-				Message:            "No resource ownership conflicts observed.",
-			})
-		}
-		return
-	}
-
-	wasActive := condition.Status == metav1.ConditionTrue
-	meta.SetStatusCondition(&r.Status.Conditions, metav1.Condition{
-		Type:               nvidiacomv1beta1.ConditionTypeOwnershipConflict,
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: generation,
-		Reason:             commoncontroller.EventReasonOwnershipConflict,
-		Message:            ownershipConflict.Error(),
-	})
-	if !wasActive {
-		r.Eventf(
-			corev1.EventTypeWarning,
-			commoncontroller.EventReasonOwnershipConflict,
-			"Refusing to reconcile a resource with conflicting controller ownership: %s",
-			ownershipConflict,
-		)
-	}
 }
 
 func (r *workloadProgramResult) applyReconcileResult(

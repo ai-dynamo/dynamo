@@ -119,7 +119,10 @@ func TestDynamoComponentDeploymentRecordOwnershipConflict(t *testing.T) {
 	assert.Empty(t, recorder.Events)
 
 	t.Log("Clear the persisted condition after a later successful reconciliation")
-	clearOwnershipConflictCondition(stored)
+	resolvedCondition, transition := applyOwnershipConflict(stored.Status.Conditions, stored.Generation, nil)
+	require.NotNil(t, resolvedCondition)
+	assert.Equal(t, ownershipConflictResolved, transition)
+	meta.SetStatusCondition(&stored.Status.Conditions, *resolvedCondition)
 	conflict = meta.FindStatusCondition(stored.Status.Conditions, v1beta1.ConditionTypeOwnershipConflict)
 	require.NotNil(t, conflict)
 	assert.Equal(t, metav1.ConditionFalse, conflict.Status)
