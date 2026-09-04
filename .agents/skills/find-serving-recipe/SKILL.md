@@ -89,11 +89,14 @@ Two invocation contexts, with different outputs:
   measured numbers when `available: true`.
 
 A Tier 0 match with a resolvable image is the best possible outcome: zero translation, attached
-perf, and a validated flag. Use it and stop.
+perf, and a validated flag. Use it and stop. A Tier 0 entry that structurally matches but fails
+the verdict bar (mutable or unresolved image, `experimental` status, unsatisfiable prerequisites,
+stale pin) is recorded with its lower grade and the walk CONTINUES: a structural match is not a
+usable match.
 
 ## Tier 1: authoritative external catalogs
 
-Consult in this order when Tier 0 has no match for the model, hardware, or topology.
+Consult in this order when Tier 0 yields no candidate meeting the required verdict.
 
 1. **`vllm-project/recipes`** (vLLM engine). Consume the JSON API, not the YAML files:
    `https://recipes.vllm.ai/models.json`, then `/<hf_org>/<hf_repo>.json`, then
@@ -175,10 +178,33 @@ without measured performance, fill the expectation from:
 Label every expectation with its source and hardware; an expectation from different hardware is
 a shape hint, not a target.
 
+## Verdicts
+
+Every candidate gets exactly one grade, decided by these conditions in order:
+
+- `ceiling-only` if ANY of: the image tag does not resolve or is mutable without a digest; the
+  source is Tier 4 (quarantined) or a Tier 3 narrative with no pinned image; the config could not
+  be fetched or read during this invocation.
+- `deployable` if ALL of: the source is Tier 0 or Tier 1 (or a Tier 2 config with a stock release
+  image); the model, hardware class, and GPU count match the engagement exactly (no inferred
+  SKU mapping); every infrastructure prerequisite the recipe declares is satisfiable on the
+  stated target or has a documented adaptation; the image resolves to an immutable release tag
+  or digest; the freshness check passes (current or immediately previous minor with unchanged
+  flags); the source is not marked experimental or unverified; and the translation into a
+  DynamoGraphDeployment is mechanical (no guessed fields).
+- `hypothesis` otherwise: a real, fetched, resolvable config that needs porting, re-verification,
+  adaptation, or a close-but-not-exact hardware or topology match before it could be proposed.
+
+Record the failed conditions next to any grade below `deployable`, so a reader knows what
+would promote it.
+
 ## Output: the recipe dossier
 
-Write `recipe-dossier.md` into the engagement's inputs (baseline selection:
-`<EXP_ROOT>/inputs/`; candidate hunting: the current iteration's analysis directory), containing:
+Write the dossier to `<EXP_ROOT>/analysis/recipe-dossier.md`, one file per engagement, in both
+invocation contexts (the interviewer establishes `EXP_ROOT` before running the ladder). A later
+invocation appends a dated section rather than replacing the file. Return the path and its
+SHA256 to the caller; callers cite both, and later iterations reuse the file by that path. The
+dossier contains:
 
 - the question (model, hardware, GPU budget, workload, topology preference);
 - the model card's correctness settings (sampling, context, parsers) and minimum engine version;
@@ -186,7 +212,8 @@ Write `recipe-dossier.md` into the engagement's inputs (baseline selection:
 - for each candidate: source with path or URL and commit or date, image and its gate result
   (resolvable, digest-pinned, mutable, missing), pinned engine version versus current stable
   and the verification date (the freshness check), flags or manifest, measured performance
-  with its source, and a verdict: `deployable`, `hypothesis`, or `ceiling-only`;
+  with its source, the verdict (`deployable`, `hypothesis`, or `ceiling-only`) and, below
+  `deployable`, the conditions that failed;
 - conflicts encountered and how precedence resolved them;
 - the selected candidate and why, or an explicit statement that nothing met the bar.
 
