@@ -123,6 +123,28 @@ def test_event_plane_zmq_ignores_ambient_nats(monkeypatch):
 
 
 @pytest.mark.forked
+def test_event_plane_env_zmq_ignores_ambient_nats(monkeypatch):
+    """DYN_EVENT_PLANE=zmq should skip ambient NATS even without event_plane kwarg.
+
+    Planner and other @dynamo_worker components historically only set the env var;
+    frontend/worker paths pass event_plane= explicitly. Both must avoid connecting
+    to Operator-injected NATS_SERVER when ZMQ is selected.
+    """
+
+    async def _run():
+        monkeypatch.setenv("NATS_SERVER", "nats://127.0.0.1:9")
+        monkeypatch.setenv("DYN_EVENT_PLANE", "zmq")
+        runtime = DistributedRuntime(
+            asyncio.get_running_loop(),
+            "file",
+            "tcp",
+        )
+        runtime.shutdown()
+
+    asyncio.run(_run())
+
+
+@pytest.mark.forked
 def test_invalid_event_plane_errors():
     async def _run():
         with pytest.raises(ValueError, match="Invalid event_plane value"):
@@ -197,6 +219,27 @@ def test_dynamo_worker_returns_working_decorator():
             pass
 
     assert inspect.iscoroutinefunction(_sample_worker)
+
+
+@patch("dynamo.runtime.DistributedRuntime")
+def test_dynamo_worker_passes_event_plane_from_env(mock_runtime_cls, monkeypatch):
+    """@dynamo_worker should forward DYN_EVENT_PLANE like frontend/worker create_runtime."""
+    mock_runtime_cls.return_value = MagicMock()
+    monkeypatch.setenv("DYN_DISCOVERY_BACKEND", "file")
+    monkeypatch.setenv("DYN_REQUEST_PLANE", "tcp")
+    monkeypatch.setenv("DYN_EVENT_PLANE", "zmq")
+
+    @dynamo_worker()
+    async def _sample_worker(runtime, *args, **kwargs):
+        return runtime
+
+    async def _run():
+        await _sample_worker()
+
+    asyncio.run(_run())
+    mock_runtime_cls.assert_called_once()
+    _, kwargs = mock_runtime_cls.call_args
+    assert kwargs.get("event_plane") == "zmq"
 
 
 # ---------------------------------------------------------------------------
