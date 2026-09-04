@@ -668,8 +668,11 @@ def test_build_tokens_prompt_forwards_user_uuids_for_each_modality() -> None:
     assert prompt["multi_modal_uuids"] == {
         "vision_chunk": ["image-key", None],
         "video": ["video-key"],
-        "audio": [None, None, None],
     }
+
+
+def test_build_user_mm_uuids_returns_none_for_all_null() -> None:
+    assert mod._build_user_mm_uuids({"image_url": [None, None]}, False) is None
 
 
 @pytest.mark.parametrize(

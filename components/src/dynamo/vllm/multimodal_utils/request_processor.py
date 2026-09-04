@@ -146,14 +146,13 @@ def _build_user_mm_uuids(
     raw_uuids: Any,
     use_unified_vision_chunk: bool,
 ) -> Optional[dict[str, list[str | None]]]:
-    """Map Dynamo media keys to vLLM cache identities without filtering them."""
+    """Map Dynamo media keys to vLLM cache identities."""
     if raw_uuids is None:
         return None
     if not isinstance(raw_uuids, dict):
         raise ValueError("multi_modal_uuids must be an object")
 
     mm_uuids: dict[str, list[str | None]] = {}
-    has_uuid = False
     for modality, values in raw_uuids.items():
         if not isinstance(values, list):
             raise ValueError(f"multi_modal_uuids[{modality!r}] must be a list")
@@ -163,7 +162,6 @@ def _build_user_mm_uuids(
                     f"multi_modal_uuids[{modality!r}] entries must be non-empty "
                     f"strings or null; got invalid entry at index {index}"
                 )
-            has_uuid |= value is not None
 
         backend_modality = str(modality)
         if backend_modality.endswith("_url"):
@@ -174,8 +172,12 @@ def _build_user_mm_uuids(
         )
         mm_uuids.setdefault(backend_modality, []).extend(values)
 
-    # If at least one UUID is present, return a list for each modality.
-    return mm_uuids if has_uuid else None
+    mm_uuids = {
+        modality: uuids
+        for modality, uuids in mm_uuids.items()
+        if any(uuid is not None for uuid in uuids)
+    }
+    return mm_uuids or None
 
 
 def _get_modality_extra_values(

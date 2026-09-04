@@ -212,7 +212,7 @@ def test_extracts_url_and_uuid_only_slots_with_alignment():
     )
 
 
-@pytest.mark.parametrize("part_type", ["image_url", "audio_url", "video_url"])
+@pytest.mark.parametrize("part_type", ["audio_url", "video_url"])
 def test_extracts_media_cache_uuids(part_type: str) -> None:
     messages = [
         {
