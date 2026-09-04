@@ -62,6 +62,7 @@ impl SidecarState {
     ) -> Result<Self, reqwest::Error> {
         Ok(Self {
             client: Client::builder()
+                .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(connect_timeout)
                 .read_timeout(read_timeout)
@@ -110,10 +111,14 @@ async fn handle(
     let cancellation_guard = cancellation.clone().drop_guard();
     let response = match prefill_endpoint {
         Some(prefill_endpoint) => {
-            state
-                .adapter
-                .execute(request, prefill_endpoint, cancellation.clone())
-                .await?
+            tokio::select! {
+                response = state.adapter.execute(
+                    request,
+                    prefill_endpoint,
+                    cancellation.clone(),
+                ) => response?,
+                () = cancellation.cancelled() => return Err(SidecarError::Cancelled),
+            }
         }
         None => {
             forward(
@@ -141,7 +146,7 @@ mod tests {
     use axum::body::{Body, Bytes, to_bytes};
     use axum::http::{HeaderValue, Method, Request, Response, StatusCode};
     use axum::routing::any;
-    use futures::{StreamExt, stream};
+    use futures::{StreamExt, future, stream};
     use serde_json::Value;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
@@ -165,7 +170,7 @@ mod tests {
         pending_stream: bool,
     }
 
-    struct BlockingAdapter {
+    struct NonCooperativeAdapter {
         cancellation_tx: Mutex<Option<oneshot::Sender<CancellationToken>>>,
     }
 
@@ -208,7 +213,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl PdAdapter for BlockingAdapter {
+    impl PdAdapter for NonCooperativeAdapter {
         async fn execute(
             &self,
             _request: Request<Body>,
@@ -216,10 +221,9 @@ mod tests {
             cancellation: CancellationToken,
         ) -> Result<Response<Body>, SidecarError> {
             if let Some(tx) = self.cancellation_tx.lock().unwrap().take() {
-                let _ = tx.send(cancellation.clone());
+                let _ = tx.send(cancellation);
             }
-            cancellation.cancelled().await;
-            Err(SidecarError::Cancelled)
+            future::pending::<Result<Response<Body>, SidecarError>>().await
         }
     }
 
@@ -540,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn dropping_request_during_dispatch_propagates_cancellation() {
         let (cancellation_tx, cancellation_rx) = oneshot::channel();
-        let adapter = Arc::new(BlockingAdapter {
+        let adapter = Arc::new(NonCooperativeAdapter {
             cancellation_tx: Mutex::new(Some(cancellation_tx)),
         });
         let app = router(test_state(
@@ -562,6 +566,45 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), cancellation.cancelled())
             .await
             .expect("dropping the handler must cancel adapter work");
+    }
+
+    #[tokio::test]
+    async fn force_shutdown_interrupts_non_cooperative_adapter() {
+        let (cancellation_tx, cancellation_rx) = oneshot::channel();
+        let adapter = Arc::new(NonCooperativeAdapter {
+            cancellation_tx: Mutex::new(Some(cancellation_tx)),
+        });
+        let force_shutdown = CancellationToken::new();
+        let app = router(test_state_with_tokens(
+            adapter,
+            reqwest::Url::parse("http://localhost:8001").unwrap(),
+            CancellationToken::new(),
+            force_shutdown.clone(),
+        ));
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header(PREFILLER_HOST_PORT, "prefill:8001")
+            .body(Body::empty())
+            .unwrap();
+
+        let task = tokio::spawn(app.oneshot(request));
+        let cancellation = cancellation_rx.await.unwrap();
+        assert!(!cancellation.is_cancelled());
+
+        force_shutdown.cancel();
+
+        let response = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("force shutdown must interrupt adapter dispatch")
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(body["error"]["code"], "request_cancelled");
+        assert!(cancellation.is_cancelled());
     }
 
     #[tokio::test]
