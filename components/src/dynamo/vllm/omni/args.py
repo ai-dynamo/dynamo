@@ -550,10 +550,8 @@ def parse_omni_args() -> OmniConfig:
         config.endpoint = "generate"
 
     if stage_router:
-        # The launch scripts forward their EXTRA_ARGS passthrough to every omni
-        # process, router included, so engine flags meant for the stage workers
-        # land here. The reduced parser does not know them and must not abort on
-        # them, but a mistyped flag still has to be visible.
+        # Launch scripts forward EXTRA_ARGS to every omni process, so stage-worker
+        # engine flags reach the router; tolerate them, but keep a typo visible.
         vllm_args, ignored = vllm_parser.parse_known_args(unknown)
         if ignored:
             logger.warning(
@@ -593,16 +591,11 @@ def parse_omni_args() -> OmniConfig:
             )
 
     if stage_router:
-        # OmniConfig.engine_args has no class-level default, so from_cli_args
-        # never materializes it; leaving it unset makes main.worker() fail on
-        # config.engine_args before it ever reaches the router dispatch.
-        # OmniHandler already stands a SimpleNamespace in for engine_args on a
-        # path that has no vLLM engine args to hand, so the shape is one
-        # downstream consumers already see.
+        # OmniConfig.engine_args has no class-level default, so leaving it unset
+        # makes main.worker() fail before it reaches the router dispatch.
         engine_args = SimpleNamespace(
-            # The parsed value, not the snapshot path config.model may have been
-            # rewritten to above -- the non-router path leaves engine_args.model
-            # as the repo id too (see the note in dynamo/vllm/main.py).
+            # The parsed repo id, not the snapshot path config.model may have
+            # been rewritten to above; the non-router path leaves this the same.
             model=vllm_args.model,
             served_model_name=vllm_args.served_model_name,
             trust_remote_code=vllm_args.trust_remote_code,

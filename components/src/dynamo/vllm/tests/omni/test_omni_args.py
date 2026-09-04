@@ -263,9 +263,8 @@ def test_stage_router_ignores_engine_option_passthrough(monkeypatch, tmp_path):
 
 
 def test_stage_router_honors_negated_flag_over_environment(monkeypatch, tmp_path):
-    # --no-omni-router must win over a truthy DYN_OMNI_ROUTER, the way argparse
-    # itself resolves a flag against its env-derived default. Losing that would
-    # route an engine-building worker onto the reduced parser.
+    # --no-omni-router must win over a truthy DYN_OMNI_ROUTER; losing that
+    # would route an engine-building worker onto the reduced parser.
     monkeypatch.setenv("DYN_OMNI_ROUTER", "true")
     monkeypatch.setattr(sys, "argv", _router_argv(tmp_path, "--no-omni-router"))
 
@@ -284,8 +283,7 @@ def test_stage_worker_still_requires_an_accelerator(monkeypatch, tmp_path):
 
 def test_parse_rejects_stage_id_combined_with_omni_router(monkeypatch, tmp_path):
     # The role pre-scan must not swallow the existing mutual-exclusion check.
-    # Runs under the module fixture's resolvable platform, not _no_accelerator,
-    # because --stage-id keeps this argv on the full engine parser.
+    # No _no_accelerator here: --stage-id keeps this argv on the full parser.
     monkeypatch.setattr(
         sys, "argv", _router_argv(tmp_path, "--stage-id", "0", "--omni-router")
     )
