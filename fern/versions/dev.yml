@@ -282,6 +282,12 @@ navigation:
             path: ../pages-dev/cli/operations/lora-adapters.md
   - tab: developer-guide
     layout:
+      - section: Security
+        icon: shield-halved
+        collapsed: true
+        contents:
+          - page: Secure Deployment Guidelines
+            path: ../pages-dev/developer-guide/security/secure-deployment-guidelines.md
       # ==================== Knowledge Base ====================
       - section: Knowledge Base
         icon: book-open
