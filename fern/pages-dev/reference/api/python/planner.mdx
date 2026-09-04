@@ -225,7 +225,7 @@ Planner search-space preparation and replay-spec materialization.
 from dynamo.planner.simulation import DynamoPlannerSweepConfigProvider
 ```
 
-[`components/src/dynamo/planner/simulation/provider.py#L664`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L664)
+[`components/src/dynamo/planner/simulation/provider.py#L666`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L666)
 
 **Public methods**
 
@@ -237,7 +237,7 @@ compile_prediction(config: Mapping[str, JSONValue], context: PredictionAdapterCo
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L674)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L676)
 
 <h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-compile-recommendation">compile_recommendation</h4>
 
@@ -247,7 +247,7 @@ compile_recommendation(config: Mapping[str, JSONValue], context: RecommendationA
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L762)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L765)
 
 <h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-materialize-candidate">materialize_candidate</h4>
 
@@ -257,7 +257,7 @@ materialize_candidate(plan: AdapterSearchPlan, selection: Mapping[str, JSONValue
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L839)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L842)
 
 <h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-generate-search-space">generate_search_space</h4>
 
@@ -267,7 +267,7 @@ generate_search_space(search_spec: Mapping[str, JSONValue], context: SweepContex
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L873)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L876)
 
 <h4 id="api-dynamo-planner-simulation-provider-dynamoplannersweepconfigprovider-materialize-replay">materialize_replay</h4>
 
@@ -277,7 +277,7 @@ materialize_replay(plan: AdapterSearchPlan, selection: Mapping[str, JSONValue], 
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L987)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L990)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-errors-emptytargetreplicaserror" title="EmptyTargetReplicasError (class)">
@@ -1114,7 +1114,7 @@ Builtin orchestrator plugins use this class directly as their private
 shared core while the remaining cross-plugin state is being split into
 explicit pipeline artifacts.
 
-[`components/src/dynamo/planner/core/state_machine.py#L49`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L49)
+[`components/src/dynamo/planner/core/state_machine.py#L51`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L51)
 
 **Public methods**
 
@@ -1126,7 +1126,7 @@ __init__(config: PlannerConfig, capabilities: Optional[WorkerCapabilities] = Non
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L62)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L64)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-update-capabilities">update_capabilities</h4>
 
@@ -1136,7 +1136,7 @@ update_capabilities(capabilities: WorkerCapabilities) -> None
 
 Replace the current worker capabilities.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L135)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L137)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-load-benchmark-fpms">load_benchmark_fpms</h4>
 
@@ -1146,7 +1146,7 @@ load_benchmark_fpms(prefill_fpms: Optional[list[ForwardPassMetrics]] = None, dec
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L156)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L158)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-begin-tick">begin_tick</h4>
 
@@ -1156,7 +1156,7 @@ begin_tick() -> None
 
 Reset per-tick diagnostics before builtin plugins run.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L177)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L179)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-observe-worker-counts">observe_worker_counts</h4>
 
@@ -1166,7 +1166,7 @@ observe_worker_counts(counts: WorkerCounts) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L181)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L183)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-observe-fpm">observe_fpm</h4>
 
@@ -1176,7 +1176,7 @@ observe_fpm(obs: FpmObservations) -> None
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L184)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L186)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-observe-runtime-metadata">observe_runtime_metadata</h4>
 
@@ -1186,7 +1186,7 @@ observe_runtime_metadata(*, kv_hit_rate: Optional[float] = None, accept_length: 
 
 Update last-value runtime metadata without touching prediction history.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L189)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L191)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-install-regressions">install_regressions</h4>
 
@@ -1196,7 +1196,7 @@ install_regressions(*, prefill: Optional[PlannerEnginePerfModel] = None, decode:
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L200)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L202)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-advance-load">advance_load</h4>
 
@@ -1206,7 +1206,7 @@ advance_load(obs: FpmObservations, *, predicted_kv_hit_rate: Optional[float] = N
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L214)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L216)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-advance-throughput-from-prediction">advance_throughput_from_prediction</h4>
 
@@ -1220,7 +1220,7 @@ The PREDICT plugin owns load prediction history. This method consumes
 only explicit prediction output so PROPOSE never re-runs prediction or
 depends on hidden predictor state.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L227)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L229)
 
 <h4 id="api-dynamo-planner-core-state-machine-plannerscalingstate-diagnostics">diagnostics</h4>
 
@@ -1230,7 +1230,7 @@ diagnostics() -> TickDiagnostics
 
 No summary available.
 
-[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L282)
+[source](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/core/state_machine.py#L284)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-errors-powerannotationinvaliderror" title="PowerAnnotationInvalidError (class)">
@@ -1335,7 +1335,7 @@ No summary available.
 from dynamo.planner import SLAPlannerDefaults
 ```
 
-[`components/src/dynamo/planner/config/defaults.py#L52`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L52)
+[`components/src/dynamo/planner/config/defaults.py#L53`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L53)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-core-types-scalingdecision" title="ScalingDecision (class)">
@@ -1431,7 +1431,7 @@ No summary available.
 from dynamo.planner import SubComponentType
 ```
 
-[`components/src/dynamo/planner/config/defaults.py#L132`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L132)
+[`components/src/dynamo/planner/config/defaults.py#L133`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L133)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-config-defaults-targetreplica" title="TargetReplica (class)">
@@ -1441,7 +1441,7 @@ No summary available.
 from dynamo.planner import TargetReplica
 ```
 
-[`components/src/dynamo/planner/config/defaults.py#L137`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L137)
+[`components/src/dynamo/planner/config/defaults.py#L138`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/config/defaults.py#L138)
 </Accordion>
 
 <Accordion id="api-dynamo-planner-core-types-tickinput" title="TickInput (class)">
@@ -1812,5 +1812,5 @@ from dynamo.planner.simulation import create_provider
 create_provider() -> DynamoPlannerSweepConfigProvider
 ```
 
-[`components/src/dynamo/planner/simulation/provider.py#L1199`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L1199)
+[`components/src/dynamo/planner/simulation/provider.py#L1205`](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/planner/simulation/provider.py#L1205)
 </Accordion>
