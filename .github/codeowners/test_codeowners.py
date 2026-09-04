@@ -30,6 +30,7 @@ from build_codeowners import (  # noqa: E402
     CoverageGate,
     _acknowledged_removals,
     _dead_patterns,
+    _removal_label_map,
     describe_transfers,
     is_policy_change,
     ownership_contract_violations,
@@ -1072,7 +1073,7 @@ class TestWeakenedDeclarations:
             {"glob": "lib/", "removing": ["docs"], "reason": "narrowed to runtime"}
         ]
         removals = weakened_declarations(base, head, ["lib/a.rs"])
-        teams = compute_resolution(head).label_to_team()
+        teams = _removal_label_map(base, compute_resolution(head))
         assert unacknowledged(removals, _acknowledged_removals(head, teams)) == []
         assert unmatched_transfers(removals, head, teams) == set()
 
@@ -1082,7 +1083,7 @@ class TestWeakenedDeclarations:
         head["shared"] = []
         head["ownership_transfers"] = [{"glob": "/lib/", "removing": ["docs"]}]
         removals = weakened_declarations(base, head, ["lib/a.rs"])
-        teams = compute_resolution(head).label_to_team()
+        teams = _removal_label_map(base, compute_resolution(head))
         assert unacknowledged(removals, _acknowledged_removals(head, teams)) == []
         assert unmatched_transfers(removals, head, teams) == set()
 
@@ -1092,7 +1093,7 @@ class TestWeakenedDeclarations:
         head["shared"] = []
         head["ownership_transfers"] = [{"glob": "lib/", "removing": ["docs", "typo"]}]
         removals = weakened_declarations(base, head, ["lib/a.rs"])
-        teams = compute_resolution(head).label_to_team()
+        teams = _removal_label_map(base, compute_resolution(head))
         assert describe_transfers(unmatched_transfers(removals, head, teams)) == [
             "lib/ (typo)"
         ]
@@ -1130,10 +1131,10 @@ class TestWeakenedDeclarations:
         head["shared"] = []
         head["ownership_transfers"] = [{"glob": "lib/", "removing": ["docs"]}]
         removals = weakened_declarations(head, head, ["lib/a.rs"])
-        teams = compute_resolution(head).label_to_team()
+        teams = _removal_label_map(head, compute_resolution(head))
         inert, warned = split_transfers(removals, head, head, teams)
         assert inert == []
-        assert warned == ["lib/ (@docs)"]
+        assert warned == ["lib/ (docs)"]
         assert (
             strict_failure(
                 True, CoverageGate([], []), None, [], [], None, [], [], inert
@@ -1147,15 +1148,95 @@ class TestWeakenedDeclarations:
         head = self._spec()
         head["ownership_transfers"] = [{"glob": "lib/", "removing": ["docs"]}]
         removals = weakened_declarations(base, head, ["lib/a.rs"])
-        teams = compute_resolution(head).label_to_team()
+        teams = _removal_label_map(base, compute_resolution(head))
         inert, warned = split_transfers(removals, head, base, teams)
-        assert inert == ["lib/ (@docs)"]
+        assert inert == ["lib/ (docs)"]
         assert warned == []
         failure = strict_failure(
             True, CoverageGate([], []), None, [], [], None, [], [], inert
         )
         assert failure is not None
         assert "acknowledge a removal that is not happening" in failure
+
+    def test_reassigning_an_area_team_is_reported(self) -> None:
+        # Every glob, every owners list and the coverage total are unchanged;
+        # only the team behind the label moves. Keyed on labels the gate sees
+        # nothing at all, which is the silent transfer this case exists for.
+        base = self._spec()
+        head = self._spec()
+        head["areas"][0]["github_team"] = "@usurper"
+        weakened = weakened_declarations(base, head, ["lib/a.rs"])
+        assert {w.kind for w in weakened} == {"area", "shared"}
+        assert {w.lost for w in weakened} == {("@runtime",)}
+
+    def test_reassigning_a_team_named_only_by_a_shared_grant_is_reported(self) -> None:
+        # docs reaches lib/ through the shared line rather than an area glob,
+        # so the transfer has to be caught on the grant that carries it.
+        base = self._spec()
+        head = self._spec()
+        head["areas"][1]["github_team"] = "@usurper"
+        weakened = weakened_declarations(base, head, ["lib/a.rs"])
+        assert [(w.kind, w.lost) for w in weakened] == [("shared", ("@docs",))]
+
+    def test_replacing_the_catch_all_is_reported(self) -> None:
+        # The catch-all is the single largest grant in the file, and swapping
+        # it hands every unrouted path to another team. lib/a.rs is owned
+        # outright, so it must not be counted as a loss.
+        base = self._spec()
+        head = self._spec()
+        head["meta"]["catch_all"] = "@usurper"
+        weakened = weakened_declarations(base, head, ["README.md", "lib/a.rs"])
+        assert [(w.kind, w.glob, w.lost) for w in weakened] == [
+            ("catch_all", "*", ("@root",))
+        ]
+
+    def test_renaming_a_label_without_moving_its_team_passes(self) -> None:
+        # A label is an alias. Renaming one changes no ownership, so keying
+        # grants on teams has to stay quiet here.
+        base = self._spec()
+        head = self._spec()
+        head["areas"][0]["label"] = "core"
+        head["shared"][0]["owners"] = ["core", "docs"]
+        assert weakened_declarations(base, head, ["lib/a.rs"]) == []
+
+    def test_wildcard_hand_off_covers_a_whole_reassignment(self) -> None:
+        # A reassignment drops the old team from every glob its label reached.
+        # Enumerating those one entry at a time turns a one-line intent into
+        # bookkeeping that rots, so '*' acknowledges the team repo-wide.
+        base = self._spec()
+        head = self._spec()
+        head["areas"][0]["github_team"] = "@usurper"
+        head["ownership_transfers"] = [
+            {"glob": "*", "removing": ["runtime"], "reason": "team renamed"}
+        ]
+        removals = weakened_declarations(base, head, ["lib/a.rs"])
+        teams = _removal_label_map(base, compute_resolution(head))
+        assert unacknowledged(removals, _acknowledged_removals(head, teams)) == []
+        assert unmatched_transfers(removals, head, teams) == set()
+
+    def test_wildcard_hand_off_naming_an_untouched_team_is_inert(self) -> None:
+        base = self._spec()
+        head = self._spec()
+        head["areas"][0]["github_team"] = "@usurper"
+        head["ownership_transfers"] = [{"glob": "*", "removing": ["docs"]}]
+        removals = weakened_declarations(base, head, ["lib/a.rs"])
+        teams = _removal_label_map(base, compute_resolution(head))
+        assert describe_transfers(unmatched_transfers(removals, head, teams)) == [
+            "* (docs)"
+        ]
+
+    def test_hand_off_may_name_the_outgoing_team_outright(self) -> None:
+        # The label survives a reassignment and points at the incoming team,
+        # so both readings have to resolve or a correct hand-off reads as
+        # unacknowledged and inert at the same time.
+        base = self._spec()
+        head = self._spec()
+        head["areas"][0]["github_team"] = "@usurper"
+        head["ownership_transfers"] = [{"glob": "*", "removing": ["@runtime"]}]
+        removals = weakened_declarations(base, head, ["lib/a.rs"])
+        teams = _removal_label_map(base, compute_resolution(head))
+        assert unacknowledged(removals, _acknowledged_removals(head, teams)) == []
+        assert unmatched_transfers(removals, head, teams) == set()
 
     def test_strict_gate_blocks_on_a_weakened_declaration(self) -> None:
         base = self._spec()

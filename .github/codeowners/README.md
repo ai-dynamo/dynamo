@@ -95,6 +95,43 @@ contract could never be retired. The edit is itself a policy change: it is
 judged full-tree and reviewed by this directory's owners, so lifting a
 guarantee is always a visible, owned decision.
 
+### Hand ownership to another team
+
+The strict gate blocks any edit that drops a team from paths that are still
+tracked, whether the edit deletes a glob, deletes a `shared` line, or repoints
+an area's `github_team` while every glob stays put. All three read the same
+way to the files: a team stops owning code it owned before.
+
+A hand-off is legitimate, so it is expressible -- it just cannot be silent.
+Record it in the same file, where it shows up in the same diff and gets the
+same review as the change it covers:
+
+```yaml
+ownership_transfers:
+  - glob: lib/kv-router/
+    removing: [runtime]
+    reason: router team took the subtree over in DIS-1234
+```
+
+Reassigning an area's team drops the outgoing team from every glob that area
+reached, so acknowledge it once with `glob: '*'` rather than one entry per
+path:
+
+```yaml
+ownership_transfers:
+  - glob: '*'
+    removing: [frontend]
+    reason: team renamed on GitHub
+```
+
+`removing` takes area labels; it also takes a `@org/team` handle outright,
+which is the clearer spelling when a label survives a reassignment and now
+names the incoming team.
+
+Entries are self-cleaning. One that matches no actual removal fails the build,
+so a hand-off cannot be left behind as a standing exemption for the next
+change to inherit.
+
 ## External contributors
 
 An external individual who has earned ownership of an area is granted it by

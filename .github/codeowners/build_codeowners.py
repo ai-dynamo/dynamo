@@ -236,44 +236,73 @@ class WeakenedDeclaration:
     lost: tuple[str, ...]
 
 
+def _spec_teams(spec: dict) -> dict[str, str]:
+    """Label-to-team map read straight off a raw areas spec.
+
+    Local to one revision on purpose. ``_declared_grants`` needs the base
+    revision's own mapping to see a reassignment, and the base spec may not
+    survive ``compute_resolution``.
+    """
+    return {
+        area["label"]: area["github_team"]
+        for area in spec.get("areas") or []
+        if area.get("label") and area.get("github_team")
+    }
+
+
 def _declared_grants(spec: dict) -> dict[tuple[str, str], set[str]]:
     """Flatten the enforceable ownership grants of a raw areas spec.
 
     Covers every declaration kind that grants ownership a head-only check
     cannot re-derive once it is gone: an area's own ``path_globs``,
-    ``required_owners``, ``shared``, and the blocking
-    ``classify.filetype_rules``. The last two matter as much as the first --
+    ``required_owners``, ``shared``, the blocking ``classify.filetype_rules``,
+    and ``meta.catch_all``. The later ones matter as much as the first --
     deleting a nested area glob lets an enclosing area absorb the files, and
     deleting the ``*Dockerfile*`` rule drops its coowner from every
     Dockerfile. Coverage stays green through both, so nothing else notices.
+
+    Grants are keyed on the GitHub team, never on the label that names it.
+    A label is an alias; repointing ``github_team`` under a label hands every
+    grant that names it to another team while every glob, every owners list
+    and the coverage total stay byte-identical. Keyed on labels the gate sees
+    nothing move. Keyed on teams the reassignment reads as what it is: the
+    old team losing every path the label reached.
 
     Reads raw YAML rather than a ``ResolvedModel`` on purpose. The resolver
     rejects retired schema keys outright, and the base revision this gate
     compares against is by definition older than HEAD, so resolving it would
     blind the gate to exactly the history it needs to read.
     """
+    teams = _spec_teams(spec)
     grants: dict[tuple[str, str], set[str]] = {}
     for kind in ("required_owners", "shared"):
         for rule in spec.get(kind) or []:
             glob = rule.get("glob")
             if glob:
-                grants[(kind, glob)] = set(rule.get("owners") or [])
+                grants[(kind, glob)] = {
+                    teams.get(label, label) for label in rule.get("owners") or []
+                }
     for area in spec.get("areas") or []:
-        label = area.get("label")
+        team = teams.get(area.get("label"))
         for glob in area.get("path_globs") or []:
-            if label and glob:
-                grants.setdefault(("area", glob), set()).add(label)
+            if team and glob:
+                grants.setdefault(("area", glob), set()).add(team)
     classify = spec.get("classify") or {}
     for rule in classify.get("filetype_rules") or []:
         pattern, coowner = rule.get("pattern"), rule.get("coowner")
         if pattern and coowner:
-            grants.setdefault(("filetype", pattern), set()).add(coowner)
+            grants.setdefault(("filetype", pattern), set()).add(
+                teams.get(coowner, coowner)
+            )
+    catch_all = (spec.get("meta") or {}).get("catch_all")
+    if catch_all:
+        grants[("catch_all", "*")] = {catch_all}
     return grants
 
 
 def _grant_pattern(kind: str, glob: str) -> str:
-    """Match form for a grant key. File-type rules match unanchored."""
-    return glob if kind == "filetype" else anchor(glob)
+    """Match form for a grant key. File-type and catch-all rules are unanchored."""
+    return glob if kind in ("filetype", "catch_all") else anchor(glob)
 
 
 def _transfer_entries(spec: dict) -> list[dict]:
@@ -307,8 +336,36 @@ def _transfer_entries(spec: dict) -> list[dict]:
     return entries
 
 
+def _transfer_key(glob: str) -> str:
+    """Lookup key for a transfer entry's glob.
+
+    ``*`` stays literal and acknowledges the team's removal repo-wide. That
+    is the shape a reassignment needs: repointing one area's ``github_team``
+    drops the old team from every glob the label reached, and enumerating
+    them one entry at a time turns a one-line intent into forty lines of
+    bookkeeping that rot the moment the area's globs change.
+    """
+    return "*" if glob == "*" else anchor(glob)
+
+
+def _transfer_teams(labels: list[str], label_teams: dict[str, set[str]]) -> set[str]:
+    """Teams an acknowledgement's ``removing`` list names.
+
+    A label resolves to every team it has named across the two revisions, not
+    just the current one. A reassignment keeps the label and repoints it, so
+    a head-only reading would resolve the entry to the team arriving rather
+    than the one leaving -- reporting the removal as unacknowledged and the
+    entry as inert, both at once, for a correctly written hand-off. An entry
+    may also name a team outright, which the fallback passes through.
+    """
+    teams: set[str] = set()
+    for label in labels:
+        teams |= label_teams.get(label) or {label}
+    return teams
+
+
 def _acknowledged_removals(
-    spec: dict, label_to_team: dict[str, str]
+    spec: dict, label_teams: dict[str, set[str]]
 ) -> dict[str, set[str]]:
     """Teams each ``ownership_transfers`` entry records as deliberately gone.
 
@@ -320,34 +377,44 @@ def _acknowledged_removals(
     """
     acknowledged: dict[str, set[str]] = {}
     for entry in _transfer_entries(spec):
-        teams = {label_to_team.get(la, la) for la in entry["removing"]}
-        acknowledged.setdefault(anchor(entry["glob"]), set()).update(teams)
+        teams = _transfer_teams(entry["removing"], label_teams)
+        acknowledged.setdefault(_transfer_key(entry["glob"]), set()).update(teams)
     return acknowledged
 
 
 def unmatched_transfers(
-    removals: list[WeakenedDeclaration], spec: dict, label_to_team: dict[str, str]
+    removals: list[WeakenedDeclaration], spec: dict, label_teams: dict[str, set[str]]
 ) -> set[tuple[str, str]]:
-    """Acknowledged ``(glob, team)`` pairs that match no actual removal.
+    """Acknowledged ``(glob, owner)`` pairs that match no actual removal.
 
     Judged per pair, not per entry. An entry naming both a real removal and a
     misspelled one would otherwise pass whole on the strength of the real
     one, and the misspelling would sit there forever -- exactly the rot the
     self-cleaning rule exists to prevent.
+
+    Reported as the author spelled it, so the message names a line they can
+    find rather than a team the label resolved to behind them.
     """
     live = {(anchor(entry.glob), team) for entry in removals for team in entry.lost}
+    losing = {team for _, team in live}
     unmatched: set[tuple[str, str]] = set()
     for entry in _transfer_entries(spec):
         for label in entry["removing"]:
-            team = label_to_team.get(label, label)
-            if (anchor(entry["glob"]), team) not in live:
-                unmatched.add((entry["glob"], team))
+            teams = _transfer_teams([label], label_teams)
+            matched = any(
+                team in losing
+                if entry["glob"] == "*"
+                else (anchor(entry["glob"]), team) in live
+                for team in teams
+            )
+            if not matched:
+                unmatched.add((entry["glob"], label))
     return unmatched
 
 
 def describe_transfers(pairs: set[tuple[str, str]]) -> list[str]:
     """Render acknowledgement pairs for a report line."""
-    return sorted(f"{glob} ({team})" for glob, team in pairs)
+    return sorted(f"{glob} ({owner})" for glob, owner in pairs)
 
 
 def weakened_declarations(
@@ -417,8 +484,9 @@ def unacknowledged(
     covers.
     """
     remaining = []
+    everywhere = acknowledged.get("*", set())
     for entry in removals:
-        covered = acknowledged.get(anchor(entry.glob), ())
+        covered = acknowledged.get(anchor(entry.glob), set()) | everywhere
         lost = tuple(t for t in entry.lost if t not in covered)
         if lost:
             remaining.append(
@@ -719,7 +787,7 @@ def split_transfers(
     removals: list[WeakenedDeclaration],
     head_spec: dict,
     base_spec: dict | None,
-    label_to_team: dict[str, str],
+    label_teams: dict[str, set[str]],
 ) -> tuple[list[str], list[str]]:
     """Split unmatched acknowledgements into blocking and inherited.
 
@@ -729,9 +797,9 @@ def split_transfers(
     merge-base and no removal can be observed. Same split the stale-glob gate
     makes between what a branch orphaned and what it inherited.
     """
-    unmatched = unmatched_transfers(removals, head_spec, label_to_team)
+    unmatched = unmatched_transfers(removals, head_spec, label_teams)
     inherited = (
-        unmatched_transfers(removals, base_spec, label_to_team)
+        unmatched_transfers(removals, base_spec, label_teams)
         if base_spec is not None
         else unmatched
     )
@@ -740,22 +808,30 @@ def split_transfers(
     )
 
 
-def _removal_label_map(base_spec: dict | None, model: ResolvedModel) -> dict[str, str]:
-    """Label-to-team map spanning both revisions.
+def _removal_label_map(
+    base_spec: dict | None, model: ResolvedModel
+) -> dict[str, set[str]]:
+    """Every team each label has named across both revisions.
 
     A hand-off can delete the area it hands off from, and then the label the
     transfer entry names exists only in the base. Head-only resolution would
     leave it as a bare label, never matching the resolved team in the loss, so
-    the entry would read as both unacknowledged and inert at once. Head wins
-    where both define a label.
+    the entry would read as both unacknowledged and inert at once. A
+    reassignment is the mirror image: the label survives and points somewhere
+    new, so head-only resolution names the arriving team instead of the
+    departing one. Keeping both readings covers each case, and costs nothing
+    -- a label that never moved resolves to a one-element set.
     """
-    head_map = model.label_to_team()
+    label_teams = {label: {team} for label, team in model.label_to_team().items()}
     if base_spec is None:
-        return head_map
+        return label_teams
     try:
-        return {**compute_resolution(base_spec).label_to_team(), **head_map}
+        base_map = compute_resolution(base_spec).label_to_team()
     except SystemExit:
-        return head_map
+        return label_teams
+    for label, team in base_map.items():
+        label_teams.setdefault(label, set()).add(team)
+    return label_teams
 
 
 def _merge_base_spec(repo: str, base: str, areas: str) -> dict | None:
