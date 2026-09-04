@@ -909,6 +909,25 @@ class TestToolExecutionE2E:
         ),
     )
     def test_chained_tools_second_call_uses_first_calls_real_output(
-        self, client: OpenAI, model: str
+        self, client: OpenAI, model: str, record_property: Any
     ):
-        assert_chained_tools_thread_real_output(client, model)
+        """Capability signal, deliberately non-gating.
+
+        The supported contract -- carrying real tool output into a final
+        response -- is gated by the single-tool case above, which is not
+        xfailed. This case asks something strictly harder that Qwen3-0.6B
+        cannot currently do, so under ``strict=False`` neither XFAIL nor XPASS
+        fails the run.
+
+        That makes the outcome invisible in a pass/fail report, which is the
+        fair objection to an xfail used this way. So the result is also recorded
+        as a property: the signal lands in the JUnit XML either way, and a model
+        that gains the capability shows up as data rather than only as a status
+        flip nobody reads.
+        """
+        try:
+            assert_chained_tools_thread_real_output(client, model)
+        except AssertionError as exc:
+            record_property("chained_tool_capability", f"unsupported: {exc}")
+            raise
+        record_property("chained_tool_capability", "supported")
