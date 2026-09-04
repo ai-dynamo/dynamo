@@ -4,13 +4,15 @@
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use tokio::sync::{Notify, Semaphore, mpsc, watch};
+#[cfg(test)]
+use tokio::sync::watch;
+use tokio::sync::{Notify, Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::protocols::{DirectRequest, FpmPublisher};
-use crate::live::{LiveEngine, LiveEngineOptions, ObservedAdmission};
+use crate::live::{LiveEngine, LiveEngineOptions, ObservedAdmission, RequestOutputBuffering};
 use crate::loadgen::WorkloadDriver;
 use crate::replay::TraceSimulationReport;
 
@@ -132,6 +134,20 @@ impl LiveRunSession {
             ..
         } = self;
         let wall_time_ms = now_ms(task_ctx.start);
+        let agentic_trajectory = task_ctx.workload.as_ref().and_then(|workload| {
+            workload
+                .driver
+                .lock()
+                .ok()
+                .and_then(|driver| driver.agentic_trajectory_snapshot())
+        });
+        let agentic_graph = task_ctx.workload.as_ref().and_then(|workload| {
+            workload
+                .driver
+                .lock()
+                .ok()
+                .and_then(|driver| driver.agentic_graph_identity())
+        });
         let vllm_preemptions_total = task_ctx
             .engines
             .iter()
@@ -164,7 +180,7 @@ impl LiveRunSession {
         let report = tokio::select! {
             biased;
             _ = cancel.cancelled() => bail!("online replay cancelled"),
-            result = recorder.finish(wall_time_ms) => result?,
+            result = recorder.finish(wall_time_ms, agentic_trajectory, agentic_graph) => result?,
         };
         if cancel.is_cancelled() {
             bail!("online replay cancelled");
@@ -181,7 +197,14 @@ impl LiveRuntime {
         mode: LiveReplayMode,
         cancel: CancellationToken,
     ) -> Result<Self> {
-        Self::new_inner(config, pending, mode, None, cancel)
+        Self::new_inner(
+            config,
+            pending,
+            mode,
+            #[cfg(test)]
+            None,
+            cancel,
+        )
     }
 
     #[cfg(test)]
@@ -199,7 +222,7 @@ impl LiveRuntime {
         config: OnlineReplayConfig,
         pending: std::collections::VecDeque<DirectRequest>,
         mode: LiveReplayMode,
-        output_gate: Option<watch::Receiver<bool>>,
+        #[cfg(test)] output_gate: Option<watch::Receiver<bool>>,
         cancel: CancellationToken,
     ) -> Result<Self> {
         let OnlineReplayConfig {
@@ -241,14 +264,15 @@ impl LiveRuntime {
                     kv_event_publishers: router.sink(worker_idx as _),
                     admission_tx: Some(admission_tx.clone()),
                     fpm_publisher: FpmPublisher::default(),
-                    request_output_capacity: None,
+                    request_output_buffering: RequestOutputBuffering::FullResponse,
                     allow_zero_output: true,
+                    #[cfg(test)]
+                    output_gate: output_gate.clone(),
                 })
                 .collect();
             engines.extend(LiveEngine::start_grouped_with_options(
                 args.clone(),
                 rank_options,
-                output_gate.clone(),
             )?);
         }
         drop(admission_tx);
@@ -433,6 +457,16 @@ impl LiveRuntime {
                         ready_turn.request_uuid,
                         ready_turn.session_id,
                         ready_turn.turn_index,
+                    )?;
+                }
+                if let (Some(request_id), Some(play_id)) =
+                    (ready_turn.authored_request_id, ready_turn.play_id)
+                {
+                    session.recorder_tx.record_agentic_metadata(
+                        ready_turn.request_uuid,
+                        request_id,
+                        play_id,
+                        ready_turn.dispatched_at_ms,
                     )?;
                 }
                 if session.task_ctx.cancel.is_cancelled() {

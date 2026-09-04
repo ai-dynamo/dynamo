@@ -285,7 +285,6 @@ def _replay_cli_env() -> dict[str, str]:
     repo_root = Path(__file__).resolve().parents[5]
     env = os.environ.copy()
     pythonpath_entries = [
-        str(repo_root / "aisimulate/src"),
         str(repo_root / "lib/bindings/python/src"),
         str(repo_root / "components/src"),
     ]

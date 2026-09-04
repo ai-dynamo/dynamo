@@ -24,6 +24,7 @@ active-sequences = [
   "dep:rustc-hash",
   "dep:tracing-subscriber",
 ]
+approximate-lru = ["active-sequences"]
 claude-trace-export = [
   "dep:chrono",
   "dep:crossbeam-channel",
@@ -72,7 +73,12 @@ router-test-support = [
   "dep:tracing-subscriber",
 ]
 satf = ["dep:dynamo-data-gen"]
-request-trace-to-mooncake = ["dep:dynamo-data-gen", "dep:tempfile"]
+request-trace-to-mooncake = ["dep:blake3", "dep:dynamo-data-gen", "dep:tempfile"]
+weka-to-agentic-mooncake = [
+  "dep:dynamo-data-gen",
+  "dep:dynamo-mocker",
+  "dep:tempfile",
+]
 test-support = [
   "router-test-support",
   "dynamo-mocker/test-support",
@@ -105,10 +111,20 @@ name = "request_trace_to_mooncake"
 path = "request_trace_to_mooncake.rs"
 required-features = ["request-trace-to-mooncake"]
 
+[[bin]]
+name = "weka_to_agentic_mooncake"
+path = "weka_to_agentic_mooncake.rs"
+required-features = ["weka-to-agentic-mooncake"]
+
 [[test]]
 name = "request_trace_to_mooncake"
 path = "tests/request_trace_to_mooncake.rs"
 required-features = ["request-trace-to-mooncake"]
+
+[[test]]
+name = "weka_to_agentic_mooncake"
+path = "tests/weka_to_agentic_mooncake.rs"
+required-features = ["weka-to-agentic-mooncake"]
 
 [[bench]]
 name = "offline_replay_bench"
@@ -132,6 +148,17 @@ name = "active_sequences_bench"
 path = "kv_router/active_sequences_bench.rs"
 harness = false
 required-features = ["active-sequences"]
+
+[[bench]]
+name = "approximate_lru_bench"
+path = "kv_router/approximate_lru_bench.rs"
+harness = false
+required-features = ["approximate-lru"]
+
+[[test]]
+name = "approximate_lru"
+path = "tests/approximate_lru.rs"
+required-features = ["approximate-lru"]
 
 [[bench]]
 name = "dc_ckf_relay_bench"

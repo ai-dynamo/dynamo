@@ -12,7 +12,6 @@ Provides:
 """
 
 import asyncio
-import os
 import warnings
 from typing import Optional, Tuple
 
@@ -78,7 +77,6 @@ def create_runtime(
 
     if response_plane not in {"tcp", "quic"}:
         raise ValueError("response_plane must be 'tcp' or 'quic'")
-    os.environ["DYN_RESPONSE_PLANE"] = response_plane
 
     loop = asyncio.get_running_loop()
 
@@ -87,6 +85,7 @@ def create_runtime(
         discovery_backend,
         request_plane,
         event_plane=event_plane,
+        response_plane=response_plane,
     )
 
     return runtime, loop

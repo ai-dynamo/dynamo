@@ -42,7 +42,6 @@ use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 /// Shared default maximum TCP message size across request-plane components.
 pub(crate) const DEFAULT_TCP_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
-static TCP_MAX_MESSAGE_SIZE: OnceLock<usize> = OnceLock::new();
 static REQUEST_PLANE_PAYLOAD_CODEC: OnceLock<RequestPlanePayloadCodec> = OnceLock::new();
 static RESPONSE_PLANE_MODE: OnceLock<ResponsePlaneMode> = OnceLock::new();
 
@@ -93,15 +92,12 @@ impl ResponsePlaneMode {
     }
 }
 
-/// Read the configured TCP max message size once and share it across client,
-/// server, and zero-copy decoder code paths.
-pub(crate) fn get_tcp_max_message_size() -> usize {
-    *TCP_MAX_MESSAGE_SIZE.get_or_init(|| {
-        std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_TCP_MAX_MESSAGE_SIZE)
-    })
+crate::env_config! {
+    /// Read the configured TCP max message size once and share it across client,
+    /// server, and zero-copy decoder code paths.
+    pub(crate) fn get_tcp_max_message_size() -> usize =
+        crate::config::environment_names::request_plane::DYN_TCP_MAX_MESSAGE_SIZE,
+        default = DEFAULT_TCP_MAX_MESSAGE_SIZE;
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -156,6 +152,22 @@ impl RequestPlanePayloadCodec {
         }
     }
 
+    /// Encode into a caller-owned writer, so a hot path can reuse one buffer
+    /// across frames instead of allocating per frame.
+    ///
+    /// Emits the same bytes as [`Self::encode`], which
+    /// `encode_into_matches_encode_byte_for_byte` pins for both codecs.
+    pub fn encode_into<T, W>(&self, value: &T, writer: &mut W) -> Result<()>
+    where
+        T: Serialize + ?Sized,
+        W: std::io::Write,
+    {
+        match self {
+            Self::Json => Ok(serde_json::to_writer(writer, value)?),
+            Self::Msgpack => Ok(rmp_serde::encode::write_named(writer, value)?),
+        }
+    }
+
     pub fn decode<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T> {
         match self {
             Self::Json => Ok(serde_json::from_slice(bytes)?),
@@ -163,6 +175,12 @@ impl RequestPlanePayloadCodec {
         }
     }
 }
+
+/// Starting capacity for a buffer that one response frame is encoded into.
+///
+/// Matches `serde_json::to_vec`'s own default so msgpack — which otherwise
+/// starts at zero — stops regrowing its buffer on every streamed frame.
+pub const RESPONSE_ENCODE_CAPACITY_HINT: usize = 128;
 
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
 impl<T: PipelineIO + Serialize + for<'de> Deserialize<'de>> Codable for T {}
@@ -532,11 +550,13 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SEND_BUFFER_COUNT, NetworkStreamWrapper, RequestControlMessage,
-        RequestPlanePayloadCodec, RequestType, ResponsePlaneMode, ResponseType, StreamOptions,
+        DEFAULT_SEND_BUFFER_COUNT, IngressResponseEncoder, NetworkStreamWrapper,
+        RequestControlMessage, RequestPlanePayloadCodec, RequestType, ResponsePlaneMode,
+        ResponseType, SerdeIngressPayloadAdapter, StreamOptions,
     };
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
+    use crate::protocols::annotated::Annotated;
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -562,6 +582,30 @@ mod tests {
         );
         assert!(ResponsePlaneMode::from_config_value(Some("")).is_err());
         assert!(ResponsePlaneMode::from_config_value(Some("invalid")).is_err());
+    }
+
+    #[test]
+    fn encode_into_matches_encode_byte_for_byte() {
+        let payload = NetworkStreamWrapper {
+            data: Some(TestPayload {
+                id: 7,
+                text: "hello".to_string(),
+                tokens: vec![1, 200, 70_000],
+            }),
+            complete_final: false,
+        };
+
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            let expected = codec.encode(&payload).expect("encode");
+            let mut actual = Vec::new();
+            codec
+                .encode_into(&payload, &mut actual)
+                .expect("encode_into");
+            assert_eq!(expected, actual, "codec={}", codec.name());
+        }
     }
 
     #[test]
@@ -699,6 +743,53 @@ mod tests {
             assert_eq!(decoded, wrapper);
         }
     }
+
+    /// `encode_into` must stay byte-compatible with `encode` for both codecs.
+    #[tokio::test]
+    async fn serde_ingress_encoder_matches_encode_byte_for_byte() {
+        let data = Annotated::from_data(serde_json::json!({
+            "token_ids": [128, 9001],
+            "index": 3,
+        }));
+        let error = Annotated::<serde_json::Value>::from_error("engine failed");
+
+        for codec in [
+            RequestPlanePayloadCodec::Json,
+            RequestPlanePayloadCodec::Msgpack,
+        ] {
+            for (case, response, complete_final, expect_error) in [
+                ("data frame", Some(data.clone()), false, false),
+                ("error frame", Some(error.clone()), false, true),
+                ("complete final", None, true, false),
+            ] {
+                let expected = codec
+                    .encode(&NetworkStreamWrapper {
+                        data: response.clone(),
+                        complete_final,
+                    })
+                    .expect("reference encode");
+
+                let frame = SerdeIngressPayloadAdapter
+                    .encode_response(codec, response, complete_final)
+                    .await
+                    .expect("adapter encode");
+
+                assert_eq!(
+                    frame.bytes.as_ref(),
+                    expected.as_slice(),
+                    "codec={} case={case}",
+                    codec.name()
+                );
+                assert_eq!(
+                    frame.is_error,
+                    expect_error,
+                    "codec={} case={case}",
+                    codec.name()
+                );
+                assert!(!frame.stop_stream, "codec={} case={case}", codec.name());
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -808,13 +899,17 @@ where
             data: response,
             complete_final,
         };
-        let encoded = payload_codec.encode(&wrapper).map_err(|err| {
-            PipelineError::SerializationError(format!(
-                "Failed serializing {} request-plane response: {}",
-                payload_codec.name(),
-                err
-            ))
-        });
+        let mut bytes = Vec::with_capacity(RESPONSE_ENCODE_CAPACITY_HINT);
+        let encoded = payload_codec
+            .encode_into(&wrapper, &mut bytes)
+            .map(|()| bytes)
+            .map_err(|err| {
+                PipelineError::SerializationError(format!(
+                    "Failed serializing {} request-plane response: {}",
+                    payload_codec.name(),
+                    err
+                ))
+            });
         std::future::ready(encoded.map(|bytes| EncodedResponseFrame {
             bytes: bytes.into(),
             is_error,

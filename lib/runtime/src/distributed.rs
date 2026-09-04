@@ -3,7 +3,6 @@
 
 use crate::component::{
     self, Component, ComponentBuilder, Endpoint, EndpointDiscoverySource, Instance, Namespace,
-    RoutingOccupancyState,
 };
 use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
@@ -21,6 +20,7 @@ use crate::{
 
 use super::utils::GracefulShutdownTracker;
 use crate::SystemHealth;
+use crate::routing_policy::RoutingOccupancyState;
 use crate::runtime::Runtime;
 
 // Used instead of std::cell::OnceCell because get_or_try_init there is nightly
@@ -128,9 +128,12 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let response_plane = ResponsePlaneMode::configured()?;
-        let (discovery_backend, nats_config, request_plane, event_transport_kind) =
+        let (discovery_backend, nats_config, request_plane, response_plane, event_transport_kind) =
             config.dissolve();
+        let response_plane = match response_plane {
+            Some(mode) => mode,
+            None => ResponsePlaneMode::configured()?,
+        };
 
         let nats_client = match nats_config {
             Some(nc) => Some(nc.connect().await?),
@@ -743,6 +746,9 @@ pub struct DistributedConfig {
     pub discovery_backend: DiscoveryBackend,
     pub nats_config: Option<nats::ClientOptions>,
     pub request_plane: RequestPlaneMode,
+    /// Explicit response transport. `None` reads `DYN_RESPONSE_PLANE` for
+    /// standalone Rust entry points.
+    pub response_plane: Option<ResponsePlaneMode>,
     /// Resolved event transport kind — computed once at config time from
     /// `DYN_EVENT_PLANE` and the discovery backend, then stored on the runtime
     /// so callers always get the same answer regardless of which other services
@@ -803,6 +809,7 @@ impl DistributedConfig {
                 None
             },
             request_plane,
+            response_plane: None,
             event_transport_kind,
         }
     }
@@ -830,6 +837,7 @@ impl DistributedConfig {
                 None
             },
             request_plane,
+            response_plane: None,
             event_transport_kind,
         }
     }
@@ -843,6 +851,7 @@ impl DistributedConfig {
             // This won't be used in process local, so we likely need a "none" option to
             // communicate that and avoid opening the ports.
             request_plane: RequestPlaneMode::Tcp,
+            response_plane: None,
             event_transport_kind: crate::discovery::EventTransportKind::Zmq,
         }
     }
@@ -890,7 +899,7 @@ impl RequestPlaneMode {
     /// Get the request plane mode from environment variable (uncached)
     /// Reads from `DYN_REQUEST_PLANE` environment variable.
     fn from_env() -> Self {
-        std::env::var("DYN_REQUEST_PLANE")
+        std::env::var(crate::config::environment_names::request_plane::DYN_REQUEST_PLANE)
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_default()
@@ -918,6 +927,7 @@ pub mod distributed_test_utils {
             ),
             nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
+            response_plane: None,
             event_transport_kind: crate::discovery::EventTransportKind::Nats,
         };
         super::DistributedRuntime::new(rt, config).await.unwrap()
@@ -941,6 +951,7 @@ pub mod distributed_test_utils {
             ),
             nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
+            response_plane: None,
             event_transport_kind: crate::discovery::EventTransportKind::Nats,
         };
         super::DistributedRuntime::new(rt, config).await.unwrap()

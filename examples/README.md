@@ -54,6 +54,12 @@ Platform-specific manifests and templates for production environments. Deploymen
 - **[Amazon ECS](deployments/ECS/README.md)** - Task definitions ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/eks/ecs.mdx))
 - **[Google GKE](deployments/GKE/README.md)** - DGD manifests ([deployment guide](../docs/fern/pages/kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx))
 
+## Integration Examples
+
+End-to-end examples that connect Dynamo to adjacent inference services:
+
+- **[llm-d Batch Gateway](deployments/llm-d-batch-gateway/README.md)** - Experimental OpenAI Batch lifecycle on a dedicated Dynamo worker pool
+
 ## Runtime Examples
 
 Low-level runtime examples for developers using Python<>Rust bindings:

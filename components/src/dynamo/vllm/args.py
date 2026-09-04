@@ -178,6 +178,20 @@ def cross_validate_config(
             "Shadow mode depends on GMS for VA-stable weight sharing."
         )
 
+    if dynamo_config.embedding_worker_processes > 1:
+        if engine_config.data_parallel_size != 1:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 currently requires "
+                "--data-parallel-size=1. The embedding process pool shares one "
+                "local EngineCore."
+            )
+        if engine_config.enable_lora:
+            raise ValueError(
+                "--embedding-worker-processes greater than 1 cannot currently be "
+                "combined with --enable-lora. Runtime LoRA state is not "
+                "synchronized across embedding endpoint processes."
+            )
+
 
 def update_dynamo_config_with_engine(
     dynamo_config: Config, engine_config: AsyncEngineArgs
@@ -378,6 +392,27 @@ def update_engine_config_with_dynamo(
                 f"--scheduler-cls is set to '{existing_cls}'. Either remove "
                 f"--scheduler-cls or use a subclass of InstrumentedScheduler."
             )
+        if os.environ.get("DYN_FPM_GC_POLICY", "").strip().lower() == "freeze":
+            # Class path as a literal, not an import: importing
+            # dynamo.vllm.gc_policy auto-starts the policy in the importing
+            # process, and this launcher process must stay untouched.
+            worker_extension_cls = "dynamo.vllm.gc_policy.FpmGcWorkerExtension"
+            existing_ext = getattr(engine_config, "worker_extension_cls", None)
+            if not existing_ext:
+                defaults["worker_extension_cls"] = worker_extension_cls
+                logger.info(
+                    "Benchmark mode: DYN_FPM_GC_POLICY set, injecting "
+                    "worker_extension_cls=%s",
+                    worker_extension_cls,
+                )
+            elif str(existing_ext) != worker_extension_cls:
+                raise ValueError(
+                    f"DYN_FPM_GC_POLICY requires "
+                    f"worker_extension_cls='{worker_extension_cls}' so model "
+                    f"workers apply the GC policy, but --worker-extension-cls "
+                    f"is set to '{existing_ext}'. Remove it or unset "
+                    f"DYN_FPM_GC_POLICY."
+                )
         benchmark_config: Dict[str, Any] = {
             "mode": dynamo_config.benchmark_mode,
             "warmup_iterations": dynamo_config.benchmark_warmup_iterations,
@@ -430,6 +465,17 @@ def update_engine_config_with_dynamo(
             logger.debug(
                 f" Skipping engine_args.{key} (not available in this vLLM version)"
             )
+
+    # DYN_GMS_USE_V1 is operator-injected (env-only, like DYN_SNAPSHOT_CONTROL_DIR).
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        if getattr(engine_config, "load_format", None) == "gms":
+            raise ValueError(
+                "DYN_GMS_USE_V1=true cannot be combined with --load-format gms"
+            )
+        engine_config.worker_cls = (
+            "gpu_memory_service.v1.integrations.vllm.worker.GMSV1Worker"
+        )
+        engine_config.enable_sleep_mode = True
 
 
 def create_kv_events_config(
