@@ -119,9 +119,9 @@ trtllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.trtllm,
-            # NGram uses no second model. This provisional value follows the
-            # 3.9 GiB aggregate baseline and must be replaced after profiling.
-            pytest.mark.profiled_vram_gib(4.0),
+            # Reuse the measured Qwen3-0.6B aggregate budget. NGram adds no
+            # draft weights, while this config lowers token and batch limits.
+            pytest.mark.profiled_vram_gib(3.9),
             pytest.mark.requested_trtllm_kv_tokens(2592),
             pytest.mark.timeout(650),
         ],
