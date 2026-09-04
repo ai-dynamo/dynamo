@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Setup checksum-pinned Grype
+description: Install a checksum-pinned Grype binary and refresh its cached vulnerability DB.
+
+runs:
+  using: composite
+  steps:
+    - name: Select Grype archive
+      id: archive
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64)
+            echo "arch=amd64" >> "$GITHUB_OUTPUT"
+            echo "sha256=0122df7b655981abe547ad3d2190d65551dac6a2bfc80b4dc2a989b5d0587458" >> "$GITHUB_OUTPUT"
+            ;;
+          aarch64|arm64)
+            echo "arch=arm64" >> "$GITHUB_OUTPUT"
+            echo "sha256=a8d7504a149629324eb5f4ce3dc25dfd211bbfe047e64ee2bf7844b466c3d84d" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "Unsupported Grype runner architecture." >&2
+            exit 1
+            ;;
+        esac
+        echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Grype vulnerability database
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+      with:
+        path: ~/.cache/grype/db
+        key: grype-db-v6-${{ runner.os }}-${{ runner.arch }}-${{ steps.archive.outputs.day }}
+        restore-keys: |
+          grype-db-v6-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Install Grype v0.116.1
+      shell: bash
+      env:
+        GRYPE_ARCH: ${{ steps.archive.outputs.arch }}
+        GRYPE_SHA256: ${{ steps.archive.outputs.sha256 }}
+      run: |
+        set -euo pipefail
+        archive="${RUNNER_TEMP}/grype_0.116.1_linux_${GRYPE_ARCH}.tar.gz"
+        install_dir="${RUNNER_TEMP}/grype-0.116.1"
+        curl --fail --silent --show-error --location --retry 3 \
+          "https://github.com/anchore/grype/releases/download/v0.116.1/grype_0.116.1_linux_${GRYPE_ARCH}.tar.gz" \
+          --output "${archive}"
+        echo "${GRYPE_SHA256}  ${archive}" | sha256sum --check --status
+        mkdir -p "${install_dir}"
+        tar -xzf "${archive}" -C "${install_dir}" grype
+        chmod 0755 "${install_dir}/grype"
+        echo "${install_dir}" >> "$GITHUB_PATH"
+        echo "GRYPE_CHECK_FOR_APP_UPDATE=false" >> "$GITHUB_ENV"
+
+    - name: Refresh Grype database
+      shell: bash
+      run: |
+        set -euo pipefail
+        grype db update >/dev/null
+        grype version
