@@ -74,9 +74,8 @@ def _override_server_args(server_args: Any, source: str, **fields: Any) -> None:
         override(source, **fields)
         return
 
-    # XPU compatibility for SGLang 0.5.11, whose ServerArgs stays mutable and
-    # predates every override API. Remove when the XPU SGLang pin is upgraded
-    # to 0.5.16+.
+    # The XPU pin's SGLang 0.5.11 stays mutable and predates every override
+    # API. Remove when that pin is upgraded to 0.5.16+.
     for name, value in fields.items():
         setattr(server_args, name, value)
 
