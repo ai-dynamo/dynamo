@@ -1465,7 +1465,8 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 						LocalObjectReference: corev1.LocalObjectReference{
 							Name: "hf-token-secret",
 						},
-						Key: "HF_TOKEN",
+						Key:      "HF_TOKEN",
+						Optional: ptr.To(true),
 					},
 				},
 			},

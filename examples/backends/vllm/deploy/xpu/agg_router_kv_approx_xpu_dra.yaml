@@ -51,6 +51,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           imagePullPolicy: IfNotPresent
           name: main
@@ -78,6 +79,7 @@ spec:
           envFrom:
           - secretRef:
               name: hf-token-secret
+              optional: true
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime-xpu:my-tag
           imagePullPolicy: IfNotPresent
           name: main
