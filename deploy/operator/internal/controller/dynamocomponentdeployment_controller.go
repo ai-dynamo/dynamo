@@ -167,23 +167,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		if err == nil {
 			return
 		}
-		reconcileErr := err
-		logs.Error(reconcileErr, "Failed to reconcile DynamoComponentDeployment.")
-		r.Recorder.Eventf(dynamoComponentDeployment, nil, corev1.EventTypeWarning, "ReconcileError", "Reconcile",
-			"Failed to reconcile DynamoComponentDeployment: %v", reconcileErr)
-		if clearErr := r.clearDCDGPUShape(ctx, req); clearErr != nil {
-			logs.Error(clearErr, "Failed to clear DynamoComponentDeployment GPU shape after reconcile error")
-		}
-		if _, statusErr := r.setStatusConditions(ctx, req,
-			metav1.Condition{
-				Type:    nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
-				Status:  metav1.ConditionFalse,
-				Reason:  "Reconciling",
-				Message: fmt.Sprintf("Failed to reconcile DynamoComponentDeployment: %v", reconcileErr),
-			},
-		); statusErr != nil {
-			logs.Error(statusErr, "Failed to update DynamoComponentDeployment status after reconcile error")
-		}
+		r.recordReconcileError(ctx, req, dynamoComponentDeployment, err)
 	}()
 
 	if _, err = commonController.HandleFinalizer(ctx, dynamoComponentDeployment, r.Client, r); err != nil {
@@ -269,6 +253,10 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	logs.Info("Finished reconciling.")
 	r.Recorder.Eventf(dynamoComponentDeployment, nil, corev1.EventTypeNormal, "Update", "Update", "All resources updated!")
 
+	ownershipConflictCondition, _ := applyOwnershipConflict(dynamoComponentDeployment.Status.Conditions, dynamoComponentDeployment.Generation, nil)
+	if ownershipConflictCondition != nil {
+		meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, *ownershipConflictCondition)
+	}
 	err = r.setStatusConditionAndServiceReplicaStatus(ctx, dynamoComponentDeployment, componentReconcileResult)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to set status condition and service replica status: %w", err)
@@ -284,6 +272,55 @@ type ComponentReconcileResult struct {
 	message              string
 	serviceReplicaStatus *nvidiacomv1beta1.ComponentReplicaStatus
 	gpuShape             *dynamo.GPUShape
+}
+
+func (r *DynamoComponentDeploymentReconciler) recordReconcileError(
+	ctx context.Context,
+	req ctrl.Request,
+	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
+	reconcileErr error,
+) {
+	logs := log.FromContext(ctx)
+	logs.Error(reconcileErr, "Failed to reconcile DynamoComponentDeployment.")
+	if clearErr := r.clearDCDGPUShape(ctx, req); clearErr != nil {
+		logs.Error(clearErr, "Failed to clear DynamoComponentDeployment GPU shape after reconcile error")
+	}
+
+	ownershipConflictCondition, ownershipConflictTransition := applyOwnershipConflict(dcd.Status.Conditions, dcd.Generation, reconcileErr)
+	if ownershipConflictCondition != nil {
+		updated, statusErr := r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: dcd.Generation,
+				Reason:             ownershipConflictCondition.Reason,
+				Message:            ownershipConflictCondition.Message,
+			},
+			*ownershipConflictCondition,
+		)
+		if statusErr != nil {
+			logs.Error(statusErr, "Failed to update DynamoComponentDeployment status after ownership conflict")
+			return
+		}
+		if ownershipConflictTransition == ownershipConflictRaised && r.Recorder != nil {
+			r.Recorder.Eventf(updated, nil, corev1.EventTypeWarning, ownershipConflictCondition.Reason, "Reconcile",
+				"Refusing to reconcile a resource with conflicting controller ownership: %s", ownershipConflictCondition.Message)
+		}
+		return
+	}
+
+	r.Recorder.Eventf(dcd, nil, corev1.EventTypeWarning, "ReconcileError", "Reconcile",
+		"Failed to reconcile DynamoComponentDeployment: %v", reconcileErr)
+	if _, statusErr := r.setStatusConditions(ctx, req,
+		metav1.Condition{
+			Type:    nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+			Status:  metav1.ConditionFalse,
+			Reason:  "Reconciling",
+			Message: fmt.Sprintf("Failed to reconcile DynamoComponentDeployment: %v", reconcileErr),
+		},
+	); statusErr != nil {
+		logs.Error(statusErr, "Failed to update DynamoComponentDeployment status after reconcile error")
+	}
 }
 
 func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx context.Context, dynamoComponentDeployment *nvidiacomv1beta1.DynamoComponentDeployment) (ComponentReconcileResult, error) {

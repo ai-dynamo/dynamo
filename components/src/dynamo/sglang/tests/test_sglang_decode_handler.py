@@ -786,17 +786,80 @@ def test_build_sampling_params_maps_guided_decoding_to_json_schema():
     )
 
 
-def test_build_sampling_params_maps_guided_decoding_to_regex():
+@pytest.mark.parametrize(
+    "guided_decoding, expected",
+    [
+        ({"regex": "a+"}, {"regex": "a+"}),
+        ({"choice": ["yes", "no"]}, {"regex": "(yes|no)"}),
+        ({"grammar": 'root ::= "a"'}, {"ebnf": 'root ::= "a"'}),
+    ],
+)
+def test_build_sampling_params_maps_non_json_guided_decoding(guided_decoding, expected):
     handler = _new_decode_handler(use_sglang_tokenizer=False)
 
     sampling_params = handler._build_sampling_params(
         {
-            "sampling_options": {"guided_decoding": {"regex": r"\{\}"}},
+            "sampling_options": {"guided_decoding": guided_decoding},
             "stop_conditions": {"max_tokens": 8},
         }
     )
 
-    assert sampling_params["regex"] == r"\{\}"
+    for key, value in expected.items():
+        assert sampling_params[key] == value
+
+
+def test_build_sampling_params_degenerate_choice_does_not_hide_later_constraint():
+    """A choice list that filters to nothing must not consume the constraint slot.
+
+    The nested cascade this replaced entered the choice branch on a truthy list,
+    filtered it empty, and then skipped grammar and structural_tag entirely.
+    """
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {
+                "guided_decoding": {"choice": [None], "grammar": 'root ::= "a"'}
+            },
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["ebnf"] == 'root ::= "a"'
+
+
+@pytest.mark.parametrize(
+    "guided_decoding",
+    [
+        {"json": {"type": "object"}},
+        {"regex": "a+"},
+        {"choice": ["yes", "no"]},
+        {"grammar": 'root ::= "a"'},
+        # Modifiers ride along with a constraint on the wire. SGLang has no
+        # SamplingParams field for either, so they must not be forwarded.
+        {"json": {"type": "object"}, "whitespace_pattern": "[\n ]?"},
+        {"regex": "a+", "backend": "xgrammar"},
+    ],
+)
+def test_guided_decoding_params_are_accepted_by_sglang(guided_decoding):
+    """Every key we emit must exist on SGLang's SamplingParams.
+
+    SamplingParams raises TypeError on an unknown keyword rather than ignoring
+    it, and the dict built here is passed straight to engine.async_generate,
+    which splats it into that constructor. Asserting only on the dict we return
+    cannot catch a key SGLang does not accept, so construct it for real.
+    """
+    from sglang.srt.sampling.sampling_params import SamplingParams
+
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {"guided_decoding": guided_decoding},
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    SamplingParams(**sampling_params)
 
 
 def test_build_sampling_params_maps_min_tokens_for_token_requests():

@@ -215,6 +215,9 @@ pub struct LlmRegistration {
 
 #[pymethods]
 impl LlmRegistration {
+    // TODO(rank-aware-kv-capacity): append any rank-capacity arguments so existing positional
+    // callers do not shift, and update the Python dataclass, duck-typed extraction, stub, and
+    // Rust-to-MDC copy as one compatibility boundary.
     #[new]
     #[pyo3(signature = (
         context_length = None,

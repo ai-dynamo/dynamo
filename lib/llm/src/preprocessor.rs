@@ -112,6 +112,7 @@ pub use crate::protocols::common::metrics::{
 };
 pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
 
+use crate::protocols::common::invalid_argument_error;
 use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 
 fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, Option<i32>) {
@@ -123,14 +124,6 @@ fn routing_priorities(hints: Option<&AgentHints>) -> (Option<f64>, Option<u32>, 
     let strict_priority = hints.and_then(|h| h.strict_priority);
     let priority = hints.and_then(|h| h.priority);
     (priority_jump, strict_priority, priority)
-}
-
-fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
-    DynamoError::builder()
-        .error_type(ErrorType::InvalidArgument)
-        .message(message.into())
-        .build()
-        .into()
 }
 
 // Preserves terminal versus recoverable failures when moka shares a

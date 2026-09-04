@@ -769,6 +769,91 @@ fn kv_event_connect_host(
     Ok(bare_host.to_string())
 }
 
+fn is_deepseek_v4_arch(model_info: &Value) -> bool {
+    model_info
+        .get("architectures")
+        .and_then(Value::as_array)
+        .is_some_and(|architectures| {
+            architectures.iter().any(|architecture| {
+                matches!(
+                    architecture.as_str(),
+                    Some(
+                        "DeepseekV4ForCausalLM"
+                            | "DeepseekV4ForCausalLMNextN"
+                            | "DeepseekV4ForCausalLMDSpark"
+                    )
+                )
+            })
+        })
+}
+
+fn hicache_native_offloading_capacity(server_info: &Value, model_info: &Value) -> Option<u64> {
+    let device_tokens = server_info
+        .get("max_total_num_tokens")?
+        .as_u64()
+        .filter(|tokens| *tokens > 0)?;
+    let policy = server_info.get("hicache_write_policy")?.as_str()?;
+    if !matches!(policy, "write_back" | "write_through") {
+        return None;
+    }
+
+    let host_tokens = match server_info.get("hicache_host_total_tokens") {
+        Some(value) => value.as_u64().filter(|tokens| *tokens > 0)?,
+        None => {
+            if server_info
+                .get("enable_hierarchical_cache")
+                .and_then(Value::as_bool)
+                != Some(true)
+                || server_info.get("hicache_size").and_then(Value::as_u64) != Some(0)
+                || client::json_u64(server_info, "dcp_size")
+                    .unwrap_or(1)
+                    .max(1)
+                    > 1
+            {
+                return None;
+            }
+
+            let page_size = client::json_u64(server_info, "page_size").filter(|size| *size > 0)?;
+            let ratio = server_info
+                .get("hicache_ratio")?
+                .as_f64()
+                .filter(|ratio| ratio.is_finite() && *ratio > 0.0)?;
+            if is_deepseek_v4_arch(model_info) {
+                // Compatibility with SGLang's current DSV4 host allocator. Prefer the
+                // authoritative field above once SGLang exposes realized capacity.
+                let device_pages = device_tokens
+                    .checked_add(page_size.checked_sub(1)?)?
+                    .checked_div(page_size)?;
+                let host_pages = device_pages as f64 * ratio;
+                if !host_pages.is_finite() || host_pages >= u64::MAX as f64 {
+                    return None;
+                }
+                (host_pages as u64).checked_mul(page_size)?
+            } else {
+                let unaligned_tokens = device_tokens as f64 * ratio;
+                if !unaligned_tokens.is_finite() || unaligned_tokens >= u64::MAX as f64 {
+                    return None;
+                }
+                (unaligned_tokens as u64)
+                    .checked_div(page_size)?
+                    .checked_add(1)?
+                    .checked_mul(page_size)?
+            }
+        }
+    };
+    if host_tokens == 0 {
+        return None;
+    }
+
+    match policy {
+        "write_back" => Some(host_tokens),
+        "write_through" => host_tokens
+            .checked_sub(device_tokens)
+            .filter(|tokens| *tokens > 0),
+        _ => None,
+    }
+}
+
 fn build_engine_config(
     discovery: &Discovery,
     mode: DisaggregationMode,
@@ -790,9 +875,14 @@ fn build_engine_config(
     let dp_size = client::json_u32(&discovery.server_info, "dp_size")
         .unwrap_or(1)
         .max(1);
+    let enable_dp_attention = discovery
+        .server_info
+        .get("enable_dp_attention")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let max_num_seqs =
         client::json_u64(&discovery.server_info, "max_running_requests").map(|value| {
-            if dp_size > 1 {
+            if enable_dp_attention && dp_size > 1 {
                 value / u64::from(dp_size)
             } else {
                 value
@@ -801,18 +891,10 @@ fn build_engine_config(
     let max_num_batched_tokens =
         client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
 
-    let enable_dp_attention = discovery
-        .server_info
-        .get("enable_dp_attention")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let (data_parallel_start_rank, data_parallel_size) = if enable_dp_attention && dp_size > 1 {
-        // Native gRPC is exposed by the rank-zero frontend for the complete
-        // multi-node SGLang endpoint, so one sidecar registers every DP rank.
-        (Some(0), Some(dp_size))
-    } else {
-        (Some(0), Some(1))
-    };
+    // Native gRPC is exposed by the rank-zero frontend for the complete
+    // SGLang endpoint, so one sidecar registers every pure- or attention-DP rank.
+    let data_parallel_start_rank = Some(0);
+    let data_parallel_size = Some(dp_size);
 
     if mode.is_prefill() && (bootstrap_host.is_none() || bootstrap_port.is_none()) {
         return Err(client::protocol_error(
@@ -825,6 +907,14 @@ fn build_engine_config(
         "grpc_service".to_string(),
         Value::String("sglang.runtime.v1.SglangService".to_string()),
     );
+    if let Some(total_tokens) =
+        hicache_native_offloading_capacity(&discovery.server_info, &discovery.model_info)
+    {
+        runtime_data.insert(
+            "native_offloading_capacity".to_string(),
+            serde_json::json!({"total_tokens": total_tokens}),
+        );
+    }
 
     Ok(EngineConfig {
         model: discovery.model_path.clone(),
@@ -852,7 +942,8 @@ mod tests {
 
     use super::{
         DisaggregationMode, DiscoveredKvEventSource, Discovery, build_engine_config,
-        discover_kv_event_sources, resolve_bootstrap_host_with_local,
+        discover_kv_event_sources, hicache_native_offloading_capacity,
+        resolve_bootstrap_host_with_local,
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
@@ -953,6 +1044,43 @@ mod tests {
     }
 
     #[test]
+    fn pure_dp_preserves_per_rank_max_num_seqs() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "dp_size": 4,
+                "enable_dp_attention": false,
+                "max_running_requests": 256,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let registration = config.llm.unwrap();
+        assert_eq!(registration.max_num_seqs, Some(256));
+        assert_eq!(registration.data_parallel_start_rank, Some(0));
+        assert_eq!(registration.data_parallel_size, Some(4));
+    }
+
+    #[test]
+    fn attention_dp_normalizes_aggregate_max_num_seqs_per_rank() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "dp_size": 4,
+                "enable_dp_attention": true,
+                "max_running_requests": 256,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(config.llm.unwrap().max_num_seqs, Some(64));
+    }
+
+    #[test]
     fn dcp_registers_logical_kv_block_size() {
         let config = build_engine_config(
             &discovery(json!({
@@ -969,6 +1097,63 @@ mod tests {
 
         assert_eq!(registration.kv_cache_block_size, Some(512));
         assert_eq!(registration.total_kv_blocks, Some(16));
+    }
+
+    #[test]
+    fn publishes_hicache_capacity() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "enable_hierarchical_cache": true,
+                "hicache_size": 0,
+                "hicache_ratio": 3.0,
+                "hicache_write_policy": "write_through",
+                "page_size": 16,
+                "max_total_num_tokens": 100,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.runtime_data.get("native_offloading_capacity"),
+            Some(&json!({"total_tokens": 204}))
+        );
+    }
+
+    #[test]
+    fn supports_deepseek_v4_hicache_capacity() {
+        let mut server_info = json!({
+            "enable_hierarchical_cache": true,
+            "hicache_size": 0,
+            "hicache_ratio": 2.0,
+            "hicache_write_policy": "write_back",
+            "page_size": 256,
+            "max_total_num_tokens": 8192,
+        });
+        for architecture in [
+            "DeepseekV4ForCausalLM",
+            "DeepseekV4ForCausalLMNextN",
+            "DeepseekV4ForCausalLMDSpark",
+        ] {
+            assert_eq!(
+                hicache_native_offloading_capacity(
+                    &server_info,
+                    &json!({"architectures": [architecture]}),
+                ),
+                Some(16384)
+            );
+        }
+
+        server_info["hicache_host_total_tokens"] = json!(16640);
+        assert_eq!(
+            hicache_native_offloading_capacity(
+                &server_info,
+                &json!({"architectures": ["DeepseekV4ForCausalLM"]}),
+            ),
+            Some(16640)
+        );
     }
 
     #[test]

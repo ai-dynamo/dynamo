@@ -156,6 +156,9 @@ func createLegacyGroveWorkerHashSuffixTestDGD(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dynamo.PCSNameForDGD(dgd.Name, dgd.Spec.Components),
 			Namespace: dgd.Namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(dgd, nvidiacomv1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
+			},
 		},
 		Spec: grovev1alpha1.PodCliqueSetSpec{Template: grovev1alpha1.PodCliqueSetTemplateSpec{
 			Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
