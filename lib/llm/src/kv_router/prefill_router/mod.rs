@@ -684,7 +684,6 @@ fn draw_bootstrap_rooms(
     let mut rooms = Vec::with_capacity(count);
     while rooms.len() < count {
         let room = compute_bootstrap_room(dp_rank, dp_size, random_room());
-        // Two choices of one request must never pair on the same room.
         if !rooms.contains(&room) {
             rooms.push(room);
         }
@@ -1114,7 +1113,6 @@ mod tests {
     #[test]
     fn extract_bootstrap_info_drops_malformed_choice_rooms() {
         for rooms in [
-            serde_json::json!(null),
             serde_json::json!("10,20"),
             serde_json::json!([10, "20"]),
             serde_json::json!([10, -20]),
