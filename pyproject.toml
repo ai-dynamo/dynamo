@@ -14,7 +14,9 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "ai-dynamo-runtime==1.5.0",
-    "aisimulate==0.1.0.dev2; python_version >= '3.11' and python_version < '3.14'",
+    # TODO(AIC-1810): replace this review-only revision with the matching exact
+    # PyPI dev release after ai-dynamo/aisimulate#115 merges, before this PR is ready.
+    "aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@d5ec73296bd24d846fd932626b80b49e08e949ee#subdirectory=python/aisimulate ; python_version >= '3.11' and python_version < '3.14'",
     "aiohttp>=3.14.3,<4.0",
     "transformers>=4.56.0",
     "kubernetes>=32.0.1,<33.0.0",

@@ -68,6 +68,20 @@ class DynamoReplayRunnerFactory:
             supported_backend_topologies=_SUPPORTED_BACKEND_TOPOLOGIES,
             supported_hooks=(_PLANNER_HOOK, _ROUTER_HOOK),
             supports_disaggregated_attention_dp=False,
+            supported_execution_modes=("offline",),
+            supported_trace_formats=(
+                "mooncake",
+                "mooncake-delta",
+                "agentic_mooncake",
+                "applied_compute_agentic",
+                "dynamo",
+                "weka",
+            ),
+            supports_agentic_lanes=True,
+            # AIC-1815 remains the first full AgentX runtime checkpoint. Keep
+            # the public runner honest about the narrower integration here.
+            supported_agentic_topologies=("agg",),
+            agentic_qualification="functional_only",
         )
 
     def create(self, worker_id: int) -> DynamoReplayRunner:
@@ -131,6 +145,16 @@ class DynamoReplayRunner:
             report = self._run_synthetic(spec, common)
 
         metrics, metadata = self._normalize_report(report, output_requirements)
+        trace_format = spec.workload.get("trace_format")
+        agentic_lanes = spec.workload.get("agentic_lanes")
+        if trace_format in {"weka", "agentic_mooncake"} or (
+            trace_format == "dynamo" and agentic_lanes is not None
+        ):
+            metadata.update(
+                agentic_qualification=self.capabilities.agentic_qualification,
+                agentic_input_format=trace_format,
+                agentic_lanes=agentic_lanes,
+            )
         self._require_goodput_metric(metrics, spec)
         return ReplayReport(metrics=metrics, metadata=metadata)
 
@@ -285,13 +309,14 @@ class DynamoReplayRunner:
         if not isinstance(trace_format, str):
             raise TypeError("trace workload requires a string trace_format")
         agentic_lanes = spec.workload.get("agentic_lanes")
+        trace_block_size = spec.workload.get("trace_block_size")
+        if trace_format != "weka" and trace_block_size is None:
+            trace_block_size = self.trace_block_size
         if deployment.deployment_mode == "agg":
             return run_trace_replay(
                 trace_files=trace_files,
                 trace_format=trace_format,
-                trace_block_size=spec.workload.get(
-                    "trace_block_size", self.trace_block_size
-                ),
+                trace_block_size=trace_block_size,
                 max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
                 agentic_lanes=agentic_lanes,
                 extra_engine_args=self._engine_args(deployment.agg_engine_args),
@@ -301,9 +326,7 @@ class DynamoReplayRunner:
         return run_trace_replay(
             trace_files=trace_files,
             trace_format=trace_format,
-            trace_block_size=spec.workload.get(
-                "trace_block_size", self.trace_block_size
-            ),
+            trace_block_size=trace_block_size,
             max_sim_time_ms=spec.workload.get("max_sim_time_ms"),
             agentic_lanes=agentic_lanes,
             prefill_engine_args=self._engine_args(deployment.prefill_engine_args),

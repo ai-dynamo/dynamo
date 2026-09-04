@@ -17,7 +17,7 @@ use super::{
     ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat, load_weka_trace};
+use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat, load_weka_agentic_graph};
 use crate::scheduler::RouterEventVisibility;
 
 /// Replay artifact KV-event timestamp visibility override.
@@ -72,13 +72,21 @@ fn load_trace_from_file(
 
 fn load_agentic_trace_from_file(
     trace_path: &Path,
-    _trace_block_size: usize,
+    trace_block_size: usize,
     trace_format: TraceFileFormat,
     arrival_speedup_ratio: f64,
 ) -> Result<AgenticTrace> {
     let trace = match trace_format {
         TraceFileFormat::AgenticMooncake => AgenticTrace::from_agentic_mooncake(trace_path)?,
-        TraceFileFormat::Weka => load_weka_trace(trace_path)?,
+        // AISimulate owns Weka validation and lowering. Dynamo keeps only this
+        // runtime composition seam so existing `trace_format="weka"` callers
+        // continue to receive the canonical validated agentic graph.
+        // A zero value is Dynamo's internal sentinel for an omitted source
+        // block-size assertion; Weka itself rejects zero block sizes.
+        TraceFileFormat::Weka => load_weka_agentic_graph(
+            trace_path,
+            (trace_block_size != 0).then_some(trace_block_size),
+        )?,
         _ => bail!("{} is not an agentic trace format", trace_format.as_str()),
     };
     trace
@@ -2765,5 +2773,45 @@ mod tests {
                 "expected validation error to mention first_arrival_timestamp_ms, got {err}",
             );
         }
+    }
+
+    #[test]
+    fn weka_trace_uses_aisimulate_ingestion_and_preserves_source_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        std::fs::write(
+            &source,
+            serde_json::to_vec(&serde_json::json!({
+                "id": "play",
+                "models": ["model"],
+                "block_size": 4,
+                "hash_id_scope": "local",
+                "requests": [
+                    {"t": 1.0, "type": "s", "model": "model", "in": 4, "out": 1, "hash_ids": [1], "api_time": 0.2},
+                    {"t": 1.4, "type": "s", "model": "model", "in": 8, "out": 1, "hash_ids": [1, 2], "api_time": 0.1}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let trace = load_agentic_trace_from_file(&source, 0, TraceFileFormat::Weka, 2.0).unwrap();
+
+        assert_eq!(trace.source().format, "weka");
+        assert_eq!(trace.block_size(), 4);
+        assert_eq!(trace.node_count(), 2);
+        assert_eq!(trace.nodes()[0].source_play_ordinal(), Some(0));
+        assert_eq!(trace.nodes()[0].recorded_api_time_ms(), Some(200.0));
+        assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
+        assert_eq!(trace.nodes()[1].not_before_ms(), 200.0);
+        assert_eq!(trace.nodes()[1].dependencies()[0].delay_ms, 100.0);
+
+        let error =
+            load_agentic_trace_from_file(&source, 512, TraceFileFormat::Weka, 1.0).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Weka source block size 4 does not match configured block size 512")
+        );
     }
 }

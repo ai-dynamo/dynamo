@@ -54,8 +54,10 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
-# Published separately by https://github.com/ai-dynamo/aisimulate.
-aisimulate-core = { version = "=0.1.0-dev.2" }
+# TODO(AIC-1810): replace this review-only revision with the matching exact
+# crates.io dev release after ai-dynamo/aisimulate#115 merges, before this PR
+# is marked ready for review.
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "d5ec73296bd24d846fd932626b80b49e08e949ee" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }

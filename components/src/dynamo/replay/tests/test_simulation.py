@@ -191,6 +191,38 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
     assert report.metrics["completed_requests"] == 2.0
 
 
+def test_weka_runner_delegates_without_inventing_a_source_block_size(
+    monkeypatch,
+) -> None:
+    seen = {}
+
+    def fake_run_trace_replay(**kwargs):
+        seen.update(kwargs)
+        return _report({"completed_requests": 2})
+
+    monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
+    monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
+    spec = ReplaySpec(
+        backend_deployment=_agg_deployment(),
+        workload={
+            "trace_path": "published-weka",
+            "trace_format": "weka",
+            "agentic_lanes": 1,
+        },
+        goal={"target": "throughput"},
+    )
+
+    report = simulation.DynamoReplayRunnerFactory().create(0).run(spec)
+
+    assert seen["trace_block_size"] is None
+    assert seen["agentic_lanes"] == 1
+    assert report.metadata == {
+        "agentic_qualification": "functional_only",
+        "agentic_input_format": "weka",
+        "agentic_lanes": 1,
+    }
+
+
 def test_trace_replay_rejects_boolean_agentic_lanes() -> None:
     with pytest.raises(TypeError, match="agentic_lanes must be an integer"):
         run_trace_replay("unused.jsonl", agentic_lanes=True)
@@ -417,11 +449,12 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
             supported_backend_topologies=(),
             supported_hooks=(),
             supports_disaggregated_attention_dp=False,
+            **_kwargs,
         ):
             seen["version"] = replay_spec_api_version
-            seen[
-                "supports_disaggregated_attention_dp"
-            ] = supports_disaggregated_attention_dp
+            seen["supports_disaggregated_attention_dp"] = (
+                supports_disaggregated_attention_dp
+            )
             self.replay_spec_api_version = replay_spec_api_version
             self.supported_backend_topologies = supported_backend_topologies
             self.supported_hooks = supported_hooks
