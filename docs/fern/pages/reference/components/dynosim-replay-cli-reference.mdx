@@ -131,7 +131,7 @@ evaluation:
 - `source.type: synthetic` creates independent requests with `input_tokens` and `output_tokens`.
 - `source.type: synthetic-session` creates ordered multi-turn sessions.
 - `source.type: trace` reads one or more paths. Supported formats include `mooncake`,
-  `mooncake-delta`, `agentic_mooncake`, `applied_compute_agentic`, and `dynamo`.
+  `mooncake-delta`, `agentic_mooncake`, `weka`, `applied_compute_agentic`, and `dynamo`.
 - `load.type: concurrency` keeps a fixed number of requests or sessions active.
 - `load.type: constant_rate` schedules evenly spaced arrivals from `requests_per_second` or
   `sessions_per_second`.
@@ -144,21 +144,24 @@ evaluation:
 - `stop.max_virtual_time_seconds` is a soft virtual-time cutoff. Requests admitted before the
   cutoff may finish afterward.
 
-For a Dynamo request trace, omit `traffic.source.block_size`; AISimulate derives it from the trace
-records and rejects mixed block sizes. Dynamo format accepts multiple trace shards. Other formats
-accept exactly one path, and their block size defaults to 512 when omitted.
+For Dynamo request traces and Weka corpora, omit `traffic.source.block_size`; AISimulate derives it
+from the source and rejects mixed block sizes. An explicitly configured Weka block size is only an
+assertion against the published source metadata. Dynamo format accepts multiple trace shards. Weka
+accepts one file or directory; other formats accept exactly one file.
 
-`mooncake-delta` and `agentic_mooncake` require aggregated engine mode.
-`agentic_mooncake` also requires `trace_timestamps` and rejects the virtual-time cutoff.
+`mooncake-delta`, `agentic_mooncake`, and `weka` require aggregated engine mode.
+The two agentic formats also require `trace_timestamps` and reject the virtual-time cutoff.
 `applied_compute_agentic` requires concurrency load.
 With the Dynamo stack, omit `planner` or set `planner.policy: disabled` for `mooncake-delta`,
 `agentic_mooncake`, and Dynamo traces that carry `agent_context` records.
 
 ### Typed agentic replay through the Dynamo API
 
-The lower-level `dynamo.replay.run_trace_replay(...)` API additionally accepts `weka` and supports
-Agentic Mooncake, Weka, and fully agentic Dynamo traces in aggregated or disaggregated offline mode.
-These API-only inputs are not yet fields in the `aisimulate predict` YAML schema.
+[AISimulate](https://github.com/ai-dynamo/aisimulate) owns public Weka ingestion, validation, and
+lowering into the canonical `ValidatedAgenticGraph`. The lower-level
+`dynamo.replay.run_trace_replay(...)` API keeps `trace_format="weka"` as a compatibility adapter,
+but delegates graph construction directly to `aisimulate-core` before Dynamo composes its Router,
+Planner, and Mocker runtime behavior.
 
 Set `agentic_lanes` to a positive integer to replay a fixed number of trajectories concurrently.
 Plays are stable-sorted and stride-assigned to lanes. A lane starts its next play only after its
@@ -186,38 +189,15 @@ Agentic Mooncake v2 begins with a required versioned header:
 ```
 
 Each request row contains a globally unique `request_id`, nonempty `play_id`, `session_id`, `model`,
-exact input and output metadata, `hash_ids`, and `not_before_ms`. The optional `dependencies` array
-contains typed incoming edges. Each edge identifies its predecessor, a `dispatch` or `completion`
-trigger, a nonnegative delay, and a `sequence`, `spawn`, `join`, or `replay_barrier` relation.
+exact input and output metadata, `hash_ids`, and `not_before_ms`. Optional
+`source_play_ordinal` and `recorded_api_time_ms` fields preserve source ordering and recorded timing
+evidence. The optional `dependencies` array contains typed incoming edges. Each edge identifies its
+predecessor, a `dispatch` or `completion` trigger, a nonnegative delay, and a `sequence`, `spawn`,
+`join`, or `replay_barrier` relation.
 
-The Weka importer recursively traverses local files in deterministic order, namespaces local
-identity by normalized source-relative path, and preserves public AgentX semantics. Request and
-nested-subagent `t` values are absolute seconds from the trace start, and every request requires a
-finite `api_time`. For each explicit subagent marker, the latest preceding outer request in source
-order becomes the inferred owner. Spawn and blocking-join edges stay within that request's
-reconstructed stream. Weka does not record an explicit parent request ID, so this rule is a
-deterministic replay policy rather than captured provider causality.
-
-Sequential turns wait for completion. Overlapping subagents depend on parent dispatch,
-post-completion subagents depend on parent completion, blocking results join the owning parent
-stream, and `async_launched` work remains background. Timestamp-inferred cross-stream ordering uses
-`replay_barrier`, not a causal join. Inner requests before their subagent marker, unsupported
-terminal states, blocking empty subagents, symlinks, mixed block sizes, and mixed models are
-rejected.
-
-To materialize the same validated graph as canonical Agentic Mooncake v2 JSONL:
-
-```bash
-cargo run -p dynamo-bench \
-  --features weka-to-agentic-mooncake \
-  --bin weka_to_agentic_mooncake -- \
-  --input traces/weka-agentx \
-  --output /tmp/agentic-mooncake-v2.jsonl
-```
-
-The converter verifies that direct Weka ingestion and reparsed v2 produce the same canonical graph
-identity. Weka remains an input format; Dynamo does not integrate with the AIPerf runtime or export
-Weka.
+Agentic Mooncake v2 remains an optional materialized interchange format. Dynamo intentionally does
+not ship a Weka parser, lowering implementation, or Weka-to-v2 converter; those source semantics
+and any future materialization tooling belong to AISimulate.
 
 ## Engine and Adapter Rules
 

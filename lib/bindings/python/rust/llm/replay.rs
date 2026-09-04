@@ -1021,7 +1021,13 @@ pub fn run_mocker_trace_replay(
             );
         }
 
-        let trace_block_size = trace_block_size.unwrap_or(512);
+        // Preserve omission for Weka so AISimulate can derive the source hash
+        // unit. The lower Dynamo API uses zero as an internal sentinel because
+        // its shared trace entrypoints predate optional source block sizes.
+        let trace_block_size = match (trace_format, trace_block_size) {
+            (dynamo_mocker::loadgen::TraceFileFormat::Weka, None) => 0,
+            (_, configured) => configured.unwrap_or(512),
+        };
         let trace_file = &trace_files[0];
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::AppliedComputeAgentic
             && replay_concurrency.is_none()
