@@ -1250,6 +1250,13 @@ impl StreamingDispatch<PreprocessedRequest, Annotated<LLMEngineOutput>>
 async fn router_with_recorded_dispatch(
     namespace: &str,
 ) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
+    router_with_recorded_dispatch_and_affinity(namespace, None).await
+}
+
+async fn router_with_recorded_dispatch_and_affinity(
+    namespace: &str,
+    session_affinity_ttl: Option<Duration>,
+) -> (RoutingHost, Arc<PendingThenCompletedDispatch>, u64, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -1296,7 +1303,7 @@ async fn router_with_recorded_dispatch(
     )
     .await
     .unwrap();
-    let router = RoutingHost::new(inner, Arc::new(chooser), None).unwrap();
+    let router = RoutingHost::new(inner, Arc::new(chooser), session_affinity_ttl).unwrap();
     (router, dispatch, worker_id, runtime)
 }
 
@@ -2571,15 +2578,21 @@ async fn builtin_host_with_recorded_dispatch(
 
 /// A request in `phase` whose client has already gone away, ready to be handed
 /// to `generate()` exactly as the prefill router hands over the decode leg.
+///
+/// `staged_kv` mirrors what the prefill router sets: true on the leg that
+/// follows a completed remote prefill, false everywhere else — including the
+/// conditional-disaggregation bypass, which reaches decode with nothing staged.
 async fn stopped_request_in_phase(
     phase: RequestPhase,
     context_id: &str,
     target: Option<u64>,
+    staged_kv: bool,
 ) -> SingleIn<PreprocessedRequest> {
     let tracker = Arc::new(RequestTracker::new());
     drop(tracker.set_phase(phase).await);
     let mut input = request();
     input.tracker = Some(Arc::clone(&tracker));
+    input.staged_kv_cleanup = staged_kv;
     if let Some(worker_id) = target {
         input.routing_mut().backend_instance_id = Some(worker_id);
     }
@@ -2613,6 +2626,7 @@ async fn builtin_stopped_decode_request_reaches_the_worker_on_every_dispatch_pat
             RequestPhase::Decode,
             &format!("post-prefill-decode-cleanup-{label}"),
             pin_worker.then_some(worker_id),
+            true,
         )
         .await;
 
@@ -2632,34 +2646,40 @@ async fn builtin_stopped_decode_request_reaches_the_worker_on_every_dispatch_pat
     }
 }
 
-/// The carve-out must stay narrow: on the builtin plane every phase except
-/// decode still cancels before any worker is contacted.
+/// The carve-out must stay narrow. Nothing without staged KV blocks may reach a
+/// worker after the client has gone — including a decode request, which is what
+/// the conditional-disaggregation bypass produces: `RequestPhase::Decode`
+/// without a remote prefill behind it, so nothing to release.
 #[tokio::test]
 #[serial_test::serial]
-async fn builtin_stopped_prefill_and_aggregated_requests_never_reach_a_worker() {
-    for (index, phase) in [RequestPhase::Prefill, RequestPhase::Aggregated]
-        .into_iter()
-        .enumerate()
-    {
+async fn builtin_stopped_requests_without_staged_kv_never_reach_a_worker() {
+    let cases = [
+        ("prefill", RequestPhase::Prefill),
+        ("aggregated", RequestPhase::Aggregated),
+        ("conditional-disagg-bypass-decode", RequestPhase::Decode),
+    ];
+
+    for (index, (label, phase)) in cases.into_iter().enumerate() {
         let (host, dispatch, _worker_id, runtime) = builtin_host_with_recorded_dispatch(
-            &format!("builtin-non-decode-after-stop-{index}"),
+            &format!("builtin-unstaged-after-stop-{index}"),
             RouterMode::RoundRobin,
         )
         .await;
         let request =
-            stopped_request_in_phase(phase, &format!("builtin-cancelled-{phase}"), None).await;
+            stopped_request_in_phase(phase, &format!("builtin-cancelled-{label}"), None, false)
+                .await;
 
         let error = host
             .generate(request)
             .await
-            .expect_err("a stopped non-decode request must be cancelled before dispatch");
+            .expect_err("a stopped request with nothing staged must be cancelled before dispatch");
         assert!(
             match_error_chain(error.as_ref(), &[ErrorType::Cancelled], &[]),
-            "{phase}: expected a cancellation error, got {error:#}"
+            "{label}: expected a cancellation error, got {error:#}"
         );
         assert!(
             dispatch.worker_ids.lock().unwrap().is_empty(),
-            "{phase}: no worker should have been asked to serve a cancelled request"
+            "{label}: no worker should have been asked to serve a cancelled request"
         );
 
         drop(host);
@@ -2675,9 +2695,13 @@ async fn builtin_stopped_prefill_and_aggregated_requests_never_reach_a_worker() 
 async fn kv_stopped_decode_request_reaches_the_worker_through_generate() {
     let (router, dispatch, worker_id, runtime) =
         router_with_recorded_dispatch("kv-decode-generate-after-stop").await;
-    let request =
-        stopped_request_in_phase(RequestPhase::Decode, "kv-post-prefill-decode-cleanup", None)
-            .await;
+    let request = stopped_request_in_phase(
+        RequestPhase::Decode,
+        "kv-post-prefill-decode-cleanup",
+        None,
+        true,
+    )
+    .await;
 
     let mut stream = router
         .generate(request)
@@ -2689,6 +2713,141 @@ async fn kv_stopped_decode_request_reaches_the_worker_through_generate() {
         dispatch.worker_ids.lock().unwrap().as_slice(),
         &[worker_id],
         "the decode worker must receive the request so it can run its KV-transfer cleanup"
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// One budget for the whole conditional route.
+///
+/// `preview_kv_route`, `plan_kv_route_from_preview` and `dispatch_kv_plan` run
+/// in sequence on the bypass path. Each used to open its own budget, so a
+/// stopped request could draw close to three full timeouts. Driving the real
+/// chain here — rather than reusing one budget object by hand — is what makes a
+/// regression visible: on the old code the plan reports a full budget again.
+#[tokio::test]
+#[serial_test::serial]
+async fn conditional_route_stages_share_one_cleanup_budget() {
+    // Real time rather than a paused clock: the router harness needs live
+    // instance discovery, which never resolves under `start_paused`.
+    let (router, runtime) = router(None).await;
+    let request = Context::new(request());
+
+    let preview = router
+        .preview_kv_route(&request, RequestPhase::Decode)
+        .await
+        .unwrap();
+
+    // Start the clock, then let measurable time pass before the next stage.
+    let opening_budget = preview.cleanup_budget_remaining();
+    let waited = Duration::from_millis(50);
+    tokio::time::sleep(waited).await;
+
+    let plan = router
+        .plan_kv_route_from_preview(&request, preview)
+        .await
+        .unwrap();
+    let planned_budget = plan.cleanup_budget_remaining();
+
+    // A restarted budget reports the full constant again, so this is what
+    // separates one shared budget from three fresh ones.
+    assert!(
+        planned_budget < opening_budget,
+        "the plan restarted the budget: preview left {opening_budget:?}, plan reports {planned_budget:?}"
+    );
+    assert!(
+        opening_budget - planned_budget >= waited,
+        "time spent between stages must come out of the shared budget"
+    );
+
+    plan.abort().await;
+    drop(router);
+    runtime.shutdown();
+}
+
+/// The session-affinity wait runs upstream of every stage the cleanup policy
+/// wraps, and it cancels on a stopped context of its own accord. A decode leg
+/// with staged KV therefore used to die there — before the carve-out could
+/// apply — whenever another request held the same session in `Initializing`.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_stopped_decode_request_survives_a_contended_session_affinity_wait() {
+    let (router, dispatch, worker_id, runtime) = router_with_recorded_dispatch_and_affinity(
+        "kv-decode-affinity-contention",
+        Some(Duration::from_secs(10)),
+    )
+    .await;
+    let session_id = SessionAffinityId::new("contended-decode-session");
+
+    // Another request is mid-initialization for the same session, so the decode
+    // leg has to wait rather than take the slot immediately.
+    let router = Arc::new(router);
+    let coordinator = router.affinity.as_ref().unwrap().clone();
+    let AffinityAcquire::Initialize(holder) = coordinator.acquire(&session_id, None).await.unwrap()
+    else {
+        panic!("the first acquisition must initialize the session");
+    };
+
+    let mut input = request();
+    let tracker = Arc::new(RequestTracker::new());
+    drop(tracker.set_phase(RequestPhase::Decode).await);
+    input.tracker = Some(Arc::clone(&tracker));
+    input.staged_kv_cleanup = true;
+    let mut decode_request = Context::with_id_and_metadata(
+        input,
+        "affinity-contended-decode".to_string(),
+        Default::default(),
+    );
+    decode_request.insert(SESSION_AFFINITY_CONTEXT_KEY, session_id.clone());
+    decode_request.context().stop();
+
+    let generate_router = Arc::clone(&router);
+    let generate = tokio::spawn(async move { generate_router.generate(decode_request).await });
+
+    // Only release the session once the decode leg is provably parked on the
+    // wait; otherwise the test could pass without ever exercising it.
+    coordinator.wait_for_initializing_waiter().await;
+    drop(holder);
+
+    let mut stream = generate
+        .await
+        .unwrap()
+        .expect("a staged-KV decode leg must survive the affinity wait");
+    while stream.next().await.is_some() {}
+
+    assert_eq!(
+        dispatch.worker_ids.lock().unwrap().as_slice(),
+        &[worker_id],
+        "the decode worker must receive the request so it can run its KV-transfer cleanup"
+    );
+
+    drop(router);
+    runtime.shutdown();
+}
+
+/// The same narrowing on the KV plane. A bypass decode request holds nothing a
+/// worker needs to release, so a disconnect is abandoned immediately.
+#[tokio::test]
+#[serial_test::serial]
+async fn kv_stopped_decode_request_without_staged_kv_never_reaches_a_worker() {
+    let (router, dispatch, _worker_id, runtime) =
+        router_with_recorded_dispatch("kv-bypass-decode-after-stop").await;
+    let request =
+        stopped_request_in_phase(RequestPhase::Decode, "kv-bypass-decode", None, false).await;
+
+    let error = router
+        .generate(request)
+        .await
+        .expect_err("a bypass decode request with nothing staged must be cancelled");
+    assert!(match_error_chain(
+        error.as_ref(),
+        &[ErrorType::Cancelled],
+        &[]
+    ));
+    assert!(
+        dispatch.worker_ids.lock().unwrap().is_empty(),
+        "no worker should have been asked to serve a cancelled bypass request"
     );
 
     drop(router);

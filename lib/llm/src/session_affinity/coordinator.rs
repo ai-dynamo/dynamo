@@ -200,7 +200,13 @@ impl AffinityCoordinator {
             .map_err(|_| anyhow::anyhow!("session affinity replica sync already enabled"))
     }
 
-    #[cfg(test)]
+    /// Take a slot without cancelling on the request context.
+    ///
+    /// The caller owns the deadline. `RoutingHost` uses this for a decode leg
+    /// that has staged KV to release: that request must reach its worker even
+    /// after the client disconnects, so it waits through a stop under the
+    /// routing host's shared cleanup budget instead of being cancelled here.
+    /// Every other caller wants [`Self::acquire_with_context`].
     pub(crate) async fn acquire(
         &self,
         session_id: &SessionAffinityId,
@@ -374,7 +380,7 @@ impl AffinityCoordinator {
     }
 
     #[cfg(test)]
-    pub(super) async fn wait_for_initializing_waiter(&self) {
+    pub(crate) async fn wait_for_initializing_waiter(&self) {
         self.inner.waiter_observed.notified().await;
     }
 

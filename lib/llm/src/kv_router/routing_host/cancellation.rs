@@ -12,7 +12,7 @@ use dynamo_runtime::{
     pipeline::{AsyncEngineContext, Error},
 };
 
-use crate::protocols::common::timing::RequestPhase;
+use crate::{preprocessor::PreprocessedRequest, protocols::common::timing::RequestPhase};
 
 /// How long a disconnected decode request may keep router state alive while it
 /// finishes reaching its worker. On expiry we abandon the operation and release
@@ -36,18 +36,43 @@ pub(super) struct CleanupBudget {
 
 impl CleanupBudget {
     /// Time left in the budget, starting the clock on first use.
-    fn remaining(&self) -> Duration {
+    pub(super) fn remaining(&self) -> Duration {
         let mut started = self.started.lock().unwrap();
         let start = *started.get_or_insert_with(Instant::now);
         CLEANUP_DISPATCH_TIMEOUT.saturating_sub(start.elapsed())
     }
 }
 
+/// Whether remote prefill left KV blocks that only this request's decode worker
+/// can release.
+///
+/// This, not the phase alone, is the reason a disconnected request is still
+/// worth dispatching. `RequestPhase::Decode` is the wider set: the
+/// conditional-disaggregation bypass reaches decode without running remote
+/// prefill, so it has nothing staged and nothing to clean up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StagedKv {
+    /// Blocks are staged on a prefill worker for one specific decode worker.
+    Present,
+    /// Nothing is staged, so abandoning the request releases everything it holds.
+    Absent,
+}
+
+impl StagedKv {
+    pub(super) fn for_request(request: &PreprocessedRequest) -> Self {
+        if request.staged_kv_cleanup {
+            Self::Present
+        } else {
+            Self::Absent
+        }
+    }
+}
+
 /// Whether a disconnected client's request still reaches its worker.
 ///
-/// Decode must proceed: remote prefill stages KV blocks for one specific decode
-/// worker, and only that worker's KV-transfer-complete path frees them. Every
-/// other phase keeps cancelling as soon as the client goes away.
+/// A decode leg with staged KV must proceed: only its decode worker's
+/// KV-transfer-complete path frees those blocks. Everything else keeps
+/// cancelling as soon as the client goes away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DispatchCancellation {
     /// Abandon the operation when the context is already stopped.
@@ -57,15 +82,17 @@ pub(super) enum DispatchCancellation {
 }
 
 impl DispatchCancellation {
-    pub(super) fn for_phase(phase: RequestPhase) -> Self {
-        match phase {
-            RequestPhase::Decode => Self::DispatchWhenStopped,
-            RequestPhase::Prefill | RequestPhase::Aggregated => Self::CancelWhenStopped,
+    pub(super) fn for_request(phase: RequestPhase, staged_kv: StagedKv) -> Self {
+        match (phase, staged_kv) {
+            (RequestPhase::Decode, StagedKv::Present) => Self::DispatchWhenStopped,
+            (RequestPhase::Decode, StagedKv::Absent)
+            | (RequestPhase::Prefill, _)
+            | (RequestPhase::Aggregated, _) => Self::CancelWhenStopped,
         }
     }
 }
 
-/// Await a routing stage under the cancellation policy its phase requires.
+/// Await a routing stage under the cancellation policy the request requires.
 ///
 /// `DispatchWhenStopped` is bounded by the shared [`CleanupBudget`] rather than
 /// waiting forever, because the stages this wraps have no deadline of their own.
@@ -73,14 +100,15 @@ impl DispatchCancellation {
 ///
 /// `stage` names the routing stage for the log emitted when the budget runs out,
 /// so an exhausted cleanup is distinguishable from an ordinary client disconnect.
-pub(super) async fn await_with_phase_policy<T>(
+pub(super) async fn await_with_cleanup_policy<T>(
     context: &dyn AsyncEngineContext,
     phase: RequestPhase,
+    staged_kv: StagedKv,
     stage: &'static str,
     budget: &CleanupBudget,
     operation: impl Future<Output = T>,
 ) -> Result<T, Error> {
-    match DispatchCancellation::for_phase(phase) {
+    match DispatchCancellation::for_request(phase, staged_kv) {
         DispatchCancellation::CancelWhenStopped => cancel_on_stop(context, operation).await,
         DispatchCancellation::DispatchWhenStopped => {
             tokio::pin!(operation);
@@ -186,11 +214,13 @@ mod tests {
         }
     }
 
-    /// The budget is shared across a request's stages rather than restarting at
-    /// each one, so several stages cannot together retain a stopped request for a
-    /// multiple of the constant.
+    /// A budget decays with the clock and floors at zero, so a late stage gets
+    /// what is left and never a negative or wrapped extension.
+    ///
+    /// That the stages of a real route share one budget is covered end to end by
+    /// `conditional_route_stages_share_one_cleanup_budget` in the parent module.
     #[tokio::test(start_paused = true)]
-    async fn cleanup_budget_is_shared_across_stages() {
+    async fn cleanup_budget_decays_and_saturates_at_zero() {
         let budget = CleanupBudget::default();
 
         // First stage starts the clock with the whole budget available.

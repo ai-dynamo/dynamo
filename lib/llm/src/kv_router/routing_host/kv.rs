@@ -20,6 +20,7 @@ where
         budget: &CleanupBudget,
     ) -> Result<SelectionOutcome, Error> {
         let context_id = request.context().id().to_string();
+        let staged_kv = StagedKv::for_request(request.content());
         let policy_class = request.metadata().get("policy-class").cloned();
         let session_context = request
             .agent_context
@@ -51,9 +52,10 @@ where
             )
             .instrument(tracing::info_span!("kv_router.select_worker"));
 
-        await_with_phase_policy(
+        await_with_cleanup_policy(
             request_context.as_ref(),
             phase,
+            staged_kv,
             "kv.select_worker",
             budget,
             selection_future,
@@ -91,7 +93,7 @@ where
         is_query_only: bool,
         budget: &CleanupBudget,
     ) -> Result<(WorkerSelection, Option<AffinityAcquire>), Error> {
-        self.select_with_session_affinity(request, phase, is_query_only, |target| {
+        self.select_with_session_affinity(request, phase, is_query_only, budget, |target| {
             self.select_request(request, phase, is_query_only, target, budget)
         })
         .await
@@ -123,6 +125,9 @@ where
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
     ) -> Result<RoutePreview, Error> {
+        // The conditional route's first stage. The budget travels with the
+        // preview into the plan and on into dispatch, so the whole route shares
+        // one deadline.
         let budget = CleanupBudget::default();
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("KV route previews require KV routing"));
@@ -131,7 +136,7 @@ where
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let (outcome, _) = self
-            .select_with_session_affinity(request, phase, true, |target| {
+            .select_with_session_affinity(request, phase, true, &budget, |target| {
                 self.select_request_outcome(
                     request,
                     phase,
@@ -150,6 +155,7 @@ where
             request_id: request.context().id().to_string(),
             phase,
             signals,
+            budget,
         })
     }
 
@@ -158,7 +164,9 @@ where
         request: &SingleIn<PreprocessedRequest>,
         preview: RoutePreview,
     ) -> Result<RoutePlan<Sel>, Error> {
-        let budget = CleanupBudget::default();
+        // Inherited, not restarted: this stage continues the route the preview
+        // opened.
+        let budget = preview.budget;
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("KV route plans require KV routing"));
         }
@@ -175,7 +183,7 @@ where
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let planned_worker = preview.signals.worker;
         let (selection, affinity) = self
-            .select_with_session_affinity(request, phase, false, |target| {
+            .select_with_session_affinity(request, phase, false, &budget, |target| {
                 let budget = &budget;
                 async move {
                     self.select_request_outcome(
@@ -206,6 +214,7 @@ where
             ),
             selection,
             affinity,
+            budget,
         })
     }
 
@@ -214,11 +223,11 @@ where
         request: SingleIn<PreprocessedRequest>,
         plan: RoutePlan<Sel>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
-        let budget = CleanupBudget::default();
         let RoutePlan {
             mut selection,
             cleanup,
             mut affinity,
+            budget,
             ..
         } = plan;
         let selected_target = route_target(selection.worker);
@@ -257,13 +266,16 @@ where
         request: &SingleIn<PreprocessedRequest>,
         threshold: f64,
     ) -> Result<bool, Error> {
+        // A local budget is sound here and only here: the probe is pinned to
+        // `RequestPhase::Prefill`, which never selects `DispatchWhenStopped`, so
+        // nothing it runs can arm or spend a budget.
         let budget = CleanupBudget::default();
         if self.kv_router_if_enabled().is_none() {
             return Err(anyhow::anyhow!("prefill load probe requires KV routing"));
         }
 
         let (outcome, _) = self
-            .select_with_session_affinity(request, RequestPhase::Prefill, true, |target| {
+            .select_with_session_affinity(request, RequestPhase::Prefill, true, &budget, |target| {
                 self.select_request_outcome(
                     request,
                     RequestPhase::Prefill,
@@ -322,6 +334,7 @@ where
         budget: &CleanupBudget,
     ) -> Result<RequestGuard<Sel>, Error> {
         let context_id = request.context().id().to_string();
+        let staged_kv = StagedKv::for_request(request.content());
         let request_context = request.context().clone();
         let routing_parts = RoutingRequestParts::new(request);
         let chooser = self.kv_router();
@@ -371,18 +384,20 @@ where
                     }
                 };
                 let record_result = if guard.has_approximate_lru() {
-                    await_with_phase_policy(
+                    await_with_cleanup_policy(
                         request_context.as_ref(),
                         phase,
+                        staged_kv,
                         "kv.record_routing_decision",
                         budget,
                         guard.acquire_approximate_lru(hashes),
                     )
                     .await?
                 } else {
-                    await_with_phase_policy(
+                    await_with_cleanup_policy(
                         request_context.as_ref(),
                         phase,
+                        staged_kv,
                         "kv.record_routing_decision",
                         budget,
                         chooser.record_routing_decision_hashes(hashes, worker),
@@ -444,6 +459,7 @@ where
             .as_ref()
             .map(|tracker| tracker.phase())
             .unwrap_or(RequestPhase::Aggregated);
+        let staged_kv = StagedKv::for_request(request.content());
         let phase_label = phase.to_string();
         guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
@@ -498,9 +514,10 @@ where
             route_trace_context.as_deref(),
             selection.worker.worker_id,
         );
-        let dispatch_result = await_with_phase_policy(
+        let dispatch_result = await_with_cleanup_policy(
             request_context.as_ref(),
             phase,
+            staged_kv,
             "kv.dispatch",
             budget,
             dispatch.instrument(route_span.clone()),
