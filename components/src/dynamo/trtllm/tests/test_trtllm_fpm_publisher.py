@@ -291,7 +291,14 @@ def test_iter_latency_ms_to_wall_time_secs_conversion():
 # ---------------------------------------------------------------------------
 
 
-def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: bool):
+def _build_publisher_stub(
+    monkeypatch,
+    *,
+    attention_dp_size: int,
+    fpm_enabled: bool,
+    publish_kv_events: bool = True,
+    publish_metrics: bool = True,
+):
     """Bypass Publisher.__init__ (heavy deps) and seed only the attributes
     initialize() reads or writes. All side-effecty subsystems are stubbed
     via ``monkeypatch`` so initialize() reaches the FPM gate cleanly without
@@ -312,6 +319,8 @@ def _build_publisher_stub(monkeypatch, *, attention_dp_size: int, fpm_enabled: b
     pub.metrics_collector = None
     pub.kv_state_endpoint = None
     pub.image_token_id = None
+    pub.publish_kv_events = publish_kv_events
+    pub.publish_metrics = publish_metrics
     pub.attention_dp_size = attention_dp_size
     pub.fpm_enabled = fpm_enabled
     pub.processing_initial_created_events = True
@@ -369,6 +378,36 @@ def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
     assert kwargs["worker_id"] == "worker-abc"
     assert kwargs["dp_size"] == 1
     assert pub.fpm_publisher is not None
+
+
+def test_publisher_initialize_metrics_only_does_not_start_kv_events(monkeypatch):
+    pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
+        monkeypatch,
+        attention_dp_size=1,
+        fpm_enabled=True,
+        publish_kv_events=False,
+        publish_metrics=True,
+    )
+    pub.initialize()
+
+    fake_fpm_cls.assert_called_once()
+    pub._init_publish_metrics_thread.assert_called_once()
+    pub._init_publish_kv_cache_events_thread.assert_not_called()
+
+
+def test_publisher_initialize_kv_events_only_does_not_start_metrics(monkeypatch):
+    pub, _publisher_mod, fake_fpm_cls = _build_publisher_stub(
+        monkeypatch,
+        attention_dp_size=1,
+        fpm_enabled=True,
+        publish_kv_events=True,
+        publish_metrics=False,
+    )
+    pub.initialize()
+
+    fake_fpm_cls.assert_not_called()
+    pub._init_publish_metrics_thread.assert_not_called()
+    pub._init_publish_kv_cache_events_thread.assert_called_once()
 
 
 def _publisher_for_kv_event_test():

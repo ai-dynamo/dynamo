@@ -228,7 +228,7 @@ def test_estimate_num_gpu_blocks_reports_unavailable_estimator(monkeypatch):
 
     with pytest.raises(
         RuntimeError,
-        match=r"aiconfigurator-core.*install the 'mocker' extra",
+        match=r"aisimulate.*not installed",
     ):
         estimate_num_gpu_blocks(
             backend_name="vllm",

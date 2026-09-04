@@ -32,6 +32,7 @@ jobs:
       snapshot_sglang: ${{ steps.changes.outputs.snapshot_sglang }}
       snapshot_trtllm: ${{ steps.changes.outputs.snapshot_trtllm }}
       power_agent: ${{ steps.changes.outputs.power_agent }}
+      sidecar: ${{ steps.changes.outputs.sidecar }}
       deploy: ${{ steps.changes.outputs.deploy }}
       dgdr: ${{ steps.changes.outputs.dgdr }}
       vllm: ${{ steps.changes.outputs.vllm }}
@@ -131,6 +132,7 @@ jobs:
       - snapshot-placeholder-sglang
       - snapshot-placeholder-trtllm
       - power-agent
+      - sidecar-build
       - vllm-build
       - vllm-local-dev-build
       - sglang-local-dev-build
@@ -337,6 +339,26 @@ jobs:
         run: make -C deploy/helm/charts/power-agent lint test
 
 # ============================================================================
+# Sidecar
+# ============================================================================
+
+  sidecar-build:
+    name: dynamo-sidecar
+    needs: changed-files
+    if: needs.changed-files.outputs.sidecar == 'true'
+    permissions:
+      actions: read
+      contents: read
+    uses: $/.github/workflows/shared-build-sidecar.yml
+    with:
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      artifact_retention_days: '7'
+      diff_event_context: pr
+      diff_current_branch: ${{ github.ref_name }}
+      diff_base_branch: ${{ needs.changed-files.outputs.base_ref }}
+      diff_merge_base_sha: ${{ needs.changed-files.outputs.merge_base_sha }}
+
+# ============================================================================
 # FRAMEWORK PIPELINES (Build → Test → Copy)
 # ============================================================================
   # ============================================================================
@@ -349,7 +371,7 @@ jobs:
     # `sample` is here because sample tests piggyback on this image and run as part of vllm-test.
     # `operator` is here because operator changes run the deploy tests, which
     # deploy the CI-built runtime image. `snapshot` is here because
-    # DynamoCheckpoint deploy tests build a snapshot placeholder from it.
+    # Snapshot checkpoint deploy tests build a snapshot placeholder from it.
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.vllm == 'true' ||
@@ -421,7 +443,7 @@ jobs:
     needs: [changed-files]
     # `operator` is here because operator changes run the deploy tests, which
     # deploy the CI-built runtime image. `snapshot` is here because
-    # DynamoCheckpoint deploy tests build a snapshot placeholder from it.
+    # Snapshot checkpoint deploy tests build a snapshot placeholder from it.
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.sglang == 'true' ||
@@ -492,7 +514,7 @@ jobs:
     needs: [changed-files]
     # `operator` is here because operator changes run the deploy tests, which
     # deploy the CI-built runtime image. `snapshot` is here because
-    # DynamoCheckpoint deploy tests build a snapshot placeholder from it.
+    # Snapshot checkpoint deploy tests build a snapshot placeholder from it.
     if: |
       needs.changed-files.outputs.core == 'true' ||
       needs.changed-files.outputs.trtllm == 'true' ||
@@ -765,7 +787,14 @@ jobs:
       cuda_version: '["13.0"]'
       platform: '["amd64", "arm64"]' # arm64 for CPU tests, single GPU tests are skipped
       run_cpu_only_tests: true
-      cpu_only_test_markers: pre_merge and vllm and gpu_0
+      # Keep the fast CPU pool parallel and isolate deployment-level tests so a
+      # slow startup cannot consume the whole pool's retry budget.
+      cpu_only_test_markers: pre_merge and vllm and gpu_0 and not e2e
+      run_cpu_e2e_tests: true
+      cpu_e2e_test_markers: pre_merge and vllm and gpu_0 and e2e
+      # Keep the outer step budget above the test's 450s timeout so pytest can
+      # finish teardown and upload diagnostics instead of being killed first.
+      cpu_e2e_test_timeout_minutes: 15
       gpu_test_markers: pre_merge and vllm and gpu_1
       gpu_test_timeout_minutes: 45
       # Profiled tests run in the parallel stage; unprofiled fall through to sequential.
@@ -908,6 +937,14 @@ jobs:
     # The frontend process hosts the KV router. Validate the experimental
     # --router-prefill-load-model=aic dependency and native prefill predictor in
     # the shipped frontend image on both architectures.
+    #
+    # This job runs as a GitHub Actions job `container:`, which overrides the
+    # image's own ENTRYPOINT (/epp) to keep the container alive and execs each
+    # step via `docker exec` instead — so /epp never actually starts here. The
+    # "Verify /epp shared library links resolve" step below exists specifically
+    # to catch Dockerfile packaging bugs (e.g. a missing runtime .so that /epp
+    # dynamically links against) that would otherwise only surface once /epp
+    # runs for real as the image's entrypoint in a deployed pod.
     strategy:
       fail-fast: false
       matrix:
@@ -919,6 +956,14 @@ jobs:
         HOME: /home/dynamo
         USER: dynamo
     steps:
+      - name: Verify /epp shared library links resolve
+        run: |
+          echo "Linked libraries for /epp:"
+          ldd /epp
+          if ldd /epp | grep -q "not found"; then
+            echo "::error::One or more shared libraries required by /epp are missing from the frontend image (see ldd output above)"
+            exit 1
+          fi
       - name: Validate router-side AIC in the frontend image
         working-directory: /workspace
         run: python tests/frontend/router_aic_image_smoke.py
@@ -1369,7 +1414,7 @@ jobs:
       DOCKERHUB_ACCESS_TOKEN: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
 
   deploy-operator-checkpoint-vllm:
-    name: vLLM DynamoCheckpoint Operator Setup
+    name: vLLM Snapshot Operator Setup
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
@@ -1401,13 +1446,12 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
   deploy-operator-checkpoint-sglang:
-    name: SGLang DynamoCheckpoint Operator Setup
+    name: SGLang Snapshot Operator Setup
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
@@ -1439,13 +1483,12 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
   deploy-operator-checkpoint-trtllm:
-    name: TRTLLM DynamoCheckpoint Operator Setup
+    name: TRTLLM Snapshot Operator Setup
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() && !cancelled() &&
@@ -1477,13 +1520,12 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
 
   deploy-snapshot-agent-checkpoint-vllm:
-    name: vLLM DynamoCheckpoint Snapshot Agent Setup
+    name: vLLM Snapshot Agent Setup
     needs: [changed-files, deploy-operator-checkpoint-vllm]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
@@ -1517,7 +1559,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1533,9 +1574,11 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
+          storage_class: azurefile-csi
+          storage_size: 64Gi
 
   deploy-snapshot-agent-checkpoint-sglang:
-    name: SGLang DynamoCheckpoint Snapshot Agent Setup
+    name: SGLang Snapshot Agent Setup
     needs: [changed-files, deploy-operator-checkpoint-sglang]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
@@ -1569,7 +1612,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1585,9 +1627,11 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
+          storage_class: azurefile-csi
+          storage_size: 64Gi
 
   deploy-snapshot-agent-checkpoint-trtllm:
-    name: TRTLLM DynamoCheckpoint Snapshot Agent Setup
+    name: TRTLLM Snapshot Agent Setup
     needs: [changed-files, deploy-operator-checkpoint-trtllm]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
@@ -1621,7 +1665,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1637,9 +1680,11 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
+          storage_class: azurefile-csi
+          storage_size: 64Gi
 
   deploy-test-checkpoint-vllm:
-    name: vLLM DynamoCheckpoint Deploy Test
+    name: vLLM Snapshot Deploy Test
     needs: [changed-files, deploy-operator-checkpoint-vllm, deploy-snapshot-agent-checkpoint-vllm, snapshot-placeholder-vllm, frontend-copy-to-acr]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
@@ -1675,7 +1720,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1691,7 +1735,9 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
-      - name: Run DynamoCheckpoint Deploy Test
+          storage_class: azurefile-csi
+          storage_size: 64Gi
+      - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
@@ -1707,12 +1753,12 @@ jobs:
           # (matches the PV/PVC creation gate); otherwise workers download from HF.
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
           extra_pytest_args: >-
-            -m dynamocheckpoint
+            -m snapshot_restore
             --checkpoint-backend=vllm
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
   deploy-test-checkpoint-sglang:
-    name: SGLang DynamoCheckpoint Deploy Test
+    name: SGLang Snapshot Deploy Test
     needs: [changed-files, deploy-operator-checkpoint-sglang, deploy-snapshot-agent-checkpoint-sglang, snapshot-placeholder-sglang, frontend-copy-to-acr]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
@@ -1748,7 +1794,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1764,7 +1809,9 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
-      - name: Run DynamoCheckpoint Deploy Test
+          storage_class: azurefile-csi
+          storage_size: 64Gi
+      - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
@@ -1780,12 +1827,12 @@ jobs:
           # (matches the PV/PVC creation gate); otherwise workers download from HF.
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
           extra_pytest_args: >-
-            -m dynamocheckpoint
+            -m snapshot_restore
             --checkpoint-backend=sglang
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
   deploy-test-checkpoint-trtllm:
-    name: TRTLLM DynamoCheckpoint Deploy Test
+    name: TRTLLM Snapshot Deploy Test
     needs: [changed-files, deploy-operator-checkpoint-trtllm, deploy-snapshot-agent-checkpoint-trtllm, snapshot-placeholder-trtllm, frontend-copy-to-acr]
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
@@ -1821,7 +1868,6 @@ jobs:
           dockerhub_username: ${{ secrets.DOCKERHUB_LOGIN_USER }}
           dockerhub_password: ${{ secrets.DOCKERHUB_ACCESS_TOKEN }}
           checkpoint_enabled: 'true'
-          checkpoint_storage_size: 64Gi
           # Same shared model cache as regular deploy tests; empty vars -> HF download.
           model_cache_server: ${{ vars.AZURE_MODEL_CACHE_SERVER }}
           model_cache_path: ${{ vars.AZURE_MODEL_CACHE_PATH }}
@@ -1837,7 +1883,9 @@ jobs:
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
           namespace: default
-      - name: Run DynamoCheckpoint Deploy Test
+          storage_class: azurefile-csi
+          storage_size: 64Gi
+      - name: Run Snapshot Deploy Test
         uses: $/.github/actions/dynamo-deploy-test
         with:
           kubeconfig_base64: ${{ steps.connect-vcluster.outputs.kubeconfig_base64 }}
@@ -1853,7 +1901,7 @@ jobs:
           # (matches the PV/PVC creation gate); otherwise workers download from HF.
           model_cache_pvc: ${{ vars.AZURE_MODEL_CACHE_SERVER != '' && vars.AZURE_MODEL_CACHE_PATH != '' && 'model-cache' || '' }}
           extra_pytest_args: >-
-            -m dynamocheckpoint
+            -m snapshot_restore
             --checkpoint-backend=trtllm
             --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
 
@@ -1875,7 +1923,7 @@ jobs:
           vcluster_namespace: ${{ needs.deploy-operator.outputs.namespace }}
 
   deploy-cleanup-checkpoint-vllm:
-    name: vLLM DynamoCheckpoint Cleanup
+    name: vLLM Snapshot Cleanup
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() &&
@@ -1892,7 +1940,7 @@ jobs:
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-vllm-dt
 
   deploy-cleanup-checkpoint-sglang:
-    name: SGLang DynamoCheckpoint Cleanup
+    name: SGLang Snapshot Cleanup
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() &&
@@ -1909,7 +1957,7 @@ jobs:
           vcluster_namespace: gh-id-${{ github.run_id }}-checkpoint-sglang-dt
 
   deploy-cleanup-checkpoint-trtllm:
-    name: TRTLLM DynamoCheckpoint Cleanup
+    name: TRTLLM Snapshot Cleanup
     if: |
       needs.changed-files.outputs.run_deploy_tests == 'true' &&
       always() &&
@@ -1936,6 +1984,7 @@ jobs:
       - snapshot-placeholder-sglang
       - snapshot-placeholder-trtllm
       - power-agent
+      - sidecar-build
       - planner-test
       - planner-copy-to-acr
       - vllm-copy-to-acr

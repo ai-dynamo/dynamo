@@ -358,8 +358,14 @@ async def _deferred_abort_guard(
 
 
 class VllmEnginePauseController:
-    def __init__(self, engine_client: Any):
+    def __init__(
+        self,
+        engine_client: Any,
+        *,
+        prepare_for_process_checkpoint: bool = False,
+    ):
         self._engine_client = engine_client
+        self._prepare_for_process_checkpoint = prepare_for_process_checkpoint
         self._is_paused = False
         self._generation_paused = False
 
@@ -392,6 +398,11 @@ class VllmEnginePauseController:
                     "Failed to resume generation after native vLLM sleep failure"
                 )
             raise
+        # Prepare before recording the pause: a failed prepare must not leave
+        # the controller claiming paused, or the next resume would issue a
+        # checkpoint_restore with no matching prepare.
+        if self._prepare_for_process_checkpoint:
+            await self._engine_client.checkpoint_prepare()
         self._is_paused = True
         return True
 
@@ -400,6 +411,8 @@ class VllmEnginePauseController:
             return False
 
         if self._is_paused:
+            if self._prepare_for_process_checkpoint:
+                await self._engine_client.checkpoint_restore()
             if tags is None:
                 await self._engine_client.wake_up()
             else:
@@ -1472,6 +1485,22 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 "message": f"new_data_parallel_size must be >= 1, got: {new_dp_size}",
             }
         parallel_config = self.engine_client.vllm_config.parallel_config
+        # Capability gate: control/scale_elastic_ep is registered on every vLLM
+        # worker, but elastic EP only works with the Ray DP backend and the
+        # feature enabled. On a worker without it, vLLM's scale_elastic_ep raises
+        # NotImplementedError / a Ray-backend assertion, which the fail-fast grow
+        # handler below would turn into a needless restart of a healthy worker.
+        # Reject unsupported configs here, before the engine is touched.
+        if not getattr(parallel_config, "enable_elastic_ep", False) or (
+            getattr(parallel_config, "data_parallel_backend", "mp") != "ray"
+        ):
+            return {
+                "status": "error",
+                "message": (
+                    "elastic EP scaling is not enabled on this worker; it requires "
+                    "enable_elastic_ep=true and data_parallel_backend=ray"
+                ),
+            }
         tp_size = parallel_config.tensor_parallel_size
         # Elastic EP sizes the EP world as data_parallel_size * tensor_parallel_size
         # (elastic_execute.py), excluding PCP, and vLLM rejects PCP>1 with DP>1 -- so a
@@ -1546,14 +1575,44 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     self.node_ip: str = d["NodeManagerAddress"]
                     self.node_id: str = d["NodeID"]
 
-            original_list_nodes = _ray_util_state.list_nodes
+            async def _scale_engine(size: int) -> None:
+                # add_dp_placement_groups calls ray.util.state.list_nodes();
+                # patch it to the GCS API for the duration of the reconfigure.
+                original_list_nodes = _ray_util_state.list_nodes
+                try:
+                    _ray_util_state.list_nodes = lambda **kw: [
+                        _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
+                    ]
+                    await self.engine_client.scale_elastic_ep(size)
+                finally:
+                    _ray_util_state.list_nodes = original_list_nodes
+
             try:
-                _ray_util_state.list_nodes = lambda **kw: [
-                    _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
-                ]
-                await self.engine_client.scale_elastic_ep(new_dp_size)
-            finally:
-                _ray_util_state.list_nodes = original_list_nodes
+                await _scale_engine(new_dp_size)
+            except EngineDeadError as dead_err:
+                # Engine died mid-grow. Restart it the same way every other engine
+                # path here does, so it comes back clean and re-registers.
+                logger.error(
+                    "[ElasticEP] Engine died during scale to dp=%s: %s",
+                    new_dp_size,
+                    dead_err,
+                )
+                self._shutdown_on_engine_dead(dead_err)  # NoReturn: restarts worker
+            except Exception as grow_err:
+                # Fail fast: vLLM does no rollback or cleanup on a failed scale (its
+                # _scale_up_elastic_ep has no except and its /scale_elastic_ep
+                # endpoint just returns 500), so a failed grow leaves the engine
+                # partial/wedged with no safe way to recover in process. Restart the
+                # worker so it comes back clean, rather than fake a recovery that
+                # nothing acts on.
+                logger.error(
+                    "[ElasticEP] Scaling to dp=%s failed: %s. vLLM does not roll "
+                    "back a failed scale; restarting the worker to recover a clean "
+                    "state.",
+                    new_dp_size,
+                    grow_err,
+                )
+                self._shutdown_worker()  # NoReturn: runtime.shutdown() + os._exit(1)
 
             logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
             return {
