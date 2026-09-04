@@ -102,17 +102,15 @@
 /components/src/dynamo/trtllm/request_handlers/                                                         @ai-dynamo/dynamo-backend-trtllm-codeowners
 /components/src/dynamo/trtllm/logits_processing/                                                        @ai-dynamo/dynamo-backend-trtllm-codeowners
 
-# === backend-triton  (@ai-dynamo/dynamo-backend-triton-codeowners) ===
-/components/src/dynamo/triton/**                                             @ai-dynamo/dynamo-backend-triton-codeowners
-/container/launch_message/triton.txt                                         @ai-dynamo/dynamo-backend-triton-codeowners
-/docs/backends/triton                                                        @ai-dynamo/dynamo-backend-triton-codeowners
-
 # === backend-sglang  (@ai-dynamo/dynamo-backend-sglang-codeowners) ===
 /lib/sidecar/sglang/                                                                                    @ai-dynamo/dynamo-backend-sglang-codeowners
 /examples/backends/sglang/                                                                              @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/                                                                          @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/tests/                                                                    @ai-dynamo/dynamo-backend-sglang-codeowners
 /components/src/dynamo/sglang/request_handlers/                                                         @ai-dynamo/dynamo-backend-sglang-codeowners
+
+# === backend-triton  (@ai-dynamo/dynamo-backend-triton-codeowners) ===
+/components/src/dynamo/triton/**                                                                        @ai-dynamo/dynamo-backend-triton-codeowners
 
 # === kv-memory  (@ai-dynamo/dynamo-kv-memory-codeowners) ===
 /lib/memory/                                                                                            @ai-dynamo/dynamo-kv-memory-codeowners
@@ -473,6 +471,7 @@
 /lib/llm/src/grpc.rs                                                                                    @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/http.rs                                                                                    @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/lora.rs                                                                                    @ai-dynamo/dynamo-frontend-codeowners
+/docs/backends/triton                                                                                   @ai-dynamo/dynamo-backend-triton-codeowners
 /tests/frontend/grpc/                                                                                   @ai-dynamo/dynamo-frontend-codeowners
 /tests/router/configs/                                                                                  @ai-dynamo/dynamo-router-codeowners
 /lib/llm/src/kv_router/                                                                                 @ai-dynamo/dynamo-router-codeowners
@@ -538,6 +537,7 @@
 /lib/llm/src/block_manager/offload/                                                                     @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/state.rs                                                                     @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/llm/src/block_manager/storage/                                                                     @ai-dynamo/dynamo-kv-memory-codeowners
+/container/launch_message/triton.txt                                                                    @ai-dynamo/dynamo-backend-triton-codeowners
 /lib/backend-common/examples/mocker/                                                                    @ai-dynamo/dynamo-performance-codeowners
 /lib/bindings/python/rust/parsers.rs                                                                    @ai-dynamo/dynamo-frontend-codeowners
 /lib/llm/src/block_manager/layout.rs                                                                    @ai-dynamo/dynamo-kv-memory-codeowners
