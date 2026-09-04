@@ -14,7 +14,8 @@ use futures::{StreamExt, stream};
 use super::SessionAffinityMode::{Hard, Soft};
 use super::{
     AffinityAcquire, AffinityCoordinator, AffinityTarget, LlmResponse, affinity_id,
-    coordinator::ReplicaApplyOutcome, explicit_target,
+    coordinator::{ReplicaApplyOutcome, tracked_stream},
+    explicit_target, to_table,
 };
 use crate::{
     preprocessor::PreprocessedRequest,
@@ -156,7 +157,7 @@ async fn session_affinity_initialization_is_atomic() {
     coordinator.wait_for_initializing_waiter().await;
     assert!(!waiter.is_finished());
 
-    let first_lease = first.commit(target(7, Some(0))).unwrap();
+    let first_lease = first.commit(to_table(target(7, Some(0)))).unwrap();
     let second = waiter.await.unwrap().unwrap();
     let AffinityAcquire::Bound {
         target: second_target,
@@ -233,7 +234,7 @@ async fn session_affinity_validates_worker_and_rank_contract() {
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target(7, None)).unwrap());
+    drop(initializer.commit(to_table(target(7, None))).unwrap());
 
     assert!(
         coordinator
@@ -263,7 +264,7 @@ async fn session_affinity_failed_bound_operation_invalidates_binding() {
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target(7, Some(0))).unwrap());
+    drop(initializer.commit(to_table(target(7, Some(0)))).unwrap());
 
     let operation = coordinator.acquire(&session_id(), None).await.unwrap();
     assert_eq!(operation.target(), Some(target(7, Some(0))));
@@ -285,9 +286,9 @@ async fn session_affinity_stream_drop_refreshes_idle_ttl() {
     else {
         panic!("first request must initialize");
     };
-    let lease = initializer.commit(target(7, Some(0))).unwrap();
+    let lease = initializer.commit(to_table(target(7, Some(0)))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    let mut stream = lease.into_stream(response_stream(1));
+    let mut stream = tracked_stream(lease, response_stream(1));
     assert!(stream.next().await.is_some());
     drop(stream);
 
@@ -302,9 +303,9 @@ async fn session_affinity_empty_stream_refreshes_idle_ttl() {
     else {
         panic!("first request must initialize");
     };
-    let lease = initializer.commit(target(7, Some(0))).unwrap();
+    let lease = initializer.commit(to_table(target(7, Some(0)))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    let mut stream = lease.into_stream(response_stream(0));
+    let mut stream = tracked_stream(lease, response_stream(0));
     assert!(stream.next().await.is_none());
 
     assert_binding_expires_after_refreshed_ttl(&coordinator).await;
@@ -318,7 +319,7 @@ async fn session_affinity_cancelled_stream_refreshes_idle_ttl() {
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target(7, Some(0))).unwrap());
+    drop(initializer.commit(to_table(target(7, Some(0)))).unwrap());
 
     tokio::time::advance(Duration::from_secs(9)).await;
     let AffinityAcquire::Bound {
@@ -329,7 +330,7 @@ async fn session_affinity_cancelled_stream_refreshes_idle_ttl() {
         panic!("continuation must acquire the existing binding");
     };
     assert_eq!(bound_target, target(7, Some(0)));
-    let mut stream = lease.into_stream(cancelled_response_stream());
+    let mut stream = tracked_stream(lease, cancelled_response_stream());
     assert!(stream.next().await.is_none());
 
     assert_binding_expires_after_refreshed_ttl(&coordinator).await;
@@ -356,9 +357,9 @@ async fn session_affinity_error_stream_refreshes_idle_ttl() {
     else {
         panic!("first request must initialize");
     };
-    let lease = initializer.commit(target(7, Some(0))).unwrap();
+    let lease = initializer.commit(to_table(target(7, Some(0)))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    let mut stream = lease.into_stream(error_response_stream());
+    let mut stream = tracked_stream(lease, error_response_stream());
     assert!(stream.next().await.unwrap().is_err());
     assert!(stream.next().await.is_none());
 
@@ -373,9 +374,9 @@ async fn session_affinity_stream_eof_refreshes_idle_ttl() {
     else {
         panic!("first request must initialize");
     };
-    let lease = initializer.commit(target(7, Some(0))).unwrap();
+    let lease = initializer.commit(to_table(target(7, Some(0)))).unwrap();
     tokio::time::advance(Duration::from_secs(9)).await;
-    let mut stream = lease.into_stream(response_stream(1));
+    let mut stream = tracked_stream(lease, response_stream(1));
     while stream.next().await.is_some() {}
 
     assert_binding_expires_after_refreshed_ttl(&coordinator).await;
@@ -389,7 +390,7 @@ async fn session_affinity_bound_lease_drop_refreshes_idle_ttl() {
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target(7, Some(0))).unwrap());
+    drop(initializer.commit(to_table(target(7, Some(0)))).unwrap());
 
     tokio::time::advance(Duration::from_secs(9)).await;
     let AffinityAcquire::Bound { lease, .. } =
@@ -425,7 +426,7 @@ async fn session_affinity_query_is_read_only() {
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target(7, Some(0))).unwrap());
+    drop(initializer.commit(to_table(target(7, Some(0)))).unwrap());
     assert_eq!(
         coordinator.query_target(&session_id(), None).unwrap(),
         Some(target(7, Some(0)))
@@ -444,7 +445,7 @@ async fn session_affinity_reaper_removes_idle_entries_and_stops_on_drop() {
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target(7, Some(0))).unwrap());
+    drop(initializer.commit(to_table(target(7, Some(0)))).unwrap());
 
     coordinator.wait_for_reaper().await;
     tokio::time::advance(Duration::from_secs(10)).await;

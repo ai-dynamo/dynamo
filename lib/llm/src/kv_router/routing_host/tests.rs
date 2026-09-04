@@ -376,7 +376,9 @@ async fn builtin_hard_affinity_ignores_local_inhibition() {
     };
     drop(
         initializer
-            .commit(AffinityTarget::worker(worker_id))
+            .commit(crate::session_affinity::to_table(AffinityTarget::worker(
+                worker_id,
+            )))
             .unwrap(),
     );
 
@@ -649,7 +651,9 @@ async fn builtin_direct_fallback_stays_disabled_for_affinity() {
     };
     drop(
         initializer
-            .commit(AffinityTarget::worker(stale_worker))
+            .commit(crate::session_affinity::to_table(AffinityTarget::worker(
+                stale_worker,
+            )))
             .unwrap(),
     );
     assert!(
@@ -1877,7 +1881,11 @@ async fn session_affinity_post_selection_failures_preserve_binding() {
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(original_target).unwrap());
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(original_target))
+            .unwrap(),
+    );
 
     let operation = Some(affinity.acquire(&session_id, None).await.unwrap());
     drop(operation);
@@ -1915,7 +1923,11 @@ async fn session_affinity_existing_selection_cancellation_preserves_binding_with
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(original_target).unwrap());
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(original_target))
+            .unwrap(),
+    );
 
     let controller = Controller::new("cancelled-selection-request".to_string());
     controller.stop();
@@ -1980,7 +1992,11 @@ async fn bind_affinity_target(
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(target).unwrap());
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(target))
+            .unwrap(),
+    );
 }
 
 #[tokio::test]
@@ -2148,7 +2164,11 @@ async fn migration_exclusion_preserves_hard_affinity_without_widening_or_escapin
     else {
         panic!("first request must initialize");
     };
-    drop(initializer.commit(original_target).unwrap());
+    drop(
+        initializer
+            .commit(crate::session_affinity::to_table(original_target))
+            .unwrap(),
+    );
 
     let mut retry_input = request();
     retry_input.routing_mut().allowed_worker_ids = Some(HashSet::from([7, 8]));

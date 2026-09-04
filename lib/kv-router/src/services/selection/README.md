@@ -21,6 +21,11 @@ and active-sequence accounting. Keep these implementation invariants explicit:
   runtime event plane in the frontend) or `Remote` (a standalone indexer
   serves it). The `Indexer` type itself is shared with the frontend
   (`services::indexer::backend`).
+- Session affinity (`services::selection::affinity::SessionAffinity`) is the
+  one session table: versioned bindings, TTL reaper, initialization/lease
+  lifecycle, hard and soft validation, replica apply. Hosts own the instance
+  and the replication transport (`AffinityReplicaSink`); the frontend wraps it
+  for pipeline streams and the runtime event plane.
 - Selector replicas synchronize admission, prefill-complete, and free events.
 - **NOTE:** Output-block updates remain local. They are deliberately excluded
   from replica sync because their frequency would consume disproportionate
