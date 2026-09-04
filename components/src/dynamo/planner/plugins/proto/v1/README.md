@@ -38,7 +38,7 @@ Total: **6 services / 33 messages / 3 enums**
 ### Messages — by category
 
 - **PluginRegistry**: `RegisterRequest` / `RegisterResponse` / `HeartbeatRequest` / `HeartbeatResponse` / `UnregisterRequest` / `UnregisterResponse` / `ListPluginsRequest` / `ListPluginsResponse` / `PluginInfo`
-- **PipelineContext + observation**: `PipelineContext` / `ObservationData` / `TrafficMetrics` / `FpmData` / `WorkerState` / `PredictionData` / `ScalingProposal` / `ComponentTarget` / `OverrideResult` / `AcceptResult` / `RejectResult`
+- **PipelineContext + observation**: `PipelineContext` / `ObservationData` / `TrafficMetrics` / `FpmData` / `WorkerState` / `BatchSchedulingData` / `BatchJobDemand` / `PoolTrafficDemand` / `BatchDispatcherFeedback` / `PredictionData` / `ScalingProposal` / `ComponentTarget` / `OverrideResult` / `AcceptResult` / `RejectResult`
 - **Stage request/response**: `PredictStageRequest` / `PredictStageResponse` / `ProposeStageRequest` / `ProposeStageResponse` / `ProposeResult` / `ReconcileStageRequest` / `ReconcileStageResponse` / `ConstrainStageRequest` / `ConstrainStageResponse`
 - **PluginLifecycle**: `BootstrapRequest` / `BootstrapResponse` / `ResetRequest` / `ResetResponse`
 
@@ -234,6 +234,15 @@ The planner populates this field on ticks that collect FPM observations.
 Plugins that declare `needs=["observations.fpm"]` receive the per-engine
 maps when available; absence of the field means no FPM data was collected
 for that tick.
+
+## Batch scheduling observations
+
+`ObservationData.batch` carries flat, independently timestamped job demand,
+online pool traffic, and dispatcher feedback. Plugins can declare
+`needs=["observations.batch"]` and join records by `pool_id`. Job deadlines and
+all `observed_at_s` values are absolute wall-clock timestamps. Dispatcher
+`applied_max_admission_rps` preserves proto presence: unset means no applied cap
+was reported, while `0.0` means admission was explicitly paused.
 
 ## References
 
