@@ -4,12 +4,13 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dynamo_kv_router::identity::PoolId;
 use dynamo_kv_router::indexer::cuckoo::{CkfBuildError, CkfConfig, DcCkfState, ProducerIdentity};
 use dynamo_kv_router::protocols::{ActiveLoad, WorkerId};
 use dynamo_runtime::protocols::EndpointId;
+use dynamo_runtime::transports::event_plane::EventEnvelope;
 use parking_lot::Mutex;
 use tokio::sync::{Notify, OwnedSemaphorePermit, TryAcquireError};
 use tokio::sync::{Semaphore, mpsc, oneshot, watch};
@@ -819,9 +820,7 @@ impl PoolRegistry {
             },
         );
         publish_catalog_upsert(&mut state, &self.catalog_tx, descriptor);
-        {
-            publish_load_if_changed(&state, &self.load_tx, request.pool_id);
-        }
+        publish_load_if_changed(&state, &self.load_tx, request.pool_id);
         reservation.disarm();
 
         Ok(PoolAttachment {
@@ -944,29 +943,18 @@ impl PoolRegistry {
             return Ok(false);
         };
         let capacity_update = serving.load.replace_capacity(runtime_configs);
-        match capacity_update {
-            Ok(changed) => {
-                if changed {
-                    publish_load_if_changed(&state, &self.load_tx, pool_id);
-                }
-                // The caller uses true to record that this active generation accepted
-                // the full runtime config, including fields outside the load contract.
-                Ok(true)
-            }
-            Err(error) => {
-                // replace_capacity invalidates state before returning an error. Publish
-                // that degraded state immediately so the previous complete snapshot
-                // cannot remain authoritative while the caller retries metadata refresh.
-                publish_load_if_changed(&state, &self.load_tx, pool_id);
-                Err(error)
-            }
-        }
+        publish_load_if_changed(&state, &self.load_tx, pool_id);
+        capacity_update?;
+        // The caller uses true to record that this active generation accepted
+        // the full runtime config, including fields outside the load contract.
+        Ok(true)
     }
 
     pub(super) fn observe_load(
         &self,
         pool_id: PoolId,
         layout_generation: u64,
+        envelope: &EventEnvelope,
         load: ActiveLoad,
     ) -> bool {
         let mut state = self.state.lock();
@@ -979,9 +967,9 @@ impl PoolRegistry {
         let Some(serving) = entry.serving.as_mut() else {
             return false;
         };
-        match serving.load.observe(load) {
+        match serving.load.observe(envelope, load) {
             LoadObservationOutcome::UnknownRank => false,
-            LoadObservationOutcome::IgnoredAdvisory => true,
+            LoadObservationOutcome::IgnoredStale => true,
             LoadObservationOutcome::Updated => {
                 publish_load_if_changed(&state, &self.load_tx, pool_id);
                 true
@@ -1000,9 +988,8 @@ impl PoolRegistry {
         let Some(serving) = entry.serving.as_mut() else {
             return false;
         };
-        if serving.load.clear_observations() {
-            publish_load_if_changed(&state, &self.load_tx, pool_id);
-        }
+        serving.load.clear_observations();
+        publish_load_if_changed(&state, &self.load_tx, pool_id);
         true
     }
 
@@ -1083,9 +1070,7 @@ impl PoolRegistry {
             if was_active {
                 publish_catalog_remove(&mut state, &self.catalog_tx, pool_id);
             }
-            {
-                publish_load_if_changed(&state, &self.load_tx, pool_id);
-            }
+            publish_load_if_changed(&state, &self.load_tx, pool_id);
             entry
         };
         entry.hub.shutdown().await;
@@ -1261,8 +1246,30 @@ impl PoolRegistry {
         self.catalog_tx.subscribe()
     }
 
+    pub(super) fn active_handle(&self, pool_id: PoolId) -> Option<KvDcRelayHandle> {
+        self.state
+            .lock()
+            .pools
+            .get(&pool_id)
+            .and_then(|entry| (entry.state == PoolEntryState::Active).then(|| entry.handle.clone()))
+    }
+
     pub(super) fn load_snapshots(&self) -> Vec<PoolLoadSnapshot> {
-        self.load_tx.borrow().clone()
+        let state = self.state.lock();
+        let now = Instant::now();
+        let mut snapshots = state
+            .pools
+            .values()
+            .filter(|entry| entry.state == PoolEntryState::Active)
+            .filter_map(|entry| {
+                entry
+                    .serving
+                    .as_ref()
+                    .map(|serving| serving.load.snapshot(entry.identity, now))
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_unstable_by_key(|snapshot| snapshot.producer.pool_id());
+        snapshots
     }
 
     pub(super) fn watch_load(&self) -> watch::Receiver<Vec<PoolLoadSnapshot>> {
@@ -1277,15 +1284,13 @@ impl PoolRegistry {
             state.reservations.clear();
             let entries = state.pools.drain().collect::<Vec<_>>();
             publish_catalog_clear(&mut state, &self.catalog_tx);
-            {
-                self.load_tx.send_if_modified(|snapshots| {
-                    if snapshots.is_empty() {
-                        return false;
-                    }
-                    snapshots.clear();
-                    true
-                });
-            }
+            self.load_tx.send_if_modified(|snapshots| {
+                if snapshots.is_empty() {
+                    return false;
+                }
+                snapshots.clear();
+                true
+            });
             entries
         };
         for (pool_id, entry) in entries {
@@ -1414,7 +1419,7 @@ fn publish_load_if_changed(
             entry
                 .serving
                 .as_ref()
-                .map(|serving| serving.load.snapshot(entry.identity))
+                .map(|serving| serving.load.snapshot(entry.identity, Instant::now()))
         });
     sender.send_if_modified(|snapshots| {
         match (
@@ -1592,6 +1597,16 @@ mod tests {
                 dp_rank: 0,
             },
         )
+    }
+
+    fn load_envelope(sequence: u64) -> EventEnvelope {
+        EventEnvelope {
+            publisher_id: 1,
+            sequence,
+            published_at: sequence,
+            topic: String::new(),
+            payload: Default::default(),
+        }
     }
 
     fn gated_builder() -> GatedBuilder {
@@ -3026,6 +3041,7 @@ mod tests {
         assert!(!registry.observe_load(
             attachment.pool_id,
             attachment.layout_generation,
+            &load_envelope(1),
             ActiveLoad::default(),
         ));
 
@@ -3056,13 +3072,13 @@ mod tests {
         assert_eq!(snapshots[0].kv_used_blocks, None);
         assert_eq!(snapshots[0].total_kv_blocks, None);
         assert_eq!(snapshots[0].kv_expected_ranks, 0);
-        assert!(snapshots[0].has_degraded_coverage());
+        assert!(snapshots[0].has_degraded_kv_coverage());
 
         registry.detach(attachment).await.unwrap();
     }
 
     #[tokio::test]
-    async fn scheduler_only_load_is_accepted_without_changing_snapshot() {
+    async fn scheduler_load_updates_optional_pool_facts() {
         let registry = PoolRegistry::new(relay_identity(), config());
         let mut attach_request = request(pool(1), "fast.router.generate", "llama");
         attach_request.serving_facts = Some(PoolServingFacts {
@@ -3075,24 +3091,24 @@ mod tests {
             )]),
         });
         let attachment = registry.attach(attach_request).await.unwrap();
-        let before = registry.load_snapshots();
-        let load_watch = registry.watch_load();
-        assert!(!load_watch.has_changed().unwrap());
 
         assert!(registry.observe_load(
             attachment.pool_id,
             attachment.layout_generation,
+            &load_envelope(1),
             ActiveLoad {
                 worker_id: 1,
                 dp_rank: 0,
                 active_decode_blocks: Some(30),
                 active_prefill_tokens: Some(512),
+                scheduler_load_scope: Some(dynamo_kv_router::protocols::SchedulerLoadScope::Local,),
                 ..ActiveLoad::default()
             },
         ));
 
-        assert_eq!(registry.load_snapshots(), before);
-        assert!(!load_watch.has_changed().unwrap());
+        let snapshot = registry.load_snapshots()[0];
+        assert_eq!(snapshot.active_decode_blocks, Some(30));
+        assert_eq!(snapshot.active_prefill_tokens, Some(512));
         registry.detach(attachment).await.unwrap();
     }
 
@@ -3113,6 +3129,7 @@ mod tests {
         assert!(registry.observe_load(
             attachment.pool_id,
             attachment.layout_generation,
+            &load_envelope(1),
             ActiveLoad {
                 worker_id: 1,
                 dp_rank: 0,
@@ -3120,8 +3137,7 @@ mod tests {
                 ..ActiveLoad::default()
             },
         ));
-        assert!(!registry.load_snapshots()[0].has_degraded_coverage());
-        let mut load_watch = registry.watch_load();
+        assert!(!registry.load_snapshots()[0].has_degraded_kv_coverage());
 
         let error = registry
             .replace_load_capacity(
@@ -3138,14 +3154,13 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("zero data_parallel_size"));
-        assert!(load_watch.has_changed().unwrap());
 
-        let snapshots = load_watch.borrow_and_update().clone();
+        let snapshots = registry.load_snapshots();
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].kv_used_blocks, None);
         assert_eq!(snapshots[0].total_kv_blocks, None);
         assert_eq!(snapshots[0].kv_expected_ranks, 0);
-        assert!(snapshots[0].has_degraded_coverage());
+        assert!(snapshots[0].has_degraded_kv_coverage());
         assert_eq!(registry.catalog().pools().len(), 1);
 
         registry.detach(attachment).await.unwrap();
@@ -3182,7 +3197,7 @@ mod tests {
         assert_eq!(initial_load[0].kv_observed_ranks, 0);
         assert_eq!(initial_load[0].kv_used_blocks, None);
         assert_eq!(initial_load[0].total_kv_blocks, Some(100));
-        assert!(initial_load[0].has_degraded_coverage());
+        assert!(initial_load[0].has_degraded_kv_coverage());
 
         let mut load = ActiveLoad {
             worker_id: 1,
@@ -3192,11 +3207,12 @@ mod tests {
         load.kv_used_blocks = Some(40);
         load.active_decode_blocks = Some(30);
         load.active_prefill_tokens = Some(512);
-        assert!(registry.observe_load(pool(1), old_generation, load));
+        load.scheduler_load_scope = Some(dynamo_kv_router::protocols::SchedulerLoadScope::Local);
+        assert!(registry.observe_load(pool(1), old_generation, &load_envelope(1), load));
         let observed = registry.load_snapshots()[0];
         assert_eq!(observed.kv_used_blocks, Some(40));
         assert_eq!(observed.total_kv_blocks, Some(100));
-        assert!(!observed.has_degraded_coverage());
+        assert!(!observed.has_degraded_kv_coverage());
 
         assert!(
             registry
@@ -3207,6 +3223,7 @@ mod tests {
         assert!(!registry.observe_load(
             pool(1),
             old_generation,
+            &load_envelope(2),
             ActiveLoad {
                 worker_id: 1,
                 dp_rank: 0,

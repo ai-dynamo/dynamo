@@ -19,13 +19,15 @@ pub struct KvDcRelay {
     publication_threshold: usize,
     publication_delay_ms: u64,
     recovery_attempt_timeout_ms: u64,
+    grpc_listen_address: Option<String>,
     inner: Arc<OnceCell<Arc<llm_rs::kv_dc_relay::KvDcRelay>>>,
 }
 
 #[pymethods]
 impl KvDcRelay {
     #[new]
-    #[pyo3(signature = (endpoint, dc_id, namespace_filter=None, endpoint_prefix=None, publication_threshold=16, publication_delay_ms=1, recovery_attempt_timeout_ms=30_000))]
+    #[pyo3(signature = (endpoint, dc_id, namespace_filter=None, endpoint_prefix=None, publication_threshold=16, publication_delay_ms=1, recovery_attempt_timeout_ms=30_000, grpc_listen_address=None))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
         dc_id: String,
@@ -34,6 +36,7 @@ impl KvDcRelay {
         publication_threshold: usize,
         publication_delay_ms: u64,
         recovery_attempt_timeout_ms: u64,
+        grpc_listen_address: Option<String>,
     ) -> Self {
         Self {
             endpoint: endpoint.inner,
@@ -43,6 +46,7 @@ impl KvDcRelay {
             publication_threshold,
             publication_delay_ms,
             recovery_attempt_timeout_ms,
+            grpc_listen_address,
             inner: Arc::new(OnceCell::new()),
         }
     }
@@ -55,6 +59,7 @@ impl KvDcRelay {
         let publication_threshold = self.publication_threshold;
         let publication_delay_ms = self.publication_delay_ms;
         let recovery_attempt_timeout_ms = self.recovery_attempt_timeout_ms;
+        let grpc_listen_address = self.grpc_listen_address.clone();
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner
@@ -75,6 +80,14 @@ impl KvDcRelay {
                                 publication_threshold,
                                 publication_delay_ms,
                                 recovery_attempt_timeout_ms,
+                                grpc_listen_address: grpc_listen_address
+                                    .map(|address| address.parse())
+                                    .transpose()
+                                    .map_err(|error| {
+                                        anyhow::anyhow!(
+                                            "invalid KV DC Relay gRPC listen address: {error}"
+                                        )
+                                    })?,
                                 ..Default::default()
                             },
                         },

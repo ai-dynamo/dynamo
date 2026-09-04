@@ -17,6 +17,7 @@ use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,6 +57,7 @@ use super::publication::{
     RelayPublicationSource,
 };
 use super::resolution::stable_dc_id;
+use super::stats::RelayStatsRuntime;
 use super::topology::{TopologyPublisher, TopologySnapshot};
 use crate::discovery::{
     KvSourceMembershipCoordinator, KvSourceMembershipView, KvSourceMembershipWatch,
@@ -120,6 +122,7 @@ pub struct KvDcRelayProducerConfig {
     pub publication_threshold: usize,
     pub publication_delay_ms: u64,
     pub recovery_attempt_timeout_ms: u64,
+    pub grpc_listen_address: Option<SocketAddr>,
 }
 
 impl Default for KvDcRelayProducerConfig {
@@ -129,6 +132,7 @@ impl Default for KvDcRelayProducerConfig {
             publication_threshold: DEFAULT_PUBLICATION_THRESHOLD,
             publication_delay_ms: DEFAULT_PUBLICATION_DELAY.as_millis() as u64,
             recovery_attempt_timeout_ms: DEFAULT_RECOVERY_ATTEMPT_TIMEOUT.as_millis() as u64,
+            grpc_listen_address: None,
         }
     }
 }
@@ -313,7 +317,7 @@ pub struct KvDcRelayDiagnosticSnapshot {
     pub buckets: Vec<u64>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SlotLifecycle {
+pub(super) enum SlotLifecycle {
     Discovered,
     Starting,
     Active,
@@ -337,11 +341,11 @@ impl SlotLifecycle {
 }
 
 #[derive(Clone)]
-struct EndpointSlotStatus {
-    lifecycle: SlotLifecycle,
-    layout_generation: u64,
-    membership: Option<EndpointMembership>,
-    actor: Option<KvDcRelayHandle>,
+pub(super) struct EndpointSlotStatus {
+    pub(super) lifecycle: SlotLifecycle,
+    pub(super) layout_generation: u64,
+    pub(super) membership: Option<EndpointMembership>,
+    pub(super) actor: Option<KvDcRelayHandle>,
     #[cfg(test)]
     settled_membership_generation: Option<u64>,
     #[cfg(feature = "ckf-diagnostics")]
@@ -363,7 +367,7 @@ impl Default for EndpointSlotStatus {
     }
 }
 
-type SharedEndpointStatus = Arc<RwLock<EndpointSlotStatus>>;
+pub(super) type SharedEndpointStatus = Arc<RwLock<EndpointSlotStatus>>;
 
 struct EndpointSlotTask {
     metadata: watch::Sender<Option<EndpointMembership>>,
@@ -433,7 +437,7 @@ impl EndpointAvailabilityWatch {
 }
 
 #[derive(Default)]
-struct HostTerminalState {
+pub(super) struct HostTerminalState {
     last_error: Mutex<Option<String>>,
 }
 
@@ -606,6 +610,7 @@ pub struct KvDcRelay {
     cancel: CancellationToken,
     membership: Mutex<Option<DcMembershipWatch>>,
     supervisor: Mutex<Option<JoinHandle<()>>>,
+    stats: Mutex<Option<RelayStatsRuntime>>,
     supervisor_complete: CancellationToken,
     terminal: Arc<HostTerminalState>,
     statuses: Arc<RwLock<HashMap<EndpointId, SharedEndpointStatus>>>,
@@ -682,6 +687,22 @@ impl KvDcRelay {
             DEFAULT_SNAPSHOT_PROGRESS_TIMEOUT,
         ));
         let terminal = Arc::new(HostTerminalState::default());
+        let stats = if let Some(listen_address) = config.producer.grpc_listen_address {
+            Some(
+                RelayStatsRuntime::start(
+                    component.clone(),
+                    statuses.clone(),
+                    pools.clone(),
+                    publication_source.clone(),
+                    listen_address,
+                    cancel.clone(),
+                    terminal.clone(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let host = tokio::spawn(run_host_supervisor(
             component,
             ckf_dc_id,
@@ -711,6 +732,7 @@ impl KvDcRelay {
             cancel,
             membership: Mutex::new(Some(membership)),
             supervisor: Mutex::new(Some(supervisor)),
+            stats: Mutex::new(stats),
             supervisor_complete,
             terminal,
             statuses,
@@ -872,6 +894,10 @@ impl KvDcRelay {
         if let Some(membership) = membership {
             membership.shutdown().await;
         }
+        let stats = self.stats.lock().take();
+        if let Some(stats) = stats {
+            stats.shutdown().await;
+        }
         Ok(())
     }
 }
@@ -886,7 +912,7 @@ fn new_relay_incarnation() -> anyhow::Result<u64> {
     let random_id = rand::rngs::OsRng
         .try_next_u64()
         .map_err(|error| anyhow::anyhow!("failed to generate Relay incarnation: {error}"))?;
-    Ok(random_id & (i64::MAX as u64))
+    Ok((random_id & (i64::MAX as u64)).max(1))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1115,7 +1141,11 @@ fn spawn_host_task_supervisor(
     })
 }
 
-fn record_host_failure(cancel: &CancellationToken, terminal: &HostTerminalState, reason: String) {
+pub(super) fn record_host_failure(
+    cancel: &CancellationToken,
+    terminal: &HostTerminalState,
+    reason: String,
+) {
     tracing::error!(error = %reason, "KV DC Relay host failed");
     terminal.record(reason);
     cancel.cancel();
@@ -2078,8 +2108,14 @@ async fn run_load_collector(
 ) {
     let mut retry = LoadRetryBackoff::default();
     loop {
-        let subscriber =
-            EventSubscriber::for_endpoint_id(component.drt(), &endpoint, KV_METRICS_SUBJECT).await;
+        let subscriber = tokio::select! {
+            _ = cancel.cancelled() => return,
+            subscriber = EventSubscriber::for_endpoint_id(
+                component.drt(),
+                &endpoint,
+                KV_METRICS_SUBJECT,
+            ) => subscriber,
+        };
         let mut subscriber = match subscriber {
             Ok(subscriber) => subscriber.typed::<ActiveLoad>(),
             Err(error) => {
@@ -2102,9 +2138,9 @@ async fn run_load_collector(
                 event = subscriber.next() => event,
             };
             match event {
-                Some(Ok((_envelope, load))) => {
+                Some(Ok((envelope, load))) => {
                     retry.succeeded();
-                    if !pools.observe_load(pool_id, layout_generation, load) {
+                    if !pools.observe_load(pool_id, layout_generation, &envelope, load) {
                         tracing::debug!(%endpoint, %pool_id, layout_generation, "Ignoring ActiveLoad outside the pool generation's expected ranks");
                     }
                 }
@@ -2980,6 +3016,7 @@ mod tests {
             cancel,
             membership: Mutex::new(None),
             supervisor: Mutex::new(Some(supervisor)),
+            stats: Mutex::new(None),
             supervisor_complete,
             terminal,
             statuses: Arc::new(RwLock::new(HashMap::new())),
@@ -3073,6 +3110,7 @@ mod tests {
             cancel: cancel.clone(),
             membership: Mutex::new(None),
             supervisor: Mutex::new(Some(supervisor)),
+            stats: Mutex::new(None),
             supervisor_complete,
             terminal,
             statuses: Arc::new(RwLock::new(HashMap::new())),
@@ -3190,6 +3228,7 @@ mod tests {
             cancel,
             membership: Mutex::new(None),
             supervisor: Mutex::new(None),
+            stats: Mutex::new(None),
             supervisor_complete: CancellationToken::new(),
             terminal: Arc::new(HostTerminalState::default()),
             statuses,

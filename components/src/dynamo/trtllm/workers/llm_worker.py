@@ -905,7 +905,6 @@ async def init_llm_worker(
 
         if config.publish_kv_events or config.publish_metrics:
             # Initialize the independently gated KV-event and metrics publishers.
-            # Use model as fallback if served_model_name is not provided
             model_name_for_metrics = config.served_model_name or config.model
             metrics_labels = [
                 (

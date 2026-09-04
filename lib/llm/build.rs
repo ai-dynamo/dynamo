@@ -49,7 +49,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn build_protos() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .type_attribute(".", "#[derive(serde::Serialize,serde::Deserialize)]")
-        .compile_protos(&["src/grpc/protos/kserve.proto"], &["src/grpc/protos"])?;
+        .compile_protos(
+            &[
+                "src/grpc/protos/kserve.proto",
+                "src/grpc/protos/kv_dc_relay.proto",
+            ],
+            &["src/grpc/protos"],
+        )?;
     Ok(())
 }
 

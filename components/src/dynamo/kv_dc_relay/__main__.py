@@ -32,6 +32,11 @@ def parse_args() -> argparse.Namespace:
         help="Optional prefix filter over namespace.component.endpoint",
     )
     parser.add_argument("--dc-id", required=True)
+    parser.add_argument(
+        "--grpc-listen-address",
+        default="127.0.0.1:50051",
+        help="Address for the canonical KV DC Relay gRPC API",
+    )
     return parser.parse_args()
 
 
@@ -86,6 +91,7 @@ async def worker(runtime: DistributedRuntime) -> None:
         args.dc_id,
         args.namespace_filter,
         args.endpoint_prefix,
+        grpc_listen_address=args.grpc_listen_address,
     )
     await relay.start()
     diagnostics = KvDcRelayDiagnostics(relay)

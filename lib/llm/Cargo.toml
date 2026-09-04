@@ -115,7 +115,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tmq = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = { workspace = true }
+tokio-stream = { workspace = true, features = ["net"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 opentelemetry = { workspace = true }
