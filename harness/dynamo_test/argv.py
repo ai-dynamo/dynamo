@@ -375,6 +375,21 @@ class ArgV:
     def _words(self) -> tuple[Token, ...]:
         return tuple(t for t in self.tokens() if t.kind is TokenKind.WORD)
 
+    def invocation(self) -> tuple[str, ...]:
+        """Every word of the command actually run, ``command`` included.
+
+        For argv form the program lives in ``command`` and only its flags are in
+        ``args`` — ``command: [python3, -m, dynamo.sglang]`` with
+        ``args: [--model-path, ...]``. A reader that looks only at ``args``
+        cannot tell which engine this is.
+
+        For shell form ``command`` is just the shell (``/bin/bash -lc``) and the
+        real invocation is inside the string, so the shell itself is left out.
+        """
+        if self.form is ArgForm.SHELL:
+            return tuple(t.text for t in self._words())
+        return tuple(self.command) + tuple(t.text for t in self._words())
+
     def _matches(self, token: Token, flag: str) -> bool:
         return token.text == flag or token.text.startswith(f"{flag}=")
 

@@ -58,9 +58,11 @@ def test_an_unknown_semantic_lists_what_the_engine_knows():
 
 
 def test_reading_accepts_every_spelling_the_engine_does():
-    """SGLang uses ``--tp`` 10 times and ``--tensor-parallel-size`` 7 times.
+    """SGLang spells this three ways, and all three are in use.
 
-    A reader that knows only the canonical spelling misses 10 of 17 workers.
+    ``--tp`` x30, ``--tensor-parallel-size`` x7, ``--tp-size`` x2. A reader that
+    knows only the canonical spelling finds it in 7 of the 39 SGLang workers
+    that set it.
     """
     assert SGLANG.read(ArgV.argv(["--tp", "8"]), "tensor_parallel").require() == "8"
     assert (
@@ -72,7 +74,7 @@ def test_reading_accepts_every_spelling_the_engine_does():
 
 
 def test_trtllm_reads_both_model_spellings():
-    """``--model-path`` ×29 and ``--model`` ×12 are both live."""
+    """``--model-path`` x44 and ``--model`` x12 are both live."""
     assert TRTLLM.read(ArgV.argv(["--model-path", "A"]), "model").require() == "A"
     assert TRTLLM.read(ArgV.argv(["--model", "A"]), "model").require() == "A"
 
@@ -192,9 +194,9 @@ def test_the_three_dialects_share_their_core_semantics():
 def test_a_config_file_makes_a_setting_unknown_not_absent():
     """ "Not set" is false when the command hands its settings to a file.
 
-    Four SGLang workers in the corpus pass only ``--config`` plus parser flags;
-    the model lives in ``/etc/sglang/*.yaml``. Answering ABSENT there invites
-    the caller to conclude no model is configured, which is wrong.
+    12 SGLang workers pass ``--config`` and the model lives in
+    ``/etc/sglang/*.yaml``. Answering ABSENT there invites the caller to
+    conclude no model is configured, which is wrong.
     """
     argv = ArgV.shell("exec python3 -m dynamo.sglang --config /etc/sglang/prefill.yaml")
     fact = SGLANG.read(argv, "model")
@@ -203,7 +205,7 @@ def test_a_config_file_makes_a_setting_unknown_not_absent():
 
 
 def test_trtllm_defers_through_extra_engine_args():
-    """``--extra-engine-args`` is TensorRT-LLM's config flag, and its commonest."""
+    """Every one of the 56 TensorRT-LLM workers in the corpus uses this."""
     argv = ArgV.shell("exec python3 -m dynamo.trtllm --extra-engine-args /cfg/e.yaml")
     assert TRTLLM.read(argv, "context_length").is_unknown
 

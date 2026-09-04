@@ -9,6 +9,7 @@ impossible to point one suite at an older release.
 """
 
 from .argv import ArgForm, ArgV, is_shell_command_flag
+from .dialect import DIALECTS, Dialect, EngineDialect, detect, for_backend
 from .facts import Fact, FactNotKnown, Status
 from .roles import (
     Policy,
@@ -41,6 +42,12 @@ __all__ = [
     "FactNotKnown",
     "Status",
     "is_shell_command_flag",
+    # engine dialects
+    "DIALECTS",
+    "Dialect",
+    "EngineDialect",
+    "detect",
+    "for_backend",
     # roles and selection
     "Policy",
     "PortName",

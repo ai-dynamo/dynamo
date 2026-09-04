@@ -11,27 +11,36 @@ emits the right flag.
 ## Read every spelling, write one
 
 The mapping is not one-to-one, and that is measured rather than assumed. Across
-the worker containers in ``recipes/`` and ``examples/``, identified by the module
-they actually launch:
+the 312 engine workers in ``recipes/`` and ``examples/`` — identified by the
+module each actually launches — three settings have more than one live
+spelling:
 
-============ =============================== ===============================
-semantic     engine                          spellings found
-============ =============================== ===============================
-model        vLLM                            ``--model`` ×109
-             SGLang                          ``--model-path`` ×23
-             **TensorRT-LLM**                ``--model-path`` ×29 **and**
-                                             ``--model`` ×12
-tensor       vLLM                            ``--tensor-parallel-size`` ×104
-parallel     **SGLang**                      ``--tp`` ×10 **and**
-                                             ``--tensor-parallel-size`` ×7
-             TensorRT-LLM                    ``--tensor-parallel-size`` ×15
-============ =============================== ===============================
+=============== ============= =========================================
+setting         engine        spellings in use
+=============== ============= =========================================
+model           vLLM          ``--model`` x202
+                SGLang        ``--model-path`` x45
+                TensorRT-LLM  ``--model-path`` x44 **and** ``--model`` x12
+tensor_parallel vLLM          ``--tensor-parallel-size`` x164
+                **SGLang**    ``--tp`` x30, ``--tensor-parallel-size`` x7,
+                              **and** ``--tp-size`` x2
+                TensorRT-LLM  ``--tensor-parallel-size`` x15
+=============== ============= =========================================
 
-So a helper that knows only ``--tensor-parallel-size`` misses 10 of SGLang's 17
-workers, and one that knows only ``--model-path`` misses 12 of TensorRT-LLM's 41.
-Reading has to accept every spelling the engine accepts; writing picks the
-canonical one. Those are different lists, and conflating them is what makes a
-scan report a flag as absent when it is right there.
+So a reader that knows only the canonical ``--tensor-parallel-size`` finds it in
+7 of the 39 SGLang workers that set tensor parallelism, and one that knows only
+``--model-path`` misses 12 of TensorRT-LLM's 56. Reading has to accept every
+spelling the engine accepts; writing picks one. Those are different lists, and
+conflating them is what makes a scan report a flag as absent when it is right
+there.
+
+## Settings that are not on the command line at all
+
+**All 56** TensorRT-LLM workers pass ``--extra-engine-args``, and 12 SGLang
+workers pass ``--config``. Their settings live in a file this reader cannot
+open. Answering "not set" for those would be a false statement, so a setting
+missing from a command that defers to a file is reported ``UNKNOWN``, naming the
+file — never ``ABSENT``.
 
 ## Flags that take no value
 
@@ -193,8 +202,8 @@ class Dialect:
         if deferred is not None:
             # Not absent: the command hands its settings to a file this reader
             # cannot open. Saying "not set" here would be a false statement, and
-            # 4 SGLang workers plus every TensorRT-LLM worker using
-            # --extra-engine-args are configured exactly this way.
+            # 12 SGLang workers and all 56 TensorRT-LLM workers are
+            # configured exactly this way.
             return Fact.unknown(
                 argv.source,
                 f"{self.backend}.{semantic} is not on the command line, which "
@@ -232,17 +241,17 @@ def _s(write: str, *read: str, switch: bool = False) -> Semantic:
 VLLM = Dialect(
     backend="vllm",
     settings={
-        "model": _s("--model"),  # 109
+        "model": _s("--model"),  # 202 of 205 vLLM workers
         "served_model_name": _s("--served-model-name"),
-        "context_length": _s("--max-model-len"),  # 80
-        "tensor_parallel": _s("--tensor-parallel-size"),  # 104
+        "context_length": _s("--max-model-len"),  # 110
+        "tensor_parallel": _s("--tensor-parallel-size"),  # 164
         "pipeline_parallel": _s("--pipeline-parallel-size"),  # 14
         "data_parallel": _s("--data-parallel-size"),  # 24
-        "gpu_memory_fraction": _s("--gpu-memory-utilization"),  # 89
-        "max_batch_size": _s("--max-num-seqs"),  # 69
-        "max_batched_tokens": _s("--max-num-batched-tokens"),  # 60
+        "gpu_memory_fraction": _s("--gpu-memory-utilization"),  # 114
+        "max_batch_size": _s("--max-num-seqs"),  # 96
+        "max_batched_tokens": _s("--max-num-batched-tokens"),  # 87
         "kv_cache_dtype": _s("--kv-cache-dtype"),  # 57
-        "eager": _s("--enforce-eager", switch=True),  # 8, takes no value
+        "eager": _s("--enforce-eager", switch=True),  # 14, takes no value
         "trust_remote_code": _s("--trust-remote-code", switch=True),
         "expert_parallel": _s("--enable-expert-parallel", switch=True),  # 23
         "tool_parser": _s("--dyn-tool-call-parser", "--tool-call-parser"),  # 82 / 4
@@ -254,16 +263,16 @@ VLLM = Dialect(
 SGLANG = Dialect(
     backend="sglang",
     settings={
-        "model": _s("--model-path"),  # 23
+        "model": _s("--model-path"),  # 45
         "served_model_name": _s("--served-model-name"),
         "context_length": _s("--context-length"),  # 3
-        # Both spellings are live: --tp x10, --tensor-parallel-size x7. Reading
-        # only the canonical one misses 10 of 17 SGLang workers.
+        # Three spellings are live: --tp x30, --tensor-parallel-size x7,
+        # --tp-size x2. Reading only the canonical one finds 7 of 39.
         "tensor_parallel": _s("--tp", "--tensor-parallel-size", "--tp-size"),
         "data_parallel": _s("--data-parallel-size", "--dp", "--dp-size"),
-        "gpu_memory_fraction": _s("--mem-fraction-static"),  # 12
+        "gpu_memory_fraction": _s("--mem-fraction-static"),  # 19
         "max_batch_size": _s("--max-running-requests"),  # 7
-        "max_batched_tokens": _s("--chunked-prefill-size"),  # 11
+        "max_batched_tokens": _s("--chunked-prefill-size"),  # 15
         "kv_cache_dtype": _s("--kv-cache-dtype"),
         "eager": _s("--disable-cuda-graph", switch=True),
         "trust_remote_code": _s("--trust-remote-code", switch=True),
@@ -276,7 +285,7 @@ SGLANG = Dialect(
 TRTLLM = Dialect(
     backend="trtllm",
     settings={
-        # Both spellings are live: --model-path x29, --model x12.
+        # Both spellings are live: --model-path x44, --model x12.
         "model": _s("--model-path", "--model"),
         "served_model_name": _s("--served-model-name"),
         "context_length": _s("--max-seq-len"),  # 17
@@ -286,7 +295,7 @@ TRTLLM = Dialect(
         "max_batched_tokens": _s("--max-num-tokens"),  # 24
         "kv_cache_dtype": _s("--kv-cache-dtype"),
         "trust_remote_code": _s("--trust-remote-code", switch=True),
-        "extra_engine_args": _s("--extra-engine-args"),  # 49
+        "extra_engine_args": _s("--extra-engine-args"),  # all 56 TRT-LLM workers
         "tool_parser": _s("--dyn-tool-call-parser", "--tool-call-parser"),
         "reasoning_parser": _s("--dyn-reasoning-parser", "--reasoning-parser"),
     },
@@ -313,12 +322,17 @@ def detect(argv: ArgV) -> Fact[str]:
     ``"vllm"`` anywhere picks up image names and environment variables, and it
     mis-attributed 12 TensorRT-LLM containers when this was first measured that
     way.
+
+    Reads the *whole* invocation, not just ``args``. v1alpha1 manifests put the
+    program in ``command`` (``[python3, -m, dynamo.sglang]``) and only its flags
+    in ``args``, so scanning ``args`` alone identifies no engine at all for
+    them.
     """
     if not argv.is_parseable:
         return Fact.unknown(
             argv.source, f"command could not be tokenised: {argv.parse_error}"
         )
-    tokens = [t.text for t in argv.tokens() if t.kind.value == "word"]
+    tokens = list(argv.invocation())
     for i, token in enumerate(tokens):
         if token != "-m" or i + 1 >= len(tokens):
             continue

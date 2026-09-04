@@ -27,7 +27,15 @@ import pytest
 PACKAGE = pathlib.Path(__file__).resolve().parents[1] / "dynamo_test"
 
 # Modules that must import nothing outside the standard library.
-TIER_0 = {"__init__.py", "argv.py", "facts.py", "roles.py", "verbs.py", "catalog.py"}
+TIER_0 = {
+    "__init__.py",
+    "argv.py",
+    "facts.py",
+    "roles.py",
+    "verbs.py",
+    "catalog.py",
+    "dialect.py",
+}
 
 # The one module permitted to import pytest, once it exists.
 PYTEST_OWNER = "pytest_plugin.py"
