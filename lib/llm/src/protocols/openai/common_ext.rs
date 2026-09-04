@@ -112,16 +112,11 @@ pub struct CommonExt {
     pub continue_final_message: Option<bool>,
 }
 
-pub(crate) struct GuidedDecodingOptionsResult {
-    pub(crate) options: Option<GuidedDecodingOptions>,
-    pub(crate) has_whitespace_pattern: bool,
-}
-
 pub(crate) fn extract_guided_decoding_options(
     request: &impl CommonExtProvider,
-) -> anyhow::Result<GuidedDecodingOptionsResult> {
+) -> anyhow::Result<Option<GuidedDecodingOptions>> {
     let guided_whitespace_pattern = request.get_guided_whitespace_pattern();
-    let options = GuidedDecodingOptions::from_optional(
+    GuidedDecodingOptions::from_optional(
         request.get_guided_json(),
         request.get_guided_regex(),
         request.get_guided_choice(),
@@ -129,11 +124,7 @@ pub(crate) fn extract_guided_decoding_options(
         request.get_guided_decoding_backend(),
         guided_whitespace_pattern.clone(),
         None,
-    )?;
-    Ok(GuidedDecodingOptionsResult {
-        options,
-        has_whitespace_pattern: guided_whitespace_pattern.is_some(),
-    })
+    )
 }
 
 impl CommonExt {

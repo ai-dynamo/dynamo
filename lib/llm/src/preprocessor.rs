@@ -5508,14 +5508,9 @@ impl OpenAIPreprocessor {
                                 ..marker_start
                                     + glm47_start_in.len()
                                     + end
-                                + glm47_end_in.len(),
+                                    + glm47_end_in.len(),
                             );
-                        }
-                        // Raw text without a possible native marker cannot affect terminal
-                        // recovery. Keep only a partial marker suffix so ordinary streamed
-                        // prose is not rescanned and retained on every chunk.
-                        if crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47").is_none() {
-                            state.input_text.clear();
+                            state.emitted_text.clear();
                         }
                     }
                 }
@@ -5612,24 +5607,23 @@ impl OpenAIPreprocessor {
                     let state = recovery.entry(choice.index).or_default();
                     if let Some(marker_start) = crate::protocols::openai::chat_completions::unified_parser::unquoted_native_tool_call_marker_or_prefix_start(&state.input_text, "glm47") {
                         let desired_content = &state.input_text[..marker_start];
-                        let replacement = if desired_content.starts_with(&state.emitted_text) {
-                            &desired_content[state.emitted_text.len()..]
-                        } else {
-                            desired_content
-                        };
-                        let suppressing_terminal_marker = choice.finish_reason
+                        if choice.finish_reason
                             == Some(dynamo_protocols::types::FinishReason::Length)
-                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some();
-                        if suppressing_terminal_marker {
+                            && crate::protocols::openai::chat_completions::unified_parser::first_unquoted_native_tool_call_marker(&state.input_text, "glm47").is_some()
+                        {
                             tracing::warn!(
                                 choice_index = choice.index,
                                 why = "truncated_native_tool_call_suppressed",
                                 suppressed_bytes = state.input_text.len() - desired_content.len(),
                                 "glm47 streaming: suppressing incomplete native tool output on length finish"
                             );
+                            let replacement = desired_content
+                                .strip_prefix(&state.emitted_text)
+                                .unwrap_or_default();
+                            choice.delta.content = (!replacement.is_empty()).then(|| {
+                                ChatCompletionMessageContent::Text(replacement.to_string())
+                            });
                         }
-                        choice.delta.content = (!replacement.is_empty())
-                            .then(|| ChatCompletionMessageContent::Text(replacement.to_string()));
                     } else if choice.finish_reason
                         == Some(dynamo_protocols::types::FinishReason::Length)
                         && choice.delta.tool_calls.is_none()
@@ -7597,6 +7591,26 @@ mod tests {
             .collect()
     }
 
+    fn assert_glm47_streaming_length_output(
+        output: &[Annotated<NvCreateChatCompletionStreamResponse>],
+        expected_content: &str,
+        split: usize,
+    ) {
+        assert_eq!(
+            stream_content(output),
+            expected_content,
+            "split at byte {split} must reconstruct the complete visible response"
+        );
+        assert!(
+            output
+                .iter()
+                .flat_map(|response| response.data.iter())
+                .flat_map(|data| data.inner.choices.iter())
+                .any(|choice| choice.finish_reason == Some(FinishReason::Length)),
+            "split at byte {split} must preserve the terminal length delta"
+        );
+    }
+
     #[tokio::test]
     async fn glm47_streaming_length_preserves_prose_and_suppresses_incomplete_marker() {
         let output = apply_glm47_streaming_length(&[
@@ -7620,11 +7634,7 @@ mod tests {
         for split in content.char_indices().map(|(index, _)| index).skip(1) {
             let output =
                 apply_glm47_streaming_length(&[&content[..split], &content[split..]]).await;
-            assert_eq!(
-                stream_content(&output),
-                content,
-                "split at byte {split} must preserve quoted marker prose"
-            );
+            assert_glm47_streaming_length_output(&output, content, split);
         }
     }
 
@@ -7633,11 +7643,7 @@ mod tests {
         let input = "I can help. <tool_call>get_weather<arg_key>city</arg_key><arg_value>Par";
         for split in input.char_indices().map(|(index, _)| index).skip(1) {
             let output = apply_glm47_streaming_length(&[&input[..split], &input[split..]]).await;
-            assert_eq!(
-                stream_content(&output),
-                "I can help. ",
-                "split at byte {split} must not expose truncated marker content"
-            );
+            assert_glm47_streaming_length_output(&output, "I can help. ", split);
         }
     }
 
@@ -8381,6 +8387,99 @@ mod tests {
         assert!(!should_hash_decoded_video(true, true, false, true));
         assert!(!should_hash_decoded_video(true, false, true, true));
         assert!(!should_hash_decoded_video(true, false, false, false));
+    }
+
+    #[cfg(all(
+        feature = "mm-routing",
+        feature = "media-ffmpeg",
+        feature = "testing-nixl"
+    ))]
+    #[tokio::test]
+    async fn adjacent_videos_reach_media_loader_with_hashing_disabled() {
+        let video_bytes = include_bytes!("../tests/data/media/240p_10.mp4");
+        let mut server = mockito::Server::new_async().await;
+        let video_mock = server
+            .mock("GET", "/video.mp4")
+            .with_status(200)
+            .with_header("content-type", "video/mp4")
+            .with_body(&video_bytes[..])
+            .expect(2)
+            .create_async()
+            .await;
+
+        let mdc = ModelDeploymentCard::load_from_disk(
+            "tests/data/sample-models/mock-llama-3.1-8b-instruct",
+            None,
+        )
+        .unwrap();
+        let mut preprocessor = Arc::try_unwrap(OpenAIPreprocessor::new(mdc).unwrap())
+            .unwrap_or_else(|_| panic!("test preprocessor unexpectedly shared"));
+        let media_decoder: MediaDecoder = serde_json::from_value(serde_json::json!({
+            "video": {"num_frames": 2}
+        }))
+        .unwrap();
+        let media_fetcher = MediaFetcher {
+            allow_direct_ip: true,
+            allow_direct_port: true,
+            allow_private_ips: true,
+            ..Default::default()
+        };
+        preprocessor.media_loader = Some(
+            MediaLoader::new(media_decoder, Some(media_fetcher))
+                .expect("test media loader must initialize"),
+        );
+        preprocessor.video_routing_processor = Some(mm_routing::VideoRoutingProcessor::test_stub());
+
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": format!("{}/video.mp4", server.url())}
+                    },
+                    {
+                        "type": "video_url",
+                        "video_url": {"url": format!("{}/video.mp4", server.url())}
+                    }
+                ]
+            }],
+            "max_tokens": 1
+        }))
+        .unwrap();
+        let mut builder = PreprocessedRequest::builder();
+        builder
+            .model("test-model".to_string())
+            .token_ids(Vec::new())
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default());
+
+        let (routing_entries, _) = preprocessor
+            .gather_multi_modal_data_with_image_tokens(&request, &mut builder, None, &[])
+            .await
+            .unwrap();
+        let preprocessed = builder.build().unwrap();
+        let videos = preprocessed
+            .multi_modal_data
+            .as_ref()
+            .and_then(|media| media.get("video_url"))
+            .expect("both decoded videos must be forwarded");
+
+        assert_eq!(videos.len(), 2);
+        for video in videos {
+            let MultimodalData::Decoded(descriptor) = video else {
+                panic!("video must reach the media loader and be decoded");
+            };
+            assert!(
+                descriptor.content_hash().is_none(),
+                "adjacent videos must reach the media loader with hashing disabled"
+            );
+        }
+        assert!(routing_entries.is_empty());
+        assert!(preprocessed.mm_routing_info.is_none());
+        video_mock.assert_async().await;
     }
 
     #[test]
