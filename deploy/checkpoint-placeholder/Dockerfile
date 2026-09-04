@@ -36,7 +36,7 @@
 # PATH search -- and so must this placeholder image (same BASE_IMAGE).
 #
 # Dynamo backend entrypoints run a restore standby path when the operator
-# injects DYN_SNAPSHOT_RESTORE_STANDBY=1, then sleep while the snapshot agent
+# injects SNAPSHOT_RESTORE_STANDBY=1, then sleep while the snapshot agent
 # restores into the container.
 
 ARG BASE_IMAGE=placeholder-requires-base-image-arg

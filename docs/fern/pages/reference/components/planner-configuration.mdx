@@ -183,7 +183,7 @@ When `optimization_target` is `throughput`, `latency`, or `load`, the Planner fo
   Minimum decode endpoints in `disagg` and `decode` modes. When set, replaces the decode value supplied by `min_endpoint`. Must be at least `1`.
 </ParamField>
 
-The Planner does not have per-component maximum endpoint fields. `max_gpu_budget`, the power budget when enabled, Global Planner allocation, and cluster capacity continue to bound scale-up. At startup and for runtime updates, the Planner rejects minimum endpoint combinations that cannot fit the configured GPU or power budget.
+The Planner does not have per-component maximum endpoint fields. `max_gpu_budget`, the power budget when enabled, Global Planner allocation, and cluster capacity continue to bound scale-up. At startup and for runtime updates, the Planner rejects minimum endpoint combinations that cannot fit the configured GPU or power budget. Send `min_gpu_budget` and `max_gpu_budget` with the endpoint fields to `PATCH /v1/min-endpoints` to update them atomically at runtime. Set either budget to `-1` to disable that bound. When both budgets are enabled, `min_gpu_budget` must not exceed `max_gpu_budget`. The response from `GET` or `PATCH` includes both budgets.
 
 <ParamField path="decode_engine_num_gpu" type="integer" default="null">
   GPUs per decode engine replica. Auto-detected from the deployment when unset.
@@ -197,6 +197,10 @@ The Planner does not have per-component maximum endpoint fields. `max_gpu_budget
 
 <ParamField path="throughput_adjustment_interval_seconds" type="integer" default="180">
   Seconds between throughput-based scaling decisions. Also accepts the alias `throughput_adjustment_interval`.
+</ParamField>
+
+<ParamField path="max_throughput_scaling_replicas" type="integer" default="8">
+  Maximum replica-count change per component from one throughput observation. The Planner caps and stores the throughput lower bound, so load-scaling ticks cannot repeatedly apply the same uncapped prediction. GPU and power budgets can reduce the change further. At the nominal minimum GPU budget, scale-down-only requests hold. At a full GPU budget, two scale-up requests hold; an opposing prefill/decode proposal applies only the largest atomic pair that fits the budget. Endpoint and out-of-band budget recovery take precedence over this limit. Must be greater than `0`.
 </ParamField>
 
 <ParamField path="throughput_metrics_source" type="string" default="frontend">

@@ -107,6 +107,17 @@ runs:
         if not available:
             sys.exit("GPU tests requested but torch.cuda.is_available() is False")
 
+    # TRT-LLM starts MPI ranks and several runtime processes per test.
+    # Higher slot counts can starve startup even when VRAM fits.
+    # xdist resolves `-n auto` from this variable before tests/conftest.py
+    # saves the result as the GPU scheduler slot count.
+    - name: Limit TRT-LLM GPU parallelism
+      if: inputs.max_vram_gib != '' && startsWith(inputs.test_suite_name, 'trtllm')
+      shell: bash
+      run: |
+        echo "PYTEST_XDIST_AUTO_NUM_WORKERS=2" >> "$GITHUB_ENV"
+        echo "📊 TRT-LLM GPU parallelism: capping at 2 concurrent tests"
+
     - name: Run pytest
       shell: bash
       env:
@@ -161,7 +172,6 @@ runs:
         # to set HOME=/ by default. Pin HOME to GITHUB_WORKSPACE so downstream code
         # that reads HOME (git, getpass.getuser) gets a writable path.
         export HOME="${GITHUB_WORKSPACE}"
-
 
         # XDG cache (flashinfer JIT, torch compile) → NVMe when available
         export XDG_CACHE_HOME="${WORK_DIR}/.cache"
