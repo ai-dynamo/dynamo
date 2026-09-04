@@ -769,6 +769,57 @@ fn kv_event_connect_host(
     Ok(bare_host.to_string())
 }
 
+fn hicache_native_offloading_capacity(server_info: &Value) -> Option<u64> {
+    let device_tokens = server_info
+        .get("max_total_num_tokens")?
+        .as_u64()
+        .filter(|tokens| *tokens > 0)?;
+    let policy = server_info.get("hicache_write_policy")?.as_str()?;
+    if !matches!(policy, "write_back" | "write_through") {
+        return None;
+    }
+
+    let host_tokens = match server_info.get("hicache_host_total_tokens") {
+        Some(value) => value.as_u64().filter(|tokens| *tokens > 0)?,
+        None => {
+            if server_info
+                .get("enable_hierarchical_cache")
+                .and_then(Value::as_bool)
+                != Some(true)
+                || server_info.get("hicache_size").and_then(Value::as_u64) != Some(0)
+                || client::json_u64(server_info, "dcp_size")
+                    .unwrap_or(1)
+                    .max(1)
+                    > 1
+            {
+                return None;
+            }
+
+            let page_size = client::json_u64(server_info, "page_size").filter(|size| *size > 0)?;
+            let ratio = server_info
+                .get("hicache_ratio")?
+                .as_f64()
+                .filter(|ratio| ratio.is_finite() && *ratio > 0.0)?;
+            let unaligned_tokens = device_tokens as f64 * ratio;
+            if !unaligned_tokens.is_finite() || unaligned_tokens >= u64::MAX as f64 {
+                return None;
+            }
+            (unaligned_tokens as u64)
+                .checked_div(page_size)?
+                .checked_add(1)?
+                .checked_mul(page_size)?
+        }
+    };
+
+    match policy {
+        "write_back" => Some(host_tokens),
+        "write_through" => host_tokens
+            .checked_sub(device_tokens)
+            .filter(|tokens| *tokens > 0),
+        _ => None,
+    }
+}
+
 fn build_engine_config(
     discovery: &Discovery,
     mode: DisaggregationMode,
@@ -825,6 +876,12 @@ fn build_engine_config(
         "grpc_service".to_string(),
         Value::String("sglang.runtime.v1.SglangService".to_string()),
     );
+    if let Some(total_tokens) = hicache_native_offloading_capacity(&discovery.server_info) {
+        runtime_data.insert(
+            "native_offloading_capacity".to_string(),
+            serde_json::json!({"total_tokens": total_tokens}),
+        );
+    }
 
     Ok(EngineConfig {
         model: discovery.model_path.clone(),
@@ -969,6 +1026,129 @@ mod tests {
 
         assert_eq!(registration.kv_cache_block_size, Some(512));
         assert_eq!(registration.total_kv_blocks, Some(16));
+    }
+
+    #[test]
+    fn publishes_ratio_based_hicache_capacity() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "enable_hierarchical_cache": true,
+                "hicache_size": 0,
+                "hicache_ratio": 3.0,
+                "hicache_write_policy": "write_back",
+                "page_size": 16,
+                "max_total_num_tokens": 100,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.runtime_data.get("native_offloading_capacity"),
+            Some(&json!({"total_tokens": 304}))
+        );
+    }
+
+    #[test]
+    fn hicache_capacity_accounts_for_write_policy() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "enable_hierarchical_cache": true,
+                "hicache_size": 0,
+                "hicache_ratio": 3.0,
+                "hicache_write_policy": "write_through",
+                "page_size": 16,
+                "max_total_num_tokens": 100,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.runtime_data.get("native_offloading_capacity"),
+            Some(&json!({"total_tokens": 204}))
+        );
+    }
+
+    #[test]
+    fn authoritative_hicache_capacity_takes_precedence() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "enable_hierarchical_cache": true,
+                "hicache_host_total_tokens": 300,
+                "hicache_size": 0,
+                "hicache_ratio": 3.0,
+                "hicache_write_policy": "write_back",
+                "page_size": 16,
+                "max_total_num_tokens": 100,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.runtime_data.get("native_offloading_capacity"),
+            Some(&json!({"total_tokens": 300}))
+        );
+    }
+
+    #[test]
+    fn does_not_publish_unproven_hicache_capacity() {
+        for server_info in [
+            json!({
+                "enable_hierarchical_cache": false,
+                "hicache_size": 0,
+                "hicache_ratio": 3.0,
+                "hicache_write_policy": "write_back",
+                "page_size": 16,
+                "max_total_num_tokens": 100,
+            }),
+            json!({
+                "enable_hierarchical_cache": true,
+                "hicache_size": 4,
+                "hicache_ratio": 3.0,
+                "hicache_write_policy": "write_back",
+                "page_size": 16,
+                "max_total_num_tokens": 100,
+            }),
+            json!({
+                "enable_hierarchical_cache": true,
+                "hicache_size": 0,
+                "hicache_ratio": 3.0,
+                "hicache_write_policy": "write_through_selective",
+                "page_size": 16,
+                "max_total_num_tokens": 100,
+            }),
+            json!({
+                "enable_hierarchical_cache": true,
+                "hicache_size": 0,
+                "hicache_ratio": 3.0,
+                "hicache_write_policy": "write_back",
+                "page_size": 16,
+                "dcp_size": 2,
+                "max_total_num_tokens": 100,
+            }),
+        ] {
+            let config = build_engine_config(
+                &discovery(server_info),
+                DisaggregationMode::Decode,
+                None,
+                None,
+            )
+            .unwrap();
+
+            assert!(
+                !config
+                    .runtime_data
+                    .contains_key("native_offloading_capacity")
+            );
+        }
     }
 
     #[test]
