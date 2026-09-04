@@ -150,7 +150,7 @@ spec:
                 readOnly: true
             - name: runtime-tmp
               emptyDir: {}
-    - name: VllmPrefillWorker
+    - name: prefill
       type: prefill
       replicas: 2
       runtimeVersionOverride: "1.4.2"
@@ -290,7 +290,7 @@ spec:
               emptyDir:
                 medium: Memory
                 sizeLimit: 64Gi
-    - name: VllmDecodeWorker
+    - name: decode
       type: decode
       replicas: 1
       runtimeVersionOverride: "1.4.2"

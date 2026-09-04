@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -12,8 +13,38 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts/kustomize-matrix.py"
 MODULE_PATH = REPO_ROOT / "scripts/kustomize-matrix.py"
+USER_FACING_MANIFEST_ROOTS = (
+    REPO_ROOT / "benchmarks",
+    REPO_ROOT / "components/src/dynamo/profiler/templates",
+    REPO_ROOT / "examples",
+    REPO_ROOT / "recipes",
+)
+LEGACY_VLLM_COMPONENT_NAME = re.compile(
+    r"^\s*(?:"
+    r"-\s+name:\s*['\"]?Vllm(?:Worker|Prefill(?:Worker)?|Decode(?:Worker)?)['\"]?"
+    r"|['\"]?Vllm(?:Worker|Prefill(?:Worker)?|Decode(?:Worker)?)['\"]?\s*:"
+    r")\s*(?:#.*)?$"
+)
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
+
+
+def test_user_facing_manifests_use_short_vllm_component_names():
+    violations = []
+    for root in USER_FACING_MANIFEST_ROOTS:
+        for path in sorted(root.rglob("*.yaml")):
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if LEGACY_VLLM_COMPONENT_NAME.fullmatch(line):
+                    violations.append(
+                        f"{path.relative_to(REPO_ROOT)}:{line_number}: {line.strip()}"
+                    )
+
+    assert not violations, (
+        "user-facing manifests must use worker, prefill, or decode instead of "
+        "legacy vLLM component names:\n" + "\n".join(violations)
+    )
 
 
 def load_matrix_module():
