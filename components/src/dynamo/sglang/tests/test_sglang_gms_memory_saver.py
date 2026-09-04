@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import multiprocessing as mp
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -282,3 +283,44 @@ def test_invalid_or_duplicate_publication_preserves_first_model(
             impl.finalize_write_mode(torch.nn.Module())
 
     finalize.assert_called_once_with(weights, first_model)
+
+
+def _setup_gms_in_child(result: mp.Queue) -> None:
+    # Imported here so GMS's process-wide Torch/SGLang patches stay in the child.
+    from gpu_memory_service.integrations.sglang import setup_gms
+    from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader
+
+    server_args = SimpleNamespace(
+        enable_memory_saver=False,
+        enable_weights_cpu_backup=False,
+        enable_draft_weights_cpu_backup=False,
+        model_loader_extra_config={},
+    )
+    loader = setup_gms(server_args)
+    result.put(
+        (
+            server_args.enable_memory_saver,
+            loader is GMSModelLoader,
+        )
+    )
+
+
+@pytest.mark.timeout(30)
+def test_setup_gms_enables_memory_saver_and_returns_model_loader():
+    ctx = mp.get_context("spawn")
+    result = ctx.Queue()
+    proc = ctx.Process(target=_setup_gms_in_child, args=(result,))
+    proc.start()
+    try:
+        proc.join(timeout=20)
+        if proc.is_alive():
+            pytest.fail("setup_gms child did not finish within 20s")
+    finally:
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=5)
+
+    assert proc.exitcode == 0
+    enable_memory_saver, loader_is_gms = result.get_nowait()
+    assert enable_memory_saver is True
+    assert loader_is_gms is True
