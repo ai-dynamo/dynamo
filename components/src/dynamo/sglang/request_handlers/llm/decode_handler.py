@@ -403,10 +403,43 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             return None
         return mm_hashes
 
+    def _rl_mode_enabled(self) -> bool:
+        """Whether this worker was launched with ``--enable-rl``.
+
+        RL clients consume the token stream itself rather than the detokenized
+        text, so a few response-shaping decisions differ between the two modes.
+        """
+        return bool(
+            getattr(getattr(self.config, "dynamo_args", None), "enable_rl", False)
+        )
+
+    def _suppressed_stop_token_ids_for(self, request: Dict[str, Any]) -> set[int]:
+        """Trailing stop token ids to drop from this worker's token stream.
+
+        Empty under ``--enable-rl``, so the token stream keeps the token that
+        terminated generation.
+
+        Tokens-in-Tokens-Out clients (``nvext.completion_token_ids``) treat the
+        returned ids as the exact sequence the engine sampled and feed it straight
+        back in as the next turn's prompt. Dropping the terminating token there
+        leaves an assistant turn that never closes, and no length check catches it
+        because the logprob array is trimmed by the same amount.
+
+        Nothing leaks into text as a result, because suppression already happens at
+        the presentation layer, which is where it belongs: the Rust ``Decoder``
+        returns no text for any hidden or user stop token id, and the SGLang frontend
+        post-processor strips trailing stop token ids before it detokenizes. Both are
+        unconditional, so this only decides *where* the marker is dropped, not
+        whether it reaches the user.
+        """
+        if self._rl_mode_enabled():
+            return set()
+        return _suppressed_stop_token_ids(request)
+
     def _metadata_uploader_from_request(
         self, request: Dict[str, Any]
     ) -> MetadataUploader | None:
-        if not getattr(getattr(self.config, "dynamo_args", None), "enable_rl", False):
+        if not self._rl_mode_enabled():
             return None
         return MetadataUploader.from_backend_request(request)
 
@@ -567,7 +600,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             output_options.get("return_tokens_as_token_ids")
         )
         user_stop_token_ids = _user_stop_token_ids(request)
-        suppressed_stop_token_ids = _suppressed_stop_token_ids(request)
+        suppressed_stop_token_ids = self._suppressed_stop_token_ids_for(request)
 
         lora_path = self._resolve_lora(request)
         if lora_path:

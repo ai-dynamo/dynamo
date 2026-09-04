@@ -57,6 +57,7 @@ from dynamo.frontend.sglang_processor import (
     _model_eos_token_ids,
     _normalize_eos_token_ids,
     _preprocess_worker,
+    _request_stop_token_ids,
     _runtime_config_parser_name,
     _tokenizer_eos_token_ids,
 )
@@ -561,6 +562,28 @@ class TestBuildDynamoPreproc:  # FRONTEND.7 — worker subprocess preproc constr
 
         assert result["stop_conditions"]["stop"] == []
         assert result["stop_conditions"]["stop_token_ids"] == [32, 34]
+
+    def test_request_stop_token_ids_mirrors_preproc_stop_token_ids(self):
+        """The post-processor's suppression set matches what the engine stops on.
+
+        ``_request_stop_token_ids`` feeds the post-processor, which drops a trailing
+        stop marker before detokenizing. It has to agree with the
+        ``stop_conditions.stop_token_ids`` sent to the worker, including the
+        integer-``stop`` spelling above.
+        """
+        for request in (
+            {"model": "test", "stop": [32, 34]},
+            {"model": "test", "stop_token_ids": [32, 34]},
+        ):
+            preproc = _build_dynamo_preproc(request, [1], "test", None)
+            assert _request_stop_token_ids(request) == set(
+                preproc["stop_conditions"]["stop_token_ids"]
+            )
+
+        # String stops are not token stops, and booleans are not token ids.
+        assert _request_stop_token_ids({"stop": " The"}) == set()
+        assert _request_stop_token_ids({"stop_token_ids": [True, 34]}) == {34}
+        assert _request_stop_token_ids({}) == set()
 
     def test_string_stops_remain_string_stops(self):
         """String stops are forwarded as string stops."""
@@ -3786,7 +3809,38 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             eos_token_ids=[2, 3],
         )
 
-        assert post._strip_trailing_eos_token_ids([10, 3, 2]) == [10]
+        assert post._strip_trailing_stop_token_ids([10, 3, 2]) == [10]
+
+    def test_strips_trailing_request_stop_token_ids(self, tokenizer):
+        """A request stop token id is stripped even when it is not a tokenizer EOS.
+
+        Covers the two cases the EOS set alone misses: a model that declares extra
+        EOS ids in ``generation_config.json`` (they reach the frontend only as
+        request stop token ids), and a worker under ``--enable-rl`` that leaves the
+        terminating token in the stream on purpose.
+        """
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=None,
+            eos_token_ids=[2],
+            stop_token_ids={576},
+        )
+
+        assert post._strip_trailing_stop_token_ids([10, 576]) == [10]
+        assert post._strip_trailing_stop_token_ids([10, 576, 2]) == [10]
+        # A stop id that is not at the tail is content, not a marker.
+        assert post._strip_trailing_stop_token_ids([576, 10]) == [576, 10]
+
+    def test_keeps_tail_when_no_stop_ids_configured(self, tokenizer):
+        """With neither EOS nor stop ids there is nothing to strip."""
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=None,
+        )
+
+        assert post._strip_trailing_stop_token_ids([10, 2]) == [10, 2]
 
 
 # ---------------------------------------------------------------------------

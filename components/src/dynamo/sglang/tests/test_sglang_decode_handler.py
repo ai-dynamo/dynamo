@@ -291,6 +291,83 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
     return handler
 
 
+_STOP_MARKER_REQUEST = {
+    "stop_conditions": {
+        "stop_token_ids": [576],
+        "stop_token_ids_hidden": [128001],
+    }
+}
+
+
+def test_suppressed_stop_token_ids_for_drops_markers_without_rl():
+    """Default serving keeps stop markers out of the token stream."""
+    handler = _new_decode_handler()
+
+    assert handler._suppressed_stop_token_ids_for(_STOP_MARKER_REQUEST) == {
+        576,
+        128001,
+    }
+
+
+def test_suppressed_stop_token_ids_for_preserves_markers_under_rl():
+    """``--enable-rl`` leaves the terminating token in the token stream.
+
+    Tokens-in-Tokens-Out clients re-feed the returned ids as the next prompt, so a
+    stripped terminator produces an assistant turn that never closes. Text stays
+    clean regardless: the Rust ``Decoder`` and the SGLang frontend post-processor
+    both suppress the marker at the presentation layer.
+    """
+    handler = _new_decode_handler(enable_rl=True)
+
+    assert handler._suppressed_stop_token_ids_for(_STOP_MARKER_REQUEST) == set()
+
+
+@pytest.mark.asyncio
+async def test_process_token_stream_keeps_stop_token_and_logprobs_under_rl():
+    """The RL token stream is byte-for-byte what the engine sampled.
+
+    Mirrors ``test_process_token_stream_trims_logprobs_for_suppressed_stop_token``
+    with the suppression set the RL path produces, so the two modes are pinned
+    against each other.
+    """
+    handler = _new_decode_handler(enable_rl=True)
+
+    chunks = await _collect(
+        handler._process_token_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "output_ids": [101, 128001],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {"type": "stop", "matched": 128001},
+                            "output_token_logprobs": [
+                                (-0.1, 101, "a"),
+                                (-0.2, 128001, "<|user|>"),
+                            ],
+                        },
+                    }
+                ]
+            ),
+            _Context(),
+            user_stop_token_ids={576},
+            suppressed_stop_token_ids=handler._suppressed_stop_token_ids_for(
+                _STOP_MARKER_REQUEST
+            ),
+        )
+    )
+
+    assert chunks == [
+        {
+            "index": 0,
+            "finish_reason": "stop",
+            "token_ids": [101, 128001],
+            "log_probs": [-0.1, -0.2],
+        }
+    ]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "processor_name", ["_process_token_stream", "_process_text_stream"]

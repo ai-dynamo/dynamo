@@ -146,6 +146,30 @@ def _request_stop_strings(request: dict[str, Any]) -> set[str]:
     return set()
 
 
+def _request_stop_token_ids(request: dict[str, Any]) -> set[int]:
+    """Stop token ids this request asks the engine to stop on.
+
+    Mirrors how :func:`_build_dynamo_preproc` fills
+    ``stop_conditions.stop_token_ids``, including the case where ``stop`` is an
+    all-integer array. The post-processor drops a trailing stop marker from these
+    before detokenizing, which is the only place it happens when the worker was
+    launched with ``--enable-rl`` and therefore keeps the marker in the token stream.
+    """
+    values: list[Any] = list(request.get("stop_token_ids") or [])
+    stop = request.get("stop")
+    if (
+        isinstance(stop, list)
+        and stop
+        and all(isinstance(item, int) and not isinstance(item, bool) for item in stop)
+    ):
+        values.extend(stop)
+    return {
+        token_id
+        for token_id in values
+        if isinstance(token_id, int) and not isinstance(token_id, bool)
+    }
+
+
 def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
     eos_token_ids = _normalize_eos_token_ids(getattr(tokenizer, "eos_token_ids", None))
     if eos_token_ids:
@@ -612,6 +636,7 @@ class SglangProcessor:
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
+            stop_token_ids=_request_stop_token_ids(request),
         )
 
         async for item in self._generate_and_stream(
@@ -672,6 +697,7 @@ class SglangProcessor:
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
+            stop_token_ids=_request_stop_token_ids(request),
         )
 
         async for item in self._generate_and_stream(
