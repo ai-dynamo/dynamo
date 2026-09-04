@@ -60,6 +60,8 @@ pub struct ServerOptions {
     #[builder(default = "0")]
     pub port: u16,
 
+    /// IP literal or exact network interface name used to bind and advertise the server.
+    /// When unset, Dynamo selects a local address automatically.
     #[builder(default)]
     pub interface: Option<String>,
 }
@@ -1575,10 +1577,17 @@ mod tests {
 
     #[tokio::test]
     async fn configured_ip_literals_bind_and_format_addresses() {
+        let ipv6_available = TcpListener::bind("[::1]:0").is_ok();
+
         for (host, expected_ip) in [
             ("127.0.0.1", "127.0.0.1".parse::<IpAddr>().unwrap()),
             ("::1", "::1".parse::<IpAddr>().unwrap()),
         ] {
+            if expected_ip.is_ipv6() && !ipv6_available {
+                eprintln!("skipping IPv6 bind because this host does not support IPv6 loopback");
+                continue;
+            }
+
             let server = TcpStreamServer::new_with_resolver(
                 ServerOptions {
                     port: 0,

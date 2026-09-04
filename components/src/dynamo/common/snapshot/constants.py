@@ -33,6 +33,7 @@ RESTORE_RUNTIME_ENV_NAMES = {
     # DistributedRuntime infrastructure env read after restore.
     "DYN_EVENT_PLANE_HOST",
     "DYN_TCP_RPC_HOST",
+    "DYN_TCP_RPC_PORT",
     "DYN_TCP_RESPONSE_STREAM_HOST",
     "DYN_TCP_RESPONSE_STREAM_PORT",
     "NATS_SERVER",

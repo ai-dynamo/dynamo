@@ -5,7 +5,7 @@
 
 use anyhow::{Result, bail};
 use local_ip_address::{Error, list_afinet_netifas, local_ip, local_ipv6};
-use std::{collections::HashMap, ffi::OsString, net::IpAddr};
+use std::{ffi::OsString, net::IpAddr};
 
 const FALLBACK: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 
@@ -73,20 +73,20 @@ pub(crate) fn resolve_host_or_interface<R: IpResolver>(
     resolver: &R,
 ) -> Result<IpAddr> {
     let host_or_interface = host_or_interface.trim();
-    if let Ok(ip) = host_or_interface.parse::<IpAddr>() {
-        if ip.is_unspecified() {
-            bail!("unspecified IP addresses cannot be advertised");
-        }
-        return Ok(ip);
-    }
-
-    let interfaces: HashMap<String, IpAddr> = resolver.list_afinet_netifas()?.into_iter().collect();
-    let ip = interfaces.get(host_or_interface).copied().ok_or_else(|| {
-        anyhow::anyhow!(
-            "'{host_or_interface}' is not a valid IP address and no network interface with that name was found"
-        )
-    })?;
-    if ip.is_unspecified() {
+    let ip = match host_or_interface.parse::<IpAddr>() {
+        Ok(ip) => ip,
+        Err(_) => resolver
+            .list_afinet_netifas()?
+            .into_iter()
+            .filter_map(|(name, ip)| (name == host_or_interface).then_some(ip))
+            .next_back()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "'{host_or_interface}' is not a valid IP address and no network interface with that name was found"
+                )
+            })?,
+    };
+    if ip.to_canonical().is_unspecified() {
         bail!("unspecified IP addresses cannot be advertised");
     }
     Ok(ip)
@@ -194,10 +194,10 @@ mod tests {
         let resolver = MockIpResolver {
             v4: Err(Error::LocalIpAddressNotFound),
             v6: Err(Error::LocalIpAddressNotFound),
-            interfaces: Vec::new(),
+            interfaces: vec![("wildcard0".to_string(), "::ffff:0.0.0.0".parse().unwrap())],
         };
 
-        for host in ["0.0.0.0", "::"] {
+        for host in ["0.0.0.0", "::", "::ffff:0.0.0.0", "wildcard0"] {
             assert_eq!(
                 resolve_host_or_interface(host, &resolver)
                     .unwrap_err()

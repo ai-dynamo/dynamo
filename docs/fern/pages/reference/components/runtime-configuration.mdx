@@ -139,8 +139,9 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
 </ParamField>
 
 <ParamField path="DYN_TCP_RESPONSE_STREAM_PORT" type="integer" default="0">
-  Port used by the TCP response stream server. When unset or set to `0`, the operating system assigns
-  a free port. Values must be between `0` and `65535`.
+  Port used by the TCP response stream server. Dynamo trims surrounding whitespace. When the value
+  is unset, empty, or `0`, the operating system assigns a free port. Values must be between `0` and
+  `65535`.
 </ParamField>
 
 <ParamField path="--event-plane" type="string" default="zmq">
