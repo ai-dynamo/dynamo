@@ -30,8 +30,9 @@ pub use delta::DeltaGenerator;
 use dynamo_parsers::tool_calling::{ToolCallResponse, ToolCallResponseChunk};
 use dynamo_protocols::types::{
     ChatChoiceStream, ChatCompletionMessageContent, ChatCompletionMessageToolCall,
-    ChatCompletionMessageToolCallChunk, ChatCompletionStreamResponseDelta, FinishReason,
-    FunctionCall, FunctionCallStream, FunctionType,
+    ChatCompletionMessageToolCallChunk, ChatCompletionRequestMessage,
+    ChatCompletionStreamResponseDelta, FinishReason, FunctionCall, FunctionCallStream,
+    FunctionType,
 };
 
 /// Map a parser-native [`ToolCallResponse`] onto the protocol/wire
@@ -139,12 +140,20 @@ impl NvCreateChatCompletionRequest {
             .map(openai_thinking_mode)
             .transpose()?
             .flatten();
+        let thinking_object = self.thinking.as_ref().and_then(|value| value.as_object());
         // vLLM's order: an explicit top-level grade wins, else the nested one.
+        // Kimi Code sends the grade as `thinking.effort` rather than `reasoning_effort`.
         let reasoning_effort = self
             .inner
             .reasoning_effort
             .as_ref()
             .and_then(|effort| serde_json::to_value(effort).ok())
+            .or_else(|| {
+                thinking_object
+                    .and_then(|object| object.get("effort"))
+                    .filter(|effort| effort.is_string())
+                    .cloned()
+            })
             .or_else(|| {
                 self.chat_template_args
                     .as_ref()
@@ -153,12 +162,22 @@ impl NvCreateChatCompletionRequest {
                     .filter(|effort| !effort.is_null())
                     .cloned()
             });
+        // Moonshot `thinking.keep: "all"` retains prior-turn reasoning in the
+        // prompt; the Kimi templates read it as `preserve_thinking`.
+        let preserve_thinking = thinking_object
+            .and_then(|object| object.get("keep"))
+            .filter(|keep| !keep.is_null())
+            .map(|keep| keep.as_str() == Some("all"));
 
         let has_template_control = self
             .chat_template_args
             .as_ref()
             .is_some_and(|args| THINKING_KEYS.iter().any(|key| args.contains_key(*key)));
-        if thinking_mode.is_none() && reasoning_effort.is_none() && !has_template_control {
+        if thinking_mode.is_none()
+            && reasoning_effort.is_none()
+            && preserve_thinking.is_none()
+            && !has_template_control
+        {
             return Ok(());
         }
 
@@ -207,12 +226,33 @@ impl NvCreateChatCompletionRequest {
         if let Some(effort) = reasoning_effort {
             args.insert("reasoning_effort".to_string(), effort);
         }
+        if let Some(preserve) = preserve_thinking {
+            args.insert(
+                "preserve_thinking".to_string(),
+                serde_json::Value::Bool(preserve),
+            );
+        }
 
         // The raw `thinking` payload has been folded into `chat_template_args`;
         // drop it so it isn't double-shipped downstream (and so it can't be
         // re-interpreted with different precedence by the worker preprocessor).
         self.thinking = None;
         Ok(())
+    }
+
+    /// Moonshot partial mode: `partial: true` on a final assistant message asks
+    /// the model to continue that content. Express it as vLLM's
+    /// `continue_final_message` so one render path serves both dialects.
+    /// An explicit `add_generation_prompt: true` is left for validation to reject.
+    pub fn normalize_partial_final_message(&mut self) {
+        let Some(ChatCompletionRequestMessage::Assistant(last)) = self.inner.messages.last() else {
+            return;
+        };
+        if last.partial != Some(true) {
+            return;
+        }
+        self.common.continue_final_message = Some(true);
+        self.common.add_generation_prompt.get_or_insert(false);
     }
 }
 
@@ -1410,6 +1450,128 @@ mod tests {
         assert_eq!(args.get("thinking_mode"), Some(&json!("adaptive")));
         assert_eq!(args.get("thinking"), None);
         assert!(request.thinking.is_none());
+    }
+
+    #[test]
+    fn test_nested_thinking_effort_and_keep_normalize_to_template_args() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "enabled", "effort": "high", "keep": "all"}
+        }))
+        .unwrap();
+        request.normalize_reasoning_template_args().unwrap();
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("thinking"), Some(&json!(true)));
+        assert_eq!(args.get("reasoning_effort"), Some(&json!("high")));
+        assert_eq!(args.get("preserve_thinking"), Some(&json!(true)));
+        assert!(request.thinking.is_none());
+    }
+
+    #[test]
+    fn test_top_level_reasoning_effort_outranks_nested_thinking_effort() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "low",
+            "thinking": {"type": "enabled", "effort": "max"}
+        }))
+        .unwrap();
+        request.normalize_reasoning_template_args().unwrap();
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("reasoning_effort"), Some(&json!("low")));
+        assert_eq!(args.get("preserve_thinking"), None);
+    }
+
+    #[test]
+    fn test_thinking_keep_null_is_not_preserve() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K2.6",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "thinking": {"type": "enabled", "keep": null}
+        }))
+        .unwrap();
+        request.normalize_reasoning_template_args().unwrap();
+
+        let args = request.chat_template_args.as_ref().unwrap();
+        assert_eq!(args.get("preserve_thinking"), None);
+    }
+
+    #[test]
+    fn test_partial_final_assistant_message_becomes_continue_final_message() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {"role": "user", "content": "Return JSON"},
+                {"role": "assistant", "content": "{\"answer\":", "partial": true}
+            ]
+        }))
+        .unwrap();
+        request.normalize_partial_final_message();
+        assert_eq!(request.common.continue_final_message, Some(true));
+        assert_eq!(request.common.add_generation_prompt, Some(false));
+        ValidateRequest::validate(&request).unwrap();
+    }
+
+    #[test]
+    fn test_partial_only_applies_to_final_assistant_message() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [
+                {"role": "assistant", "content": "draft", "partial": true},
+                {"role": "user", "content": "Continue"}
+            ]
+        }))
+        .unwrap();
+        request.normalize_partial_final_message();
+        assert_eq!(request.common.continue_final_message, None);
+        assert_eq!(request.common.add_generation_prompt, None);
+    }
+
+    #[test]
+    fn test_partial_keeps_explicit_add_generation_prompt_for_validation() {
+        let mut request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K3",
+            "add_generation_prompt": true,
+            "messages": [{"role": "assistant", "content": "x", "partial": true}]
+        }))
+        .unwrap();
+        request.normalize_partial_final_message();
+        assert_eq!(request.common.add_generation_prompt, Some(true));
+        assert!(ValidateRequest::validate(&request).is_err());
+    }
+
+    #[test]
+    fn test_kimi_typed_fields_deserialize_without_unsupported_fields() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K3",
+            "prompt_cache_key": "sess_1",
+            "safety_identifier": "user_1",
+            "messages": [
+                {"role": "system", "tools": [{
+                    "type": "function",
+                    "function": {"name": "read_file", "parameters": {"type": "object"}}
+                }]},
+                {"role": "user", "content": "hi"}
+            ],
+            "tools": [{"type": "builtin_function", "function": {"name": "$web_search"}}]
+        }))
+        .unwrap();
+        assert_eq!(request.inner.prompt_cache_key.as_deref(), Some("sess_1"));
+        assert_eq!(request.inner.safety_identifier.as_deref(), Some("user_1"));
+        assert!(request.unsupported_fields.is_empty());
+        ValidateRequest::validate(&request).unwrap();
+
+        // The `$` prefix is only tolerated on builtin tools.
+        let plain: NvCreateChatCompletionRequest = serde_json::from_value(json!({
+            "model": "moonshotai/Kimi-K3",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "$web_search"}}]
+        }))
+        .unwrap();
+        assert!(ValidateRequest::validate(&plain).is_err());
     }
 
     #[test]

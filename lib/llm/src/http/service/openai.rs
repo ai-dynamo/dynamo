@@ -2824,6 +2824,7 @@ async fn chat_completions(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
+    request.normalize_partial_final_message();
 
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,

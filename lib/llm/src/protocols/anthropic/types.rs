@@ -38,6 +38,7 @@ fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequest
         ChatCompletionRequestSystemMessage {
             content: ChatCompletionRequestSystemMessageContent::Text(content),
             name: None,
+            tools: None,
         },
     ));
 }
@@ -100,6 +101,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                             audio: None,
                             tool_calls: None,
                             function_call: None,
+                            partial: None,
                         },
                     ));
                 }
@@ -465,6 +467,7 @@ fn convert_assistant_blocks(
             tool_calls: tc,
             #[allow(deprecated)]
             function_call: None,
+            partial: None,
         },
     ));
 }

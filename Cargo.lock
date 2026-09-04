@@ -2890,9 +2890,8 @@ dependencies = [
 
 [[package]]
 name = "dynamo-protocols"
-version = "5.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d2723c9ec1c3106cd044ca7f3ff7db71e0e347d1190aa2694a7cc7121376a2a"
+version = "5.4.1"
+source = "git+https://github.com/ai-dynamo/frontend-crates.git?branch=kimi-code-compat#4ac3253a2aa546bd86ca0ecf4b7cda30be58df7a"
 dependencies = [
  "async-openai",
  "derive_builder",

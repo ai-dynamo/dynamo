@@ -559,9 +559,16 @@ pub fn validate_tools(
         if tool.function.name.trim().is_empty() {
             anyhow::bail!("Function name at index {} cannot be empty", i);
         }
-        if !tool
-            .function
-            .name
+        // Moonshot builtin tools are `$`-prefixed (`$web_search`).
+        let name = match tool.r#type {
+            dynamo_protocols::types::ChatCompletionToolType::BuiltinFunction => tool
+                .function
+                .name
+                .strip_prefix('$')
+                .unwrap_or(&tool.function.name),
+            dynamo_protocols::types::ChatCompletionToolType::Function => &tool.function.name,
+        };
+        if !name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         {
