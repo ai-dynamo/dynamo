@@ -382,7 +382,19 @@ impl LLMEngine for SglangSidecarEngine {
                             continue;
                         }
 
+                        let prev_generated = generated;
                         generated = generated.saturating_add(token_ids.len() as u32);
+                        if token_ids.len() > 32 || response.finished {
+                            tracing::warn!(
+                                request_id = %ctx.id(),
+                                msg_token_ids_len = token_ids.len(),
+                                prev_generated,
+                                new_generated = generated,
+                                finished = response.finished,
+                                meta_info = ?response.meta_info,
+                                "RCA_DEBUG token_ids delta"
+                            );
+                        }
                         if response.finished {
                             let mut terminal = match terminal_from_meta(
                                 &response.meta_info,
