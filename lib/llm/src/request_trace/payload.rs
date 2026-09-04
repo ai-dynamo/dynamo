@@ -43,6 +43,11 @@ fn capture_http_headers_with_list(
     }
     let mut out = BTreeMap::new();
     for name in capture_list {
+        if headers.contains_key(name.as_str()) && crate::sensitive::is_sensitive_header(name, "") {
+            out.insert(name.clone(), REDACTED_HEADER_VALUE.to_string());
+            continue;
+        }
+
         let values = headers
             .get_all(name.as_str())
             .iter()
@@ -269,6 +274,24 @@ mod tests {
     }
 
     #[test]
+    fn capture_http_headers_retains_sensitive_name_with_undecodable_value() {
+        let capture_list = vec!["authorization".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            axum::http::HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+
+        let captured = capture_http_headers_with_list(&headers, &capture_list)
+            .expect("sensitive header is represented as redacted");
+        assert_eq!(
+            captured.get("authorization").map(String::as_str),
+            Some("<redacted>")
+        );
+    }
+
+    #[test]
     fn capture_http_headers_redacts_bearer_value_under_benign_name() {
         let capture_list = vec!["x-forwarded-credential".to_string()];
 
@@ -279,6 +302,26 @@ mod tests {
             .expect("sensitive header is represented as redacted");
         assert_eq!(
             captured.get("x-forwarded-credential").map(String::as_str),
+            Some("<redacted>")
+        );
+    }
+
+    #[test]
+    fn capture_http_headers_redacts_basic_value_under_benign_name() {
+        let capture_list = vec!["x-forwarded-authorization".to_string()];
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-authorization",
+            "bAsIc dXNlcjpwYXNz".parse().unwrap(),
+        );
+
+        let captured = capture_http_headers_with_list(&headers, &capture_list)
+            .expect("sensitive header is represented as redacted");
+        assert_eq!(
+            captured
+                .get("x-forwarded-authorization")
+                .map(String::as_str),
             Some("<redacted>")
         );
     }

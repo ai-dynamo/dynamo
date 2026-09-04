@@ -12,14 +12,20 @@ const SENSITIVE_HEADER_NAMES: &[&str] = &[
     "x-access-token",
 ];
 
+const CREDENTIAL_SCHEMES: &[&str] = &["basic", "bearer"];
+
 pub(crate) fn is_sensitive_header(name: &str, value: &str) -> bool {
     SENSITIVE_HEADER_NAMES
         .iter()
         .any(|sensitive_name| name.eq_ignore_ascii_case(sensitive_name))
         || value
             .trim_start()
-            .get(.."bearer ".len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+            .split_once(char::is_whitespace)
+            .is_some_and(|(scheme, _)| {
+                CREDENTIAL_SCHEMES
+                    .iter()
+                    .any(|credential_scheme| scheme.eq_ignore_ascii_case(credential_scheme))
+            })
 }
 
 #[cfg(test)]
@@ -35,8 +41,13 @@ mod tests {
     }
 
     #[test]
-    fn identifies_bearer_values_case_insensitively_after_whitespace() {
-        assert!(is_sensitive_header("x-custom", "  bEaReR secret"));
+    fn identifies_credential_schemes_case_insensitively_after_whitespace() {
+        for scheme in ["bAsIc", "bEaReR"] {
+            assert!(is_sensitive_header(
+                "x-custom",
+                &format!("  {scheme} secret")
+            ));
+        }
     }
 
     #[test]
