@@ -629,10 +629,17 @@ pub mod llm {
             "DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC";
 
         /// Comma/whitespace-separated allowlist of HTTP request header names to
-        /// record in request payload records. Unset/empty captures none. Values
+        /// record in request payload records. Unset/empty captures none. An entry
+        /// ending in `*` matches every header name with that prefix. Values
         /// are recorded unredacted; avoid credential-bearing headers.
         pub const DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST: &str =
             "DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST";
+
+        /// Comma/whitespace-separated denylist of HTTP request header names that
+        /// are never recorded, applied after the capture list matches. Accepts the
+        /// same trailing-`*` prefix entries. Unset/empty subtracts nothing.
+        pub const DYN_REQUEST_TRACE_HTTP_HEADER_DENY_LIST: &str =
+            "DYN_REQUEST_TRACE_HTTP_HEADER_DENY_LIST";
 
         /// S3 bucket for the S3 request-trace sink. Required when
         /// `DYN_REQUEST_TRACE_SINKS` includes `s3`.
@@ -1029,6 +1036,7 @@ mod tests {
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
             llm::request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
             llm::request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
+            llm::request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_DENY_LIST,
             llm::audit::DYN_AUDIT_OTEL_MAX_PAYLOAD_BYTES,
             // Model
             model::model_express::MODEL_EXPRESS_URL,

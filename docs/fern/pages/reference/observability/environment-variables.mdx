@@ -349,7 +349,11 @@ See [Forward Pass Metrics Trace Reference](forward-pass-metrics-traces.mdx) for 
 </ParamField>
 
 <ParamField path="DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST" type="string">
-  Comma- or whitespace-separated allowlist of HTTP header names captured on `request_payload` rows. Values are not redacted.
+  Comma- or whitespace-separated allowlist of HTTP header names captured on `request_payload` rows. An entry ending in `*` matches every header name with that prefix. Values are not redacted.
+</ParamField>
+
+<ParamField path="DYN_REQUEST_TRACE_HTTP_HEADER_DENY_LIST" type="string">
+  Comma- or whitespace-separated denylist applied after the capture list matches, using the same trailing-`*` syntax. It only subtracts; naming a header here never captures it.
 </ParamField>
 
 See [Request Trace Reference](request-traces.mdx) for compatibility aliases, sink behavior, and record semantics.

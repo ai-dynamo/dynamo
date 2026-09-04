@@ -96,6 +96,7 @@ pub struct RequestTracePolicy {
     pub nats_subject: String,
     pub otel_max_payload_bytes: usize,
     pub http_header_capture_list: Vec<String>,
+    pub http_header_deny_list: Vec<String>,
     pub tool_events_zmq_endpoint: Option<String>,
     pub tool_events_zmq_topic: Option<String>,
     pub s3_bucket: Option<String>,
@@ -194,23 +195,14 @@ fn load_from_env() -> RequestTracePolicy {
     ])
     .filter(|value| *value > 0)
     .unwrap_or(DEFAULT_OTEL_MAX_PAYLOAD_BYTES);
-    let http_header_capture_list =
-        std::env::var(env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST)
-            .ok()
-            .map(|raw| {
-                let mut names = Vec::new();
-                for name in raw
-                    .split(|c: char| c == ',' || c.is_whitespace())
-                    .map(str::to_ascii_lowercase)
-                    .filter(|name| !name.is_empty())
-                {
-                    if !names.contains(&name) {
-                        names.push(name);
-                    }
-                }
-                names
-            })
-            .unwrap_or_default();
+    let http_header_capture_list = parse_header_name_list(
+        env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
+        StarSentinel::Deferred,
+    );
+    let http_header_deny_list = parse_header_name_list(
+        env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_DENY_LIST,
+        StarSentinel::Allowed,
+    );
     let tool_events_zmq_endpoint =
         std::env::var(env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT)
             .ok()
@@ -249,6 +241,7 @@ fn load_from_env() -> RequestTracePolicy {
         nats_subject,
         otel_max_payload_bytes,
         http_header_capture_list,
+        http_header_deny_list,
         tool_events_zmq_endpoint,
         tool_events_zmq_topic,
         s3_bucket,
@@ -257,6 +250,55 @@ fn load_from_env() -> RequestTracePolicy {
         s3_roll_uncompressed_bytes,
         s3_flush_interval_ms,
     }
+}
+
+/// Whether an all-`*` entry means anything for a given list.
+#[derive(Clone, Copy)]
+enum StarSentinel {
+    /// Capture list: "capture everything" is deferred until captured values are
+    /// redacted, so the entry is dropped.
+    Deferred,
+    /// Deny list: "deny everything" only ever subtracts, so it is safe to honour.
+    /// Dropping it would fail open on an explicit denial.
+    Allowed,
+}
+
+/// Parse a comma/whitespace-separated header-name list into lowercased, de-duplicated
+/// entries, preserving the order they were configured in. An entry ending in `*` is a
+/// prefix pattern; matching lives in `payload::capture_http_headers`.
+///
+/// A `*` anywhere other than the end is not pattern syntax, so it is reported instead of
+/// being left to match nothing silently.
+fn parse_header_name_list(env_name: &str, star_sentinel: StarSentinel) -> Vec<String> {
+    let Ok(raw) = std::env::var(env_name) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for name in raw
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(str::to_ascii_lowercase)
+        .filter(|name| !name.is_empty())
+    {
+        let all_star = name.chars().all(|c| c == '*');
+        if all_star && matches!(star_sentinel, StarSentinel::Deferred) {
+            tracing::warn!(
+                %env_name,
+                "request trace: capture-all `*` is not supported yet; entry ignored"
+            );
+            continue;
+        }
+        if !all_star && name.trim_end_matches('*').contains('*') {
+            tracing::warn!(
+                %env_name,
+                %name,
+                "request trace: `*` is only a trailing prefix marker; entry matched literally"
+            );
+        }
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 fn load_records(
@@ -564,6 +606,55 @@ mod tests {
             let policy = load_from_env();
             assert!(policy.http_header_capture_list.is_empty());
         });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn http_header_deny_list_parses_like_the_capture_list_and_defaults_empty() {
+        with_request_trace_env(
+            &[
+                (env_request_trace::DYN_REQUEST_TRACE, "1"),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_DENY_LIST,
+                    " X-Someplatform-Internal-Token,, x-internal-*, * ",
+                ),
+            ],
+            || {
+                let policy = load_from_env();
+                assert_eq!(
+                    policy.http_header_deny_list,
+                    vec!["x-someplatform-internal-token", "x-internal-*", "*"],
+                    "the deny list keeps an all-`*` entry, which subtracts everything"
+                );
+            },
+        );
+
+        with_request_trace_env(&[(env_request_trace::DYN_REQUEST_TRACE, "1")], || {
+            let policy = load_from_env();
+            assert!(policy.http_header_deny_list.is_empty());
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn http_header_capture_list_keeps_prefix_entries_and_drops_a_bare_star() {
+        with_request_trace_env(
+            &[
+                (env_request_trace::DYN_REQUEST_TRACE, "1"),
+                (
+                    env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
+                    "X-Someplatform-*, *, x-request-id",
+                ),
+            ],
+            || {
+                let policy = load_from_env();
+                assert_eq!(
+                    policy.http_header_capture_list,
+                    vec!["x-someplatform-*", "x-request-id"],
+                    "a trailing-`*` entry is kept as configured and a bare `*` is dropped"
+                );
+            },
+        );
     }
 
     #[test]
