@@ -50,7 +50,7 @@ class RequestHandler:
         inference_responses = self._model.async_infer(inference_request)
         async for inference_response in inference_responses:
             response_tensors = []
-            for output_name, output_tensor in inference_response.outputs:
+            for output_name, output_tensor in inference_response.outputs.items():
                 triton_dtype = self._output_dtypes[output_name]
                 if triton_dtype not in TRITON_TO_DYNAMO_DTYPE.keys():
                     raise TypeError(
