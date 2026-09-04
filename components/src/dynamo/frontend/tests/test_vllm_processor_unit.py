@@ -36,7 +36,7 @@ from dynamo.frontend.prepost import (
 from dynamo.llm.exceptions import HttpError, InvalidArgument
 
 # NOTE: dynamo.frontend.vllm_processor is imported lazily inside the tests that
-# need it (and via the vllm_processor_module fixture). Importing it at module
+# need it (and via the real_vllm_processor_module fixture). Importing it at module
 # top level would run its `from vllm.tasks import ...` /
 # `from vllm.v1.engine.parallel_sampling import ...` imports during pytest
 # collection, which breaks the pytest-marker-report pre-commit hook (its vllm
@@ -1136,8 +1136,15 @@ class _FakePostProcessor:
 
 
 @pytest.fixture
-def vllm_processor_module(monkeypatch):
+def real_vllm_processor_module():
     import dynamo.frontend.vllm_processor as module
+
+    return module
+
+
+@pytest.fixture
+def vllm_processor_module(monkeypatch, real_vllm_processor_module):
+    module = real_vllm_processor_module
 
     class FakeEngineCoreOutput:
         __struct_fields__ = ()
@@ -1465,9 +1472,9 @@ class TestRoutedEnginePath:
         ids=["single-choice", "parallel-choices", "concurrent-request"],
     )
     async def test_local_stop_releases_only_the_completed_request(
-        self, tokenizer, n, other_request
+        self, tokenizer, n, other_request, real_vllm_processor_module
     ):
-        import dynamo.frontend.vllm_processor as module
+        module = real_vllm_processor_module
 
         sampling_params = SamplingParams(
             n=n, stop=["STOP"], output_kind=module.RequestOutputKind.DELTA
@@ -1489,18 +1496,21 @@ class TestRoutedEnginePath:
         stop_tokens = tokenizer.encode("hello ST", add_special_tokens=False)
         stop_tokens += tokenizer.encode("OP", add_special_tokens=False)
         items = [{"token_ids": [token], "index": 0} for token in stop_tokens]
+        expected_tokens = len(stop_tokens)
         if n > 1:
+            # The shared stream may deliver more tokens for the stopped choice
+            # while another choice is still active.
+            items.append({"token_ids": [42, 43], "index": 0})
+            other_tokens = tokenizer.encode("other answer", add_special_tokens=False)
             items.append(
                 {
-                    "token_ids": tokenizer.encode(
-                        "other answer", add_special_tokens=False
-                    ),
+                    "token_ids": other_tokens,
                     "index": 1,
                     "finish_reason": "length",
                 }
             )
+            expected_tokens += len(other_tokens)
         expected_chunks = len(items)
-        expected_tokens = sum(len(item["token_ids"]) for item in items)
         items.append({"token_ids": [42], "index": 0})
         routed_engine = _FakeRoutedEngine(items)
         processor = _make_processor(module, routed_engine)
@@ -1552,6 +1562,9 @@ class TestRoutedEnginePath:
             if choice["finish_reason"]
         } == ({0: "stop", 1: "length"} if n > 1 else {0: "stop"})
         assert data[-1]["usage"]["completion_tokens"] == expected_tokens
+        metrics = [json.loads(chunk["comment"][0]) for chunk in chunks]
+        assert metrics[-1]["output_tokens"] == expected_tokens
+        assert sum(metric["chunk_tokens"] for metric in metrics) == expected_tokens
         assert set(processor.output_processor.request_states) == (
             {"unrelated"} if other_request else set()
         )

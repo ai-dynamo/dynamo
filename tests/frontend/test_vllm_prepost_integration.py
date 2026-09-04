@@ -13,6 +13,7 @@ from typing import Any, Generator
 import pytest
 import requests
 
+from tests.frontend.test_prepost import OUTPUTS_INTERVAL_20
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.port_utils import ServicePorts
@@ -321,8 +322,6 @@ def test_vllm_chat_processor_forwards_max_thinking_tokens(
 def test_vllm_chat_processor_local_stop_preserves_stream_terminal(
     start_services: tuple[int, Path],
 ) -> None:
-    from tests.frontend.test_prepost import OUTPUTS_INTERVAL_20
-
     frontend_port, capture_path = start_services
     payload = {
         "model": TEST_MODEL,

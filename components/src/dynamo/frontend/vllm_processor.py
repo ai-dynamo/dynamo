@@ -951,11 +951,6 @@ class VllmProcessor:
                     )
                     break
 
-                # Count before any choice gate — tool/reasoning parsers may
-                # consume tokens without emitting a visible delta.
-                chunk_tokens = len(engine_response.get("token_ids") or [])
-                cumulative_output_tokens += chunk_tokens
-
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
                 if output_request_id is None:
@@ -971,6 +966,15 @@ class VllmProcessor:
                         }
                     )
                     break
+
+                # Count active choices before processing: tool/reasoning
+                # parsers may consume tokens without emitting a visible delta.
+                chunk_tokens = (
+                    len(engine_response.get("token_ids") or [])
+                    if output_request_id in self.output_processor.request_states
+                    else 0
+                )
+                cumulative_output_tokens += chunk_tokens
 
                 raw_finish_reason = engine_response.get("finish_reason")
                 finish_reason = map_finish_reason(raw_finish_reason)
