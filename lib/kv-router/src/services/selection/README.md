@@ -17,10 +17,10 @@ and active-sequence accounting. Keep these implementation invariants explicit:
   diff (retry of not-yet-schedulable records, stale deletion). Hosts do not
   call `upsert_worker`/`delete_worker` for discovery-driven membership.
 - A partition's KV index comes from `HostCache.index: KvIndexSource`: `Owned`
-  (the core builds it and a `KvEventIngress`, by default `ZmqDirectIngress`,
-  feeds it), `Provided` (the host built and feeds it; the core only reads),
-  or `Remote` (a standalone indexer serves it). The `Indexer` type itself is
-  shared with the frontend (`services::indexer::backend`).
+  (a `KvEventIngress` builds and feeds it: `ZmqDirectIngress` here, the
+  runtime event plane in the frontend) or `Remote` (a standalone indexer
+  serves it). The `Indexer` type itself is shared with the frontend
+  (`services::indexer::backend`).
 - Selector replicas synchronize admission, prefill-complete, and free events.
 - **NOTE:** Output-block updates remain local. They are deliberately excluded
   from replica sync because their frequency would consume disproportionate

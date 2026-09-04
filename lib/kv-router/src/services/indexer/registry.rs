@@ -676,6 +676,11 @@ impl WorkerRegistry {
         Ok(())
     }
 
+    /// Whether `worker_id` has listeners registered here.
+    pub fn has_worker(&self, worker_id: WorkerId) -> bool {
+        self.workers.contains_key(&worker_id)
+    }
+
     pub fn list(&self) -> Vec<WorkerInfo> {
         self.list_filtered(None, None)
     }

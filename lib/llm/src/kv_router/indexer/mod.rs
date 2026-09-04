@@ -26,9 +26,11 @@ pub(crate) use dynamo_kv_router::indexer::WireTieredMatchDetails;
 pub use dynamo_kv_router::services::indexer::backend::{Indexer, RemotePrimary, SideIndexer};
 pub(crate) use dynamo_kv_router::services::indexer::recording::ApproximateRequestLease;
 use dynamo_runtime::component::Component;
+pub(crate) use ingress::{RuntimeIngress, RuntimeIngressArgs};
 use tokio_util::sync::CancellationToken;
 
 mod embedding_cache;
+mod ingress;
 mod recovery;
 pub mod remote;
 

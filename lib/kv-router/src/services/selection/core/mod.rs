@@ -211,15 +211,11 @@ pub struct HostCache {
 /// Where a partition's KV index comes from and who feeds it.
 #[derive(Clone)]
 pub enum KvIndexSource {
-    /// The core builds the index and the ingress feeds it with worker KV
-    /// events; the ingress decides what metadata a worker needs to be
-    /// schedulable. Defaults to [`ZmqDirectIngress`].
+    /// The ingress builds each partition's index and feeds it with worker KV
+    /// events; it also decides what metadata a worker needs to be schedulable
+    /// and what happens to the index when a worker leaves. Defaults to
+    /// [`ZmqDirectIngress`]; the frontend supplies its runtime-backed ingress.
     Owned(Arc<dyn KvEventIngress>),
-    /// The host built this index and feeds it (its own event ingress and
-    /// recovery). Every partition uses it; the core reads it for selection
-    /// and dequeue-time refresh but never writes to it, and workers need no
-    /// KV-event metadata.
-    Provided(Arc<Indexer>),
     /// A standalone indexer at this base URL serves the primary index; this
     /// core does not subscribe to worker KV events.
     Remote(String),
@@ -235,11 +231,6 @@ impl std::fmt::Debug for KvIndexSource {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Owned(_) => formatter.write_str("Owned"),
-            Self::Provided(indexer) => formatter
-                .debug_struct("Provided")
-                .field("remote", &indexer.is_remote())
-                .field("overlap_refresh", &indexer.supports_overlap_refresh())
-                .finish(),
             Self::Remote(url) => formatter.debug_tuple("Remote").field(url).finish(),
         }
     }
@@ -409,9 +400,7 @@ impl SelectionCore {
             indexer_threads,
             cancel_token.clone(),
         ));
-        let listens_for_kv_events = kv_router_config.use_kv_events
-            && !indexer_policy.is_remote()
-            && !matches!(host.cache.index, KvIndexSource::Provided(_));
+        let listens_for_kv_events = kv_router_config.use_kv_events && !indexer_policy.is_remote();
         indexer_registry.set_indexer_policy(indexer_policy);
         if signal_indexer_ready {
             indexer_registry.signal_ready();
@@ -731,17 +720,15 @@ impl SelectionCore {
                     self.cancel_token.child_token(),
                 );
 
-                let (indexer, refreshes) = match &self.host.cache.index {
-                    KvIndexSource::Provided(indexer) => {
-                        (Indexer::clone(indexer), indexer.supports_overlap_refresh())
+                let indexer = match &self.host.cache.index {
+                    KvIndexSource::Owned(ingress) => {
+                        ingress.open(&self.indexer_registry, &key, block_size)
                     }
-                    KvIndexSource::Owned(_) | KvIndexSource::Remote(_) => (
-                        self.indexer_registry
-                            .get_or_create_indexer(key.clone(), block_size),
-                        true,
-                    ),
+                    KvIndexSource::Remote(_) => self
+                        .indexer_registry
+                        .get_or_create_indexer(key.clone(), block_size),
                 };
-                let overlap_refresh = refreshes.then(|| {
+                let overlap_refresh = indexer.supports_overlap_refresh().then(|| {
                     Arc::new(TieredOverlapRefresher::new(
                         RefreshProvider::Local(Arc::new(indexer.clone())),
                         self.kv_router_config.clone(),
@@ -809,10 +796,7 @@ impl SelectionCore {
     }
 
     async fn cleanup_indexer_registration(&self, record: &WorkerCatalogRecord) {
-        if matches!(self.host.cache.index, KvIndexSource::Provided(_)) {
-            return;
-        }
-        if let Some(ingress) = self.ingress() {
+        if let KvIndexSource::Owned(ingress) = &self.host.cache.index {
             ingress.detach(&self.indexer_registry, record).await;
             return;
         }

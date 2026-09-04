@@ -593,12 +593,11 @@ pub struct KvRouter {
     cancellation_token: CancellationToken,
     client: Client,
     is_eagle: bool,
-    kv_event_subscription: Option<indexer::KvEventSubscriptionHandle>,
+    ingress: Arc<indexer::RuntimeIngress>,
     tracking_hash: TrackingHashContext,
     tracking_model_name: String,
     approximate_lru_ranks: ApproximateLruRanks,
     request_leases: request_lease::RequestLeaseManager,
-    _served_indexer_handle: Option<ServedIndexerHandle>,
     /// Optional external shared KV cache pool. When present, `find_best_match`
     /// queries it in parallel with the indexer and factors shared hits into scoring.
     shared_cache: Option<Box<dyn SharedKvCache>>,
@@ -757,18 +756,20 @@ impl KvRouter {
         let cancellation_guard = cancellation_token.clone().drop_guard();
         let min_initial_workers = min_initial_workers_from_env()?;
 
-        let indexer = if cache_required {
-            indexer::build(
-                component,
-                &kv_router_config,
-                block_size,
-                model_name.as_deref(),
-                cancellation_token.child_token(),
-            )
-            .await?
-        } else {
-            Indexer::None
-        };
+        let ingress = indexer::RuntimeIngress::start(indexer::RuntimeIngressArgs {
+            endpoint: &endpoint,
+            kv_router_config: &kv_router_config,
+            block_size,
+            model_name: model_name.as_deref(),
+            worker_role,
+            metric_worker_type,
+            cache_required,
+            kv_event_source_requirement,
+            kv_source_membership,
+            cancellation_token: cancellation_token.clone(),
+        })
+        .await?;
+        let indexer = ingress.indexer().clone();
         let approximate_lru_metrics = metrics::ApproximateLruMetrics::from_component(component);
         let configured_policy = kv_router_config.router_approximate_cache_policy.to_string();
         let effective_policy = if kv_router_config.overlap_score_credit <= 0.0 {
@@ -831,7 +832,8 @@ impl KvRouter {
                 prefill_load_estimator: prefill_load_estimator.clone(),
                 overloaded_worker_provider,
                 available_worker_provider,
-                indexer: indexer.clone(),
+                ingress: Arc::clone(&ingress)
+                    as Arc<dyn dynamo_kv_router::services::selection::KvEventIngress>,
                 scheduler_load,
                 endpoint: endpoint.clone(),
                 router_id: endpoint.drt().discovery().instance_id(),
@@ -845,58 +847,6 @@ impl KvRouter {
             scheduler.booking_cleanup(),
             cancellation_token.child_token(),
         );
-        // Start KV event subscription if needed — skip when using a remote indexer.
-        let kv_event_subscription = if cache_required
-            && kv_event_source_requirement.should_subscribe(&kv_router_config)
-        {
-            let membership_watch = kv_source_membership.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "KV source membership watch is required when local KV event subscription is enabled"
-                )
-            })?;
-            Some(
-                indexer::start_subscriber(
-                    endpoint.clone(),
-                    indexer.clone(),
-                    membership_watch,
-                    block_size,
-                    model_name.clone().unwrap_or_else(|| "unknown".to_string()),
-                    worker_role,
-                    kv_event_source_requirement,
-                    metric_worker_type,
-                    cancellation_token.child_token(),
-                )
-                .await?,
-            )
-        } else {
-            tracing::info!(
-                requirement = %kv_event_source_requirement,
-                cache_required,
-                "Skipping KV event subscription (use_kv_events={}, overlap_score_credit={}, use_remote_indexer={})",
-                kv_router_config.use_kv_events,
-                kv_router_config.overlap_score_credit,
-                kv_router_config.use_remote_indexer,
-            );
-            None
-        };
-
-        let served_indexer_handle = if kv_router_config.serve_indexer {
-            let model_name = model_name.clone().ok_or_else(|| {
-                anyhow::anyhow!("model_name is required when serve_indexer is configured")
-            })?;
-            Some(
-                ensure_served_indexer_service(
-                    component.clone(),
-                    ServedIndexerMode::from_use_kv_events(kv_router_config.use_kv_events),
-                    model_name,
-                    indexer.clone(),
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-
         tracing::info!("KV Routing initialized");
         let cancellation_token = cancellation_guard.disarm();
         Ok(Self {
@@ -910,12 +860,11 @@ impl KvRouter {
             cancellation_token,
             client,
             is_eagle,
-            kv_event_subscription,
+            ingress,
             tracking_hash,
             tracking_model_name,
             approximate_lru_ranks,
             request_leases,
-            _served_indexer_handle: served_indexer_handle,
             shared_cache,
             lora_filter,
             endpoint_registration: None,
@@ -934,9 +883,7 @@ impl KvRouter {
         &mut self,
         task_guard: dynamo_runtime::engine::EngineContextGuard,
     ) {
-        if let Some(subscription) = self.kv_event_subscription.as_mut() {
-            subscription.set_task_guard(task_guard.clone());
-        }
+        self.ingress.set_task_guard(task_guard.clone());
         self.teardown_task_guard = Some(task_guard);
     }
 
@@ -958,11 +905,9 @@ impl KvRouter {
     }
 
     /// Cancel background work and wait for KV event ingestion to stop.
-    pub async fn shutdown(mut self) {
+    pub async fn shutdown(self) {
         self.cancellation_token.cancel();
-        if let Some(subscription) = self.kv_event_subscription.take() {
-            subscription.shutdown().await;
-        }
+        self.ingress.shutdown().await;
     }
 
     pub fn is_eagle(&self) -> bool {
@@ -2787,7 +2732,7 @@ mod tests {
         let router = make_router_without_membership(Some(WorkerType::Decode))
             .await
             .expect("ordinary decode must not require KV source membership");
-        assert!(router.kv_event_subscription.is_none());
+        assert!(!router.ingress.has_subscription());
 
         let error = make_router_without_membership(None)
             .await
@@ -2836,7 +2781,7 @@ mod tests {
 
         assert_eq!(router.required_worker_inputs(), WorkerInputs::LOAD);
         assert!(matches!(router.indexer, Indexer::None));
-        assert!(router.kv_event_subscription.is_none());
+        assert!(!router.ingress.has_subscription());
         assert!(router.shared_cache.is_none());
         assert!(matches!(
             router.dump_events().await,

@@ -28,9 +28,9 @@ use dynamo_kv_router::scheduling::{
 use dynamo_kv_router::sequences::{SequenceError, SequenceRequest};
 use dynamo_kv_router::services::selection::{
     CatalogObserver, CatalogReconciler, HostCache, HostEligibility, HostLoad, HostReplication,
-    HostTelemetry, KvIndexSource, SelectionHost, SelectionPartition, SelectionService,
-    SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource, WorkerRequest,
-    WorkerSelectionPolicyRegistry,
+    HostTelemetry, KvEventIngress, KvIndexSource, SelectionHost, SelectionPartition,
+    SelectionService, SelectionServiceBuilder, WorkerCatalogRecord, WorkerCatalogSource,
+    WorkerRequest, WorkerSelectionPolicyRegistry,
 };
 use dynamo_kv_router::{DEFAULT_ROUTING_GROUP, PrefillLoadEstimator, WorkerSelectionPolicyFactory};
 use dynamo_tokens::SequenceHash;
@@ -50,9 +50,9 @@ pub(crate) struct EmbeddedSelectionArgs {
     pub prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     pub overloaded_worker_provider: OverloadedWorkerProvider,
     pub available_worker_provider: WorkerAvailabilityProvider,
-    /// The router's index, built and fed by the router; the partition reads
-    /// it for selection and dequeue-time refresh.
-    pub indexer: super::indexer::Indexer,
+    /// Builds and feeds the router's index from the runtime; the partition
+    /// takes its index from it.
+    pub ingress: Arc<dyn KvEventIngress>,
     /// Scheduler-owned load snapshots for the worker monitor's overload
     /// detection, the same feed the runtime scheduler publishes.
     pub scheduler_load: crate::kv_router::routing_load::SchedulerLoadSender,
@@ -155,7 +155,7 @@ impl EmbeddedSelection {
             },
             cache: HostCache {
                 shared: None,
-                index: KvIndexSource::Provided(Arc::new(args.indexer)),
+                index: KvIndexSource::Owned(args.ingress),
             },
             eligibility: HostEligibility::default(),
             telemetry: HostTelemetry {
