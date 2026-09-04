@@ -58,6 +58,8 @@ def mock_context():
     context.trace_id = "test-trace-id"
     context.span_id = "test-span-id"
     context.is_cancelled = MagicMock(return_value=False)
+    context.is_stopped = MagicMock(return_value=False)
+    context.is_killed = MagicMock(return_value=False)
     return context
 
 
@@ -277,11 +279,14 @@ class TestImageDiffusionWorkerHandler:
         user_id = "user123"
         request_id = "req456"
 
-        url = await handler._upload_to_fs(image_bytes, user_id, request_id)
+        url, storage_path = await handler._upload_to_fs(
+            image_bytes, user_id, request_id
+        )
 
         # Verify storage path format
         assert f"users/{user_id}/generations/{request_id}/" in url
         assert url.endswith(".png")
+        assert storage_path.startswith(f"users/{user_id}/generations/{request_id}/")
 
     @pytest.mark.asyncio
     async def test_generate_images_with_numpy_array(self, handler):
@@ -443,3 +448,138 @@ class TestImageDiffusionWorkerHandler:
         call_args = handler.generator.generate.call_args
         sampling_params = call_args[1]["sampling_params_kwargs"]
         assert "image_path" not in sampling_params
+
+
+class TestNParameter:
+    """The OpenAI `n` field: n independent images per request."""
+
+    @staticmethod
+    def _request(n=None, seed=42):
+        req = {
+            "prompt": "A red square",
+            "model": "test-model",
+            "size": "256x256",
+            "response_format": "b64_json",
+            "user": "test-user",
+            "nvext": {"num_inference_steps": 10, "seed": seed},
+        }
+        if n is not None:
+            req["n"] = n
+        return req
+
+    @staticmethod
+    def _mock_one_image(handler):
+        test_image = Image.new("RGB", (256, 256), color="red")
+        handler.generator.generate = Mock(
+            return_value=SimpleNamespace(frames=[test_image])
+        )
+
+    @pytest.mark.asyncio
+    async def test_n_returns_n_images(self, handler, mock_context):
+        """n=3 produces three generations and three data entries."""
+        self._mock_one_image(handler)
+
+        results = []
+        async for result in handler.generate(self._request(n=3), mock_context):
+            results.append(result)
+
+        assert len(results) == 1
+        assert len(results[0]["data"]) == 3
+        assert handler.generator.generate.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_n_seeds_are_deterministic_and_distinct(self, handler, mock_context):
+        """With an explicit seed, generation i uses seed+i."""
+        self._mock_one_image(handler)
+
+        async for _ in handler.generate(self._request(n=3, seed=42), mock_context):
+            pass
+
+        seeds = [
+            call.kwargs["sampling_params_kwargs"]["seed"]
+            for call in handler.generator.generate.call_args_list
+        ]
+        assert seeds == [42, 43, 44]
+
+    @pytest.mark.asyncio
+    async def test_n_defaults_to_single_image(self, handler, mock_context):
+        """Omitted n behaves exactly as before: one generation, one image."""
+        self._mock_one_image(handler)
+
+        results = []
+        async for result in handler.generate(self._request(), mock_context):
+            results.append(result)
+
+        assert len(results[0]["data"]) == 1
+        assert handler.generator.generate.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_n_above_max_is_rejected(self, handler, mock_context):
+        """n above MAX_IMAGES_PER_REQUEST is rejected, matching the TRT-LLM
+        image handler's [1, 10] validation (no silent clamping)."""
+        self._mock_one_image(handler)
+
+        results = []
+        async for result in handler.generate(self._request(n=99), mock_context):
+            results.append(result)
+
+        assert results[0]["data"] == []
+        assert "n must be in [1, 10]" in results[0]["error"]
+        assert handler.generator.generate.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_n_below_one_is_an_error(self, handler, mock_context):
+        """n=0 must not silently produce one image."""
+        self._mock_one_image(handler)
+
+        results = []
+        async for result in handler.generate(self._request(n=0), mock_context):
+            results.append(result)
+
+        assert results[0]["data"] == []
+        assert "n must be in [1, 10]" in results[0]["error"]
+        assert handler.generator.generate.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_cancelled_request_stops_between_generations(
+        self, handler, mock_context
+    ):
+        """A context stopped after the first generation must not start more."""
+        self._mock_one_image(handler)
+        # False for the first iteration check, True afterwards
+        mock_context.is_stopped = MagicMock(side_effect=[False, True, True])
+
+        results = []
+        async for result in handler.generate(self._request(n=3), mock_context):
+            results.append(result)
+
+        assert results == []
+        assert handler.generator.generate.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_partial_upload_failure_cleans_up(self, handler, mock_context):
+        """If a later upload fails, earlier uploaded files are removed."""
+        self._mock_one_image(handler)
+
+        uploads = []
+
+        async def fake_upload(img, user_id, request_id):
+            if len(uploads) == 1:
+                raise RuntimeError("upload failed")
+            uploads.append(
+                f"users/{user_id}/generations/{request_id}/img{len(uploads)}.png"
+            )
+            return "http://x/img.png", uploads[-1]
+
+        handler._upload_to_fs = fake_upload
+        handler._cleanup_uploads = AsyncMock()
+
+        req = self._request(n=2)
+        req["response_format"] = "url"
+        results = []
+        async for result in handler.generate(req, mock_context):
+            results.append(result)
+
+        assert results[0]["data"] == []
+        assert "upload failed" in results[0]["error"]
+        handler._cleanup_uploads.assert_awaited_once_with(uploads)
