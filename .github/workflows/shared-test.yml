@@ -239,7 +239,7 @@ jobs:
         # pool or retry until the parent step kills the runner container.
         if: ${{ !cancelled() && steps.checkout.outcome == 'success' && inputs.run_cpu_e2e_tests }}
         timeout-minutes: ${{ inputs.cpu_e2e_test_timeout_minutes }}
-        uses: ./.github/actions/pytest-local
+        uses: $/.github/actions/pytest-local
         with:
           container_workspace: ${{ inputs.container_workspace }}
           pytest_marks: ${{ inputs.cpu_e2e_test_markers }}
