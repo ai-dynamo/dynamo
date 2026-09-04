@@ -48,7 +48,7 @@ Each row links to its tracking issue under the [Dynamo Triton Runtime — Improv
 | :-------------------------------------- | :----: | :-----------: |
 | `nvcr.io/nvidia/tritonserver:26.07-py3` | `13.2` |  `610.43.02`  | <!-- Update version with each Triton release. -->
 
-The Triton release is pinned in [`container/context.yaml`](../../../container/context.yaml) under `triton.cuda13.2` (`runtime_image_tag`/`base_image_tag`), the same way the other framework runtimes pin their image.
+The Triton release is pinned in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/container/context.yaml) under `triton.cuda13.2` (`runtime_image_tag`/`base_image_tag`), the same way the other framework runtimes pin their image.
 
 ## Prerequisites
 
@@ -171,7 +171,7 @@ Common flags:
 
 ## Configuring the Triton version
 
-The Triton release is pinned by `triton.cuda13.2.runtime_image_tag` in [`container/context.yaml`](../../../container/context.yaml) (default `26.07-py3`), mirroring how the other framework runtimes pin their image.
+The Triton release is pinned by `triton.cuda13.2.runtime_image_tag` in [`container/context.yaml`](https://github.com/ai-dynamo/dynamo/tree/main/container/context.yaml) (default `26.07-py3`), mirroring how the other framework runtimes pin their image.
 The CUDA family is fixed by the Triton release, so `--cuda-version` is auto-derived; passing it explicitly is rejected.
 
 To build into a different Triton release, override `RUNTIME_IMAGE_TAG` at build time (no `context.yaml` edit needed). Keep `BASE_IMAGE_TAG` on CUDA 13.1 (default `26.02-cuda13.1-devel-ubuntu24.04`):
@@ -223,7 +223,7 @@ graph LR
     B --> C["Dynamo Triton Runtime"]
 ```
 
-The worker ([`components/src/dynamo/triton/main.py`](blob/main/components/src/dynamo/triton/main.py)):
+The worker ([`components/src/dynamo/triton/main.py`](https://github.com/ai-dynamo/dynamo/tree/main/components/src/dynamo/triton/main.py)):
 1. Starts an in-process server object
 2. Loads all models from the model repository
 3. Reads each model's configuration (`config.pbtxt`)
