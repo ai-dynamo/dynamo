@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dynamo-test-harness"
+version = "0.1.0"
+description = "Shared test harness for Dynamo: deployment-agnostic values, providers, and evidence"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+# Tier 0 is stdlib only. Anything heavier belongs behind an extra so that
+# `plan` and `judge` still run on a laptop, in a bare CI checkout, and inside a
+# runner with no cluster credentials.
+dependencies = []
+
+[project.optional-dependencies]
+manifest = ["pyyaml>=6.0"]
+
+[tool.setuptools.packages.find]
+include = ["dynamo_test*"]
