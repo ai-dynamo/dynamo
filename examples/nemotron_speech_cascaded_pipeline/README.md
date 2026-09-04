@@ -286,6 +286,40 @@ python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py
 The check reports TTS TTFB, ASR first-transcript latency, PCM RMS, and the final
 transcript. It fails on an API error, silent audio, or an empty transcript.
 
+### Measure ASR-to-LLM handoff
+
+The smoke client can pass the final transcript to the LLM and report time to
+first text and total LLM latency. With the default DGD, measure streamed chat
+completions:
+
+```bash
+python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
+  --llm-transport chat
+```
+
+To compare the text-only Realtime path, use a Dynamo vLLM image containing
+[realtime text session support](https://github.com/ai-dynamo/dynamo/pull/14326),
+add `--realtime` to the `VllmWorker` arguments in `deploy/agg.yaml`, and redeploy
+the DGD. Then run:
+
+```bash
+python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
+  --llm-transport realtime
+```
+
+Run the two modes sequentially with the same image, model, speech, instructions,
+and output-token limit. The Realtime client opens its WebSocket before audio is
+sent, so `llm_ttft_from_asr_final_ms` measures handoff on an established session.
+The `asr_start_to_llm_first_token_ms` metric covers ASR streaming plus LLM TTFT.
+
+This comparison does not feed partial ASR deltas into the LLM. The standard
+OpenAI Realtime text flow accepts a complete `conversation.item.create` before
+`response.create`; it has no text equivalent of `input_audio_buffer.append`.
+Consequently this path can reduce connection setup or session-management cost,
+but it cannot overlap LLM prefill with speech recognition. True overlap requires
+a separately specified incremental text or token contract that feeds vLLM's
+`StreamingInput` while preserving the model's chat-template and token boundaries.
+
 The TTS adapter requires a Dynamo runtime with streaming
 `/v1/audio/speech` support. The realtime ASR adapter disables server VAD
 because Pipecat's local VAD and Smart Turn processors commit the input audio.
