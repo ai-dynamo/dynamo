@@ -1,0 +1,88 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Cloud Deployment Templates
+subtitle: Provider-specific Dynamo manifests and configuration for Amazon EKS and ECS, Google GKE, and Azure AKS.
+---
+
+Use these files with the provider installation guide linked in each section. Replace image tags,
+secrets, storage classes, network settings, and instance types before applying them.
+
+## Amazon EKS
+
+See [Amazon EKS Setup](../../kubernetes/installation/managed-kubernetes/eks/eks-setup.mdx) for cluster,
+storage, Elastic Fabric Adapter (EFA), and Dynamo platform setup.
+
+### Model Deployments
+
+<AccordionGroup>
+<Accordion title="agg.yaml · Aggregated vLLM on EKS">
+<Code src="../../../../../examples/deployments/EKS/manifests/vllm/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="disagg.yaml · Disaggregated vLLM over EFA">
+<Code src="../../../../../examples/deployments/EKS/manifests/vllm/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="disagg-p5.yaml · Disaggregated vLLM on P5 instances">
+<Code src="../../../../../examples/deployments/EKS/manifests/vllm/disagg-p5.yaml" title="disagg-p5.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="disagg-tcp.yaml · Disaggregated vLLM over TCP">
+<Code src="../../../../../examples/deployments/EKS/manifests/vllm/disagg-tcp.yaml" title="disagg-tcp.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+### Cluster and Model-Cache Configuration
+
+<AccordionGroup>
+<Accordion title="eksctl.yaml · EKS Auto Mode cluster configuration">
+<Code src="../../../../../examples/deployments/EKS/templates/eksctl.yaml" title="eksctl.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="automode-np-gpu.yaml · GPU node pool for EKS Auto Mode">
+<Code src="../../../../../examples/deployments/EKS/automode-np-gpu.yaml" title="automode-np-gpu.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="model-download/kustomization.yaml · Model download overlay">
+Copy a recipe's `model-download.yaml` into this directory before rendering the overlay, as described
+in the EKS setup guide.
+
+<Code src="../../../../../examples/deployments/EKS/manifests/model-download/kustomization.yaml" title="kustomization.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+## Google GKE
+
+See [Google Kubernetes Engine Setup](../../kubernetes/installation/managed-kubernetes/gcp/gke-setup.mdx)
+for cluster and Dynamo platform setup.
+
+<AccordionGroup>
+<Accordion title="vllm/disagg.yaml · Disaggregated vLLM on GKE">
+<Code src="../../../../../examples/deployments/GKE/vllm/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="sglang/disagg.yaml · Disaggregated SGLang on GKE">
+<Code src="../../../../../examples/deployments/GKE/sglang/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+## Azure AKS
+
+The AKS example supplies Helm values for scheduling the Dynamo platform on Spot VM nodes. Use it with
+[Azure Kubernetes Service Setup](../../kubernetes/installation/managed-kubernetes/azure/aks-setup.mdx)
+and the [Spot VMs guide](../../kubernetes/installation/managed-kubernetes/azure/spot-vms.mdx).
+
+<AccordionGroup>
+<Accordion title="values-aks-spot.yaml · Dynamo platform values for Spot VM nodes">
+<Code src="../../../../../examples/deployments/AKS/values-aks-spot.yaml" title="values-aks-spot.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+## Amazon ECS
+
+These task definitions are used together by the [Amazon ECS deployment guide](../../kubernetes/installation/managed-kubernetes/eks/ecs.mdx).
+They start the shared etcd and NATS services, the Dynamo frontend with an aggregated vLLM worker, and
+an additional prefill worker.
+
+<AccordionGroup>
+<Accordion title="ECS task definitions">
+<Code src="../../../../../examples/deployments/ECS/task_definition_etcd_nats.json" title="task_definition_etcd_nats.json" language="json" maxLines={0} />
+<Code src="../../../../../examples/deployments/ECS/task_definition_frontend.json" title="task_definition_frontend.json" language="json" maxLines={0} />
+<Code src="../../../../../examples/deployments/ECS/task_definition_prefillworker.json" title="task_definition_prefillworker.json" language="json" maxLines={0} />
+</Accordion>
+</AccordionGroup>

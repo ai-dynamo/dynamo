@@ -1,0 +1,112 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Integration Deployment Templates
+subtitle: Kubernetes manifests for batch inference, custom workers, fleet planning, power budgets, and development deployments.
+---
+
+These examples combine Dynamo with another service or demonstrate a deployment pattern that does not
+belong to one of the primary backend template pages. Review each example's prerequisites before
+applying it.
+
+## llm-d Batch Gateway
+
+<Warning>
+**Experimental.** This example validates offline OpenAI Batch API processing with a dedicated Dynamo
+worker pool. It is not a production recipe.
+</Warning>
+
+<AccordionGroup>
+<Accordion title="dynamo.yaml · Dedicated vLLM backend">
+<Code src="../../../../../examples/deployments/llm-d-batch-gateway/dynamo.yaml" title="dynamo.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="batch-infra.yaml · Valkey and shared batch storage">
+<Code src="../../../../../examples/deployments/llm-d-batch-gateway/batch-infra.yaml" title="batch-infra.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="Batch Gateway Helm values">
+Use the base values for synchronous dispatch. Add the async override and the llm-d async processor
+values to test queue-based dispatch.
+
+<Code src="../../../../../examples/deployments/llm-d-batch-gateway/batch-gateway-values.yaml" title="batch-gateway-values.yaml" language="yaml" maxLines={0} />
+<Code src="../../../../../examples/deployments/llm-d-batch-gateway/batch-gateway-async-values.yaml" title="batch-gateway-async-values.yaml" language="yaml" maxLines={0} />
+<Code src="../../../../../examples/deployments/llm-d-batch-gateway/llm-d-async-values.yaml" title="llm-d-async-values.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+Follow the source
+[README](https://github.com/ai-dynamo/dynamo/blob/main/examples/deployments/llm-d-batch-gateway/README.md)
+for chart versions, installation order, and verification commands.
+
+## FastVideo Custom Worker
+
+<Warning>
+**Experimental.** These manifests deploy the custom FastVideo worker used by the text-to-video
+example. See [Text-to-Video](../../use-cases/diffusion/workflows/text-to-video.md) for the model and
+request workflow.
+</Warning>
+
+<AccordionGroup>
+<Accordion title="agg.yaml · Standard FastVideo deployment">
+<Code src="../../../../../examples/diffusers/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="agg_user_workload.yaml · FastVideo on dedicated workload nodes">
+<Code src="../../../../../examples/diffusers/deploy/agg_user_workload.yaml" title="agg_user_workload.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="Required storage and platform values">
+Create the model-cache claim before applying either DGD. Use the platform values when the operator,
+etcd, and NATS must tolerate the dedicated `user-workload` nodes used by the second DGD.
+
+<Code src="../../../../../examples/diffusers/deploy/huggingface-cache-pvc.yaml" title="huggingface-cache-pvc.yaml" language="yaml" maxLines={0} />
+<Code src="../../../../../examples/diffusers/deploy/dynamo-platform-values-user-workload.yaml" title="dynamo-platform-values-user-workload.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+## Global Planner
+
+The multi-model example deploys one Global Planner control DGD and two independent vLLM model DGDs
+that share a GPU budget. Substitute its environment variables with `envsubst` before applying it.
+See the [Global Planner Guide](../../developer-guide/knowledge-base/modular-components/planner/global-planner-guide.md)
+for architecture and operating details.
+
+<AccordionGroup>
+<Accordion title="global-planner-gpu-budget.yaml · Multi-model shared GPU budget">
+<Code src="../../../../../examples/global_planner/global-planner-gpu-budget.yaml" title="global-planner-gpu-budget.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+## Power-Aware Budgeting
+
+This pair demonstrates per-worker GPU power caps and a deployment-wide Planner power budget. The DGD
+focuses on the power-management fields; add the normal frontend, image, model, and worker command
+settings required by your vLLM deployment before applying it. See [Planner Examples](../../developer-guide/knowledge-base/modular-components/planner/planner-examples.md)
+for the surrounding Planner concepts.
+
+<AccordionGroup>
+<Accordion title="dgd.yaml · Per-GPU power caps">
+<Code src="../../../../../examples/power-aware-budget/dgd.yaml" title="dgd.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="planner_config.json · Deployment-wide power budget">
+Mount this configuration at the path referenced by the Planner component in `dgd.yaml`.
+
+<Code src="../../../../../examples/power-aware-budget/planner_config.json" title="planner_config.json" language="json" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+## Development and Testing
+
+These deployments do not load a production model. Use them to validate the operator, graph wiring,
+routing, or custom-component development.
+
+<AccordionGroup>
+<Accordion title="hello_world.yaml · Custom backend development example">
+Deploys a minimal Python backend and frontend without a GPU-backed model.
+
+<Code src="../../../../../examples/custom_backend/hello_world/deploy/hello_world.yaml" title="hello_world.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="mocker/agg.yaml · Aggregated mock worker">
+<Code src="../../../../../examples/backends/mocker/deploy/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="mocker/disagg.yaml · Disaggregated mock workers">
+<Code src="../../../../../examples/backends/mocker/deploy/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
