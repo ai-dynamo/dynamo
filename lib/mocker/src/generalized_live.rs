@@ -34,9 +34,6 @@ use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 use uuid::Uuid;
 
-#[cfg(not(test))]
-use crate::common::utils::sleep_until_precise;
-
 /// Engine type driven by the native live runtime.
 pub type GroupedEngine = GeneralizedMockerEngine<SchedulerRank>;
 
@@ -375,6 +372,8 @@ impl GroupedLiveActor {
     }
 
     async fn run_until_stopped(&mut self) -> Result<()> {
+        let mut pass_timer = ReusablePreciseTimer::default();
+        let mut internal_timer = ReusablePreciseTimer::default();
         loop {
             if self.cancel_token.is_cancelled() {
                 return Ok(());
@@ -383,7 +382,7 @@ impl GroupedLiveActor {
             self.process_due_internal_work().await?;
             if !self.engine.is_ready() {
                 self.next_pass_deadline_ms = None;
-                if !self.wait_for_idle_work().await? {
+                if !self.wait_for_idle_work(&mut internal_timer).await? {
                     return Ok(());
                 }
                 continue;
@@ -413,7 +412,10 @@ impl GroupedLiveActor {
             let zero_duration = end_ms <= started_at_ms;
             self.publish(GroupedLiveEvent::PassStarted(started)).await?;
 
-            if !self.wait_for_pass_boundary(end_ms).await? {
+            if !self
+                .wait_for_pass_boundary(end_ms, &mut pass_timer, &mut internal_timer)
+                .await?
+            {
                 return Ok(());
             }
             let completed_at_ms = self.advance_engine_time(end_ms);
@@ -538,9 +540,12 @@ impl GroupedLiveActor {
         }
     }
 
-    async fn wait_for_idle_work(&mut self) -> Result<bool> {
+    async fn wait_for_idle_work(
+        &mut self,
+        internal_timer: &mut ReusablePreciseTimer,
+    ) -> Result<bool> {
         let deadline_ms = self.engine.next_internal_deadline_ms();
-        let deadline = sleep_until_ms(self.clock_origin, deadline_ms);
+        let deadline = sleep_until_ms(internal_timer, self.clock_origin, deadline_ms);
         tokio::pin!(deadline);
         tokio::select! {
             biased;
@@ -584,13 +589,19 @@ impl GroupedLiveActor {
         Ok(())
     }
 
-    async fn wait_for_pass_boundary(&mut self, end_ms: f64) -> Result<bool> {
-        let pass_deadline = sleep_until_ms(self.clock_origin, Some(end_ms));
+    async fn wait_for_pass_boundary(
+        &mut self,
+        end_ms: f64,
+        pass_timer: &mut ReusablePreciseTimer,
+        internal_timer: &mut ReusablePreciseTimer,
+    ) -> Result<bool> {
+        let pass_deadline = sleep_until_ms(pass_timer, self.clock_origin, Some(end_ms));
         tokio::pin!(pass_deadline);
         let mut accept_commands = true;
         loop {
             let internal_deadline_ms = self.engine.next_internal_deadline_ms();
-            let internal_deadline = sleep_until_ms(self.clock_origin, internal_deadline_ms);
+            let internal_deadline =
+                sleep_until_ms(internal_timer, self.clock_origin, internal_deadline_ms);
             tokio::pin!(internal_deadline);
             tokio::select! {
                 biased;
@@ -693,7 +704,68 @@ fn command_can_apply_during_pass(command: &Command) -> bool {
     )
 }
 
-async fn sleep_until_ms(origin: Instant, deadline_ms: Option<f64>) {
+#[derive(Default)]
+struct ReusablePreciseTimer {
+    #[cfg(target_os = "linux")]
+    delay: Option<tokio_timerfd::Delay>,
+    #[cfg(all(test, target_os = "linux"))]
+    timerfd_creations: usize,
+}
+
+impl ReusablePreciseTimer {
+    async fn sleep_until(&mut self, deadline: std::time::Instant) {
+        if deadline <= std::time::Instant::now() {
+            tokio::task::yield_now().await;
+            return;
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(delay) = self.delay.as_mut() {
+                delay.reset(deadline);
+            } else {
+                match tokio_timerfd::Delay::new(deadline) {
+                    Ok(delay) => {
+                        self.delay = Some(delay);
+                        #[cfg(test)]
+                        {
+                            self.timerfd_creations += 1;
+                        }
+                    }
+                    Err(_) => {
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+                        return;
+                    }
+                }
+            }
+
+            let result = self
+                .delay
+                .as_mut()
+                .expect("timerfd delay must exist after initialization")
+                .await;
+            if result.is_err() {
+                self.delay = None;
+                tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        }
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    fn timerfd_creations(&self) -> usize {
+        self.timerfd_creations
+    }
+}
+
+async fn sleep_until_ms(
+    _timer: &mut ReusablePreciseTimer,
+    origin: Instant,
+    deadline_ms: Option<f64>,
+) {
     let Some(deadline_ms) = deadline_ms else {
         std::future::pending::<()>().await;
         return;
@@ -702,7 +774,7 @@ async fn sleep_until_ms(origin: Instant, deadline_ms: Option<f64>) {
     #[cfg(test)]
     tokio::time::sleep_until(deadline).await;
     #[cfg(not(test))]
-    sleep_until_precise(deadline.into_std()).await;
+    _timer.sleep_until(deadline.into_std()).await;
 }
 
 #[cfg(test)]
@@ -717,6 +789,54 @@ mod tests {
     };
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn reusable_precise_timer_reuses_its_timerfd() {
+        let mut timer = ReusablePreciseTimer::default();
+
+        for _ in 0..2 {
+            let deadline = std::time::Instant::now() + Duration::from_millis(2);
+            tokio::time::timeout(Duration::from_secs(1), timer.sleep_until(deadline))
+                .await
+                .expect("reusable precise timer did not complete");
+        }
+
+        assert_eq!(timer.timerfd_creations(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn reusable_precise_timer_rearms_after_cancelled_wait_expires() {
+        let mut timer = ReusablePreciseTimer::default();
+        let cancelled_deadline = std::time::Instant::now() + Duration::from_millis(50);
+        {
+            let wait = timer.sleep_until(cancelled_deadline);
+            tokio::pin!(wait);
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep(Duration::from_millis(2)) => {}
+                _ = &mut wait => panic!("the cancelled wait completed early"),
+            }
+        }
+
+        tokio::time::sleep_until(tokio::time::Instant::from_std(
+            cancelled_deadline + Duration::from_millis(5),
+        ))
+        .await;
+
+        let rearmed_at = std::time::Instant::now();
+        let rearmed_deadline = rearmed_at + Duration::from_millis(30);
+        tokio::time::timeout(Duration::from_secs(1), timer.sleep_until(rearmed_deadline))
+            .await
+            .expect("rearmed precise timer did not complete");
+
+        assert!(
+            rearmed_at.elapsed() >= Duration::from_millis(20),
+            "the old unread expiration completed the rearmed wait early"
+        );
+        assert_eq!(timer.timerfd_creations(), 1);
+    }
 
     fn request(id: u128, prompt_len: usize, output_len: usize) -> Request {
         Request {
@@ -1321,7 +1441,14 @@ mod tests {
             engine_time_ms: 0.0,
             next_pass_deadline_ms: None,
         };
-        assert!(actor.wait_for_pass_boundary(started.end_ms).await.unwrap());
+        let mut pass_timer = ReusablePreciseTimer::default();
+        let mut internal_timer = ReusablePreciseTimer::default();
+        assert!(
+            actor
+                .wait_for_pass_boundary(started.end_ms, &mut pass_timer, &mut internal_timer,)
+                .await
+                .unwrap()
+        );
         response
             .try_recv()
             .expect("queued cancellation must be applied before the overdue boundary")
