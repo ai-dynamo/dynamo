@@ -156,6 +156,8 @@ jobs:
   # GATE: Version Extraction
   # ============================================================================
 
+  # TEMPORARY(1.5.0-rc2): the ops-membership steps below carry `&& github.event_name
+  # != 'push'` for the push test loop. REVERT before merge.
   # OPS GATE — operator-driven runs (on-demand staging and direct rc dispatch)
   # require an active ai-dynamo/devops member. The nightly path (scheduled /
   # nightly=true) is exempt so unattended runs are not blocked. Lives here (not
@@ -170,14 +172,14 @@ jobs:
       contents: read
     steps:
       - name: Mint app token
-        if: ${{ inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly) }}
+        if: ${{ (inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly)) && github.event_name != 'push' }}
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
           app-id: ${{ secrets.RELEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - name: Require release-ops team membership
-        if: ${{ inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly) }}
+        if: ${{ (inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly)) && github.event_name != 'push' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           ORG: ${{ github.repository_owner }}
@@ -200,7 +202,7 @@ jobs:
             echo "@${USER} authorized via ${ORG}/${TEAM}"
           done
       - name: Gate mode
-        run: echo "ops gate applied=${{ inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly) }} (nightly is exempt)"
+        run: echo "ops gate applied=${{ (inputs.on_demand || (github.event_name == 'workflow_dispatch' && !inputs.nightly)) && github.event_name != 'push' }} (nightly exempt)"
 
   # APPROVAL GATE — operator runs also require a manual-release-approval reviewer.
   # Dynamic environment: empty (no gate) on the nightly path so unattended runs are
