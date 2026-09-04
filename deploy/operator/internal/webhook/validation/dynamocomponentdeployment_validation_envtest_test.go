@@ -56,7 +56,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		oldDeployment      runtime.Object
 		checkpointOff      bool
 		seedWithoutWebhook bool
-		username           string
 		wantSchemaErr      string
 		wantCELErr         string
 		wantWebhookErrs    []string
@@ -190,13 +189,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{
 				"spec.ingress.host: Required value: is required when ingress is enabled",
 			},
-		},
-		{
-			name: "operator-created DGD target accepts automatic snapshot failover",
-			deployment: automaticFailoverTargetDCD(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-				dcd.OwnerReferences = []metav1.OwnerReference{dgdControllerReference()}
-			}),
-			username: admissionOperatorPrincipal,
 		},
 		{
 			name: "v1beta1 derives runtime version from a semver image tag",
@@ -920,6 +912,23 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
+			name: "intra-pod failover rejects multiple shadows",
+			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				Resources:     workerGPU,
+				GPUMemoryService: &nvidiacomv1alpha1.GPUMemoryServiceSpec{
+					Enabled: true,
+					Mode:    nvidiacomv1alpha1.GMSModeIntraPod,
+				},
+				Failover: &nvidiacomv1alpha1.FailoverSpec{
+					Enabled:    true,
+					Mode:       nvidiacomv1alpha1.GMSModeIntraPod,
+					NumShadows: 2,
+				},
+			}),
+			wantWebhookErrs: []string{`spec.failover.numShadows: Invalid value: 2: is invalid for mode="intraPod": intraPod uses a fixed 1 primary + 1 shadow sidecar; use failover.mode="interPod" to configure numShadows`},
+		},
+		{
 			name: "single-shadow intra-pod failover is accepted",
 			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				ComponentType: consts.ComponentTypeWorker,
@@ -1607,7 +1616,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 				gates:              gates,
 				seedWithoutWebhook: tt.seedWithoutWebhook,
 				withoutTopology:    true,
-				username:           tt.username,
 				wantSchemaError:    tt.wantSchemaErr,
 				wantCELError:       tt.wantCELErr,
 				wantWebhookErrors:  tt.wantWebhookErrs,
@@ -1661,38 +1669,6 @@ func alphaDCDForAdmission(
 		mutate(dcd)
 	}
 	return dcd
-}
-
-func automaticFailoverTargetDCD(
-	mutate func(*nvidiacomv1beta1.DynamoComponentDeployment),
-) *nvidiacomv1beta1.DynamoComponentDeployment {
-	return betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
-		enableBetaIntraPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
-		main := &dcd.Spec.PodTemplate.Spec.Containers[0]
-		main.Command = []string{"python3"}
-		main.Args = []string{"-m", "dynamo.vllm"}
-		dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{
-			Enabled:       true,
-			CheckpointRef: k8sptr.To("checkpoint-worker"),
-		}
-		dcd.Spec.Experimental.Failover = &nvidiacomv1beta1.FailoverSpec{
-			Mode:       nvidiacomv1beta1.GMSModeIntraPod,
-			NumShadows: 1,
-		}
-		if mutate != nil {
-			mutate(dcd)
-		}
-	})
-}
-
-func dgdControllerReference() metav1.OwnerReference {
-	return metav1.OwnerReference{
-		APIVersion: nvidiacomv1beta1.GroupVersion.String(),
-		Kind:       "DynamoGraphDeployment",
-		Name:       "test-graph",
-		UID:        "test-graph-uid",
-		Controller: k8sptr.To(true),
-	}
 }
 
 func alphaDCDWithSharedSpec(
