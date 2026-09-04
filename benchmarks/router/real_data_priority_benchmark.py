@@ -21,6 +21,7 @@ from common import (
     get_aiperf_cmd_for_trace,
     prepare_trace_dataset,
     resolve_tokenizer,
+    set_trace_agent_hint,
     setup_logger,
 )
 
@@ -73,22 +74,11 @@ def offset_hash_ids(tier_requests):
 
 
 def tag_requests_with_priority(requests, priority):
-    """Return request copies with nvext.agent_hints.priority merged in."""
+    """Return request copies with extra.nvext.agent_hints.priority merged in."""
     tagged_requests = []
     for request in requests:
         tagged_request = copy.deepcopy(request)
-
-        nvext = tagged_request.get("nvext")
-        if not isinstance(nvext, dict):
-            nvext = {}
-            tagged_request["nvext"] = nvext
-
-        agent_hints = nvext.get("agent_hints")
-        if not isinstance(agent_hints, dict):
-            agent_hints = {}
-            nvext["agent_hints"] = agent_hints
-
-        agent_hints["priority"] = priority
+        set_trace_agent_hint(tagged_request, "priority", priority)
         tagged_requests.append(tagged_request)
     return tagged_requests
 
@@ -107,7 +97,7 @@ def run_concurrent_streams(
     """Launch concurrent aiperf subprocesses for each tier.
 
     Args:
-        tag_priority: If True, inject nvext.agent_hints.priority per tier.
+        tag_priority: If True, inject extra.nvext.agent_hints.priority per tier.
     """
     processes = []
     log_files = []
