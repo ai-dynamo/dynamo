@@ -10,11 +10,13 @@ Test Execution Times (Last Run: 2025-12-09):
 
 import logging
 import os
-import shutil
 import time
 
 import pytest
 
+from tests.fault_tolerance.cancellation.sglang_devices import (
+    resolve_sglang_disaggregated_devices,
+)
 from tests.fault_tolerance.cancellation.utils import (
     DynamoFrontendProcess,
     poll_for_pattern,
@@ -48,6 +50,7 @@ class DynamoWorkerProcess(ManagedProcess):
         system_port: int,
         frontend_port: int,
         mode: str = "agg",
+        bootstrap_port: int | None = None,
     ):
         """
         Initialize SGLang worker process.
@@ -57,6 +60,8 @@ class DynamoWorkerProcess(ManagedProcess):
             system_port: Port for system metrics server
             frontend_port: Port where frontend is running
             mode: One of "agg", "prefill", "decode"
+            bootstrap_port: Shared disaggregation bootstrap port. Required for
+                prefill and decode workers; unused by aggregated workers.
         """
         command = [
             "python3",
@@ -72,19 +77,25 @@ class DynamoWorkerProcess(ManagedProcess):
             "1",
             "--trust-remote-code",
         ]
-
+        # The test owns this shared rendezvous port and releases it once after
+        # both disaggregated workers stop.
+        self.bootstrap_port = bootstrap_port
         # Add mode-specific arguments
         if mode == "agg":
             # Aggregated mode - add skip-tokenizer-init like the serve test
             command.append("--skip-tokenizer-init")
         else:
             # Disaggregated mode - add disaggregation arguments like disagg.sh
+            if bootstrap_port is None:
+                raise ValueError(
+                    "bootstrap_port is required for disaggregated SGLang workers"
+                )
             command.extend(
                 [
                     "--disaggregation-mode",
                     mode,
                     "--disaggregation-bootstrap-port",
-                    "12345",  # TODO: use dynamic port allocation
+                    str(bootstrap_port),
                     "--host",
                     "0.0.0.0",
                     "--disaggregation-transfer-backend",
@@ -126,23 +137,18 @@ class DynamoWorkerProcess(ManagedProcess):
         request.addfinalizer(lambda port=self.fpm_port: deallocate_port(port))
         env["DYN_FORWARDPASS_METRIC_PORT"] = str(self.fpm_port)
 
-        # Set GPU assignment for disaggregated mode (like disagg.sh)
-        if mode == "decode":
-            env["CUDA_VISIBLE_DEVICES"] = "1"  # Use GPU 1 for decode worker
-        elif mode == "prefill":
-            env["CUDA_VISIBLE_DEVICES"] = "0"  # Use GPU 0 for prefill worker
-        # For agg (aggregated) mode, use default GPU assignment
+        # Preserve scheduler-assigned device tokens (including GPU/MIG UUIDs)
+        # while retaining the established prefill-first, decode-second topology.
+        if mode in ("prefill", "decode"):
+            prefill_device, decode_device = resolve_sglang_disaggregated_devices(
+                env.get("CUDA_VISIBLE_DEVICES")
+            )
+            env["CUDA_VISIBLE_DEVICES"] = (
+                prefill_device if mode == "prefill" else decode_device
+            )
+        # Aggregated mode inherits the scheduler assignment unchanged.
 
-        # Set log directory based on worker type
-        log_dir = f"{request.node.name}_{mode}_worker"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
+        log_dir = request.getfixturevalue("tmp_path") / f"{mode}_worker"
 
         super().__init__(
             command=command,
@@ -158,7 +164,7 @@ class DynamoWorkerProcess(ManagedProcess):
             straggler_commands=[
                 "-m dynamo.sglang",
             ],
-            log_dir=log_dir,
+            log_dir=str(log_dir),
         )
 
         self.mode = mode
@@ -166,12 +172,13 @@ class DynamoWorkerProcess(ManagedProcess):
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Release allocated port when worker exits."""
-        try:
-            # system_port is a required parameter, always set in __init__
-            deallocate_port(self.system_port)
-            deallocate_port(self.fpm_port)
-        except Exception as e:
-            logging.warning(f"Failed to release SGLang worker port: {e}")
+        for port in (self.system_port, self.fpm_port):
+            if port is None:
+                continue
+            try:
+                deallocate_port(port)
+            except Exception as e:
+                logging.warning(f"Failed to release SGLang worker port {port}: {e}")
 
         return super().__exit__(exc_type, exc_val, exc_tb)
 
@@ -194,7 +201,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
 @pytest.mark.timeout(160)  # 3x average
 @pytest.mark.gpu_1
-@pytest.mark.skip(reason="DYN-2265")
 @pytest.mark.nightly
 def test_request_cancellation_sglang_aggregated(
     request, runtime_services_dynamic_ports, predownload_models
@@ -216,8 +222,8 @@ def test_request_cancellation_sglang_aggregated(
     - Testing 3 scenarios: ~30s (~10s each)
     - Teardown: ~2s
 
-    TODO: Test is currently flaky/failing due to SGLang limitations with prefill cancellation.
-    See: https://github.com/sgl-project/sglang/issues/11139
+    The upstream SGLang prefill-cancellation limitation does not apply here: this
+    test waits for SGLang to assign a request ID before cancelling generation.
     """
     logger.info("Sanity check if latest test is getting executed")
 
@@ -339,6 +345,8 @@ def test_request_cancellation_sglang_decode_cancel(
     request.addfinalizer(lambda port=decode_system_port: deallocate_port(port))
     prefill_system_port = allocate_port(DynamoPortRange.SERVE.value)
     request.addfinalizer(lambda port=prefill_system_port: deallocate_port(port))
+    bootstrap_port = allocate_port(DynamoPortRange.BOOTSTRAP.value)
+    request.addfinalizer(lambda port=bootstrap_port: deallocate_port(port))
 
     # Step 1: Start the frontend (allocates its own port)
     with DynamoFrontendProcess(request) as frontend:
@@ -350,6 +358,7 @@ def test_request_cancellation_sglang_decode_cancel(
             system_port=decode_system_port,
             frontend_port=frontend.frontend_port,
             mode="decode",
+            bootstrap_port=bootstrap_port,
         ) as decode_worker:
             logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
@@ -359,8 +368,12 @@ def test_request_cancellation_sglang_decode_cancel(
                 system_port=prefill_system_port,
                 frontend_port=frontend.frontend_port,
                 mode="prefill",
+                bootstrap_port=bootstrap_port,
             ) as prefill_worker:
                 logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
+                assert (
+                    decode_worker.bootstrap_port == prefill_worker.bootstrap_port
+                ), "Prefill and decode workers must share a bootstrap port"
 
                 # TODO: Why wait after worker ready fixes frontend 404 / 500 flakiness?
                 time.sleep(2)
