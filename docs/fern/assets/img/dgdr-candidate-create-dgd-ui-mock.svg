@@ -1,0 +1,135 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+<svg viewBox="0 0 1440 900" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Create a DGD from a Dynamo Search candidate</title>
+  <desc id="desc">A dialog showing a DynamoGraphDeploymentCandidate with flat DGD fields and evaluation parameters as syntax-highlighted YAML, fields for a new DGD name and namespace, a notice that traffic routing remains unchanged, and a Create DGD button.</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="18" flood-color="#091425" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="900" fill="#F5F7FA"/>
+  <rect x="0" y="0" width="1440" height="72" fill="#111827"/>
+  <circle cx="38" cy="36" r="18" fill="#76B900"/>
+  <path d="M29 37 L35 43 L47 29" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="70" y="43" font-family="Inter, Helvetica, Arial, sans-serif" font-size="23" font-weight="700" fill="#FFFFFF">Dynamo Search</text>
+  <text x="1174" y="42" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#CBD5E1">namespace</text>
+  <rect x="1250" y="20" width="156" height="34" rx="6" fill="#273449"/>
+  <text x="1266" y="42" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#FFFFFF">inference</text>
+  <path d="M1384 34 l6 6 l6 -6" fill="none" stroke="#CBD5E1" stroke-width="2"/>
+
+  <text x="32" y="116" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#64748B">DGDR / minimax-planner-search / run-4 /</text>
+  <text x="323" y="116" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" fill="#334155">candidates</text>
+  <text x="32" y="151" font-family="Inter, Helvetica, Arial, sans-serif" font-size="28" font-weight="700" fill="#0F172A">Published candidates</text>
+
+  <rect x="32" y="178" width="1374" height="470" rx="10" fill="#FFFFFF"/>
+  <g font-family="Inter, Helvetica, Arial, sans-serif" font-size="13">
+    <text x="55" y="215" font-weight="700" fill="#64748B">RANK</text>
+    <text x="125" y="215" font-weight="700" fill="#64748B">CANDIDATE</text>
+    <text x="560" y="215" font-weight="700" fill="#64748B">TOPOLOGY</text>
+    <text x="735" y="215" font-weight="700" fill="#64748B">GPUS</text>
+    <text x="865" y="215" font-weight="700" fill="#64748B">GOODPUT/GPU</text>
+    <text x="1030" y="215" font-weight="700" fill="#64748B">MEAN E2E</text>
+    <text x="1170" y="215" font-weight="700" fill="#64748B">STATE</text>
+    <line x1="55" y1="229" x2="1380" y2="229" stroke="#E2E8F0"/>
+    <rect x="45" y="240" width="1348" height="62" rx="7" fill="#F1F8E7" stroke="#76B900"/>
+    <text x="70" y="278" font-weight="700" fill="#0F172A">1</text>
+    <text x="125" y="278" font-weight="700" fill="#2563EB">minimax-planner-search-g4-4b5c3f31</text>
+    <text x="560" y="278" fill="#334155">agg TP4/EP4</text>
+    <text x="735" y="278" fill="#334155">8.3 avg</text>
+    <text x="865" y="278" fill="#334155">87.7 tok/s</text>
+    <text x="1030" y="278" fill="#334155">1,921 ms</text>
+    <rect x="1165" y="258" width="88" height="24" rx="12" fill="#DDF3BC"/>
+    <text x="1182" y="275" font-weight="700" fill="#4D7C0F">selected</text>
+    <line x1="55" y1="318" x2="1380" y2="318" stroke="#E2E8F0"/>
+    <text x="70" y="355" font-weight="700" fill="#0F172A">2</text>
+    <text x="125" y="355" fill="#2563EB">minimax-planner-search-g4-7</text>
+    <text x="560" y="355" fill="#334155">disagg P8/D16</text>
+    <text x="735" y="355" fill="#334155">24 avg</text>
+    <text x="865" y="355" fill="#334155">82.1 tok/s</text>
+    <text x="1030" y="355" fill="#334155">1,734 ms</text>
+  </g>
+
+  <rect width="1440" height="900" fill="#0F172A" opacity="0.58"/>
+
+  <g filter="url(#shadow)">
+    <rect x="150" y="55" width="1140" height="790" rx="14" fill="#FFFFFF"/>
+  </g>
+  <text x="190" y="105" font-family="Inter, Helvetica, Arial, sans-serif" font-size="25" font-weight="700" fill="#0F172A">Create DGD from candidate</text>
+  <text x="190" y="132" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13" fill="#64748B">minimax-planner-search-g4-4b5c3f31 · rank 1 · evaluated successfully</text>
+  <circle cx="1245" cy="98" r="18" fill="#F1F5F9"/>
+  <path d="M1239 92 l12 12 M1251 92 l-12 12" fill="none" stroke="#475569" stroke-width="2" stroke-linecap="round"/>
+  <line x1="150" y1="153" x2="1290" y2="153" stroke="#E2E8F0"/>
+
+  <rect x="190" y="181" width="650" height="560" rx="9" fill="#0B1220"/>
+  <rect x="190" y="181" width="650" height="42" rx="9" fill="#172033"/>
+  <rect x="190" y="214" width="650" height="9" fill="#172033"/>
+  <circle cx="213" cy="202" r="5" fill="#EF4444"/>
+  <circle cx="231" cy="202" r="5" fill="#F59E0B"/>
+  <circle cx="249" cy="202" r="5" fill="#76B900"/>
+  <text x="275" y="207" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#CBD5E1">DynamoGraphDeploymentCandidate · YAML</text>
+  <text x="790" y="207" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#94A3B8">Copy</text>
+
+  <g font-family="SFMono-Regular, Consolas, monospace" font-size="13.2" xml:space="preserve">
+    <text x="214" y="253"><tspan fill="#7DD3FC">apiVersion</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">nvidia.com/v1beta2</tspan></text>
+    <text x="214" y="276"><tspan fill="#7DD3FC">kind</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">DynamoGraphDeploymentCandidate</tspan></text>
+    <text x="214" y="299"><tspan fill="#7DD3FC">metadata</tspan><tspan fill="#CBD5E1">:</tspan></text>
+    <text x="214" y="322"><tspan fill="#64748B">  </tspan><tspan fill="#7DD3FC">name</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">minimax-planner-search-g4-4b5c3f31</tspan></text>
+    <text x="214" y="345"><tspan fill="#64748B">  </tspan><tspan fill="#7DD3FC">namespace</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">inference</tspan></text>
+    <text x="214" y="368"><tspan fill="#7DD3FC">spec</tspan><tspan fill="#CBD5E1">:</tspan><tspan fill="#64748B">  # flat DGD fields + evaluation parameters</tspan></text>
+    <text x="214" y="391"><tspan fill="#64748B">  </tspan><tspan fill="#7DD3FC">components</tspan><tspan fill="#CBD5E1">:</tspan></text>
+    <text x="214" y="414"><tspan fill="#CBD5E1">    - </tspan><tspan fill="#7DD3FC">name</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">Frontend</tspan></text>
+    <text x="214" y="437"><tspan fill="#64748B">      </tspan><tspan fill="#7DD3FC">type</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">frontend</tspan></text>
+    <text x="214" y="460"><tspan fill="#64748B">      </tspan><tspan fill="#7DD3FC">replicas</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#FDBA74">1</tspan></text>
+    <text x="214" y="483"><tspan fill="#64748B">      </tspan><tspan fill="#7DD3FC">podTemplate</tspan><tspan fill="#CBD5E1">:</tspan></text>
+    <text x="214" y="506"><tspan fill="#64748B">        </tspan><tspan fill="#7DD3FC">spec</tspan><tspan fill="#CBD5E1">:</tspan></text>
+    <text x="214" y="529"><tspan fill="#64748B">          </tspan><tspan fill="#7DD3FC">containers</tspan><tspan fill="#CBD5E1">:</tspan></text>
+    <text x="214" y="552"><tspan fill="#CBD5E1">            - </tspan><tspan fill="#7DD3FC">name</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">main</tspan></text>
+    <text x="214" y="575"><tspan fill="#64748B">              </tspan><tspan fill="#7DD3FC">image</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">dynamo-frontend:1.3.0</tspan></text>
+    <text x="214" y="598"><tspan fill="#CBD5E1">    - </tspan><tspan fill="#7DD3FC">name</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">VllmDecodeWorker</tspan></text>
+    <text x="214" y="621"><tspan fill="#64748B">      </tspan><tspan fill="#7DD3FC">type</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#A7F3D0">worker</tspan></text>
+    <text x="214" y="644"><tspan fill="#64748B">      </tspan><tspan fill="#7DD3FC">replicas</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#FDBA74">1</tspan></text>
+    <text x="214" y="667"><tspan fill="#64748B">      </tspan><tspan fill="#7DD3FC">resources</tspan><tspan fill="#CBD5E1">:</tspan></text>
+    <text x="214" y="690"><tspan fill="#64748B">        </tspan><tspan fill="#7DD3FC">limits</tspan><tspan fill="#CBD5E1">: { </tspan><tspan fill="#7DD3FC">nvidia.com/gpu</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#FDBA74">8</tspan><tspan fill="#CBD5E1"> }</tspan></text>
+    <text x="214" y="718"><tspan fill="#64748B">  </tspan><tspan fill="#7DD3FC">parameters</tspan><tspan fill="#CBD5E1">: { </tspan><tspan fill="#7DD3FC">workload</tspan><tspan fill="#CBD5E1">: { </tspan><tspan fill="#7DD3FC">kv_load_ratio</tspan><tspan fill="#CBD5E1">: </tspan><tspan fill="#FDBA74">0.5</tspan><tspan fill="#CBD5E1"> } }</tspan></text>
+  </g>
+
+  <text x="880" y="202" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">NEW DEPLOYMENT</text>
+
+  <rect x="880" y="214" width="370" height="112" rx="8" fill="#F3FAE8" stroke="#76B900" stroke-width="2"/>
+  <circle cx="906" cy="243" r="10" fill="#76B900"/>
+  <path d="M901 243 l4 4 l7 -8" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="928" y="248" font-family="Inter, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0F172A">Create an independent DGD</text>
+  <text x="904" y="278" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">Copy the DGD fields; omit parameters.</text>
+  <text x="904" y="298" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">The DGDC and its run remain unchanged.</text>
+
+  <text x="880" y="365" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">NEW DGD NAME</text>
+  <rect x="880" y="377" width="370" height="44" rx="7" fill="#FFFFFF" stroke="#CBD5E1"/>
+  <text x="896" y="405" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#0F172A">minimax-production-g4</text>
+
+  <text x="880" y="459" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#64748B">NAMESPACE</text>
+  <rect x="880" y="471" width="370" height="44" rx="7" fill="#FFFFFF" stroke="#CBD5E1"/>
+  <text x="896" y="499" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" fill="#0F172A">inference</text>
+
+  <rect x="880" y="551" width="370" height="105" rx="8" fill="#FFF7E6" stroke="#F59E0B"/>
+  <circle cx="905" cy="577" r="10" fill="#F59E0B"/>
+  <text x="902" y="582" font-family="Inter, Helvetica, Arial, sans-serif" font-size="13" font-weight="700" fill="#FFFFFF">!</text>
+  <text x="925" y="578" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" font-weight="700" fill="#92400E">Traffic routing is unchanged</text>
+  <text x="904" y="606" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#78350F">Creating the DGD does not update an Ingress,</text>
+  <text x="904" y="626" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#78350F">LoadBalancer, or HTTPRoute. Route traffic after</text>
+  <text x="904" y="646" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#78350F">the new DGD reports Ready.</text>
+
+  <rect x="880" y="680" width="370" height="48" rx="8" fill="#F8FAFC" stroke="#E2E8F0"/>
+  <text x="904" y="709" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#475569">The operation fails if this DGD name already exists.</text>
+
+  <line x1="150" y1="768" x2="1290" y2="768" stroke="#E2E8F0"/>
+  <rect x="1030" y="789" width="94" height="40" rx="7" fill="#FFFFFF" stroke="#CBD5E1"/>
+  <text x="1055" y="814" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#334155">Cancel</text>
+  <rect x="1122" y="789" width="128" height="40" rx="7" fill="#76B900"/>
+  <text x="1147" y="814" font-family="Inter, Helvetica, Arial, sans-serif" font-size="14" font-weight="700" fill="#172400">Create DGD</text>
+
+  <text x="32" y="878" font-family="Inter, Helvetica, Arial, sans-serif" font-size="12" fill="#94A3B8">Mock interface for creating a DGD in the experimental DGDR v1beta2 workflow</text>
+</svg>
