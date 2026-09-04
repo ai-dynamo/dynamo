@@ -392,7 +392,9 @@ fn resolve_event_transport_kind(
     }
 }
 
-fn resolve_response_plane_mode(response_plane: Option<&str>) -> PyResult<Option<ResponsePlaneMode>> {
+fn resolve_response_plane_mode(
+    response_plane: Option<&str>,
+) -> PyResult<Option<ResponsePlaneMode>> {
     match response_plane {
         Some("tcp") => Ok(Some(ResponsePlaneMode::Tcp)),
         Some("quic") => Ok(Some(ResponsePlaneMode::Quic)),
