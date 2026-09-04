@@ -1057,9 +1057,6 @@ mod tests {
         .expect("request-plane send should succeed")
     }
 
-    /// Two instances in one process register the same endpoint name on the shared server.
-    /// Unregistering one through the trait must leave the other dispatchable; the removed
-    /// key must be rejected on the request-plane ACK rather than left hanging.
     #[tokio::test]
     async fn unregister_endpoint_removes_only_the_callers_instance() {
         crate::logging::init();

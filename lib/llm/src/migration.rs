@@ -733,9 +733,6 @@ mod tests {
         );
     }
 
-    // A worker that rejects the dispatch because it no longer serves the
-    // addressed instance is a worker-scoped fault; the pool-scoped Unavailable
-    // means there is nowhere to migrate to.
     #[test]
     fn worker_unavailable_is_migratable_but_pool_unavailable_is_not() {
         assert!(is_migratable(&migratable_error(

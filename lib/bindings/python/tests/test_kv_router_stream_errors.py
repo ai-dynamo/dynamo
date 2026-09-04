@@ -69,7 +69,6 @@ class _Worker:
 
 
 async def _wait_for_single_instance(endpoint):
-    """Return a client for `endpoint` once its watcher sees exactly one instance."""
     client = await endpoint.client()
     instances = await client.wait_for_instances()
     assert len(instances) == 1
@@ -103,7 +102,6 @@ async def error_router_endpoint(router_runtime):
 
 @pytest.fixture
 async def worker_pair(router_runtime):
-    """Two workers in this process whose endpoint names share the `.worker.generate` suffix."""
     suffix = uuid.uuid4().hex
     workers = [
         await _Worker.start(f"worker-{name}-{suffix}.worker.generate")
@@ -138,12 +136,7 @@ async def test_kv_router_propagates_stream_errors(
 async def test_worker_teardown_leaves_sibling_worker_reachable(
     worker_pair, router_runtime, monkeypatch
 ):
-    """Regression test for ai-dynamo/dynamo#14261.
-
-    Every runtime in a process shares one TCP request-plane server keyed by
-    `{instance_id}/{endpoint_name}`. Tearing down one worker used to remove every key
-    with the same endpoint name, so a request to the surviving sibling hung.
-    """
+    """Regression test for ai-dynamo/dynamo#14261."""
     monkeypatch.setenv("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")
     torn_down, survivor = worker_pair
     torn_down_client = await _wait_for_single_instance(

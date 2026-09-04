@@ -2503,9 +2503,6 @@ mod tests {
         );
     }
 
-    /// The addressed server answered that it has no handler for this instance,
-    /// so the instance is gone or shutting down; same quarantine argument as
-    /// `stream_incomplete_quarantines_the_worker`.
     #[test]
     fn worker_unavailable_quarantines_the_worker() {
         let err = DynamoError::builder()

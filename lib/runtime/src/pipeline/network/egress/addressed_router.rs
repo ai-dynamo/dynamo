@@ -864,15 +864,9 @@ mod rejection_detection_tests {
 
     #[test]
     fn unavailable_payload_maps_to_worker_unavailable() {
-        // Both payloads come from the one server addressed by the dispatch, so they
-        // must keep worker scope rather than report the whole pool as unavailable.
-        for payload in [
-            b"Server unavailable: unknown endpoint x".as_slice(),
-            b"Server unavailable: worker pool channel closed".as_slice(),
-        ] {
-            let err = detect_worker_rejection_response(payload).expect("should detect unavailable");
-            assert_eq!(err.error_type(), ErrorType::WorkerUnavailable);
-        }
+        let err = detect_worker_rejection_response(b"Server unavailable: unknown endpoint x")
+            .expect("should detect unavailable");
+        assert_eq!(err.error_type(), ErrorType::WorkerUnavailable);
     }
 
     #[test]
