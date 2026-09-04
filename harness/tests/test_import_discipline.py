@@ -35,6 +35,7 @@ TIER_0 = {
     "verbs.py",
     "catalog.py",
     "dialect.py",
+    "evidence.py",
 }
 
 # The one module permitted to import pytest, once it exists.

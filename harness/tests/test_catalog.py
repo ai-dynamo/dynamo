@@ -12,7 +12,14 @@ this file lists all 26 of them and checks it.
 import pytest
 from dynamo_test import catalog  # noqa: F401  (registers the verbs)
 from dynamo_test.roles import Role
-from dynamo_test.verbs import REGISTRY, Grant, Receiver, UnknownVerb, VerbCall, Verdict
+from dynamo_test.verbs import (
+    REGISTRY,
+    Contribution,
+    Grant,
+    Receiver,
+    UnknownVerb,
+    VerbCall,
+)
 
 # Every `class X(Event)` in the scenario suite's events package, as measured.
 SCENARIO_EVENT_KINDS = [
@@ -122,13 +129,13 @@ def test_gating_and_observing_are_different_names_not_a_flag():
     return, so an argument turns the gate off and the report still says PASSED.
     A reader cannot tell a check that held from one that was asked not to look.
     """
-    assert REGISTRY.require("logs").verdict is Verdict.NONE  # pure reader
+    assert REGISTRY.require("logs").contributes is Contribution.NONE  # pure reader
     assert REGISTRY.require("metrics").gates is False
 
 
 def test_act_verbs_never_gate():
     for spec in REGISTRY.for_receiver(Receiver.ACT):
-        assert spec.verdict is Verdict.NONE, spec.name
+        assert spec.contributes is Contribution.NONE, spec.name
 
 
 def test_every_fault_verb_declares_what_it_proves():

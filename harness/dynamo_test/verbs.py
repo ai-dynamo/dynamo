@@ -61,7 +61,7 @@ __all__ = [
     "Phase",
     "Receiver",
     "Grant",
-    "Verdict",
+    "Contribution",
     "VerbSpec",
     "VerbCall",
     "VerbRegistry",
@@ -104,8 +104,14 @@ class Grant(str, Enum):
     INFRA = "infra"
 
 
-class Verdict(str, Enum):
-    """What a verb's outcome contributes to the run result."""
+class Contribution(str, Enum):
+    """What a verb's outcome contributes to the run result.
+
+    Deliberately not called ``Verdict``. A *verdict* is what a run concluded
+    (:class:`dynamo_test.evidence.Verdict`); this is what one verb's outcome
+    feeds into that conclusion. They are different questions and sharing a name
+    made it possible to import the wrong one.
+    """
 
     GATES = "gates"
     OBSERVED = "observed"
@@ -159,11 +165,11 @@ PURE_READERS = frozenset(
     }
 )
 
-_PREFIX_VERDICT = {
-    "expect_": Verdict.GATES,
-    "observe_": Verdict.OBSERVED,
-    "require_valid_": Verdict.VALIDITY,
-    "report_": Verdict.ARTIFACT,
+_PREFIX_CONTRIBUTION = {
+    "expect_": Contribution.GATES,
+    "observe_": Contribution.OBSERVED,
+    "require_valid_": Contribution.VALIDITY,
+    "report_": Contribution.ARTIFACT,
 }
 
 _NAME = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -192,11 +198,11 @@ class VerbSpec:
             )
         if self.receiver is Receiver.JUDGE:
             if self.name not in PURE_READERS and not any(
-                self.name.startswith(p) for p in _PREFIX_VERDICT
+                self.name.startswith(p) for p in _PREFIX_CONTRIBUTION
             ):
                 raise NamingLaw(
                     f"JUDGE verb {self.name!r} must start with one of "
-                    f"{', '.join(sorted(_PREFIX_VERDICT))} — the prefix is how a "
+                    f"{', '.join(sorted(_PREFIX_CONTRIBUTION))} — the prefix is how a "
                     "reader tells a gate from an observation — or be one of the "
                     f"pure readers ({', '.join(sorted(PURE_READERS))})."
                 )
@@ -213,18 +219,18 @@ class VerbSpec:
             )
 
     @property
-    def verdict(self) -> Verdict:
+    def contributes(self) -> Contribution:
         """What this verb's outcome contributes to the run result."""
         if self.receiver is Receiver.ACT:
-            return Verdict.NONE
-        for prefix, verdict in _PREFIX_VERDICT.items():
+            return Contribution.NONE
+        for prefix, contribution in _PREFIX_CONTRIBUTION.items():
             if self.name.startswith(prefix):
-                return verdict
-        return Verdict.NONE
+                return contribution
+        return Contribution.NONE
 
     @property
     def gates(self) -> bool:
-        return self.verdict is Verdict.GATES
+        return self.contributes is Contribution.GATES
 
     def call(self, **kwargs: Any) -> "VerbCall":
         """Build a call to this verb, validating the selector."""
@@ -400,7 +406,7 @@ class VerbRegistry:
                 "receiver": s.receiver.value,
                 "phase": s.phase.value,
                 "grant": s.grant.value,
-                "verdict": s.verdict.value,
+                "contributes": s.contributes.value,
                 "gates": s.gates,
                 "takes_selector": s.takes_selector,
                 "default_role": str(s.default_role) if s.default_role else None,

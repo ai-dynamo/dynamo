@@ -10,6 +10,7 @@ impossible to point one suite at an older release.
 
 from .argv import ArgForm, ArgV, is_shell_command_flag
 from .dialect import DIALECTS, Dialect, EngineDialect, detect, for_backend
+from .evidence import Evidence, Outcome, Producer, Promise, Recorder, Seal, Verdict
 from .facts import Fact, FactNotKnown, Status
 from .roles import (
     Policy,
@@ -24,13 +25,13 @@ from .roles import (
 )
 from .verbs import (
     REGISTRY,
+    Contribution,
     Grant,
     Phase,
     Receiver,
     VerbCall,
     VerbRegistry,
     VerbSpec,
-    Verdict,
     verb,
 )
 
@@ -48,6 +49,14 @@ __all__ = [
     "EngineDialect",
     "detect",
     "for_backend",
+    # evidence
+    "Evidence",
+    "Outcome",
+    "Producer",
+    "Promise",
+    "Recorder",
+    "Seal",
+    "Verdict",
     # roles and selection
     "Policy",
     "PortName",
@@ -65,7 +74,7 @@ __all__ = [
     "Receiver",
     "VerbCall",
     "VerbRegistry",
+    "Contribution",
     "VerbSpec",
-    "Verdict",
     "verb",
 ]
