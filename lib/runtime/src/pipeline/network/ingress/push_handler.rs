@@ -643,10 +643,8 @@ where
         })?;
 
         tracing::trace!("calling generate");
-        // The one backend admission point: `generate` is not polled unless a
-        // slot was taken, and the slot rides in the returned stream so every
-        // exit releases it. A refusal surfaces as an ordinary `generate`
-        // failure, leaving the error path below unchanged.
+        // Route backend generation through the transport-independent admission
+        // boundary. Admission errors follow the existing generate error path.
         let context = request.context();
         let stream = admission_gate::global()
             .admit(
@@ -696,8 +694,6 @@ where
             }
         };
 
-        // Pumping this stream to the end, or dropping it, returns the admitted
-        // slot to the oldest queued request.
         self.pump_response_stream(stream, &publisher, payload_codec)
             .await;
 
