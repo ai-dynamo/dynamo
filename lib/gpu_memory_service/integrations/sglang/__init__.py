@@ -8,13 +8,18 @@ Usage:
 
     if server_args.load_format == "gms":
         load_format = setup_gms(server_args)
-        server_args.override("dynamo.gms", load_format=load_format)
+        override_server_args(server_args, "dynamo.gms", load_format=load_format)
+
+``server_args`` is already resolved by the time a launcher reaches this call,
+and a resolved SGLang ``ServerArgs`` rejects attribute assignment. The caller
+must therefore apply ``load_format`` through SGLang's resolution API; Dynamo's
+SGLang worker does this with ``dynamo.sglang._compat.override_server_args``.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Type
+from typing import TYPE_CHECKING, Any, Type
 
 if TYPE_CHECKING:
     from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader
@@ -31,6 +36,49 @@ _gms_initialized = False
 def is_gms_active() -> bool:
     """Return True if setup_gms() has been called successfully."""
     return _gms_initialized
+
+
+def _override_server_args(server_args: Any, source: str, **fields: Any) -> None:
+    """Declare launcher-stage SGLang configuration fields.
+
+    SGLang 0.5.18+ keeps ``ServerArgs`` raw and resolves the effective
+    configuration separately, so a change made after resolution must be
+    declared through its resolution API for the engine's resolved projection to
+    observe it. Assigning the attribute instead raises ``AttributeError``.
+
+    This mirrors ``dynamo.sglang._compat.override_server_args``. It is
+    duplicated rather than imported because ``gpu-memory-service`` is a
+    standalone distribution that must not depend on ``dynamo.*``; keep the two
+    ladders in step.
+    """
+    try:
+        from sglang.srt.arg_groups.overrides import declare_late_resolution
+    except ImportError:
+        # SGLang 0.5.17 and the XPU 0.5.11 pin predate declarations.
+        declare_late_resolution = None  # type: ignore[assignment]
+
+    if declare_late_resolution is not None:
+        declare_late_resolution(server_args, source, **fields)
+        return
+
+    # SGLang 0.5.18 exposes the declaration as a ServerArgs method instead.
+    # Remove when the minimum supported SGLang provides declare_late_resolution.
+    late_resolution = getattr(server_args, "_late_resolution", None)
+    if callable(late_resolution):
+        late_resolution(source, **fields)
+        return
+
+    # Fallback for SGLang 0.5.17. Remove when minimum supported SGLang is 0.5.18+.
+    override = getattr(server_args, "override", None)
+    if callable(override):
+        override(source, **fields)
+        return
+
+    # XPU compatibility for SGLang 0.5.11, whose ServerArgs stays mutable and
+    # predates every override API. Remove when the XPU SGLang pin is upgraded
+    # to 0.5.16+.
+    for name, value in fields.items():
+        setattr(server_args, name, value)
 
 
 def setup_gms(server_args) -> Type["GMSModelLoader"]:
@@ -58,13 +106,8 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
             "Cannot use --enable-draft-weights-cpu-backup with --load-format gms."
         )
 
-    override = getattr(server_args, "override", None)
-    if callable(override):
-        override("dynamo.gms", enable_memory_saver=True)
-    else:
-        # The separately pinned XPU image still uses SGLang 0.5.11, which
-        # predates ServerArgs.override. Remove after that pin reaches 0.5.16+.
-        server_args.enable_memory_saver = True
+    _override_server_args(server_args, "dynamo.gms", enable_memory_saver=True)
+
     # Resolve lock mode and RO reconnect timeout from model_loader_extra_config
     # before patches fire.
     global _gms_lock_mode
