@@ -113,9 +113,7 @@ Workers register their endpoints and are discovered through the discovery plane.
   (`ETCD_AUTH_CA`, `ETCD_AUTH_CLIENT_CERT`, `ETCD_AUTH_CLIENT_KEY`).
 
 **Why it matters:** an unauthenticated discovery plane lets any peer on the
-network enumerate workers and inject or alter routing metadata. See the
-[Discovery Plane](../knowledge-base/concepts/communication-planes/discovery-plane.md)
-reference.
+network enumerate workers and inject or alter routing metadata.
 
 ### Event plane
 
@@ -142,9 +140,7 @@ selected by `DYN_EVENT_PLANE`:
 
 **Why it matters:** the event plane carries **sensitive request-derived data** —
 KV events can reconstruct prompt content — so keep it on the trusted network and
-restrict publishers and subscribers. See the
-[Event Plane](../knowledge-base/concepts/communication-planes/event-plane.md)
-reference.
+restrict publishers and subscribers.
 
 ### Request plane
 
@@ -170,9 +166,7 @@ you use.
 **Why it matters:** TLS encrypts request-plane traffic, and mTLS additionally
 authenticates the client so an unauthenticated peer cannot deliver requests or
 data-transfer payloads to a worker. Keep the plane on the trusted network as
-defense in depth. See the
-[Request Plane](../knowledge-base/concepts/communication-planes/request-plane.md)
-reference.
+defense in depth.
 
 ## Restrict or Disable Optional Surfaces
 
