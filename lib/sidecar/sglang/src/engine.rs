@@ -296,21 +296,6 @@ impl LLMEngine for SglangSidecarEngine {
                 yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
                 return;
             }
-            if is_prefill {
-                let Some(handoff) = prefill_handoff.take() else {
-                    yield Err(client::protocol_error(
-                        "SGLang gRPC prefill request is missing disaggregated params",
-                    ));
-                    return;
-                };
-                // Match the Python worker contract and let decode rendezvous
-                // while SGLang performs the prefill in this drained stream.
-                yield Ok(LLMEngineOutput {
-                    disaggregated_params: Some(handoff),
-                    ..Default::default()
-                });
-            }
-
             tracing::debug!(request_id = %ctx.id(), "sending request to SGLang gRPC");
             let opened = tokio::select! {
                 biased;
@@ -329,6 +314,21 @@ impl LLMEngine for SglangSidecarEngine {
                     return;
                 }
             };
+            if is_prefill {
+                let Some(handoff) = prefill_handoff.take() else {
+                    yield Err(client::protocol_error(
+                        "SGLang gRPC prefill request is missing disaggregated params",
+                    ));
+                    return;
+                };
+                // Publish the handoff only after SGLang accepts the prefill RPC.
+                // Decode can then rendezvous while this stream is drained without
+                // racing a bootstrap room that the backend has not seen yet.
+                yield Ok(LLMEngineOutput {
+                    disaggregated_params: Some(handoff),
+                    ..Default::default()
+                });
+            }
 
             let mut generated = 0_u32;
             let mut observed_prompt_tokens = prompt_tokens;
