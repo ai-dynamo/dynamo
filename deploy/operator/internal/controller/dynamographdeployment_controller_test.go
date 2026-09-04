@@ -703,13 +703,13 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name                      string
-		dgdSpec                   v1alpha1.DynamoGraphDeploymentSpec
-		existingGroveResources    []client.Object
-		draEnabled                bool
-		wantReconcileResult ReconcileResult
-		wantErrSubstring    string
-		interceptorFuncs    interceptor.Funcs
+		name                   string
+		dgdSpec                v1alpha1.DynamoGraphDeploymentSpec
+		existingGroveResources []client.Object
+		draEnabled             bool
+		wantReconcileResult    ReconcileResult
+		wantErrSubstring       string
+		interceptorFuncs       interceptor.Funcs
 	}{
 		{
 			// Covers the error-propagation fix: a non-NotFound Grove read error
@@ -782,7 +782,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			},
 		},
 		{
-			name:                      "frontend service with 1 replica, decode service with 2 replicas - 2 PodCliques - one unready",
+			name: "frontend service with 1 replica, decode service with 2 replicas - 2 PodCliques - one unready",
 
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
@@ -858,7 +858,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			},
 		},
 		{
-			name:                      "decode worker multinode (PCSG), prefill worker multinode (PCSG) - both ready",
+			name: "decode worker multinode (PCSG), prefill worker multinode (PCSG) - both ready",
 
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
@@ -940,7 +940,7 @@ func TestGroveWorkloadsReconciler_Reconcile(t *testing.T) {
 			},
 		},
 		{
-			name:                      "frontend worker (PodClique), aggregated worker multinode (PCSG) - PCSG unready",
+			name: "frontend worker (PodClique), aggregated worker multinode (PCSG) - PCSG unready",
 
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
