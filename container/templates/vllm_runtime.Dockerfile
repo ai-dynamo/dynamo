@@ -242,11 +242,14 @@ RUN --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.
 # libao*, libmad0, libid3tag0, libltdl7) we'd then be redistributing. SoX is
 # inherently GPL (no LGPL replacement), so the compliant fix is to not ship it.
 # (sglang_runtime.Dockerfile is the reference codec-compliance pattern.)
+# libjemalloc2 lets Dynamo processes opt into jemalloc via
+# LD_PRELOAD or DYN_FRONTEND_JEMALLOC; it is not preloaded by default.
 RUN set -eux; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         jq \
-        libturbojpeg; \
+        libturbojpeg \
+        libjemalloc2; \
     ldconfig; \
     ldconfig -p | grep -q 'libturbojpeg.so.0'; \
     rm -rf /var/lib/apt/lists/*
@@ -349,12 +352,14 @@ RUN set -eux; \
 # (CPU-only) so a missing compiler aborts the build instead of shipping.
 RUN --mount=type=bind,source=./container/deps/vllm/validate_torch_compile_smoke.py,target=/tmp/validate_torch_compile_smoke.py,readonly \
     python3 /tmp/validate_torch_compile_smoke.py
+{% endif %}
 
 # Copy the LGPL ffmpeg from wheel_builder: versioned shared libs (libav*.so*,
 # libsw*.so*) + libvpx + the LGPL CLI binary that imageio/diffusers target via
-# IMAGEIO_FFMPEG_EXE. Ungated by enable_media_ffmpeg because the base GPL ffmpeg
-# was just purged, so the LGPL CLI must always be present for the omni
-# video-export path to have something to encode with.
+# IMAGEIO_FFMPEG_EXE. This remains ungated by enable_media_ffmpeg so the
+# media-enabled runtime wheel and the omni video-export path always have their
+# required shared libraries and CLI available.
+{% if device == "cuda" or device == "xpu" %}
 RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
     mkdir -p /usr/local/lib/pkgconfig && \
     cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/ && \

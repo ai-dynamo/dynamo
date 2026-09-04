@@ -54,6 +54,7 @@ mod admission;
 mod census;
 mod conditional_bypass;
 mod query;
+pub use query::PrefillReservation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]

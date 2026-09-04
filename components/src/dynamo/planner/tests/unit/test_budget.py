@@ -11,7 +11,9 @@ import pytest
 from dynamo.planner.core.budget import (
     bounds_for_total,
     compute_tolerance,
-    guard_disagg_load_budget,
+    fit_directional_budget_pair,
+    guard_disagg_scaling_budget,
+    guard_single_scaling_budget,
     proportional_clamp_pair,
     proportional_clamp_single,
 )
@@ -219,6 +221,132 @@ def test_clamp_pair_infeasible_band_falls_back_to_inputs():
 
 
 # ---------------------------------------------------------------------------- #
+# single-component direction-preserving guard                                  #
+# ---------------------------------------------------------------------------- #
+
+
+def test_single_budget_holds_scale_down_at_nominal_floor():
+    assert guard_single_scaling_budget(64, 63, 1, 64, 64, 1) == (
+        64,
+        "gpu_budget_guard_hold",
+    )
+
+
+def test_single_budget_does_not_bounce_from_tolerance_edge_to_floor():
+    assert guard_single_scaling_budget(63, 62, 1, 64, 64, 1) == (
+        63,
+        "gpu_budget_guard_hold",
+    )
+
+
+def test_single_budget_recovery_can_override_throughput_delta():
+    assert guard_single_scaling_budget(70, 69, 1, -1, 64, 1) == (
+        64,
+        "gpu_budget_reconcile",
+    )
+
+
+# ---------------------------------------------------------------------------- #
+# bounded direction-preserving throughput fit                                  #
+# ---------------------------------------------------------------------------- #
+
+
+def _fit_throughput(
+    current: tuple[int, int],
+    proposed: tuple[int, int],
+    *,
+    p_gpu: int = 1,
+    d_gpu: int = 1,
+    min_gpus: int = 64,
+    max_gpus: int = 64,
+) -> tuple[int, int]:
+    return fit_directional_budget_pair(
+        current[0],
+        current[1],
+        proposed[0],
+        proposed[1],
+        p_gpu,
+        d_gpu,
+        min_gpus,
+        max_gpus,
+        1,
+        1,
+    )
+
+
+def test_throughput_fit_holds_when_both_roles_scale_up_at_ceiling():
+    assert _fit_throughput((24, 40), (32, 48)) == (24, 40)
+
+
+def test_throughput_fit_admits_only_funded_part_of_opposing_rebalance():
+    assert _fit_throughput((24, 40), (23, 48)) == (23, 41)
+
+
+def test_throughput_fit_preserves_weighted_opposing_atomicity():
+    assert _fit_throughput(
+        (16, 16),
+        (15, 24),
+        p_gpu=2,
+        d_gpu=1,
+        min_gpus=48,
+        max_gpus=48,
+    ) == (15, 18)
+
+
+def test_throughput_fit_shares_available_headroom_between_two_scale_ups():
+    assert _fit_throughput(
+        (24, 36),
+        (32, 44),
+        min_gpus=-1,
+        max_gpus=64,
+    ) == (26, 38)
+
+
+@pytest.mark.parametrize(("p_gpu", "d_gpu"), [(1, 1), (1, 2), (2, 3)])
+def test_throughput_fit_exhaustively_preserves_directions_and_budget(p_gpu, d_gpu):
+    for current_p in range(1, 5):
+        for current_d in range(1, 5):
+            budget = current_p * p_gpu + current_d * d_gpu
+            for proposed_p in range(max(0, current_p - 2), current_p + 3):
+                for proposed_d in range(max(0, current_d - 2), current_d + 3):
+                    final_p, final_d = fit_directional_budget_pair(
+                        current_p,
+                        current_d,
+                        proposed_p,
+                        proposed_d,
+                        p_gpu,
+                        d_gpu,
+                        budget,
+                        budget,
+                        0,
+                        0,
+                    )
+                    assert (
+                        min(current_p, proposed_p)
+                        <= final_p
+                        <= max(current_p, proposed_p)
+                    )
+                    assert (
+                        min(current_d, proposed_d)
+                        <= final_d
+                        <= max(current_d, proposed_d)
+                    )
+                    final_total = final_p * p_gpu + final_d * d_gpu
+                    assert bounds_for_total(
+                        final_total,
+                        budget,
+                        budget,
+                        max(p_gpu, d_gpu),
+                    )[0]
+
+                    opposing = (proposed_p < current_p and proposed_d > current_d) or (
+                        proposed_p > current_p and proposed_d < current_d
+                    )
+                    if opposing:
+                        assert (final_p == current_p) == (final_d == current_d)
+
+
+# ---------------------------------------------------------------------------- #
 # disaggregated load-budget safety guard                                       #
 # ---------------------------------------------------------------------------- #
 
@@ -234,7 +362,7 @@ def _guard(
     prefill_min_endpoint: int = 1,
     decode_min_endpoint: int = 1,
 ) -> tuple[int, int, str | None]:
-    return guard_disagg_load_budget(
+    return guard_disagg_scaling_budget(
         current[0],
         current[1],
         proposed[0],
@@ -311,16 +439,24 @@ def test_load_budget_allows_scale_down_above_floor():
     assert _guard((35, 35), (34, 35), max_gpus=80) == (34, 35, None)
 
 
-def test_load_budget_disabled_minimum_preserves_legacy_clamp():
-    expected = proportional_clamp_pair(3, 2, 1, 1, -1, 4, 1, 1)
+def test_load_budget_disabled_minimum_does_not_invent_ceiling_donor():
     actual_p, actual_d, reason = _guard(
         (3, 1),
         (3, 2),
         min_gpus=-1,
         max_gpus=4,
     )
-    assert (actual_p, actual_d) == expected
-    assert reason is None
+    assert (actual_p, actual_d) == (3, 1)
+    assert reason == "gpu_budget_guard_hold"
+
+
+def test_load_budget_max_only_both_up_does_not_invent_donor():
+    assert _guard(
+        (4, 1),
+        (5, 2),
+        min_gpus=-1,
+        max_gpus=5,
+    ) == (4, 1, "gpu_budget_guard_hold")
 
 
 def test_load_budget_weighted_tolerance_does_not_enable_donor_only_churn():

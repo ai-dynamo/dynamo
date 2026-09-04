@@ -65,6 +65,13 @@ TRTLLM_GRPC_PORT="${TRTLLM_GRPC_PORT:-50051}"
 TRTLLM_CONTEXT_LENGTH="${TRTLLM_CONTEXT_LENGTH:-4096}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
+# `--grpc` needs `smg-grpc-proto`, which TRT-LLM keeps behind its optional
+# `grpc-smg` extra. Constraint copied from that extra so we resolve what
+# upstream resolves.
+if ! "$TRTLLM_PYTHON" -c "import smg_grpc_proto" >/dev/null 2>&1; then
+    "$TRTLLM_PYTHON" -m pip install --no-cache-dir "smg-grpc-proto>=0.4.2"
+fi
+
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_trtllm_override_args_with_mem)
 TRTLLM_GPU_MEM_ARGS=()

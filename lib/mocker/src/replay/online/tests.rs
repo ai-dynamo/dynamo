@@ -119,7 +119,7 @@ async fn admission_timestamp_is_preserved_when_forwarding_is_delayed() {
         })
         .unwrap();
     drop(recorder_tx);
-    let report = recorder.finish(500.0).await.unwrap();
+    let report = recorder.finish(500.0, None, None).await.unwrap();
     let record = &report.per_request[0];
     assert_eq!(record.first_admit_ms, Some(0.0));
     assert!(record.first_admit_ms <= record.first_token_ms);
@@ -298,28 +298,30 @@ fn online_agentic_trace_releases_dependency_after_parent_completion() {
             hash_id_scope: AgenticHashIdScope::Local,
             source: AgenticSourceProvenance {
                 format: "test".to_string(),
-                digest: "online-agentic".to_string(),
+                digest: "online-agentic-dependency".to_string(),
             },
         },
         vec![
             AgenticMooncakeRow {
                 request_id: "root".to_string(),
-                session_id: "root".to_string(),
                 play_id: "play".to_string(),
+                session_id: "root".to_string(),
                 model: "model".to_string(),
                 input_length: Some(64),
                 output_length: Some(2),
                 hash_ids: Some(vec![1]),
+                not_before_ms: 0.0,
                 ..Default::default()
             },
             AgenticMooncakeRow {
                 request_id: "dependent".to_string(),
-                session_id: "dependent".to_string(),
                 play_id: "play".to_string(),
+                session_id: "dependent".to_string(),
                 model: "model".to_string(),
                 input_length: Some(64),
                 output_length: Some(2),
                 hash_ids: Some(vec![2]),
+                not_before_ms: 0.0,
                 dependencies: vec![AgenticDependency {
                     request_id: "root".to_string(),
                     trigger: AgenticDependencyTrigger::Completion,
@@ -342,6 +344,7 @@ fn online_agentic_trace_releases_dependency_after_parent_completion() {
             },
         ),
         trace,
+        None,
     )
     .unwrap();
 

@@ -260,6 +260,46 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{"spec.experimental.checkpoint: Forbidden: checkpoint functionality is disabled in the operator configuration"},
 		},
 		{
+			name: "v1beta1 standalone worker checkpointRef is rejected",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled:       true,
+						CheckpointRef: k8sptr.To("worker-snapshot"),
+					},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.experimental.checkpoint.checkpointRef: Forbidden: worker-class checkpointRef is supported only on DynamoGraphDeployment-managed components"},
+		},
+		{
+			name: "v1alpha1 standalone worker checkpointRef is rejected",
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.Spec.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{
+					Enabled:       true,
+					CheckpointRef: k8sptr.To("worker-snapshot"),
+				}
+			}),
+			wantWebhookErrs: []string{"spec.checkpoint.checkpointRef: Forbidden: worker-class checkpointRef is supported only on DynamoGraphDeployment-managed components"},
+		},
+		{
+			name: "DGD-managed worker checkpointRef is accepted",
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: nvidiacomv1beta1.GroupVersion.String(),
+					Kind:       nvidiacomv1beta1.DynamoGraphDeploymentGVK.Kind,
+					Name:       "graph",
+					UID:        "graph-uid",
+					Controller: k8sptr.To(true),
+				}}
+				dcd.Spec.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
+					Checkpoint: &nvidiacomv1beta1.ComponentCheckpointConfig{
+						Enabled:       true,
+						CheckpointRef: k8sptr.To("worker-snapshot"),
+					},
+				}
+			}),
+		},
+		{
 			name: "invalid replicas",
 			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
 				dcd.Spec.Replicas = &negativeReplicas
@@ -595,13 +635,19 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 		},
 		{
 			name: "deprecated checkpoint mode with checkpointRef is accepted",
-			deployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
-				ComponentType: consts.ComponentTypeWorker,
-				Checkpoint: &nvidiacomv1alpha1.ServiceCheckpointConfig{
+			deployment: alphaDCDForAdmission(func(dcd *nvidiacomv1alpha1.DynamoComponentDeployment) {
+				dcd.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
+					Kind:       "DynamoGraphDeployment",
+					Name:       "graph",
+					UID:        "graph-uid",
+					Controller: k8sptr.To(true),
+				}}
+				dcd.Spec.Checkpoint = &nvidiacomv1alpha1.ServiceCheckpointConfig{
 					Enabled:       true,
 					Mode:          nvidiacomv1alpha1.CheckpointModeManual,
 					CheckpointRef: k8sptr.To("existing-checkpoint"),
-				},
+				}
 			}),
 		},
 		{

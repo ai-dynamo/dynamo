@@ -475,6 +475,13 @@ pub mod llm {
     /// EMA smoothing factor (alpha) for the EMA predictor. Range [0.0, 1.0].
     pub const DYN_LORA_ALLOCATION_EMA_ALPHA: &str = "DYN_LORA_ALLOCATION_EMA_ALPHA";
 
+    /// Bounded startup wait, in seconds, for the KV state-agent host
+    /// advertisement before an opted-in worker gives up on KV routing.
+    /// `0` fails after a single discovery snapshot; invalid values use the
+    /// 30-second default.
+    pub const DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS: &str =
+        "DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS";
+
     /// Metrics configuration
     pub mod metrics {
         /// Custom metrics prefix (overrides default "dynamo_frontend")
@@ -980,6 +987,7 @@ mod tests {
             llm::DYN_REASONING_FIELD_NAME,
             llm::DYN_ENABLE_EXPERIMENTAL_PARSERS_V2,
             llm::DYN_ENABLE_GUIDED_TOOL_STREAMING,
+            llm::DYN_KV_STATE_AGENT_HOST_DISCOVERY_TIMEOUT_SECS,
             llm::DYN_LORA_ALLOCATION_ENABLED,
             llm::DYN_LORA_ALLOCATION_ALGORITHM,
             llm::DYN_LORA_ALLOCATION_TIMESTEP_SECS,

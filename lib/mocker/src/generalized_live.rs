@@ -34,8 +34,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 use uuid::Uuid;
 
-#[cfg(not(test))]
-use crate::common::utils::sleep_until_precise;
+use crate::common::utils::ReusablePreciseTimer;
 
 /// Engine type driven by the native live runtime.
 pub type GroupedEngine = GeneralizedMockerEngine<SchedulerRank>;
@@ -375,6 +374,8 @@ impl GroupedLiveActor {
     }
 
     async fn run_until_stopped(&mut self) -> Result<()> {
+        let mut pass_timer = ReusablePreciseTimer::default();
+        let mut internal_timer = ReusablePreciseTimer::default();
         loop {
             if self.cancel_token.is_cancelled() {
                 return Ok(());
@@ -383,7 +384,7 @@ impl GroupedLiveActor {
             self.process_due_internal_work().await?;
             if !self.engine.is_ready() {
                 self.next_pass_deadline_ms = None;
-                if !self.wait_for_idle_work().await? {
+                if !self.wait_for_idle_work(&mut internal_timer).await? {
                     return Ok(());
                 }
                 continue;
@@ -413,7 +414,10 @@ impl GroupedLiveActor {
             let zero_duration = end_ms <= started_at_ms;
             self.publish(GroupedLiveEvent::PassStarted(started)).await?;
 
-            if !self.wait_for_pass_boundary(end_ms).await? {
+            if !self
+                .wait_for_pass_boundary(end_ms, &mut pass_timer, &mut internal_timer)
+                .await?
+            {
                 return Ok(());
             }
             let completed_at_ms = self.advance_engine_time(end_ms);
@@ -538,9 +542,12 @@ impl GroupedLiveActor {
         }
     }
 
-    async fn wait_for_idle_work(&mut self) -> Result<bool> {
+    async fn wait_for_idle_work(
+        &mut self,
+        internal_timer: &mut ReusablePreciseTimer,
+    ) -> Result<bool> {
         let deadline_ms = self.engine.next_internal_deadline_ms();
-        let deadline = sleep_until_ms(self.clock_origin, deadline_ms);
+        let deadline = sleep_until_ms(internal_timer, self.clock_origin, deadline_ms);
         tokio::pin!(deadline);
         tokio::select! {
             biased;
@@ -584,13 +591,19 @@ impl GroupedLiveActor {
         Ok(())
     }
 
-    async fn wait_for_pass_boundary(&mut self, end_ms: f64) -> Result<bool> {
-        let pass_deadline = sleep_until_ms(self.clock_origin, Some(end_ms));
+    async fn wait_for_pass_boundary(
+        &mut self,
+        end_ms: f64,
+        pass_timer: &mut ReusablePreciseTimer,
+        internal_timer: &mut ReusablePreciseTimer,
+    ) -> Result<bool> {
+        let pass_deadline = sleep_until_ms(pass_timer, self.clock_origin, Some(end_ms));
         tokio::pin!(pass_deadline);
         let mut accept_commands = true;
         loop {
             let internal_deadline_ms = self.engine.next_internal_deadline_ms();
-            let internal_deadline = sleep_until_ms(self.clock_origin, internal_deadline_ms);
+            let internal_deadline =
+                sleep_until_ms(internal_timer, self.clock_origin, internal_deadline_ms);
             tokio::pin!(internal_deadline);
             tokio::select! {
                 biased;
@@ -693,16 +706,17 @@ fn command_can_apply_during_pass(command: &Command) -> bool {
     )
 }
 
-async fn sleep_until_ms(origin: Instant, deadline_ms: Option<f64>) {
+async fn sleep_until_ms(
+    timer: &mut ReusablePreciseTimer,
+    origin: Instant,
+    deadline_ms: Option<f64>,
+) {
     let Some(deadline_ms) = deadline_ms else {
         std::future::pending::<()>().await;
         return;
     };
     let deadline = origin + Duration::from_secs_f64(deadline_ms.max(0.0) / 1_000.0);
-    #[cfg(test)]
-    tokio::time::sleep_until(deadline).await;
-    #[cfg(not(test))]
-    sleep_until_precise(deadline.into_std()).await;
+    timer.sleep_until(deadline.into_std()).await;
 }
 
 #[cfg(test)]
@@ -1263,6 +1277,61 @@ mod tests {
         actor.await.unwrap().unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn pass_boundary_uses_reusable_timerfd() {
+        let mut engine = EngineFactory::new(EngineConfig {
+            num_gpu_blocks: 128,
+            block_size: 4,
+            max_num_seqs: 8,
+            max_num_batched_tokens: 256,
+            timing_model: TimingModelConfig::Fixed {
+                prefill_ms: 5.0,
+                decode_ms: 0.0,
+            },
+            ..EngineConfig::default()
+        })
+        .unwrap()
+        .build(EngineIdentity::new(7), NonZeroU32::new(1).unwrap())
+        .unwrap();
+        engine
+            .apply_command_effects(
+                SchedulerCommand::new(0, Command::Submit(request(12, 4, 2))),
+                0.0,
+            )
+            .unwrap();
+        let started = engine.execute_pass(0.0).unwrap().unwrap();
+
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (_cancellation_tx, cancellation_rx) = mpsc::channel(1);
+        let (event_tx, _events) = mpsc::channel(1);
+        let mut actor = GroupedLiveActor {
+            engine,
+            command_rx,
+            cancellation_rx,
+            event_tx,
+            cancel_token: CancellationToken::new(),
+            clock_origin: Instant::now(),
+            deferred_commands: VecDeque::new(),
+            engine_time_ms: 0.0,
+            next_pass_deadline_ms: Some(started.end_ms),
+        };
+        let mut pass_timer = ReusablePreciseTimer::with_timerfd_for_test();
+        let mut internal_timer = ReusablePreciseTimer::default();
+        let waited_at = std::time::Instant::now();
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            actor.wait_for_pass_boundary(started.end_ms, &mut pass_timer, &mut internal_timer),
+        )
+        .await
+        .expect("pass boundary did not complete")
+        .unwrap();
+
+        assert!(waited_at.elapsed() >= Duration::from_millis(1));
+        assert_eq!(pass_timer.timerfd_create_attempts(), 1);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn queued_cancellation_preempts_an_overdue_pass_boundary() {
         let mut engine = EngineFactory::new(EngineConfig {
@@ -1321,7 +1390,14 @@ mod tests {
             engine_time_ms: 0.0,
             next_pass_deadline_ms: None,
         };
-        assert!(actor.wait_for_pass_boundary(started.end_ms).await.unwrap());
+        let mut pass_timer = ReusablePreciseTimer::default();
+        let mut internal_timer = ReusablePreciseTimer::default();
+        assert!(
+            actor
+                .wait_for_pass_boundary(started.end_ms, &mut pass_timer, &mut internal_timer,)
+                .await
+                .unwrap()
+        );
         response
             .try_recv()
             .expect("queued cancellation must be applied before the overdue boundary")
