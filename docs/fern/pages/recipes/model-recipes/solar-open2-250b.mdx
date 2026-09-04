@@ -1,0 +1,137 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Solar Open2 250B"
+---
+
+## Profiles
+
+| Profile | Serving mode | GPUs | Context |
+|---|---|---:|---|
+| `agg-b200-chat` | Aggregated, two replicas, KV-aware routing | 4 | 1M |
+
+## Prerequisites
+
+- Kubernetes cluster with B200 nodes and the Dynamo operator installed
+- A `ReadWriteMany` storage class with at least 300 GB available
+- Registry credentials for the runtime image (`nvcr-secret`)
+
+## Prepare the model cache
+
+Edit `storageClassName` in `model-cache.yaml` first.
+
+```bash
+kubectl apply -f recipes/solar-open2-250b/model-cache/model-cache.yaml
+kubectl apply -f recipes/solar-open2-250b/model-cache/model-download.yaml
+kubectl wait --for=condition=complete job/model-download --timeout=2h
+```
+
+The checkpoint is approximately 153 GB.
+
+## Deploy
+
+```bash
+kubectl apply -f recipes/solar-open2-250b/vllm/agg-b200-chat/deploy.yaml
+kubectl wait --for=condition=Ready dynamographdeployment/solar-open2-250b-vllm-b200-agg-chat --timeout=30m
+```
+
+
+## Smoke test
+
+```bash
+kubectl port-forward svc/solar-open2-250b-vllm-b200-agg-chat-frontend 8000:8000 &
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"solar-open2-250b",
+       "messages":[{"role":"user","content":"What is 12 times 7?"}],
+       "max_tokens":128}'
+```
+
+Solar Open2 is a reasoning model. Short generations may return the answer in
+`reasoning_content` with `content` empty; allow a larger `max_tokens` to see a
+final answer in `content`.
+
+## Runtime image
+
+Both manifests pin a purpose-built runtime image by digest. It extends the
+Dynamo 1.4.1 vLLM runtime with the Solar Open2 architecture and parser support
+and a Dynamo frontend compatibility patch. The changes are Python-only.
+
+The stock Dynamo 1.4.1 vLLM runtime does not serve this model — it has no Solar
+Open2 model definition — so the pinned image is required rather than optional.
+Pin by digest, not by tag.
+
+## Configuration notes
+
+### Both profiles
+
+- **NVFP4 weights, FP8 KV cache.** Both manifests set `--kv-cache-dtype fp8`
+  with `--calculate-kv-scales`. FP8 halves KV bytes relative to BF16, which
+  roughly doubles the KV pool and raises the realised prefix-cache hit rate.
+- **MoE backend.** `--moe-backend flashinfer_trtllm` with
+  `--enable-flashinfer-autotune`.
+- **Attention.** FlashInfer is selected automatically. Note that FlashAttention
+  is not compatible with an FP8 KV cache on this model and will fail at startup
+  if forced.
+- **Hybrid KV pages.** Solar Open2 has 12 grouped-query attention layers and 36
+  KDA linear-attention layers. The effective KV page is a hybrid page of roughly
+  1072 tokens at `--block-size 16`, not the block size itself. Tools that assume
+  block size equals page size need adjusting.
+- **Expert parallelism** is left off. It measured as neutral for aggregated
+  serving on this checkpoint, so the simpler configuration is used.
+
+### Aggregated profile
+
+- Two worker replicas at tensor parallel size 2, fronted by a KV-aware router
+  (`--router-mode kv`, `--router-kv-events`) with a ZMQ KV-event publisher on
+  each worker. KV-aware routing outperforms round-robin on prefix-reuse
+  workloads.
+
+
+- Separate prefill and decode workers connected by `NixlConnector`, with
+  `kv_role: kv_producer` on prefill and `kv_role: kv_consumer` on decode, each
+- **`VLLM_SSM_CONV_STATE_LAYOUT=DS` is required.** Solar Open2's KDA layers
+  register as SSM layers, and their convolution state must cross the KV-transfer
+  boundary. Without this variable the engine asserts during initialization and
+  the workers will not start.
+- **Each worker requests `rdma/ib` equal to its GPU count.** This is required, not
+  optional: without it the device plugin does not inject `/dev/infiniband`, UCX
+  falls back to TCP, and nothing logs an error. Verify inside a running worker with
+  `kubectl exec <pod> -c main -- ls /dev/infiniband` and expect `uverbsN`, `umadN`
+  and `rdma_cm`. One HCA per GPU is correct; requesting more measured worse.
+- Transport is configured with `NCCL_IB_DISABLE=0`, `UCX_TLS=^cuda_ipc`,
+  `UCX_RNDV_SCHEME=get_zcopy` and `UCX_MAX_RNDV_RAILS=4`. `UCX_NET_DEVICES` is
+  deliberately left unset; pinning it produced `NIXL_ERR_BACKEND`.
+- **The frontend uses round-robin routing, not KV-aware routing.** This is
+  deliberate. KV-aware routing improves the aggregated profile, but on a
+  local cache to reuse, so routing by prefix overlap only concentrates load and
+  inflates inter-token latency.
+- The topology is one prefill worker (TP4 with expert parallelism, 4 GPUs) and three
+  decode workers (TP2, 6 GPUs), which matches the measured per-worker request rates
+  of each phase.
+- Speculative decoding is not supported on this checkpoint and is not enabled.
+
+## Known limitations
+
+  throughput of the 4-GPU aggregated profile, while delivering roughly an order of
+  magnitude higher time-to-first-token. Prefer the aggregated profile unless
+  per-user throughput or independent prefill/decode scaling is the priority.
+- The 1M context length requires sufficient KV capacity; reduce
+  `--max-model-len` if deploying on a smaller GPU allocation.
+- Speculative decoding is not available on this checkpoint.
+
+## Source
+
+- Manifests: `recipes/solar-open2-250b/`
+- Model: `nota-ai/Solar-Open2-250B-Nota-NVFP4`
+
+## Measured performance
+
+Chat workload, 15% subset of the internal `nim_turbo` 8k/1k 70kv trace
+(1805 requests, mean ISL 37.4k tokens, mean OSL 1008 tokens). SLA: p50 TTFT
+below 5 s and p50 user output throughput at or above 49 tok/s.
+
+| Workload | Recipe | Framework | SKU | Concurrency | System output tok/s/GPU | User output tok/s (P50) | TTFT P50 (ms) |
+|---|---|---|---|---:|---:|---:|---:|
+| Chat (15% subset) | Aggregated, 2 replicas, KV-aware routing | vLLM | B200 | 20 | 214.98 | 52.16 | 319 |
+

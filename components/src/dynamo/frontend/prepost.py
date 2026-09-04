@@ -717,6 +717,7 @@ class StreamingPostProcessor:
     def _tool_start_markers(self) -> tuple[str, ...]:
         markers = [
             getattr(self.tool_parser, "tool_call_start_token", None),
+            getattr(self.tool_parser, "TOOL_CALL_START", None),
             # MistralToolParser names its [TOOL_CALLS] marker bot_token.
             getattr(self.tool_parser, "bot_token", None),
             *self._tool_parser_terminal_markers(("TOOL_START", "FUNC_PREFIX")),
@@ -730,6 +731,7 @@ class StreamingPostProcessor:
     def _tool_end_markers(self) -> tuple[str, ...]:
         markers = [
             getattr(self.tool_parser, "tool_call_end_token", None),
+            getattr(self.tool_parser, "TOOL_CALL_END", None),
             *self._tool_parser_terminal_markers(("TOOL_END", "FUNC_END")),
         ]
         return tuple(
