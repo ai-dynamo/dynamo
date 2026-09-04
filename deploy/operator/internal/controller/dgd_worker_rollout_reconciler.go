@@ -1268,20 +1268,6 @@ func (r *dgdWorkerRolloutReconciler) dcdObservesWorkerHash(
 	return true, nil
 }
 
-// deleteOldWorkerDCDs lists and deletes all worker DCDs belonging to this DGD whose
-// hash label does NOT match newWorkerHash. This cleans up all old generations at once.
-func (r *dgdWorkerRolloutReconciler) deleteOldWorkerDCDs(
-	ctx context.Context,
-	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
-	newWorkerHash string,
-) error {
-	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, newWorkerHash)
-	if err != nil {
-		return fmt.Errorf("failed to list non-current worker DCDs: %w", err)
-	}
-	return r.deleteWorkerDCDs(ctx, oldDCDs)
-}
-
 // deleteWorkerDCDs deletes the given worker DCDs with a UID precondition on each.
 func (r *dgdWorkerRolloutReconciler) deleteWorkerDCDs(
 	ctx context.Context,

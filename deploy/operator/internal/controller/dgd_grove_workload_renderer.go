@@ -228,12 +228,14 @@ func podCliqueSetUsesGroveWorkerHashSuffix(
 }
 
 // podCliqueSetObservesWorkerHash reports whether every worker clique carries a
-// coherent hash. Accepts all-canonical (desired hash on every clique) or, when
-// isFirstGeneration is true, all-unstamped (no clique has a hash yet).
+// coherent hash. Accepts all-canonical (desired hash on every clique) always, or
+// all-unstamped (no clique has a hash) when acceptAllUnstamped is true. The
+// all-unstamped path is only valid for a pre-existing legacy PCS that was never
+// suffixed; a newly created PCS must carry the canonical hash label.
 func podCliqueSetObservesWorkerHash(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	pcs *grovev1alpha1.PodCliqueSet,
-	isFirstGeneration bool,
+	acceptAllUnstamped bool,
 ) (bool, error) {
 	if !dgdHasWorkerComponents(dgd) {
 		return true, nil
@@ -243,7 +245,7 @@ func podCliqueSetObservesWorkerHash(
 		return false, fmt.Errorf("compute desired Grove worker hash: %w", err)
 	}
 	allCanonical := true
-	allUnstamped := isFirstGeneration
+	allUnstamped := acceptAllUnstamped
 	for i := range dgd.Spec.Components {
 		component := &dgd.Spec.Components[i]
 		if !dynamo.IsWorkerComponent(string(component.ComponentType)) {

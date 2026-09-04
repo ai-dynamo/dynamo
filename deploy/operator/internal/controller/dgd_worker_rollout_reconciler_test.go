@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"testing"
 
@@ -142,6 +143,21 @@ func newTestComponentWorkloadsReconciler(
 	rollout *dgdWorkerRolloutReconciler,
 ) *componentWorkloadsReconciler {
 	return newComponentWorkloadsReconciler(rollout.Client, rollout.GetRecorder(), rollout)
+}
+
+// deleteOldWorkerDCDs is a test convenience wrapper that lists and deletes all
+// worker DCDs belonging to dgd whose hash label does not match newWorkerHash.
+// Production callers list first and pass the result to deleteWorkerDCDs directly.
+func (r *dgdWorkerRolloutReconciler) deleteOldWorkerDCDs(
+	ctx context.Context,
+	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
+	newWorkerHash string,
+) error {
+	oldDCDs, err := r.listOldWorkerDCDs(ctx, dgd, newWorkerHash)
+	if err != nil {
+		return fmt.Errorf("failed to list non-current worker DCDs: %w", err)
+	}
+	return r.deleteWorkerDCDs(ctx, oldDCDs)
 }
 
 func TestGroveWorkerHashSuffixMigration(t *testing.T) {

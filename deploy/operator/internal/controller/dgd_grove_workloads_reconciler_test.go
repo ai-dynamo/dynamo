@@ -404,7 +404,7 @@ func TestGroveWorkloadsReconciler_ReconcilePodCliqueSetRejectsStaleObservation(t
 	reconciler := &groveWorkloadsReconciler{syncer: newDGDResourceSyncer(kubeClient, nil)}
 
 	t.Log("Reconcile the exact observation and surface the retryable conflict")
-	_, err := reconciler.reconcilePodCliqueSet(context.Background(), dgd, &grovePodCliqueSetRender{
+	_, _, err := reconciler.reconcilePodCliqueSet(context.Background(), dgd, &grovePodCliqueSetRender{
 		existing: observed,
 		desired:  desired,
 	})
@@ -443,7 +443,7 @@ func TestGroveWorkloadsReconciler_ReconcilePodCliqueSetReturnsCreateConflict(t *
 	reconciler := &groveWorkloadsReconciler{syncer: newDGDResourceSyncer(kubeClient, nil)}
 
 	t.Log("Reconcile the missing observation and surface the retryable creation collision")
-	_, err := reconciler.reconcilePodCliqueSet(context.Background(), dgd, &grovePodCliqueSetRender{desired: desired})
+	_, _, err := reconciler.reconcilePodCliqueSet(context.Background(), dgd, &grovePodCliqueSetRender{desired: desired})
 
 	t.Log("Verify the creation collision is returned to the caller")
 	require.Error(t, err)
@@ -484,14 +484,14 @@ func TestGroveProviderOverridesUseObservedPCSReconciliation(t *testing.T) {
 
 	t.Log("Create the PCS after composing an opaque root topology override")
 	dgd.Spec.ProviderOverride = rootTopologyOverride(`{"topologyName":"gpu-topology","futureProviderField":{"enabled":true}}`)
-	_, err := reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{desired: desired})
+	_, _, err := reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{desired: desired})
 	require.NoError(t, err)
 	assertLiveRootTopologyValue(t, kubeClient, "topologyName", "gpu-topology")
 
 	t.Log("Reuse the typed render observation when the desired PCS is unchanged")
 	observed := &grovev1alpha1.PodCliqueSet{}
 	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(desired), observed))
-	_, err = reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{existing: observed, desired: desired})
+	_, _, err = reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{existing: observed, desired: desired})
 	require.NoError(t, err)
 	assert.Zero(t, updateCalls)
 
@@ -499,7 +499,7 @@ func TestGroveProviderOverridesUseObservedPCSReconciliation(t *testing.T) {
 	dgd.Spec.ProviderOverride = rootTopologyOverride(`{"topologyName":"changed"}`)
 	rejectUpdate = true
 	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(desired), observed))
-	_, err = reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{existing: observed, desired: desired})
+	_, _, err = reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{existing: observed, desired: desired})
 	require.ErrorContains(t, err, "provider rejected update")
 	assert.Equal(t, 1, updateCalls)
 	assertLiveRootTopologyValue(t, kubeClient, "topologyName", "gpu-topology")
@@ -508,7 +508,7 @@ func TestGroveProviderOverridesUseObservedPCSReconciliation(t *testing.T) {
 	rejectUpdate = false
 	dgd.Spec.ProviderOverride = nil
 	require.NoError(t, kubeClient.Get(ctx, client.ObjectKeyFromObject(desired), observed))
-	_, err = reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{existing: observed, desired: desired})
+	_, _, err = reconciler.reconcilePodCliqueSet(ctx, dgd, &grovePodCliqueSetRender{existing: observed, desired: desired})
 	require.NoError(t, err)
 	assert.Equal(t, 2, updateCalls)
 	live := newUnstructuredGrovePodCliqueSet()
@@ -529,28 +529,28 @@ func TestPodCliqueSetObservesWorkerHash(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name              string
-		isFirstGeneration bool
-		cliqueHash        string
-		want              bool
+		name               string
+		acceptAllUnstamped bool
+		cliqueHash         string
+		want               bool
 	}{
 		{
-			name:              "unstamped cliques accepted on first generation",
-			isFirstGeneration: true,
-			cliqueHash:        "",
-			want:              true,
+			name:               "unstamped cliques accepted for legacy unsuffixed PCS",
+			acceptAllUnstamped: true,
+			cliqueHash:         "",
+			want:               true,
 		},
 		{
-			name:              "unstamped cliques rejected when not first generation",
-			isFirstGeneration: false,
-			cliqueHash:        "",
-			want:              false,
+			name:               "unstamped cliques rejected for new PCS requiring canonical hash",
+			acceptAllUnstamped: false,
+			cliqueHash:         "",
+			want:               false,
 		},
 		{
-			name:              "cliques bearing target hash accepted",
-			isFirstGeneration: false,
-			cliqueHash:        wantHash,
-			want:              true,
+			name:               "cliques bearing target hash accepted regardless of acceptAllUnstamped",
+			acceptAllUnstamped: false,
+			cliqueHash:         wantHash,
+			want:               true,
 		},
 	}
 
@@ -571,7 +571,7 @@ func TestPodCliqueSetObservesWorkerHash(t *testing.T) {
 				pcs.Spec.Template.Cliques[0].Labels[consts.KubeLabelDynamoWorkerHash] = tt.cliqueHash
 			}
 
-			got, err := podCliqueSetObservesWorkerHash(dgd, pcs, tt.isFirstGeneration)
+			got, err := podCliqueSetObservesWorkerHash(dgd, pcs, tt.acceptAllUnstamped)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got)
 		})

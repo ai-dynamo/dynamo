@@ -92,14 +92,21 @@ func (r *groveWorkloadsReconciler) Reconcile(
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return ReconcileResult{}, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
 	}
-	syncedPodCliqueSet, err := r.reconcilePodCliqueSet(ctx, dgd, renderedPodCliqueSet)
+	syncedPodCliqueSet, pcsWasWritten, err := r.reconcilePodCliqueSet(ctx, dgd, renderedPodCliqueSet)
 	if err != nil {
 		logger.Error(err, "failed to reconcile the Grove PodCliqueSet")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodCliqueSet: %w", err)
 	}
 	// Project the hash only once the informer cache reflects the target suffix on every worker clique.
-	if workerHashTransition.needsCommit() {
-		observed, err := podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing, workerHashTransition.isFirstGeneration)
+	// If we wrote the PCS this reconcile, the informer has not yet caught up with that write; defer
+	// the commit to the next watch-driven reconcile, where pcsWasWritten will be false.
+	if workerHashTransition.needsCommit() && !pcsWasWritten {
+		// allUnstamped is valid only for a pre-existing legacy PCS that was never suffixed.
+		// A newly created PCS must carry the canonical hash label, so require allCanonical.
+		isLegacyUnsuffixed := workerHashTransition.isFirstGeneration &&
+			renderedPodCliqueSet.existing != nil &&
+			!podCliqueSetUsesGroveWorkerHashSuffix(dgd, renderedPodCliqueSet.existing)
+		observed, err := podCliqueSetObservesWorkerHash(dgd, renderedPodCliqueSet.existing, isLegacyUnsuffixed)
 		if err != nil {
 			return ReconcileResult{}, failWorkloadProgram(
 				reasonRollingUpdateFailed,
@@ -145,11 +152,11 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 	ctx context.Context,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	rendered *grovePodCliqueSetRender,
-) (*grovev1alpha1.PodCliqueSet, error) {
+) (*grovev1alpha1.PodCliqueSet, bool, error) {
 	// Compose opaque provider fields only at the serialization boundary.
 	desiredProviderObject, err := provideroverride.ComposeGroveOverrides(dgd, rendered.desired)
 	if err != nil {
-		return nil, fmt.Errorf("compose Grove provider overrides: %w", err)
+		return nil, false, fmt.Errorf("compose Grove provider overrides: %w", err)
 	}
 
 	// Serialize the exact typed observation selected during rendering.
@@ -157,14 +164,14 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 	if rendered.existing != nil {
 		object, conversionErr := runtime.DefaultUnstructuredConverter.ToUnstructured(rendered.existing)
 		if conversionErr != nil {
-			return nil, fmt.Errorf("convert observed Grove PodCliqueSet to unstructured: %w", conversionErr)
+			return nil, false, fmt.Errorf("convert observed Grove PodCliqueSet to unstructured: %w", conversionErr)
 		}
 		observedProviderObject = &unstructured.Unstructured{Object: object}
 		observedProviderObject.SetGroupVersionKind(desiredProviderObject.GroupVersionKind())
 	}
 
 	// Synchronize without rereading or mutating the render observation.
-	_, synced, err := commoncontroller.SyncObservedResource(
+	wasWritten, synced, err := commoncontroller.SyncObservedResource(
 		ctx,
 		&r.syncer,
 		dgd,
@@ -172,15 +179,15 @@ func (r *groveWorkloadsReconciler) reconcilePodCliqueSet(
 		desiredProviderObject,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("sync Grove PodCliqueSet: %w", err)
+		return nil, false, fmt.Errorf("sync Grove PodCliqueSet: %w", err)
 	}
 
 	// Adapt the synchronized wire object to the typed Grove readiness view.
 	podCliqueSet := &grovev1alpha1.PodCliqueSet{}
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(synced.Object, podCliqueSet); err != nil {
-		return nil, fmt.Errorf("convert synchronized Grove PodCliqueSet: %w", err)
+		return nil, false, fmt.Errorf("convert synchronized Grove PodCliqueSet: %w", err)
 	}
-	return podCliqueSet, nil
+	return podCliqueSet, wasWritten, nil
 }
 
 // observePodCliqueSetReadiness takes the authoritative Grove snapshot after
