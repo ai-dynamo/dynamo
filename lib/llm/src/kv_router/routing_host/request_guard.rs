@@ -4,7 +4,10 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    kv_router::{KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector},
+    kv_router::{
+        KvRouter, metrics::RouterRequestMetrics, prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
+        scheduler::DefaultWorkerSelector,
+    },
     local_model::runtime_config::ModelRuntimeConfig,
     lora::LoadEstimator,
     preprocessor::PreprocessedRequest,
@@ -275,19 +278,24 @@ impl RequestObservability {
         self.dispatch_guard = Some(StageGuard::new(STAGE_DISPATCH, phase_label));
     }
 
-    /// Record prefill start, but only for phases that actually run prefill.
+    /// Record prefill start for dispatches that actually run prefill.
     ///
-    /// `prefill_start_time` is write-once. A decode-only request that reaches
-    /// dispatch with a tracker would otherwise stamp it here, making
-    /// `prefill_time_ms` describe decode time as though it were prefill time.
-    /// A decode that follows a prefill keeps the timestamp prefill recorded,
-    /// because the later write is a no-op.
-    fn record_prefill_start(&self) {
-        if let Some(tracker) = &self.tracker
-            && tracker.phase() != RequestPhase::Decode
-        {
-            tracker.record_prefill_start();
+    /// Decode normally skips this timestamp. Conditional disaggregation is the
+    /// exception: it labels the request Decode while the selected decode worker
+    /// runs local prefill and decode from the full prompt.
+    fn record_prefill_start(&self, request: &PreprocessedRequest) {
+        let Some(tracker) = &self.tracker else {
+            return;
+        };
+        let includes_prefill = tracker.phase() != RequestPhase::Decode
+            || request
+                .annotations
+                .iter()
+                .any(|annotation| annotation == BYPASS_REMOTE_PREFILL_ANNOTATION);
+        if !includes_prefill {
+            return;
         }
+        tracker.record_prefill_start();
     }
 
     fn mark_dispatched(&mut self) {
@@ -695,8 +703,8 @@ where
         self.observability.start_dispatch(phase_label);
     }
 
-    pub(super) fn record_prefill_start(&self) {
-        self.observability.record_prefill_start();
+    pub(super) fn record_prefill_start(&self, request: &PreprocessedRequest) {
+        self.observability.record_prefill_start(request);
     }
 
     pub(super) fn mark_dispatched(&mut self) {
@@ -1003,6 +1011,19 @@ mod output_hash_tests {
 mod prefill_start_tests {
     use super::*;
 
+    fn test_request(tracker: Arc<RequestTracker>, annotations: Vec<String>) -> PreprocessedRequest {
+        PreprocessedRequest::builder()
+            .model("test".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(Default::default())
+            .sampling_options(Default::default())
+            .output_options(Default::default())
+            .annotations(annotations)
+            .tracker(Some(tracker))
+            .build()
+            .unwrap()
+    }
+
     fn test_metrics() -> Arc<RouterRequestMetrics> {
         fn hist(name: &str) -> prometheus::Histogram {
             prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
@@ -1030,29 +1051,41 @@ mod prefill_start_tests {
         })
     }
 
-    async fn dispatch_once(phase: RequestPhase) -> Arc<RequestTracker> {
+    async fn dispatch_once(phase: RequestPhase, annotations: Vec<String>) -> Arc<RequestTracker> {
         let tracker = Arc::new(RequestTracker::new());
         let _permit = tracker.set_phase(phase).await;
-        RequestObservability::new(Some(tracker.clone()), test_metrics()).record_prefill_start();
+        let request = test_request(tracker.clone(), annotations);
+        RequestObservability::new(request.tracker.clone(), test_metrics())
+            .record_prefill_start(&request);
         tracker
     }
 
     #[tokio::test]
     async fn prefill_dispatch_records_prefill_start() {
-        let tracker = dispatch_once(RequestPhase::Prefill).await;
+        let tracker = dispatch_once(RequestPhase::Prefill, Vec::new()).await;
         assert!(tracker.prefill_wait_time_ms().is_some());
     }
 
     #[tokio::test]
     async fn aggregated_dispatch_records_prefill_start() {
-        let tracker = dispatch_once(RequestPhase::Aggregated).await;
+        let tracker = dispatch_once(RequestPhase::Aggregated, Vec::new()).await;
         assert!(tracker.prefill_wait_time_ms().is_some());
     }
 
     #[tokio::test]
     async fn decode_only_dispatch_does_not_record_prefill_start() {
-        let tracker = dispatch_once(RequestPhase::Decode).await;
+        let tracker = dispatch_once(RequestPhase::Decode, Vec::new()).await;
         assert!(tracker.prefill_wait_time_ms().is_none());
+    }
+
+    #[tokio::test]
+    async fn conditional_disagg_decode_records_local_prefill_start() {
+        let tracker = dispatch_once(
+            RequestPhase::Decode,
+            vec![BYPASS_REMOTE_PREFILL_ANNOTATION.to_string()],
+        )
+        .await;
+        assert!(tracker.prefill_wait_time_ms().is_some());
     }
 
     /// Pins `RequestTracker`'s first-write-wins contract, which this fix relies on:
@@ -1064,15 +1097,17 @@ mod prefill_start_tests {
     async fn decode_after_prefill_retains_the_prefill_timestamp() {
         let tracker = Arc::new(RequestTracker::new());
         let metrics = test_metrics();
+        let request = test_request(tracker.clone(), Vec::new());
 
         let prefill_permit = tracker.set_phase(RequestPhase::Prefill).await;
-        RequestObservability::new(Some(tracker.clone()), metrics.clone()).record_prefill_start();
+        RequestObservability::new(Some(tracker.clone()), metrics.clone())
+            .record_prefill_start(&request);
         let recorded_by_prefill = tracker.prefill_wait_time_ms();
         assert!(recorded_by_prefill.is_some());
         drop(prefill_permit);
 
         let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
-        RequestObservability::new(Some(tracker.clone()), metrics).record_prefill_start();
+        RequestObservability::new(Some(tracker.clone()), metrics).record_prefill_start(&request);
         assert_eq!(tracker.prefill_wait_time_ms(), recorded_by_prefill);
     }
 }
