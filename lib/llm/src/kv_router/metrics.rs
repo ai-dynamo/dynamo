@@ -70,6 +70,7 @@ pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
 const TARGET_COMPONENT_LABEL: &str = "target_component";
 const TARGET_ENDPOINT_LABEL: &str = "target_endpoint";
+const CACHE_LOSS_FUNNEL_STAGES: [&str; 6] = ["f0", "f1", "f2", "f3", "f4", "f5"];
 
 /// Buckets for CPU-bound compute phases (block hashing, sequence hashing).
 fn compute_overhead_buckets() -> Vec<f64> {
@@ -1022,7 +1023,7 @@ impl RouterRequestMetrics {
                         extra_labels,
                     )
                     .expect("failed to create router_cache_loss_observations_total");
-                for stage in ["f0", "f1", "f2", "f3", "f4", "f5"] {
+                for stage in CACHE_LOSS_FUNNEL_STAGES {
                     cache_loss_funnel_tokens_total.with_label_values(&[stage]);
                 }
                 for result in ["complete", "incomplete"] {
@@ -1120,8 +1121,8 @@ impl RouterRequestMetrics {
             .inc_by(prompt_tokens);
     }
 
-    pub fn observe_cache_loss_funnel(&self, stages: [u64; 6]) {
-        for (stage, tokens) in ["f0", "f1", "f2", "f3", "f4", "f5"].into_iter().zip(stages) {
+    pub fn observe_cache_loss_funnel(&self, stages: [u64; CACHE_LOSS_FUNNEL_STAGES.len()]) {
+        for (stage, tokens) in CACHE_LOSS_FUNNEL_STAGES.into_iter().zip(stages) {
             self.cache_loss_funnel_tokens_total
                 .with_label_values(&[stage])
                 .inc_by(tokens);
