@@ -901,6 +901,7 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        has_local_stop = False
         # Per-request reasoning-token usage (NVBug 6678449b); see
         # _ReasoningUsageAnnotator. Must be per-request, never module-level.
         # The counts live on the post-processors, which are per-request too.
@@ -997,7 +998,13 @@ class VllmProcessor:
                 )
 
                 if vllm_out.reqs_to_abort:
-                    pass
+                    has_local_stop = True
+                # Choices share a routed stream; a local stop on one must not
+                # cancel siblings that are still generating.
+                locally_finished = has_local_stop and not any(
+                    child_id in self.output_processor.request_states
+                    for child_id in registered_request_ids
+                )
 
                 choices = []
                 postprocess_error = False
@@ -1037,7 +1044,14 @@ class VllmProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if usage := engine_response.get("completion_usage"):
+                    usage = engine_response.get("completion_usage")
+                    if locally_finished and not usage:
+                        usage = {
+                            "prompt_tokens": input_tokens,
+                            "completion_tokens": cumulative_output_tokens,
+                            "total_tokens": input_tokens + cumulative_output_tokens,
+                        }
+                    if usage:
                         dynamo_out["usage"] = reasoning_usage.annotate(usage)
                     envelope["data"] = dynamo_out
 
@@ -1057,6 +1071,8 @@ class VllmProcessor:
                 envelope["comment"] = [json.dumps(metrics)]
 
                 yield envelope
+                if locally_finished:
+                    break
             _nvtx.end_range(rng_stream)
         except VLLMClientError:
             # Preserve request-side 400/404/422 errors for generator(), which
