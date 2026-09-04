@@ -382,6 +382,7 @@ The benchmark replays the Mooncake-format agentic trace described in [perf/READM
 ## Limitations
 
 - With JSON structured decoding, output for non-object top-level items can appear in `reasoning_content` instead of `content`.
+- Requests containing `logprobs` or `stop_token_ids` are not supported and may cause disaggregated recipes to crash or enter a bad state
 
 ## Source
 
