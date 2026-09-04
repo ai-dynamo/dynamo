@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -1618,7 +1617,7 @@ async def test_process_text_stream_uploads_routed_experts(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_process_token_stream_suppresses_hidden_stop_token_reason():
+async def test_process_token_stream_preserves_hidden_stop_token_but_not_reason():
     handler = _new_decode_handler()
 
     chunks = await _collect(
@@ -1643,6 +1642,7 @@ async def test_process_token_stream_suppresses_hidden_stop_token_reason():
         )
     )
 
+    assert chunks[0]["token_ids"] == [128001]
     assert "stop_reason" not in chunks[0]
 
 
