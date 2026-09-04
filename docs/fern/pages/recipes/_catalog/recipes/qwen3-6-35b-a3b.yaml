@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: qwen3-6-35b-a3b
+title: Qwen3.6-35B-A3B
+page: pages/recipes/model-recipes/qwen3-6-35b-a3b.mdx
+provider: qwen
+model:
+  name: Qwen3.6-35B-A3B
+  hf_id: nvidia/Qwen3.6-35B-A3B-NVFP4 / Qwen/Qwen3.6-35B-A3B-FP8
+  precision: NVFP4 + FP8 KV (B200, GB200) / FP8 weights + BF16 KV (H200)
+status: validated
+artifacts:
+  recipe_specific_images:
+  - nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+  recipe_specific_image_periods:
+  - image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+    source_revision: 22bb1d4981fd17d11917036531a71ef91790c823
+    source_kind: deploy-asset
+targets:
+- id: sglang-b200-agg-agentic
+  recommended: true
+  hardware:
+    gpu: B200
+    count: 1
+  runtime:
+    framework: Dynamo + SGLang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+  topology: aggregated
+  techniques:
+  - speculative-decoding
+  - prefix-caching
+  workload:
+    type: agentic
+    traffic: 64K input tokens / 400 output tokens, 90% KV reuse, concurrency 32, 3541 requests
+  deploy:
+    asset: recipes/qwen3.6-35b-a3b/sglang/agg-b200-mtp/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 2988.50 output tok/s/GPU, 111.98 user tok/s P50, TTFT P50 286.90 ms at concurrency 32 (3,541-request agentic trace, simulated acc_len=3.3153 from SpeedBench coding)
+- id: sglang-gb200-agg-agentic
+  recommended: false
+  hardware:
+    gpu: GB200
+    count: 1
+  runtime:
+    framework: Dynamo + SGLang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+  topology: aggregated
+  techniques:
+  - prefix-caching
+  - speculative-decoding
+  workload:
+    type: agentic
+    traffic: 64K input tokens / 400 output tokens, 90% KV reuse, concurrency 32, 3541 requests
+  deploy:
+    asset: recipes/qwen3.6-35b-a3b/sglang/agg-gb200-mtp/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 3035.98 output tok/s/GPU, 111.47 user tok/s P50, TTFT P50 156.07 ms at concurrency 32 (3,541-request agentic trace, simulated acc_len=3.3153 from SpeedBench coding)
+- id: sglang-h200-agg-agentic
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 1
+  runtime:
+    framework: Dynamo + SGLang
+    image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+  topology: aggregated
+  techniques:
+  - prefix-caching
+  - speculative-decoding
+  workload:
+    type: agentic
+    traffic: 64K input tokens / 400 output tokens, 90% KV reuse, concurrency 32, 3541 requests
+  deploy:
+    asset: recipes/qwen3.6-35b-a3b/sglang/agg-h200-mtp/deploy.yaml
+  expected_performance:
+    available: true
+    summary: 1332.03 output tok/s/GPU, 57.75 user tok/s P50, TTFT P50 360.31 ms at concurrency 32 (3,541-request agentic trace, simulated acc_len=3.3153 from SpeedBench coding)
+related_benchmarks: []
+maintainer: null

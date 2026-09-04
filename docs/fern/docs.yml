@@ -57,6 +57,10 @@ redirects:
   - source: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b"
     destination: "/dynamo/dev/recipes/qwen-3-8-2-4t-a95b-fp8"
 
+  # Recipe slug renamed to use the canonical model name.
+  - source: "/dynamo/dev/recipes/gemma4-31b"
+    destination: "/dynamo/dev/recipes/gemma-4-31b"
+
   # Documentation navigation consolidation on dev.
   - source: "/dynamo/dev/cli/model-deployment/multi-node-deployment"
     destination: "/dynamo/dev/kubernetes/installation/multinode-orchestration"
@@ -99,7 +103,7 @@ redirects:
   - source: "/dynamo/dev/knowledge-base/kubernetes/kubernetes-operator/rolling-update"
     destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference#rollingupdatestatus"
   - source: "/dynamo/dev/knowledge-base/kubernetes/kubernetes-operator/snapshot"
-    destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference#dynamocheckpoint"
+    destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference#componentcheckpointconfig"
   - source: "/dynamo/dev/knowledge-base/kubernetes/kubernetes-operator/shadow-engine-failover"
     destination: "/dynamo/dev/kubernetes/fault-tolerance/introduction"
   - source: "/dynamo/dev/knowledge-base/kubernetes/kubernetes-operator/disagg-communication"
@@ -139,7 +143,7 @@ redirects:
   - source: "/dynamo/dev/kubernetes/kubernetes-operator/rolling-update"
     destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference#rollingupdatestatus"
   - source: "/dynamo/dev/kubernetes/operations/cold-start-optimizations/dynamo-snapshot"
-    destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference#dynamocheckpoint"
+    destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference#componentcheckpointconfig"
   - source: "/dynamo/dev/kubernetes/fault-tolerance/shadow-engine-failover"
     destination: "/dynamo/dev/kubernetes/fault-tolerance/introduction"
   - source: "/dynamo/dev/kubernetes/disaggregated-serving/disaggregated-communication"
@@ -215,7 +219,7 @@ redirects:
     destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-readableoperation"
   - source: "/dynamo/dev/reference/nixl-connect/writable-operation"
     destination: "/dynamo/dev/reference/api/python/nixl_connect#api-dynamo-nixl-connect-writableoperation"
-  # AI Simulate's experimental Spica package was renamed to Sweeper on dev only.
+  # AISimulate's experimental Spica package was renamed to Sweeper on dev only.
   - source: "/dynamo/dev/knowledge-base/modular-components/ai-simulate/spica"
     destination: "/dynamo/dev/knowledge-base/concepts/simulation/ai-simulate/sweeper/overview"
   - source: "/dynamo/dev/knowledge-base/modular-components/ai-simulate/spica/overview"
@@ -534,7 +538,7 @@ redirects:
   - source: "/dynamo/kubernetes-deployment/advanced-platform/shadow-engine-failover"
     destination: "/dynamo/dev/kubernetes/fault-tolerance/introduction"
   - source: "/dynamo/kubernetes-deployment/advanced-platform/snapshot"
-    destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference#dynamocheckpoint"
+    destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference#componentcheckpointconfig"
   - source: "/dynamo/kubernetes-deployment/advanced-platform/webhooks"
     destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference"
   - source: "/dynamo/kubernetes-deployment/cloud-provider-guides/aws/ecs"
@@ -603,8 +607,10 @@ redirects:
     destination: "/dynamo/dev/kubernetes/getting-started/quickstart"
   - source: "/dynamo/kubernetes-deployment/start-here/minikube-setup"
     destination: "/dynamo/dev/cli/installation/minikube-setup"
+  # The Examples reference page was an empty stub and has been removed. Worked, runnable
+  # deployments live in the recipes catalog, so both Examples URLs land there.
   - source: "/dynamo/resources/examples"
-    destination: "/dynamo/dev/reference/examples"
+    destination: "/dynamo/dev/recipes/browse"
   - source: "/dynamo/resources/feature-matrix"
     destination: "/dynamo/dev/reference/compatibility"
   - source: "/dynamo/resources/glossary"
@@ -783,7 +789,14 @@ redirects:
   - source: "/dynamo/dev/getting-started/release-artifacts"
     destination: "/dynamo/dev/reference/release-artifacts"
   - source: "/dynamo/dev/getting-started/examples"
-    destination: "/dynamo/dev/reference/examples"
+    destination: "/dynamo/dev/recipes/browse"
+  # The Examples reference page was an empty stub and is gone; keep its dev URL
+  # serving. No redirect for the Model Storage overview: unlike Examples it is
+  # a live 41-line page, still listed at index.yml:110, so redirecting it would
+  # bounce readers off working content to the AKS provider guide and make the
+  # overview unreachable.
+  - source: "/dynamo/dev/reference/examples"
+    destination: "/dynamo/dev/recipes/browse"
   - source: "/dynamo/dev/fastokens-tokenizer"
     destination: "/dynamo/dev/advanced-customizations/fastokens-tokenizer"
   - source: "/dynamo/v1.0.1/getting-started/support-matrix"
@@ -917,7 +930,7 @@ redirects:
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/webhooks"
     destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/snapshot"
-    destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference#dynamocheckpoint"
+    destination: "/dynamo/dev/reference/api/kubernetes/full-api-reference#componentcheckpointconfig"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/shadow-engine-failover"
     destination: "/dynamo/dev/kubernetes/fault-tolerance/introduction"
   - source: "/dynamo/dev/kubernetes-deployment/deployment-guide/developing-with-tilt"

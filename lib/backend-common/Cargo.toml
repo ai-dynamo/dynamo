@@ -25,6 +25,7 @@ integration = ["dynamo-runtime/integration"]
 dynamo-runtime = { workspace = true }
 dynamo-llm = { path = "../llm", default-features = false }
 dynamo-protocols = { workspace = true }
+dynamo-rl = { workspace = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
@@ -40,7 +41,6 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
-url = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

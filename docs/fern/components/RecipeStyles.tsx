@@ -187,6 +187,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 
 #provider-all:checked ~ .dynamo-recipe-browser label[for="provider-all"],
 #provider-nvidia:checked ~ .dynamo-recipe-browser label[for="provider-nvidia"],
+#provider-google:checked ~ .dynamo-recipe-browser label[for="provider-google"],
 #provider-qwen:checked ~ .dynamo-recipe-browser label[for="provider-qwen"],
 #provider-deepseek:checked ~ .dynamo-recipe-browser label[for="provider-deepseek"],
 #provider-moonshot:checked ~ .dynamo-recipe-browser label[for="provider-moonshot"],
@@ -660,6 +661,7 @@ main.fern-main:not(:has(> .fern-layout-content-wrapper ~ aside)) .fern-layout-gu
 }
 
 #provider-nvidia:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="nvidia"]),
+#provider-google:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="google"]),
 #provider-qwen:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="qwen"]),
 #provider-deepseek:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="deepseek"]),
 #provider-moonshot:checked ~ .dynamo-model-grid [data-recipe-card]:not([data-provider~="moonshot"]),
@@ -2170,6 +2172,15 @@ body:has(input[name="recipe-usecase"][value="agentic"]:checked) [data-usecase]:n
 }
 
 /* Highlight the matching row in an expected-performance or comparison table */
+body:has(input[name="recipe-sku"][value="b200"]:checked) [data-highlight-sku~="b200"],
+body:has(input[name="recipe-sku"][value="h200"]:checked) [data-highlight-sku~="h200"],
+body:has(input[name="recipe-sku"][value="h100"]:checked) [data-highlight-sku~="h100"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked) [data-highlight-sku~="gb200"],
+body:has(input[name="recipe-sku"][value="gb300"]:checked) [data-highlight-sku~="gb300"] {
+    background: color-mix(in srgb, var(--nv-color-green) 18%, transparent);
+    font-weight: 600;
+}
+
 body:has(input[name="recipe-sku"]:checked) tr[data-sku][data-usecase] {
     opacity: 0.55;
 }
@@ -2179,6 +2190,15 @@ body:has(input[name="recipe-sku"][value="b200"]:checked):has(input[name="recipe-
 body:has(input[name="recipe-sku"][value="h200"]:checked):has(input[name="recipe-usecase"][value="chat"]:checked) tr[data-sku~="h200"][data-usecase~="chat"],
 body:has(input[name="recipe-sku"][value="h200"]:checked):has(input[name="recipe-usecase"][value="agentic"]:checked) tr[data-sku~="h200"][data-usecase~="agentic"] {
     opacity: 1;
+    font-weight: 600;
+}
+
+/* Highlight the selected GPU when a table intentionally shows every result. */
+body:has(input[name="recipe-sku"][value="b200"]:checked) .dynamo-variant-table tr[data-gpu="b200"],
+body:has(input[name="recipe-sku"][value="gb200"]:checked) .dynamo-variant-table tr[data-gpu="gb200"],
+body:has(input[name="recipe-sku"][value="h200"]:checked) .dynamo-variant-table tr[data-gpu="h200"] {
+    background: color-mix(in srgb, var(--nv-color-green) 18%, transparent);
+    box-shadow: inset 3px 0 0 var(--nv-color-green);
     font-weight: 600;
 }
 

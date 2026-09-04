@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ import pytest
 
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.llm import HttpError
+from dynamo.llm.exceptions import EngineShutdown
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
     native_generate_stream,
@@ -47,6 +49,28 @@ pytestmark = [
     pytest.mark.profiled_vram_gib(0),
     pytest.mark.pre_merge,
 ]
+
+
+@pytest.mark.asyncio
+async def test_cancellation_monitor_rechecks_shutdown_after_cleanup():
+    handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.shutdown_event = asyncio.Event()
+
+    async def set_shutdown_when_cancelled(*_args):
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            handler.shutdown_event.set()
+            raise
+
+    handler._handle_cancellation = set_shutdown_when_cancelled
+    request_id_future = asyncio.get_running_loop().create_future()
+    request_id_future.set_result("sglang-request-id")
+    context = SimpleNamespace(id=lambda: "request-id")
+
+    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+        async with handler._cancellation_monitor(request_id_future, context):
+            await asyncio.sleep(0)
 
 
 def _read_zstd_payload(path):
@@ -251,6 +275,7 @@ def test_openai_stop_sampling_params_maps_token_id_stop_array():
 
 def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool = False):
     handler = DecodeWorkerHandler.__new__(DecodeWorkerHandler)
+    handler.shutdown_event = None
     handler.use_sglang_tokenizer = use_sglang_tokenizer
     handler.config = SimpleNamespace(
         server_args=SimpleNamespace(served_model_name="test-model"),
@@ -264,6 +289,67 @@ def _new_decode_handler(*, use_sglang_tokenizer: bool = False, enable_rl: bool =
 
     handler._cancellation_monitor = no_cancellation_monitor
     return handler
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+async def test_shutdown_abort_chunk_raises_engine_shutdown(processor_name):
+    handler = _new_decode_handler()
+    handler.shutdown_event = asyncio.Event()
+    handler.shutdown_event.set()
+    context = SimpleNamespace(id=lambda: "request-id")
+
+    async def stream():
+        yield {
+            "text": "",
+            "output_ids": [],
+            "meta_info": {
+                "id": "sglang-request-id",
+                "finish_reason": {"type": "abort"},
+            },
+        }
+
+    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+        async for _ in getattr(handler, processor_name)(stream(), context):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "processor_name", ["_process_token_stream", "_process_text_stream"]
+)
+async def test_shutdown_during_abort_metadata_upload_raises_engine_shutdown(
+    processor_name,
+):
+    handler = _new_decode_handler()
+    handler.shutdown_event = asyncio.Event()
+    context = SimpleNamespace(
+        id=lambda: "request-id",
+        is_stopped=lambda: False,
+        notify_first_token=lambda: None,
+    )
+
+    class ShutdownUploader:
+        async def upload_choice(self, *_args):
+            handler.shutdown_event.set()
+
+    async def stream():
+        yield {
+            "text": "",
+            "output_ids": [],
+            "meta_info": {
+                "id": "sglang-request-id",
+                "finish_reason": {"type": "abort"},
+            },
+        }
+
+    with pytest.raises(EngineShutdown, match="shut down during token generation"):
+        async for _ in getattr(handler, processor_name)(
+            stream(), context, metadata_uploader=ShutdownUploader()
+        ):
+            pass
 
 
 def test_engine_generate_preserves_native_fields_and_overrides_worker_state():
@@ -698,6 +784,82 @@ def test_build_sampling_params_maps_guided_decoding_to_json_schema():
     assert sampling_params["json_schema"] == (
         '{"type": "object", "properties": {"city": {"type": "string"}}}'
     )
+
+
+@pytest.mark.parametrize(
+    "guided_decoding, expected",
+    [
+        ({"regex": "a+"}, {"regex": "a+"}),
+        ({"choice": ["yes", "no"]}, {"regex": "(yes|no)"}),
+        ({"grammar": 'root ::= "a"'}, {"ebnf": 'root ::= "a"'}),
+    ],
+)
+def test_build_sampling_params_maps_non_json_guided_decoding(guided_decoding, expected):
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {"guided_decoding": guided_decoding},
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    for key, value in expected.items():
+        assert sampling_params[key] == value
+
+
+def test_build_sampling_params_degenerate_choice_does_not_hide_later_constraint():
+    """A choice list that filters to nothing must not consume the constraint slot.
+
+    The nested cascade this replaced entered the choice branch on a truthy list,
+    filtered it empty, and then skipped grammar and structural_tag entirely.
+    """
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {
+                "guided_decoding": {"choice": [None], "grammar": 'root ::= "a"'}
+            },
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    assert sampling_params["ebnf"] == 'root ::= "a"'
+
+
+@pytest.mark.parametrize(
+    "guided_decoding",
+    [
+        {"json": {"type": "object"}},
+        {"regex": "a+"},
+        {"choice": ["yes", "no"]},
+        {"grammar": 'root ::= "a"'},
+        # Modifiers ride along with a constraint on the wire. SGLang has no
+        # SamplingParams field for either, so they must not be forwarded.
+        {"json": {"type": "object"}, "whitespace_pattern": "[\n ]?"},
+        {"regex": "a+", "backend": "xgrammar"},
+    ],
+)
+def test_guided_decoding_params_are_accepted_by_sglang(guided_decoding):
+    """Every key we emit must exist on SGLang's SamplingParams.
+
+    SamplingParams raises TypeError on an unknown keyword rather than ignoring
+    it, and the dict built here is passed straight to engine.async_generate,
+    which splats it into that constructor. Asserting only on the dict we return
+    cannot catch a key SGLang does not accept, so construct it for real.
+    """
+    from sglang.srt.sampling.sampling_params import SamplingParams
+
+    handler = _new_decode_handler(use_sglang_tokenizer=False)
+    sampling_params = handler._build_sampling_params(
+        {
+            "sampling_options": {"guided_decoding": guided_decoding},
+            "stop_conditions": {"max_tokens": 8},
+        }
+    )
+
+    SamplingParams(**sampling_params)
 
 
 def test_build_sampling_params_maps_min_tokens_for_token_requests():

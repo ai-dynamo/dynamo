@@ -178,11 +178,17 @@ impl AnthropicStreamConverter {
         let mut events = Vec::new();
         let mut block_index = self.next_block_index;
 
-        for tool_call in &self.tool_call_states {
-            if !tool_call.is_emit_ready() {
-                continue;
-            }
+        // Only the token limit cuts a call short, and it does so once, in the last
+        // call. Mirrors `chat_completion_to_anthropic_response`.
+        let truncated = self.stop_reason == Some(AnthropicStopReason::MaxTokens);
+        let ready: Vec<&ToolCallState> = self
+            .tool_call_states
+            .iter()
+            .filter(|tool_call| tool_call.is_emit_ready())
+            .collect();
+        let last_call = ready.len().saturating_sub(1);
 
+        for (call_index, tool_call) in ready.into_iter().enumerate() {
             let emitted_id = new_tool_use_id();
             tracing::debug!(
                 backend_id = %tool_call.backend_id,
@@ -202,17 +208,47 @@ impl AnthropicStreamConverter {
                 None,
             ));
 
-            for (arguments, usage_snapshot) in &tool_call.argument_fragments {
+            // A client rebuilds `input` by concatenating these fragments, so a
+            // truncated call leaves it holding JSON that never parses. Send the same
+            // repaired object the batch converter returns instead, so one generation
+            // does not yield different arguments depending on `stream`.
+            let raw: String = tool_call
+                .argument_fragments
+                .iter()
+                .map(|(arguments, _)| arguments.as_str())
+                .collect();
+            let repaired = (truncated
+                && call_index == last_call
+                && serde_json::from_str::<serde_json::Value>(&raw).is_err())
+            .then(|| super::types::tool_use_input(&tool_call.name, &raw, true));
+
+            if let Some(input) = repaired {
                 events.push((
                     "content_block_delta",
                     AnthropicStreamEvent::ContentBlockDelta {
                         index: block_index,
                         delta: AnthropicDelta::InputJsonDelta {
-                            partial_json: arguments.clone(),
+                            partial_json: input.to_string(),
                         },
                     },
-                    Some(usage_snapshot.clone()),
+                    tool_call
+                        .argument_fragments
+                        .last()
+                        .map(|(_, usage)| usage.clone()),
                 ));
+            } else {
+                for (arguments, usage_snapshot) in &tool_call.argument_fragments {
+                    events.push((
+                        "content_block_delta",
+                        AnthropicStreamEvent::ContentBlockDelta {
+                            index: block_index,
+                            delta: AnthropicDelta::InputJsonDelta {
+                                partial_json: arguments.clone(),
+                            },
+                        },
+                        Some(usage_snapshot.clone()),
+                    ));
+                }
             }
 
             events.push((
@@ -386,7 +422,7 @@ impl AnthropicStreamConverter {
                         AnthropicStopReason::ToolUse
                     }
                     dynamo_protocols::types::FinishReason::ContentFilter => {
-                        AnthropicStopReason::EndTurn
+                        AnthropicStopReason::Refusal
                     }
                     dynamo_protocols::types::FinishReason::FunctionCall => {
                         AnthropicStopReason::ToolUse
@@ -693,7 +729,7 @@ impl AnthropicStreamConverter {
                         AnthropicStopReason::ToolUse
                     }
                     dynamo_protocols::types::FinishReason::ContentFilter => {
-                        AnthropicStopReason::EndTurn
+                        AnthropicStopReason::Refusal
                     }
                     dynamo_protocols::types::FinishReason::FunctionCall => {
                         AnthropicStopReason::ToolUse
@@ -1376,6 +1412,63 @@ mod tests {
                 ..
             } if partial_json == "{}"
         ));
+    }
+
+    /// Concatenate every `input_json_delta` fragment, which is what an Anthropic
+    /// client does to rebuild `tool_use.input`.
+    fn streamed_tool_input(events: &[TaggedEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match &event.data {
+                AnthropicStreamEvent::ContentBlockDelta {
+                    delta: AnthropicDelta::InputJsonDelta { partial_json },
+                    ..
+                } => Some(partial_json.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The batch converter repairs a call cut off at the token limit into the members
+    /// that finished. The stream must rebuild the same input. Otherwise one generation
+    /// yields different tool arguments depending on `stream`.
+    #[test]
+    fn test_truncated_tool_arguments_match_the_batch_conversion() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let mut tagged = conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("record_literal"),
+            Some(r#"{"label": "customer-eof", "literal_text": "cust"#),
+        ));
+        tagged.extend(conv.process_chunk_tagged(&finish_chunk(FinishReason::Length)));
+        tagged.extend(conv.emit_end_events_tagged());
+
+        let streamed = streamed_tool_input(&tagged);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&streamed).ok(),
+            Some(serde_json::json!({"label": "customer-eof"})),
+            "streamed input must match the batch conversion, got: {streamed}"
+        );
+    }
+
+    /// The guard on the rule above. A call that parses is sent verbatim, fragment by
+    /// fragment, whatever ended generation.
+    #[test]
+    fn test_complete_tool_arguments_are_streamed_verbatim() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+
+        let mut tagged = conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("record_literal"),
+            Some(r#"{"label": "done"}"#),
+        ));
+        tagged.extend(conv.process_chunk_tagged(&finish_chunk(FinishReason::Length)));
+        tagged.extend(conv.emit_end_events_tagged());
+
+        assert_eq!(streamed_tool_input(&tagged), r#"{"label": "done"}"#);
     }
 
     /// Buffered tool-argument fragments must carry the usage snapshot from their
