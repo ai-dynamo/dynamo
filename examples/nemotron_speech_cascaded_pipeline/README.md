@@ -68,6 +68,7 @@ flowchart LR
     Frontend --> ASRWorker
     ASRWorker <-->|"Speech NIM streaming gRPC"| ASR
 
+    STTClient -.->|"transcript deltas"| LLMClient
     Pipecat --> LLMClient
     LLMClient -->|"/v1/chat/completions<br/>or /v1/realtime"| Frontend
     Frontend --> LLMWorker
