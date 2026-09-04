@@ -190,8 +190,12 @@ fn suppress_tool_call_output(choice: &mut DeltaChoice) {
 
 /// A token-limit finish can interrupt only the final structured call. Keep earlier
 /// calls whose argument strings are valid JSON, but do not expose the incomplete call
-/// as executable structured output. An empty argument string remains valid for a
-/// parameterless tool call because the stream schema permits omitted arguments.
+/// as executable structured output.
+///
+/// An empty argument string is the MOST truncated shape, not a parameterless call: the
+/// limit landed after the name and before the first argument token. The wire schema does
+/// permit omitted arguments, but nothing here can tell that apart from a call cut short,
+/// so at the token limit it is dropped with every other unparseable tail.
 fn drop_incomplete_length_tool_calls(choice: &mut DeltaChoice) {
     if choice.finish_reason != Some(dynamo_protocols::types::FinishReason::Length) {
         return;
@@ -207,7 +211,6 @@ fn drop_incomplete_length_tool_calls(choice: &mut DeltaChoice) {
         .enumerate()
         .filter(|(index, tool_call)| {
             *index != terminal_index
-                || tool_call.function.arguments.is_empty()
                 || serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments).is_ok()
         })
         .map(|(_, tool_call)| tool_call)
@@ -233,7 +236,7 @@ fn suppress_incomplete_structured_content(
     }
 
     if let Some(marker_start) =
-        super::unified_parser::first_unquoted_native_tool_call_marker(&choice.text, parser)
+        super::unified_parser::first_unquoted_structural_tool_call_marker(&choice.text, parser)
     {
         tracing::warn!(
             parser,
@@ -1812,7 +1815,33 @@ mod tests {
         annotated_delta2.data.as_mut().expect("delta data").nvext =
             Some(serde_json::json!({ "stop_reason": 128001 }));
 
-        let stream = Box::pin(stream::iter(vec![annotated_delta1, annotated_delta2]));
+        let mut metadata = annotated_delta2.clone();
+        let metadata_data = metadata.data.as_mut().expect("metadata data");
+        metadata_data.inner.choices.clear();
+        metadata_data.nvext = Some(serde_json::json!({
+            "engine_data": {
+                "prompt_token_ids": [1, 2],
+                "completion_token_ids": [10, 11],
+                "completion_logprobs": [-0.1, -0.2],
+            }
+        }));
+
+        let mut usage = metadata.clone();
+        let usage_data = usage.data.as_mut().expect("usage data");
+        usage_data.nvext = None;
+        usage_data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+            prompt_tokens: 2,
+            completion_tokens: 2,
+            total_tokens: 4,
+            ..Default::default()
+        });
+
+        let stream = Box::pin(stream::iter(vec![
+            annotated_delta1,
+            annotated_delta2,
+            metadata,
+            usage,
+        ]));
         let response = DeltaAggregator::apply(stream, ParsingOptions::default())
             .await
             .expect("aggregate stream");
@@ -1820,9 +1849,18 @@ mod tests {
         assert_eq!(
             response.nvext,
             Some(serde_json::json!({
-                "engine_data": { "trace_id": "abc" },
+                "engine_data": {
+                    "prompt_token_ids": [1, 2],
+                    "completion_token_ids": [10, 11],
+                    "completion_logprobs": [-0.1, -0.2],
+                },
                 "stop_reason": 128001,
             }))
+        );
+        assert_eq!(response.inner.choices.len(), 1);
+        assert_eq!(
+            response.inner.usage.expect("aggregated usage").total_tokens,
+            4
         );
     }
 
@@ -2238,6 +2276,68 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "get_weather");
         assert_eq!(tool_calls[0].function.arguments, "{\"city\":\"Paris\"}");
+    }
+
+    /// The limit can land after the function name and before the first argument
+    /// token. That leaves no argument bytes, which is the most truncated shape, not a
+    /// parameterless call, so it must not reach the client as executable.
+    #[tokio::test]
+    async fn test_length_drops_a_final_tool_call_with_no_argument_bytes() {
+        let call = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("first".to_string()),
+            r#type: Some(dynamo_protocols::types::FunctionType::Function),
+            function: Some(dynamo_protocols::types::FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: None,
+            }),
+        };
+        let result = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![create_test_delta_with_tool_chunks(
+                0,
+                vec![call],
+                Some(dynamo_protocols::types::FinishReason::Length),
+                Some(dynamo_protocols::types::Role::Assistant),
+            )])),
+            ParsingOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let choice = &result.inner.choices[0];
+        assert!(
+            choice.message.tool_calls.is_none(),
+            "a call cut off before its arguments must not be executable"
+        );
+        assert_eq!(
+            choice.finish_reason,
+            Some(dynamo_protocols::types::FinishReason::Length)
+        );
+    }
+
+    /// `phi4` opens a call with the bare word `functools`, so cutting content at every
+    /// configured marker would truncate an ordinary answer about that Python module.
+    #[tokio::test]
+    async fn test_length_keeps_prose_containing_a_word_shaped_marker() {
+        let text = "Use functools.lru_cache to memoize the call, and it will";
+        let result = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![create_test_delta(
+                0,
+                text,
+                Some(dynamo_protocols::types::Role::Assistant),
+                Some(dynamo_protocols::types::FinishReason::Length),
+                None,
+                None,
+            )])),
+            ParsingOptions::new(Some("phi4".to_string()), None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.inner.choices[0].message.content,
+            Some(ChatCompletionMessageContent::Text(text.to_string()))
+        );
     }
 
     #[tokio::test]

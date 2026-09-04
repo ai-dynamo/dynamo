@@ -875,7 +875,10 @@ impl ResponseStreamConverter {
         // whether the still-open reasoning item completed or was truncated.
         self.append_active_reasoning_done_events(events, output_status);
 
-        self.close_open_message_item(events, output_status);
+        // Only the terminal item was cut short, and the terminal response reports it
+        // that way. The `output_item.done` event has to agree, or a client sees one
+        // item marked incomplete in the stream and completed in the final response.
+        self.close_open_message_item(events, self.item_output_status(self.message_output_index));
 
         // Fallback for backends that end the transport without a finish-reason chunk.
         self.append_pending_function_call_done_events(events, output_status, true);
@@ -1730,6 +1733,35 @@ mod tests {
             panic!("expected message output");
         };
         assert_eq!(message.status, OutputStatus::Incomplete);
+    }
+
+    /// The message item is not the terminal item here, so the terminal response reports
+    /// it completed. `append_end_events` now closes it with this same per-item status,
+    /// so the `output_item.done` event cannot disagree with the final response.
+    #[test]
+    fn test_length_leaves_a_non_terminal_message_item_completed() {
+        let mut conv = ResponseStreamConverter::new("test-model".into(), default_params());
+        let _ = conv.process_chunk(&text_chunk("here you go "));
+        let _ = conv.process_chunk(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("get_weather"),
+            Some(r#"{"city":"Par"#),
+        ));
+        let _ = conv.process_chunk(&finish_chunk(FinishReason::Length));
+
+        assert_eq!(
+            conv.item_output_status(conv.message_output_index),
+            OutputStatus::Completed,
+            "only the terminal item was cut short"
+        );
+
+        let _ = conv.emit_end_events();
+        let response = conv.make_response(conv.terminal_status(), conv.completed_output());
+        let OutputItem::Message(message) = &response.output[0] else {
+            panic!("expected message output");
+        };
+        assert_eq!(message.status, OutputStatus::Completed);
     }
 
     #[test]

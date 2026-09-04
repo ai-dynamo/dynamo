@@ -329,6 +329,24 @@ pub(crate) fn first_unquoted_native_tool_call_marker(content: &str, parser: &str
         .min()
 }
 
+/// Like [`first_unquoted_native_tool_call_marker`], but only for markers that cannot be
+/// ordinary prose.
+///
+/// Truncating a response at a marker is safe only when the marker is control syntax. Some
+/// parsers open a call with a plain word — `phi4` uses `functools` — and an answer about
+/// the Python module of that name would lose everything from the word onward. A marker
+/// carrying a punctuation character (`<`, `|`, `[`) cannot be written by accident.
+pub(crate) fn first_unquoted_structural_tool_call_marker(
+    content: &str,
+    parser: &str,
+) -> Option<usize> {
+    native_tool_call_start_tokens(parser)?
+        .iter()
+        .filter(|marker| !marker.chars().all(char::is_alphanumeric))
+        .filter_map(|marker| first_unquoted_marker_position(content, marker))
+        .min()
+}
+
 /// Return the start of an unquoted native marker, including an unquoted
 /// partial marker suffix that must remain buffered for the next stream chunk.
 pub(crate) fn unquoted_native_tool_call_marker_or_prefix_start(
