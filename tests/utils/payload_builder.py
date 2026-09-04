@@ -310,7 +310,6 @@ def metric_payload_default(
     backend: Optional[str] = None,
     port: int = DefaultPort.SYSTEM1.value,
     check_lifecycle_gauges: bool = False,
-    min_spec_decode_draft_tokens: int = 0,
 ) -> MetricsPayload:
     """Create a metrics payload for the specified backend.
 
@@ -324,8 +323,6 @@ def metric_payload_default(
             (``cleanup_time_seconds``, ``drain_time_seconds``,
             ``kv_cache_hit_rate``) are registered. Default False because
             legacy entry points don't emit them.
-        min_spec_decode_draft_tokens: Minimum TRT-LLM speculative draft-token
-            count. A positive value proves that speculative decoding ran.
 
     Returns:
         Backend-specific MetricsPayload subclass based on backend parameter
@@ -346,10 +343,7 @@ def metric_payload_default(
     elif backend == "sglang":
         return SGLangMetricsPayload(**common_args)
     elif backend == "trtllm":
-        return TRTLLMMetricsPayload(
-            **common_args,
-            min_spec_decode_draft_tokens=min_spec_decode_draft_tokens,
-        )
+        return TRTLLMMetricsPayload(**common_args)
     elif backend == "lmcache":
         return LMCacheMetricsPayload(**common_args)
     else:

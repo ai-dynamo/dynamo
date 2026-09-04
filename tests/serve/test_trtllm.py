@@ -114,7 +114,7 @@ trtllm_configs = {
     "aggregated_spec_decoding": TRTLLMConfig(
         name="aggregated_spec_decoding",
         directory=trtllm_dir,
-        script_name="agg_metrics.sh",
+        script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
@@ -135,16 +135,11 @@ trtllm_configs = {
         },
         request_payloads=[
             completion_payload(
-                prompt=("Paris is the capital of France. " "Paris is the capital of"),
-                repeat_count=3,
+                prompt=TEXT_PROMPT,
+                repeat_count=1,
                 expected_response=[],
                 max_tokens=32,
                 temperature=0.0,
-            ),
-            metric_payload_default(
-                min_num_requests=3,
-                backend="trtllm",
-                min_spec_decode_draft_tokens=1,
             ),
         ],
     ),

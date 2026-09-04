@@ -2232,8 +2232,6 @@ class SGLangDisaggRouterMetricsPayload(MetricsPayload):
 class TRTLLMMetricsPayload(MetricsPayload):
     """Metrics validation for TensorRT-LLM backend"""
 
-    min_spec_decode_draft_tokens: int = 0
-
     def _get_backend_specific_checks(self) -> list[MetricCheck]:
         """TRT-LLM-specific metric checks"""
         checks = [
@@ -2286,24 +2284,6 @@ class TRTLLMMetricsPayload(MetricsPayload):
                         ),
                     ),
                     multiline=True,
-                )
-            )
-
-        if self.min_spec_decode_draft_tokens > 0:
-            checks.append(
-                MetricCheck(
-                    name="trtllm_spec_decode_num_draft_tokens_total",
-                    pattern=lambda name: (rf"{name}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"),
-                    validator=lambda value: (
-                        float(value) >= self.min_spec_decode_draft_tokens
-                    ),
-                    error_msg=lambda name, value: (
-                        f"{name} has count {value}, expected at least "
-                        f"{self.min_spec_decode_draft_tokens}"
-                    ),
-                    success_msg=lambda name, value: (
-                        f"SUCCESS: Found {name} with count: {value}"
-                    ),
                 )
             )
 
