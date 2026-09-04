@@ -50,6 +50,12 @@ BACKEND_IMAGE_NAMES: dict[str, str] = {
 
 PLANNER_IMAGE_NAME = "dynamo-planner"
 
+# Backend used when a request asks for automatic backend selection but the code
+# path taken cannot search across backends. Every path that derives a container
+# image or renders a command line needs one concrete backend name, so "auto"
+# has to become a real backend somewhere; this is the single value it becomes.
+DEFAULT_BACKEND = "vllm"
+
 
 def _replace_image_name(image_ref: str, new_name: str) -> str:
     """Replace the image name component in a Docker image reference.
@@ -109,6 +115,37 @@ def derive_backend_image(profiler_image: str, backend: str) -> str:
         )
 
     return _replace_image_name(profiler_image, backend_image_name)
+
+
+def resolve_auto_backend(backend: str, search_path: str) -> str:
+    """Resolve ``backend='auto'`` to a concrete backend for one search path.
+
+    ``auto`` asks the profiler to pick a backend by searching across all of
+    them. Only the RAPID simulation search can do that; every other path needs
+    a concrete backend to derive a container image and render a command line
+    from. Those paths call this helper, which logs which backend they settled
+    on and why the request was not honoured as written.
+
+    Concrete backends are returned unchanged, so this is safe to apply
+    unconditionally.
+
+    Args:
+        backend: The requested backend, possibly ``'auto'``.
+        search_path: Human-readable name of the calling path, used in the
+            warning so an operator can see which one did not search.
+
+    Returns:
+        A concrete backend name.
+    """
+    if backend != "auto":
+        return backend
+    logger.warning(
+        "backend='auto' was requested but %s does not search across backends; "
+        "using '%s'. Request a concrete backend to control which one runs.",
+        search_path,
+        DEFAULT_BACKEND,
+    )
+    return DEFAULT_BACKEND
 
 
 # ---------------------------------------------------------------------------
