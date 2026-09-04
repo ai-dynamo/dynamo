@@ -109,10 +109,6 @@ pub const PASSTHROUGH_EXTRA_FIELDS: &[&str] = &[
     "allowed_token_ids",
     "bad_words_token_ids",
     "logprob_token_ids",
-    // OpenAI cache-affinity / abuse-tracking hints. Routing already keys on
-    // prompt prefix, so these are accepted and forwarded, not acted on.
-    "prompt_cache_key",
-    "safety_identifier",
 ];
 
 static IGNORE_OPENAI_FE_UNSUPPORTED_FIELDS: LazyLock<bool> =
@@ -170,13 +166,6 @@ fn validate_no_unsupported_fields_with_ignore(
     if let Some(value) = unsupported_fields.get("logprob_token_ids") {
         serde_json::from_value::<Vec<crate::types::TokenIdType>>(value.clone())
             .map_err(|_| anyhow::anyhow!("`logprob_token_ids` must be an array of token IDs"))?;
-    }
-    for key in ["prompt_cache_key", "safety_identifier"] {
-        if let Some(value) = unsupported_fields.get(key)
-            && !value.is_string()
-        {
-            anyhow::bail!("`{key}` must be a string");
-        }
     }
     Ok(())
 }
@@ -570,9 +559,16 @@ pub fn validate_tools(
         if tool.function.name.trim().is_empty() {
             anyhow::bail!("Function name at index {} cannot be empty", i);
         }
-        if !tool
-            .function
-            .name
+        // Moonshot builtin tools are `$`-prefixed (`$web_search`).
+        let name = match tool.r#type {
+            dynamo_protocols::types::ChatCompletionToolType::BuiltinFunction => tool
+                .function
+                .name
+                .strip_prefix('$')
+                .unwrap_or(&tool.function.name),
+            dynamo_protocols::types::ChatCompletionToolType::Function => &tool.function.name,
+        };
+        if !name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         {
@@ -971,25 +967,6 @@ mod tests {
             let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
             assert!(err.to_string().contains("must be an array of token IDs"));
         }
-    }
-
-    #[test]
-    fn validate_no_unsupported_fields_accepts_prompt_cache_key_and_safety_identifier() {
-        let fields = HashMap::from([
-            ("prompt_cache_key".to_string(), json!("sess_123")),
-            ("safety_identifier".to_string(), json!("user_abc")),
-        ]);
-        validate_no_unsupported_fields_with_ignore(&fields, false).unwrap();
-    }
-
-    #[test]
-    fn validate_no_unsupported_fields_rejects_non_string_prompt_cache_key() {
-        let fields = HashMap::from([("prompt_cache_key".to_string(), json!(42))]);
-        let err = validate_no_unsupported_fields_with_ignore(&fields, false).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("`prompt_cache_key` must be a string")
-        );
     }
 
     #[test]
