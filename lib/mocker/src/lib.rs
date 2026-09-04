@@ -18,3 +18,4 @@ pub mod loadgen;
 pub mod replay;
 pub mod scheduler;
 pub mod services;
+pub mod sglang;

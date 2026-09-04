@@ -8,6 +8,7 @@
 
 mod handoff;
 mod metrics;
+mod sglang;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -792,6 +793,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         let (request, ctx) = input.into_parts();
         let request_start = Instant::now();
+        let native_sglang = sglang::response_metadata(&request, ctx.id()).map_err(Error::from)?;
 
         let dp_rank = self.resolve_dp_rank(&request);
 
@@ -818,7 +820,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 .ok_or_else(|| Error::msg("max_output_tokens must be specified for mocker"))?
                 as usize
         };
-        let replay_key = request.get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY);
+        let replay_key = request
+            .get_annotation_value(OUTPUT_REPLAY_ID_ANNOTATION_KEY)
+            .or_else(|| {
+                // A native SGLang decode request has no replay annotation, so fall back to its
+                // rid. Only do so when a trace is loaded, otherwise every native request would
+                // warn below about a replay it never asked for.
+                if is_prefill {
+                    return None;
+                }
+                let metadata = native_sglang.as_ref()?;
+                self.response_replay_table.as_ref()?;
+                Some(metadata.request_id().to_string())
+            });
         let planned_output_token_ids = replay_key.as_deref().and_then(|key| {
             let Some(table) = self.response_replay_table.as_ref() else {
                 tracing::warn!(
@@ -1251,7 +1265,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             tokio::spawn(response_task);
         }
 
-        let stream = UnboundedReceiverStream::new(stream_rx).map(Annotated::from_data);
+        let mut completion_tokens = 0_usize;
+        let stream = UnboundedReceiverStream::new(stream_rx).map(move |mut output| {
+            if let Some(metadata) = native_sglang.as_ref() {
+                completion_tokens = completion_tokens.saturating_add(output.token_ids.len());
+                sglang::adapt(metadata, &mut output, completion_tokens);
+            }
+            Annotated::from_data(output)
+        });
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
 }

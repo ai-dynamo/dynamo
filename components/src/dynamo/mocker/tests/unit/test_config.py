@@ -57,6 +57,7 @@ def make_args(**overrides):
         "sglang_chunked_prefill_size": None,
         "sglang_clip_max_new_tokens": None,
         "sglang_schedule_conservativeness": None,
+        "sglang_generate": False,
         "trtllm_capacity_scheduler_policy": None,
         "aic_perf_model": False,
         "aic_system": None,
@@ -103,6 +104,11 @@ def test_build_runtime_config_uses_normalized_sglang_page_size_alias():
     assert runtime_config.max_num_seqs == 256
     assert runtime_config.max_num_batched_tokens == 8192
     assert runtime_config.runtime_data["output_replay_consumer"] == "true"
+
+
+def test_sglang_generate_capability_is_opt_in():
+    assert parse_args([]).sglang_generate is False
+    assert parse_args(["--sglang-generate"]).sglang_generate is True
 
 
 def test_build_mocker_engine_args_rejects_mismatched_sglang_sizes():
