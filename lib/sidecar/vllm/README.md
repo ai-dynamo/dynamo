@@ -180,6 +180,8 @@ command.
 
 The sidecar waits for both the Control and Inference services through the standard gRPC health API before registering the worker. The deployment manifests retain lightweight socket probes for container lifecycle monitoring. The engine image must include a `vllm-rs` build compatible with the vendored protocol.
 
+The Dynamo vLLM runtime image exposes `vllm-rs` on `PATH`, linked from the `vllm` package that image installs, so `vllm-rs serve` runs there by name. A stock upstream engine image ships the same binary inside the package but leaves it off `PATH`; `deploy/agg.yaml` and `deploy/disagg.yaml` run that image and resolve the path out of the package themselves.
+
 ### Prerequisites
 
 - A Kubernetes cluster (**v1.29+**, or v1.28 with the `SidecarContainers` feature

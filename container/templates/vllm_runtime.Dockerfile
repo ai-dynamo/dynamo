@@ -176,6 +176,10 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
 {% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
+{# cuda installs into the system interpreter, so /usr/local/bin is the PATH entry
+   Dynamo already owns there (see the /usr/local/bin/python link above). xpu and cpu
+   run out of ${VIRTUAL_ENV} and prepend ${VIRTUAL_ENV}/bin to PATH. #}
+{% set vllm_rs_link = "/usr/local/bin/vllm-rs" if device == "cuda" else "${VIRTUAL_ENV}/bin/vllm-rs" %}
 
 # The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
 # requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
@@ -497,6 +501,25 @@ expected = sys.argv[1]
 if actual != expected:
     raise RuntimeError(f"expected transformers {expected}, found {actual}")
 PY
+
+# Put `vllm-rs` on PATH. It is upstream vLLM's own Rust frontend and
+# managed-engine CLI, shipped as a plain data file inside the installed `vllm`
+# package rather than as a console script, so the base image already carries it
+# but nothing makes it resolvable by name -- and the sidecar launch scripts under
+# lib/sidecar/vllm/launch/ invoke `vllm-rs serve` bare. Linking the copy that is
+# already in the package is what keeps the pairing lib/sidecar/vllm/README.md
+# requires: the exposed binary is by construction from the same vLLM source
+# revision as the Python `vllm` package, which fetching or building a separate
+# artifact could not guarantee. Runs after every package layer in this stage so
+# it sees the final installed vllm. The existence check and the `--help` call
+# share this layer, so a base image that stops shipping the binary fails the
+# build here instead of producing an image whose launch scripts die at startup.
+RUN set -eu; \
+    pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
+    [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ] \
+      || { echo "ERROR: installed vllm package (${pkg}) ships no executable vllm-rs" >&2; exit 1; }; \
+    ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
+    vllm-rs --help >/dev/null
 
 USER dynamo
 
