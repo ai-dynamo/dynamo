@@ -20,6 +20,7 @@ recipes:
 - nemotron-3-super
 - glm-5-nvfp4
 - deepseek-v4-pro
+- deepseek-v4-pro-0813
 - deepseek-v4-flash
 - gpt-oss-120b
 - qwen3-32b
