@@ -1221,7 +1221,7 @@ async fn sleep_status_remains_advertised_without_sleep_mode() {
 }
 
 #[tokio::test]
-async fn mixed_multimodal_media_forwards_uuids_for_each_modality() {
+async fn mixed_multimodal_media_is_forwarded_with_image_uuid_only() {
     let service = FakeVllm::default();
     let mut discovered = model_info();
     discovered.supports_multimodal = true;
@@ -1252,17 +1252,6 @@ async fn mixed_multimodal_media_forwards_uuids_for_each_modality() {
         ),
     ]));
     multimodal_request.output_options.prompt_logprobs = None;
-    let expected_uuids = [
-        ("image_url", pb::Modality::Image, "image-cache-id"),
-        ("video_url", pb::Modality::Video, "video-cache-id"),
-        ("audio_url", pb::Modality::Audio, "audio-cache-id"),
-    ];
-    multimodal_request.multi_modal_uuids = Some(
-        expected_uuids
-            .iter()
-            .map(|(key, _, uuid)| (key.to_string(), vec![Some(uuid.to_string())]))
-            .collect(),
-    );
     multimodal_request
         .extra_args
         .as_mut()
@@ -1291,16 +1280,6 @@ async fn mixed_multimodal_media_forwards_uuids_for_each_modality() {
     let requests = server.service.requests.lock().await;
     let media = &requests.last().expect("recorded request").media;
     assert_eq!(media.len(), 3);
-    let assert_uuids = |media: &[pb::MediaItem]| {
-        for (_, modality, expected_uuid) in expected_uuids {
-            let item = media
-                .iter()
-                .find(|item| item.modality() == modality)
-                .unwrap_or_else(|| panic!("missing {modality:?} media"));
-            assert_eq!(item.uuid, expected_uuid);
-        }
-    };
-    assert_uuids(media);
     let image = media
         .iter()
         .find(|item| item.modality() == pb::Modality::Image)
@@ -1313,6 +1292,12 @@ async fn mixed_multimodal_media_forwards_uuids_for_each_modality() {
         .iter()
         .find(|item| item.modality() == pb::Modality::Audio)
         .expect("audio media");
+    assert_eq!(
+        image.uuid,
+        "0123456789abcdef000000000000000000000000000000000000000000000000"
+    );
+    assert!(video.uuid.is_empty());
+    assert!(audio.uuid.is_empty());
     assert!(matches!(
         image.source.as_ref(),
         Some(pb::media_item::Source::DataUri(_))
@@ -1363,42 +1348,19 @@ async fn mixed_multimodal_media_forwards_uuids_for_each_modality() {
     let decode_wire = &requests[requests.len() - 1];
     assert_eq!(prefill_wire.media.len(), 3);
     assert_eq!(decode_wire.media.len(), 3);
-    assert_uuids(&prefill_wire.media);
-    assert_uuids(&decode_wire.media);
     assert_eq!(
         decode_wire.prompt.as_ref(),
         Some(&pb::generate_request::Prompt::TokenIds(pb::TokenIds {
             ids: vec![11, 22, 33],
         }))
     );
-}
-
-#[test]
-fn image_hash_is_used_as_cache_uuid_when_user_uuid_is_missing() {
-    let mut request = request();
-    request.multi_modal_data = Some(std::collections::HashMap::from([(
-        "image_url".to_string(),
-        vec![MultimodalData::RawUrl(
-            "https://example.com/image.png".to_string(),
-        )],
-    )]));
-    request
-        .extra_args
-        .as_mut()
-        .and_then(serde_json::Value::as_object_mut)
-        .expect("object extra_args")
-        .insert("mm_hashes".to_string(), json!(["0123456789abcdef"]));
-
-    let wire = build_generate_request(
-        request,
-        "image-hash-fallback".to_string(),
-        DisaggregationMode::Aggregated,
-    )
-    .expect("request conversion");
-
-    assert_eq!(wire.media.len(), 1);
+    let decode_image = decode_wire
+        .media
+        .iter()
+        .find(|item| item.modality() == pb::Modality::Image)
+        .expect("decode image media");
     assert_eq!(
-        wire.media[0].uuid,
+        decode_image.uuid,
         "0123456789abcdef000000000000000000000000000000000000000000000000"
     );
 }
@@ -1755,6 +1717,19 @@ async fn unsupported_features_fail_before_rpc_submission() {
     let mut multimodal = request();
     multimodal.mm_processor_kwargs = Some(json!({"use_audio_in_video": true}));
     requests.push(multimodal);
+
+    let mut audio_uuid = request();
+    audio_uuid.multi_modal_data = Some(std::collections::HashMap::from([(
+        "audio_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "https://example.com/sample.wav".to_string(),
+        )],
+    )]));
+    audio_uuid.multi_modal_uuids = Some(std::collections::HashMap::from([(
+        "audio_url".to_string(),
+        vec![Some("audio-cache-id".to_string())],
+    )]));
+    requests.push(audio_uuid);
 
     let mut lora_request = serde_json::to_value(request()).expect("serialize request");
     lora_request["routing"] = json!({"lora_name": "adapter"});
