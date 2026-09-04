@@ -665,6 +665,8 @@ jobs:
     with:
       framework: vllm
       pytest_markers: '(pre_merge or post_merge) and vllm'
+    secrets:
+      DD_API_KEY: ${{ secrets.DD_API_KEY }}
 
   # ============================================================================
   # IMAGE COMPLIANCE

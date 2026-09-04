@@ -27,6 +27,10 @@ on:
         type: string
         default: ''
   workflow_call:
+    secrets:
+      DD_API_KEY:
+        description: 'Datadog API key for Test Optimization. Optional — when absent, tests run exactly as before with no reporting.'
+        required: false
     inputs:
       framework:
         description: 'Framework name (vllm, sglang, dynamo)'
@@ -176,6 +180,16 @@ jobs:
             echo "✅ Sanity check passed"
           fi
 
+      # XPU runs pytest inside a container the pytest action launches, so the
+      # tracer is installed here and mounted in there. Best-effort throughout:
+      # if any of it fails the docker run is unchanged.
+      - name: Configure Datadog Test Visibility
+        continue-on-error: true
+        uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
+        with:
+          languages: python
+          api_key: ${{ secrets.DD_API_KEY }}
+          site: datadoghq.com
       - name: Run XPU tests
         uses: $/.github/actions/pytest
         with:
@@ -224,6 +238,14 @@ jobs:
           CONTAINER_ID_PREFIX="test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}"
           docker rm -f "${CONTAINER_ID_PREFIX}_pytest" 2>/dev/null || true
 
+      # See the note on the test-xpu job above.
+      - name: Configure Datadog Test Visibility
+        continue-on-error: true
+        uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
+        with:
+          languages: python
+          api_key: ${{ secrets.DD_API_KEY }}
+          site: datadoghq.com
       - name: Run XPU 2-card tests
         uses: $/.github/actions/pytest
         with:

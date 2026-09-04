@@ -170,6 +170,26 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
 
+        # Mount the runner's Datadog tracer into the test container. Fully
+        # conditional — unset/missing DD_TRACER_FOLDER leaves the docker run
+        # below unchanged.
+        DOCKER_DD_FLAGS=()
+        if [[ -n "${DD_TRACER_FOLDER:-}" && -d "${DD_TRACER_FOLDER}" ]]; then
+          DOCKER_DD_FLAGS+=(-v "${DD_TRACER_FOLDER}:/dd-tracer:ro")
+          for v in DD_SERVICE DD_ENV DD_TAGS DD_SITE DD_API_KEY \
+                   DD_CIVISIBILITY_AGENTLESS_ENABLED DD_CIVISIBILITY_ENABLED \
+                   DD_CIVISIBILITY_ITR_ENABLED PYTEST_ADDOPTS; do
+            if [[ -n "${!v:-}" ]]; then
+              DOCKER_DD_FLAGS+=(--env "${v}=${!v}")
+            fi
+          done
+          # Repoint the loader at the mount.
+          DOCKER_DD_FLAGS+=(--env "DD_TRACER_FOLDER=/dd-tracer")
+          echo "📡 Datadog instrumentation mounted from ${DD_TRACER_FOLDER}"
+        else
+          echo "📡 Datadog instrumentation not configured; running uninstrumented"
+        fi
+
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --shm-size=200m \
@@ -177,6 +197,7 @@ runs:
           --network host \
           --memory=6g \
           "${DOCKER_ENV_FLAGS[@]}" \
+          ${DOCKER_DD_FLAGS[@]+"${DOCKER_DD_FLAGS[@]}"} \
           ${COVERAGE_ENV} \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
@@ -301,6 +322,26 @@ runs:
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_PLATFORM=${{ inputs.platform_arch }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_TYPE=${{ inputs.test_type }}")
         DOCKER_ENV_FLAGS+=(--env "DYNAMO_TEST_WORKFLOW=${GITHUB_WORKFLOW}")
+
+        # Mount the runner's Datadog tracer into the test container. Fully
+        # conditional — unset/missing DD_TRACER_FOLDER leaves the docker run
+        # below unchanged.
+        DOCKER_DD_FLAGS=()
+        if [[ -n "${DD_TRACER_FOLDER:-}" && -d "${DD_TRACER_FOLDER}" ]]; then
+          DOCKER_DD_FLAGS+=(-v "${DD_TRACER_FOLDER}:/dd-tracer:ro")
+          for v in DD_SERVICE DD_ENV DD_TAGS DD_SITE DD_API_KEY \
+                   DD_CIVISIBILITY_AGENTLESS_ENABLED DD_CIVISIBILITY_ENABLED \
+                   DD_CIVISIBILITY_ITR_ENABLED PYTEST_ADDOPTS; do
+            if [[ -n "${!v:-}" ]]; then
+              DOCKER_DD_FLAGS+=(--env "${v}=${!v}")
+            fi
+          done
+          # Repoint the loader at the mount.
+          DOCKER_DD_FLAGS+=(--env "DD_TRACER_FOLDER=/dd-tracer")
+          echo "📡 Datadog instrumentation mounted from ${DD_TRACER_FOLDER}"
+        else
+          echo "📡 Datadog instrumentation not configured; running uninstrumented"
+        fi
         if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
           DOCKER_ENV_FLAGS+=(--env "COVERAGE_FILE=/workspace/test-results/.coverage")
           DOCKER_ENV_FLAGS+=(--env "PYTHONPATH=/workspace/components/src:/workspace/lib/bindings/python/src")
@@ -311,6 +352,7 @@ runs:
           --rm -w /workspace \
           --network host \
           "${DOCKER_ENV_FLAGS[@]}" \
+          ${DOCKER_DD_FLAGS[@]+"${DOCKER_DD_FLAGS[@]}"} \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           -v "/models:${HF_HOME}" \
