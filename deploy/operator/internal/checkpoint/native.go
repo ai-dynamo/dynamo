@@ -62,8 +62,8 @@ func ManagedPodSnapshotUse(ownerUID types.UID) PodSnapshotUse {
 // but not-yet-ready snapshot is returned with Ready=false so callers can gate
 // workloads while retaining an admission-time reference to the same object.
 // A nil config means checkpointing is disabled. Reader must be non-nil when
-// checkpointing is enabled. A nil expectedWorkerHash means the target is not a
-// worker-class component; a non-nil value must contain its generation hash.
+// checkpointing is enabled. A non-empty snapshot worker hash requires the same
+// non-empty expectedWorkerHash; nil means the target has no worker generation.
 func ResolvePodSnapshotForService(
 	ctx context.Context,
 	reader client.Reader,
@@ -81,10 +81,6 @@ func ResolvePodSnapshotForService(
 	if config.CheckpointRef == nil || strings.TrimSpace(*config.CheckpointRef) == "" {
 		return nil, fmt.Errorf("checkpointRef is required for native PodSnapshot restore")
 	}
-	if expectedWorkerHash != nil && *expectedWorkerHash == "" {
-		return nil, fmt.Errorf("worker compatibility hash is required for native PodSnapshot restore")
-	}
-
 	// Read the referenced standalone Snapshot object directly.
 	snapshotName := strings.TrimSpace(*config.CheckpointRef)
 	snapshot := &snapshotv1alpha1.PodSnapshot{}
@@ -154,6 +150,10 @@ func ResolvePodSnapshotForService(
 		)
 	}
 	workerHash := annotations[consts.SnapshotWorkerHashAnnotation]
+	// Enforce source-declared worker compatibility against the target generation.
+	if workerHash != "" && (expectedWorkerHash == nil || *expectedWorkerHash == "") {
+		return nil, fmt.Errorf("worker compatibility hash is required for native PodSnapshot restore")
+	}
 	if expectedWorkerHash != nil && workerHash != *expectedWorkerHash {
 		return nil, fmt.Errorf(
 			"referenced PodSnapshot %s/%s worker hash %q does not match expected hash %q",
