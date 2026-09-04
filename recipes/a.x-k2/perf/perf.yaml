@@ -78,7 +78,7 @@ spec:
             - -c
             - |
               set -euo pipefail
-              ulimit -n 600000
+              ulimit -n 600000 || echo "WARNING: could not raise the open-file limit; using $(ulimit -n)"
               apt-get update && apt-get install -y --no-install-recommends curl jq && apt-get clean
               pip install -q "aiperf==0.10.0" "transformers==4.57.3" "tokenizers==0.22.2"
 
@@ -131,9 +131,10 @@ spec:
                 echo " concurrency=${c}   requests=${REQUESTS}   artifact=${RUN_DIR}"
                 echo "================================================================"
                 # 90-minute guard per cell: a decode KV-saturation stall otherwise
-                # holds the Job until activeDeadlineSeconds.
+                # holds the Job until activeDeadlineSeconds. A failed or timed-out
+                # cell is reported and the sweep continues with the next one.
                 # shellcheck disable=SC2086
-                timeout 90m aiperf profile \
+                if ! timeout 90m aiperf profile \
                   --model "${TARGET_MODEL}" \
                   --tokenizer "${TOKENIZER}" \
                   --tokenizer-trust-remote-code \
@@ -156,8 +157,11 @@ spec:
                   --random-seed "${RANDOM_SEED}" \
                   --request-timeout-seconds 1800 \
                   --ui simple \
-                  --artifact-dir "${RUN_DIR}"
-                echo "Concurrency ${c} complete; artifacts in ${RUN_DIR}"
+                  --artifact-dir "${RUN_DIR}"; then
+                  echo "WARNING: concurrency ${c} failed or timed out; continuing sweep"
+                else
+                  echo "Concurrency ${c} complete; artifacts in ${RUN_DIR}"
+                fi
                 # Let in-flight decode drain and KV usage settle between cells.
                 sleep 60
               done

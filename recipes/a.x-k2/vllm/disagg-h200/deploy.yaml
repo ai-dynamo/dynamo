@@ -6,11 +6,7 @@
 # Prefill: 2 workers x (TP2 x DP4 + EP), one node each. Decode: 2 workers x
 # (TP8 + EP), one node each. KV blocks move prefill -> decode over NIXL/UCX
 # (RDMA). The frontend uses event-driven KV-aware routing; prefill workers
-# publish KV events over ZMQ. This is the configuration adopted after the
-# 32-GPU H200 agg-vs-disagg study in ../../README.md#performance: at 16K-input
-# / 1K-output traffic it delivers +16-51 % total throughput over the aggregated
-# TP8 baseline between 32 and 256 concurrent requests, with decode ITL p99
-# around 80 ms instead of 870-2,300 ms.
+# publish KV events over ZMQ. Results are in ../../README.md#performance.
 #
 # Operating limit: each decode worker holds ~864K KV tokens (49 concurrent
 # 16K-token requests). Keep steady-state concurrency per 32-GPU unit at or
@@ -58,13 +54,10 @@ spec:
                 # real KV block events (see --kv-events-config below), so the
                 # router selects the prefill worker that already holds the
                 # shared prefix and keeps both decode workers balanced.
-                # Measured: TTFT p50 halves and the random-routing stall at 128
-                # concurrent cold requests does not occur.
                 - name: DYN_ROUTER_MODE
                   value: kv
                 - name: DYN_ROUTER_USE_KV_EVENTS
                   value: "true"
-                # Default value, stated explicitly for reproducible tuning.
                 - name: DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT
                   value: "1.0"
                 - name: HF_HUB_OFFLINE

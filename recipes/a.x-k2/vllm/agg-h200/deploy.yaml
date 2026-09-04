@@ -3,12 +3,8 @@
 #
 # A.X-K2 (skt/A.X-K2, FP8) -- AGGREGATED on 8-GPU H200 nodes, vLLM.
 #
-# One TP8 + EP worker per node, round-robin routing. This is the aggregated
-# baseline from the 32-GPU H200 study in ../../README.md#performance (measured
-# with replicas: 4). At 8-16 concurrent requests per 32 GPUs it is within 8 %
-# of the disaggregated recipe and simpler to run; from 32 concurrent requests
-# upward the disagg-h200 recipe delivers +16-51 % throughput and ~10x lower
-# decode ITL p99.
+# One TP8 + EP worker per node, round-robin routing: the aggregated baseline of
+# the 32-GPU H200 study in ../../README.md#performance.
 #
 # Scale by `replicas` (one node per replica). KV-aware routing is deliberately
 # not enabled here: on this aggregated layout it added +2-7 % throughput but
@@ -73,7 +69,6 @@ spec:
       # The A.X-K2 runtime image tag is not semver; tell the operator which
       # Dynamo runtime is installed inside it.
       runtimeVersionOverride: 1.4.2
-      # Measured with 4 replicas (32 GPUs). One 8-GPU node per replica.
       replicas: 4
       sharedMemorySize: 64Gi
       podTemplate:
