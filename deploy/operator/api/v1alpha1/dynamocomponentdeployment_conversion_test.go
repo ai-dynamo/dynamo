@@ -634,14 +634,14 @@ func TestDCD_RoundTrip_ExperimentalGrove(t *testing.T) {
 		{
 			name: "grove.forceScalingGroup only",
 			experimental: &v1beta1.ExperimentalSpec{
-				Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+				Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
 			},
 		},
 		{
 			name: "grove.forceScalingGroup alongside alpha-representable GMS",
 			experimental: &v1beta1.ExperimentalSpec{
 				GPUMemoryService: &v1beta1.GPUMemoryServiceSpec{Mode: v1beta1.GMSModeIntraPod},
-				Grove:            &v1beta1.GroveSpec{ForceScalingGroup: true},
+				Grove:            &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
 			},
 		},
 	}

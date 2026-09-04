@@ -74,6 +74,29 @@ func TestConvertFromSharedMemorySpec(t *testing.T) {
 	}
 }
 
+func TestBugDGD_ExplicitFalseForceScalingGroupRoundTrips(t *testing.T) {
+	t.Log("Build a hub DGD with forceScalingGroup explicitly disabled")
+	in := &v1beta1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "explicit-false", Namespace: "ns"},
+		Spec: v1beta1.DynamoGraphDeploymentSpec{
+			Components: []v1beta1.DynamoComponentDeploymentSharedSpec{{
+				ComponentName: "worker",
+				ComponentType: v1beta1.ComponentTypeWorker,
+				Experimental: &v1beta1.ExperimentalSpec{
+					Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(false)},
+				},
+			}},
+		},
+	}
+
+	t.Log("Round-trip through the v1alpha1 conversion webhook representation")
+	out := roundTripFromV1beta1(t, in)
+	got := out.Spec.Components[0].Experimental.Grove.ForceScalingGroup
+	if got == nil || *got {
+		t.Fatalf("forceScalingGroup = %v, want explicit false", got)
+	}
+}
+
 func TestBugDGD_SpokeServiceAndExtraVolumeMountsCompose(t *testing.T) {
 	in := &DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "volume-mounts", Namespace: "ns"},

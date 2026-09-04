@@ -576,7 +576,7 @@ func (v *sharedValidation) validateGroveSpec(
 	fldPath *field.Path,
 	grovePathway bool,
 ) field.ErrorList {
-	if grove.ForceScalingGroup && !grovePathway {
+	if k8sptr.Deref(grove.ForceScalingGroup, false) && !grovePathway {
 		return field.ErrorList{field.Forbidden(
 			fldPath.Child("forceScalingGroup"),
 			"is currently supported only for Grove-backed DynamoGraphDeployment components",
@@ -915,7 +915,7 @@ func (v *sharedValidation) validateExperimentalSpecUpdate(
 			fldPath.Child("grove"),
 			options.ownerKind,
 		)...)
-	} else if oldGrove != nil && oldGrove.ForceScalingGroup {
+	} else if oldGrove != nil && k8sptr.Deref(oldGrove.ForceScalingGroup, false) {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("grove", "forceScalingGroup"),
 			nil,
@@ -934,13 +934,14 @@ func (v *sharedValidation) validateGroveSpecUpdate(
 	fldPath *field.Path,
 	ownerKind schema.GroupKind,
 ) field.ErrorList {
-	oldForced := oldGrove != nil && oldGrove.ForceScalingGroup
-	if newGrove.ForceScalingGroup == oldForced {
+	oldForced := oldGrove != nil && k8sptr.Deref(oldGrove.ForceScalingGroup, false)
+	newForced := k8sptr.Deref(newGrove.ForceScalingGroup, false)
+	if newForced == oldForced {
 		return nil
 	}
 	return field.ErrorList{field.Invalid(
 		fldPath.Child("forceScalingGroup"),
-		newGrove.ForceScalingGroup,
+		newForced,
 		fmt.Sprintf("cannot be toggled after creation; delete and recreate the %s to change it", ownerKind.Kind),
 	)}
 }

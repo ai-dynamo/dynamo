@@ -976,7 +976,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			groveDisabled: true,
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 			wantWebhookErrs: []string{"spec.components[1].experimental.grove.forceScalingGroup: Forbidden: is currently supported only for Grove-backed DynamoGraphDeployment components"},
@@ -985,7 +985,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "v1beta1 grove.forceScalingGroup on a single-node component reaches the webhook",
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				betaWorkerComponent(dgd).Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 		},
@@ -995,7 +995,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 				worker := betaWorkerComponent(dgd)
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 		},
@@ -2444,7 +2444,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			oldDeployment: newBetaDGDForValidation(),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 			wantWebhookErrs: []string{"spec.components[1].experimental.grove.forceScalingGroup: Invalid value: true: cannot be toggled after creation; delete and recreate the DynamoGraphDeployment to change it"},
@@ -2453,7 +2453,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "grove.forceScalingGroup removal is immutable",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 			deployment:      newBetaDGDForValidation(),
@@ -2463,12 +2463,12 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "unchanged grove.forceScalingGroup update reaches the webhook",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 		},
@@ -2479,7 +2479,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: false},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(false)},
 				}
 			}),
 		},
@@ -2487,7 +2487,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			name: "grove block removal with retained experimental is immutable",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Experimental = &nvidiacomv1beta1.ExperimentalSpec{
-					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: true},
+					Grove: &nvidiacomv1beta1.GroveSpec{ForceScalingGroup: k8sptr.To(true)},
 				}
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {

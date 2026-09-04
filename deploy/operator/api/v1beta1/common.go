@@ -236,7 +236,7 @@ type GroveSpec struct {
 	// components a standalone PodClique), not "force PodClique".
 	// Immutable after creation.
 	// +optional
-	ForceScalingGroup bool `json:"forceScalingGroup,omitempty"`
+	ForceScalingGroup *bool `json:"forceScalingGroup,omitempty"`
 }
 
 // ExperimentalSpec groups opt-in preview features whose API shape and behavior
