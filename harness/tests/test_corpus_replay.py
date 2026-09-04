@@ -157,3 +157,145 @@ def test_every_edited_command_still_parses_under_bash(shell_commands):
         if result.returncode != 0:
             rejected.append(f"{argv.source}: {result.stderr.strip()[:120]}")
     assert rejected == []
+
+
+# ------------------------------------------------------- the dialect, on the corpus
+
+
+def _worker_argvs():
+    """Every container that actually launches an inference engine."""
+    from dynamo_test.dialect import detect
+
+    for root in ROOTS:
+        for path in sorted(root.rglob("*.yaml")):
+            for name, container in _containers(path):
+                if not isinstance(container, dict):
+                    continue
+                argv = ArgV.from_container(
+                    container, source=f"{path.relative_to(REPO)}[{name}]"
+                )
+                backend = detect(argv)
+                if backend.is_known:
+                    yield backend.require(), argv
+
+
+@pytest.fixture(scope="module")
+def workers():
+    found = list(_worker_argvs())
+    assert found, "expected the corpus to contain engine workers"
+    return found
+
+
+def test_the_engine_is_detected_for_every_worker(workers):
+    """Detection reads ``python -m dynamo.<engine>``, not a substring.
+
+    Matching a backend name anywhere in the command picks up image names and
+    environment variables; that mis-attributed 12 TensorRT-LLM containers when
+    this was first measured the loose way.
+    """
+    from dynamo_test.dialect import DIALECTS
+
+    assert {b for b, _ in workers} <= set(DIALECTS)
+    assert len(workers) > 100
+
+
+# Manifests whose worker declares no model at all, and does not defer to a
+# config file either. Each is a real defect, not a gap in the reader.
+#
+# All three are the YAML folded-scalar bug: `>-` collapses the newline in
+# `\<newline>` into a space, making it an escaped space, so bash delivers
+# " --model" with a leading space and argparse rejects it. Fixed by OPS-8534
+# (PR #14321); when that lands these entries should be deleted and this test
+# will say so.
+KNOWN_UNDECLARED_MODEL = {
+    "recipes/qwen3-vl-32b-fp8/vllm/agg/deploy.yaml[VllmWorker]",
+    "recipes/qwen3-vl-32b-fp8/vllm/hetero_hardware_disagg/deploy.yaml[EncodeWorker]",
+    "recipes/qwen3-vl-32b-fp8/vllm/hetero_hardware_disagg/deploy.yaml[VllmDecodeWorker]",
+}
+
+
+def test_no_worker_reports_its_model_absent_without_reason(workers):
+    """Every engine worker either declares a model or defers to a config file.
+
+    ``ABSENT`` means the reader looked at the whole command line and the model
+    genuinely is not there — which for a worker is a broken manifest. This is
+    the check that found OPS-8534.
+    """
+    from dynamo_test.dialect import for_backend
+
+    absent = {
+        argv.source
+        for backend, argv in workers
+        if for_backend(backend).read(argv, "model").is_absent
+    }
+    unexpected = absent - KNOWN_UNDECLARED_MODEL
+    assert unexpected == set(), f"workers declaring no model: {sorted(unexpected)}"
+
+    fixed = KNOWN_UNDECLARED_MODEL - absent
+    assert fixed == set(), (
+        f"these now declare a model: {sorted(fixed)}. Remove them from "
+        "KNOWN_UNDECLARED_MODEL."
+    )
+
+
+def test_a_config_file_makes_the_model_unknown_not_absent(workers):
+    """Deferring to ``--config`` is not the same as declaring nothing.
+
+    Four SGLang workers put every setting in ``/etc/sglang/*.yaml`` and pass only
+    ``--config``. Reporting "no model" for those would be false; the reader
+    cannot see the file, so the honest answer is UNKNOWN.
+    """
+    from dynamo_test.dialect import for_backend
+
+    deferred = [
+        argv
+        for backend, argv in workers
+        if for_backend(backend).read(argv, "model").is_unknown and argv.is_parseable
+    ]
+    assert deferred, "expected some workers to configure themselves from a file"
+    for argv in deferred:
+        fact = for_backend("sglang").read(argv, "model")
+        assert "defers to" in fact.detail or "could not be tokenised" in fact.detail
+
+
+def test_both_live_spellings_are_actually_exercised(workers):
+    """Guards the multi-spelling tables against being quietly reduced to one.
+
+    SGLang uses ``--tp`` and ``--tensor-parallel-size``; TensorRT-LLM uses
+    ``--model-path`` and ``--model``. If the corpus stops using one, this fails
+    and the table can be simplified deliberately rather than by accident.
+    """
+    sglang_tp = {
+        f
+        for backend, argv in workers
+        if backend == "sglang"
+        for f in ("--tp", "--tensor-parallel-size")
+        if argv.get(f).is_known
+    }
+    trtllm_model = {
+        f
+        for backend, argv in workers
+        if backend == "trtllm"
+        for f in ("--model-path", "--model")
+        if argv.get(f).is_known
+    }
+    assert sglang_tp == {"--tp", "--tensor-parallel-size"}, sglang_tp
+    assert trtllm_model == {"--model-path", "--model"}, trtllm_model
+
+
+def test_setting_a_semantic_round_trips_on_every_worker(workers):
+    """Write through the dialect, read it back, on all of them."""
+    from dynamo_test.dialect import for_backend
+
+    damage = []
+    for backend, argv in workers:
+        dialect = for_backend(backend)
+        try:
+            out = dialect.apply(argv, context_length=4096)
+        except Exception as exc:  # AmbiguousInsertion is a legitimate refusal
+            damage.append(f"{argv.source}: {type(exc).__name__}: {exc}")
+            continue
+        got = dialect.read(out, "context_length")
+        if not got.is_known or got.require() != "4096":
+            damage.append(f"{argv.source}: read back {got.status.value}")
+    assert damage == []
