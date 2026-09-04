@@ -467,6 +467,12 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, DiscoveryEvent::Removed(_)))
         );
+        assert!(
+            publication
+                .state_changes
+                .iter()
+                .any(|c| matches!(c, StateChange::Remove(1)))
+        );
         assert!(!table.known.contains_key(&1));
     }
 
