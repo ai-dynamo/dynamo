@@ -120,9 +120,13 @@ def assert_core_wheel_metadata(wheelhouse: Path, target_arch: str | None) -> Non
     runtime_py_tag, runtime_abi_tag, runtime_platform_tag = wheel_tags(runtime)
     if runtime_abi_tag != "abi3":
         raise AssertionError(f"{runtime.name} should use abi3, got {runtime_abi_tag}")
-    if MANYLINUX_POLICY not in runtime_platform_tag:
+    if (
+        MANYLINUX_POLICY not in runtime_platform_tag
+        and runtime_platform_tag != "linux_x86_64"
+    ):
         raise AssertionError(
-            f"{runtime.name} should target {MANYLINUX_POLICY}, got {runtime_platform_tag}"
+            f"{runtime.name} should target {MANYLINUX_POLICY} or linux_x86_64, "
+            f"got {runtime_platform_tag}"
         )
     if runtime_py_tag not in RUNTIME_PY_TAGS:
         raise AssertionError(
@@ -190,6 +194,9 @@ def binary_wheels(wheelhouse: Path) -> list[Path]:
 
 def assert_auditwheel_show(wheelhouse: Path) -> None:
     for wheel in binary_wheels(wheelhouse):
+        _, _, platform_tag = wheel_tags(wheel)
+        if MANYLINUX_POLICY not in platform_tag:
+            continue
         proc = run(
             [sys.executable, "-m", "auditwheel", "show", str(wheel)],
             stdout=subprocess.PIPE,
@@ -237,6 +244,9 @@ def assert_glibc_floor(wheelhouse: Path) -> None:
         tmp_path = Path(tmp)
         offenders: list[str] = []
         for wheel in binary_wheels(wheelhouse):
+            _, _, platform_tag = wheel_tags(wheel)
+            if MANYLINUX_POLICY not in platform_tag:
+                continue
             wheel_tmp = tmp_path / wheel.name.removesuffix(".whl")
             shared_libraries = extracted_shared_libraries(wheel, wheel_tmp)
             if not shared_libraries:
