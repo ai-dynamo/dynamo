@@ -497,6 +497,7 @@ mod tests {
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT,
         env_request_trace::DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC,
         env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST,
+        env_request_trace::DYN_REQUEST_TRACE_HTTP_HEADER_DENY_LIST,
         env_audit::DYN_AUDIT_SINKS,
         env_audit::DYN_AUDIT_FORCE_LOGGING,
         env_audit::DYN_AUDIT_CAPACITY,
