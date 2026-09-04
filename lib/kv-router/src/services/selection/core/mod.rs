@@ -12,17 +12,18 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::identity::RoutingPartitionId;
-use crate::indexer::TieredMatchDetails;
+use crate::indexer::{SharedKvCache, TieredMatchDetails};
 use crate::protocols::{
-    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, WorkerAffinityTarget,
-    WorkerId, WorkerWithDpRank,
+    ActiveSequenceEvent, LocalBlockHash, PrefillLoadHint, RoutingConstraints, SharedCacheHits,
+    WorkerAffinityTarget, WorkerId, WorkerWithDpRank,
 };
 use crate::scheduling::config::RouterConfigOverride;
 use crate::scheduling::selector::WorkerSelectionPolicy;
 use crate::scheduling::{
-    KvSchedulerError, LocalScheduler, OverlapAnalysis, OverlapSignals, PotentialLoad, ScheduleMode,
-    ScheduleRequest, SessionContext, TieredOverlapRefresher, effective_prefill_tokens,
-    prefill_load_hint_from_effective_tokens,
+    KvSchedulerError, LocalScheduler, LoraWorkerFilter, OverlapAnalysis, OverlapSignals,
+    OverloadedWorkerProvider, PotentialLoad, PrefillLoadEstimator, ScheduleMode, ScheduleRequest,
+    SessionContext, TieredOverlapRefresher, WorkerAvailabilityProvider, effective_prefill_tokens,
+    narrow_allowed_worker_ids_by_lora, prefill_load_hint_from_effective_tokens,
 };
 use crate::sequences::{
     ActiveSequencesMultiWorker, ReplicaWorkerPolicy, SequenceError, SequenceRequest,
@@ -43,8 +44,8 @@ use super::pending::{PendingSelection, SelectionCache, SelectionCacheConfig};
 use super::types::{
     ModelLoadResponse, OverlapScoresRequest, OverlapScoresResponse, PotentialLoadsRequest,
     ReadyResponse, ReservationRequest, ReservationResponse, SelectAndReserveRequest, SelectRequest,
-    SelectResponse, SelectionWorkerConfig, WorkerCatalogRecord, WorkerLifecycle,
-    WorkerPatchRequest, WorkerRequest,
+    SelectResponse, SelectionWorkerConfig, SelectionWorkerLoad, WorkerCatalogRecord,
+    WorkerLifecycle, WorkerPatchRequest, WorkerRequest,
 };
 use crate::WorkerSelectionPolicyFactory;
 use crate::WorkerType;
@@ -71,6 +72,7 @@ struct PreparedSelectionInputs {
     sequence_hashes: Vec<SequenceHash>,
     isl_tokens: usize,
     overlap: OverlapSignals,
+    shared_cache_hits: Option<SharedCacheHits>,
 }
 
 struct SelectionOperation {
@@ -82,11 +84,13 @@ struct SelectionOperation {
     priority_jump: f64,
     strict_priority: u32,
     policy_class: Option<String>,
-    session_id: Option<String>,
+    session_context: Option<SessionContext>,
     affinity_target: Option<WorkerAffinityTarget>,
     pinned_worker: Option<WorkerWithDpRank>,
     allowed_worker_ids: Option<HashSet<WorkerId>>,
     routing_constraints: RoutingConstraints,
+    /// Skip queue admission and return the chosen worker's load snapshot.
+    advisory: bool,
 }
 
 /// Resolved inputs for booking a reservation, shared by the cached and explicit
@@ -102,6 +106,48 @@ struct ReservationBooking {
     lora_name: Option<String>,
 }
 
+/// Host-supplied hooks applied to every partition scheduler the core creates.
+///
+/// A host that owns request transport (for example the frontend `KvRouter`)
+/// uses these to feed overload shedding and hard availability from its own
+/// client state, to attach a prefill-duration estimator, and to consult a
+/// shared (cross-worker) KV cache during selection. The standalone HTTP
+/// service leaves them unset.
+#[derive(Clone, Default)]
+pub struct SelectionHostHooks {
+    pub prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
+    pub overloaded_worker_provider: Option<OverloadedWorkerProvider>,
+    pub available_worker_provider: Option<WorkerAvailabilityProvider>,
+    /// Queried alongside the indexer for prompts that carry `token_ids`; a
+    /// failed lookup is logged and selection proceeds without shared hits.
+    pub shared_cache: Option<Arc<dyn SharedKvCache>>,
+    /// Narrows candidates to the workers that can serve the request's LoRA
+    /// adapter, strictly within the caller's `allowed_worker_ids`.
+    pub lora_worker_filter: Option<Arc<dyn LoraWorkerFilter>>,
+}
+
+impl std::fmt::Debug for SelectionHostHooks {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SelectionHostHooks")
+            .field(
+                "prefill_load_estimator",
+                &self.prefill_load_estimator.is_some(),
+            )
+            .field("shared_cache", &self.shared_cache.is_some())
+            .field("lora_worker_filter", &self.lora_worker_filter.is_some())
+            .field(
+                "overloaded_worker_provider",
+                &self.overloaded_worker_provider.is_some(),
+            )
+            .field(
+                "available_worker_provider",
+                &self.available_worker_provider.is_some(),
+            )
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SelectionServiceConfig {
     pub port: u16,
@@ -113,12 +159,29 @@ pub struct SelectionServiceConfig {
     pub selection_cache: SelectionCacheConfig,
 }
 
+type SelectionEntries = RwLock<HashMap<RoutingPartitionId, Arc<OnceCell<Arc<SelectionEntry>>>>>;
+
+/// `selection_id` -> partition that holds its booking.
+///
+/// Lifecycle calls (`prefill_complete`, `free`, `add_output_block`) arrive with
+/// only a selection id, so without this index every call scans every partition
+/// scheduler. Selection ids are caller-controlled strings, so this stays on the
+/// standard hasher. Entries are removed on `free`, on a `RequestNotFound` from
+/// the indexed scheduler, and by a periodic sweep that drops ids whose booking
+/// expired underneath them.
+type ReservationIndex = RwLock<HashMap<String, RoutingPartitionId>>;
+
 pub struct SelectionCore {
     catalog: WorkerCatalog,
-    entries: RwLock<HashMap<RoutingPartitionId, Arc<OnceCell<Arc<SelectionEntry>>>>>,
+    entries: Arc<SelectionEntries>,
+    reservation_index: Arc<ReservationIndex>,
+    /// Sweep task is started lazily from the first `ensure_entry`, which always
+    /// runs inside the host runtime; construction itself may not.
+    reservation_sweep_started: OnceCell<()>,
     indexer_registry: Arc<WorkerRegistry>,
     kv_router_config: crate::config::KvRouterConfig,
     worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+    host_hooks: SelectionHostHooks,
     worker_type: WorkerType,
     cancel_token: CancellationToken,
     replica_config: Option<ReplicaSyncConfig>,
@@ -161,6 +224,7 @@ impl SelectionCore {
             cancel_token,
             None,
             None,
+            SelectionHostHooks::default(),
             WorkerType::Aggregated,
             true,
             cache_config,
@@ -175,6 +239,7 @@ impl SelectionCore {
         cancel_token: CancellationToken,
         replica_config: Option<ReplicaSyncConfig>,
         worker_selection_policy_factory: Option<WorkerSelectionPolicyFactory>,
+        host_hooks: SelectionHostHooks,
         worker_type: WorkerType,
         signal_indexer_ready: bool,
         cache_config: SelectionCacheConfig,
@@ -190,10 +255,13 @@ impl SelectionCore {
         }
         Self {
             catalog: WorkerCatalog::default(),
-            entries: RwLock::new(HashMap::new()),
+            entries: Arc::new(RwLock::new(HashMap::new())),
+            reservation_index: Arc::new(RwLock::new(HashMap::new())),
+            reservation_sweep_started: OnceCell::new(),
             indexer_registry,
             kv_router_config,
             worker_selection_policy_factory,
+            host_hooks,
             worker_type,
             cancel_token,
             replica_config,
@@ -419,6 +487,13 @@ impl SelectionCore {
             .ok_or_else(|| SelectionError::BadRequest("block_size is required".to_string()))?;
         let is_eagle = record.is_eagle.unwrap_or(false);
         let key = record.key();
+        self.reservation_sweep_started.get_or_init(|| {
+            spawn_reservation_index_sweep(
+                Arc::clone(&self.entries),
+                Arc::clone(&self.reservation_index),
+                self.cancel_token.child_token(),
+            );
+        });
 
         let entry_cell = { self.entries.read().get(&key).cloned() };
         let entry_cell = entry_cell.unwrap_or_else(|| {
@@ -473,11 +548,12 @@ impl SelectionCore {
                     profile,
                     block_size,
                     selector,
-                    None,
+                    self.host_hooks.prefill_load_estimator.clone(),
                     Some(overlap_refresh),
-                    None,
-                    // Standalone selection has no router Client snapshot.
-                    None,
+                    // Standalone selection has no router Client snapshot, so
+                    // these stay `None` unless an embedding host injects them.
+                    self.host_hooks.overloaded_worker_provider.clone(),
+                    self.host_hooks.available_worker_provider.clone(),
                     self.kv_router_config.router_queue_recheck_interval(),
                     self.kv_router_config.router_track_prefill_tokens,
                     self.cancel_token.child_token(),
@@ -614,9 +690,10 @@ impl SelectionCore {
 
     pub async fn select_with_policy_class(
         &self,
-        req: SelectRequest,
+        mut req: SelectRequest,
         policy_class: Option<String>,
     ) -> Result<SelectResponse, SelectionError> {
+        let session_context = req.take_session_context();
         self.schedule_selection(
             SelectionOperation {
                 key: RoutingPartitionId::new(req.model_name, req.routing_group),
@@ -627,11 +704,12 @@ impl SelectionCore {
                 priority_jump: req.priority_jump.unwrap_or_default(),
                 strict_priority: req.strict_priority.unwrap_or(0),
                 policy_class,
-                session_id: req.session_id,
+                session_context,
                 affinity_target: req.affinity_target,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
+                advisory: req.advisory,
             },
             false,
         )
@@ -647,9 +725,10 @@ impl SelectionCore {
 
     pub async fn select_and_reserve_with_policy_class(
         &self,
-        req: SelectAndReserveRequest,
+        mut req: SelectAndReserveRequest,
         policy_class: Option<String>,
     ) -> Result<SelectResponse, SelectionError> {
+        let session_context = req.take_session_context();
         let selection_id = req
             .selection_id
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -663,11 +742,12 @@ impl SelectionCore {
                 priority_jump: req.priority_jump.unwrap_or_default(),
                 strict_priority: req.strict_priority.unwrap_or(0),
                 policy_class,
-                session_id: req.session_id,
+                session_context,
                 affinity_target: req.affinity_target,
                 pinned_worker: req.pinned_worker,
                 allowed_worker_ids: req.allowed_worker_ids,
                 routing_constraints: req.routing_constraints,
+                advisory: false,
             },
             true,
         )
@@ -688,13 +768,19 @@ impl SelectionCore {
             priority_jump,
             strict_priority,
             policy_class,
-            session_id,
+            session_context,
             affinity_target,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
+            advisory,
         } = operation;
         self.ensure_running()?;
+        if advisory && book {
+            return Err(SelectionError::BadRequest(
+                "advisory selection cannot book a reservation".to_string(),
+            ));
+        }
 
         let entry = self.ready_entry(&key)?;
         let PreparedSelectionInputs {
@@ -702,12 +788,14 @@ impl SelectionCore {
             sequence_hashes,
             isl_tokens,
             overlap,
+            shared_cache_hits,
         } = self
             .prepare_selection_inputs(
                 &entry,
                 &prompt,
                 self.kv_router_config
                     .assume_kv_reuse(router_config_override.as_ref()),
+                true,
             )
             .await?;
         let mode = if book {
@@ -737,6 +825,16 @@ impl SelectionCore {
                 track_prefill_tokens,
             )
         });
+        let allowed_worker_ids = match self.host_hooks.lora_worker_filter.as_deref() {
+            Some(filter) => narrow_allowed_worker_ids_by_lora(
+                filter,
+                prompt.lora_name.as_deref(),
+                allowed_worker_ids,
+                pinned_worker.as_ref(),
+                || self.catalog.schedulable_worker_ids_for_key(&key),
+            ),
+            None => allowed_worker_ids,
+        };
         let response_sequence_hashes =
             book.then(|| sequence_hashes.iter().map(|hash| *hash as i64).collect());
         let response_isl_tokens = book.then_some(isl_tokens);
@@ -754,21 +852,34 @@ impl SelectionCore {
             priority_jump,
             strict_priority,
             policy_class,
-            session_context: session_id
-                .map(|session_id| SessionContext::new(session_id, None, None, None)),
+            session_context,
             expected_output_tokens,
             affinity_target,
             pinned_worker,
             allowed_worker_ids,
             routing_constraints,
-            shared_cache_hits: None,
+            shared_cache_hits,
         };
-        let response = tokio::select! {
+        let (response, advisory_load) = tokio::select! {
             biased;
             _ = self.cancel_token.cancelled() => {
                 return Err(SelectionError::Scheduler(KvSchedulerError::SubscriberShutdown));
             }
-            result = entry.scheduler.schedule_request(schedule_request) => result?,
+            result = async {
+                if advisory {
+                    entry
+                        .scheduler
+                        .select_without_admission(schedule_request)
+                        .await
+                        .map(|advisory| (advisory.response, Some(advisory.selected_worker_load)))
+                } else {
+                    entry
+                        .scheduler
+                        .schedule_request(schedule_request)
+                        .await
+                        .map(|response| (response, None))
+                }
+            } => result?,
         };
         let endpoint = self
             .catalog
@@ -785,6 +896,33 @@ impl SelectionCore {
         );
 
         let effective_prefill = effective_prefill_tokens(isl_tokens, response.cached_tokens);
+        let potential_decode_blocks = response.potential_decode_blocks as u64;
+        let total_kv_blocks = advisory_load
+            .and_then(|load| load.total_kv_blocks.map(|blocks| blocks as u64))
+            .or_else(|| {
+                self.catalog
+                    .total_kv_blocks(response.best_worker.worker_id, &key)
+            });
+        let decode_busy = self
+            .kv_router_config
+            .conditional_disagg_decode_busy_threshold
+            .zip(total_kv_blocks)
+            .map(|(threshold, total_kv_blocks)| {
+                potential_decode_blocks as f64 > threshold * total_kv_blocks as f64
+            });
+        let worker_load = advisory_load.map(|load| SelectionWorkerLoad {
+            active_prefill_tokens: load.active_prefill_tokens,
+            prefill_token_capacity: load.prefill_token_capacity,
+            total_kv_blocks,
+            prefill_busy: self
+                .kv_router_config
+                .conditional_disagg_prefill_busy_threshold
+                .map(|threshold| load.prefill_load_exceeds(threshold)),
+        });
+
+        if book && let Some(selection_id) = selection_id.as_deref() {
+            self.record_reservation(selection_id, &key);
+        }
 
         if let Some((cache_id, sequence_hashes, lora_name, track_prefill_tokens)) = cached_inputs {
             self.selection_cache.insert(
@@ -816,6 +954,9 @@ impl SelectionCore {
             block_size: entry.block_size,
             overlap,
             effective_prefill_tokens: effective_prefill,
+            potential_decode_blocks,
+            decode_busy,
+            worker_load,
         })
     }
 
@@ -1007,6 +1148,7 @@ impl SelectionCore {
                 lora_name,
             })
             .await?;
+        self.record_reservation(&selection_id, &key);
 
         Ok(ReservationResponse {
             selection_id,
@@ -1018,32 +1160,65 @@ impl SelectionCore {
         })
     }
 
+    fn record_reservation(&self, selection_id: &str, key: &RoutingPartitionId) {
+        self.reservation_index
+            .write()
+            .insert(selection_id.to_string(), key.clone());
+    }
+
+    fn forget_reservation(&self, selection_id: &str) {
+        self.reservation_index.write().remove(selection_id);
+    }
+
+    /// Entries to try for a lifecycle call on `selection_id`: the indexed
+    /// partition first, then every other initialized partition. The fallback
+    /// covers bookings mirrored from replica peers, which never pass through
+    /// this core's booking paths.
+    fn lifecycle_entries(&self, selection_id: &str) -> Vec<Arc<SelectionEntry>> {
+        let indexed = self
+            .reservation_index
+            .read()
+            .get(selection_id)
+            .cloned()
+            .and_then(|key| self.entry(&key));
+        let mut entries = self.initialized_entries();
+        if let Some(indexed) = indexed {
+            entries.retain(|entry| !Arc::ptr_eq(entry, &indexed));
+            entries.insert(0, indexed);
+        }
+        entries
+    }
+
     pub async fn prefill_complete(&self, selection_id: &str) -> Result<(), SelectionError> {
-        let entries = self.initialized_entries();
-        for entry in entries {
+        for entry in self.lifecycle_entries(selection_id) {
             match entry.scheduler.mark_prefill_completed(selection_id).await {
                 Ok(()) => return Ok(()),
                 Err(SequenceError::RequestNotFound { .. }) => continue,
                 Err(error) => return Err(error.into()),
             }
         }
+        self.forget_reservation(selection_id);
         Err(SelectionError::NotFound(format!(
             "reservation {selection_id} not found"
         )))
     }
 
     pub async fn free_reservation(&self, selection_id: &str) -> Result<(), SelectionError> {
-        let entries = self.initialized_entries();
-        for entry in entries {
-            match entry.scheduler.free(selection_id).await {
-                Ok(()) => return Ok(()),
-                Err(SequenceError::RequestNotFound { .. }) => continue,
-                Err(error) => return Err(error.into()),
+        let result = async {
+            for entry in self.lifecycle_entries(selection_id) {
+                match entry.scheduler.free(selection_id).await {
+                    Ok(()) => return Ok(()),
+                    Err(SequenceError::RequestNotFound { .. }) => continue,
+                    Err(error) => return Err(error.into()),
+                }
             }
+            Err(SelectionError::NotFound(format!(
+                "reservation {selection_id} not found"
+            )))
         }
-        Err(SelectionError::NotFound(format!(
-            "reservation {selection_id} not found"
-        )))
+        .await;
+        self.forget_reservation(selection_id);
+        result
     }
 
     pub fn add_output_block(
@@ -1059,8 +1234,7 @@ impl SelectionCore {
             ));
         }
 
-        let entries = self.initialized_entries();
-        for entry in entries {
+        for entry in self.lifecycle_entries(selection_id) {
             match entry
                 .scheduler
                 .add_output_block(selection_id, decay_fraction)
@@ -1070,6 +1244,7 @@ impl SelectionCore {
                 Err(error) => return Err(error.into()),
             }
         }
+        self.forget_reservation(selection_id);
         Err(SelectionError::NotFound(format!(
             "reservation {selection_id} not found"
         )))
@@ -1117,6 +1292,7 @@ impl SelectionCore {
                 &req.prompt,
                 self.kv_router_config
                     .assume_kv_reuse(req.router_config_override.as_ref()),
+                false,
             )
             .await?;
         let track_prefill_tokens = req
@@ -1161,11 +1337,16 @@ impl SelectionCore {
         )
     }
 
+    /// Normalize the prompt and gather cache signals. The indexer lookup and
+    /// the optional shared-cache lookup run concurrently; the shared cache is
+    /// consulted only when `query_shared_cache` is set, a shared cache is
+    /// attached, and the prompt carries raw `token_ids`.
     async fn prepare_selection_inputs(
         &self,
         entry: &SelectionEntry,
         prompt: &PromptRequest,
         assume_kv_reuse: bool,
+        query_shared_cache: bool,
     ) -> Result<PreparedSelectionInputs, SelectionError> {
         let normalized = prompt.normalize_for_selection(
             entry.is_eagle,
@@ -1175,15 +1356,36 @@ impl SelectionCore {
                 assume_kv_reuse,
             },
         )?;
-        let tiered = if normalized.block_hashes.is_empty() {
-            TieredMatchDetails::default()
-        } else {
-            entry
-                .indexer
-                .find_tiered_matches(normalized.block_hashes.clone())
-                .await
-                .map_err(|error| SelectionError::Internal(error.to_string()))?
+        let indexer_lookup = async {
+            if normalized.block_hashes.is_empty() {
+                Ok(TieredMatchDetails::default())
+            } else {
+                entry
+                    .indexer
+                    .find_tiered_matches(normalized.block_hashes.clone())
+                    .await
+                    .map_err(|error| SelectionError::Internal(error.to_string()))
+            }
         };
+        let shared_cache = query_shared_cache
+            .then_some(self.host_hooks.shared_cache.as_deref())
+            .flatten()
+            .zip(prompt.token_ids.as_deref());
+        let shared_cache_lookup = async {
+            let (shared_cache, tokens) = shared_cache?;
+            match shared_cache
+                .check_blocks(tokens, entry.block_size, prompt.cache_namespace.as_deref())
+                .await
+            {
+                Ok(hits) => Some(hits),
+                Err(error) => {
+                    tracing::warn!(%error, "Shared cache query failed, ignoring");
+                    None
+                }
+            }
+        };
+        let (tiered, shared_cache_hits) = tokio::join!(indexer_lookup, shared_cache_lookup);
+        let tiered = tiered?;
         let overlap =
             OverlapAnalysis::new(&self.kv_router_config, entry.block_size, &tiered).signals();
         drop(tiered);
@@ -1192,6 +1394,7 @@ impl SelectionCore {
             sequence_hashes: normalized.sequence_hashes,
             isl_tokens: normalized.isl_tokens,
             overlap,
+            shared_cache_hits,
         })
     }
 
@@ -1207,6 +1410,65 @@ impl SelectionCore {
         }
         workers
     }
+}
+
+/// Drop index entries whose booking no longer exists in its partition
+/// scheduler (expired by the periodic force-expiry, or freed through a path
+/// that bypassed this core). Returns the number of entries removed.
+fn sweep_reservation_index(entries: &SelectionEntries, index: &ReservationIndex) -> usize {
+    let snapshot: Vec<(String, RoutingPartitionId)> = index
+        .read()
+        .iter()
+        .map(|(id, key)| (id.clone(), key.clone()))
+        .collect();
+    if snapshot.is_empty() {
+        return 0;
+    }
+    let stale: Vec<String> = {
+        let entries = entries.read();
+        snapshot
+            .into_iter()
+            .filter(|(id, key)| {
+                entries
+                    .get(key)
+                    .and_then(|cell| cell.get())
+                    .is_none_or(|entry| !entry.scheduler.has_request(id))
+            })
+            .map(|(id, _)| id)
+            .collect()
+    };
+    if stale.is_empty() {
+        return 0;
+    }
+    let mut index = index.write();
+    stale
+        .iter()
+        .filter(|id| index.remove(id.as_str()).is_some())
+        .count()
+}
+
+fn spawn_reservation_index_sweep(
+    entries: Arc<SelectionEntries>,
+    index: Arc<ReservationIndex>,
+    cancel_token: CancellationToken,
+) {
+    let period = crate::sequences::active_request_expiry_duration();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled() => break,
+                _ = interval.tick() => {
+                    let removed = sweep_reservation_index(&entries, &index);
+                    if removed > 0 {
+                        tracing::debug!(removed, "Swept stale selection reservation index entries");
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn tracking_scope(entry: &SelectionEntry) -> TrackingHashScope<'_> {
@@ -1293,10 +1555,12 @@ mod tests {
             priority_jump: None,
             strict_priority: None,
             session_id: None,
+            session_context: None,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
+            advisory: false,
         }
     }
 
@@ -1311,6 +1575,7 @@ mod tests {
             priority_jump: None,
             strict_priority: None,
             session_id: None,
+            session_context: None,
             affinity_target: None,
             pinned_worker: None,
             allowed_worker_ids: None,
@@ -1374,6 +1639,7 @@ mod tests {
                 CancellationToken::new(),
                 None,
                 None,
+                SelectionHostHooks::default(),
                 worker_type,
                 true,
                 SelectionCacheConfig::default(),
@@ -1389,6 +1655,307 @@ mod tests {
                 expected_label,
                 "{worker_type}"
             );
+        }
+    }
+
+    fn core_with_hooks(hooks: SelectionHostHooks) -> SelectionCore {
+        core_with_hooks_and_policy(hooks, None)
+    }
+
+    fn core_with_hooks_and_policy(
+        hooks: SelectionHostHooks,
+        policy_factory: Option<WorkerSelectionPolicyFactory>,
+    ) -> SelectionCore {
+        let config = test_config(false);
+        let tracking_hash = Arc::new(
+            TrackingHashContext::from_config(&config).expect("valid tracking hash configuration"),
+        );
+        SelectionCore::new_inner(
+            config,
+            1,
+            CancellationToken::new(),
+            None,
+            policy_factory,
+            hooks,
+            WorkerType::Aggregated,
+            true,
+            SelectionCacheConfig::default(),
+            tracking_hash,
+        )
+    }
+
+    /// Picker that records what worker selection saw and always takes row 0.
+    struct CapturingPicker {
+        observed: Arc<parking_lot::Mutex<Vec<SelectionObservation>>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct SelectionObservation {
+        session_context: Option<SessionContext>,
+        shared_beyond_device_blocks: Vec<u32>,
+    }
+
+    impl crate::scheduling::selector::WorkerPicker for CapturingPicker {
+        fn required_worker_inputs(&self) -> crate::scheduling::selector::WorkerInputs {
+            crate::scheduling::selector::WorkerInputs::CACHE
+        }
+
+        fn pick(
+            &mut self,
+            context: &crate::scheduling::selector::WorkerSelectionContext<'_>,
+            input: crate::scheduling::selector::WorkerInputView<'_>,
+        ) -> Result<usize, crate::scheduling::WorkerSelectionPolicyError> {
+            self.observed.lock().push(SelectionObservation {
+                session_context: context.session_context().cloned(),
+                shared_beyond_device_blocks: input
+                    .cache()
+                    .expect("CACHE inputs requested")
+                    .iter()
+                    .map(|cache| cache.shared_beyond_device_blocks())
+                    .collect(),
+            });
+            Ok(0)
+        }
+    }
+
+    fn capturing_policy_factory() -> (
+        WorkerSelectionPolicyFactory,
+        Arc<parking_lot::Mutex<Vec<SelectionObservation>>>,
+    ) {
+        let observed = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let factory_observed = Arc::clone(&observed);
+        let factory: WorkerSelectionPolicyFactory =
+            Arc::new(move |config, worker_type, _partition| {
+                WorkerSelectionPolicy::new(
+                    config.clone(),
+                    worker_type.as_str(),
+                    Vec::new(),
+                    Box::new(CapturingPicker {
+                        observed: Arc::clone(&factory_observed),
+                    }),
+                )
+            });
+        (factory, observed)
+    }
+
+    type SharedCacheCalls = Arc<parking_lot::Mutex<Vec<(Vec<u32>, u32, Option<String>)>>>;
+
+    /// Shared cache that reports every block as a hit and records each query.
+    struct RecordingSharedCache {
+        calls: SharedCacheCalls,
+    }
+
+    #[async_trait::async_trait]
+    impl SharedKvCache for RecordingSharedCache {
+        async fn check_blocks(
+            &self,
+            tokens: &[u32],
+            block_size: u32,
+            cache_namespace: Option<&str>,
+        ) -> Result<SharedCacheHits, crate::indexer::KvRouterError> {
+            self.calls.lock().push((
+                tokens.to_vec(),
+                block_size,
+                cache_namespace.map(str::to_string),
+            ));
+            let blocks = (tokens.len() / block_size as usize) as u32;
+            Ok(SharedCacheHits::from_hits(&vec![true; blocks as usize]))
+        }
+    }
+
+    struct OnlyWorkerForLora {
+        worker_id: WorkerId,
+    }
+
+    impl LoraWorkerFilter for OnlyWorkerForLora {
+        fn filter_worker_ids_for_lora(
+            &self,
+            _lora_name: &str,
+            available: &[WorkerId],
+        ) -> Vec<WorkerId> {
+            available
+                .iter()
+                .copied()
+                .filter(|id| *id == self.worker_id)
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_lora_filter_narrows_candidates() {
+        let core = core_with_hooks(SelectionHostHooks {
+            lora_worker_filter: Some(Arc::new(OnlyWorkerForLora { worker_id: 2 })),
+            ..SelectionHostHooks::default()
+        });
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.upsert_worker(worker(2)).await.expect("worker upsert");
+
+        // LoRA request: only the filter's worker is eligible.
+        for _ in 0..4 {
+            let mut request = select_request();
+            request.prompt.lora_name = Some("adapter-a".to_string());
+            let response = core.select(request).await.expect("select");
+            assert_eq!(response.worker_id, 2);
+        }
+
+        // The filter never widens the caller's allow-set: an allow-set that
+        // excludes the filter's worker is preserved as-is.
+        let mut request = select_request();
+        request.prompt.lora_name = Some("adapter-a".to_string());
+        request.allowed_worker_ids = Some(HashSet::from([1]));
+        let response = core.select(request).await.expect("select");
+        assert_eq!(response.worker_id, 1);
+
+        // A pinned worker inside the universe survives the filter.
+        let mut request = select_request();
+        request.prompt.lora_name = Some("adapter-a".to_string());
+        request.pinned_worker = Some(WorkerWithDpRank::new(1, 0));
+        let response = core.select(request).await.expect("select");
+        assert_eq!(response.worker_id, 1);
+    }
+
+    #[tokio::test]
+    async fn shared_cache_hits_reach_worker_selection() {
+        let calls: SharedCacheCalls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let (factory, observed) = capturing_policy_factory();
+        let core = core_with_hooks_and_policy(
+            SelectionHostHooks {
+                prefill_load_estimator: None,
+                overloaded_worker_provider: None,
+                available_worker_provider: None,
+                shared_cache: Some(Arc::new(RecordingSharedCache {
+                    calls: Arc::clone(&calls),
+                })),
+                lora_worker_filter: None,
+            },
+            Some(factory),
+        );
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+
+        let mut request = select_request();
+        request.prompt.cache_namespace = Some("tenant-a".to_string());
+        core.select(request).await.expect("select");
+
+        assert_eq!(
+            calls.lock().as_slice(),
+            &[(vec![1, 2, 3, 4], 4, Some("tenant-a".to_string()))]
+        );
+        let observations = observed.lock().clone();
+        assert_eq!(observations.len(), 1);
+        // One block in the prompt, no device overlap, so the whole prompt is a
+        // shared-cache hit beyond the device prefix.
+        assert_eq!(observations[0].shared_beyond_device_blocks, vec![1]);
+
+        // Load projection does not consult the shared cache.
+        core.potential_loads(PotentialLoadsRequest {
+            model_name: "model".to_string(),
+            routing_group: "default".to_string(),
+            prompt: prompt(),
+            router_config_override: None,
+        })
+        .await
+        .expect("potential loads");
+        assert_eq!(calls.lock().len(), 1);
+
+        // Prompts without raw tokens cannot be checked against the shared cache.
+        let mut request = select_request();
+        request.prompt = PromptRequest {
+            token_ids: None,
+            block_hashes: Some(vec![11]),
+            sequence_hashes: Some(vec![101]),
+            isl_tokens: Some(4),
+            ..PromptRequest::default()
+        };
+        core.select(request).await.expect("select");
+        assert_eq!(calls.lock().len(), 1);
+        assert_eq!(observed.lock()[1].shared_beyond_device_blocks, vec![0]);
+    }
+
+    #[tokio::test]
+    async fn session_context_reaches_worker_selection() {
+        use super::super::types::{
+            SelectionKvHints, SelectionSessionContext,
+        };
+
+        let (factory, observed) = capturing_policy_factory();
+        let core = core_with_hooks_and_policy(SelectionHostHooks::default(), Some(factory));
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+
+        let mut request = select_request();
+        request.session_id = Some("ignored-legacy".to_string());
+        request.session_context = Some(SelectionSessionContext {
+            session_id: "child-session".to_string(),
+            parent_session_id: Some("root-session".to_string()),
+            session_final: Some(true),
+            kv_hints: Some(SelectionKvHints {
+                evict_session: true,
+            }),
+        });
+        core.select(request).await.expect("select");
+
+        let mut request = reserve_request("legacy-session-reservation");
+        request.session_id = Some("legacy-only".to_string());
+        core.select_and_reserve(request)
+            .await
+            .expect("select and reserve");
+
+        let observations = observed.lock();
+        let context = observations[0]
+            .session_context
+            .as_ref()
+            .expect("structured session context");
+        assert_eq!(context.session_id(), "child-session");
+        assert_eq!(context.parent_session_id(), Some("root-session"));
+        assert_eq!(context.session_final(), Some(true));
+        assert!(context.kv_hints().expect("kv hints").evict_session());
+
+        let legacy = observations[1]
+            .session_context
+            .as_ref()
+            .expect("legacy session context");
+        assert_eq!(legacy.session_id(), "legacy-only");
+        assert_eq!(legacy.parent_session_id(), None);
+    }
+
+    #[tokio::test]
+    async fn injected_availability_provider_restricts_selection() {
+        let available: Arc<parking_lot::Mutex<Option<Arc<HashSet<WorkerId>>>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+        let provider_state = Arc::clone(&available);
+        let core = core_with_hooks(SelectionHostHooks {
+            prefill_load_estimator: None,
+            overloaded_worker_provider: None,
+            available_worker_provider: Some(Arc::new(move || provider_state.lock().clone())),
+            shared_cache: None,
+            lora_worker_filter: None,
+        });
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.upsert_worker(worker(2)).await.expect("worker upsert");
+
+        for only in [1, 2] {
+            *available.lock() = Some(Arc::new(HashSet::from([only])));
+            for _ in 0..4 {
+                let response = core.select(select_request()).await.expect("select");
+                assert_eq!(response.worker_id, only);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_overload_provider_excludes_worker() {
+        let core = core_with_hooks(SelectionHostHooks {
+            prefill_load_estimator: None,
+            overloaded_worker_provider: Some(Arc::new(|| Some(HashSet::from([1])))),
+            available_worker_provider: None,
+            shared_cache: None,
+            lora_worker_filter: None,
+        });
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.upsert_worker(worker(2)).await.expect("worker upsert");
+
+        for _ in 0..4 {
+            let response = core.select(select_request()).await.expect("select");
+            assert_eq!(response.worker_id, 2);
         }
     }
 
@@ -1648,6 +2215,171 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn advisory_select_reports_worker_load_and_busy_evaluation() {
+        let mut config = test_config(false);
+        config.conditional_disagg_prefill_busy_threshold = Some(0.5);
+        config.conditional_disagg_decode_busy_threshold = Some(0.0);
+        let core = SelectionCore::try_new_local(
+            config,
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        ).expect("valid test config");
+        let mut request = worker(1);
+        request.total_kv_blocks = Some(1000);
+        core.upsert_worker(request).await.expect("worker upsert");
+
+        // Admitted (queued) select: decode evaluation comes from the catalog's
+        // total_kv_blocks; no load snapshot is taken.
+        let response = core.select(select_request()).await.expect("select");
+        assert!(response.potential_decode_blocks > 0);
+        assert_eq!(
+            response.decode_busy,
+            Some(true),
+            "threshold 0.0 is always exceeded"
+        );
+        assert!(response.worker_load.is_none());
+
+        // Advisory select: same decode evaluation plus the projected load.
+        let mut request = select_request();
+        request.advisory = true;
+        let response = core.select(request).await.expect("advisory select");
+        assert!(response.potential_decode_blocks > 0);
+        assert_eq!(response.decode_busy, Some(true));
+        let load = response.worker_load.expect("advisory load");
+        assert_eq!(load.total_kv_blocks, Some(1000));
+        assert_eq!(load.prefill_token_capacity, 1024);
+        assert_eq!(load.active_prefill_tokens, 0);
+        assert_eq!(load.prefill_busy, Some(false));
+
+        // Advisory selection does not book.
+        assert!(core.reservation_index.read().is_empty());
+        assert_eq!(
+            core.loads(Some("model"), Some("default"))[0].loads[0].potential_prefill_tokens,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_evaluation_is_absent_without_thresholds_or_capacity() {
+        let core = SelectionCore::try_new_local(
+            test_config(false),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        ).expect("valid test config");
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        let mut request = select_request();
+        request.advisory = true;
+        let response = core.select(request).await.expect("advisory select");
+        assert_eq!(response.decode_busy, None);
+        let load = response.worker_load.expect("advisory load");
+        assert_eq!(load.total_kv_blocks, None);
+        assert_eq!(load.prefill_busy, None);
+    }
+
+    #[tokio::test]
+    async fn reservation_index_tracks_bookings_until_freed() {
+        let core = SelectionCore::try_new_local(
+            test_config(false),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        ).expect("valid test config");
+        for (worker_id, routing_group) in [(1, "group-a"), (2, "group-b")] {
+            let mut request = worker(worker_id);
+            request.routing_group = routing_group.to_string();
+            core.upsert_worker(request).await.expect("worker upsert");
+        }
+        let key_b = RoutingPartitionId::new("model", "group-b");
+
+        // select_and_reserve records the booking's partition.
+        let mut request = reserve_request("booked");
+        request.routing_group = "group-b".to_string();
+        core.select_and_reserve(request).await.expect("reserve");
+        assert_eq!(core.reservation_index.read().get("booked"), Some(&key_b));
+        assert_eq!(
+            core.lifecycle_entries("booked")[0].key,
+            key_b,
+            "indexed partition is tried first"
+        );
+
+        // The explicit reservation path records too.
+        let mut request = select_request();
+        request.routing_group = "group-b".to_string();
+        request.selection_id = Some("cached".to_string());
+        core.select(request).await.expect("select");
+        assert!(core.reservation_index.read().get("cached").is_none());
+        core.create_reservation(ReservationRequest {
+            model_name: "model".to_string(),
+            routing_group: "group-b".to_string(),
+            selection_id: "cached".to_string(),
+            worker_id: None,
+            dp_rank: None,
+            prompt: PromptRequest::default(),
+            router_config_override: None,
+            expected_output_tokens: None,
+            effective_prefill_tokens: None,
+            track_prefill_tokens: None,
+        })
+        .await
+        .expect("cached reservation");
+        assert_eq!(core.reservation_index.read().get("cached"), Some(&key_b));
+
+        // Lifecycle calls still resolve, and free drops the index entry.
+        core.prefill_complete("booked")
+            .await
+            .expect("prefill complete");
+        core.free_reservation("booked").await.expect("free");
+        assert!(core.reservation_index.read().get("booked").is_none());
+        core.free_reservation("cached").await.expect("free");
+        assert!(core.reservation_index.read().is_empty());
+
+        // Unknown ids fall back to the full scan and stay unindexed.
+        assert!(matches!(
+            core.prefill_complete("never-booked").await,
+            Err(SelectionError::NotFound(_))
+        ));
+        assert!(core.reservation_index.read().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reservation_index_sweep_drops_bookings_released_out_of_band() {
+        let core = SelectionCore::try_new_local(
+            test_config(false),
+            1,
+            CancellationToken::new(),
+            SelectionCacheConfig::default(),
+        ).expect("valid test config");
+        core.upsert_worker(worker(1)).await.expect("worker upsert");
+        core.select_and_reserve(reserve_request("live"))
+            .await
+            .expect("reserve live");
+        core.select_and_reserve(reserve_request("stale"))
+            .await
+            .expect("reserve stale");
+        assert_eq!(core.reservation_index.read().len(), 2);
+        assert_eq!(
+            sweep_reservation_index(&core.entries, &core.reservation_index),
+            0
+        );
+
+        // Release directly through the scheduler, as force-expiry would.
+        let entry = core
+            .entry(&RoutingPartitionId::new("model", "default"))
+            .expect("entry");
+        entry.scheduler.free("stale").await.expect("scheduler free");
+
+        assert_eq!(
+            sweep_reservation_index(&core.entries, &core.reservation_index),
+            1
+        );
+        let index = core.reservation_index.read();
+        assert_eq!(index.len(), 1);
+        assert!(index.contains_key("live"));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn queued_selection_returns_refreshed_overlap_snapshot() {
         let mut config = test_config(false);
@@ -1726,6 +2458,7 @@ mod tests {
                     priority_jump: None,
                     strict_priority: None,
                     session_id: None,
+                    session_context: None,
                     affinity_target: None,
                     pinned_worker: None,
                     allowed_worker_ids: None,

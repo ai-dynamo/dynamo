@@ -13,7 +13,7 @@ use crate::services::common::replica_sync::{
 };
 use crate::tracking_hash::TrackingHashContext;
 
-use super::core::{SelectionCore, SelectionServiceConfig};
+use super::core::{SelectionCore, SelectionHostHooks, SelectionServiceConfig};
 use super::error::SelectionError;
 use super::pending::SelectionCacheConfig;
 use super::policy_registry::WorkerSelectionPolicyRegistry;
@@ -33,6 +33,7 @@ pub struct SelectionServiceBuilder {
     selection_cache: SelectionCacheConfig,
     worker_type: WorkerType,
     worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
+    host_hooks: SelectionHostHooks,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -70,7 +71,16 @@ impl SelectionServiceBuilder {
             selection_cache: SelectionCacheConfig::default(),
             worker_type,
             worker_selection_policy_registry,
+            host_hooks: SelectionHostHooks::default(),
         }
+    }
+
+    /// Attach host-owned hooks (prefill-load estimator, overload exclusion
+    /// set, hard-availability set). Applied to every partition scheduler this
+    /// service creates.
+    pub fn host_hooks(mut self, hooks: SelectionHostHooks) -> Self {
+        self.host_hooks = hooks;
+        self
     }
 
     pub fn indexer_threads(mut self, indexer_threads: usize) -> Self {
@@ -123,6 +133,7 @@ impl SelectionServiceBuilder {
             cancel_token.clone(),
             replica_config,
             worker_selection_policy_factory,
+            self.host_hooks,
             self.worker_type,
             false,
             self.selection_cache,

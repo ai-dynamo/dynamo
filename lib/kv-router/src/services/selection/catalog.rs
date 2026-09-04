@@ -99,6 +99,34 @@ impl WorkerCatalog {
         })
     }
 
+    pub(super) fn schedulable_worker_ids_for_key(&self, key: &RoutingPartitionId) -> Vec<WorkerId> {
+        self.workers
+            .read()
+            .values()
+            .filter(|record| {
+                record.lifecycle == WorkerLifecycle::Schedulable
+                    && record.model_name == key.model_name
+                    && record.routing_group == key.routing_group
+            })
+            .map(|record| record.worker_id)
+            .collect()
+    }
+
+    /// `total_kv_blocks` published by a schedulable worker in `key`'s partition.
+    pub(super) fn total_kv_blocks(
+        &self,
+        worker_id: WorkerId,
+        key: &RoutingPartitionId,
+    ) -> Option<u64> {
+        let workers = self.workers.read();
+        let record = workers.get(&worker_id)?;
+        (record.lifecycle == WorkerLifecycle::Schedulable
+            && record.model_name == key.model_name
+            && record.routing_group == key.routing_group)
+            .then_some(record.total_kv_blocks)
+            .flatten()
+    }
+
     pub(super) fn scheduler_configs_for_key(
         &self,
         key: &RoutingPartitionId,

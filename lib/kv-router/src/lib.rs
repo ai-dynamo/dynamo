@@ -70,6 +70,7 @@ pub use queue::SchedulerQueue;
 pub use radix_tree::RadixTree;
 pub use scheduling::LocalScheduler;
 pub use scheduling::PrefillLoadEstimator;
+pub use scheduling::lora_filter::LoraWorkerFilter;
 pub use scheduling::policy::{FcfsPolicy, RouterSchedulingPolicy, SchedulingPolicy, WsptPolicy};
 pub use scheduling::{
     KvSchedulerError, PotentialLoad, SchedulingRequest, SchedulingResponse, SessionContext,

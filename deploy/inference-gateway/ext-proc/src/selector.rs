@@ -291,6 +291,7 @@ impl Selector {
             router_config_override: None,
             expected_output_tokens: req.expected_output_tokens,
             session_id: None,
+            session_context: None,
             priority_jump: req.priority_jump,
             strict_priority: req.strict_priority,
             affinity_target: None,

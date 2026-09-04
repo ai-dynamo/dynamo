@@ -10,9 +10,11 @@ use crate::protocols::{
     DpRank, KvTransferEnforcement, RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike,
     WorkerId, WorkerWithDpRank,
 };
-use crate::scheduling::PotentialLoad;
 use crate::scheduling::config::RouterConfigOverride;
 pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
+use crate::scheduling::{
+    PotentialLoad, SessionContext, WorkerSelectionKvHints,
+};
 use crate::services::overlap::MooncakeOverlapSummary;
 
 use super::input::PromptRequest;
@@ -376,12 +378,28 @@ pub struct SelectRequest {
     pub expected_output_tokens: Option<u32>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
+    /// Legacy session identity. Ignored when `session_context` is present.
     pub session_id: Option<String>,
+    pub session_context: Option<SelectionSessionContext>,
     pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     #[serde(default)]
     pub routing_constraints: RoutingConstraints,
+    /// Select from current scheduler state without queue admission.
+    ///
+    /// The response then carries the chosen worker's `worker_load` snapshot
+    /// and `prefill_busy` evaluation. The request never waits in the router
+    /// queue; when the queue would have rejected it the call fails the same
+    /// way an admitted selection does. Rejected on `select_and_reserve`.
+    #[serde(default)]
+    pub advisory: bool,
+}
+
+impl SelectRequest {
+    pub(super) fn take_session_context(&mut self) -> Option<SessionContext> {
+        resolve_session_context(self.session_context.take(), self.session_id.take())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,12 +415,68 @@ pub struct SelectAndReserveRequest {
     pub expected_output_tokens: Option<u32>,
     pub priority_jump: Option<f64>,
     pub strict_priority: Option<u32>,
+    /// Legacy session identity. Ignored when `session_context` is present.
     pub session_id: Option<String>,
+    pub session_context: Option<SelectionSessionContext>,
     pub affinity_target: Option<WorkerAffinityTarget>,
     pub pinned_worker: Option<WorkerWithDpRank>,
     pub allowed_worker_ids: Option<HashSet<WorkerId>>,
     #[serde(default)]
     pub routing_constraints: RoutingConstraints,
+}
+
+impl SelectAndReserveRequest {
+    pub(super) fn take_session_context(&mut self) -> Option<SessionContext> {
+        resolve_session_context(self.session_context.take(), self.session_id.take())
+    }
+}
+
+/// Session metadata handed to worker selection, mirroring the frontend's
+/// agent-context extension field for field.
+///
+/// `session_context` supersedes the flat `session_id`: when both are present
+/// the structured form wins.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SelectionSessionContext {
+    pub session_id: String,
+    pub parent_session_id: Option<String>,
+    pub session_final: Option<bool>,
+    pub kv_hints: Option<SelectionKvHints>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct SelectionKvHints {
+    #[serde(default)]
+    pub evict_session: bool,
+}
+
+impl From<SelectionSessionContext> for SessionContext {
+    fn from(context: SelectionSessionContext) -> Self {
+        // Exhaustive so a new wire field must be mapped here.
+        let SelectionSessionContext {
+            session_id,
+            parent_session_id,
+            session_final,
+            kv_hints,
+        } = context;
+        SessionContext::new(
+            session_id,
+            parent_session_id,
+            session_final,
+            kv_hints.map(|SelectionKvHints { evict_session }| {
+                WorkerSelectionKvHints::new(evict_session)
+            }),
+        )
+    }
+}
+
+fn resolve_session_context(
+    session_context: Option<SelectionSessionContext>,
+    session_id: Option<String>,
+) -> Option<SessionContext> {
+    session_context.map(SessionContext::from).or_else(|| {
+        session_id.map(|session_id| SessionContext::new(session_id, None, None, None))
+    })
 }
 
 /// Booking request: replay the selection cached under `selection_id`, or book
@@ -474,6 +548,33 @@ pub struct SelectResponse {
     pub block_size: u32,
     pub overlap: MooncakeOverlapSummary,
     pub effective_prefill_tokens: usize,
+    /// Projected KV blocks on the chosen worker once this request decodes,
+    /// including its own blocks: the scheduler's `potential_decode_blocks`.
+    pub potential_decode_blocks: u64,
+    /// `potential_decode_blocks` against the chosen worker's `total_kv_blocks`
+    /// at `conditional_disagg_decode_busy_threshold`. Absent when either the
+    /// threshold or the worker's capacity is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_busy: Option<bool>,
+    /// Chosen worker's load at selection time. Present only for advisory
+    /// selections (`SelectRequest::advisory`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_load: Option<SelectionWorkerLoad>,
+}
+
+/// Load snapshot of the chosen worker, as the scheduler projected it for this
+/// request. Mirrors the frontend's advisory selection load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SelectionWorkerLoad {
+    pub active_prefill_tokens: usize,
+    pub prefill_token_capacity: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_kv_blocks: Option<u64>,
+    /// `active_prefill_tokens` against `prefill_token_capacity` at
+    /// `conditional_disagg_prefill_busy_threshold`. Absent when the threshold
+    /// is unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefill_busy: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -500,4 +601,50 @@ pub struct ModelLoadResponse {
     pub loads: Vec<PotentialLoad>,
     pub pending_count: usize,
     pub pending_isl_tokens: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_request_deserializes_structured_session_context() {
+        let mut request: SelectRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3, 4],
+            "session_id": "legacy",
+            "session_context": {
+                "session_id": "child",
+                "parent_session_id": "root",
+                "session_final": false,
+                "kv_hints": { "evict_session": true }
+            }
+        }))
+        .expect("valid select request");
+
+        let context = request
+            .take_session_context()
+            .expect("structured context wins over legacy session_id");
+        assert_eq!(context.session_id(), "child");
+        assert_eq!(context.parent_session_id(), Some("root"));
+        assert_eq!(context.session_final(), Some(false));
+        assert!(context.kv_hints().expect("kv hints").evict_session());
+    }
+
+    #[test]
+    fn select_request_falls_back_to_legacy_session_id() {
+        let mut request: SelectRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2, 3, 4],
+            "session_id": "legacy"
+        }))
+        .expect("valid select request");
+        let context = request.take_session_context().expect("legacy context");
+        assert_eq!(context.session_id(), "legacy");
+        assert_eq!(context.parent_session_id(), None);
+        assert_eq!(context.kv_hints(), None);
+
+        let mut request: SelectAndReserveRequest =
+            serde_json::from_value(serde_json::json!({ "token_ids": [1, 2, 3, 4] }))
+                .expect("valid reserve request");
+        assert!(request.take_session_context().is_none());
+    }
 }
