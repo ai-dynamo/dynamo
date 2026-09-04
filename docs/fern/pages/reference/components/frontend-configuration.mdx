@@ -610,6 +610,13 @@ The frontend performs per-request host-memory allocations. Under high CPU load, 
 contention can cap frontend throughput before the GPU workers saturate. Dynamo runtime containers
 include jemalloc, but the frontend does not preload it by default.
 
+<Note>
+  Released vLLM, SGLang, TensorRT-LLM, and standalone frontend images up to and including v1.5.0 do
+  not ship `libjemalloc2`; images from later releases include it. Verify with
+  `dpkg -L libjemalloc2 | grep 'libjemalloc.so'`. On older images, install the package into a shared
+  volume with an initContainer or use a custom image.
+</Note>
+
 <ParamField path="LD_PRELOAD" type="string" default="unset">
   Preload jemalloc for the frontend process. The library path depends on the container architecture:
 
