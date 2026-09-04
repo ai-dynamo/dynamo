@@ -1,0 +1,228 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Aggregated Nemotron 3.5 Super VL (NVFP4) on TensorRT-LLM, 1x B200 per worker.
+#
+# Sizing notes:
+#   * tensor_parallel_size: 1 -- the NVFP4 export is 79 GiB on disk and fits one
+#     B200. The BF16 export (248.9 GiB) would need tp>=2 and is a different
+#     checkpoint layout; this recipe targets NVFP4 only.
+#   * max_batch_size 4 / max_num_tokens 8192 / max_seq_len 4096 are the values
+#     the model was validated at. They are deliberately conservative: this is a
+#     hybrid Mamba2 + MoE model (512 experts, top-22) and the KV/Mamba state
+#     budget has not been swept.
+#   * max_input_len defaults to 1024 in TRT-LLM. Long-context workloads MUST
+#     raise it in agg.yaml or prompts silently truncate.
+#   * trust_remote_code is required: the checkpoint ships its own modeling code.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nemotron-35-super-vl-agg-b200-config
+data:
+  agg.yaml: |
+    backend: pytorch
+    # The checkpoint ships its own modeling code.
+    trust_remote_code: true
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    # Chunked prefill bounds the prefill chunk rather than the sequence, so a
+    # 42K-token agentic prompt is admitted in pieces instead of rejected.
+    # Batch/token/graph sizes follow nemotron-3-super-fp8's trtllm recipe, which
+    # pairs them with free_gpu_memory_fraction 0.85 on the same Nemotron-H
+    # hybrid. Larger values (512 / 65536, from nemotron-3.5-lightning) OOM here:
+    # activation buffers and CUDA-graph captures do not fit alongside an 85% KV
+    # pool once the 79GB NVFP4 weights are resident on a 178GiB B200.
+    enable_chunked_prefill: true
+    max_seq_len: 65536
+    max_num_tokens: 8192
+    max_batch_size: 16
+    stream_interval: 10
+    kv_cache_config:
+      # FP8 KV is baked into this checkpoint (modelopt 0.42.0).
+      dtype: auto
+      free_gpu_memory_fraction: 0.85
+      # Block reuse on a Nemotron-H hybrid needs all three of these. The model
+      # defaults enable_block_reuse to false because, as modeling_nemotron_h.py
+      # puts it, reuse "also requires a Mamba snapshot policy": without a
+      # snapshot of the SSM state at the end of the reusable prefix there is
+      # nothing to resume from, so reuse is accepted and then silently does
+      # nothing. The offset is the shared prefix length the benchmark sends
+      # (SHARED_PROMPT_LEN in ../../perf/perf.yaml); change them together.
+      enable_block_reuse: true
+      use_kv_cache_manager_v2: true
+      mamba_state_config:
+        periodic_snapshot_interval: 0
+        additional_snapshot_offsets_from_start: [42240]
+    cuda_graph_config:
+      enable_padding: true
+      max_batch_size: 16
+    # One MTP layer ships in the checkpoint (language_model.mtp.layers.1), so
+    # max_draft_len is 1.
+    speculative_config:
+      decoding_type: MTP
+      max_draft_len: 1
+      mtp_eagle_one_model: true
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-35-super-vl-agg-b200
+  labels:
+    app.kubernetes.io/name: nemotron-35-super-vl-agg-b200
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: trtllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: nvcr-pull-secret
+          containers:
+            - name: main
+              image: REPLACE_WITH_BUILT_IMAGE
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace/
+              command:
+                - /bin/bash
+                - -lc
+                - exec python3 "$@"
+                - --
+              args:
+                - -m
+                - dynamo.frontend
+                - --router-mode
+                - kv
+                - --http-port
+                - "8000"
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                # Remote-code modules must be pod-local: HF writes a lock file when
+                # compiling the checkpoint's custom code, and every replica sharing one
+                # directory on the model-cache PVC contends on it over NFS.
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+              resources: {}
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                periodSeconds: 10
+                timeoutSeconds: 60
+                failureThreshold: 60
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+
+    - name: agg
+      type: worker
+      # 8 workers x tp=1 fills one 8-GPU B200 node and gives the KV-aware router
+      # something to route across. Each worker is the single-GPU configuration
+      # the model was validated at; only the replica count differs.
+      replicas: 8
+      sharedMemorySize: 40Gi
+      podTemplate:
+        spec:
+          imagePullSecrets:
+            - name: nvcr-pull-secret
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: nvidia.com/gpu.product
+                        operator: In
+                        values:
+                          - NVIDIA-B200
+          tolerations:
+            - key: nvidia.com/gpu
+              operator: Equal
+              value: "true"
+              effect: NoSchedule
+          containers:
+            - name: main
+              image: REPLACE_WITH_BUILT_IMAGE
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace/
+              command:
+                - /bin/bash
+                - -lc
+                - exec python3 "$@"
+                - --
+              args:
+                - -m
+                - dynamo.trtllm
+                - --model
+                - nvidia/nemotron_35_super_conservative_fp8kv
+                - --served-model-name
+                - nvidia/nemotron_35_super_conservative_fp8kv
+                - --tensor-parallel-size
+                - "1"
+                - --max-batch-size
+                - "4"
+                - --max-num-tokens
+                - "8192"
+                - --max-seq-len
+                - "4096"
+                - --extra-engine-args
+                - /config/agg.yaml
+                - --enable-multimodal
+                - --dyn-reasoning-parser
+                - nemotron_nano
+                - --dyn-tool-call-parser
+                - nemotron_nano
+              envFrom:
+                - secretRef:
+                    name: hf-token-secret
+              env:
+                - name: POD_UID
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.uid
+                - name: HF_HOME
+                  value: /model-cache
+                # Remote-code modules must be pod-local: HF writes a lock file when
+                # compiling the checkpoint's custom code, and every replica sharing one
+                # directory on the model-cache PVC contends on it over NFS.
+                - name: HF_MODULES_CACHE
+                  value: /tmp/hf_modules
+                - name: TRITON_CACHE_DIR
+                  value: /tmp/.triton-cache
+              resources:
+                requests:
+                  memory: 256Gi
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              startupProbe:
+                httpGet:
+                  path: /health
+                  port: 9090
+                periodSeconds: 30
+                timeoutSeconds: 20
+                failureThreshold: 120
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                - name: config
+                  mountPath: /config
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+            - name: config
+              configMap:
+                name: nemotron-35-super-vl-agg-b200-config
