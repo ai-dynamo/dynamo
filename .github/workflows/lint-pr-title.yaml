@@ -8,6 +8,14 @@ on:
       - synchronize
       - reopened
 
+# The action adds a type label to the PR, and creates the repository label if
+# it does not exist yet, so it needs write on both issues and pull-requests.
+# Without this block the job inherits the repository default token.
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
 jobs:
   conventional-commits:
     name: Validate PR title and add label
