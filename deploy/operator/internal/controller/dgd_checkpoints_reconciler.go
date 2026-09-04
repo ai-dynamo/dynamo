@@ -266,7 +266,7 @@ func (r *dgdCheckpointsReconciler) reconcileAutomaticSnapshotJob(
 		return nil, err
 	}
 	if dynamo.IsIntraPodFailoverEnabled(component) {
-		if err := dynamo.PrepareVLLMAutomaticFailoverSnapshotSource(targetContainer); err != nil {
+		if err := dynamo.PrepareVLLMSnapshotSourceContainer(targetContainer); err != nil {
 			return nil, err
 		}
 	}

@@ -328,7 +328,7 @@ func (v *dynamoGraphDeploymentValidation) validateDynamoGraphDeploymentSpec(
 				workloadProvider:                  opts.workloadProvider,
 			},
 		)...)
-		for _, err := range dynamo.ValidateAutomaticFailoverCheckpointSource(
+		for _, err := range dynamo.ValidateFailoverCheckpointForDGD(
 			component,
 			spec.BackendFramework,
 		) {

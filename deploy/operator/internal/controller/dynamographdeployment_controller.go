@@ -163,7 +163,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 				fmt.Errorf("component %q: %w", component.ComponentName, compatibilityErr),
 			)
 		}
-		for _, compatibilityErr := range dynamo.ValidateAutomaticFailoverCheckpointSource(
+		for _, compatibilityErr := range dynamo.ValidateFailoverCheckpointForDGD(
 			component,
 			dynamoDeployment.Spec.BackendFramework,
 		) {

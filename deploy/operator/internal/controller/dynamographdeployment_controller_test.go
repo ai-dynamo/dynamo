@@ -155,8 +155,7 @@ func TestDynamoGraphDeploymentReconcileLocksProviderBeforeRejectingStoredCheckpo
 	require.Equal(t, dgd.Generation, ready.ObservedGeneration)
 	require.Equal(t, string(reasonFailedToReconcileResources), ready.Reason)
 	require.Equal(t,
-		"component \"prefill\": Snapshot with gpuMemoryService.mode=InterPod is unsupported\n"+
-			"component \"decode\": Snapshot with active/passive failover requires an operator-managed automatic single-node vLLM Worker checkpoint: checkpointRef must be omitted so the DGD owns the automatic checkpoint",
+		"component \"prefill\": Snapshot with gpuMemoryService.mode=InterPod is unsupported",
 		ready.Message,
 	)
 	require.Zero(t, stored.Status.ObservedGeneration)

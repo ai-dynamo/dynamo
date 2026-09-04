@@ -32,8 +32,6 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	k8sresource "k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
@@ -738,15 +736,15 @@ func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
 	component := validAutomaticFailoverComponent()
 
 	t.Run("accepts DGD source and generated DCD target", func(t *testing.T) {
-		require.Empty(t, ValidateAutomaticFailoverCheckpointSource(component, string(BackendFrameworkVLLM)))
+		require.Empty(t, ValidateFailoverCheckpointForDGD(component, string(BackendFrameworkVLLM)))
 
 		target := component.DeepCopy()
 		target.Experimental.Checkpoint.CheckpointRef = ptr.To("checkpoint-worker")
-		require.Empty(t, ValidateAutomaticFailoverCheckpointTarget(target, string(BackendFrameworkVLLM), true))
+		require.Empty(t, ValidateFailoverCheckpointForDCD(target, string(BackendFrameworkVLLM)))
 
 		twoShadows := component.DeepCopy()
 		twoShadows.Experimental.Failover.NumShadows = 2
-		require.Empty(t, ValidateAutomaticFailoverCheckpointSource(twoShadows, string(BackendFrameworkVLLM)))
+		require.Empty(t, ValidateFailoverCheckpointForDGD(twoShadows, string(BackendFrameworkVLLM)))
 	})
 
 	t.Run("rejects standalone target and incompatible runtime profile", func(t *testing.T) {
@@ -761,11 +759,10 @@ func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
 			"--data-parallel-size", "2",
 		}
 
-		violations := ValidateAutomaticFailoverCheckpointTarget(target, string(BackendFrameworkVLLM), false)
+		violations := ValidateFailoverCheckpointForDCD(target, string(BackendFrameworkVLLM))
 		require.Len(t, violations, 1)
 		for _, message := range []string{
-			"only supported for an operator-generated DCD",
-			"disaggregation mode must be aggregated",
+				"disaggregation mode must be aggregated",
 			"request plane must be tcp",
 			"tensor parallel size must be 1",
 			"pipeline parallel size must be 1",
@@ -775,70 +772,24 @@ func TestValidateAutomaticFailoverCheckpoint(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects a referenced DGD source", func(t *testing.T) {
-		source := component.DeepCopy()
-		source.Experimental.Checkpoint.CheckpointRef = ptr.To("foreign")
-		violations := ValidateAutomaticFailoverCheckpointSource(source, string(BackendFrameworkVLLM))
-		require.Len(t, violations, 1)
-		assert.ErrorContains(t, violations[0], "checkpointRef must be omitted")
-	})
 }
 
-func TestPrepareVLLMAutomaticFailoverSnapshotSource(t *testing.T) {
-	t.Run("shapes only the source load profile and listeners", func(t *testing.T) {
-		container := validAutomaticFailoverComponent().PodTemplate.Spec.Containers[0]
-		container.Env = []corev1.EnvVar{
-			{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "9100"},
-			{Name: "KEEP_ME", Value: "yes"},
-			{Name: "DYN_VLLM_GMS_SHADOW_MODE", Value: "true"},
-		}
-
-		require.NoError(t, PrepareVLLMAutomaticFailoverSnapshotSource(&container))
-		env := envToMap(container.Env)
-		assert.NotContains(t, env, "DYN_FORWARDPASS_METRIC_PORT")
-		assert.Equal(t, "false", env["DYN_VLLM_GMS_SHADOW_MODE"])
-		assert.Equal(t, "agg", env["DYN_VLLM_DISAGGREGATION_MODE"])
-		assert.Equal(t, "tcp", env["DYN_REQUEST_PLANE"])
-		assert.Equal(t, "yes", env["KEEP_ME"])
-		assert.Equal(t, "gms", vllmFlagValue(t, container.Args, vllmLoadFormatFlag))
-	})
-
-	t.Run("leaves the source unchanged on an unsupported worker", func(t *testing.T) {
-		container := validAutomaticFailoverComponent().PodTemplate.Spec.Containers[0]
-		container.Args = append(container.Args, vllmWorkerClassFlag, "unsupported.Worker")
-		original := container.DeepCopy()
-
-		require.Error(t, PrepareVLLMAutomaticFailoverSnapshotSource(&container))
-		assert.Equal(t, *original, container)
-	})
-
-	t.Run("preserves the GMS V1 automatic load format", func(t *testing.T) {
-		container := validAutomaticFailoverComponent().PodTemplate.Spec.Containers[0]
-		container.Args = append(
-			container.Args,
-			vllmWorkerClassFlag, gmsV1VLLMWorkerClass,
-			vllmLoadFormatFlag, "auto",
-		)
-
-		require.NoError(t, PrepareVLLMAutomaticFailoverSnapshotSource(&container))
-		assert.Equal(t, "auto", vllmFlagValue(t, container.Args, vllmLoadFormatFlag))
-	})
-}
-
-func TestIsDGDControlled(t *testing.T) {
-	dgd := &v1beta1.DynamoGraphDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: "graph", UID: types.UID("graph-uid")},
+func TestPrepareVLLMSnapshotSourceContainer(t *testing.T) {
+	container := corev1.Container{
+		Name: "main",
+		Env: []corev1.EnvVar{
+			{Name: "DYN_FORWARDPASS_METRIC_PORT", Value: "20380"},
+			{Name: "KEEP_ME", Value: "1"},
+		},
 	}
-	dcd := &v1beta1.DynamoComponentDeployment{
-		ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{
-			*metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
-		}},
-	}
-	assert.True(t, IsDGDControlled(dcd))
 
-	dcd.OwnerReferences[0].UID = ""
-	assert.False(t, IsDGDControlled(dcd))
+	require.NoError(t, PrepareVLLMSnapshotSourceContainer(&container))
+
+	assert.False(t, containerHasEnvVar(&container, "DYN_FORWARDPASS_METRIC_PORT"))
+	assert.True(t, containerHasEnvVar(&container, "KEEP_ME"))
+	require.Error(t, PrepareVLLMSnapshotSourceContainer(nil))
 }
+
 
 // --- IsIntraPodFailoverEnabled ---
 

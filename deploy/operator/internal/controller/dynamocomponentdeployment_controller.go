@@ -161,10 +161,9 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 		}
 		return ctrl.Result{}, nil
 	}
-	if compatibilityErr := stderrors.Join(dynamo.ValidateAutomaticFailoverCheckpointTarget(
+	if compatibilityErr := stderrors.Join(dynamo.ValidateFailoverCheckpointForDCD(
 		&dynamoComponentDeployment.Spec.DynamoComponentDeploymentSharedSpec,
 		dynamoComponentDeployment.Spec.BackendFramework,
-		dynamo.IsDGDControlled(dynamoComponentDeployment),
 	)...); compatibilityErr != nil {
 		if _, statusErr := r.setStatusConditions(ctx, req,
 			metav1.Condition{

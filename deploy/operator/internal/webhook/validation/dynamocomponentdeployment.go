@@ -182,10 +182,9 @@ func (v *dynamoComponentDeploymentValidation) validateDynamoComponentDeployment(
 ) field.ErrorList {
 	fldPath := field.NewPath("spec")
 	allErrs := v.validateDynamoComponentDeploymentSpec(&dcd.Spec, fldPath)
-	for _, err := range dynamo.ValidateAutomaticFailoverCheckpointTarget(
+	for _, err := range dynamo.ValidateFailoverCheckpointForDCD(
 		&dcd.Spec.DynamoComponentDeploymentSharedSpec,
 		dcd.Spec.BackendFramework,
-		dynamo.IsDGDControlled(dcd),
 	) {
 		allErrs = append(allErrs, field.Forbidden(
 			fldPath.Child("experimental", "checkpoint"),
