@@ -151,30 +151,41 @@ def test_parse_args_returns_config_with_expected_attrs(monkeypatch):
     assert config.endpoint == "generate"
 
 
-def test_config_use_kv_events_derived_from_publish_events(monkeypatch):
-    """Config.validate sets use_kv_events from publish_events_and_metrics."""
-    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS", raising=False)
-    config = parse_args(["--publish-events"])
-    assert config.publish_events_and_metrics is True
+def test_config_use_kv_events_derived_from_publish_kv_events(monkeypatch):
+    """Config.validate derives use_kv_events from the event-publishing flag."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    config = parse_args(["--publish-kv-events"])
+    assert config.publish_kv_events is True
+    assert config.publish_metrics is False
     assert config.use_kv_events is True
 
-    config_off = parse_args(["--no-publish-events"])
-    assert config_off.publish_events_and_metrics is False
+    config_off = parse_args(["--no-publish-kv-events"])
+    assert config_off.publish_kv_events is False
     assert config_off.use_kv_events is False
 
 
-def test_deprecated_publish_events_flag_alias_maps_and_logs(monkeypatch, caplog):
-    """The deprecated --publish-events-and-metrics alias must still map to
-    publish_events_and_metrics AND surface its deprecation notice on the log
-    stream, which is visible under CPython's default warning filters (a bare
-    warnings.warn(DeprecationWarning) from library code is not)."""
+def test_publish_metrics_is_independent_from_kv_events(monkeypatch):
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
+    config = parse_args(["--publish-metrics"])
+    assert config.publish_kv_events is False
+    assert config.publish_metrics is True
+    assert config.use_kv_events is False
+
+
+def test_deprecated_publish_events_flag_alias_maps_to_both_controls(
+    monkeypatch, caplog
+):
+    """The deprecated combined flag enables both independent publishing paths."""
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
     with caplog.at_level("WARNING"), pytest.warns(
         DeprecationWarning, match="--publish-events-and-metrics is deprecated"
     ):
         config = parse_args(["--publish-events-and-metrics"])
-    assert config.publish_events_and_metrics is True
+    assert config.publish_kv_events is True
+    assert config.publish_metrics is True
     assert config.use_kv_events is True
     assert any(
         "--publish-events-and-metrics is deprecated" in r.message
@@ -182,7 +193,7 @@ def test_deprecated_publish_events_flag_alias_maps_and_logs(monkeypatch, caplog)
     )
 
 
-def test_deprecated_publish_events_env_alias_maps_and_logs(monkeypatch, caplog):
+def test_deprecated_publish_events_env_alias_maps_to_both_controls(monkeypatch, caplog):
     """The deprecated DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS env var must still
     map to the new env var AND surface its deprecation notice on the log
     stream."""
@@ -191,14 +202,17 @@ def test_deprecated_publish_events_env_alias_maps_and_logs(monkeypatch, caplog):
     # environment on teardown and that write does not leak into later tests.
     monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
     monkeypatch.setenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", "true")
     with caplog.at_level("WARNING"), pytest.warns(
         DeprecationWarning, match="DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated"
     ):
         config = parse_args([])
-    assert config.publish_events_and_metrics is True
+    assert config.publish_kv_events is True
+    assert config.publish_metrics is True
     assert config.use_kv_events is True
     assert os.environ["DYN_TRTLLM_PUBLISH_KV_EVENTS"] == "true"
+    assert os.environ["DYN_TRTLLM_PUBLISH_METRICS"] == "true"
     assert any(
         "DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS is deprecated" in r.message
         for r in caplog.records
@@ -461,13 +475,35 @@ def _mock_get_llm_engine(engine_args, *args, **kwargs):
     raise EngineArgsCaptured(engine_args)
 
 
+@pytest.mark.parametrize(
+    ("publish_flags", "expected_iter_perf_stats"),
+    [
+        (["--publish-kv-events"], False),
+        (["--publish-metrics"], True),
+        (["--publish-kv-events", "--publish-metrics"], True),
+        (["--publish-events-and-metrics"], True),
+    ],
+)
 @pytest.mark.asyncio
-async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
-    """Without overrides, engine_args passed to get_llm_engine use CLI defaults."""
+async def test_init_llm_worker_engine_args_without_overrides(
+    monkeypatch, publish_flags, expected_iter_perf_stats
+):
+    """KV events and metrics control their respective engine paths independently."""
     monkeypatch.delenv("DYN_TRTLLM_MAX_NUM_TOKENS", raising=False)
     monkeypatch.delenv("DYN_TRTLLM_MAX_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_EXTRA_ENGINE_ARGS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_OVERRIDE_ENGINE_ARGS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_KV_EVENTS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_METRICS", raising=False)
+    monkeypatch.delenv("DYN_TRTLLM_PUBLISH_EVENTS_AND_METRICS", raising=False)
 
-    config = parse_args(["--model", "fake-model"])
+    if publish_flags == ["--publish-events-and-metrics"]:
+        with pytest.warns(
+            DeprecationWarning, match="--publish-events-and-metrics is deprecated"
+        ):
+            config = parse_args(["--model", "fake-model", *publish_flags])
+    else:
+        config = parse_args(["--model", "fake-model", *publish_flags])
 
     with (
         mock.patch("dynamo.trtllm.workers.llm_worker.tokenizer_factory"),
@@ -489,6 +525,8 @@ async def test_init_llm_worker_engine_args_without_overrides(monkeypatch):
         engine_args = exc_info.value.engine_args
         assert engine_args["max_num_tokens"] == config.max_num_tokens
         assert engine_args["max_batch_size"] == config.max_batch_size
+        assert engine_args["return_perf_metrics"] is False
+        assert engine_args["enable_iter_perf_stats"] is expected_iter_perf_stats
 
 
 @pytest.mark.asyncio

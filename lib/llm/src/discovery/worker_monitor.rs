@@ -253,10 +253,74 @@ pub struct WorkerLoadState {
     pub active_prefill_tokens: HashMap<u32, u64>,
     /// max_num_batched_tokens from runtime config (same for all dp_ranks)
     pub max_num_batched_tokens: HashMap<u32, u64>,
+    /// The current router-visible ranks declared by this worker's runtime config.
+    /// `None` allows observations received before discovery to remain usable until
+    /// the runtime config arrives and establishes the authoritative rank set.
+    declared_dp_ranks: Option<HashSet<u32>>,
     decode_overload_latches: HashMap<u32, DecodeOverloadLatchState>,
 }
 
 impl WorkerLoadState {
+    fn reconcile_runtime_config(
+        &mut self,
+        dp_ranks: std::ops::Range<u32>,
+        total_kv_blocks: Option<u64>,
+        max_num_batched_tokens: Option<u64>,
+        active_decode_blocks_threshold: Option<f64>,
+    ) -> HashSet<u32> {
+        let declared_dp_ranks: HashSet<_> = dp_ranks.collect();
+
+        self.active_decode_blocks
+            .retain(|dp_rank, _| declared_dp_ranks.contains(dp_rank));
+        self.kv_used_blocks
+            .retain(|dp_rank, _| declared_dp_ranks.contains(dp_rank));
+        self.active_prefill_tokens
+            .retain(|dp_rank, _| declared_dp_ranks.contains(dp_rank));
+
+        self.kv_total_blocks.clear();
+        if let Some(total_blocks) = total_kv_blocks {
+            // TODO(rank-aware-kv-capacity): resolve each rank from a validated advertisement and
+            // retain its provenance. Aggregate/representative estimates may support approximate
+            // routing, but must not trip this hard overload threshold. Exclusion remains
+            // worker-granular until the overloaded-worker contract itself becomes rank-aware.
+            self.kv_total_blocks.extend(
+                declared_dp_ranks
+                    .iter()
+                    .map(|&dp_rank| (dp_rank, total_blocks)),
+            );
+        }
+
+        self.max_num_batched_tokens.clear();
+        if let Some(max_batched) = max_num_batched_tokens {
+            self.max_num_batched_tokens.extend(
+                declared_dp_ranks
+                    .iter()
+                    .map(|&dp_rank| (dp_rank, max_batched)),
+            );
+        }
+
+        self.decode_overload_latches.clear();
+        if let Some(threshold) = active_decode_blocks_threshold {
+            for &dp_rank in &declared_dp_ranks {
+                self.update_decode_overload_latch(
+                    dp_rank,
+                    self.active_decode_blocks.get(&dp_rank).copied(),
+                    self.kv_used_blocks.get(&dp_rank).copied(),
+                    threshold,
+                );
+            }
+        }
+
+        self.declared_dp_ranks = Some(declared_dp_ranks.clone());
+        declared_dp_ranks
+    }
+
+    fn accepts_dp_rank(&self, dp_rank: u32) -> bool {
+        self.declared_dp_ranks
+            .as_ref()
+            .is_none_or(|declared| declared.contains(&dp_rank))
+    }
+
     fn is_decode_signal_overloaded(
         used_blocks: u64,
         total_blocks: u64,
@@ -343,10 +407,14 @@ impl WorkerLoadState {
         &mut self,
         observation: LoadObservation,
         active_decode_blocks_threshold: Option<f64>,
-    ) {
+    ) -> bool {
         let (worker, active_decode_blocks, active_prefill_tokens, kv_used_blocks) =
             observation.parts();
         let dp_rank = worker.dp_rank;
+        if !self.accepts_dp_rank(dp_rank) {
+            return false;
+        }
+
         if let Some(active_blocks) = active_decode_blocks {
             self.active_decode_blocks.insert(dp_rank, active_blocks);
         }
@@ -364,6 +432,7 @@ impl WorkerLoadState {
                 threshold,
             );
         }
+        true
     }
 
     #[cfg(test)]
@@ -404,15 +473,24 @@ impl WorkerLoadState {
             return false;
         }
 
-        // Get all dp_ranks we know about
-        let all_dp_ranks: std::collections::HashSet<_> = self
-            .active_decode_blocks
-            .keys()
-            .chain(self.kv_used_blocks.keys())
-            .chain(self.decode_overload_latches.keys())
-            .chain(self.active_prefill_tokens.keys())
-            .copied()
-            .collect();
+        // Once discovery has supplied the runtime config, its rank set is
+        // authoritative. An expected rank without a load observation is free,
+        // so one noisy rank cannot exclude the whole worker during startup.
+        let fallback_dp_ranks;
+        let all_dp_ranks = match &self.declared_dp_ranks {
+            Some(declared_dp_ranks) => declared_dp_ranks,
+            None => {
+                fallback_dp_ranks = self
+                    .active_decode_blocks
+                    .keys()
+                    .chain(self.kv_used_blocks.keys())
+                    .chain(self.decode_overload_latches.keys())
+                    .chain(self.active_prefill_tokens.keys())
+                    .copied()
+                    .collect();
+                &fallback_dp_ranks
+            }
+        };
 
         // If no dp_ranks known, not overloaded
         if all_dp_ranks.is_empty() {
@@ -791,36 +869,46 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         overloaded_tracker.remove_workers(&removed_workers);
                         client.clear_overloaded_instances_for_removed(&removed_workers);
 
-                        // Update worker load states with runtime config values for all dp_ranks
-                        // This ensures we track workers from MDCs even if they don't publish ActiveLoad
+                        let cfg = thresholds.get();
+
+                        // Reconcile worker state to the authoritative rank range from discovery.
+                        // This also makes expected-but-unobserved ranks participate in the
+                        // worker-level "all ranks overloaded" decision.
                         for (lease_id, runtime_config) in runtime_configs.iter() {
                             let mut state = worker_load_states.entry(*lease_id).or_default();
-
-                            let dp_start = runtime_config.data_parallel_start_rank;
-                            let dp_end = dp_start + runtime_config.data_parallel_size;
-
-                            // Track dp_ranks for this worker (for cleanup when worker disappears)
-                            let dp_ranks_set = known_worker_dp_ranks.entry(*lease_id).or_default();
-                            for dp_rank in dp_start..dp_end {
-                                dp_ranks_set.insert(dp_rank);
-                            }
-
-                            // Populate total_blocks for all dp_ranks (they share the same total)
-                            if let Some(total_blocks) = runtime_config.total_kv_blocks {
-                                for dp_rank in dp_start..dp_end {
-                                    state.kv_total_blocks.insert(dp_rank, total_blocks);
+                            let dp_ranks = match runtime_config.data_parallel_rank_range() {
+                                Ok(dp_ranks) => dp_ranks,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        worker_id = *lease_id,
+                                        %error,
+                                        "ignoring runtime config with an invalid data-parallel rank range"
+                                    );
+                                    continue;
                                 }
-                            }
+                            };
+                            let declared_dp_ranks = state.reconcile_runtime_config(
+                                dp_ranks,
+                                runtime_config.total_kv_blocks,
+                                runtime_config.max_num_batched_tokens,
+                                cfg.active_decode_blocks_threshold,
+                            );
 
-                            // Populate max_num_batched_tokens for all dp_ranks
-                            if let Some(max_batched) = runtime_config.max_num_batched_tokens {
-                                for dp_rank in dp_start..dp_end {
-                                    state.max_num_batched_tokens.insert(dp_rank, max_batched);
-                                }
+                            if let Some(previous_dp_ranks) = known_worker_dp_ranks
+                                .insert(*lease_id, declared_dp_ranks.clone())
+                            {
+                                let removed_dp_ranks: Vec<_> = previous_dp_ranks
+                                    .difference(&declared_dp_ranks)
+                                    .copied()
+                                    .collect();
+                                cleanup_worker_metrics(
+                                    *lease_id,
+                                    &removed_dp_ranks,
+                                    source.metric_label(),
+                                );
                             }
                         }
 
-                        let cfg = thresholds.get();
                         last_thresholds = cfg.clone();
                         let overloaded_workers = collect_overloaded_workers(&worker_load_states, &cfg);
                         if overloaded_tracker.replace(overloaded_workers) {
@@ -852,6 +940,18 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 dp_rank = worker.dp_rank,
                                 source = ?source,
                                 "dropping load event until endpoint membership is discovered"
+                            );
+                            continue;
+                        }
+                        if worker_load_states
+                            .get(&worker.worker_id)
+                            .is_some_and(|state| !state.accepts_dp_rank(worker.dp_rank))
+                        {
+                            tracing::debug!(
+                                worker_id = worker.worker_id,
+                                dp_rank = worker.dp_rank,
+                                source = ?source,
+                                "dropping load event outside the worker's current runtime-config rank range"
                             );
                             continue;
                         }
@@ -933,6 +1033,18 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                     dp_rank = worker.dp_rank,
                                     source = ?source,
                                     "dropping scheduler load until endpoint membership is discovered"
+                                );
+                                continue;
+                            }
+                            if worker_load_states
+                                .get(&worker.worker_id)
+                                .is_some_and(|state| !state.accepts_dp_rank(worker.dp_rank))
+                            {
+                                tracing::debug!(
+                                    worker_id = worker.worker_id,
+                                    dp_rank = worker.dp_rank,
+                                    source = ?source,
+                                    "dropping scheduler load outside the worker's current runtime-config rank range"
                                 );
                                 continue;
                             }
@@ -1234,6 +1346,83 @@ mod tests {
         state.kv_total_blocks.insert(0, 100);
 
         assert!(state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+    }
+
+    #[test]
+    fn expected_but_unobserved_dp_rank_keeps_worker_available() {
+        let mut state = WorkerLoadState::default();
+        state.reconcile_runtime_config(0..2, Some(100), Some(1_000), Some(0.6));
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 0,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(90),
+            },
+            Some(0.6),
+        );
+        assert!(!state.is_overloaded(Some(0.6), None, None));
+
+        state.update_from_active_load(
+            &ActiveLoad {
+                worker_id: 1,
+                dp_rank: 1,
+                active_decode_blocks: None,
+                active_prefill_tokens: None,
+                kv_used_blocks: Some(90),
+            },
+            Some(0.6),
+        );
+        assert!(state.is_overloaded(Some(0.6), None, None));
+    }
+
+    #[test]
+    fn runtime_config_update_reconciles_rank_range_and_optional_capacity() {
+        let mut state = WorkerLoadState::default();
+        state.reconcile_runtime_config(2..4, Some(100), Some(1_000), Some(0.6));
+
+        for dp_rank in 2..4 {
+            state.update_from_active_load(
+                &ActiveLoad {
+                    worker_id: 1,
+                    dp_rank,
+                    active_decode_blocks: Some(90),
+                    active_prefill_tokens: Some(900),
+                    kv_used_blocks: Some(90),
+                },
+                Some(0.6),
+            );
+        }
+        assert!(state.is_overloaded(Some(0.6), None, Some(0.5)));
+
+        let declared = state.reconcile_runtime_config(3..4, None, None, Some(0.6));
+        assert_eq!(declared, HashSet::from([3]));
+        assert!(!state.active_decode_blocks.contains_key(&2));
+        assert!(!state.kv_used_blocks.contains_key(&2));
+        assert!(!state.active_prefill_tokens.contains_key(&2));
+        assert!(state.kv_total_blocks.is_empty());
+        assert!(state.max_num_batched_tokens.is_empty());
+        assert!(state.decode_overload_latches.is_empty());
+        assert!(!state.is_overloaded(Some(0.6), None, Some(0.5)));
+
+        assert!(!state.apply_load_observation(
+            LoadObservation::Remote(RemoteActiveLoadSnapshot {
+                worker: WorkerWithDpRank::new(1, 2),
+                active_decode_blocks: Some(100),
+                active_prefill_tokens: Some(1_000),
+                kv_used_blocks: Some(100),
+            }),
+            Some(0.6),
+        ));
+
+        let declared = state.reconcile_runtime_config(4..5, Some(100), Some(1_000), Some(0.6));
+        assert_eq!(declared, HashSet::from([4]));
+        assert!(state.active_decode_blocks.is_empty());
+        assert!(state.kv_used_blocks.is_empty());
+        assert!(state.active_prefill_tokens.is_empty());
+        assert!(!state.is_overloaded(Some(0.6), None, Some(0.5)));
     }
 
     #[test]

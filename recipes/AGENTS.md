@@ -30,10 +30,11 @@ SPDX-License-Identifier: Apache-2.0
   base with backend-neutral `PrefillWorker` and `DecodeWorker` service keys.
   A recipe matrix at `.kustomize-matrix.yaml` has an explicit `source`, a
   `nameTemplate`, and a `matrix` mapping whose values contain a `name` and may
-  provide `components`, `templates`, and `values`. The matrix, recipe-local base
-  and Components, and shared Components are source. Each template selection
-  has a source relative to the matrix and a generated `path` under the
-  overlay's `components/` directory. Generated paths
+  provide `components`, `templates`, `values`, and `sortOptions`. The matrix,
+  recipe-local base and Components, and shared Components are source.
+  `sortOptions` orders the resources in that value's generated overlay. Each
+  template selection has a source relative to the matrix and a generated `path`
+  under the overlay's `components/` directory. Generated paths
   selected by one variant must be unique and non-overlapping. Shared
   template sources live in `recipes/kustomize/templates/`. A selected template
   directory extends the direct `*.yaml` and `*.yaml.j2` files in its parent

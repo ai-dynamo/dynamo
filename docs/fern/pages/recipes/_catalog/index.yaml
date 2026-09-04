@@ -10,6 +10,7 @@
 # active ones in recipes/<id>.yaml.
 schema_version: 1
 recipes:
+- gemma4-31b
 - glm-5-3-flash
 - kimi-k3
 - qwen-3-8-2-4t-a95b-fp8
@@ -21,6 +22,7 @@ recipes:
 - nemotron-3-super
 - glm-5-nvfp4
 - deepseek-v4-pro
+- deepseek-v4-pro-0813
 - deepseek-v4-flash
 - gpt-oss-120b
 - qwen3-32b
