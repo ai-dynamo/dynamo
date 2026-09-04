@@ -60,6 +60,13 @@ vllm_dir = os.environ.get("VLLM_DIR") or os.path.join(
     WORKSPACE_DIR, "examples/backends/vllm"
 )
 
+
+@pytest.fixture(autouse=True)
+def clear_stale_fpm_env(monkeypatch):
+    """Keep serve/XPU tests isolated from stale FPM env vars inherited by CI or parent shells."""
+    monkeypatch.delenv("DYN_FORWARDPASS_METRIC_PORT", raising=False)
+
+
 # Generated multimodal configs from profile definitions
 _mm_configs: dict[str, VLLMConfig] = {}
 for _profile in VLLM_MULTIMODAL_PROFILES:
