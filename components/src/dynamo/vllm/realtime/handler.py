@@ -40,8 +40,9 @@ from .events import (
 from .serving import (
     ChatCompletionFactory,
     StreamingInputFactory,
-    build_chat_completion_factory,
+    TextPrefillFactory,
     build_realtime_serving,
+    build_realtime_text_factories,
 )
 
 logger = logging.getLogger(__name__)
@@ -186,6 +187,7 @@ class _TextTurn(RealtimeTurn):
         add_to_conversation: bool,
         items: list[dict[str, Any]],
         conversation_messages: list[dict[str, str]],
+        prefill_task: asyncio.Task[None] | None = None,
     ) -> None:
         super().__init__()
         self.response_id = f"resp_{uuid.uuid4().hex}"
@@ -196,6 +198,7 @@ class _TextTurn(RealtimeTurn):
         self.add_to_conversation = add_to_conversation
         self.items = items
         self.conversation_messages = conversation_messages
+        self.prefill_task = prefill_task
         self.previous_item_id = items[-1]["id"] if items else None
         self.text = ""
         self.finished = False
@@ -213,17 +216,58 @@ class _TextTurn(RealtimeTurn):
         }
 
 
+class _TextPrefill:
+    """Queue incremental text for one best-effort prefill request."""
+
+    def __init__(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        factory: TextPrefillFactory,
+    ) -> None:
+        self.messages = messages
+        self._parts: list[str] = []
+        self._updates: asyncio.Queue[tuple[str, bool] | None] = asyncio.Queue()
+        self.task: asyncio.Task[None] = asyncio.create_task(
+            factory(messages, self.updates())
+        )
+
+    @property
+    def text(self) -> str:
+        return "".join(self._parts)
+
+    async def updates(self) -> AsyncGenerator[tuple[str, bool], None]:
+        while (update := await self._updates.get()) is not None:
+            yield update
+
+    def append(self, text: str) -> None:
+        self._parts.append(text)
+        if not self.task.done():
+            self._updates.put_nowait((text, False))
+
+    def commit(self) -> None:
+        if not self.task.done():
+            self._updates.put_nowait(("", True))
+            self._updates.put_nowait(None)
+
+    async def cancel(self) -> None:
+        self.task.cancel()
+        await asyncio.gather(self.task, return_exceptions=True)
+
+
 class RealtimeTextHandler:
-    """Serve append-only text conversations with a standard vLLM model."""
+    """Serve text conversations and incremental text prefill with vLLM."""
 
     def __init__(
         self,
         *,
         model_name: str,
         chat_completion_factory: ChatCompletionFactory,
+        text_prefill_factory: TextPrefillFactory | None = None,
     ) -> None:
         self.model_name = model_name
         self._chat_completion_factory = chat_completion_factory
+        self._text_prefill_factory = text_prefill_factory
 
     @classmethod
     def from_engine(
@@ -234,14 +278,16 @@ class RealtimeTextHandler:
         model_path: str,
         chat_template_path: str | None,
     ) -> "RealtimeTextHandler":
+        chat_completion, text_prefill = build_realtime_text_factories(
+            engine_client=engine_client,
+            model_name=model_name,
+            model_path=model_path,
+            chat_template_path=chat_template_path,
+        )
         return cls(
             model_name=model_name,
-            chat_completion_factory=build_chat_completion_factory(
-                engine_client=engine_client,
-                model_name=model_name,
-                model_path=model_path,
-                chat_template_path=chat_template_path,
-            ),
+            chat_completion_factory=chat_completion,
+            text_prefill_factory=text_prefill,
         )
 
     def _validate_session(self, session: Any) -> str | None:
@@ -328,6 +374,10 @@ class RealtimeTextHandler:
         usage = None
         finish_reason = None
         try:
+            if turn.prefill_task is not None:
+                # Prefill is an optimization. Its failure must not change the
+                # exact final chat-completion behavior.
+                await asyncio.gather(turn.prefill_task, return_exceptions=True)
             stream = await self._chat_completion_factory(
                 turn.messages, turn.max_output_tokens
             )
@@ -434,7 +484,7 @@ class RealtimeTextHandler:
         request_stream: AsyncGenerator[Any, None],
         context: Context,
     ) -> AsyncGenerator[dict, None]:
-        session = {
+        session: dict[str, Any] = {
             "type": "realtime",
             "model": self.model_name,
             "instructions": "",
@@ -447,6 +497,8 @@ class RealtimeTextHandler:
             context=context, run_turn=self._run_turn, max_concurrent_turns=1
         )
         active_response: _TextTurn | None = None
+        active_prefill: _TextPrefill | None = None
+        committed_prefill: _TextPrefill | None = None
 
         def emit_error(event: dict[str, Any], code: str, message: str) -> None:
             connection.emit(
@@ -467,7 +519,7 @@ class RealtimeTextHandler:
         async def handle_event(
             event: Any, connection: RealtimeConnection[_TextTurn]
         ) -> None:
-            nonlocal active_response, session
+            nonlocal active_prefill, active_response, committed_prefill, session
             if not isinstance(event, dict):
                 connection.emit(
                     invalid_request_error_event(
@@ -479,6 +531,13 @@ class RealtimeTextHandler:
             running = current_response()
 
             if event_type == "session.update":
+                if active_prefill is not None:
+                    emit_error(
+                        event,
+                        "input_buffer_active",
+                        "session cannot change while the text buffer is active",
+                    )
+                    return
                 update = event.get("session")
                 if not isinstance(update, dict):
                     emit_error(event, "invalid_session", "session must be an object")
@@ -490,11 +549,18 @@ class RealtimeTextHandler:
                 session = candidate
                 connection.emit(session_updated_event(session))
             elif event_type == "conversation.item.create":
-                if running is not None:
+                if running is not None or active_prefill is not None:
                     emit_error(
                         event,
                         "response_in_progress",
-                        "conversation cannot change while a response is running",
+                        "conversation cannot change while input or response is active",
+                    )
+                    return
+                if committed_prefill is not None:
+                    emit_error(
+                        event,
+                        "response_required",
+                        "create a response before starting another input turn",
                     )
                     return
                 if event.get("previous_item_id") is not None:
@@ -518,10 +584,79 @@ class RealtimeTextHandler:
                 messages.append(message)
                 connection.emit(conversation_item_added_event(item, previous_item_id))
                 connection.emit(conversation_item_done_event(item, previous_item_id))
+            elif event_type == "input_text_buffer.append":
+                if running is not None:
+                    emit_error(
+                        event,
+                        "response_in_progress",
+                        "text cannot be appended while a response is running",
+                    )
+                    return
+                if committed_prefill is not None:
+                    emit_error(
+                        event,
+                        "response_required",
+                        "create a response before starting another input turn",
+                    )
+                    return
+                text = event.get("text")
+                if not isinstance(text, str) or not text:
+                    emit_error(event, "invalid_text", "text must be a non-empty string")
+                    return
+                if self._text_prefill_factory is None:
+                    emit_error(
+                        event,
+                        "unsupported_event",
+                        "incremental text input is unavailable for this worker",
+                    )
+                    return
+                if active_prefill is None:
+                    prompt = list(messages)
+                    if session["instructions"]:
+                        prompt.insert(
+                            0,
+                            {"role": "system", "content": session["instructions"]},
+                        )
+                    active_prefill = _TextPrefill(
+                        messages=prompt,
+                        factory=self._text_prefill_factory,
+                    )
+                active_prefill.append(text)
+            elif event_type == "input_text_buffer.commit":
+                if active_prefill is None or not active_prefill.text:
+                    emit_error(event, "invalid_text", "input text buffer is empty")
+                    return
+                active_prefill.commit()
+                committed_prefill = active_prefill
+                text = active_prefill.text
+                active_prefill = None
+                item, message = _normalize_text_item(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": text}],
+                    }
+                )
+                previous_item_id = items[-1]["id"] if items else None
+                items.append(item)
+                messages.append(message)
+                connection.emit(conversation_item_added_event(item, previous_item_id))
+                connection.emit(conversation_item_done_event(item, previous_item_id))
+            elif event_type == "input_text_buffer.clear":
+                if active_prefill is not None:
+                    await active_prefill.cancel()
+                    active_prefill = None
             elif event_type == "response.create":
                 if running is not None:
                     emit_error(
                         event, "response_in_progress", "a response is already running"
+                    )
+                    return
+                if active_prefill is not None:
+                    emit_error(
+                        event,
+                        "input_not_committed",
+                        "commit the text buffer before creating a response",
                     )
                     return
                 try:
@@ -542,6 +677,12 @@ class RealtimeTextHandler:
                 except ValueError as exc:
                     emit_error(event, "invalid_response", str(exc))
                     return
+                prefill_task = None
+                if committed_prefill is not None:
+                    if use_conversation and committed_prefill.messages == prompt[:-1]:
+                        prefill_task = committed_prefill.task
+                    else:
+                        await committed_prefill.cancel()
                 active_response = await connection.ensure_turn(
                     lambda: _TextTurn(
                         messages=prompt,
@@ -550,8 +691,10 @@ class RealtimeTextHandler:
                         add_to_conversation=add_to_conversation,
                         items=items,
                         conversation_messages=messages,
+                        prefill_task=prefill_task,
                     )
                 )
+                committed_prefill = None
                 connection.finish_active_turn()
             elif event_type == "response.cancel":
                 if running is None:
@@ -590,12 +733,18 @@ class RealtimeTextHandler:
                     f"unsupported event type: {event_type}",
                 )
 
-        async for event in connection.generate(
-            request_stream,
-            handle_event=handle_event,
-            close_active_turn=lambda turn: None,
-        ):
-            yield event
+        try:
+            async for event in connection.generate(
+                request_stream,
+                handle_event=handle_event,
+                close_active_turn=lambda turn: None,
+            ):
+                yield event
+        finally:
+            if active_prefill is not None:
+                await active_prefill.cancel()
+            if committed_prefill is not None:
+                await committed_prefill.cancel()
 
 
 def _default_sampling_params() -> Any:
