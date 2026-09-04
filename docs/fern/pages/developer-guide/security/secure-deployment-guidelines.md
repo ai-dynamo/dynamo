@@ -113,7 +113,9 @@ Workers register their endpoints and are discovered through the discovery plane.
   (`ETCD_AUTH_CA`, `ETCD_AUTH_CLIENT_CERT`, `ETCD_AUTH_CLIENT_KEY`).
 
 **Why it matters:** an unauthenticated discovery plane lets any peer on the
-network enumerate workers and inject or alter routing metadata.
+network enumerate workers and inject or alter routing metadata. See the
+[Discovery Plane](../knowledge-base/concepts/system-architecture/architecture.md#discovery-plane)
+reference.
 
 ### Event plane
 
@@ -127,20 +129,25 @@ selected by `DYN_EVENT_PLANE`:
   by the NATS server configuration (for example `tls { ca_file: …; verify: true }`),
   not by Dynamo, so harden the server config as well.
 - **ZMQ** is the default event transport in configurations without NATS, and some
-  backends (for example, vLLM) publish KV-cache events over ZMQ natively. ZMQ has
-  no built-in authentication or encryption. **Treat KV-cache events as sensitive
-  request-derived data:** they carry token IDs, cumulative block hashes, and the
-  cache/LoRA namespace — given the model tokenizer, the token IDs can reconstruct
-  prompt text and the hashes reveal shared prefixes. Keep every ZMQ endpoint on the
-  trusted network: bind the broker (`ZMQ_BROKER_XSUB_BIND` / `ZMQ_BROKER_XPUB_BIND`)
-  and the advertised KV-event host to cluster-internal addresses, keep intra-node
-  sockets on loopback, and restrict who can publish or subscribe with NetworkPolicy.
-  Authenticated encryption for ZMQ is possible future hardening but requires
-  additional key-management infrastructure.
+  backends (for example, vLLM) publish KV-cache events over ZMQ natively. Dynamo's
+  ZMQ transports do not add authentication or encryption. Treat all KV-cache events
+  as sensitive request-derived data. Raw engine-side stored-block events can contain
+  token IDs and cache/LoRA context; the token IDs can expose block-aligned request
+  text when decoded with the corresponding tokenizer. Dynamo's normalized
+  event-plane payloads instead carry deterministic per-token-block hashes, which can
+  reveal equality or shared-prefix relationships and support offline dictionary
+  attacks against predictable token blocks. Neither representation necessarily
+  exposes the complete prompt. Keep every ZMQ endpoint on the trusted network: bind
+  the broker (`ZMQ_BROKER_XSUB_BIND` / `ZMQ_BROKER_XPUB_BIND`) and the advertised
+  KV-event host to cluster-internal addresses, keep intra-node sockets on loopback,
+  and restrict who can publish or subscribe with NetworkPolicy.
 
 **Why it matters:** the event plane carries **sensitive request-derived data** —
-KV events can reconstruct prompt content — so keep it on the trusted network and
-restrict publishers and subscribers.
+KV events can disclose or help infer prompt content, depending on the publisher and
+wire representation — so keep it on the trusted network and restrict publishers and
+subscribers. See the
+[Event Plane](../knowledge-base/concepts/system-architecture/architecture.md#event-plane)
+reference.
 
 ### Request plane
 
@@ -161,12 +168,18 @@ you use.
   clients present an identity with `DYN_TCP_TLS_CLIENT_CERT_PATH` /
   `DYN_TCP_TLS_CLIENT_KEY_PATH`. For the NATS transport, use
   `NATS_TLS_CLIENT_CERT_PATH` / `NATS_TLS_CLIENT_KEY_PATH`.
+- **Constrain the trust domain.** TLS clients must validate the server certificate
+  against an appropriately constrained trust root and the expected server identity.
+  mTLS servers must likewise require client certificates from a trust domain scoped
+  to the intended callers. Certificate authentication does not replace authorization
+  or network isolation.
 - Keep the **NIXL/RDMA** data-transfer fabric on the trusted network.
 
 **Why it matters:** TLS encrypts request-plane traffic, and mTLS additionally
 authenticates the client so an unauthenticated peer cannot deliver requests or
 data-transfer payloads to a worker. Keep the plane on the trusted network as
-defense in depth.
+defense in depth. See
+[request-plane TLS and mTLS](../../reference/components/tls-configuration.mdx).
 
 ## Restrict or Disable Optional Surfaces
 
@@ -201,9 +214,11 @@ While some provide their own authentication, many do not, and several bind on al
 interfaces.
 
 **Keep every such interface on the trusted network**, expose only the routes a
-deployment uses, and disable the ones you don't need. Network reachability is not
-authorization — a `ClusterIP` Service (for example the worker system routes on
-`DYN_SYSTEM_PORT`, default `9090`) is reachable cluster-wide with no caller
+deployment uses, and disable the ones you don't need. In operator-managed
+deployments, the Dynamo Operator enables the worker system server on
+`DYN_SYSTEM_PORT=9090` and exposes it through an in-cluster `ClusterIP` Service (the
+standalone runtime default is `-1`, disabled). Network reachability is not
+authorization — that `ClusterIP` Service is reachable cluster-wide with no caller
 authentication. Deployers should restrict these interfaces to authorized workloads
 and namespaces (for example with a NetworkPolicy) and verify that isolation. Where
 an interface offers its own authentication, enable it as defense in depth — but
