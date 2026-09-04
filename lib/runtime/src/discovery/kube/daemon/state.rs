@@ -286,12 +286,16 @@ impl BatchChanges {
 
             let old_instances = flatten_metadata(before.as_deref());
             let new_instances = flatten_metadata(after.as_deref());
+            // Check raw instance equality before moving new_instances.
+            // reconcile_discovery_snapshot intentionally suppresses same-ID EventChannel
+            // diffs, so using diff.is_empty() as the Upsert gate would leave list_state
+            // stale when an EventChannel transport changes.
+            let instances_changed = old_instances != new_instances;
             let (diff, _) = reconcile_discovery_snapshot(&old_instances, new_instances);
-            let content_changed = !diff.is_empty();
             events.extend(diff);
 
             match after {
-                Some(metadata) if content_changed => {
+                Some(metadata) if instances_changed => {
                     state_changes.push(StateChange::Upsert(instance_id, metadata));
                 }
                 None if before.is_some() => {
@@ -514,8 +518,6 @@ mod tests {
         apply_readiness(&mut table, readiness);
         apply_crs(&mut table, crs);
 
-        // Build a CR with different endpoint content so the diff is non-empty
-        // and a StateChange::Upsert is emitted for the changed worker.
         let mut updated_metadata = DiscoveryMetadata::new();
         updated_metadata
             .register_endpoint(DiscoveryInstance::Endpoint(Instance {
@@ -542,6 +544,73 @@ mod tests {
         assert!(matches!(
             publication.state_changes.as_slice(),
             [StateChange::Upsert(500, _)]
+        ));
+    }
+
+    #[test]
+    fn event_channel_transport_change_updates_list_state() {
+        // reconcile_discovery_snapshot intentionally emits no DiscoveryEvent for
+        // same-ID EventChannel transport changes, so the Upsert gate must not rely
+        // on the event diff being non-empty.
+        use crate::discovery::{EventScope, EventTransport};
+
+        let mut table = JoinTable::new();
+        apply_readiness(
+            &mut table,
+            HashMap::from([("worker".to_string(), ready(1, TEST_POD_UID))]),
+        );
+
+        let mut meta = DiscoveryMetadata::new();
+        meta.register_event_channel(DiscoveryInstance::EventChannel {
+            scope: EventScope::Namespace {
+                name: "ns".to_string(),
+            },
+            topic: "kv-events".to_string(),
+            instance_id: 1,
+            transport: EventTransport::zmq("tcp://127.0.0.1:5555"),
+        })
+        .unwrap();
+        apply_crs(
+            &mut table,
+            HashMap::from([(
+                "worker".to_string(),
+                CachedCrMetadata {
+                    metadata: Arc::new(meta),
+                    uid: Some("C1".to_string()),
+                    owner_pod_uid: Some(TEST_POD_UID.to_string()),
+                },
+            )]),
+        );
+
+        let mut updated_meta = DiscoveryMetadata::new();
+        updated_meta
+            .register_event_channel(DiscoveryInstance::EventChannel {
+                scope: EventScope::Namespace {
+                    name: "ns".to_string(),
+                },
+                topic: "kv-events".to_string(),
+                instance_id: 1,
+                transport: EventTransport::zmq("tcp://127.0.0.1:6666"),
+            })
+            .unwrap();
+        let publication = apply_crs(
+            &mut table,
+            HashMap::from([(
+                "worker".to_string(),
+                CachedCrMetadata {
+                    metadata: Arc::new(updated_meta),
+                    uid: Some("C2".to_string()),
+                    owner_pod_uid: Some(TEST_POD_UID.to_string()),
+                },
+            )]),
+        );
+
+        // reconcile emits no events (same-ID EventChannel transport change is
+        // intentionally suppressed), but list_state must still be updated.
+        assert!(publication.events.is_empty());
+        assert!(matches!(
+            publication.state_changes.as_slice(),
+            [StateChange::Upsert(1, _)]
         ));
     }
 }

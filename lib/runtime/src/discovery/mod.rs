@@ -1728,7 +1728,6 @@ mod tests {
             model_suffix: None,
         };
 
-        // Endpoint matches endpoint queries
         assert!(endpoint.matches(&DiscoveryQuery::AllEndpoints));
         assert!(endpoint.matches(&DiscoveryQuery::NamespacedEndpoints {
             namespace: "ns".to_string()
@@ -1743,13 +1742,11 @@ mod tests {
             endpoint: "ep".to_string(),
         }));
 
-        // Endpoint does not match wrong namespace or model queries
         assert!(!endpoint.matches(&DiscoveryQuery::NamespacedEndpoints {
             namespace: "other".to_string()
         }));
         assert!(!endpoint.matches(&DiscoveryQuery::AllModels));
 
-        // Model matches model queries
         assert!(model.matches(&DiscoveryQuery::AllModels));
         assert!(model.matches(&DiscoveryQuery::NamespacedModels {
             namespace: "ns".to_string()
@@ -1764,7 +1761,6 @@ mod tests {
             endpoint: "ep".to_string(),
         }));
 
-        // Model does not match endpoint queries (cross-type)
         assert!(!model.matches(&DiscoveryQuery::AllEndpoints));
     }
 }
