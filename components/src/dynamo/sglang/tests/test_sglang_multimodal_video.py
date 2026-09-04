@@ -217,7 +217,8 @@ async def test_multimodal_prefill_starts_before_returning_bootstrap():
     handler._wait_for_request_registration = wait_for_registration
     handler._cancellation_monitor = _never_cancels
 
-    stream = handler.generate(object(), _FakeContext("request-id"))
+    request = SimpleNamespace(sampling_params={})
+    stream = handler.generate(request, _FakeContext("request-id"))
     bootstrap = json.loads(await anext(stream))
 
     assert events == [
@@ -339,7 +340,8 @@ async def test_multimodal_prefill_cancellation_awaits_consumer_cleanup():
     handler._wait_for_request_registration = wait_for_registration
     handler._cancellation_monitor = _never_cancels
 
-    stream = handler.generate(object(), _FakeContext("request-id"))
+    request = SimpleNamespace(sampling_params={})
+    stream = handler.generate(request, _FakeContext("request-id"))
     await anext(stream)
     await stream.aclose()
 
