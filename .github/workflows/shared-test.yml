@@ -151,6 +151,7 @@ jobs:
         # Datadog Test Optimization scoping (settings are per service+env).
         DD_SERVICE: ai-dynamo
         DD_ENV: ${{ inputs.dd_env }}
+        # Overwritten per-lane by the tagging step below.
         DD_TAGS: 'team:dynamo'
         DD_CIVISIBILITY_FLAKY_RETRY_ENABLED: ${{ inputs.dd_flaky_retry_enabled }}
         DD_CIVISIBILITY_FLAKY_RETRY_COUNT: '2'
@@ -181,14 +182,61 @@ jobs:
           KVBM_MLA_BACKEND: ${{ inputs.kvbm_mla_backend }}
         run: |
           echo "KVBM_MLA_BACKEND=${KVBM_MLA_BACKEND}" >> "$GITHUB_ENV"
+      # Datadog takes ci.job.name from $GITHUB_JOB, which in a reusable workflow
+      # is the inner job id — "test" for every caller — so test data can't be
+      # attributed to a lane. Composed in a step because DD_TAGS is
+      # comma-separated and lane names contain commas and spaces.
+      - name: Tag Datadog test sessions with the CI lane
+        shell: bash
+        env:
+          LANE_SUITE: ${{ inputs.test_suite_name }}
+          LANE_TYPE: ${{ inputs.test_type }}
+          LANE_CUDA: ${{ matrix.cuda_version == '' && 'cpu' || format('cuda{0}', matrix.cuda_version) }}
+          LANE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          slug() {
+            printf '%s' "$1" \
+              | tr '[:upper:]' '[:lower:]' \
+              | tr -c 'a-z0-9._-' '-' \
+              | tr -s '-' \
+              | sed 's/^-//; s/-$//'
+          }
+          lane="$(slug "${LANE_SUITE}-${LANE_TYPE}-${LANE_CUDA}-${LANE_PLATFORM}")"
+          {
+            echo "DD_TAGS=team:dynamo,lane:${lane},test_suite:$(slug "${LANE_SUITE}")"
+          } >> "$GITHUB_ENV"
+          echo "Datadog lane tag: ${lane}"
+
       # Experimental: trialing Datadog Test Visibility. Remove if not kept.
       - name: Configure Datadog Test Visibility
+        id: dd_setup
         continue-on-error: true
         uses: datadog/test-visibility-github-action@4e7afb05b464fd349275e41e65a7f4de83e7f46b  # v2.10.0
         with:
           languages: python
           api_key: ${{ secrets.DD_API_KEY }}
           site: datadoghq.com
+      # continue-on-error above makes a failed setup silent — tests run, nothing
+      # uploads, the job looks green. Warn only; reporting must never break a
+      # test job.
+      - name: Check Datadog instrumentation took effect
+        if: ${{ always() }}
+        shell: bash
+        env:
+          DD_SETUP_OUTCOME: ${{ steps.dd_setup.outcome }}
+          DD_API_KEY_SET: ${{ secrets.DD_API_KEY != '' }}
+        run: |
+          set -uo pipefail
+          if [ "${DD_API_KEY_SET}" != "true" ]; then
+            echo "::warning title=Datadog::DD_API_KEY is empty for this job; no test sessions will be uploaded."
+          elif [ "${DD_SETUP_OUTCOME}" != "success" ]; then
+            echo "::warning title=Datadog::Test Visibility setup outcome='${DD_SETUP_OUTCOME}'; no test sessions will be uploaded."
+          elif [ -z "${DD_CIVISIBILITY_AGENTLESS_ENABLED:-}${PYTEST_ADDOPTS:-}${DD_TRACE_DEBUG:-}" ]; then
+            echo "::warning title=Datadog::Setup reported success but injected no tracer env; pytest will run uninstrumented."
+          else
+            echo "Datadog Test Visibility configured (lane: ${DD_TAGS:-unset})."
+          fi
       - name: Run Sanity Check on Runtime Image
         if: ${{ inputs.run_sanity_check }}
         shell: bash
