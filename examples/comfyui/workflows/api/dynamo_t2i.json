@@ -1,0 +1,35 @@
+{
+  "1": {
+    "class_type": "DynamoEndpointConfig",
+    "inputs": {
+      "base_url": "http://localhost:8000",
+      "api_key": "",
+      "timeout_s": 600
+    }
+  },
+  "2": {
+    "class_type": "DynamoTextToImage",
+    "inputs": {
+      "model": "Qwen/Qwen-Image",
+      "prompt": "a red apple on a white table, studio lighting",
+      "size": "1024x1024",
+      "n": 1,
+      "steps": 20,
+      "guidance_scale": 5.0,
+      "seed": 42,
+      "negative_prompt": "blurry, low quality",
+      "response_format": "b64_json",
+      "base_url": "http://localhost:8000",
+      "api_key": "",
+      "timeout_s": 600,
+      "endpoint": ["1", 0]
+    }
+  },
+  "3": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "dynamo_t2i",
+      "images": ["2", 0]
+    }
+  }
+}
