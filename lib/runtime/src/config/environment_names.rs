@@ -804,7 +804,7 @@ pub mod quic_response {
     /// Bulk-lane batch interval in microseconds. Defaults to 5,000. Registration,
     /// prologue, first-data, and priority-end frames always flush immediately.
     pub const DYN_QUIC_RESPONSE_BATCH_INTERVAL_US: &str = "DYN_QUIC_RESPONSE_BATCH_INTERVAL_US";
-    /// Per-response frontend mailbox capacity. Defaults to 64 frames.
+    /// Per-response frontend mailbox capacity. Defaults to 16,384 frames.
     pub const DYN_QUIC_RESPONSE_BUFFER_CAPACITY: &str = "DYN_QUIC_RESPONSE_BUFFER_CAPACITY";
 }
 
