@@ -753,7 +753,10 @@ mod tests {
             json!({"guided_whitespace_pattern": "[\n ]?"}),
             json!({"guided_decoding_backend": "xgrammar"}),
         ] {
-            let sampling = chat_request_with(&extra)
+            let request = chat_request_with(&extra);
+            ValidateRequest::validate(&request)
+                .unwrap_or_else(|e| panic!("{extra} must pass request validation, got: {e}"));
+            let sampling = request
                 .extract_sampling_options()
                 .unwrap_or_else(|e| panic!("{extra} must stay valid, got: {e}"));
             assert!(

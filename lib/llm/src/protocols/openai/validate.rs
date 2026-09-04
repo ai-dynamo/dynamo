@@ -870,7 +870,7 @@ pub fn validate_chat_template_args(
     Ok(())
 }
 
-/// Rejects a request with conflicting or incomplete guided-decoding options.
+/// Rejects a request with conflicting guided-decoding options.
 ///
 /// The conflict rule itself lives in [`crate::protocols::common::GuidedDecodingOptions::validate`],
 /// reached here through `from_optional`, so this function adds no second copy of it. What it adds is
@@ -883,10 +883,7 @@ pub fn validate_chat_template_args(
 /// `structural_tag` has no `CommonExtProvider` getter, matching `extract_sampling_options`,
 /// which also passes `None` for it.
 pub fn validate_guided_decoding(request: &impl CommonExtProvider) -> Result<(), anyhow::Error> {
-    let result = extract_guided_decoding_options(request)?;
-    if result.options.is_none() && result.has_whitespace_pattern {
-        anyhow::bail!("guided_whitespace_pattern requires a primary guided-decoding constraint");
-    }
+    extract_guided_decoding_options(request)?;
     Ok(())
 }
 
