@@ -5,9 +5,9 @@
 
 Two layers:
 
-* **Pure math** (``compute_tolerance``, ``bounds_for_total``,
-  ``proportional_clamp_pair``, ``proportional_clamp_single``, plus the
-  power-budget helpers below): no I/O, no state, no logging. Shared by
+* **Pure math** (``compute_tolerance``, ``bounds_for_total``, the directional
+  scaling guards, the proportional clamps, and the power-budget helpers
+  below): no I/O, no state, no logging. Shared by
   the builtin local planner state (where the budget is enforced
   intra-DGD by clamping the joint ``(num_prefill, num_decode)`` desired
   counts), the orchestrator engine adapter's final budget clamp, and the
@@ -175,7 +175,199 @@ def proportional_clamp_pair(
     return new_p, new_d
 
 
-def guard_disagg_load_budget(
+def fit_directional_budget_pair(
+    current_p: int,
+    current_d: int,
+    proposed_p: int,
+    proposed_d: int,
+    p_gpu: int,
+    d_gpu: int,
+    min_gpus: int,
+    max_gpus: int,
+    prefill_min_endpoint: int,
+    decode_min_endpoint: int,
+) -> tuple[int, int]:
+    """Fit a bounded proposal to the GPU band without changing its directions.
+
+    Every returned component lies between its current and proposed counts. For
+    an opposing rebalance, both legs move or neither moves so a GPU-width
+    mismatch can never leave only the donor removal. Callers bound throughput
+    deltas before invoking this helper, keeping the candidate set small.
+    """
+    if p_gpu <= 0 or d_gpu <= 0:
+        return proposed_p, proposed_d
+
+    tolerance = (
+        compute_tolerance([p_gpu, d_gpu]) if min_gpus >= 0 and max_gpus >= 0 else 0
+    )
+    p_down = proposed_p < current_p
+    p_up = proposed_p > current_p
+    d_down = proposed_d < current_d
+    d_up = proposed_d > current_d
+    opposing_rebalance = (p_down and d_up) or (p_up and d_down)
+    requested_p = abs(proposed_p - current_p)
+    requested_d = abs(proposed_d - current_d)
+
+    def _ceil_div(numerator: int, denominator: int) -> int:
+        return -((-numerator) // denominator)
+
+    p_low = max(min(current_p, proposed_p), prefill_min_endpoint)
+    p_high = max(current_p, proposed_p)
+    d_low = max(min(current_d, proposed_d), decode_min_endpoint)
+    d_high = max(current_d, proposed_d)
+
+    # Counts outside these bounds cannot possibly satisfy the band, so do not
+    # let an extreme configured cap or stale cached floor expand the scan past
+    # the actual resource envelope.
+    if max_gpus >= 0:
+        p_high = min(p_high, (max_gpus - d_low * d_gpu) // p_gpu)
+        d_high = min(d_high, (max_gpus - p_low * p_gpu) // d_gpu)
+    if min_gpus >= 0:
+        lower_budget = min_gpus - tolerance
+        p_low = max(p_low, _ceil_div(lower_budget - d_high * d_gpu, p_gpu))
+        d_low = max(d_low, _ceil_div(lower_budget - p_high * p_gpu, d_gpu))
+    if p_low > p_high or d_low > d_high:
+        return current_p, current_d
+
+    proposed_in_band, _ = bounds_for_total(
+        proposed_p * p_gpu + proposed_d * d_gpu,
+        min_gpus,
+        max_gpus,
+        tolerance,
+    )
+    if (
+        proposed_p >= prefill_min_endpoint
+        and proposed_d >= decode_min_endpoint
+        and proposed_in_band
+    ):
+        return proposed_p, proposed_d
+
+    best: Optional[tuple[tuple[int, int, int, int, int], tuple[int, int]]] = None
+
+    def _consider(candidate_p: int, candidate_d: int) -> None:
+        nonlocal best
+        total = candidate_p * p_gpu + candidate_d * d_gpu
+        in_band, _ = bounds_for_total(total, min_gpus, max_gpus, tolerance)
+        if not in_band:
+            return
+        distance = abs(proposed_p - candidate_p) + abs(proposed_d - candidate_d)
+        progress_p = abs(candidate_p - current_p)
+        progress_d = abs(candidate_d - current_d)
+        proportional_skew = abs(progress_p * requested_d - progress_d * requested_p)
+        score = (
+            distance,
+            proportional_skew,
+            -(progress_p + progress_d),
+            candidate_p,
+            candidate_d,
+        )
+        if best is None or score < best[0]:
+            best = (score, (candidate_p, candidate_d))
+
+    effective_min: Optional[int] = min_gpus - tolerance if min_gpus >= 0 else None
+
+    # Enumerate only the shorter component range. For each value, the budget
+    # band defines one interval for the other component, whose closest point
+    # to the proposal is the only candidate that can minimize the primary
+    # distance score. This reduces the old Cartesian O(P*D) search to
+    # O(min(P,D)); the normal cap=8 path is at most nine iterations.
+    if p_high - p_low <= d_high - d_low:
+        for candidate_p in range(p_low, p_high + 1):
+            candidate_d_low, candidate_d_high = d_low, d_high
+            p_cost = candidate_p * p_gpu
+            if effective_min is not None:
+                candidate_d_low = max(
+                    candidate_d_low,
+                    _ceil_div(effective_min - p_cost, d_gpu),
+                )
+            if max_gpus >= 0:
+                candidate_d_high = min(
+                    candidate_d_high,
+                    (max_gpus - p_cost) // d_gpu,
+                )
+            if opposing_rebalance:
+                if candidate_p == current_p:
+                    if candidate_d_low <= current_d <= candidate_d_high:
+                        _consider(candidate_p, current_d)
+                    continue
+                if proposed_d > current_d:
+                    candidate_d_low = max(candidate_d_low, current_d + 1)
+                else:
+                    candidate_d_high = min(candidate_d_high, current_d - 1)
+            if candidate_d_low <= candidate_d_high:
+                candidate_d = min(
+                    max(proposed_d, candidate_d_low),
+                    candidate_d_high,
+                )
+                _consider(candidate_p, candidate_d)
+    else:
+        for candidate_d in range(d_low, d_high + 1):
+            candidate_p_low, candidate_p_high = p_low, p_high
+            d_cost = candidate_d * d_gpu
+            if effective_min is not None:
+                candidate_p_low = max(
+                    candidate_p_low,
+                    _ceil_div(effective_min - d_cost, p_gpu),
+                )
+            if max_gpus >= 0:
+                candidate_p_high = min(
+                    candidate_p_high,
+                    (max_gpus - d_cost) // p_gpu,
+                )
+            if opposing_rebalance:
+                if candidate_d == current_d:
+                    if candidate_p_low <= current_p <= candidate_p_high:
+                        _consider(current_p, candidate_d)
+                    continue
+                if proposed_p > current_p:
+                    candidate_p_low = max(candidate_p_low, current_p + 1)
+                else:
+                    candidate_p_high = min(candidate_p_high, current_p - 1)
+            if candidate_p_low <= candidate_p_high:
+                candidate_p = min(
+                    max(proposed_p, candidate_p_low),
+                    candidate_p_high,
+                )
+                _consider(candidate_p, candidate_d)
+
+    return (current_p, current_d) if best is None else best[1]
+
+
+def guard_single_scaling_budget(
+    current: int,
+    proposed: int,
+    gpu_cost: int,
+    min_gpus: int,
+    max_gpus: int,
+    min_endpoint: int,
+) -> tuple[int, Optional[str]]:
+    """Apply a GPU band to one bounded proposal without reversing direction."""
+    if gpu_cost <= 0:
+        return proposed, None
+
+    tolerance = gpu_cost if min_gpus >= 0 and max_gpus >= 0 else 0
+    current_total = current * gpu_cost
+    current_in_band, _ = bounds_for_total(current_total, min_gpus, max_gpus, tolerance)
+    if not current_in_band:
+        reconciled = proportional_clamp_single(
+            current, gpu_cost, min_gpus, max_gpus, min_endpoint
+        )
+        return reconciled, "gpu_budget_reconcile"
+
+    if min_gpus >= 0 and current_total <= min_gpus and proposed < current:
+        return current, "gpu_budget_guard_hold"
+    if max_gpus >= 0 and current_total >= max_gpus and proposed > current:
+        return current, "gpu_budget_guard_hold"
+
+    final = proportional_clamp_single(
+        proposed, gpu_cost, min_gpus, max_gpus, min_endpoint
+    )
+    if not min(current, proposed) <= final <= max(current, proposed):
+        return current, "gpu_budget_guard_hold"
+    return final, None
+
+
+def guard_disagg_scaling_budget(
     current_p: int,
     current_d: int,
     proposed_p: int,
@@ -187,7 +379,7 @@ def guard_disagg_load_budget(
     prefill_min_endpoint: int,
     decode_min_endpoint: int,
 ) -> tuple[int, int, Optional[str]]:
-    """Apply GPU budgets to a disaggregated *load-scaling* proposal safely.
+    """Apply GPU budgets to a bounded disaggregated scaling proposal safely.
 
     ``min_gpu_budget`` is a scale-down guard, not an independent source of
     scale-up intent. Once the current allocation has reached that floor, a
@@ -200,12 +392,12 @@ def guard_disagg_load_budget(
     If the observed allocation is already outside the budget band, recovery is
     kept explicit: the current allocation, rather than the load proposal, is
     reconciled back toward the band and ``"gpu_budget_reconcile"`` is returned.
-    A negative minimum preserves the legacy clamp behavior, including for
-    max-only configurations.
+    A negative minimum disables only the floor; the hard ceiling remains
+    direction-preserving and never invents a donor.
 
     The returned optional reason is suitable for load-decision diagnostics.
     """
-    if min_gpus < 0 or p_gpu <= 0 or d_gpu <= 0:
+    if p_gpu <= 0 or d_gpu <= 0:
         new_p, new_d = proportional_clamp_pair(
             proposed_p,
             proposed_d,
@@ -252,30 +444,48 @@ def guard_disagg_load_budget(
     if current_total <= min_gpus and any_down and not any_up:
         return current_p, current_d, "gpu_budget_guard_hold"
 
-    # At the floor, an opposing proposal is one indivisible rebalance. If its
-    # weighted pair does not fit, fail closed rather than letting the generic
-    # clamp suppress the scale-up leg while retaining the donor removal.
+    # At the floor, keep opposing movements atomic. Fit the largest useful
+    # direction-preserving sub-pair; if no receiver can move with its donor,
+    # fail closed instead of executing only the removal.
     if current_total <= min_gpus and opposing_rebalance:
-        proposed_total = proposed_p * p_gpu + proposed_d * d_gpu
-        proposed_in_band, _ = bounds_for_total(
-            proposed_total, min_gpus, max_gpus, tolerance
+        fitted_p, fitted_d = fit_directional_budget_pair(
+            current_p,
+            current_d,
+            proposed_p,
+            proposed_d,
+            p_gpu,
+            d_gpu,
+            min_gpus,
+            max_gpus,
+            prefill_min_endpoint,
+            decode_min_endpoint,
         )
-        if not proposed_in_band:
+        if (fitted_p, fitted_d) == (current_p, current_d):
             return current_p, current_d, "gpu_budget_guard_hold"
-        return proposed_p, proposed_d, None
+        return fitted_p, fitted_d, None
 
     # At the hard ceiling there is no unallocated capacity for a scale-up.
     # Refuse to invent a donor from a pool whose load signal said hold/up.
-    # For an explicit opposing proposal, require the pair itself to fit so the
-    # clamp cannot suppress one leg and execute only the other.
+    # For an explicit opposing proposal, fit both legs together so a clamp can
+    # never suppress the receiver and execute only the donor removal.
     if max_gpus >= 0 and current_total >= max_gpus and any_up:
-        proposed_total = proposed_p * p_gpu + proposed_d * d_gpu
-        proposed_in_band, _ = bounds_for_total(
-            proposed_total, min_gpus, max_gpus, tolerance
-        )
-        if not opposing_rebalance or not proposed_in_band:
+        if not opposing_rebalance:
             return current_p, current_d, "gpu_budget_guard_hold"
-        return proposed_p, proposed_d, None
+        fitted_p, fitted_d = fit_directional_budget_pair(
+            current_p,
+            current_d,
+            proposed_p,
+            proposed_d,
+            p_gpu,
+            d_gpu,
+            min_gpus,
+            max_gpus,
+            prefill_min_endpoint,
+            decode_min_endpoint,
+        )
+        if (fitted_p, fitted_d) == (current_p, current_d):
+            return current_p, current_d, "gpu_budget_guard_hold"
+        return fitted_p, fitted_d, None
 
     new_p, new_d = proportional_clamp_pair(
         proposed_p,
@@ -507,6 +717,36 @@ def apply_power_budget(
     if p_adjustable and d_adjustable:
         assert proposed_p is not None and proposed_d is not None
         assert p_watts is not None and d_watts is not None
+        current_p_count = 0 if current_p is None else current_p
+        current_d_count = 0 if current_d is None else current_d
+        if (
+            project_watts(
+                current_p_count,
+                current_d_count,
+                p_watts,
+                d_watts,
+            )
+            <= total_budget
+        ):
+            # An ordinary in-band proposal may use only the directions it
+            # requested. Proportional shrinking can otherwise invent a donor
+            # (and exceed a throughput delta cap) merely because another role
+            # asked to scale up. Explicit opposing swaps were staged above;
+            # out-of-band current allocations retain the recovery path below.
+            new_p, new_d = fit_directional_budget_pair(
+                current_p_count,
+                current_d_count,
+                proposed_p,
+                proposed_d,
+                p_watts,
+                d_watts,
+                -1,
+                total_budget,
+                prefill_min_endpoint,
+                decode_min_endpoint,
+            )
+            return new_p, new_d, "power_budget_clamped"
+
         new_p, new_d = _shrink_pair(
             proposed_p,
             proposed_d,

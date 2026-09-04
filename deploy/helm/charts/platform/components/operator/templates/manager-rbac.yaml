@@ -120,18 +120,6 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - podsnapshots
-  verbs:
-  - create
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - nvidia.com
-  resources:
-  - dynamocheckpoints/finalizers
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
@@ -141,7 +129,6 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
-  - dynamocheckpoints/status
   - dynamocomponentdeployments/status
   - dynamographdeploymentrequests/status
   - dynamographdeployments/status

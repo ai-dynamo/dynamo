@@ -10,12 +10,12 @@ subtitle: Full Kubernetes CRD + operator-config API reference, generated from th
 > [!WARNING]
 > **Auto-generated from source.** This page is regenerated from the Dynamo operator CRDs by `docs/fern/scripts/gen_kubernetes_api.py` and covers **every** type across all three API packages: the deprecated `nvidia.com/v1alpha1` surface, the supported `nvidia.com/v1beta1` surface, and the operator's own `operator.config.dynamo.nvidia.com/v1alpha1` configuration. The trimmed [DGD](dynamo-graph-deployment.mdx), [DGDR](dynamo-graph-deployment-request.mdx), and [DCD](dynamo-component-deployment.mdx) references cover only user-facing `v1beta1` fields. To edit the surface, change the Go types under `deploy/operator/api/` and let CI regenerate this page.
 
-Dynamo publishes 3 Kubernetes API packages with 176 typed CRD and config sections.
+Dynamo publishes 3 Kubernetes API packages with 166 typed CRD and config sections.
 
 <CardGroup cols={3}>
-<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">75 types</Card>
+<Card title="nvidia.com/v1alpha1" href="#nvidia-com-v1alpha1">69 types</Card>
 <Card title="nvidia.com/v1beta1" href="#nvidia-com-v1beta1">69 types</Card>
-<Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">32 types</Card>
+<Card title="operator.config.dynamo.nvidia.com/v1alpha1" href="#operator-config-dynamo-nvidia-com-v1alpha1">28 types</Card>
 </CardGroup>
 
 <div id="nvidia-com-v1alpha1" />
@@ -32,7 +32,6 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 **Resource Types**
 
 <CardGroup cols={3}>
-<Card title="DynamoCheckpoint" href="#dynamocheckpoint" />
 <Card title="DynamoComponentDeployment" href="#dynamocomponentdeployment" />
 <Card title="DynamoGraphDeployment" href="#dynamographdeployment" />
 <Card title="DynamoGraphDeploymentRequest" href="#dynamographdeploymentrequest" />
@@ -85,13 +84,13 @@ checkpoint resources when the owning DGD is deleted.
 **Allowed values**
 
 - <Badge intent="note" minimal>Delete</Badge> CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint CRs and artifacts when the owning DGD is deleted.
-- <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs and artifacts after the owning DGD is deleted. Users can reference the retained checkpoint with checkpointRef if they accept compatibility risk.
+- <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs and artifacts after the owning DGD is deleted. Retained automatic checkpoints are not valid checkpointRef targets.
 </Accordion>
 
 <Accordion id="checkpointmode" title="CheckpointMode">
 Deprecated: use checkpoint.enabled instead.
 enabled=true without checkpointRef creates a DGD-managed automatic
-checkpoint; checkpointRef restores the named checkpoint.
+checkpoint; checkpointRef restores the named PodSnapshot.
 
 
 **Kind:** `enum`
@@ -102,7 +101,7 @@ checkpoint; checkpointRef restores the named checkpoint.
 **Allowed values**
 
 - <Badge intent="note" minimal>Auto</Badge> Deprecated: use checkpoint.enabled=true and omit checkpointRef.
-- <Badge intent="note" minimal>Manual</Badge> Deprecated: use checkpointRef to restore an existing checkpoint.
+- <Badge intent="note" minimal>Manual</Badge> Deprecated: use checkpointRef to restore an existing PodSnapshot.
 </Accordion>
 
 <Accordion id="checkpointstartuppolicy" title="CheckpointStartupPolicy">
@@ -116,7 +115,7 @@ CheckpointStartupPolicy defines when worker pods should wait for a checkpoint.
 
 **Allowed values**
 
-- <Badge intent="note" minimal>Immediate</Badge> CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint job runs in the background, and only pods created after the checkpoint is Ready are restore-shaped by the pod-create mutating webhook.
+- <Badge intent="note" minimal>Immediate</Badge> CheckpointStartupPolicyImmediate starts workers immediately. The SnapshotJob capture runs in the background, and only pods created after the checkpoint is Ready are restore-shaped by the pod-create mutating webhook.
 - <Badge intent="note" minimal>WaitForCheckpoint</Badge> CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the component's checkpoint is Ready, then starts them from the checkpoint.
 </Accordion>
 
@@ -249,240 +248,53 @@ Created indicates whether the DGD has been successfully created. Used to prevent
 </ParamField>
 </Accordion>
 
-<Accordion id="dynamocheckpoint" title="DynamoCheckpoint">
-DynamoCheckpoint is the Schema for the dynamocheckpoints API
-It represents a container checkpoint that can be used to restore pods to a warm state
-
-
-**Kind:** `resource`
-
-<ParamField path="apiVersion" type="string">
-`nvidia.com/v1alpha1`
-</ParamField>
-
-<ParamField path="kind" type="string">
-`DynamoCheckpoint`
-</ParamField>
-
-<ParamField path="metadata" type="ObjectMeta">
-Refer to Kubernetes API documentation for fields of `metadata`.
-See [ObjectMeta](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#objectmeta-v1-meta).
-</ParamField>
-
-<ParamField path="spec" type="DynamoCheckpointSpec">
-See [DynamoCheckpointSpec](#dynamocheckpointspec).
-</ParamField>
-
-<ParamField path="status" type="DynamoCheckpointStatus">
-See [DynamoCheckpointStatus](#dynamocheckpointstatus).
-</ParamField>
-</Accordion>
-
 <Accordion id="dynamocheckpointidentity" title="DynamoCheckpointIdentity">
-Deprecated: legacy identity metadata. Keep it only where v1alpha1 still
-requires spec.identity; omit DGD-managed identity and use checkpointRef for
-explicit restores.
+Deprecated: omit in DGD service checkpoint configs. Automatic capture
+needs no replacement; use CheckpointRef to restore a PodSnapshot.
 
 
 **Kind:** `type`
-**Appears in:** [DynamoCheckpointSpec](#dynamocheckpointspec), [ServiceCheckpointConfig](#servicecheckpointconfig)
+**Appears in:** [ServiceCheckpointConfig](#servicecheckpointconfig)
 
 <ParamField path="model" type="string" required={true}>
-Model is the model identifier (e.g., "meta-llama/Llama-3-70B") Deprecated: legacy spec.identity only.
+Model is the model identifier (e.g., "meta-llama/Llama-3-70B"). Deprecated: legacy identity only.
 **Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="backendFramework" type="string" required={true}>
-BackendFramework is the runtime framework (vllm, sglang, trtllm) Deprecated: legacy spec.identity only.
+BackendFramework is the runtime framework (vllm, sglang, trtllm). Deprecated: legacy identity only.
 **Validation:** Enum: [vllm sglang trtllm]  Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="dynamoVersion" type="string">
-DynamoVersion is the Dynamo platform version (optional). Deprecated: legacy spec.identity only.
+DynamoVersion is the Dynamo platform version. Deprecated: legacy identity only.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="tensorParallelSize" type="integer" default="1">
-TensorParallelSize is the tensor parallel configuration. Deprecated: checkpoint launch uses the pod template instead.
+TensorParallelSize is the tensor parallel configuration. Deprecated: automatic capture derives compatibility from the worker.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="pipelineParallelSize" type="integer" default="1">
-PipelineParallelSize is the pipeline parallel configuration. Deprecated: checkpoint launch uses the pod template instead.
+PipelineParallelSize is the pipeline parallel configuration. Deprecated: automatic capture derives compatibility from the worker.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="dtype" type="string">
-Dtype is the data type (fp16, bf16, fp8, etc.). Deprecated: legacy spec.identity only.
+Dtype is the data type (fp16, bf16, fp8, etc.). Deprecated: legacy identity only.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="maxModelLen" type="integer">
-MaxModelLen is the maximum sequence length. Deprecated: legacy spec.identity only.
+MaxModelLen is the maximum sequence length. Deprecated: legacy identity only.
 **Validation:** Minimum: 1  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="extraParameters" type="object (keys:string, values:string)">
-ExtraParameters are additional parameters that affect the checkpoint hash. Use for any framework-specific or custom parameters not covered above. Deprecated: legacy spec.identity only.
+ExtraParameters contains additional legacy identity parameters. Deprecated: legacy identity only.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
-</Accordion>
-
-<Accordion id="dynamocheckpointjobconfig" title="DynamoCheckpointJobConfig">
-DynamoCheckpointJobConfig defines the configuration for the checkpoint creation Job
-
-
-**Kind:** `type`
-**Appears in:** [DynamoCheckpointSpec](#dynamocheckpointspec)
-
-<ParamField path="podTemplateSpec" type="PodTemplateSpec" required={true}>
-PodTemplateSpec allows customizing the checkpoint Job pod This should include the container that runs the workload to be checkpointed and any workload/runtime env, service account, GMS, or DRA wiring needed by that container. Auto-created checkpoints from DynamoGraphDeployment render Dynamo defaults before creating the DynamoCheckpoint.
-See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="targetContainerName" type="string" default="main">
-TargetContainerName is the container in PodTemplateSpec to snapshot.
-**Validation:** MaxLength: 63  MinLength: 1  Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="sharedMemory" type="SharedMemorySpec">
-SharedMemory controls the tmpfs mounted at /dev/shm for the checkpoint Job pod. When omitted, checkpoint Jobs use the same default 8Gi tmpfs as Dynamo components.
-See [SharedMemorySpec](#sharedmemoryspec).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="activeDeadlineSeconds" type="integer" default="3600">
-ActiveDeadlineSeconds specifies the maximum time the Job can run
-**Validation:** Minimum: 1  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="backoffLimit" type="integer">
-Deprecated: BackoffLimit is ignored. Checkpoint Jobs never retry.
-**Validation:** Minimum: 0  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="ttlSecondsAfterFinished" type="integer">
-Deprecated: TTLSecondsAfterFinished is ignored. The operator deletes checkpoint Jobs after recording their terminal outcome.
-**Validation:** Minimum: 0  Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="dynamocheckpointphase" title="DynamoCheckpointPhase">
-DynamoCheckpointPhase represents the current phase of the checkpoint lifecycle
-
-
-**Kind:** `enum`
-**Underlying type:** `string`
-**Validation:** Enum: [Pending Creating Ready Failed]
-**Appears in:** [DynamoCheckpointStatus](#dynamocheckpointstatus)
-
-**Allowed values**
-
-- <Badge intent="note" minimal>Pending</Badge> DynamoCheckpointPhasePending indicates the checkpoint CR has been created but the Job has not started
-- <Badge intent="note" minimal>Creating</Badge> DynamoCheckpointPhaseCreating indicates the checkpoint Job is running
-- <Badge intent="note" minimal>Ready</Badge> DynamoCheckpointPhaseReady indicates the checkpoint artifact is available
-- <Badge intent="note" minimal>Failed</Badge> DynamoCheckpointPhaseFailed indicates the checkpoint creation failed
-</Accordion>
-
-<Accordion id="dynamocheckpointspec" title="DynamoCheckpointSpec">
-DynamoCheckpointSpec defines the desired state of DynamoCheckpoint
-
-
-**Kind:** `type`
-**Appears in:** [DynamoCheckpoint](#dynamocheckpoint)
-
-<ParamField path="identity" type="DynamoCheckpointIdentity" required={true}>
-Deprecated: required by v1alpha1 for standalone checkpoints. Auto checkpoints synthesize it; checkpointRef restores use the referenced CR.
-See [DynamoCheckpointIdentity](#dynamocheckpointidentity).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="gpuMemoryService" type="GPUMemoryServiceSpec">
-GPUMemoryService records checkpoint-time GPU Memory Service metadata for a prepared checkpoint Job pod. The DynamoCheckpoint controller does not inject GMS/DRA resources; auto-created checkpoints from DynamoGraphDeployment prepare the pod template before creating this object. Manual GMS-enabled checkpoints must provide the prepared pod template; the controller fails the checkpoint if the required GMS/DRA wiring is missing. This field is intentionally outside spec.identity, so it does not affect the checkpoint identity hash or deduplication.
-See [GPUMemoryServiceSpec](#gpumemoryservicespec).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="job" type="DynamoCheckpointJobConfig" required={true}>
-Job defines the configuration for the checkpoint creation Job
-See [DynamoCheckpointJobConfig](#dynamocheckpointjobconfig).
-**Validation:** Required: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="dynamocheckpointstatus" title="DynamoCheckpointStatus">
-DynamoCheckpointStatus defines the observed state of DynamoCheckpoint
-
-
-**Kind:** `type`
-**Appears in:** [DynamoCheckpoint](#dynamocheckpoint)
-
-<ParamField path="phase" type="DynamoCheckpointPhase">
-Phase represents the current phase of the checkpoint lifecycle
-See [DynamoCheckpointPhase](#dynamocheckpointphase).
-**Validation:** Enum: [Pending Creating Ready Failed]  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="checkpointID" type="string">
-CheckpointID is the artifact ID used by the snapshot protocol.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="identityHash" type="string">
-IdentityHash is the computed hash of the checkpoint identity. Deprecated: use CheckpointID. This field is retained for compatibility with older status consumers.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="location" type="string">
-Deprecated: Location is ignored and no longer populated. It is retained only so older objects continue to validate.
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="storageType" type="DynamoCheckpointStorageType">
-Deprecated: StorageType is ignored and no longer populated. It is retained only so older objects continue to validate.
-See [DynamoCheckpointStorageType](#dynamocheckpointstoragetype).
-**Validation:** Enum: [pvc s3 oci]  Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="jobName" type="string">
-JobName is the name of the checkpoint creation Job
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="podSnapshotName" type="string">
-PodSnapshotName is the name of the PodSnapshot this checkpoint created to drive capture. It is the authoritative pointer to the snapshot (which is otherwise located by label, not by reconstructing its name) and lets the controller distinguish a never-created snapshot (empty) from one that was created and later went missing (set, but no longer found).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="createdAt" type="Time">
-CreatedAt is the timestamp when the checkpoint became ready
-See [Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="message" type="string">
-Message provides additional information about the current state
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-
-<ParamField path="conditions" type="Condition array">
-DEPRECATED: Conditions are deprecated. Use status.phase instead.
-See [Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta).
-**Validation:** Optional: \&#123;\&#125;
-</ParamField>
-</Accordion>
-
-<Accordion id="dynamocheckpointstoragetype" title="DynamoCheckpointStorageType">
-Deprecated: StorageType is retained for compatibility with older
-DynamoCheckpoint status consumers. The current checkpoint flow publishes
-PVC-backed artifacts discovered from the snapshot-agent DaemonSet.
-
-
-**Kind:** `type`
-**Underlying type:** `string`
-**Validation:** Enum: [pvc s3 oci]
-**Appears in:** [DynamoCheckpointStatus](#dynamocheckpointstatus)
 </Accordion>
 
 <Accordion id="dynamocomponentdeployment" title="DynamoComponentDeployment">
@@ -1494,7 +1306,7 @@ GPUMemoryServiceSpec configures the GPU Memory Service (GMS) for a worker compon
 
 
 **Kind:** `type`
-**Appears in:** [DynamoCheckpointSpec](#dynamocheckpointspec), [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+**Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 <ParamField path="enabled" type="boolean">
 Enabled activates GMS wiring. GPU resources on client containers are replaced with a DRA ResourceClaim for shared GPU access.
@@ -1512,7 +1324,7 @@ DeviceClassName is the DRA DeviceClass to request GPUs from.
 </ParamField>
 
 <ParamField path="extraClientContainers" type="string array">
-ExtraClientContainers lists additional user-declared containers that should be wired as GMS clients in pods rendered from the enclosing spec. DGD/DCD services apply this to service pods. Auto-created checkpoints apply checkpoint job clients before creating the DynamoCheckpoint; manual DynamoCheckpoint users must provide an already-prepared pod template. Every name must match a user-declared container in the enclosing pod spec.
+ExtraClientContainers lists additional user-declared containers that should be wired as GMS clients in pods rendered from the enclosing spec. DGD/DCD services apply this to service pods. Automatic captures apply SnapshotJob capture Pod clients before creating the SnapshotJob. Every name must match a user-declared container in the enclosing pod spec.
 **Validation:** items:MaxLength: 63  items:MinLength: 1  items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2058,12 +1870,12 @@ ServiceCheckpointConfig configures checkpointing for a DGD service
 **Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 <ParamField path="enabled" type="boolean" default="false">
-Enabled indicates whether checkpointing is enabled for this service
+Enabled indicates whether checkpointing is enabled for this service. When true, omit CheckpointRef for a DGD-managed automatic checkpoint or set CheckpointRef to restore a PodSnapshot in the same namespace.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="mode" type="CheckpointMode">
-Deprecated: omit mode. Use enabled=true without checkpointRef for a DGD-managed automatic checkpoint, or use checkpointRef to restore the named checkpoint.
+Deprecated: omit mode. Use enabled=true without checkpointRef for a DGD-managed automatic checkpoint, or use checkpointRef to restore the named PodSnapshot.
 See [CheckpointMode](#checkpointmode).
 **Validation:** Enum: [Auto Manual]  Optional: \&#123;\&#125;
 </ParamField>
@@ -2075,18 +1887,18 @@ See [CheckpointStartupPolicy](#checkpointstartuppolicy).
 </ParamField>
 
 <ParamField path="deletionPolicy" type="CheckpointDeletionPolicy" default="Delete">
-DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD.
 See [CheckpointDeletionPolicy](#checkpointdeletionpolicy).
 **Validation:** Enum: [Delete Retain]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="checkpointRef" type="string">
-CheckpointRef references an existing DynamoCheckpoint CR by metadata.name. If specified, this service's Identity is ignored and the referenced checkpoint is used directly.
+CheckpointRef references an existing PodSnapshot in the same namespace by metadata.name. If specified, this service's Identity is ignored and the referenced PodSnapshot is used directly. Standalone worker-class (worker, prefill, or decode) DynamoComponentDeployment resources cannot set this field; configure CheckpointRef on the owning DynamoGraphDeployment service.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="identity" type="DynamoCheckpointIdentity">
-Deprecated: omit for DGD-managed checkpoints; no action is needed. Use CheckpointRef to restore an existing checkpoint.
+Deprecated: omit for DGD-managed checkpoints; the operator ignores this field. Use CheckpointRef to restore an existing PodSnapshot.
 See [DynamoCheckpointIdentity](#dynamocheckpointidentity).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2097,26 +1909,26 @@ TargetContainerName is the workload container to snapshot and restore.
 </ParamField>
 
 <ParamField path="job" type="ServiceCheckpointJobConfig">
-Job customizes the DGD-managed checkpoint Job.
+Job customizes the DGD-managed SnapshotJob capture Pod.
 See [ServiceCheckpointJobConfig](#servicecheckpointjobconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
 <Accordion id="servicecheckpointjobconfig" title="ServiceCheckpointJobConfig">
-ServiceCheckpointJobConfig customizes the checkpoint Job created for a DGD service.
+ServiceCheckpointJobConfig customizes the SnapshotJob capture Pod created for a DGD service.
 
 
 **Kind:** `type`
 **Appears in:** [ServiceCheckpointConfig](#servicecheckpointconfig)
 
 <ParamField path="gmsClientContainers" type="string array">
-GMSClientContainers lists checkpoint Job containers that should receive GMS client wiring. Requires gpuMemoryService on the service.
+GMSClientContainers lists SnapshotJob capture Pod containers that should receive GMS client wiring. Requires gpuMemoryService on the service.
 **Validation:** items:MaxLength: 63  items:MinLength: 1  items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec">
-PodTemplate customizes the checkpoint Job pod. The operator starts from the selected workload container and merges this template so users can add helper containers such as gms-saver.
+PodTemplate customizes the SnapshotJob capture Pod. The operator starts from the selected workload container and merges this template so users can add helper containers such as gms-saver.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Schemaless: \&#123;\&#125;  Type: object  Optional: \&#123;\&#125;
 </ParamField>
@@ -2130,17 +1942,17 @@ ServiceCheckpointStatus contains checkpoint information for a single service.
 **Appears in:** [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
 
 <ParamField path="checkpointName" type="string">
-CheckpointName is the name of the associated Checkpoint CR
+CheckpointName is the name of the active PodSnapshot.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="checkpointID" type="string">
-CheckpointID is the artifact ID used by the snapshot protocol
+CheckpointID is a deprecated legacy Dynamo artifact ID. Native standalone snapshots leave this field empty.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="identityHash" type="string">
-IdentityHash is the computed hash of the checkpoint identity Deprecated: automatic checkpoints use CheckpointID. This field is retained for older status consumers.
+IdentityHash is a deprecated legacy checkpoint identity hash. Native standalone snapshots leave this field empty.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2216,7 +2028,7 @@ ScheduledReplicas is the number of replicas the backend scheduler has scheduled,
 <Accordion id="sharedmemoryspec" title="SharedMemorySpec">
 
 **Kind:** `type`
-**Appears in:** [DynamoCheckpointJobConfig](#dynamocheckpointjobconfig), [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
+**Appears in:** [DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec), [DynamoComponentDeploymentSpec](#dynamocomponentdeploymentspec)
 
 <ParamField path="disabled" type="boolean">
 Disabled, when true, opts out of mounting a shared-memory medium for the component. When false (or unset), shared memory is enabled and Size is required (enforced by the validating webhook). Size is ignored when Disabled is true.
@@ -2346,13 +2158,13 @@ checkpoint resources when the owning DGD is deleted.
 **Allowed values**
 
 - <Badge intent="note" minimal>Delete</Badge> CheckpointDeletionPolicyDelete deletes DGD-managed automatic checkpoint CRs and artifacts when the owning DGD is deleted.
-- <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs and artifacts after the owning DGD is deleted. Users can reference the retained checkpoint with checkpointRef if they accept compatibility risk.
+- <Badge intent="note" minimal>Retain</Badge> CheckpointDeletionPolicyRetain keeps DGD-managed automatic checkpoint CRs and artifacts after the owning DGD is deleted. Retained automatic checkpoints are not valid checkpointRef targets.
 </Accordion>
 
 <Accordion id="v1beta1-checkpointmode" title="CheckpointMode">
 Deprecated: use checkpoint.enabled instead.
 enabled=true without checkpointRef creates a DGD-managed automatic
-checkpoint; checkpointRef restores the named checkpoint.
+checkpoint; checkpointRef restores the named PodSnapshot.
 
 
 **Kind:** `enum`
@@ -2363,7 +2175,7 @@ checkpoint; checkpointRef restores the named checkpoint.
 **Allowed values**
 
 - <Badge intent="note" minimal>Auto</Badge> Deprecated: use checkpoint.enabled=true and omit checkpointRef.
-- <Badge intent="note" minimal>Manual</Badge> Deprecated: use checkpointRef to restore an existing checkpoint.
+- <Badge intent="note" minimal>Manual</Badge> Deprecated: use checkpointRef to restore an existing PodSnapshot.
 </Accordion>
 
 <Accordion id="v1beta1-checkpointstartuppolicy" title="CheckpointStartupPolicy">
@@ -2377,7 +2189,7 @@ CheckpointStartupPolicy defines when worker pods should wait for a checkpoint.
 
 **Allowed values**
 
-- <Badge intent="note" minimal>Immediate</Badge> CheckpointStartupPolicyImmediate starts workers immediately. The checkpoint job runs in the background, and only pods created after the checkpoint is Ready are restore-shaped by the pod-create mutating webhook.
+- <Badge intent="note" minimal>Immediate</Badge> CheckpointStartupPolicyImmediate starts workers immediately. The SnapshotJob capture runs in the background, and only pods created after the checkpoint is Ready are restore-shaped by the pod-create mutating webhook.
 - <Badge intent="note" minimal>WaitForCheckpoint</Badge> CheckpointStartupPolicyWaitForCheckpoint gates worker replicas until the component's checkpoint is Ready, then starts them from the checkpoint.
 </Accordion>
 
@@ -2409,12 +2221,12 @@ ComponentCheckpointConfig configures checkpointing for a DGD component.
 **Appears in:** [ExperimentalSpec](#experimentalspec)
 
 <ParamField path="enabled" type="boolean" required={true}>
-enabled indicates whether checkpointing is enabled for this component. When true, omit checkpointRef for a DGD-managed automatic checkpoint or set checkpointRef to restore an existing checkpoint. Omit the checkpoint block, or set enabled=false, to disable checkpointing.
+enabled indicates whether checkpointing is enabled for this component. When true, omit checkpointRef for a DGD-managed automatic checkpoint or set checkpointRef to restore an existing PodSnapshot in the same namespace. Omit the checkpoint block, or set enabled=false, to disable checkpointing.
 **Validation:** Required: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="mode" type="CheckpointMode">
-Deprecated: omit mode. Use enabled=true without checkpointRef for a DGD-managed automatic checkpoint, or use checkpointRef to restore the named checkpoint.
+Deprecated: omit mode. Use enabled=true without checkpointRef for a DGD-managed automatic checkpoint, or use checkpointRef to restore the named PodSnapshot.
 See [CheckpointMode](#v1beta1-checkpointmode).
 **Validation:** Enum: [Auto Manual]  Optional: \&#123;\&#125;
 </ParamField>
@@ -2426,18 +2238,18 @@ See [CheckpointStartupPolicy](#v1beta1-checkpointstartuppolicy).
 </ParamField>
 
 <ParamField path="deletionPolicy" type="CheckpointDeletionPolicy" default="Delete">
-DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit checkpointRef checkpoints are never owned or deleted by the DGD.
+DeletionPolicy defines whether a DGD-managed automatic checkpoint CR and artifact are deleted or retained when the owning DGD is deleted. Explicit checkpointRef PodSnapshots are never owned or deleted by the DGD.
 See [CheckpointDeletionPolicy](#v1beta1-checkpointdeletionpolicy).
 **Validation:** Enum: [Delete Retain]  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="checkpointRef" type="string">
-checkpointRef references an existing DynamoCheckpoint CR by `metadata.name`. When set, this component's `identity` is ignored and the referenced checkpoint is used directly.
+checkpointRef references an existing PodSnapshot in the same namespace by metadata.name. When set, this component's `identity` is ignored and the referenced PodSnapshot is used directly. Standalone worker-class (worker, prefill, or decode) DynamoComponentDeployment resources cannot set this field; configure checkpointRef on the owning DynamoGraphDeployment component.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="identity" type="DynamoCheckpointIdentity">
-Deprecated: omit for DGD-managed checkpoints; no action is needed. Use checkpointRef to restore an existing checkpoint.
+Deprecated: omit for DGD-managed checkpoints; the operator ignores this field. Use checkpointRef to restore an existing PodSnapshot.
 See [DynamoCheckpointIdentity](#v1beta1-dynamocheckpointidentity).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -2448,26 +2260,26 @@ targetContainerName is the workload container to snapshot and restore.
 </ParamField>
 
 <ParamField path="job" type="ComponentCheckpointJobConfig">
-job customizes the DGD-managed checkpoint Job.
+job customizes the DGD-managed SnapshotJob capture Pod.
 See [ComponentCheckpointJobConfig](#componentcheckpointjobconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 </Accordion>
 
 <Accordion id="componentcheckpointjobconfig" title="ComponentCheckpointJobConfig">
-ComponentCheckpointJobConfig customizes the checkpoint Job created for a DGD component.
+ComponentCheckpointJobConfig customizes the SnapshotJob capture Pod created for a DGD component.
 
 
 **Kind:** `type`
 **Appears in:** [ComponentCheckpointConfig](#componentcheckpointconfig)
 
 <ParamField path="gmsClientContainers" type="string array">
-gmsClientContainers lists checkpoint Job containers that should receive GMS client wiring. Requires gpuMemoryService on the component.
+gmsClientContainers lists SnapshotJob capture Pod containers that should receive GMS client wiring. Requires gpuMemoryService on the component.
 **Validation:** items:MaxLength: 63  items:MinLength: 1  items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="podTemplate" type="PodTemplateSpec">
-podTemplate customizes the checkpoint Job pod. The operator starts from the selected workload container and merges this template so users can add helper containers such as gms-saver.
+podTemplate customizes the SnapshotJob capture Pod. The operator starts from the selected workload container and merges this template so users can add helper containers such as gms-saver.
 See [PodTemplateSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#podtemplatespec-v1-core).
 **Validation:** Schemaless: \&#123;\&#125;  Type: object  Optional: \&#123;\&#125;
 </ParamField>
@@ -2481,17 +2293,17 @@ ComponentCheckpointStatus contains checkpoint information for a single component
 **Appears in:** [DynamoGraphDeploymentStatus](#v1beta1-dynamographdeploymentstatus)
 
 <ParamField path="checkpointName" type="string">
-checkpointName is the name of the associated DynamoCheckpoint CR.
+checkpointName is the name of the active PodSnapshot.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="checkpointID" type="string">
-checkpointID is the artifact ID used by the snapshot protocol.
+checkpointID is a deprecated legacy Dynamo artifact ID. Native standalone snapshots leave this field empty.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
 <ParamField path="identityHash" type="string">
-identityHash is the computed hash of the checkpoint identity. Deprecated: automatic checkpoints use checkpointID. This field is retained for older status consumers.
+identityHash is a deprecated legacy checkpoint identity hash. Native standalone snapshots leave this field empty.
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
 
@@ -2655,9 +2467,9 @@ AvailableReplicas is the number of replicas that are available and ready.
 </Accordion>
 
 <Accordion id="v1beta1-dynamocheckpointidentity" title="DynamoCheckpointIdentity">
-Deprecated: omit in DGD component checkpoint configs. Auto needs no
-replacement; use checkpointRef for explicit restores.
-Duplicated from v1alpha1; DynamoCheckpoint itself remains v1alpha1.
+Deprecated: omit in DGD component checkpoint configs. Automatic capture
+needs no replacement; use checkpointRef to restore a PodSnapshot.
+Duplicated from v1alpha1 for conversion compatibility.
 
 
 **Kind:** `type`
@@ -3450,7 +3262,7 @@ See [GroveSpec](#grovespec).
 </ParamField>
 
 <ParamField path="checkpoint" type="ComponentCheckpointConfig">
-checkpoint configures container-image snapshotting and restore for this component. Set `checkpoint.enabled: true` to opt in. Without checkpointRef, the DGD controller creates a DGD-scoped DynamoCheckpoint CR and later restores pods in the same DGD generation from that checkpoint. With checkpointRef, the DGD restores from that existing checkpoint instead. The user-facing shape of this field is still settling, which is why it lives under `experimental` in v1beta1 instead of at the top level.
+checkpoint configures container-image snapshotting and restore for this component. Set `checkpoint.enabled: true` to opt in. Without checkpointRef, the DGD controller creates a DGD-scoped SnapshotJob and later restores pods in the same DGD generation from its PodSnapshot. With checkpointRef, the DGD restores from the named PodSnapshot in the same namespace. The user-facing shape of this field is still settling, which is why it lives under `experimental` in v1beta1 instead of at the top level.
 See [ComponentCheckpointConfig](#componentcheckpointconfig).
 **Validation:** Optional: \&#123;\&#125;
 </ParamField>
@@ -3562,7 +3374,7 @@ deviceClassName is the DRA `DeviceClass` to request GPUs from.
 </ParamField>
 
 <ParamField path="extraClientContainers" type="string array">
-extraClientContainers lists additional user-declared containers that should be wired as GMS clients in service pods. Checkpoint Job clients are declared under checkpoint.job.gmsClientContainers. Every name must match a container in the enclosing component's podTemplate.spec.containers.
+extraClientContainers lists additional user-declared containers that should be wired as GMS clients in service pods. SnapshotJob capture Pod clients are declared under checkpoint.job.gmsClientContainers. Every name must match a container in the enclosing component's podTemplate.spec.containers.
 **Validation:** items:MaxLength: 63  items:MinLength: 1  items:Pattern: `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`  Optional: \&#123;\&#125;
 </ParamField>
 
@@ -4311,82 +4123,6 @@ Enabled indicates if checkpoint functionality is enabled
 Seccomp controls the localhost seccomp profile applied to checkpoint and restore pods. A nil value means "use the default profile"; set Seccomp.Disabled=true to disable seccomp injection entirely.
 See [CheckpointSeccompConfiguration](#checkpointseccompconfiguration).
 </ParamField>
-
-<ParamField path="storage" type="CheckpointStorageConfiguration">
-Storage optionally configures the namespace-local checkpoint PVC that workload pods mount. When omitted, the operator preserves the legacy behavior of discovering storage from a snapshot-agent DaemonSet in the workload namespace.
-See [CheckpointStorageConfiguration](#checkpointstorageconfiguration).
-</ParamField>
-
-<ParamField path="cleanupImage" type="string" default="busybox:1.36">
-CleanupImage is the image used by best-effort artifact cleanup Jobs for automatically-created checkpoints. It must provide a POSIX shell and `rm`.
-</ParamField>
-</Accordion>
-
-<Accordion id="checkpointociconfig" title="CheckpointOCIConfig">
-Deprecated: CheckpointOCIConfig is retained for compatibility and ignored by
-the current snapshot flow.
-
-
-**Kind:** `type`
-**Appears in:** [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-<ParamField path="uri" type="string">
-URI is the legacy OCI URI (oci://registry/repository).
-</ParamField>
-
-<ParamField path="credentialsSecretRef" type="string">
-CredentialsSecretRef is the legacy docker config secret name.
-</ParamField>
-</Accordion>
-
-<Accordion id="checkpointpvcconfig" title="CheckpointPVCConfig">
-CheckpointPVCConfig configures the namespace-local PVC mounted into
-checkpoint and restore workload pods.
-
-
-**Kind:** `type`
-**Appears in:** [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-<ParamField path="pvcName" type="string">
-PVCName is the PVC name in each workload namespace.
-</ParamField>
-
-<ParamField path="basePath" type="string">
-BasePath is the mount path inside checkpoint and restore workload pods.
-</ParamField>
-
-<ParamField path="create" type="boolean">
-Create tells the operator to create the PVC in workload namespaces when it is missing. When false, the PVC must already exist.
-</ParamField>
-
-<ParamField path="size" type="string">
-Size is the storage request used when Create is true.
-</ParamField>
-
-<ParamField path="storageClassName" type="string">
-StorageClassName is the optional StorageClass name used when Create is true.
-</ParamField>
-
-<ParamField path="accessMode" type="string">
-AccessMode is the PVC access mode used when Create is true.
-</ParamField>
-</Accordion>
-
-<Accordion id="checkpoints3config" title="CheckpointS3Config">
-Deprecated: CheckpointS3Config is retained for compatibility and ignored by
-the current snapshot flow.
-
-
-**Kind:** `type`
-**Appears in:** [CheckpointStorageConfiguration](#checkpointstorageconfiguration)
-
-<ParamField path="uri" type="string">
-URI is the legacy S3 URI (s3://[endpoint/]bucket/prefix).
-</ParamField>
-
-<ParamField path="credentialsSecretRef" type="string">
-CredentialsSecretRef is the legacy credentials secret name.
-</ParamField>
 </Accordion>
 
 <Accordion id="checkpointseccompconfiguration" title="CheckpointSeccompConfiguration">
@@ -4407,34 +4143,6 @@ Disabled, when true, suppresses seccomp profile injection entirely. Use this for
 
 <ParamField path="profile" type="string">
 Profile is the localhost seccomp profile path. Empty falls back to DefaultSeccompProfile. Ignored when Disabled is true.
-</ParamField>
-</Accordion>
-
-<Accordion id="checkpointstorageconfiguration" title="CheckpointStorageConfiguration">
-CheckpointStorageConfiguration configures checkpoint storage for operator
-pod mutations. Only PVC storage is implemented today.
-
-
-**Kind:** `type`
-**Appears in:** [CheckpointConfiguration](#checkpointconfiguration)
-
-<ParamField path="type" type="string">
-Type is the storage backend type. Only pvc is implemented today.
-</ParamField>
-
-<ParamField path="pvc" type="CheckpointPVCConfig">
-PVC configuration for pvc-based settings.
-See [CheckpointPVCConfig](#checkpointpvcconfig).
-</ParamField>
-
-<ParamField path="s3" type="CheckpointS3Config">
-Deprecated: S3 is retained for compatibility and ignored.
-See [CheckpointS3Config](#checkpoints3config).
-</ParamField>
-
-<ParamField path="oci" type="CheckpointOCIConfig">
-Deprecated: OCI is retained for compatibility and ignored.
-See [CheckpointOCIConfig](#checkpointociconfig).
 </ParamField>
 </Accordion>
 
