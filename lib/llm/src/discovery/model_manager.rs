@@ -1031,16 +1031,27 @@ impl ModelManager {
             .is_some_and(|m| m.is_ready_to_serve())
     }
 
-    /// Snapshot the serving readiness of every registered model.
+    /// Snapshot the serving readiness of every registered primary model name.
     ///
     /// Each value is derived from [`Model::is_ready_to_serve`], the same
     /// selection gate used by request routing and KServe model readiness.
     /// Results are sorted by model name so scrape output is deterministic.
+    ///
+    /// An alias is registered in `models` under its own name so that routing can
+    /// resolve it, which would otherwise emit a second, duplicate reading for the
+    /// deployment it points at. Alias names are therefore filtered out here, so a
+    /// caller sees one entry per primary name — matching the request path, which
+    /// canonicalizes an alias through [`Self::resolve_canonical_name`] before it
+    /// labels a metric. Both maps are read from the single loaded catalog guard,
+    /// so they always come from the same published snapshot. A LoRA adapter is a
+    /// distinct servable model rather than a second name for one, is never
+    /// recorded in `aliases`, and so keeps its own entry.
     pub(crate) fn registered_model_readiness(&self) -> Vec<(String, bool)> {
         let catalog = self.catalog.load();
         let mut readiness = catalog
             .models
             .iter()
+            .filter(|(name, _)| !catalog.aliases.contains_key(name.as_str()))
             .map(|(name, model)| (name.clone(), model.is_ready_to_serve()))
             .collect::<Vec<_>>();
         readiness.sort_unstable_by(|left, right| left.0.cmp(&right.0));

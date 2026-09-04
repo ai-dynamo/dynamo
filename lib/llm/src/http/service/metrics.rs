@@ -2485,6 +2485,48 @@ mod tests {
     }
 
     #[test]
+    fn model_ready_metric_omits_alias_names() {
+        let manager = Arc::new(ModelManager::new());
+        let registry = Registry::new();
+        register_model_ready_metric(&registry, manager.clone(), None).unwrap();
+
+        let mut card = ModelDeploymentCard::default();
+        card.worker_type = Some(crate::worker_type::WorkerType::Aggregated);
+        let mut worker_set = crate::discovery::WorkerSet::new(
+            "watched".to_string(),
+            "watched-mdc".to_string(),
+            card,
+        );
+        let (worker_tx, worker_rx) = tokio::sync::watch::channel(Vec::new());
+        worker_set.set_instance_watcher(worker_rx);
+        worker_set.chat_engine = Some(Arc::new(crate::engines::StreamingEngineAdapter::new(
+            crate::engines::make_echo_engine(),
+        )));
+        let worker_set = Arc::new(worker_set);
+
+        // The alias shares the primary's WorkerSet and is registered under its own
+        // name, which is what the discovery commit path does. `register_alias` runs
+        // before the alias name gains a WorkerSet: it refuses a name that is already
+        // a live primary, so the reverse order would record no alias at all and this
+        // test would pass without the readiness filter.
+        assert!(manager.add_worker_set_arc("test-model", "watched", worker_set.clone()));
+        assert!(manager.register_alias("test-model-alias", "test-model"));
+        assert!(manager.add_worker_set_arc("test-model-alias", "watched", worker_set));
+
+        worker_tx.send(vec![1]).unwrap();
+
+        assert_eq!(model_ready_value(&registry, "test-model"), Some(1.0));
+        assert_eq!(model_ready_value(&registry, "test-model-alias"), None);
+
+        let series = registry
+            .gather()
+            .into_iter()
+            .find(|family| family.name() == model_ready_metric_name(None))
+            .map(|family| family.get_metric().len());
+        assert_eq!(series, Some(1));
+    }
+
+    #[test]
     fn test_round_to_sig_figs() {
         // Test rounding to 2 significant figures
         assert_eq!(round_to_sig_figs(0.0026, 2), 0.0026);
