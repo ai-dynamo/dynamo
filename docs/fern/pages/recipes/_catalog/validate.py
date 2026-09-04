@@ -32,20 +32,26 @@ Runnable from the repo root as:
     python3 docs/fern/pages/recipes/_catalog/validate.py
 """
 
+import importlib.util
 import json
 import os
-import re
 import sys
 
 # --- Locate repo root relative to this script ---------------------------------
-# This script lives at <repo>/docs/fern/pages/recipes/_catalog/validate.py
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", "..", "..", ".."))
 DOCS_DIR = os.path.join(REPO_ROOT, "docs", "fern")
 RECIPES_CAT = os.path.join(DOCS_DIR, "pages", "recipes", "_catalog")
 BENCH_CAT = os.path.join(DOCS_DIR, "pages", "recipes", "feature-benchmarks", "_catalog")
 
-# --- Optional deps -------------------------------------------------------------
+_IMAGE_ATTRIBUTION_SPEC = importlib.util.spec_from_file_location(
+    "recipe_image_attribution", os.path.join(SCRIPT_DIR, "image_attribution.py")
+)
+if _IMAGE_ATTRIBUTION_SPEC is None or _IMAGE_ATTRIBUTION_SPEC.loader is None:
+    raise RuntimeError("Could not load recipe image attribution validator")
+_image_attribution = importlib.util.module_from_spec(_IMAGE_ATTRIBUTION_SPEC)
+_IMAGE_ATTRIBUTION_SPEC.loader.exec_module(_image_attribution)
+
 try:
     import yaml as _yaml  # type: ignore
 
@@ -314,10 +320,6 @@ def load_yaml(path):
 ERRORS = []
 WARNINGS = []
 
-_IMAGE_FIELD_RE = re.compile(
-    r"""^\s*(?:-\s*)?image:\s*(?:"([^"]+)"|'([^']+)'|([^\s#]+))\s*(?:#.*)?$"""
-)
-
 
 def err(msg):
     ERRORS.append(msg)
@@ -457,62 +459,20 @@ def check_assets_recipe(obj, label):
     check_recipe_specific_images(obj, deploy_assets, label)
 
 
-def _deploy_images(path):
-    images = set()
-    with open(path, "r") as f:
-        for line in f:
-            match = _IMAGE_FIELD_RE.match(line)
-            if match:
-                images.add(next(value for value in match.groups() if value is not None))
-    return images
-
-
 def check_recipe_specific_images(obj, deploy_assets, label):
     artifacts = obj.get("artifacts")
-    if artifacts is None:
-        return
-    if not isinstance(artifacts, dict):
-        err("[%s] artifacts must be an object" % label)
-        return
-    configured_images = artifacts.get("recipe_specific_images")
-    if configured_images is None:
-        return
-    if not isinstance(configured_images, list):
-        err("[%s] artifacts.recipe_specific_images must be an array" % label)
-        return
-    deployed_images = set()
-    for asset in deploy_assets:
-        path = resolve_repo_path(asset)
-        if os.path.isfile(path):
-            deployed_images.update(_deploy_images(path))
-    for image in configured_images:
-        if image not in deployed_images:
-            err(
-                "[%s] recipe-specific image is not referenced by a deploy asset: %s"
-                % (label, image)
-            )
+    deploy_paths = [
+        resolve_repo_path(asset)
+        for asset in deploy_assets
+        if os.path.isfile(resolve_repo_path(asset))
+    ]
+    ERRORS.extend(
+        _image_attribution.recipe_image_errors(artifacts, deploy_paths, label)
+    )
 
 
 def check_recipe_specific_image_ownership(entries):
-    owners = {}
-    for recipe_id, obj in entries.items():
-        if not isinstance(obj, dict):
-            continue
-        artifacts = obj.get("artifacts")
-        if not isinstance(artifacts, dict):
-            continue
-        configured_images = artifacts.get("recipe_specific_images")
-        if not isinstance(configured_images, list):
-            continue
-        for image in configured_images:
-            if isinstance(image, str):
-                owners.setdefault(image, set()).add(recipe_id)
-    for image, recipe_ids in sorted(owners.items()):
-        if len(recipe_ids) > 1:
-            err(
-                "[recipes] recipe-specific image declared by multiple recipes: %s (%s)"
-                % (image, ", ".join(sorted(recipe_ids)))
-            )
+    ERRORS.extend(_image_attribution.recipe_image_ownership_errors(entries))
 
 
 def check_assets_benchmark(obj, label):

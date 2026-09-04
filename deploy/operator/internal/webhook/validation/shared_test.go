@@ -127,8 +127,7 @@ func admissionSourceVersion(t *testing.T, object runtime.Object) string {
 	case *nvidiacomv1alpha1.DynamoGraphDeployment,
 		*nvidiacomv1alpha1.DynamoComponentDeployment,
 		*nvidiacomv1alpha1.DynamoGraphDeploymentRequest,
-		*nvidiacomv1alpha1.DynamoModel,
-		*nvidiacomv1alpha1.DynamoCheckpoint:
+		*nvidiacomv1alpha1.DynamoModel:
 		return nvidiacomv1alpha1.GroupVersion.Version
 	case *nvidiacomv1beta1.DynamoGraphDeployment,
 		*nvidiacomv1beta1.DynamoComponentDeployment,
@@ -270,8 +269,9 @@ func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
 		},
 	}
 	validation := &sharedValidation{
-		ctx:                  context.Background(),
-		runtimeVersionSource: runtimeVersionSourceDisabled,
+		ctx:                   context.Background(),
+		runtimeVersionSource:  runtimeVersionSourceV1Beta1,
+		ratchetRuntimeVersion: true,
 	}
 
 	t.Log("Validate the standalone component as defense in depth behind OpenAPI pruning")

@@ -23,8 +23,11 @@ from dynamo.common.snapshot.constants import SNAPSHOT_CONTROL_DIR_ENV
 from dynamo.sglang._compat import (
     ensure_sglang_tensor_image_size,
     filter_supported_async_generate_kwargs,
+    get_sglang_model_config,
     override_server_args,
     require_reasoning_kwargs,
+    resolved_server_args,
+    sglang_uses_mla_backend,
 )
 from dynamo.sglang.args import (
     _diffusion_generator_kwargs,
@@ -99,7 +102,49 @@ def test_diffusion_generator_kwargs_omits_unset_master_port():
     assert "master_port" not in kwargs
 
 
-def test_override_server_args_supports_legacy_xpu_pin():
+def test_override_server_args_uses_declarative_resolution(monkeypatch):
+    calls = []
+
+    def declare(server_args, source, **fields):
+        calls.append((server_args, source, fields))
+
+    monkeypatch.setattr(sglang_compat, "declare_late_resolution", declare)
+    server_args = SimpleNamespace()
+
+    override_server_args(
+        server_args,
+        "dynamo.test",
+        enable_memory_saver=True,
+    )
+
+    assert calls == [(server_args, "dynamo.test", {"enable_memory_saver": True})]
+    assert not hasattr(server_args, "enable_memory_saver")
+
+
+def test_override_server_args_supports_sglang_0_5_17(monkeypatch):
+    calls = []
+
+    class ServerArgs:
+        def override(self, source, **fields):
+            calls.append((source, fields))
+            for name, value in fields.items():
+                object.__setattr__(self, name, value)
+
+    monkeypatch.setattr(sglang_compat, "declare_late_resolution", None)
+    server_args = ServerArgs()
+
+    override_server_args(
+        server_args,
+        "dynamo.test",
+        enable_memory_saver=True,
+    )
+
+    assert calls == [("dynamo.test", {"enable_memory_saver": True})]
+    assert server_args.enable_memory_saver is True
+
+
+def test_override_server_args_supports_legacy_xpu_pin(monkeypatch):
+    monkeypatch.setattr(sglang_compat, "declare_late_resolution", None)
     server_args = SimpleNamespace(enable_memory_saver=False)
 
     override_server_args(
@@ -111,6 +156,79 @@ def test_override_server_args_supports_legacy_xpu_pin():
 
     assert server_args.enable_memory_saver is True
     assert server_args.load_format == "legacy-loader"
+
+
+def test_resolved_server_args_uses_declarative_view(monkeypatch):
+    raw_server_args = SimpleNamespace(page_size=None)
+    resolved_server_args_view = SimpleNamespace(page_size=64)
+
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_resolved_view",
+        lambda server_args: resolved_server_args_view,
+    )
+
+    assert resolved_server_args(raw_server_args) is resolved_server_args_view
+    assert raw_server_args.page_size is None
+
+
+def test_compat_uses_current_sglang_model_config_accessor(monkeypatch):
+    expected = SimpleNamespace(is_multimodal=True)
+    server_args = SimpleNamespace()
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_model_config_of",
+        lambda value: expected if value is server_args else None,
+    )
+
+    assert get_sglang_model_config(server_args) is expected
+
+
+def test_compat_uses_legacy_sglang_model_config_accessor(monkeypatch):
+    expected = SimpleNamespace(is_multimodal=False)
+    server_args = SimpleNamespace(get_model_config=lambda: expected)
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_model_config_of",
+        lambda _: pytest.fail("current accessor should not run for legacy ServerArgs"),
+    )
+
+    assert get_sglang_model_config(server_args) is expected
+
+
+def test_compat_uses_current_sglang_mla_accessor(monkeypatch):
+    server_args = SimpleNamespace()
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_use_mla_backend",
+        lambda value: value is server_args,
+    )
+
+    assert sglang_uses_mla_backend(server_args) is True
+
+
+def test_compat_uses_legacy_sglang_mla_accessor(monkeypatch):
+    server_args = SimpleNamespace(use_mla_backend=lambda: True)
+    monkeypatch.setattr(
+        sglang_compat,
+        "sglang_use_mla_backend",
+        lambda _: pytest.fail("current accessor should not run for legacy ServerArgs"),
+    )
+
+    assert sglang_uses_mla_backend(server_args) is True
+
+
+def test_config_uses_resolved_server_args_after_runtime_init():
+    raw_server_args = SimpleNamespace(page_size=None, disaggregation_mode="null")
+    resolved_server_args = SimpleNamespace(page_size=64, disaggregation_mode="null")
+    raw_server_args._resolved = lambda: resolved_server_args
+    config = sglang_args.Config(raw_server_args, SimpleNamespace())
+
+    runtime_server_args = config.use_resolved_server_args(raw_server_args)
+
+    assert raw_server_args.page_size is None
+    assert runtime_server_args is resolved_server_args
+    assert config.server_args.page_size == 64
 
 
 @pytest.fixture(autouse=True)

@@ -27,6 +27,7 @@ def _clear_rejection_threshold_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "DYN_ACTIVE_PREFILL_TOKENS_THRESHOLD_FRAC",
         "DYN_ADMISSION_CONTROL",
         "DYN_ROUTER_QUEUE_THRESHOLD",
+        "DYN_ROUTER_SESSION_AFFINITY_MODE",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -565,6 +566,7 @@ def test_frontend_rejection_thresholds_default_to_none(
         "active_prefill_tokens_threshold": None,
         "active_prefill_tokens_threshold_frac": None,
         "session_affinity_ttl_secs": None,
+        "session_affinity_mode": "hard",
     }
     assert "busy-worker rejection disabled" in caplog.text
 
@@ -693,6 +695,7 @@ def test_all_rejection_thresholds_and_queue_override_are_forwarded(
         "active_prefill_tokens_threshold": 1000,
         "active_prefill_tokens_threshold_frac": 2.0,
         "session_affinity_ttl_secs": None,
+        "session_affinity_mode": "hard",
     }
     assert config.kv_router_kwargs()["router_queue_threshold"] == 32.0
 
@@ -859,6 +862,28 @@ def test_session_affinity_ttl_cli_and_environment(monkeypatch) -> None:
     )
     config.validate()
     assert config.session_affinity_ttl_secs == 900
+
+
+def test_session_affinity_mode_cli_and_environment(monkeypatch) -> None:
+    monkeypatch.delenv("DYN_ROUTER_SESSION_AFFINITY_MODE", raising=False)
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    assert config.session_affinity_mode == "hard"
+    assert config.router_kwargs()["session_affinity_mode"] == "hard"
+
+    monkeypatch.setenv("DYN_ROUTER_SESSION_AFFINITY_MODE", "soft")
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(parser.parse_args([]))
+    assert config.session_affinity_mode == "soft"
+
+    parser = argparse.ArgumentParser()
+    FrontendArgGroup().add_arguments(parser)
+    config = FrontendConfig.from_cli_args(
+        parser.parse_args(["--router-session-affinity-mode", "hard"])
+    )
+    assert config.session_affinity_mode == "hard"
 
 
 @pytest.mark.parametrize("ttl", [0, 31_536_001])

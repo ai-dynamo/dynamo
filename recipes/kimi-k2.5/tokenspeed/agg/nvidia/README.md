@@ -224,9 +224,7 @@ the Dynamo Operator generate the underlying `Deployment`s/`Service`s. This recip
 differs on three axes:
 
 1. **Engine knobs are inline CLI flags, not a ConfigMap.** TokenSpeed accepts engine
-   knobs directly on the worker command line, similar to vLLM. Layout therefore
-   mirrors [`recipes/llama-3-70b/vllm/agg/`](../../../../llama-3-70b/vllm/agg/) rather
-   than the TRT-LLM ConfigMap pattern.
+   knobs directly on the worker command line rather than through a TRT-LLM ConfigMap.
 2. **Raw `Deployment` + `Service` resources, not a `DynamoGraphDeployment`.** The
    operator's `backendFramework` enum currently only validates `vllm`, `sglang`,
    `trtllm` — `tokenspeed` is rejected by admission validation. Until the operator

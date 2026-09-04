@@ -133,7 +133,7 @@ jobs:
           mkdir -p "${CARGO_TARGET_DIR}"
           echo "CARGO_TARGET_DIR=${CARGO_TARGET_DIR}" >> "$GITHUB_ENV"
 
-      - name: Run Rust checks (block-manager + media-ffmpeg + integration tests)
+      - name: Run Rust checks (block-manager + media-ffmpeg + MM routing + integration tests)
         # Run from the checked-out source (owned by the runner uid) rather than
         # /workspace (baked as dynamo:0 mode 0775). The ARC pod runs as uid 1001
         # with non-zero gid, so it falls into "other" perms on the baked tree and
@@ -148,7 +148,7 @@ jobs:
           eval $(/workspace/container/use-sccache.sh setup-env)
           rustup component add rustfmt clippy
           cargo fmt -- --check
-          cargo clippy --features block-manager,media-ffmpeg,testing-nixl,integration --no-deps --all-targets -- -D warnings
+          cargo clippy --features block-manager,media-ffmpeg,mm-routing,testing-nixl,integration --no-deps --all-targets -- -D warnings
           # dynamo_llm lib unit tests mutate process env via `temp_env`
           # (std::env::set_var/remove_var); in a multi-threaded libtest binary that
           # write reallocates `environ` while another test thread (a parallel test's
@@ -162,7 +162,7 @@ jobs:
           # criterion. (Verified on the GPU tester: whole command runs green with
           # benches; lib suite 7s -> 35s single-threaded, other targets sub-second; and
           # under 12x contention 3/3 parallel shards segfault vs 0/3 single-threaded.)
-          RUST_TEST_THREADS=1 cargo test --locked --all-targets --features=block-manager,media-ffmpeg,testing-nixl,integration -- --nocapture
+          RUST_TEST_THREADS=1 cargo test --locked --all-targets --features=block-manager,media-ffmpeg,mm-routing,testing-nixl,integration -- --nocapture
           cargo clippy -p kvbm-physical --no-deps --all-targets -- -D warnings
           cargo test --locked -p kvbm-physical --features testing-kvbm -- --nocapture --test-threads=4
           /workspace/container/use-sccache.sh show-stats "Rust Checks"
