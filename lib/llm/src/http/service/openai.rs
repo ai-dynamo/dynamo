@@ -3218,6 +3218,9 @@ pub fn validate_chat_completion_fields_generic(
     request: &NvCreateChatCompletionRequest,
 ) -> Result<(), ErrorResponse> {
     request.validate().map_err(|e| {
+        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
+            return ErrorMessage::from_anyhow(e, "Invalid chat completion request");
+        }
         ErrorMessage::from_http_error(HttpError {
             code: 400,
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
@@ -3249,6 +3252,9 @@ pub fn validate_completion_fields_generic(
     request: &NvCreateCompletionRequest,
 ) -> Result<(), ErrorResponse> {
     request.validate().map_err(|e| {
+        if find_invalid_argument_in_chain(e.as_ref()).is_some() {
+            return ErrorMessage::from_anyhow(e, "Invalid completion request");
+        }
         ErrorMessage::from_http_error(HttpError {
             code: 400,
             message: VALIDATION_PREFIX.to_string() + &e.to_string(),
