@@ -13,7 +13,7 @@ use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
 
 use crate::identity::RoutingPartitionId;
-use crate::protocols::WorkerWithDpRank;
+use crate::protocols::{LocalBlockHash, WorkerWithDpRank};
 
 /// How long a pending selection lives before it is evicted.
 const SELECTION_CACHE_TTL: Duration = Duration::from_secs(120);
@@ -56,6 +56,9 @@ pub(super) struct PendingSelection {
     pub expected_output_tokens: Option<u32>,
     pub track_prefill_tokens: bool,
     pub lora_name: Option<String>,
+    /// Public block hashes retained only when the partition indexer records
+    /// routing decisions, so the replayed booking can be recorded too.
+    pub routing_hashes: Option<Vec<LocalBlockHash>>,
 }
 
 struct Entry {
@@ -71,6 +74,9 @@ type CacheKey = (RoutingPartitionId, String);
 /// Approximate resident bytes: sequence hashes plus id and scope strings.
 fn entry_bytes(key: &CacheKey, selection: &PendingSelection) -> usize {
     selection.sequence_hashes.len() * std::mem::size_of::<SequenceHash>()
+        + selection.routing_hashes.as_ref().map_or(0, |hashes| {
+            hashes.len() * std::mem::size_of::<LocalBlockHash>()
+        })
         + key.1.len()
         + key.0.model_name.len()
         + key.0.routing_group.len()
@@ -267,6 +273,7 @@ mod tests {
             expected_output_tokens: Some(16),
             track_prefill_tokens: true,
             lora_name: None,
+            routing_hashes: None,
         }
     }
 

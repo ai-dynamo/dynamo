@@ -65,7 +65,8 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 |------|---------|-------------|
 | `--port` | `8092` | HTTP server port. |
 | `--threads` | `4` | KV indexer worker threads. |
-| `--indexer-peers` | none | Comma-separated HTTP URLs used for startup KV recovery through `/dump`. |
+| `--indexer-peers` | none | Comma-separated HTTP URLs used for startup KV recovery through `/dump`. Ignored with `--remote-indexer-url`. |
+| `--remote-indexer-url` | none | Base URL of a [standalone indexer](standalone-indexer.md) that serves the primary KV index. The selector then does not subscribe to worker KV events; workers publish to the indexer instead. Requires `use_kv_events=true`. |
 | `--replica-sync-port` | none | Local ZMQ PUB port for active-load lifecycle events. The selector binds `tcp://*:<port>` internally. |
 | `--replica-sync-peers` | none | Comma-separated ZMQ PUB endpoints for selector peers. Requires `--replica-sync-port`. |
 | `--selection-cache-ttl-secs` | `120` | Seconds an unclaimed pending selection lives before eviction. |
@@ -78,6 +79,29 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 
 Router scheduling behavior continues to use the standard Dynamo router
 environment configuration.
+
+### KV Indexing Modes
+
+The service resolves its indexer shape from the same router configuration the
+frontend uses, so the two index the same way:
+
+| Configuration | Primary indexer | Routing decisions |
+|---|---|---|
+| `use_kv_events=true` (default) | Event-driven from worker ZMQ events | Not recorded |
+| `use_kv_events=true`, `DYN_ROUTER_PREDICTED_TTL_SECS` set | Event-driven | Recorded into a short-TTL side indexer merged into device scores by per-worker max |
+| `use_kv_events=false` | Approximate: no events, entries expire after `router_ttl_secs` | Recorded into the primary |
+| `--remote-indexer-url` (or `SelectionServiceBuilder::remote_indexer`) | Served by a standalone indexer, queried through `POST /query_tiered_by_hash` | Recorded into the side indexer when `DYN_ROUTER_PREDICTED_TTL_SECS` is set, else not recorded |
+
+With a remote primary, worker records do not need `kv_events_endpoint(s)` to
+become schedulable, no ZMQ listener is started in the selector, and `/dump`
+returns no primary events (peers recover from the indexer instead). A remote
+lookup failure is reported as an offline indexer for that selection.
+
+A routing decision is recorded when a reservation is booked (`select_and_reserve`,
+or `select` followed by `POST /reservations`), never for a query-only `select`.
+Hash-only reservations that supply `sequence_hashes` without `block_hashes` or
+`token_ids` are not recorded. `router_approximate_cache_policy=lru` is not yet
+supported here and falls back to TTL retention with a warning.
 
 The standalone expiry guard measures absolute age from admission; output progress does not refresh
 it. Periodic cleanup therefore reclaims stale state approximately five to six minutes after
@@ -116,6 +140,19 @@ record. If the model or routing group changes, the worker is removed from the
 previous partition and moved to the new one, which can leave the previous
 partition not ready. Assign a unique ID to every live worker across the entire
 service.
+
+A worker that can consume router hints registers `router_hint_worker_type`
+(its backend role, used to match hint sources to targets) and, when it can also
+serve as a source, `router_hint_source_control_endpoints` keyed by global DP
+rank:
+
+```json
+{
+  "worker_id": 1,
+  "router_hint_worker_type": "decode",
+  "router_hint_source_control_endpoints": { "0": "tcp://worker:5600", "1": "tcp://worker:5601" }
+}
+```
 
 `PATCH /workers/{worker_id}` updates supplied fields, `DELETE
 /workers/{worker_id}` removes the worker, and `GET /workers` lists catalog
@@ -195,6 +232,24 @@ chosen worker once this request is decoding, including the request's own
 blocks. `decode_busy` compares it against the worker's `total_kv_blocks` at
 `conditional_disagg_decode_busy_threshold` and is omitted when either the
 threshold or the capacity is unknown.
+
+A booking response may also carry a `router_hint` when another worker of the
+same `router_hint_worker_type` holds a longer cached prefix than the chosen
+worker and advertises a source control endpoint for the matching DP rank:
+
+```json
+{
+  "router_hint": {
+    "source_control_endpoint": "tcp://worker-1:5600",
+    "block_hashes": [8713492873, 1928374650]
+  }
+}
+```
+
+`block_hashes` are root-aligned external sequence hashes; entry `i` is request
+block `i`, and the target decides which suffix to fetch from the source. Hints
+require a local event-driven primary indexer (no approximate or remote primary)
+and are never attached to query-only `select` responses.
 
 ### Advisory selection
 

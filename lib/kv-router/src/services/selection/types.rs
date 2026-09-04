@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::identity::{RoutingPartitionId, default_routing_group};
 use crate::protocols::{
-    DpRank, KvTransferEnforcement, RoutingConstraints, WorkerAffinityTarget, WorkerConfigLike,
-    WorkerId, WorkerWithDpRank,
+    DpRank, KvTransferEnforcement, RouterHintWorkerMetadata, RoutingConstraints,
+    WorkerAffinityTarget, WorkerConfigLike, WorkerId, WorkerWithDpRank,
 };
+use crate::router_hint::RouterHint;
 use crate::scheduling::config::RouterConfigOverride;
 pub use crate::scheduling::{OverlapScoresResponse, SharedCacheOverlapScore, WorkerOverlapScore};
 use crate::scheduling::{PotentialLoad, SessionContext, WorkerSelectionInputTrigger};
@@ -49,6 +50,13 @@ pub struct SelectionWorkerConfig {
     pub kv_transfer_domain: Option<String>,
     pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
     pub kv_transfer_preferred_weight: Option<f32>,
+    /// Backend role used to match router-hint sources to targets. Presence
+    /// means the worker can consume router hints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_worker_type: Option<String>,
+    /// Per-global-DP-rank KV control endpoints a hint target fetches from.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub router_hint_source_control_endpoints: HashMap<u32, String>,
 }
 
 impl WorkerConfigLike for SelectionWorkerConfig {
@@ -91,6 +99,24 @@ impl WorkerConfigLike for SelectionWorkerConfig {
     fn kv_transfer_preferred_weight(&self) -> Option<f32> {
         self.kv_transfer_preferred_weight
     }
+
+    fn router_hint_metadata_for_dp_rank(
+        &self,
+        dp_rank: DpRank,
+    ) -> Option<RouterHintWorkerMetadata<'_>> {
+        let worker_type = self.router_hint_worker_type.as_deref()?;
+        if worker_type.is_empty() {
+            return None;
+        }
+        Some(RouterHintWorkerMetadata {
+            worker_type,
+            source_control_endpoint: self
+                .router_hint_source_control_endpoints
+                .get(&dp_rank)
+                .map(String::as_str)
+                .filter(|endpoint| !endpoint.is_empty()),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -118,6 +144,10 @@ pub struct WorkerCatalogRecord {
     pub kv_transfer_domain: Option<String>,
     pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
     pub kv_transfer_preferred_weight: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_hint_worker_type: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub router_hint_source_control_endpoints: HashMap<u32, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_schedulable_reasons: Vec<String>,
 }
@@ -145,6 +175,8 @@ impl WorkerCatalogRecord {
             kv_transfer_domain: req.kv_transfer_domain,
             kv_transfer_enforcement: req.kv_transfer_enforcement,
             kv_transfer_preferred_weight: req.kv_transfer_preferred_weight,
+            router_hint_worker_type: req.router_hint_worker_type,
+            router_hint_source_control_endpoints: req.router_hint_source_control_endpoints,
             not_schedulable_reasons: Vec::new(),
         }
     }
@@ -181,6 +213,8 @@ impl WorkerCatalogRecord {
             kv_transfer_domain: self.kv_transfer_domain.clone(),
             kv_transfer_enforcement: self.kv_transfer_enforcement,
             kv_transfer_preferred_weight: self.kv_transfer_preferred_weight,
+            router_hint_worker_type: self.router_hint_worker_type.clone(),
+            router_hint_source_control_endpoints: self.router_hint_source_control_endpoints.clone(),
         })
     }
 
@@ -255,6 +289,8 @@ impl Default for WorkerRequest {
             kv_transfer_domain: None,
             kv_transfer_enforcement: None,
             kv_transfer_preferred_weight: None,
+            router_hint_worker_type: None,
+            router_hint_source_control_endpoints: HashMap::new(),
         }
     }
 }
@@ -285,6 +321,13 @@ pub struct WorkerRequest {
     pub kv_transfer_domain: Option<String>,
     pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
     pub kv_transfer_preferred_weight: Option<f32>,
+    /// Backend role for router-hint source/target matching. Set it to mark the
+    /// worker as able to consume router hints.
+    #[serde(default)]
+    pub router_hint_worker_type: Option<String>,
+    /// Per-global-DP-rank KV control endpoints this worker can serve hints from.
+    #[serde(default)]
+    pub router_hint_source_control_endpoints: HashMap<u32, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -305,6 +348,10 @@ pub struct WorkerPatchRequest {
     pub kv_transfer_domain: Option<String>,
     pub kv_transfer_enforcement: Option<KvTransferEnforcement>,
     pub kv_transfer_preferred_weight: Option<f32>,
+    #[serde(default)]
+    pub router_hint_worker_type: Option<String>,
+    #[serde(default)]
+    pub router_hint_source_control_endpoints: Option<HashMap<u32, String>>,
 }
 
 impl WorkerCatalogRecord {
@@ -359,6 +406,12 @@ impl WorkerCatalogRecord {
         }
         if patch.kv_transfer_preferred_weight.is_some() {
             self.kv_transfer_preferred_weight = patch.kv_transfer_preferred_weight;
+        }
+        if patch.router_hint_worker_type.is_some() {
+            self.router_hint_worker_type = patch.router_hint_worker_type;
+        }
+        if let Some(endpoints) = patch.router_hint_source_control_endpoints {
+            self.router_hint_source_control_endpoints = endpoints;
         }
     }
 }
@@ -565,6 +618,11 @@ pub struct SelectResponse {
     /// selections (`SelectRequest::advisory`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_load: Option<SelectionWorkerLoad>,
+    /// Source the chosen worker can fetch a longer cached prefix from. Present
+    /// only for bookings when the partition has router-hint-capable workers,
+    /// the indexer can retain the matched chain, and a better source exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub router_hint: Option<RouterHint>,
 }
 
 /// Load snapshot of the chosen worker, as the scheduler projected it for this

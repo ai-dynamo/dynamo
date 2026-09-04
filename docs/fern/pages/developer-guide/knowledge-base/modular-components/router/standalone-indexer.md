@@ -399,6 +399,32 @@ after they have been computed. Callers must precompute these hashes with the int
 and omit `cache_salt` from `/query_by_hash`. Use `/query` when the indexer should compute salted
 hashes from tokens server-side.
 
+### `POST /query_tiered_by_hash` — Lossless tiered matches for a remote-primary selector
+
+```bash
+curl -X POST http://localhost:8090/query_tiered_by_hash \
+  -H 'Content-Type: application/json' \
+  -d '{"block_hashes": [123456, 789012], "model_name": "llama-3-8b", "routing_group": "default"}'
+```
+
+Returns the indexer's tiered match details in their wire form rather than the
+Mooncake score summary, so a caller can run its own overlap analysis:
+
+```json
+{
+  "block_size": 16,
+  "tiered": {
+    "device": { "scores": [[{"worker_id": 7, "dp_rank": 0}, 2]], "frequencies": [] },
+    "lower_tier": [["HostPinned", { "hits": [[{"worker_id": 7, "dp_rank": 0}, 1]] }]]
+  }
+}
+```
+
+Scores and hits are in blocks. This is the endpoint a
+[standalone selection service](standalone-selection.md) configured with
+`--remote-indexer-url` uses for its primary lookups. Both `model_name` and
+`routing_group` are required; an unknown partition returns `404`.
+
 ### Per-instance tier breakdown
 
 Each entry in `instances` is keyed by `instance_id` (as a string) and reports prefix reach across the device, host-pinned, and disk storage tiers:

@@ -364,6 +364,11 @@ struct SelectServiceCli {
     #[arg(long, value_delimiter = ',')]
     indexer_peers: Vec<String>,
 
+    /// Base URL of a standalone indexer that serves the primary KV index; this
+    /// selector then does not subscribe to worker KV events itself
+    #[arg(long)]
+    remote_indexer_url: Option<String>,
+
     /// Local ZMQ PUB port for active-load replica events
     #[arg(long, value_parser = parse_nonzero_port)]
     replica_sync_port: Option<u16>,
@@ -552,6 +557,7 @@ where
         port: cli.port,
         threads: cli.threads,
         indexer_peers: cli.indexer_peers,
+        remote_indexer_url: cli.remote_indexer_url,
         replica_sync_port: cli.replica_sync_port,
         replica_sync_peers: cli.replica_sync_peers,
         kv_router_config,
@@ -642,7 +648,7 @@ pub(crate) struct SelectionService {
 impl SelectionService {
     /// Create a selection service. `indexer_threads` sizes the KV indexer pool.
     #[new]
-    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None))]
+    #[pyo3(signature = (*, indexer_threads = 4, indexer_peers = None, replica_sync_port = None, replica_sync_peers = None, selection_cache = None, remote_indexer_url = None))]
     fn new(
         py: Python<'_>,
         indexer_threads: usize,
@@ -650,6 +656,7 @@ impl SelectionService {
         replica_sync_port: Option<u16>,
         replica_sync_peers: Option<Vec<String>>,
         selection_cache: Option<SelectionCacheConfig>,
+        remote_indexer_url: Option<String>,
     ) -> PyResult<Self> {
         let replica_sync_peers = replica_sync_peers.unwrap_or_default();
         if replica_sync_port.is_none() && !replica_sync_peers.is_empty() {
@@ -671,6 +678,9 @@ impl SelectionService {
         .selection_cache(selection_cache.unwrap_or_default().inner);
         if let Some(port) = replica_sync_port {
             builder = builder.replica_sync(port, replica_sync_peers);
+        }
+        if let Some(url) = remote_indexer_url {
+            builder = builder.remote_indexer(url);
         }
         let inner = py
             .allow_threads(|| pyo3_async_runtimes::tokio::get_runtime().block_on(builder.build()))

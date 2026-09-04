@@ -11,6 +11,7 @@ use crate::scheduling::PotentialLoad;
 use crate::services::common::replica_sync::{
     PeerManager, ReplicaPeerError, ReplicaSyncRuntime, setup_replica_sync,
 };
+use crate::services::indexer::backend::IndexerPolicy;
 use crate::tracking_hash::TrackingHashContext;
 
 use super::core::{SelectionCore, SelectionHostHooks, SelectionServiceConfig};
@@ -34,6 +35,7 @@ pub struct SelectionServiceBuilder {
     worker_type: WorkerType,
     worker_selection_policy_registry: WorkerSelectionPolicyRegistry,
     host_hooks: SelectionHostHooks,
+    remote_indexer_url: Option<String>,
 }
 
 /// Warn when a host does not construct workers for explicitly configured policy roles.
@@ -72,7 +74,16 @@ impl SelectionServiceBuilder {
             worker_type,
             worker_selection_policy_registry,
             host_hooks: SelectionHostHooks::default(),
+            remote_indexer_url: None,
         }
+    }
+
+    /// Serve the primary KV index from a standalone indexer at `base_url`
+    /// instead of subscribing to worker KV events in this process. Requires
+    /// `use_kv_events=true`; `indexer_peers` recovery is skipped.
+    pub fn remote_indexer(mut self, base_url: impl Into<String>) -> Self {
+        self.remote_indexer_url = Some(base_url.into());
+        self
     }
 
     /// Attach host-owned hooks (prefill-load estimator, overload exclusion
@@ -112,6 +123,18 @@ impl SelectionServiceBuilder {
             .worker_selection_policy_registry
             .resolve_for_worker_type(&self.kv_router_config, self.worker_type)?;
         let tracking_hash = Arc::new(TrackingHashContext::from_config(&self.kv_router_config)?);
+        let mut indexer_policy = IndexerPolicy::from_router_config(&self.kv_router_config)?;
+        if let Some(base_url) = &self.remote_indexer_url {
+            indexer_policy = indexer_policy.with_remote_indexer(base_url.clone())?;
+            if !self.indexer_peers.is_empty() {
+                tracing::warn!(
+                    remote_indexer_url = %base_url,
+                    "indexer_peers are ignored when the primary indexer is remote"
+                );
+            }
+            tracing::info!(remote_indexer_url = %base_url, "Using remote KV indexer");
+        }
+        let recover_from_peers = !self.indexer_peers.is_empty() && !indexer_policy.is_remote();
         let cancel_token = CancellationToken::new();
         let mut startup_guard = StartupGuard::new(cancel_token.clone());
         let replica_runtime = setup_replica_sync(
@@ -138,9 +161,10 @@ impl SelectionServiceBuilder {
             false,
             self.selection_cache,
             tracking_hash,
+            indexer_policy,
         ));
 
-        if !self.indexer_peers.is_empty() {
+        if recover_from_peers {
             match core.recover_indexer_from_peers(&self.indexer_peers).await {
                 Ok(true) => tracing::info!("Selection indexer recovery completed"),
                 Ok(false) => {
@@ -197,6 +221,9 @@ impl SelectionServiceConfig {
         .selection_cache(self.selection_cache.clone());
         if let Some(port) = self.replica_sync_port {
             builder = builder.replica_sync(port, self.replica_sync_peers.clone());
+        }
+        if let Some(url) = &self.remote_indexer_url {
+            builder = builder.remote_indexer(url.clone());
         }
         builder
     }

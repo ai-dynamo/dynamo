@@ -127,6 +127,20 @@ impl WorkerCatalog {
             .flatten()
     }
 
+    /// Whether any schedulable worker in `key`'s partition can consume router
+    /// hints. Worker-level metadata, so one representative rank suffices.
+    pub(super) fn has_router_hint_capable_workers(&self, key: &RoutingPartitionId) -> bool {
+        self.workers.read().values().any(|record| {
+            record.lifecycle == WorkerLifecycle::Schedulable
+                && record.model_name == key.model_name
+                && record.routing_group == key.routing_group
+                && record
+                    .router_hint_worker_type
+                    .as_deref()
+                    .is_some_and(|worker_type| !worker_type.is_empty())
+        })
+    }
+
     pub(super) fn scheduler_configs_for_key(
         &self,
         key: &RoutingPartitionId,

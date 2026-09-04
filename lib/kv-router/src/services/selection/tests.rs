@@ -1759,11 +1759,12 @@ async fn cached_booking_honors_prefill_tracking() {
     assert_eq!(loads[0]["loads"][0]["potential_prefill_tokens"], 0);
 
     // A select-time override is captured and replayed: this booking tracks
-    // prefill load despite the config default.
+    // prefill load despite the config default. A distinct prompt keeps the
+    // approximate indexer (populated by req-1's booking) from crediting it.
     let select_response = post(
         app.clone(),
         "/select",
-        r#"{"model_name":"model","selection_id":"req-2","token_ids":[1,2,3,4],"router_config_override":{"track_prefill_tokens":true}}"#,
+        r#"{"model_name":"model","selection_id":"req-2","token_ids":[5,6,7,8],"router_config_override":{"track_prefill_tokens":true}}"#,
     )
     .await;
     assert_eq!(select_response.status(), StatusCode::OK);
@@ -1796,6 +1797,7 @@ async fn selector_replica_sync_propagates_request_lifecycle() {
         port: 8092,
         threads: 1,
         indexer_peers: Vec::new(),
+        remote_indexer_url: None,
         replica_sync_port: Some(port_a),
         replica_sync_peers: Vec::new(),
         kv_router_config: test_config(),

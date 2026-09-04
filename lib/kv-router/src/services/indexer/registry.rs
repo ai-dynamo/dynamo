@@ -18,7 +18,7 @@ use crate::identity::RoutingPartitionId;
 use crate::indexer::KvIndexerMetrics;
 use crate::protocols::WorkerId;
 
-use super::backend::{Indexer, create_indexer_with_metrics};
+use super::backend::{Indexer, IndexerPolicy, create_indexer_with_policy};
 use super::listener::spawn_zmq_listener;
 
 pub struct IndexerEntry {
@@ -315,6 +315,9 @@ pub struct WorkerRegistry {
     watermarks: DashMap<(WorkerId, u32), Arc<AtomicU64>>,
     num_threads: usize,
     indexer_metrics: Arc<KvIndexerMetrics>,
+    /// Shape of every indexer this registry creates. Set before the first
+    /// partition is created; later changes affect only new partitions.
+    indexer_policy: Mutex<IndexerPolicy>,
     ready_tx: watch::Sender<bool>,
     ready_rx: watch::Receiver<bool>,
     root_cancel_token: CancellationToken,
@@ -361,10 +364,20 @@ impl WorkerRegistry {
             watermarks: DashMap::new(),
             num_threads,
             indexer_metrics,
+            indexer_policy: Mutex::new(IndexerPolicy::event_driven()),
             ready_tx,
             ready_rx,
             root_cancel_token,
         }
+    }
+
+    /// Set the shape used for indexers created from now on.
+    pub fn set_indexer_policy(&self, policy: IndexerPolicy) {
+        *self.indexer_policy.lock() = policy;
+    }
+
+    pub fn indexer_policy(&self) -> IndexerPolicy {
+        self.indexer_policy.lock().clone()
     }
 
     pub fn signal_ready(&self) {
@@ -437,10 +450,12 @@ impl WorkerRegistry {
                 "Creating new indexer"
             );
             IndexerEntry {
-                indexer: create_indexer_with_metrics(
+                indexer: create_indexer_with_policy(
+                    &key,
                     block_size,
                     self.num_threads,
                     self.indexer_metrics.clone(),
+                    &self.indexer_policy.lock(),
                 ),
                 block_size,
             }
@@ -743,10 +758,12 @@ impl WorkerRegistry {
                 "Creating indexer from recovery dump"
             );
             IndexerEntry {
-                indexer: create_indexer_with_metrics(
+                indexer: create_indexer_with_policy(
+                    &key,
                     block_size,
                     self.num_threads,
                     self.indexer_metrics.clone(),
+                    &self.indexer_policy.lock(),
                 ),
                 block_size,
             }
