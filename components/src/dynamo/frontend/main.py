@@ -335,9 +335,9 @@ def _export_transport_tls_env(config: FrontendConfig) -> None:
     if config.tcp_tls_client_key_path:
         os.environ["DYN_TCP_TLS_CLIENT_KEY_PATH"] = config.tcp_tls_client_key_path
     if config.tcp_tls_client_ca_cert_path:
-        os.environ["DYN_TCP_TLS_CLIENT_CA_CERT_PATH"] = (
-            config.tcp_tls_client_ca_cert_path
-        )
+        os.environ[
+            "DYN_TCP_TLS_CLIENT_CA_CERT_PATH"
+        ] = config.tcp_tls_client_ca_cert_path
     if config.nats_tls_ca_cert_path:
         os.environ["NATS_TLS_CA_CERT_PATH"] = config.nats_tls_ca_cert_path
     if config.nats_tls_insecure:
