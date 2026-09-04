@@ -27,7 +27,6 @@ That image is the build's `RUNTIME_IMAGE`, so the result is a single "Dynamo + T
 
 The KServe gRPC tensor path is still being completed.
 The Triton and KServe features below are not yet supported end-to-end through the Dynamo Frontend.
-Each row links to its tracking issue under the [Dynamo Triton Runtime — Improved Integration](https://linear.app/nvidia/project/dynamo-triton-runtime-improved-integration-c37a0369dc3d) project.
 
 | Limitation                             | Effect                                                                                                                                                                                                                                              |
 | :------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
