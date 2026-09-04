@@ -78,6 +78,7 @@ Environment variables:
   DYN_MODEL                      LLM model checkpoint
   DYN_ENCODER_CLASS              Dotted class path for the CustomEncoder subclass
   DYN_WORKER_GPU                 GPU index (default: 0)
+  DYN_VLLM_GPU_MEMORY_UTILIZATION Explicit vLLM GPU-memory utilization
   DYN_CUSTOM_JINJA_TEMPLATE      Path to a .jinja chat template (defaults to the
                                  bundled templates/qwen_vl.jinja)
   DYN_CUSTOM_PHRASE             Phrase the HitchhikersEncoder embeds as the "image"
@@ -91,11 +92,16 @@ done
 # VRAM sizing: honors the profiler/test-harness override
 # (_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES) when set, else falls back to a sane
 # local default. Required for VRAM-safe parallel test scheduling.
-GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
-[[ -z "$GPU_MEM_ARGS" ]] && GPU_MEM_ARGS="--gpu-memory-utilization 0.8"
+if [[ -n "${DYN_VLLM_GPU_MEMORY_UTILIZATION:-}" ]]; then
+    GPU_MEM_ARGS="--gpu-memory-utilization $DYN_VLLM_GPU_MEMORY_UTILIZATION"
+else
+    GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
+    [[ -z "$GPU_MEM_ARGS" ]] && GPU_MEM_ARGS="--gpu-memory-utilization 0.8"
+fi
 
 print_launch_banner --no-curl "CustomEncoder — Aggregated Serving" "$MODEL" "$HTTP_PORT" \
     "Worker GPU:  $WORKER_GPU" \
+    "GPU memory:  $GPU_MEM_ARGS" \
     "Encoder:     $ENCODER_CLASS" \
     "Jinja tmpl:  ${CUSTOM_JINJA_TEMPLATE:-(model default)}" \
     "NOTE: HitchhikersVisionEncoder fakes an image as a fixed-phrase embedding;" \
