@@ -988,7 +988,9 @@ fn strip_tool_call_text(text: &str) -> std::borrow::Cow<'_, str> {
             if let Some(end_offset) = input[start..].find(close) {
                 input.replace_range(start..start + end_offset + close.len(), "");
             } else {
-                input.truncate(start);
+                // A length-limited response or literal marker may not have a
+                // matching close tag. Preserve it verbatim rather than
+                // deleting the entire user-visible suffix.
                 break;
             }
         }
@@ -3038,6 +3040,16 @@ thinking
         let stripped = strip_tool_call_text(text);
         assert!(!stripped.contains("<tool_call>"));
         assert!(!stripped.contains("<think>"));
+    }
+
+    #[test]
+    fn test_strip_tool_call_text_preserves_unclosed_markers() {
+        for text in [
+            "visible <tool_call>partial arguments",
+            "visible <think>partial reasoning",
+        ] {
+            assert_eq!(strip_tool_call_text(text), text);
+        }
     }
 
     // ── PR1: reasoning / text.format / service_tier pass-through tests ──
