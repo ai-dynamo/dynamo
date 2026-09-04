@@ -1718,6 +1718,7 @@ async fn explicit_reservation_discards_cached_selection() {
 async fn cached_booking_honors_prefill_tracking() {
     let config = crate::config::KvRouterConfig {
         router_track_prefill_tokens: false,
+        overlap_score_credit: 0.0,
         ..test_config()
     };
     let service = Arc::new(SelectionService::new_local_for_test(config, 1));
@@ -2001,4 +2002,319 @@ async fn hash_path_validation_returns_bad_request() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// Standalone approximate routing records `select_and_reserve` decisions so
+/// repeated prefixes see KV overlap instead of remaining purely load-aware.
+#[tokio::test]
+async fn repeated_prefix_without_kv_events_uses_approximate_overlap() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let first = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"prefix-a"}"#,
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = response_json(first).await;
+    let first_worker = first["worker_id"].as_u64().unwrap();
+    assert_eq!(first["overlap"]["longest_matched"].as_u64().unwrap(), 0);
+
+    let second = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"prefix-b"}"#,
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second = response_json(second).await;
+
+    assert!(
+        second["overlap"]["longest_matched"].as_u64().unwrap() > 0,
+        "standalone selection should record routing decision and expose approximate KV overlap"
+    );
+    assert_eq!(second["worker_id"].as_u64().unwrap(), first_worker);
+}
+
+/// Approximate routing decisions are pruned after the configured TTL, after
+/// which a repeated prefix falls back to zero overlap.
+#[tokio::test]
+async fn approximate_overlap_decisions_expire_after_ttl() {
+    let mut config = test_config();
+    config.router_ttl_secs = 0.05; // 50 ms TTL
+    let service = Arc::new(SelectionService::new_local_for_test(config, 1));
+    let app = create_router(Arc::new(AppState { service }));
+
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let first = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"ttl-a"}"#,
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"ttl-b"}"#,
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second = response_json(second).await;
+    assert!(
+        second["overlap"]["longest_matched"].as_u64().unwrap() > 0,
+        "fresh approximate decision should still be visible"
+    );
+
+    // Wait for the TTL bucket to expire.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let third = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"ttl-c"}"#,
+    )
+    .await;
+    assert_eq!(third.status(), StatusCode::OK);
+    let third = response_json(third).await;
+    assert_eq!(
+        third["overlap"]["longest_matched"].as_u64().unwrap(),
+        0,
+        "approximate decision should expire after TTL"
+    );
+}
+
+/// Approximate routing decisions must respect cache-namespace isolation.
+/// A prefix recorded under one namespace should not produce overlap for a
+/// request with a different namespace.
+#[tokio::test]
+async fn approximate_routing_is_isolated_by_cache_namespace() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let first = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"ns-a","cache_salt":"tenant-a"}"#,
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"ns-b","cache_salt":"tenant-b"}"#,
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second = response_json(second).await;
+    assert_eq!(
+        second["overlap"]["longest_matched"].as_u64().unwrap(),
+        0,
+        "different cache namespaces must not share approximate routing state"
+    );
+}
+
+/// When worker KV events are enabled the approximate standalone path must stay
+/// disabled: the indexer should not retain routing decisions locally.
+#[tokio::test]
+async fn approximate_routing_is_disabled_when_kv_events_enabled() {
+    use crate::services::common::zmq::create_bound_pub_socket;
+
+    let mut config = test_config();
+    config.use_kv_events = true;
+    let service = Arc::new(SelectionService::new_local_for_test(config, 1));
+    let app = create_router(Arc::new(AppState { service }));
+
+    // Start a PUB socket so the listener can connect and the worker becomes
+    // schedulable in event-driven mode.
+    let socket_path = tempfile::NamedTempFile::new()
+        .unwrap()
+        .path()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let _pub_socket = create_bound_pub_socket(&format!("ipc://{socket_path}")).unwrap();
+
+    let response = post(
+        app.clone(),
+        "/workers",
+        &format!(
+            r#"{{
+                "worker_id": 1,
+                "model_name": "model",
+                "endpoint": "http://worker-1:8000",
+                "block_size": 4,
+                "kv_events_endpoints": {{
+                    "0": "ipc://{socket_path}"
+                }}
+            }}"#
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let first = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"events-a"}"#,
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"events-b"}"#,
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second = response_json(second).await;
+    assert_eq!(
+        second["overlap"]["longest_matched"].as_u64().unwrap(),
+        0,
+        "event-driven path must not record standalone approximate decisions"
+    );
+}
+
+/// Disabling overlap scoring in standalone mode must prevent approximate
+/// decision recording, preserving purely load-aware behavior.
+#[tokio::test]
+async fn approximate_routing_is_disabled_when_overlap_credit_zero() {
+    let mut config = test_config();
+    config.overlap_score_credit = 0.0;
+    let service = Arc::new(SelectionService::new_local_for_test(config, 1));
+    let app = create_router(Arc::new(AppState { service }));
+
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let first = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"credit-a"}"#,
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = post(
+        app.clone(),
+        "/select_and_reserve",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"credit-b"}"#,
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second = response_json(second).await;
+    assert_eq!(
+        second["overlap"]["longest_matched"].as_u64().unwrap(),
+        0,
+        "overlap_credit=0 must disable standalone approximate recording"
+    );
+}
+
+/// Cached `/select` + `/reservations` also records a standalone approximate
+/// routing decision once the booking succeeds, so repeated `/select` requests
+/// for the same prefix see KV overlap.
+#[tokio::test]
+async fn cached_reservation_records_standalone_approximate_decision() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let first = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"cache-sel"}"#,
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = response_json(first).await;
+    let first_worker = first["worker_id"].as_u64().unwrap();
+    assert_eq!(first["overlap"]["longest_matched"].as_u64().unwrap(), 0);
+
+    let reserve = post(
+        app.clone(),
+        "/reservations",
+        r#"{"model_name":"model","selection_id":"cache-sel"}"#,
+    )
+    .await;
+    assert_eq!(reserve.status(), StatusCode::CREATED);
+
+    let second = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"cache-sel-2"}"#,
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second = response_json(second).await;
+    assert!(
+        second["overlap"]["longest_matched"].as_u64().unwrap() > 0,
+        "cached reservation should record routing decision and expose approximate KV overlap"
+    );
+    assert_eq!(second["worker_id"].as_u64().unwrap(), first_worker);
+}
+
+/// Explicit `/reservations` (with a `worker_id`) does not carry block hashes,
+/// so it must not record a standalone approximate routing decision.
+#[tokio::test]
+async fn explicit_reservation_skips_standalone_approximate_recording() {
+    let app = app();
+    assert_eq!(
+        register_worker(app.clone(), None).await.status(),
+        StatusCode::CREATED
+    );
+
+    let first = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"expl-sel"}"#,
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = response_json(first).await;
+    assert_eq!(first["overlap"]["longest_matched"].as_u64().unwrap(), 0);
+
+    let reserve = serde_json::json!({
+        "model_name": "model",
+        "selection_id": "expl-res",
+        "worker_id": first["worker_id"],
+        "dp_rank": first["dp_rank"],
+        "sequence_hashes": [1],
+        "isl_tokens": 4,
+        "effective_prefill_tokens": first["effective_prefill_tokens"]
+    });
+    let explicit = post(app.clone(), "/reservations", &reserve.to_string()).await;
+    assert_eq!(explicit.status(), StatusCode::CREATED);
+
+    let second = post(
+        app.clone(),
+        "/select",
+        r#"{"model_name":"model","token_ids":[1,2,3,4],"selection_id":"expl-sel-2"}"#,
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second = response_json(second).await;
+    assert_eq!(
+        second["overlap"]["longest_matched"].as_u64().unwrap(),
+        0,
+        "explicit reservations must not add approximate routing state"
+    );
 }

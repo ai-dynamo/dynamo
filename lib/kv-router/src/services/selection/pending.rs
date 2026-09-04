@@ -13,7 +13,7 @@ use dynamo_tokens::SequenceHash;
 use parking_lot::Mutex;
 
 use crate::identity::RoutingPartitionId;
-use crate::protocols::WorkerWithDpRank;
+use crate::protocols::{LocalBlockHash, WorkerWithDpRank};
 
 /// How long a pending selection lives before it is evicted.
 const SELECTION_CACHE_TTL: Duration = Duration::from_secs(120);
@@ -50,6 +50,7 @@ impl Default for SelectionCacheConfig {
 pub(super) struct PendingSelection {
     pub key: RoutingPartitionId,
     pub worker: WorkerWithDpRank,
+    pub block_hashes: Vec<LocalBlockHash>,
     pub sequence_hashes: Vec<SequenceHash>,
     pub isl_tokens: usize,
     pub effective_prefill_tokens: usize,
@@ -68,9 +69,11 @@ struct Entry {
 /// Scoped by `(RoutingPartitionId, selection_id)`.
 type CacheKey = (RoutingPartitionId, String);
 
-/// Approximate resident bytes: sequence hashes plus id and scope strings.
+/// Approximate resident bytes: block hashes, sequence hashes, plus id and
+/// scope strings.
 fn entry_bytes(key: &CacheKey, selection: &PendingSelection) -> usize {
-    selection.sequence_hashes.len() * std::mem::size_of::<SequenceHash>()
+    selection.block_hashes.len() * std::mem::size_of::<LocalBlockHash>()
+        + selection.sequence_hashes.len() * std::mem::size_of::<SequenceHash>()
         + key.1.len()
         + key.0.model_name.len()
         + key.0.routing_group.len()
@@ -261,6 +264,7 @@ mod tests {
         PendingSelection {
             key: key(),
             worker: WorkerWithDpRank::new(worker_id, 0),
+            block_hashes: Vec::new(),
             sequence_hashes: vec![1, 2, 3],
             isl_tokens: 12,
             effective_prefill_tokens: 8,
