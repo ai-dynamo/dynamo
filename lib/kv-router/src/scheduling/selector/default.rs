@@ -1858,6 +1858,99 @@ mod tests {
     }
 
     #[test]
+    fn decision_trace_scores_match_default_selection() {
+        let block_size = 16;
+        let warm_worker = WorkerWithDpRank::from_worker_id(0);
+        let cold_worker = WorkerWithDpRank::from_worker_id(1);
+        let workers = HashMap::from([
+            (warm_worker.worker_id, TaintedWorkerConfig::default()),
+            (cold_worker.worker_id, TaintedWorkerConfig::default()),
+        ]);
+        let mut request = base_request(128);
+        request
+            .overlap
+            .tier_overlap_blocks
+            .device
+            .insert(warm_worker, 4);
+        request
+            .overlap
+            .effective_overlap_blocks
+            .insert(warm_worker, 4.0);
+        request.worker_loads.insert(
+            warm_worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 10,
+                ..Default::default()
+            },
+        );
+        request.worker_loads.insert(
+            cold_worker,
+            crate::sequences::WorkerLoadProjection {
+                active_decode_blocks: 1,
+                ..Default::default()
+            },
+        );
+        let selector = DefaultWorkerSelector::new(
+            Some(KvRouterConfig {
+                overlap_score_credit: 1.0,
+                router_temperature: 0.0,
+                ..Default::default()
+            }),
+            "test",
+        );
+        let weights = selection_weights(&selector.kv_router_config, &request);
+        let input = MaterializedSelectionInput::new(&request, block_size, weights);
+        let selected = selector
+            .select_worker(WorkerSelectionInput::configured(
+                &workers,
+                &request,
+                request.eligibility(),
+                block_size,
+            ))
+            .unwrap();
+        let trace = decision_trace_for_selection(
+            &selector.kv_router_config,
+            selector.worker_type,
+            &input,
+            &workers,
+            &request,
+            request.eligibility(),
+            selected.worker,
+            1.0,
+        )
+        .expect("full sampling should retain a default-policy trace");
+
+        assert_eq!(selected.worker, cold_worker);
+        assert_eq!(trace.selected_worker_id, cold_worker.worker_id);
+        assert_eq!(trace.max_overlap_worker_id, warm_worker.worker_id);
+        assert_eq!(trace.avoidable_prefill_token_equivalents, 64.0);
+
+        let default_context =
+            DefaultScoringContext::new(&workers, &request, request.eligibility(), weights);
+        let scorer =
+            DefaultWorkerScorer::new(selector.kv_router_config.clone(), selector.worker_type);
+        for candidate in &trace.candidates {
+            let worker = WorkerWithDpRank {
+                worker_id: candidate.worker_id,
+                dp_rank: candidate.dp_rank,
+            };
+            let expected = scorer.worker_logit(
+                &input.context,
+                default_context,
+                &default_row(&input, default_context, worker, None),
+                "test",
+            );
+            assert!(
+                (candidate.total_cost_blocks - expected).abs() < f64::EPSILON,
+                "worker {} trace score {} differs from selection score {}",
+                candidate.worker_id,
+                candidate.total_cost_blocks,
+                expected,
+            );
+        }
+    }
+
+    #[test]
     fn test_worker_logit_clamps_non_decode_overlap_credit() {
         let worker = WorkerWithDpRank::from_worker_id(0);
         let mut request = base_request(64);
