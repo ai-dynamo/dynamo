@@ -992,6 +992,10 @@ navigation:
                 path: pages/recipes/kubernetes-templates/dgd/vllm.mdx
           - page: DGDR
             path: pages/recipes/kubernetes-templates/dgdr.mdx
+          - page: Cloud Deployments
+            path: pages/recipes/kubernetes-templates/cloud-deployments.mdx
+          - page: Integration Deployments
+            path: pages/recipes/kubernetes-templates/integration-deployments.mdx
 
       # ==================== Local Templates ====================
       - section: Local Templates
@@ -1004,6 +1008,8 @@ navigation:
             path: pages/recipes/cli-templates/tensorrt-llm.mdx
           - page: vLLM
             path: pages/recipes/cli-templates/vllm.mdx
+          - page: Additional Backends
+            path: pages/recipes/cli-templates/additional-backends.mdx
 
       # ==================== Feature Benchmarks ====================
       # Evidence pages behind the recipes: controlled A/B benchmarks whose
@@ -1139,11 +1145,6 @@ navigation:
         icon: microchip
         path: pages/reference/general/model-early-access-builds.mdx
         slug: model-early-access-builds
-
-      - page: Examples
-        icon: file-code
-        path: pages/reference/general/examples.md
-        slug: examples
 
       # ==================== API Reference ====================
       # docs/fern/scripts/gen_python_api.py generates the Python landing page

@@ -110,7 +110,7 @@ The default model is `Qwen/Qwen3-VL-2B-Instruct`.
 | `DYNAMO_HOME` | `/workspace` | Dynamo checkout or container workspace used to resolve configuration files. |
 | `MODEL_PATH` | `Qwen/Qwen3-VL-2B-Instruct` | Model identifier or local model path passed to TensorRT-LLM. |
 | `SERVED_MODEL_NAME` | `Qwen/Qwen3-VL-2B-Instruct` | Model name registered with and accepted by the frontend. |
-| `AGG_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg.yaml` | TensorRT-LLM engine configuration for the aggregated worker. |
+| `AGG_ENGINE_ARGS` | `$DYNAMO_HOME/examples/backends/trtllm/engine_configs/qwen3-vl-2b-instruct/agg_kv_router.yaml` | TensorRT-LLM engine configuration for the aggregated worker. |
 | `MODEL_TYPE` | `qwen3_vl` | TensorRT-LLM multimodal model type used by the router worker. |
 | `BLOCK_SIZE` | `32` | KV-cache block size; it must match the backend block size for KV routing. |
 | `DYN_HTTP_PORT` | `8000` | HTTP port exposed by the Dynamo frontend. |

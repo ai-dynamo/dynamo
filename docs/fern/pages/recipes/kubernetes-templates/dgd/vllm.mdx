@@ -5,21 +5,22 @@ title: vLLM Deployment Templates
 subtitle: Ready-to-apply DynamoGraphDeployment manifests for serving vLLM with Dynamo on Kubernetes.
 ---
 
-Copy-paste deployment templates for the vLLM backend, grouped by topology. Each template includes a
-`DynamoGraphDeployment` that uses `nvidia.com/v1beta1`; XPU templates also include
-`resource.k8s.io/v1` Dynamic Resource Allocation resources. Each manifest is embedded from
-[`examples/backends/vllm/deploy/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy)
-— open an entry, use the copy button, then set your image tag and `hf-token-secret` before applying.
+Copy-paste deployment templates for the vLLM backend, grouped by topology and feature. Each template
+includes a `DynamoGraphDeployment` that uses `nvidia.com/v1beta1`; some templates also include or
+require related Kubernetes resources. The manifests are embedded from
+[`examples/backends/vllm/deploy/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/backends/vllm/deploy).
+Set the image tags, secrets, storage, and hardware-specific fields required by your environment before
+applying a template.
 
-Apply any template with:
+Apply a template with:
 
 ```bash
 kubectl apply -f agg.yaml
 ```
 
 <Note>
-A few templates bundle a second resource (a `ResourceClaimTemplate` for Dynamic Resource Allocation).
-Apply the whole file — both documents are part of the example.
+Apply every document in a multi-resource file. For templates with separate supporting files, apply or
+install those resources as described in the corresponding accordion.
 </Note>
 
 ## Aggregated
@@ -31,7 +32,7 @@ Apply the whole file — both documents are part of the example.
 <Accordion title="agg_router.yaml · Aggregated with KV-aware routing">
 <Code src="../../../../../../examples/backends/vllm/deploy/agg_router.yaml" title="agg_router.yaml" language="yaml" maxLines={0} />
 </Accordion>
-<Accordion title="agg_router_kv_approx.yaml · KV routing with approximate cache tracking (no NATS/KV events)">
+<Accordion title="agg_router_kv_approx.yaml · KV routing with approximate cache tracking">
 <Code src="../../../../../../examples/backends/vllm/deploy/agg_router_kv_approx.yaml" title="agg_router_kv_approx.yaml" language="yaml" maxLines={0} />
 </Accordion>
 <Accordion title="agg_kvbm.yaml · Aggregated with KV Block Manager offloading">
@@ -45,9 +46,6 @@ Apply the whole file — both documents are part of the example.
 </Accordion>
 <Accordion title="agg_tracing.yaml · Aggregated with OpenTelemetry tracing">
 <Code src="../../../../../../examples/backends/vllm/deploy/agg_tracing.yaml" title="agg_tracing.yaml" language="yaml" maxLines={0} />
-</Accordion>
-<Accordion title="agg_xpu_dra.yaml · Aggregated with Dynamic Resource Allocation (bundles a ResourceClaimTemplate)">
-<Code src="../../../../../../examples/backends/vllm/deploy/xpu/agg_xpu_dra.yaml" title="agg_xpu_dra.yaml" language="yaml" maxLines={0} />
 </Accordion>
 </AccordionGroup>
 
@@ -78,15 +76,106 @@ Apply the whole file — both documents are part of the example.
 <Accordion title="disagg-multinode.yaml · Disaggregated across multiple nodes">
 <Code src="../../../../../../examples/backends/vllm/deploy/disagg-multinode.yaml" title="disagg-multinode.yaml" language="yaml" maxLines={0} />
 </Accordion>
-<Accordion title="disagg_xpu_dra.yaml · Disaggregated with Dynamic Resource Allocation (bundles a ResourceClaimTemplate)">
-<Code src="../../../../../../examples/backends/vllm/deploy/xpu/disagg_xpu_dra.yaml" title="disagg_xpu_dra.yaml" language="yaml" maxLines={0} />
+</AccordionGroup>
+
+## Gateway API Inference Extension
+
+Install and configure the Gateway API Inference Extension before applying these manifests. See
+[Gateway API Routing](../../../kubernetes/kv-aware-routing/gateway-api.mdx) for the complete setup.
+
+<AccordionGroup>
+<Accordion title="gaie/agg.yaml · Aggregated serving behind an Endpoint Picker">
+<Code src="../../../../../../examples/backends/vllm/deploy/gaie/agg.yaml" title="agg.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="gaie/disagg.yaml · Disaggregated serving behind an Endpoint Picker">
+<Code src="../../../../../../examples/backends/vllm/deploy/gaie/disagg.yaml" title="disagg.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="gaie/http-route.yaml · HTTPRoute for the vLLM deployment">
+Apply this route with the matching aggregated or disaggregated DGD.
+
+<Code src="../../../../../../examples/backends/vllm/deploy/gaie/http-route.yaml" title="http-route.yaml" language="yaml" maxLines={0} />
 </Accordion>
 </AccordionGroup>
 
-## Other
+## LoRA
+
+See [LoRA Adapters](../../../kubernetes/operations/lora-adapters.md) for setup and lifecycle commands.
+The MinIO-backed examples require the secret, model resource, and synchronization Job shown next to
+their DGD.
 
 <AccordionGroup>
-<Accordion title="gms-failover.yaml · Multinode GPU Memory Service with failover (bundles a ResourceClaimTemplate)">
+<Accordion title="lora/agg_lora.yaml · LoRA adapters from object storage">
+<Code src="../../../../../../examples/backends/vllm/deploy/lora/agg_lora.yaml" title="agg_lora.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="lora/agg_lora_hf.yaml · LoRA adapter from Hugging Face">
+<Code src="../../../../../../examples/backends/vllm/deploy/lora/agg_lora_hf.yaml" title="agg_lora_hf.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="lora/agg_lora.yaml supporting resources">
+<Code src="../../../../../../examples/backends/vllm/deploy/lora/minio-secret.yaml" title="minio-secret.yaml" language="yaml" maxLines={0} />
+<Code src="../../../../../../examples/backends/vllm/deploy/lora/lora-model.yaml" title="lora-model.yaml" language="yaml" maxLines={0} />
+<Code src="../../../../../../examples/backends/vllm/deploy/lora/sync-lora-job.yaml" title="sync-lora-job.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="lora/multimodal/agg_qwen_lora.yaml · Multimodal LoRA serving">
+<Code src="../../../../../../examples/backends/vllm/deploy/lora/multimodal/agg_qwen_lora.yaml" title="agg_qwen_lora.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="Multimodal LoRA supporting resources">
+<Code src="../../../../../../examples/backends/vllm/deploy/lora/multimodal/minio-secret.yaml" title="minio-secret.yaml" language="yaml" maxLines={0} />
+<Code src="../../../../../../examples/backends/vllm/deploy/lora/multimodal/lora-model.yaml" title="lora-model.yaml" language="yaml" maxLines={0} />
+<Code src="../../../../../../examples/backends/vllm/deploy/lora/multimodal/sync-lora-job.yaml" title="sync-lora-job.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+## Intel XPU
+
+These templates use Kubernetes Dynamic Resource Allocation for Intel XPU devices. Apply the complete
+file so its `ResourceClaimTemplate` and DGD stay together.
+
+### Aggregated
+
+<AccordionGroup>
+<Accordion title="agg_xpu_dra.yaml · Baseline aggregated serving">
+<Code src="../../../../../../examples/backends/vllm/deploy/xpu/agg_xpu_dra.yaml" title="agg_xpu_dra.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="agg_router_xpu_dra.yaml · Aggregated with KV-aware routing">
+<Code src="../../../../../../examples/backends/vllm/deploy/xpu/agg_router_xpu_dra.yaml" title="agg_router_xpu_dra.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="agg_router_kv_approx_xpu_dra.yaml · Approximate KV routing">
+<Code src="../../../../../../examples/backends/vllm/deploy/xpu/agg_router_kv_approx_xpu_dra.yaml" title="agg_router_kv_approx_xpu_dra.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="agg_tracing_xpu_dra.yaml · Aggregated with OpenTelemetry tracing">
+<Code src="../../../../../../examples/backends/vllm/deploy/xpu/agg_tracing_xpu_dra.yaml" title="agg_tracing_xpu_dra.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+### Disaggregated
+
+<AccordionGroup>
+<Accordion title="disagg_xpu_dra.yaml · Baseline disaggregated serving">
+<Code src="../../../../../../examples/backends/vllm/deploy/xpu/disagg_xpu_dra.yaml" title="disagg_xpu_dra.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="disagg_router_xpu_dra.yaml · Disaggregated with KV-aware routing">
+<Code src="../../../../../../examples/backends/vllm/deploy/xpu/disagg_router_xpu_dra.yaml" title="disagg_router_xpu_dra.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="disagg_planner_xpu_dra.yaml · Disaggregated with Planner autoscaling">
+<Code src="../../../../../../examples/backends/vllm/deploy/xpu/disagg_planner_xpu_dra.yaml" title="disagg_planner_xpu_dra.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="disagg_tracing_xpu_dra.yaml · Disaggregated with OpenTelemetry tracing">
+<Code src="../../../../../../examples/backends/vllm/deploy/xpu/disagg_tracing_xpu_dra.yaml" title="disagg_tracing_xpu_dra.yaml" language="yaml" maxLines={0} />
+</Accordion>
+</AccordionGroup>
+
+## External KV Cache and Failover
+
+<AccordionGroup>
+<Accordion title="v1beta1/agg_lmcache.yaml · Aggregated serving with LMCache MP">
+Deploy the LMCache operator resource first. See [Deploy LMCache MP](../../../kubernetes/kv-cache-offloading/lmcache.mdx)
+for the full workflow.
+
+<Code src="../../../../../../examples/backends/vllm/deploy/v1beta1/agg_lmcache.yaml" title="agg_lmcache.yaml" language="yaml" maxLines={0} />
+</Accordion>
+<Accordion title="gms-failover.yaml · Multinode GPU Memory Service with failover">
+This file bundles its Dynamic Resource Allocation resources with the DGD.
+
 <Code src="../../../../../../examples/backends/vllm/deploy/gms-failover.yaml" title="gms-failover.yaml" language="yaml" maxLines={0} />
 </Accordion>
 </AccordionGroup>
