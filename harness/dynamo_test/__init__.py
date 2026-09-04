@@ -10,12 +10,55 @@ impossible to point one suite at an older release.
 
 from .argv import ArgForm, ArgV, is_shell_command_flag
 from .facts import Fact, FactNotKnown, Status
+from .roles import (
+    Policy,
+    PortName,
+    Process,
+    Role,
+    RoleBinding,
+    RoleTable,
+    Sel,
+    UnknownRole,
+    at,
+)
+from .verbs import (
+    REGISTRY,
+    Grant,
+    Phase,
+    Receiver,
+    VerbCall,
+    VerbRegistry,
+    VerbSpec,
+    Verdict,
+    verb,
+)
 
 __all__ = [
+    # values
     "ArgForm",
     "ArgV",
     "Fact",
     "FactNotKnown",
     "Status",
     "is_shell_command_flag",
+    # roles and selection
+    "Policy",
+    "PortName",
+    "Process",
+    "Role",
+    "RoleBinding",
+    "RoleTable",
+    "Sel",
+    "UnknownRole",
+    "at",
+    # verbs
+    "REGISTRY",
+    "Grant",
+    "Phase",
+    "Receiver",
+    "VerbCall",
+    "VerbRegistry",
+    "VerbSpec",
+    "Verdict",
+    "verb",
 ]
