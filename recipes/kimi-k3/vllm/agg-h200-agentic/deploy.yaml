@@ -15,7 +15,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-72f1ff2388ead7d5bffce168cd12c5b71a749d35-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-267a3244b74ebfe7834bbb59de90a77d35f35d01-vllm-runtime@sha256:c76257455802d4aae42c5dac4d4754e71a821ef626672814efdf0b3e9328a557
           imagePullPolicy: IfNotPresent
           command: [python3, -m, dynamo.frontend]
           args:
@@ -51,7 +51,7 @@ spec:
       spec:
         containers:
         - name: main
-          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-72f1ff2388ead7d5bffce168cd12c5b71a749d35-vllm-runtime
+          image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-267a3244b74ebfe7834bbb59de90a77d35f35d01-vllm-runtime@sha256:c76257455802d4aae42c5dac4d4754e71a821ef626672814efdf0b3e9328a557
           imagePullPolicy: IfNotPresent
           command: [python3, -m, dynamo.vllm]
           args:
