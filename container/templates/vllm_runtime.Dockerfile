@@ -386,12 +386,15 @@ RUN set -eu; \
 # with a source install that leaves no binary on disk. On cuda, IMAGEIO_FFMPEG_EXE
 # (set above) points imageio at the LGPL CLI copied from wheel_builder. The
 # --no-binary directive lives in the requirements file itself.
-# The upstream vllm-openai base bakes its own uv cache into the image at
-# /opt/uv/cache; the archived wheel copies there duplicate installed packages
-# (and keep stale versions on disk after the floors above refresh them). That
-# cache lives in an inherited base layer, so removing it here does not shrink
-# the pulled image -- it only drops it from the final filesystem view, which
-# is what the compliance scanners see, so drop it in the same layer.
+# The vllm-openai base sets UV_CACHE_DIR=/opt/uv/cache and used to bake a uv
+# cache there (v0.27.1 carried archived wheel copies, including mooncake, that
+# duplicated installed packages and kept stale versions on disk after floors
+# refreshed them). The pinned v0.28.0 base mounts a cache over that path in
+# every uv RUN and ships only the empty directory, so the rm below is a no-op
+# today. It stays as a guard against a base that bakes the cache again: the
+# cache would sit in an inherited layer, so removing it here does not shrink
+# the pulled image, it only drops it from the final filesystem view, which is
+# what the compliance scanners see.
 {% if device == "cuda" %}
 RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/requirements.vllm.txt \
     --mount=type=cache,id=uv-root-{{ context.dynamo.uv_version }},target=/root/.cache/uv,sharing=locked \
@@ -406,8 +409,12 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
 # non-NVIDIA device. Drop it from the shared requirements rather than ship an
 # unusable NVIDIA codec wheel in, for example, the Intel XPU image. The pattern
 # is anchored to the line start so it cannot match inside another requirement,
-# and the import check fails the build if the package arrives by another route
+# and the presence check fails the build if the package arrives by another route
 # -- a filter that silently stopped matching would otherwise look like success.
+# It asks importlib for the distribution instead of importing it: `import
+# PyNvVideoCodec` dlopens libnvcuvid.so.1, which no driverless XPU or CPU
+# builder has, so an import-based check would raise whether or not the wheel is
+# installed and could never fail the build.
 #
 # mooncake goes the same way, for two reasons. The floor names the CUDA 13
 # distribution, and the XPU and CPU bases carry no mooncake at all, so under
@@ -429,7 +436,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.vllm.txt,target=/tmp/
     uv pip install {{ pip_target }} --reinstall-package imageio-ffmpeg --no-deps \
         --requirement /tmp/requirements.vllm.nonvidia.txt && \
     rm -f /tmp/requirements.vllm.nonvidia.txt && \
-    ! /opt/venv/bin/python -c "import PyNvVideoCodec" 2>/dev/null && \
+    /opt/venv/bin/python -c "import importlib.util,sys; sys.exit(1 if importlib.util.find_spec('PyNvVideoCodec') else 0)" && \
     /opt/venv/bin/python -c "import importlib.metadata as m, re, sys; names={re.sub(r'[-_.]+', '-', n).lower() for d in m.distributions() if (n := (d.metadata or {}).get('Name'))}; sys.exit(1 if 'mooncake-transfer-engine-cuda13' in names else 0)" && \
     rm -rf /opt/uv/cache
 {% endif %}
