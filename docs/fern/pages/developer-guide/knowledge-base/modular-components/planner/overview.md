@@ -93,18 +93,24 @@ For `throughput`, `latency`, and `load`, the Planner enables load-based scaling,
 
 > **Need multi-DGD coordination?** See the [Global Planner Guide](global-planner-guide.md) for shared-policy coordination across multiple DGDs and single-endpoint multi-pool deployments.
 
-## When to Use Each Scaling Method
+## Choose a Target Without a Specific SLA
 
-- **Throughput-based scaling** should be enabled for the `sla` target when you want stable, prediction-based capacity planning. Native AIC or bootstrap FPMs make it ready sooner; otherwise it warms from live FPMs.
-- **Load-based scaling** should be enabled when traffic is bursty or hard to predict. It reacts quickly to real-time load changes without requiring pre-deployment data.
-- **Both methods together**: For the best of both worlds, enable both. Throughput-based scaling provides a lower bound (long-term capacity), while load-based scaling handles bursts above that floor. When both are enabled, use a longer `throughput_adjustment_interval_seconds` than `load_adjustment_interval_seconds`.
+Choose the default `throughput` target for a balance of throughput and GPU use, or choose `latency` to scale up earlier and keep queues shorter. Both targets use load-based scaling automatically, with no SLA values or profiling data required.
+
+For topology, target, runtime environment, and dependency decisions, see [Choose a Planner Mode](choose-planner-mode.md).
+
+## Choose a Target With a Specific SLA
+
+Choose the `sla` target and enable throughput-based and load-based scaling together. Throughput-based scaling provides a stable capacity floor, while load-based scaling responds to bursts above that floor. Native AIC or bootstrap FPMs make the performance model ready sooner; otherwise it warms from live FPMs.
+
+For the complete decision path and a recommended SLA configuration, see [Choose a Planner Mode](choose-planner-mode.md).
 
 ## Quick Start
 
 ### Prerequisites
 
 - Dynamo platform installed on Kubernetes ([Installation Guide](../../../../kubernetes/installation/install-dynamo.md))
-- kube-prometheus-stack installed ([Metrics Setup](../../../../kubernetes/operations/observability.mdx))
+- For the `sla` target, kube-prometheus-stack installed ([Metrics Setup](../../../../kubernetes/operations/observability.mdx))
 
 ### Default Target (zero config)
 
@@ -169,6 +175,7 @@ Load-based scaling has the following known limitations. Throughput-based scaling
 
 | Document | Description |
 |----------|-------------|
+| [Choose a Planner Mode](choose-planner-mode.md) | Topology, target, scaling method, environment, and dependency decisions |
 | [Planner Guide](planner-guide.md) | Deployment, configuration, integration |
 | [Planner Design](planner-design.md) | Architecture and algorithm internals |
 | [Planner Examples](planner-examples.md) | Planner-specific configuration examples |
