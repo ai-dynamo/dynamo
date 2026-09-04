@@ -287,16 +287,17 @@ impl BatchChanges {
             let old_instances = flatten_metadata(before.as_deref());
             let new_instances = flatten_metadata(after.as_deref());
             let (diff, _) = reconcile_discovery_snapshot(&old_instances, new_instances);
+            let content_changed = !diff.is_empty();
             events.extend(diff);
 
             match after {
-                Some(metadata) => {
+                Some(metadata) if content_changed => {
                     state_changes.push(StateChange::Upsert(instance_id, metadata));
                 }
                 None if before.is_some() => {
                     state_changes.push(StateChange::Remove(instance_id));
                 }
-                None => {}
+                _ => {}
             }
         }
 
@@ -486,6 +487,7 @@ mod tests {
             HashMap::from([("worker".to_string(), cached("C2", TEST_POD_UID))]),
         );
         assert!(publication.events.is_empty());
+        assert!(publication.state_changes.is_empty());
         assert_eq!(table.cr_uid("worker"), Some("C2"));
     }
 
@@ -506,12 +508,28 @@ mod tests {
         apply_readiness(&mut table, readiness);
         apply_crs(&mut table, crs);
 
+        // Build a CR with different endpoint content so the diff is non-empty
+        // and a StateChange::Upsert is emitted for the changed worker.
+        let mut updated_metadata = DiscoveryMetadata::new();
+        updated_metadata
+            .register_endpoint(DiscoveryInstance::Endpoint(Instance {
+                namespace: "ns".to_string(),
+                component: "comp".to_string(),
+                endpoint: "ep-updated".to_string(),
+                instance_id: 99,
+                transport: TransportType::Tcp("127.0.0.1:1234".to_string()),
+                device_type: None,
+                request_plane_codec: None,
+            }))
+            .unwrap();
+        let updated_cr = CachedCrMetadata {
+            metadata: Arc::new(updated_metadata),
+            uid: Some("C-new".to_string()),
+            owner_pod_uid: Some(TEST_POD_UID.to_string()),
+        };
+
         let mut changes = BatchChanges::default();
-        table.set_cr(
-            "worker-500".to_string(),
-            Some(cached("C-new", TEST_POD_UID)),
-            &mut changes,
-        );
+        table.set_cr("worker-500".to_string(), Some(updated_cr), &mut changes);
         let publication = changes.finish(&table);
 
         assert_eq!(publication.state_changes.len(), 1);

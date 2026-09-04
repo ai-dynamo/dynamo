@@ -530,7 +530,7 @@ mod tests {
 
     const TEST_POD_UID: &str = "pod-uid-test";
 
-    fn make_cached(uid: &str, _generation: i64) -> CachedCrMetadata {
+    fn make_cached(uid: &str) -> CachedCrMetadata {
         CachedCrMetadata {
             metadata: Arc::new(DiscoveryMetadata::new()),
             uid: Some(uid.to_string()),
@@ -538,7 +538,7 @@ mod tests {
         }
     }
 
-    fn make_cached_with_endpoint(uid: &str, _generation: i64) -> CachedCrMetadata {
+    fn make_cached_with_endpoint(uid: &str) -> CachedCrMetadata {
         let mut meta = DiscoveryMetadata::new();
         meta.register_endpoint(DiscoveryInstance::Endpoint(Instance {
             namespace: "ns".to_string(),
@@ -572,13 +572,13 @@ mod tests {
 
         table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached_with_endpoint("uid-1", 1),
+            make_cached_with_endpoint("uid-1"),
         )]));
         assert!(table.known.contains_key(&1u64));
 
         table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached_with_endpoint("uid-2", 1),
+            make_cached_with_endpoint("uid-2"),
         )]));
         assert_eq!(table.cr_uid("worker-a"), Some("uid-2"));
     }
@@ -590,7 +590,7 @@ mod tests {
         table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
         table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached_with_endpoint("uid-1", 1),
+            make_cached_with_endpoint("uid-1"),
         )]));
         assert!(table.known.contains_key(&1u64));
 
@@ -613,7 +613,7 @@ mod tests {
 
         let events = table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached_with_endpoint("uid-1", 1),
+            make_cached_with_endpoint("uid-1"),
         )]));
         assert!(!events.is_empty());
         assert!(table.known.contains_key(&1u64));
@@ -626,7 +626,7 @@ mod tests {
         table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
         table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached_with_endpoint("uid-1", 1),
+            make_cached_with_endpoint("uid-1"),
         )]));
         assert!(table.known.contains_key(&1u64));
 
@@ -646,12 +646,12 @@ mod tests {
         table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
         table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached_with_endpoint("uid-1", 1),
+            make_cached_with_endpoint("uid-1"),
         )]));
 
         let events = table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
-            make_cached_with_endpoint("uid-1", 1),
+            make_cached_with_endpoint("uid-1"),
         )]));
         assert!(events.is_empty());
     }
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn cached_metadata_for_invalid_cr_reuses_same_kube_object() {
         let mut cache = HashMap::new();
-        cache.insert("worker-a".to_string(), make_cached("uid-1", 7));
+        cache.insert("worker-a".to_string(), make_cached("uid-1"));
 
         let cached =
             cached_metadata_for_invalid_cr("worker-a", Some("uid-1"), Some(TEST_POD_UID), &cache)
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn cached_metadata_for_invalid_cr_rejects_recreated_kube_object() {
         let mut cache = HashMap::new();
-        cache.insert("worker-a".to_string(), make_cached("uid-1", 7));
+        cache.insert("worker-a".to_string(), make_cached("uid-1"));
 
         assert!(
             cached_metadata_for_invalid_cr("worker-a", Some("uid-2"), Some(TEST_POD_UID), &cache,)
@@ -682,7 +682,7 @@ mod tests {
     #[test]
     fn cached_metadata_for_invalid_cr_rejects_new_pod_owner() {
         let mut cache = HashMap::new();
-        cache.insert("worker-a".to_string(), make_cached("uid-1", 7));
+        cache.insert("worker-a".to_string(), make_cached("uid-1"));
 
         assert!(
             cached_metadata_for_invalid_cr("worker-a", Some("uid-1"), Some("new-pod-uid"), &cache,)
@@ -693,7 +693,7 @@ mod tests {
     #[test]
     fn invalid_cr_owner_change_discards_cached_metadata() {
         let mut cache = HashMap::new();
-        cache.insert("worker-a".to_string(), make_cached("uid-1", 7));
+        cache.insert("worker-a".to_string(), make_cached("uid-1"));
 
         let mut cr = DynamoWorkerMetadata::new(
             "worker-a",
@@ -747,7 +747,7 @@ mod tests {
             HashMap::from([("worker-0".to_string(), (1u64, "pod-uid-U2".to_string()))]);
         table.apply_readiness_scan(new_left);
 
-        let mut cr = make_cached_with_endpoint("cr-uid-1", 1);
+        let mut cr = make_cached_with_endpoint("cr-uid-1");
         cr.owner_pod_uid = Some("pod-uid-U1".to_string()); // old owner
         let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr)]));
 
@@ -766,7 +766,7 @@ mod tests {
             HashMap::from([("worker-0".to_string(), (1u64, "pod-uid-U1".to_string()))]);
         table.apply_readiness_scan(new_left);
 
-        let mut cr = make_cached_with_endpoint("cr-uid-1", 1);
+        let mut cr = make_cached_with_endpoint("cr-uid-1");
         cr.owner_pod_uid = Some("pod-uid-U1".to_string());
         let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr)]));
 
@@ -783,7 +783,7 @@ mod tests {
         let mut table = JoinTable::new();
 
         // U1 ready + CR owner U1 → joined
-        let mut cr_u1 = make_cached_with_endpoint("cr-uid-1", 1);
+        let mut cr_u1 = make_cached_with_endpoint("cr-uid-1");
         cr_u1.owner_pod_uid = Some("pod-uid-U1".to_string());
         table.apply_readiness_scan(HashMap::from([(
             "worker-0".to_string(),
@@ -813,7 +813,7 @@ mod tests {
         );
 
         // New CR with owner U2 arrives → U2 joins
-        let mut cr_u2 = make_cached_with_endpoint("cr-uid-2", 1);
+        let mut cr_u2 = make_cached_with_endpoint("cr-uid-2");
         cr_u2.owner_pod_uid = Some("pod-uid-U2".to_string());
         let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr_u2)]));
         assert!(
@@ -828,7 +828,7 @@ mod tests {
         // CR owner changes in-place while pod U1 is still ready → evict U1.
         let mut table = JoinTable::new();
 
-        let mut cr = make_cached_with_endpoint("cr-uid-1", 1);
+        let mut cr = make_cached_with_endpoint("cr-uid-1");
         cr.owner_pod_uid = Some("pod-uid-U1".to_string());
         table.apply_readiness_scan(HashMap::from([(
             "worker-0".to_string(),
@@ -838,7 +838,7 @@ mod tests {
         assert!(table.known.contains_key(&1u64));
 
         // CR updated with new owner U2 (in-place, same CR object, different owner)
-        let mut cr_new_owner = make_cached_with_endpoint("cr-uid-1", 2);
+        let mut cr_new_owner = make_cached_with_endpoint("cr-uid-1");
         cr_new_owner.owner_pod_uid = Some("pod-uid-U2".to_string());
         let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr_new_owner)]));
 
