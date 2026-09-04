@@ -22,7 +22,6 @@ fewer iterations, run the following command (expected to finish in ~58s + ~152s)
 
 import logging
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -35,7 +34,13 @@ from typing import Any, Dict, List, Optional, TextIO
 import pytest
 import requests
 
-from tests.utils.port_utils import allocate_port, deallocate_port
+from tests.utils.managed_process import terminate_process_tree
+from tests.utils.port_utils import (
+    allocate_port,
+    allocate_ports,
+    deallocate_port,
+    deallocate_ports,
+)
 from tests.utils.test_output import resolve_test_output_path
 
 from .common import DeterminismTester, ServerType
@@ -150,6 +155,13 @@ class LLMServerManager:
         self.base_url = base_url or f"http://localhost:{self.port}"
         self.metrics_port = allocate_port(start_port=6880)
         self.metrics_port_allocated = True
+        # KVBM's leader binds a PUB and an ACK socket.  Do not use its process-wide
+        # defaults (56001/56002): a vLLM EngineCore child can outlive the API server
+        # during teardown and make the next parametrized case fail to bind.
+        # This mirrors the dynamic-port handling in the shared llm_server_kvbm
+        # fixture and also keeps parallel test processes isolated.
+        self.zmq_pub_port, self.zmq_ack_port = allocate_ports(count=2, start_port=20001)
+        self.zmq_ports_allocated = True
         self.process: Optional[subprocess.Popen] = None
         self.cpu_cache_blocks = cpu_cache_blocks
         self.gpu_cache_blocks = gpu_cache_blocks
@@ -178,6 +190,8 @@ class LLMServerManager:
                 # Enable KVBM metrics for monitoring offload/onboard
                 "DYN_KVBM_METRICS": "true",
                 "DYN_KVBM_METRICS_PORT": str(self.metrics_port),
+                "DYN_KVBM_LEADER_ZMQ_PUB_PORT": str(self.zmq_pub_port),
+                "DYN_KVBM_LEADER_ZMQ_ACK_PORT": str(self.zmq_ack_port),
             }
         )
 
@@ -351,13 +365,22 @@ class LLMServerManager:
     def stop_server(self):
         """Stop LLM server and close logs."""
         if self.process:
+            process = self.process
             try:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                # Waiting only for the API-server parent is insufficient: vLLM's
+                # EngineCore is a child process and can retain GPU allocations and
+                # KVBM's ZMQ sockets after the parent exits. Snapshot and terminate
+                # the complete tree before releasing this test's ports.
+                terminate_process_tree(
+                    process.pid,
+                    logging.getLogger("pytest"),
+                    timeout=10,
+                )
                 try:
-                    self.process.wait(timeout=30)
+                    process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
-                    os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-                    self.process.wait()
+                    process.kill()
+                    process.wait()
             except (ProcessLookupError, OSError):
                 pass
             finally:
@@ -375,6 +398,9 @@ class LLMServerManager:
         if self.metrics_port_allocated:
             deallocate_port(self.metrics_port)
             self.metrics_port_allocated = False
+        if self.zmq_ports_allocated:
+            deallocate_ports([self.zmq_pub_port, self.zmq_ack_port])
+            self.zmq_ports_allocated = False
 
     def _close_log_files(self):
         if self.server_stdout_file:
