@@ -117,7 +117,7 @@ trtllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
-            pytest.mark.pre_merge,
+            pytest.mark.nightly,
             pytest.mark.trtllm,
             # Reuse the measured Qwen3-0.6B aggregate budget. NGram adds no
             # draft weights, while this config lowers token and batch limits.
