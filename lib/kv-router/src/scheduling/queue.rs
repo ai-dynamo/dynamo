@@ -2595,8 +2595,6 @@ policy_classes:
             .unwrap();
         assert_eq!(request.affinity_target, None);
 
-        // A pinned request keeps its pin: the classifier target must not create an
-        // unsatisfiable pin+affinity pair.
         request.pinned_worker = Some(WorkerWithDpRank::from_worker_id(3));
         let mut pinned = queue.build_classify_request(&request, ingress_at);
         pinned.set_worker_selection_target(target);
