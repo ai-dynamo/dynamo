@@ -10,9 +10,10 @@ on:
 
 # The action adds a type label to the PR, and creates the repository label if
 # it does not exist yet, so it needs write on both issues and pull-requests.
-# Without this block the job inherits the repository default token.
+# `contents` is deliberately left unset (none): there is no checkout step and
+# the action only calls the issues API, so nothing here reads repository
+# contents. Without this block the job inherits the repository default token.
 permissions:
-  contents: read
   issues: write
   pull-requests: write
 
