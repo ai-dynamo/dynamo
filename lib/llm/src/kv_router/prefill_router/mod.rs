@@ -669,7 +669,6 @@ where
     }
 }
 
-/// Number of independent samples the request asks for (`sampling_options.n`).
 fn parallel_sample_count(request: &PreprocessedRequest) -> usize {
     request
         .sampling_options

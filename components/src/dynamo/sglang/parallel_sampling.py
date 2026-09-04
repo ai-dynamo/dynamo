@@ -40,7 +40,6 @@ def requested_parallel_samples(sampling_params: Mapping[str, Any]) -> int:
 
 
 def single_sample_params(sampling_params: Mapping[str, Any]) -> dict[str, Any]:
-    """Copy of ``sampling_params`` for one fanned-out sub-request."""
     return {**sampling_params, "n": 1}
 
 
@@ -163,20 +162,21 @@ async def merge_choice_streams(
     before that stream's pump task is cancelled. Order matters: SGLang drops a
     cancelled request's state without telling its scheduler, so a later abort
     is a no-op and the sub-request would decode to ``max_tokens`` unconsumed.
-
-    The queue is unbounded; it holds at most one request's output.
     """
-    queue: asyncio.Queue[tuple[int, Any, BaseException | None]] = asyncio.Queue()
+    # Bounded so the consumer paces the pumps, as it paced the single stream.
+    queue: asyncio.Queue[tuple[int, Any, BaseException | None]] = asyncio.Queue(
+        maxsize=len(streams)
+    )
     finished: set[int] = set()
 
     async def pump(choice_index: int, stream: AsyncIterator[T]) -> None:
         try:
             async for item in stream:
-                queue.put_nowait((choice_index, item, None))
+                await queue.put((choice_index, item, None))
         except Exception as error:  # noqa: BLE001 - forwarded to the consumer
-            queue.put_nowait((choice_index, _STREAM_DONE, error))
+            await queue.put((choice_index, _STREAM_DONE, error))
             return
-        queue.put_nowait((choice_index, _STREAM_DONE, None))
+        await queue.put((choice_index, _STREAM_DONE, None))
 
     tasks = [
         asyncio.create_task(pump(choice_index, stream))
