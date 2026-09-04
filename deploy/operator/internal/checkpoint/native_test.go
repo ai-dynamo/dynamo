@@ -136,6 +136,25 @@ func TestResolvePodSnapshotForService(t *testing.T) {
 		assert.Equal(t, snapshot.UID, info.NativeSnapshot.UID)
 	})
 
+	t.Run("rejects a worker snapshot when the target has no worker hash", func(t *testing.T) {
+		t.Log("Given a worker PodSnapshot and a target without worker generation metadata")
+		snapshot := nativeTestPodSnapshot()
+		reader := fake.NewClientBuilder().WithScheme(nativeTestScheme(t)).WithObjects(snapshot).Build()
+
+		t.Log("When the reference is resolved without a target worker hash")
+		_, err := ResolvePodSnapshotForService(
+			context.Background(),
+			reader,
+			snapshot.Namespace,
+			nativeTestCheckpointConfig(snapshot.Name),
+			nil,
+			ExplicitPodSnapshotUse(),
+		)
+
+		t.Log("Then the snapshot metadata requires worker compatibility validation")
+		require.ErrorContains(t, err, "worker compatibility hash is required")
+	})
+
 	t.Run("rejects a worker restore before its hash is available", func(t *testing.T) {
 		t.Log("Given a worker restore whose generation identity is not initialized")
 		snapshot := nativeTestPodSnapshot()

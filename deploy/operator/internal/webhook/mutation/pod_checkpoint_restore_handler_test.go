@@ -130,6 +130,7 @@ func TestPodCheckpointRestoreMutatorNativeRestore(t *testing.T) {
 			{
 				name: "worker generation mismatch",
 				mutate: func(pod *corev1.Pod) {
+					pod.Labels[consts.KubeLabelDynamoComponentType] = consts.ComponentTypeFrontend
 					pod.Labels[consts.KubeLabelDynamoWorkerHash] = "worker-v2"
 				},
 				wantErr: "does not match expected hash",
@@ -246,6 +247,26 @@ func TestPodCheckpointRestoreMutatorAutomaticSnapshotJob(t *testing.T) {
 		assert.Equal(t, snapshot.Name, shaped.Annotations[podcontract.RestoreFromAnnotation])
 		assert.NotContains(t, shaped.Annotations, consts.RestoreCandidateSourceKindAnnotation)
 		assert.NotContains(t, shaped.Annotations, consts.SnapshotJobCandidateUIDAnnotation)
+	})
+
+	t.Run("completed worker capture rejects mismatched target worker generation", func(t *testing.T) {
+		t.Log("Given a completed worker SnapshotJob and a target claiming a non-worker component type")
+		snapshot := automaticRestoreTestSnapshot()
+		job := automaticRestoreTestJob(true)
+		job.Status.PodSnapshotName = snapshot.Name
+		job.Status.PodSnapshotUID = snapshot.UID
+		pod := automaticRestoreCandidatePod(job, nvidiacomv1alpha1.CheckpointStartupPolicyImmediate)
+		pod.Labels[consts.KubeLabelDynamoComponentType] = consts.ComponentTypeFrontend
+		pod.Labels[consts.KubeLabelDynamoWorkerHash] = "worker-v2"
+		mutator := automaticRestoreTestMutator(t, scheme, job, snapshot)
+
+		t.Log("When Pod admission resolves the worker snapshot from its server-side source")
+		resp := mutator.Handle(ctx, podCreateAdmissionRequest(t, pod))
+
+		t.Log("Then the target cannot suppress or bypass worker-hash validation")
+		assert.False(t, resp.Allowed)
+		require.NotNil(t, resp.Result)
+		assert.Contains(t, resp.Result.Message, "does not match expected hash")
 	})
 
 	t.Run("recreated SnapshotJob never restores through the stale candidate", func(t *testing.T) {
