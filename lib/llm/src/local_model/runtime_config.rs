@@ -4,6 +4,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    ops::Range,
     str::FromStr,
 };
 
@@ -31,6 +32,9 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
+
+/// Resource-safety bound for rank ranges advertised by one worker.
+pub(crate) const MAX_DATA_PARALLEL_RANKS_PER_WORKER: u32 = 4096;
 
 /// Runtime-data key indicating that a backend expects tool structural tags to
 /// exclude reasoning and manages grammar activation around reasoning itself.
@@ -566,6 +570,9 @@ fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), Vali
             "data_parallel_size must be at least 1",
         ));
     }
+    config
+        .data_parallel_rank_range()
+        .map_err(|error| validation_error("invalid_data_parallel_rank_range", error))?;
 
     if let Some(parser) = config
         .tool_call_parser
@@ -638,6 +645,23 @@ impl ModelRuntimeConfig {
 
     pub fn validate_config(&self) -> Result<(), String> {
         self.validate().map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn data_parallel_rank_range(&self) -> Result<Range<u32>, String> {
+        if self.data_parallel_size == 0 {
+            return Err("data_parallel_size must be at least 1".to_string());
+        }
+        if self.data_parallel_size > MAX_DATA_PARALLEL_RANKS_PER_WORKER {
+            return Err(format!(
+                "data_parallel_size {} exceeds the supported maximum {}",
+                self.data_parallel_size, MAX_DATA_PARALLEL_RANKS_PER_WORKER
+            ));
+        }
+        let end = self
+            .data_parallel_start_rank
+            .checked_add(self.data_parallel_size)
+            .ok_or_else(|| "data-parallel rank range overflows u32".to_string())?;
+        Ok(self.data_parallel_start_rank..end)
     }
 
     pub fn set_engine_specific<T: Serialize>(&mut self, key: &str, value: T) -> anyhow::Result<()> {
@@ -1228,14 +1252,33 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_config_rejects_zero_data_parallel_size() {
-        let config = ModelRuntimeConfig {
-            data_parallel_size: 0,
-            ..Default::default()
-        };
-
-        let error = config.validate_config().unwrap_err();
-        assert!(error.contains("data_parallel_size must be at least 1"));
+    fn test_validate_config_rejects_invalid_data_parallel_ranges() {
+        for (config, expected_error) in [
+            (
+                ModelRuntimeConfig {
+                    data_parallel_size: 0,
+                    ..Default::default()
+                },
+                "data_parallel_size must be at least 1",
+            ),
+            (
+                ModelRuntimeConfig {
+                    data_parallel_size: MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1,
+                    ..Default::default()
+                },
+                "exceeds the supported maximum",
+            ),
+            (
+                ModelRuntimeConfig {
+                    data_parallel_start_rank: u32::MAX,
+                    ..Default::default()
+                },
+                "data-parallel rank range overflows u32",
+            ),
+        ] {
+            let error = config.validate_config().unwrap_err();
+            assert!(error.contains(expected_error), "{error}");
+        }
     }
 
     #[test]

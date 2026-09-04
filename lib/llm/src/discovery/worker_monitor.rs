@@ -263,14 +263,12 @@ pub struct WorkerLoadState {
 impl WorkerLoadState {
     fn reconcile_runtime_config(
         &mut self,
-        dp_start: u32,
-        dp_size: u32,
+        dp_ranks: std::ops::Range<u32>,
         total_kv_blocks: Option<u64>,
         max_num_batched_tokens: Option<u64>,
         active_decode_blocks_threshold: Option<f64>,
     ) -> HashSet<u32> {
-        let dp_end = dp_start.saturating_add(dp_size);
-        let declared_dp_ranks: HashSet<_> = (dp_start..dp_end).collect();
+        let declared_dp_ranks: HashSet<_> = dp_ranks.collect();
 
         self.active_decode_blocks
             .retain(|dp_rank, _| declared_dp_ranks.contains(dp_rank));
@@ -878,10 +876,19 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         // worker-level "all ranks overloaded" decision.
                         for (lease_id, runtime_config) in runtime_configs.iter() {
                             let mut state = worker_load_states.entry(*lease_id).or_default();
-                            let dp_start = runtime_config.data_parallel_start_rank;
+                            let dp_ranks = match runtime_config.data_parallel_rank_range() {
+                                Ok(dp_ranks) => dp_ranks,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        worker_id = *lease_id,
+                                        %error,
+                                        "ignoring runtime config with an invalid data-parallel rank range"
+                                    );
+                                    continue;
+                                }
+                            };
                             let declared_dp_ranks = state.reconcile_runtime_config(
-                                dp_start,
-                                runtime_config.data_parallel_size,
+                                dp_ranks,
                                 runtime_config.total_kv_blocks,
                                 runtime_config.max_num_batched_tokens,
                                 cfg.active_decode_blocks_threshold,
@@ -1344,7 +1351,7 @@ mod tests {
     #[test]
     fn expected_but_unobserved_dp_rank_keeps_worker_available() {
         let mut state = WorkerLoadState::default();
-        state.reconcile_runtime_config(0, 2, Some(100), Some(1_000), Some(0.6));
+        state.reconcile_runtime_config(0..2, Some(100), Some(1_000), Some(0.6));
 
         state.update_from_active_load(
             &ActiveLoad {
@@ -1374,7 +1381,7 @@ mod tests {
     #[test]
     fn runtime_config_update_reconciles_rank_range_and_optional_capacity() {
         let mut state = WorkerLoadState::default();
-        state.reconcile_runtime_config(2, 2, Some(100), Some(1_000), Some(0.6));
+        state.reconcile_runtime_config(2..4, Some(100), Some(1_000), Some(0.6));
 
         for dp_rank in 2..4 {
             state.update_from_active_load(
@@ -1390,7 +1397,7 @@ mod tests {
         }
         assert!(state.is_overloaded(Some(0.6), None, Some(0.5)));
 
-        let declared = state.reconcile_runtime_config(3, 1, None, None, Some(0.6));
+        let declared = state.reconcile_runtime_config(3..4, None, None, Some(0.6));
         assert_eq!(declared, HashSet::from([3]));
         assert!(!state.active_decode_blocks.contains_key(&2));
         assert!(!state.kv_used_blocks.contains_key(&2));
@@ -1410,7 +1417,7 @@ mod tests {
             Some(0.6),
         ));
 
-        let declared = state.reconcile_runtime_config(4, 1, Some(100), Some(1_000), Some(0.6));
+        let declared = state.reconcile_runtime_config(4..5, Some(100), Some(1_000), Some(0.6));
         assert_eq!(declared, HashSet::from([4]));
         assert!(state.active_decode_blocks.is_empty());
         assert!(state.kv_used_blocks.is_empty());
