@@ -869,7 +869,7 @@ def _select_launches(
                 # ones that came back, so it launches on the pass they do.
                 req = test.profiled_gib
 
-                def _hold_key(gi: int) -> tuple[bool, float, int]:
+                def _hold_key(gi: int, req: float = req) -> tuple[bool, float, int]:
                     return (
                         not _usable_now(gi, req),
                         -(_cap(gi) - tentative[gi].budget),
