@@ -73,6 +73,25 @@ apply_scratch_kv_patches()
 logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
 
+def _publish_kv_adoption(rank: int, adopted: bool) -> None:
+    """Tell the scheduler process whether THIS rank inherited its KV pages.
+
+    The block-index handover runs in the scheduler's process, which at TP>1 is
+    not this one and has no handle on the executor -- so it cannot ask us over
+    ``collective_rpc``. One tiny file per rank next to the mirror is the cheapest
+    channel that crosses the boundary. Rewritten on every wake, so a rank that
+    stops adopting overwrites its own previous answer.
+    """
+    path = os.environ.get("GMS_KV_INDEX_PATH")
+    if not path:
+        return
+    try:
+        with open(f"{path}.rank{rank}", "w") as f:
+            f.write("1" if adopted else "0")
+    except OSError as e:
+        logger.warning("[GMS] could not publish KV adoption for rank %d: %s", rank, e)
+
+
 def kv_reuse_enabled() -> bool:
     """Opt in to committing the KV layout so it survives this engine (default off).
 
@@ -454,6 +473,13 @@ class GMSWorker(Worker):
                 else RequestedLockType.RW
             )
             adopted = kv_cache_manager.granted_lock_type == GrantedLockType.RW_DATA
+            # Recorded because the grant alone cannot answer this later:
+            # commit_layout() below regrants a *creating* writer to RW_DATA too,
+            # so after wake_up returns both cases look identical. The prefix-index
+            # plugin reads this to decide whether a predecessor's index describes
+            # these pages or some pages that no longer exist.
+            self._gms_kv_adopted = adopted
+            _publish_kv_adoption(self.rank, adopted)
             if was_scratch:
                 # Move scratch bookkeeping from _scratch_mappings into _mappings
                 # as preserved-VA records and flip subsequent allocations on
