@@ -294,6 +294,7 @@ impl PreparedRequest {
                 ec_transfer_params: None,
             }),
             routed_experts: None,
+            sampling_mask: Vec::new(),
         }
     }
 
