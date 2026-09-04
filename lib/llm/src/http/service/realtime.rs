@@ -65,8 +65,9 @@ use super::{RouteDoc, error::SanitizedError, service_v2};
 use crate::discovery::ModelManagerError;
 use crate::types::RealtimeBidirectionalEngine;
 use dynamo_protocols::types::realtime::{
-    EventType, RealtimeAPIError, RealtimeClientEvent, RealtimeClientEventSessionUpdate,
-    RealtimeServerEvent, RealtimeServerEventError, RealtimeServerEventSessionCreated, Session,
+    DynamoRealtimeClientEvent, EventType, RealtimeAPIError, RealtimeClientEvent,
+    RealtimeClientEventSessionUpdate, RealtimeServerEvent, RealtimeServerEventError,
+    RealtimeServerEventSessionCreated, Session,
 };
 use uuid::Uuid;
 
@@ -147,14 +148,14 @@ async fn handle_socket(
         return;
     };
 
-    let (req_tx, req_rx) = mpsc::channel::<RealtimeClientEvent>(REQUEST_CHANNEL_CAPACITY);
+    let (req_tx, req_rx) = mpsc::channel::<DynamoRealtimeClientEvent>(REQUEST_CHANNEL_CAPACITY);
 
     // Forward the session.update verbatim — it carries the engine's
     // generation config (instructions, voice, audio formats, turn-detection,
     // max_output_tokens, tools, output_modalities). The handler only used
     // it to pick the engine; the rest is the engine's to apply.
     if req_tx
-        .send(RealtimeClientEvent::SessionUpdate(session_update))
+        .send(RealtimeClientEvent::SessionUpdate(session_update).into())
         .await
         .is_err()
     {
@@ -232,21 +233,22 @@ async fn handle_socket(
             }
         };
         match msg {
-            Message::Text(text) => match serde_json::from_str::<RealtimeClientEvent>(text.as_str())
-            {
-                Ok(event) => {
-                    if req_tx.send(event).await.is_err() {
-                        tracing::debug!("/v1/realtime engine receiver dropped; ending inbound");
+            Message::Text(text) => {
+                match serde_json::from_str::<DynamoRealtimeClientEvent>(text.as_str()) {
+                    Ok(event) => {
+                        if req_tx.send(event).await.is_err() {
+                            tracing::debug!("/v1/realtime engine receiver dropped; ending inbound");
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "/v1/realtime malformed JSON frame; closing");
+                        *close_reason.lock() =
+                            Some(close_message(close_code::INVALID, "malformed JSON frame"));
                         break;
                     }
                 }
-                Err(err) => {
-                    tracing::warn!(%err, "/v1/realtime malformed JSON frame; closing");
-                    *close_reason.lock() =
-                        Some(close_message(close_code::INVALID, "malformed JSON frame"));
-                    break;
-                }
-            },
+            }
             Message::Binary(_) => {
                 tracing::warn!("/v1/realtime received binary frame; not supported in this slice");
                 *close_reason.lock() = Some(close_message(
@@ -388,7 +390,7 @@ where
         };
         let event = match msg {
             Message::Text(text) => {
-                match serde_json::from_str::<RealtimeClientEvent>(text.as_str()) {
+                match serde_json::from_str::<DynamoRealtimeClientEvent>(text.as_str()) {
                     Ok(e) => e,
                     Err(err) => {
                         // Client-driven and repeatable; debug! so a misbehaving
@@ -415,7 +417,7 @@ where
             Message::Ping(_) | Message::Pong(_) => continue, // axum handles ping replies
         };
         let session_update = match event {
-            RealtimeClientEvent::SessionUpdate(req) => req,
+            DynamoRealtimeClientEvent::OpenAI(RealtimeClientEvent::SessionUpdate(req)) => req,
             other => {
                 tracing::debug!(
                     event = other.event_type(),
