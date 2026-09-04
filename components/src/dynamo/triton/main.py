@@ -67,7 +67,11 @@ def _read_model_config(
             logger.debug(serialized_config)
             return serialized_config
     else:
-        serialized_config = str(model_config)
+        # model.config() returns dict[str, Any]; parse it back into the ModelConfig
+        # protobuf and serialize to bytes, matching the config.pbtxt branch above.
+        from google.protobuf import json_format
+        model_config_pb = json_format.ParseDict(model_config, mc.ModelConfig())
+        serialized_config = model_config_pb.SerializeToString()
         logger.info("Read model config from Triton.")
         logger.debug(serialized_config)
         return serialized_config
