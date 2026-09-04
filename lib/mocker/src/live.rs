@@ -92,17 +92,22 @@ pub fn stable_request_uuid(seed: u64, request_id: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
+/// One deterministic, tokenizer-independent output token ID. Addressable by
+/// position so a caller that needs a single token does not have to materialize
+/// the whole plan.
+pub fn deterministic_token_id(seed: u64, request_id: &str, position: usize) -> u32 {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&seed.to_le_bytes());
+    hasher.update(request_id.as_bytes());
+    hasher.update(&(position as u64).to_le_bytes());
+    let bytes = hasher.finalize();
+    1_000 + (u32::from_le_bytes(bytes.as_bytes()[..4].try_into().unwrap()) % 31_000)
+}
+
 /// Produce deterministic, tokenizer-independent output token IDs.
 pub fn deterministic_output_tokens(seed: u64, request_id: &str, count: usize) -> Vec<u32> {
     (0..count)
-        .map(|position| {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(&seed.to_le_bytes());
-            hasher.update(request_id.as_bytes());
-            hasher.update(&(position as u64).to_le_bytes());
-            let bytes = hasher.finalize();
-            1_000 + (u32::from_le_bytes(bytes.as_bytes()[..4].try_into().unwrap()) % 31_000)
-        })
+        .map(|position| deterministic_token_id(seed, request_id, position))
         .collect()
 }
 

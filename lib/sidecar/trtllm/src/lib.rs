@@ -6,10 +6,17 @@
 mod args;
 mod client;
 mod convert;
-mod disagg;
+/// Disaggregation wire contract, shared with the Mocker server so the two do
+/// not carry separate copies of the same keys.
+#[doc(hidden)]
+pub mod disagg;
 mod engine;
 mod model;
-mod proto;
+
+/// Generated OpenEngine gRPC types, exposed for the Mocker server until
+/// `openengine.v1` is published as a standalone protocol crate.
+#[doc(hidden)]
+pub mod proto;
 
 pub use engine::TrtllmSidecarEngine;
 

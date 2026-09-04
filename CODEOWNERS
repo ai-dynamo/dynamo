@@ -515,6 +515,7 @@
 /tests/gpu_memory_service/                                                   @ai-dynamo/dynamo-gms-codeowners
 /lib/llm/src/block_manager/                                                  @ai-dynamo/dynamo-kv-memory-codeowners
 /lib/mocker/servers/sglang/                                                  @ai-dynamo/dynamo-backend-sglang-codeowners
+/lib/mocker/servers/trtllm/                                                  @ai-dynamo/dynamo-backend-trtllm-codeowners
 /lib/runtime/src/metrics.rs                                                  @ai-dynamo/dynamo-observability-codeowners
 /tests/vllm_self_benchmark/                                                  @ai-dynamo/dynamo-performance-codeowners
 /deploy/pre-deployment/nixl/                                                 @ai-dynamo/dynamo-kv-memory-codeowners
