@@ -9,7 +9,7 @@ Use these examples when you want a concrete starting point instead of a conceptu
 
 ## Start Here
 
-- [Hello World custom backend](https://github.com/ai-dynamo/dynamo/tree/main/examples/custom_backend/hello_world) — a minimal GPU-unaware graph that demonstrates Dynamo's component model.
+- [Hello World custom backend](https://github.com/ai-dynamo/dynamo/tree/main/examples/custom_backend/hello_world) — a two-stage, GPU-unaware introduction: a minimal runtime service (`basic/`), then a complete custom engine on the unified backend served through the OpenAI-compatible frontend with KV-aware routing (`engine/`).
 - [Kubernetes Quickstart](../../kubernetes/getting-started/quickstart.mdx) — run a model on Kubernetes with the current recommended path.
 - [CLI Getting Started](../../cli/getting-started/introduction.mdx) — run Dynamo locally from the CLI.
 

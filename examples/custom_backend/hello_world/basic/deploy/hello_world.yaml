@@ -46,7 +46,7 @@ spec:
             requests:
               cpu: "1"
               memory: 2Gi
-          workingDir: /workspace/examples/custom_backend/hello_world/
+          workingDir: /workspace/examples/custom_backend/hello_world/basic/
     replicas: 1
     type: frontend
   - name: HelloWorldWorker
@@ -86,6 +86,6 @@ spec:
             requests:
               cpu: "1"
               memory: 4Gi
-          workingDir: /workspace/examples/custom_backend/hello_world/
+          workingDir: /workspace/examples/custom_backend/hello_world/basic/
     replicas: 1
     type: worker
