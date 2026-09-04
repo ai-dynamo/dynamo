@@ -697,9 +697,11 @@ class ManagedProcess:
     def _check_url(self, url, timeout=30, sleep=1, log_interval=20):
         if isinstance(url, tuple):
             response_check = url[1]
+            accept_non_200 = len(url) > 2 and url[2]
             url = url[0]
         else:
             response_check = None
+            accept_non_200 = False
         start_time = time.time()
         self._logger.info("Checking URL %s", url)
         elapsed = 0.0
@@ -715,7 +717,7 @@ class ManagedProcess:
 
             try:
                 response = requests.get(url, timeout=timeout - elapsed)
-                if response.status_code == 200:
+                if response.status_code == 200 or accept_non_200:
                     if response_check is None or response_check(response):
                         # Try to format JSON response nicely, otherwise show raw text
                         try:

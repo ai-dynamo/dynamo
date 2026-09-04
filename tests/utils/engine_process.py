@@ -17,6 +17,20 @@ from tests.utils.payloads import BasePayload, check_health_generate, check_model
 logger = logging.getLogger(__name__)
 
 
+def check_worker_generate_ready(response: requests.Response) -> bool:
+    """Accept a worker once its generate endpoint is ready.
+
+    Encode workers intentionally keep their component-level health status at
+    503, so worker readiness must come from the endpoint state in the payload.
+    """
+    try:
+        endpoints = response.json().get("endpoints", {})
+    except (ValueError, AttributeError):
+        return False
+
+    return isinstance(endpoints, dict) and endpoints.get("generate") == "ready"
+
+
 FRONTEND_PORT = (
     DefaultPort.FRONTEND.value
 )  # Do NOT use this in tests! Use allocate_port() instead.
@@ -69,6 +83,9 @@ class EngineConfig:
     # (num_system_ports is sized for the largest config in the module), so the
     # health check must not probe beyond this count.
     health_check_worker_count: int = 2
+    # Some workers expose a ready generate endpoint while their component-level
+    # health intentionally remains 503. Opt in to endpoint-level readiness.
+    health_check_worker_endpoint_ready: bool = False
     health_check_funcs: List[Any] = field(default_factory=list)
     env: Dict[str, str] = field(default_factory=dict)
     stragglers: list[str] = field(default_factory=list)
@@ -246,12 +263,15 @@ class EngineProcess(ManagedProcess):
         delayed = config.delayed_start
         worker_checks: list[tuple] = []
         if config.health_check_workers:
-            worker_checks = [
-                (url, None)
-                for url in cls.worker_health_check_urls(
-                    env, config.health_check_worker_count
-                )
-            ]
+            worker_urls = cls.worker_health_check_urls(
+                env, config.health_check_worker_count
+            )
+            if config.health_check_worker_endpoint_ready:
+                worker_checks = [
+                    (url, check_worker_generate_ready, True) for url in worker_urls
+                ]
+            else:
+                worker_checks = [(url, None) for url in worker_urls]
             delayed = 0
 
         health_urls = worker_checks + frontend_checks
