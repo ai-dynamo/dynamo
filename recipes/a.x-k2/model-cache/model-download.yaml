@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: model-download
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["sh", "-c"]
+          # skt/A.X-K2 is public and ungated; a token only raises rate limits.
+          envFrom:
+            - secretRef:
+                name: hf-token-secret
+                optional: true
+          env:
+            - name: MODEL_NAME
+              value: skt/A.X-K2
+            # Workers read the checkpoint from the same HF_HOME with HF_HUB_OFFLINE=1.
+            - name: HF_HOME
+              value: /shared-model-cache
+            - name: HF_XET_HIGH_PERFORMANCE
+              value: "1"
+          # The checkpoint is ~647 GiB (block-scaled FP8, Apache-2.0). The
+          # download takes 1-3 hours depending on egress bandwidth.
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub==1.16.4
+              hf download "${MODEL_NAME}"
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+            limits:
+              cpu: "8"
+              memory: 32Gi
+          volumeMounts:
+            - name: shared-model-cache
+              mountPath: /shared-model-cache
+      volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache

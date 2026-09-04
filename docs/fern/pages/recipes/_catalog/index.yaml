@@ -15,6 +15,7 @@ recipes:
 - kimi-k3
 - qwen-3-8-2-4t-a95b-fp8
 - glm-5-2
+- ax-k2
 - inkling
 - kimi-k2-6
 - nemotron-3-5-lightning

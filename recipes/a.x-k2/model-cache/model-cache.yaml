@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  # Canonical claim name used by the portable beta recipes (`shared-model-cache`
+  # volume + `/shared-model-cache` mount). A cluster Kustomization may rebind the
+  # workers to a differently named claim; see recipes/templates/kustomize/.
+  name: shared-model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      # skt/A.X-K2 FP8 checkpoint is ~647 GiB on disk. The remainder holds the
+      # persistent vLLM / Triton / FlashInfer JIT caches written by the workers
+      # and the AIPerf artifacts written by perf/perf.yaml.
+      storage: 1000Gi
+  # Edit this to match your cluster (`kubectl get storageclass`).
+  storageClassName: "your-storage-class-name"

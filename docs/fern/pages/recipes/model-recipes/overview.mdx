@@ -23,6 +23,7 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 <input className="dynamo-filter-input" type="radio" id="provider-openai" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-zai" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="provider-thinkingmachines" name="provider" />
+<input className="dynamo-filter-input" type="radio" id="provider-skt" name="provider" />
 <input className="dynamo-filter-input" type="radio" id="runtime-all" name="runtime" defaultChecked />
 <input className="dynamo-filter-input" type="radio" id="runtime-vllm" name="runtime" />
 <input className="dynamo-filter-input" type="radio" id="runtime-trtllm" name="runtime" />
@@ -38,11 +39,11 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
   <div className="dynamo-recipe-browser-header">
     <div>
       <p className="dynamo-recipe-eyebrow">Recipe catalog</p>
-      <h3>19 model families</h3>
+      <h3>20 model families</h3>
       <p>Filter by provider, runtime, and hardware. Each card notes its serving technique and workload shape.</p>
     </div>
     <div className="dynamo-catalog-facts">
-      <strong>104</strong>
+      <strong>106</strong>
       <span>Deployable configurations</span>
       <button className="dynamo-filter-reset" type="reset">Reset filters</button>
     </div>
@@ -57,7 +58,8 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
 <label className="dynamo-recipe-chip" htmlFor="provider-meta">Meta</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-openai">OpenAI</label>
 <label className="dynamo-recipe-chip" htmlFor="provider-zai">Z.AI</label>
-<label className="dynamo-recipe-chip" htmlFor="provider-thinkingmachines">Thinking Machines</label></div></div>
+<label className="dynamo-recipe-chip" htmlFor="provider-thinkingmachines">Thinking Machines</label>
+<label className="dynamo-recipe-chip" htmlFor="provider-skt">SK Telecom</label></div></div>
 <div className="dynamo-filter-row"><span className="dynamo-recipe-label">Runtime</span><div className="dynamo-filter-options"><label className="dynamo-recipe-chip" htmlFor="runtime-all">All</label>
 <label className="dynamo-recipe-chip" htmlFor="runtime-vllm">vLLM</label>
 <label className="dynamo-recipe-chip" htmlFor="runtime-trtllm">TensorRT-LLM</label>
@@ -115,6 +117,15 @@ Start with the model, runtime, and hardware you need to run. Model cards are sor
     <p className="dynamo-model-summary">SGLang recipes for long-context agentic traffic on B200 (NVFP4) or H200 (FP8), aggregated or disaggregated, with KV-aware routing, EAGLE MTP speculation, and HiCache CPU offload.</p>
     <div className="dynamo-model-tags"><span>SGLang</span><span>4x/12x B200 · 8x/16x H200</span><span>Agentic · up to 500K context</span></div>
   <a className="dynamo-card-link" href="glm-5-2.mdx" aria-label="Open the GLM-5.3/5.2 recipe">Open recipe</a>
+  </div>
+  <div className="dynamo-model-card" data-recipe-card data-provider="skt" data-runtime="vllm" data-hardware="h200" data-technique="aggregated disaggregated kv-routing expert-parallel" data-workload="long-context-reuse">
+    <div className="dynamo-model-card-top">
+      <img className="dynamo-model-logo" src="../../../assets/img/recipes/providers/skt.webp" alt="" />
+      <div><h3>A.X-K2</h3><p>SK Telecom</p></div>
+    </div>
+    <p className="dynamo-model-summary">vLLM recipes for SK Telecom's 688B MoE (33B active, MLA) on H200: aggregated TP8 or 2P2D disaggregated with KV-aware routing and NIXL KV transfer, benchmarked on 16K-input few-shot traffic with a 10K shared prefix.</p>
+    <div className="dynamo-model-tags"><span>vLLM</span><span>32x H200</span><span>Long-context prefix reuse</span><span>FP8</span></div>
+  <a className="dynamo-card-link" href="ax-k2.mdx" aria-label="Open the A.X-K2 recipe">Open recipe</a>
   </div>
   <div className="dynamo-model-card" data-recipe-card data-provider="thinkingmachines" data-runtime="sglang vllm" data-hardware="b200 gb300" data-technique="aggregated disaggregated kv-routing spec-decoding" data-workload="agentic-coding long-context-reuse multimodal-reuse">
     <div className="dynamo-model-card-top">

@@ -1,0 +1,187 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# A.X-K2 (skt/A.X-K2, FP8) -- AGGREGATED on 8-GPU H200 nodes, vLLM.
+#
+# One TP8 + EP worker per node, round-robin routing: the aggregated baseline of
+# the 32-GPU H200 study in ../../README.md#performance.
+#
+# Scale by `replicas` (one node per replica). KV-aware routing is deliberately
+# not enabled here: on this aggregated layout it added +2-7 % throughput but
+# raised TTFT p50 2-4x between 32 and 128 concurrent requests.
+#
+# Portable base per recipes/CONTRIBUTING.md: cluster-owned fields (namespace,
+# node selection, tolerations, image pull Secrets, RDMA device resources and
+# network attachments, UCX_NET_DEVICES / NCCL_IB_HCA device names, probes) are
+# bound by the cluster Kustomization, not here.
+#
+# Notes:
+# - --model uses the Hugging Face id and resolves offline from the
+#   shared-model-cache PVC.
+# - VLLM_CACHE_ROOT lives on the PVC, with the Triton and FlashInfer JIT caches
+#   pinned next to it so every worker reuses them.
+# - Worker security context follows the catalog contract (UID/GID 0 with
+#   IPC_LOCK, SYS_PTRACE, SYS_RESOURCE).
+# - Frontend carries the template's CPU/memory requests and offline env.
+# The KV-aware aggregated arm (C) of the study adds only
+# the commented Frontend env and worker flag below.
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: axk2-vllm-agg-h200
+  labels:
+    app.kubernetes.io/name: axk2-vllm-agg-h200
+    app.kubernetes.io/part-of: axk2
+spec:
+  backendFramework: vllm
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.4.2
+              imagePullPolicy: IfNotPresent
+              command: [python3]
+              args: [-m, dynamo.frontend]
+              env:
+                # Routing is the control variable of this recipe; state it.
+                # For the KV-aware aggregated arm (C) set the three
+                # values below instead and enable --kv-events-config on the
+                # workers:
+                #   DYN_ROUTER_MODE=kv, DYN_ROUTER_USE_KV_EVENTS="true",
+                #   DYN_ROUTER_KV_OVERLAP_SCORE_CREDIT="1.0"
+                - name: DYN_ROUTER_MODE
+                  value: round_robin
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+              resources:
+                requests:
+                  cpu: "8"
+                  memory: 16Gi
+
+    - name: Worker
+      type: worker
+      # The A.X-K2 runtime image tag is not semver; tell the operator which
+      # Dynamo runtime is installed inside it.
+      runtimeVersionOverride: 1.4.2
+      replicas: 4
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              # Custom build: Dynamo vllm-runtime 1.4.2 + the A.X-K2 vLLM fork.
+              # See ../../container/README.md. Replace before deploying.
+              image: your-registry.example.com/dynamo/vllm-runtime:1.4.2-axk2
+              imagePullPolicy: IfNotPresent
+              workingDir: /workspace
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              command: [python3]
+              args:
+                - -m
+                - dynamo.vllm
+                - --model
+                - $(MODEL_NAME)
+                - --served-model-name
+                - $(SERVED_MODEL_NAME)
+                - --trust-remote-code
+                - --tensor-parallel-size
+                - "8"
+                - --enable-expert-parallel
+                - --kv-cache-dtype
+                - fp8_ds_mla
+                - --gpu-memory-utilization
+                - "0.90"
+                - --max-num-seqs
+                - "256"
+                # Prefill a 16K-class prompt in one scheduling step instead of
+                # two 8K chunks (fits at TP8; it does not at TP2 x DP4).
+                - --max-num-batched-tokens
+                - "32768"
+                - --enable-prefix-caching
+                # MoE kernel for the TP layout (fork default made explicit).
+                - --moe-backend
+                - triton
+                - --dyn-reasoning-parser
+                - deepseek_v3
+                - --dyn-tool-call-parser
+                - hermes
+                - --dyn-default-thinking-mode
+                - enabled
+                # To reproduce the aggregated KV-aware arm (C), publish
+                # KV events here and switch the Frontend to DYN_ROUTER_MODE=kv:
+                # - --kv-events-config
+                # - '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080","enable_kv_cache_events":true}'
+              env:
+                - name: MODEL_NAME
+                  value: skt/A.X-K2
+                - name: SERVED_MODEL_NAME
+                  value: A.X-K2
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: TRANSFORMERS_OFFLINE
+                  value: "1"
+                # Keep prefix hashes identical across workers so a later switch
+                # to KV-aware routing needs no worker restart.
+                - name: PYTHONHASHSEED
+                  value: "0"
+                # Persist DeepGEMM / FlashInfer / Triton JIT artifacts across
+                # restarts. A cold JIT warmup takes ~25 minutes; warm is <6.
+                - name: VLLM_CACHE_ROOT
+                  value: /shared-model-cache/runtime-cache/axk2/vllm
+                - name: TRITON_CACHE_DIR
+                  value: /shared-model-cache/runtime-cache/axk2/triton
+                - name: FLASHINFER_WORKSPACE_BASE
+                  value: /shared-model-cache/runtime-cache/axk2/flashinfer
+                - name: VLLM_SKIP_P2P_CHECK
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                # NCCL tuning used in the study. Device
+                # selection (NCCL_IB_HCA) stays with the cluster Kustomization.
+                - name: NCCL_IB_DISABLE
+                  value: "0"
+                - name: NCCL_IGNORE_CPU_AFFINITY
+                  value: "1"
+                - name: NCCL_IB_PCI_RELAXED_ORDERING
+                  value: "1"
+                # UCX settings are inert without KV transfer. They are kept
+                # identical to the aggregated workers of the study so the numbers in
+                # ../../README.md#performance apply to this manifest as-is.
+                - name: UCX_TLS
+                  value: rc_x,rc,cuda_copy,cuda_ipc
+                - name: UCX_RNDV_SCHEME
+                  value: get_zcopy
+                - name: UCX_RNDV_THRESH
+                  value: "0"
+                - name: UCX_MAX_RNDV_LANES
+                  value: "4"
+                - name: UCX_RCACHE_MAX_UNRELEASED
+                  value: "1024"
+              resources:
+                requests:
+                  nvidia.com/gpu: "8"
+                  cpu: "32"
+                  memory: 512Gi
+                limits:
+                  nvidia.com/gpu: "8"
+                  cpu: "64"
+                  memory: 768Gi
+              volumeMounts:
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache

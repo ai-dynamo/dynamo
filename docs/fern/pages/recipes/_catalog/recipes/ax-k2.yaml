@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: ax-k2
+title: A.X-K2
+page: pages/recipes/model-recipes/ax-k2.mdx
+provider: skt
+model:
+  name: A.X-K2
+  hf_id: skt/A.X-K2
+  precision: Block-scaled FP8 checkpoint + FP8 MLA KV cache (fp8_ds_mla)
+status: experimental
+targets:
+- id: vllm-disagg-h200
+  recommended: true
+  hardware:
+    gpu: H200
+    count: 32
+  runtime:
+    framework: vllm
+  topology: disaggregated
+  techniques:
+  - disaggregated-prefill-decode
+  - kv-aware-routing
+  - nixl-ucx
+  - fp8
+  - fp8-kv-cache
+  - expert-parallel
+  - prefix-caching
+  workload:
+    type: long-context-reuse
+    traffic: 16,384 ISL (10,240-token shared prefix x 32 groups + 6,144 unique) / 1,024 OSL, closed-loop concurrency 8-256
+  deploy:
+    asset: recipes/a.x-k2/vllm/disagg-h200/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/a.x-k2/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 47,056 total tok/s (input+output) at concurrency 128 on 32x H200, TTFT p50 1.82 s, TPOT p50 42 ms, ITL p99 80 ms; +51 % over aggregated TP8 round-robin (single run, vllm bench serve)
+- id: vllm-agg-h200
+  recommended: false
+  hardware:
+    gpu: H200
+    count: 32
+  runtime:
+    framework: vllm
+  topology: aggregated
+  techniques:
+  - fp8
+  - fp8-kv-cache
+  - expert-parallel
+  - prefix-caching
+  - round-robin
+  workload:
+    type: long-context-reuse
+    traffic: 16,384 ISL (10,240-token shared prefix x 32 groups + 6,144 unique) / 1,024 OSL, closed-loop concurrency 8-256
+  deploy:
+    asset: recipes/a.x-k2/vllm/agg-h200/deploy.yaml
+  benchmark:
+    tool: aiperf
+    asset: recipes/a.x-k2/perf/perf.yaml
+  expected_performance:
+    available: true
+    summary: 31,164 total tok/s (input+output) at concurrency 128 with 4x TP8 replicas on 32x H200, TTFT p50 1.14 s, TPOT p50 65 ms, ITL p99 881 ms (single run, vllm bench serve)
+related_benchmarks: []
+maintainer: Heo Seungmin (SK Telecom)
+gaps:
+- worker image is a placeholder; the A.X-K2 vLLM fork has no public Dynamo runtime image (custom build documented in recipes/a.x-k2/container/README.md)
+- measured at vLLM 0.28.1rc1 on Dynamo 1.4.2; the public fork branch axk2-v0.23.0 pairs with vllm-runtime 1.3.0 and is unvalidated with these flags
+- published numbers come from vllm bench serve closed-loop runs, not from the shipped AIPerf perf.yaml
+- single run per cell (seed 42), no repeat runs or confidence intervals; closed-loop only
+- disaggregated decode workers stall at KV saturation on cold 16K prompts above ~100 concurrent requests per 32 GPUs (open issue, documented on page)

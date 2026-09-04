@@ -778,6 +778,9 @@ navigation:
           - page: GLM-5.3/5.2
             path: pages/recipes/model-recipes/glm-5-2.mdx
             slug: glm-5-2
+          - page: A.X-K2
+            path: pages/recipes/model-recipes/ax-k2.mdx
+            slug: ax-k2
           - page: Inkling NVFP4
             path: pages/recipes/model-recipes/inkling-nvfp4.mdx
             slug: inkling

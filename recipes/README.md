@@ -84,6 +84,7 @@ These recipes are under active development and may require additional setup step
 
 | Model | Framework | Mode | GPUs | Deployment | Notes |
 |-------|-----------|------|------|------------|-------|
+| **[A.X-K2](a.x-k2/)** | vLLM | Aggregated + Disaggregated | 8x H200 per worker (32x H200 measured) | ✅ | Text only — 688B MoE / 33B active (DeepSeek-V3-style MLA), FP8 weights + FP8 MLA KV, agg TP8+EP round-robin or 2P2D disagg (TP2×DP4 prefill / TP8 decode) with KV-aware routing and NIXL over RDMA, 256K ctx, reasoning + tool calling. Benchmarked at 16K/1K with a 10K shared prefix (AIPerf Job included): disagg +16–51 % throughput and ~1/10 decode ITL p99 vs agg from 32 concurrent requests. Requires the [SKT-AI vLLM fork and a custom Dynamo runtime image](a.x-k2/container/). |
 | **[Gemma-4-31B](gemma4-31b/)** | TensorRT-LLM | Aggregated | 8x B200 / 8x GB200 / 8x H200 | ✅ | NVFP4 + FP8 KV on B200/GB200; BF16 + 16-bit KV and TP4 on H200; KV-aware routing; MTP on B200/GB200, not yet verified on H200; agentic profile |
 | **[GLM-5-NVFP4 (EFA)](glm-5-nvfp4/sglang/disagg/efa/)** | SGLang | Disagg Prefill/Decode over AWS EFA | 20x GB200 | ✅ | KV transfer over AWS EFA via NIXL LIBFABRIC instead of UCX. Patched libfabric baked into image. Requires [custom container build](glm-5-nvfp4/sglang/disagg/efa/Dockerfile.efa). |
 | **[Nemotron-3-Nano-Omni-NVFP4](nemotron-3-nano-omni/vllm/agg/)** | vLLM | Aggregated | 1x GPU | ✅ | Multimodal text/image/video/audio serving. Requires [custom container build](nemotron-3-nano-omni/). |

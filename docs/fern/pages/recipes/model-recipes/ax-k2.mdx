@@ -1,0 +1,264 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "A.X-K2"
+subtitle: "Serve skt/A.X-K2 with Dynamo and vLLM on H200, aggregated or with prefill/decode disaggregation and KV-aware routing."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Each target below is an NVIDIA Dynamo + vLLM deployment of SK Telecom's `skt/A.X-K2`, a 688B-parameter mixture-of-experts model (33B active) with DeepSeek-V3-style Multi-head Latent Attention (MLA), a block-scaled FP8 checkpoint, and a 256K context window. Both targets run on 32x H200 (four 8-GPU nodes) and were measured on 16K-input / 1K-output traffic whose requests share a 10K-token few-shot prefix. The disaggregated target is the recommended pick: from 32 concurrent requests upward it delivers +16 to +51 % total throughput over the aggregated TP8 baseline and roughly one tenth of its decode inter-token latency (ITL) p99. Pick your serving topology; every command on this page updates to match.
+
+<Warning>
+**Experimental.** The A.X-K2 model implementation lives in the [SKT-AI vLLM fork](https://github.com/SKT-AI/vllm) until it lands upstream, so the worker image is a custom build on the Dynamo 1.4.2 vLLM runtime. Build it per the [container README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/a.x-k2/container/README.md) and replace the placeholder image before deploying.
+</Warning>
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" defaultChecked />
+<label htmlFor="recipe-variant-disagg">Disaggregated <span className="dynamo-target-picker-hint">Recommended</span></label>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" />
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="disagg">
+<span><b>Checkpoint</b> skt/A.X-K2</span>
+<span><b>Precision</b> FP8 weights + FP8 MLA KV cache (fp8_ds_mla)</span>
+<span><b>GPUs</b> 32x H200: 2 prefill workers (8 GPUs each) + 2 decode workers (8 GPUs each)</span>
+<span><b>Parallelism</b> TP2 x DP4 + EP prefill / TP8 + EP decode</span>
+<span><b>Routing</b> Event-driven KV-aware; NIXL KV transfer over UCX/RDMA</span>
+<span><b>Workload</b> 16K ISL (10K shared prefix + 6K unique) / 1K OSL</span>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="agg">
+<span><b>Checkpoint</b> skt/A.X-K2</span>
+<span><b>Precision</b> FP8 weights + FP8 MLA KV cache (fp8_ds_mla)</span>
+<span><b>GPUs</b> 8x H200 per worker; measured with 4 workers (32x H200)</span>
+<span><b>Parallelism</b> TP8 + EP</span>
+<span><b>Routing</b> Round-robin</span>
+<span><b>Workload</b> 16K ISL (10K shared prefix + 6K unique) / 1K OSL</span>
+</div>
+</div>
+
+## Prerequisites
+
+<div data-variant="disagg">
+
+- A Kubernetes cluster with the Dynamo platform installed and **four 8-GPU H200 nodes** available, with RDMA (InfiniBand or RoCE) between them exposed to the pods for NIXL KV transfer. See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A custom worker image built from the A.X-K2 vLLM fork on `vllm-runtime:1.4.2` ([container README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/a.x-k2/container/README.md)).
+- A filled cluster Kustomization or a private copy of the manifest that adds node selection, tolerations, image pull Secrets, RDMA device resources and network attachments, and the RDMA device names (`UCX_NET_DEVICES`, `NCCL_IB_HCA`). The portable base omits them; the measured values are listed in the [source README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/a.x-k2/README.md#cluster-bindings-used-in-the-measurement).
+- Optionally a Hugging Face token for the download Job. `skt/A.X-K2` is public and ungated (Apache-2.0); a token only raises rate limits.
+
+</div>
+
+<div data-variant="agg">
+
+- A Kubernetes cluster with the Dynamo platform installed and **one 8-GPU H200 node per worker replica** (the manifest ships with four replicas). See the [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+- A custom worker image built from the A.X-K2 vLLM fork on `vllm-runtime:1.4.2` ([container README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/a.x-k2/container/README.md)).
+- A filled cluster Kustomization or a private copy of the manifest that adds node selection, tolerations, and image pull Secrets. The portable base omits them.
+- Optionally a Hugging Face token for the download Job. `skt/A.X-K2` is public and ungated (Apache-2.0); a token only raises rate limits.
+
+</div>
+
+Create the namespace and, optionally, the token secret:
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+# Optional; the download Job runs without it.
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+<Warning>
+Set `storageClassName` in `model-cache/model-cache.yaml` to a ReadWriteMany class on your cluster, replace the placeholder worker image, and bind the cluster-owned fields before applying.
+</Warning>
+
+## Deploy
+
+Create the `shared-model-cache` PVC and download the checkpoint (~647 GiB; 1-3 hours). The workers read it offline and keep their JIT kernel caches on the same volume, so later starts skip the ~25-minute cold warmup:
+
+```bash
+kubectl apply -f recipes/a.x-k2/model-cache/model-cache.yaml -n ${NAMESPACE}
+kubectl apply -f recipes/a.x-k2/model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=14400s
+```
+
+Then apply the manifest for your target.
+
+<div data-variant="disagg">
+
+```bash
+kubectl apply -f recipes/a.x-k2/vllm/disagg-h200/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=axk2-vllm-disagg-h200 \
+  -n ${NAMESPACE} --timeout=5400s
+```
+
+</div>
+
+<div data-variant="agg">
+
+```bash
+kubectl apply -f recipes/a.x-k2/vllm/agg-h200/deploy.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Ready pod \
+  -l nvidia.com/dynamo-graph-deployment-name=axk2-vllm-agg-h200 \
+  -n ${NAMESPACE} --timeout=5400s
+```
+
+</div>
+
+To change a running deployment, delete the DGD and apply the new manifest instead of patching it: a patched deployment can leave old and new worker pods contending for the same nodes.
+
+## Smoke Test
+
+Send a test request to verify the deployment serves traffic. First forward the frontend port for your target:
+
+<div data-variant="disagg">
+
+```bash
+kubectl port-forward svc/axk2-vllm-disagg-h200-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-variant="agg">
+
+```bash
+kubectl port-forward svc/axk2-vllm-agg-h200-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+</div>
+
+Both targets serve the model as `A.X-K2`:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"A.X-K2","messages":[{"role":"user","content":"A.X K2를 한 문장으로 소개해줘."}],"max_tokens":256}'
+```
+
+Thinking mode is on by default, so a small `max_tokens` budget can be spent on `reasoning_content` before any `content` appears. Pass `"chat_template_kwargs": {"enable_thinking": false}` to disable it per request.
+
+## Benchmark
+
+One AIPerf Job, `perf/perf.yaml`, covers both targets. It runs a closed-loop concurrency sweep at 16,384 input / 1,024 output tokens and writes artifacts to the shared PVC. Edit the `env` block to select the target and workload:
+
+| Variable | Values |
+| --- | --- |
+| `ENDPOINT` | `axk2-vllm-disagg-h200-frontend:8000` or `axk2-vllm-agg-h200-frontend:8000` |
+| `WORKLOAD` | `w1` (32 shared 10K prefixes + 6K unique), `w2` (16K cold), `w3` (one shared 10K prefix + 6K unique) |
+| `CONCURRENCIES` | Space-separated sweep, default `8 16 32 64 128` |
+
+```bash
+kubectl apply -f recipes/a.x-k2/perf/perf.yaml -n ${NAMESPACE}
+kubectl logs -f job/axk2-bench -n ${NAMESPACE}
+```
+
+<div data-variant="disagg">
+
+Keep `w2` (cold) concurrency at or below 128 on this target: at 256 the decode workers saturate their KV cache and stall (see [Notes](#notes)).
+
+</div>
+
+## Expected Performance
+
+Measured on 32x H200 with `vllm bench serve` (closed-loop, seed 42, single run per cell) at 16K input / 1K output; the shipped AIPerf Job reproduces the same request shapes. Total tok/s counts input and output tokens.
+
+The rows for your selected topology are highlighted.
+
+**W1 (32 shared 10K prefixes + 6K unique per request)**
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Target</th><th>Concurrency</th><th>Total tok/s</th><th>TTFT p50</th><th>TPOT p50</th><th>ITL p99</th></tr></thead>
+<tbody>
+<tr data-variant="disagg"><td>Disaggregated 2P2D + KV routing</td><td>32</td><td>20,003</td><td>1.38 s</td><td>24.6 ms</td><td>79 ms</td></tr>
+<tr data-variant="disagg"><td>Disaggregated 2P2D + KV routing</td><td>64</td><td>31,280</td><td>1.56 s</td><td>31.6 ms</td><td>82 ms</td></tr>
+<tr data-variant="disagg"><td>Disaggregated 2P2D + KV routing</td><td>128</td><td>47,056</td><td>1.82 s</td><td>42.0 ms</td><td>80 ms</td></tr>
+<tr data-variant="disagg"><td>Disaggregated 2P2D + KV routing</td><td>256</td><td>48,079</td><td>32.3 s</td><td>56.5 ms</td><td>330 ms</td></tr>
+<tr data-variant="agg"><td>Aggregated 4x TP8, round-robin</td><td>32</td><td>17,219</td><td>0.95 s</td><td>28.6 ms</td><td>49 ms</td></tr>
+<tr data-variant="agg"><td>Aggregated 4x TP8, round-robin</td><td>64</td><td>23,730</td><td>0.96 s</td><td>41.9 ms</td><td>876 ms</td></tr>
+<tr data-variant="agg"><td>Aggregated 4x TP8, round-robin</td><td>128</td><td>31,164</td><td>1.14 s</td><td>65.0 ms</td><td>881 ms</td></tr>
+<tr data-variant="agg"><td>Aggregated 4x TP8, round-robin</td><td>256</td><td>33,138</td><td>37.4 s</td><td>81.1 ms</td><td>2,324 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+**W2 (16K cold, no prefix reuse)**
+
+<div className="dynamo-variant-table-wrap">
+<table className="dynamo-variant-table">
+<thead><tr><th>Target</th><th>Concurrency</th><th>Total tok/s</th><th>TTFT p50</th><th>TPOT p50</th><th>ITL p99</th></tr></thead>
+<tbody>
+<tr data-variant="disagg"><td>Disaggregated 2P2D + KV routing</td><td>32</td><td>20,599</td><td>2.83 s</td><td>23.1 ms</td><td>46 ms</td></tr>
+<tr data-variant="disagg"><td>Disaggregated 2P2D + KV routing</td><td>64</td><td>30,154</td><td>5.12 s</td><td>29.4 ms</td><td>87 ms</td></tr>
+<tr data-variant="disagg"><td>Disaggregated 2P2D + KV routing</td><td>128</td><td>43,931</td><td>12.5 s</td><td>34.4 ms</td><td>88 ms</td></tr>
+<tr data-variant="disagg"><td>Disaggregated 2P2D + KV routing</td><td>256</td><td colSpan="4">stalled (decode KV saturation)</td></tr>
+<tr data-variant="agg"><td>Aggregated 4x TP8, round-robin</td><td>32</td><td>14,725</td><td>2.21 s</td><td>34.6 ms</td><td>41 ms</td></tr>
+<tr data-variant="agg"><td>Aggregated 4x TP8, round-robin</td><td>64</td><td>18,739</td><td>2.21 s</td><td>55.5 ms</td><td>2,153 ms</td></tr>
+<tr data-variant="agg"><td>Aggregated 4x TP8, round-robin</td><td>128</td><td>22,335</td><td>13.3 s</td><td>87.1 ms</td><td>2,231 ms</td></tr>
+<tr data-variant="agg"><td>Aggregated 4x TP8, round-robin</td><td>256</td><td>21,393</td><td>114 s</td><td>92.0 ms</td><td>4,250 ms</td></tr>
+</tbody>
+</table>
+</div>
+
+**Effect decomposition** (same measurement, one variable moved at a time; W1 = shared prefix, W2 = cold)
+
+Prefill/decode disaggregation with KV-aware routing held constant (aggregated TP8 → 2P2D):
+
+| Concurrency | W1 total tok/s | W2 total tok/s | W1 ITL p99 | W2 ITL p99 |
+| ---: | --- | --- | --- | --- |
+| 32 | 17,523 → 20,003 (+14 %) | 14,484 → 20,599 (+42 %) | 48 → 79 ms | 41 → 46 ms |
+| 64 | 24,832 → 31,280 (+26 %) | 18,618 → 30,154 (+62 %) | 874 → 82 ms | 2,149 → 87 ms |
+| 128 | 33,186 → 47,056 (+42 %) | 22,185 → 43,931 (+98 %) | 879 → 80 ms | 2,174 → 88 ms |
+| 256 | 35,498 → 48,079 (+35 %) | 21,428 → stalled | 2,016 → 330 ms | 4,246 → stalled |
+
+KV-aware routing with topology held constant (aggregated: round-robin → KV; 2P2D: random → KV):
+
+| Concurrency | agg W1 tok/s | agg W1 TTFT p50 | 2P2D W1 tok/s | 2P2D W1 TTFT p50 | 2P2D W2 tok/s |
+| ---: | --- | --- | --- | --- | --- |
+| 32 | 17,219 → 17,523 (+2 %) | 0.95 → 2.01 s | 18,437 → 20,003 (+8 %) | 2.74 → 1.38 s | 18,755 → 20,599 (+10 %) |
+| 64 | 23,730 → 24,832 (+5 %) | 0.96 → 2.22 s | 29,843 → 31,280 (+5 %) | 2.70 → 1.56 s | 30,377 → 30,154 (−1 %) |
+| 128 | 31,164 → 33,186 (+6 %) | 1.14 → 4.25 s | 46,556 → 47,056 (+1 %) | 3.51 → 1.82 s | stalled → 43,931 |
+| 256 | 33,138 → 35,498 (+7 %) | 37.4 → 30.6 s | 45,478 → 48,079 (+6 %) | 35.3 → 32.3 s | — → stalled |
+
+Below 32 concurrent requests the two targets are within 8 % of each other. Full six-concurrency tables, the TP2 x DP4 aggregated alternative, and the W3 cache-ceiling run are in the [source README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/a.x-k2/README.md#performance).
+
+## Compare All Targets
+
+| | Disaggregated (recommended) | Aggregated |
+|---|---|---|
+| **GPUs** | 32x H200: 2 prefill + 2 decode workers, 8 GPUs each | 8x H200 per worker, 4 workers measured |
+| **Parallelism** | TP2 x DP4 + EP prefill / TP8 + EP decode | TP8 + EP |
+| **Routing** | KV-aware (event-driven, prefill workers publish KV events) | Round-robin |
+| **Prefill batch budget** | 8,192 (engine default) prefill / 2,048 decode | 32,768 |
+| **KV capacity per worker** | 1.77M tokens prefill / 864K tokens decode (49 x 16K) | 864K tokens (49 x 16K) |
+| **MoE backend** | flashinfer_cutlass prefill / triton decode | triton |
+| **KV transfer** | NIXL over UCX/RDMA | N/A |
+| **Best at** | 32 to 128 concurrent requests per 32 GPUs | Up to 16 concurrent requests per 32 GPUs (within 8 % of disaggregated) |
+| **Operating limit** | About 100 concurrent cold 16K requests per 32 GPUs | KV-bound above 49 requests per worker; completes with long TTFT |
+
+## Related Feature Benchmarks
+
+No controlled feature benchmark page is linked to this recipe yet. The five-arm agg-vs-disagg and routing comparison behind it is summarized in the [source README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/a.x-k2/README.md#performance). Browse the [Feature Benchmarks](../feature-benchmarks/browse-all-benchmarks.mdx) for comparable KV-routing and disaggregation studies.
+
+## Notes
+
+- **Decode KV saturation stall (open).** On the disaggregated target, cold 16K prompts above ~100 concurrent requests per 32 GPUs fill both decode workers to 51 running sequences and 100 % KV usage, after which generation stops until the client aborts. NIXL reported no errors, and the workers recover without a restart. Prefix-hit traffic and the aggregated target complete at the same KV usage. Cap concurrency, or set `--max-num-seqs` on the decode workers near the per-worker KV limit.
+- **KV-aware routing is essential on 2P2D and counterproductive on this aggregated layout.** On 2P2D it halves TTFT p50 and prevents the random-routing stall at 128 concurrent cold requests. On aggregated TP8 it adds only +2 to +7 % throughput and raises TTFT p50 2-4x between 32 and 128 concurrent requests, so the aggregated target ships with round-robin.
+- **Prefill batch budgets differ by layout.** TP8 prefills a 16K prompt in one 32,768-token step. TP2 x DP4 does not fit that budget (dense weights are replicated per GPU) and uses the 8,192 default, so a 16K prompt is two chunks and TTFT has a ~2 s floor.
+- **FlashInfer autotune is off.** With no warm JIT cache the TP2 x DP4 warmup hung for 25+ minutes until the NCCL watchdog killed the worker. Both targets persist the DeepGEMM, FlashInfer, and Triton caches on the shared PVC.
+- Reasoning uses the `deepseek_v3` parser and tool calling the `hermes` parser. Thinking mode is enabled by default via `--dyn-default-thinking-mode enabled`.
+
+## Source
+
+- Source README: [recipes/a.x-k2/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/a.x-k2/README.md)
+- Container build: [recipes/a.x-k2/container/README.md](https://github.com/ai-dynamo/dynamo/blob/main/recipes/a.x-k2/container/README.md)
+- Disaggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/a.x-k2/vllm/disagg-h200/deploy.yaml)
+- Aggregated H200: [deploy.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/a.x-k2/vllm/agg-h200/deploy.yaml)
+- Benchmark manifest: [perf.yaml](https://github.com/ai-dynamo/dynamo/blob/main/recipes/a.x-k2/perf/perf.yaml)
+- Model card: [skt/A.X-K2](https://huggingface.co/skt/A.X-K2)
