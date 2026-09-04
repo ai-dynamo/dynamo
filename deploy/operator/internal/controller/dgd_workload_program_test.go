@@ -677,6 +677,7 @@ func TestComponentProgram_ReconcileWorkerRollout(t *testing.T) {
 			},
 		})
 		reconciler := createTestDGDReconcilerWithStatus(dgd, withObjects(targetDCD))
+		adoptTestDCDs(dgd, reconciler.Client)
 		program := reconciler.newComponentProgram()
 		status := dgd.DeepCopy().Status
 
@@ -1058,6 +1059,7 @@ func TestComponentWorkloadsReconciler_RemovedWorkerComponentDrainedToZero(t *tes
 	})
 
 	r := createTestDGDReconcilerWithStatus(reducedDGD, withObjects(prefillOldDCD, decodeOldDCD))
+	adoptTestDCDs(reducedDGD, r.Client)
 	rollout := newDGDWorkerRolloutReconciler(r.Client, r.Recorder)
 	workloads := newComponentWorkloadsReconciler(r.Client, r.Recorder, rollout)
 

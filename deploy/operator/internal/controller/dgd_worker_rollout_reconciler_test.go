@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -111,12 +112,38 @@ func createTestDGDReconcilerWithStatus(dgd *nvidiacomv1beta1.DynamoGraphDeployme
 	}
 }
 
+// adoptTestDCDs sets dgd as the controller owner on all DCDs in r's cache
+// that carry dgd's name label but lack an owner reference. Unit tests use
+// label-only fixtures, so this establishes the ownership that production code
+// now requires via metav1.IsControlledBy.
+func adoptTestDCDs(dgd *nvidiacomv1beta1.DynamoGraphDeployment, r client.Client) {
+	scheme := runtime.NewScheme()
+	_ = nvidiacomv1beta1.AddToScheme(scheme)
+	ctx := context.Background()
+	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
+	if err := r.List(ctx, dcdList, client.MatchingLabels{
+		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+	}); err != nil {
+		return
+	}
+	for i := range dcdList.Items {
+		dcd := &dcdList.Items[i]
+		if !metav1.IsControlledBy(dcd, dgd) {
+			if ctrl.SetControllerReference(dgd, dcd, scheme) == nil {
+				_ = r.Update(ctx, dcd)
+			}
+		}
+	}
+}
+
 func createTestReconcilerWithStatus(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 	opts ...testReconcilerOption,
 ) *dgdWorkerRolloutReconciler {
 	reconciler := createTestDGDReconcilerWithStatus(dgd, opts...)
-	return newDGDWorkerRolloutReconciler(reconciler.Client, reconciler.Recorder)
+	r := newDGDWorkerRolloutReconciler(reconciler.Client, reconciler.Recorder)
+	adoptTestDCDs(dgd, r.Client)
+	return r
 }
 
 func newTestComponentWorkloadsReconciler(
@@ -1589,6 +1616,60 @@ func TestContinueRollingUpdate_AllServicesUpdated(t *testing.T) {
 	assert.Equal(t, []string{"decode", "prefill"}, dgd.Status.RollingUpdate.UpdatedComponents)
 }
 
+func TestContinueRollingUpdate_AllWorkersRemoved(t *testing.T) {
+	t.Log("DGD has all worker components removed; only a frontend remains")
+	dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"frontend": {ComponentType: consts.ComponentTypeFrontend},
+	})
+	oldWorkerHash := testOldWorkerHash
+	newWorkerHash := betaDGDWorkersSpecHash(t, dgd)
+	dgd.Annotations = map[string]string{consts.AnnotationCurrentWorkerHashV2: oldWorkerHash}
+	dgd.Status.RollingUpdate = &nvidiacomv1beta1.RollingUpdateStatus{
+		Phase: nvidiacomv1beta1.RollingUpdatePhaseInProgress,
+	}
+
+	t.Log("Seed an old worker DCD that has been drained to zero replicas and all pods terminated")
+	oldWorkerDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-worker-" + oldWorkerHash[:8],
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoWorkerHash:          oldWorkerHash,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+				ServiceName:   "worker",
+				Replicas:      ptr.To(int32(0)),
+			},
+		},
+		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+				ReadyReplicas: ptr.To(int32(0)),
+			},
+		},
+	})
+
+	r := createTestReconcilerWithStatus(dgd, withObjects(oldWorkerDCD))
+	ctx := context.Background()
+
+	t.Log("continueRollingUpdate: old DCD is drained so completeRollingUpdate deletes it and waits for cache")
+	err := r.continueRollingUpdate(ctx, dgd, &dgd.Status, newWorkerHash)
+	require.NoError(t, err)
+
+	t.Log("Old DCD must be deleted from the fake client")
+	dcdList := &nvidiacomv1beta1.DynamoComponentDeploymentList{}
+	require.NoError(t, r.List(ctx, dcdList, client.InNamespace("default")))
+	assert.Empty(t, dcdList.Items, "old worker DCD must be deleted after drain")
+
+	t.Log("Phase must advance to Completed once the old DCD disappears from cache; run a second reconcile")
+	err = r.continueRollingUpdate(ctx, dgd, &dgd.Status, newWorkerHash)
+	require.NoError(t, err)
+	assert.Equal(t, nvidiacomv1beta1.RollingUpdatePhaseCompleted, dgd.Status.RollingUpdate.Phase)
+}
+
 func TestReconcileRollingUpdate_RecreateAtZeroWaitsForOldPodTermination(t *testing.T) {
 	const oldWorkerHash = "oldhash0"
 
@@ -2695,6 +2776,73 @@ func TestFindLegacyWorkerDCDs(t *testing.T) {
 		result, err := r.findLegacyWorkerDCDs(ctx, dgd)
 		require.NoError(t, err)
 		assert.Empty(t, result)
+	})
+
+	t.Run("excludes ownerless DCD", func(t *testing.T) {
+		t.Log("Seed a worker DCD that carries the DGD name label but has no controller owner reference")
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {ComponentType: consts.ComponentTypeWorker},
+		})
+		ownerlessDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-dgd-worker",
+				Namespace: "default",
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				},
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypeWorker,
+				},
+			},
+		})
+
+		t.Log("Build the reconciler directly, bypassing the auto-ref helper, to keep the DCD ownerless")
+		dgdReconciler := createTestDGDReconcilerWithStatus(dgd, withObjects(ownerlessDCD))
+		r := newDGDWorkerRolloutReconciler(dgdReconciler.Client, dgdReconciler.Recorder)
+
+		result, err := r.findLegacyWorkerDCDs(context.Background(), dgd)
+		require.NoError(t, err)
+		assert.Empty(t, result, "ownerless DCD must not be treated as a legacy DCD")
+	})
+
+	t.Run("excludes DCD owned by a previous DGD UID", func(t *testing.T) {
+		t.Log("Seed a worker DCD whose controller owner reference points to an old DGD UID")
+		dgd := createTestDGD("test-dgd", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+			"worker": {ComponentType: consts.ComponentTypeWorker},
+		})
+		dgd.UID = "current-dgd-uid"
+
+		isController := true
+		staleDCD := betaDCD(t, &nvidiacomv1alpha1.DynamoComponentDeployment{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-dgd-worker",
+				Namespace: "default",
+				Labels: map[string]string{
+					consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: nvidiacomv1beta1.GroupVersion.String(),
+					Kind:       "DynamoGraphDeployment",
+					Name:       "test-dgd",
+					UID:        "previous-dgd-uid",
+					Controller: &isController,
+				}},
+			},
+			Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+				DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: consts.ComponentTypeWorker,
+				},
+			},
+		})
+
+		dgdReconciler := createTestDGDReconcilerWithStatus(dgd, withObjects(staleDCD))
+		r := newDGDWorkerRolloutReconciler(dgdReconciler.Client, dgdReconciler.Recorder)
+
+		result, err := r.findLegacyWorkerDCDs(context.Background(), dgd)
+		require.NoError(t, err)
+		assert.Empty(t, result, "DCD with stale owner UID must not be treated as a legacy DCD")
 	})
 }
 

@@ -421,6 +421,9 @@ func (r *dgdWorkerRolloutReconciler) findLegacyWorkerDCDs(
 
 	var legacyDCDs []nvidiacomv1beta1.DynamoComponentDeployment
 	for _, dcd := range dcdList.Items {
+		if !metav1.IsControlledBy(&dcd, dgd) {
+			continue
+		}
 		if !dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
 			continue
 		}
@@ -639,7 +642,7 @@ func (r *dgdWorkerRolloutReconciler) continueRollingUpdate(
 	rollingUpdateStatus.UpdatedComponents = updatedComponents
 
 	// Rolling update is complete when every worker component is individually updated.
-	if len(updatedComponents) == totalWorkerComponents && totalWorkerComponents > 0 {
+	if len(updatedComponents) == totalWorkerComponents {
 		return r.completeRollingUpdate(ctx, dgd, status, newWorkerHash)
 	}
 
@@ -847,6 +850,9 @@ func (r *dgdWorkerRolloutReconciler) getWorkerInfoForWorkerHash(
 	}
 
 	for _, dcd := range dcdList.Items {
+		if !metav1.IsControlledBy(&dcd, dgd) || dcd.DeletionTimestamp != nil {
+			continue
+		}
 		if !dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
 			continue
 		}
@@ -1207,6 +1213,9 @@ func (r *dgdWorkerRolloutReconciler) listOldWorkerDCDs(
 
 	var workers []nvidiacomv1beta1.DynamoComponentDeployment
 	for _, dcd := range dcdList.Items {
+		if !metav1.IsControlledBy(&dcd, dgd) {
+			continue
+		}
 		if !dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
 			continue
 		}
@@ -1239,6 +1248,9 @@ func (r *dgdWorkerRolloutReconciler) dcdObservesWorkerHash(
 	observed := make(map[string]struct{}, len(dcdList.Items))
 	for i := range dcdList.Items {
 		dcd := &dcdList.Items[i]
+		if !metav1.IsControlledBy(dcd, dgd) || dcd.DeletionTimestamp != nil {
+			continue
+		}
 		if dynamo.IsWorkerComponent(string(dcd.Spec.ComponentType)) {
 			observed[dynamo.GetDCDComponentName(dcd)] = struct{}{}
 		}
@@ -1469,7 +1481,9 @@ func (r *dgdWorkerRolloutReconciler) buildRollingUpdateContext(
 		newDCDName := dynamo.GetDCDResourceName(dgd, componentName, newWorkerHash)
 		newDCD := &nvidiacomv1beta1.DynamoComponentDeployment{}
 		if err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD); err == nil {
-			newState = dcdComponentStateFromDCD(newDCD)
+			if metav1.IsControlledBy(newDCD, dgd) && newDCD.DeletionTimestamp == nil {
+				newState = dcdComponentStateFromDCD(newDCD)
+			}
 		} else if !apierrors.IsNotFound(err) {
 			return dynamo.RollingUpdateContext{}, fmt.Errorf("failed to get new worker DCD %s: %w", newDCDName, err)
 		}
