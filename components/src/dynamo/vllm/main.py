@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model
+from dynamo.common.multimodal.codec_errors import mistral_image_decoder_missing
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
@@ -439,6 +441,33 @@ def _resolve_video_token_id(vllm_config: VllmConfig) -> Optional[int]:
     return None
 
 
+def check_mistral_image_decoder(vllm_config: VllmConfig) -> None:
+    """Fail fast when a Mistral-tokenizer multimodal model has no OpenCV.
+
+    ``mistral_common`` resizes every still image with ``cv2`` before
+    normalization, and the runtime images deliberately ship no OpenCV. Without
+    this check the gap surfaces from inside vLLM's multimodal profiling run,
+    after the weights are already loaded, as an upstream ``ImportError``
+    recommending ``pip install mistral-common[opencv]`` -- which is not the
+    supported install for these images.
+
+    Only ``--tokenizer-mode mistral`` routes through ``mistral_common``. The
+    Hugging Face processor path imports no OpenCV, so it must not trip this.
+
+    Both config attributes are read defensively: a guard that runs on every
+    startup must never be the thing that breaks startup if vLLM moves them.
+    A move is caught loudly instead, by the contract test alongside this check.
+    """
+    model_config = vllm_config.model_config
+    if not getattr(model_config, "is_multimodal_model", False):
+        return
+    if getattr(model_config, "tokenizer_mode", None) != "mistral":
+        return
+    if importlib.util.find_spec("cv2") is not None:
+        return
+    raise mistral_image_decoder_missing("vllm")
+
+
 def setup_kv_event_publisher(
     config: Config,
     generate_endpoint: Endpoint,
@@ -671,6 +700,9 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    # Before AsyncLLM: the same gap found later, during vLLM's multimodal
+    # profiling run, costs a full model load first and reports the wrong remedy.
+    check_mistral_image_decoder(vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 

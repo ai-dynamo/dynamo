@@ -94,6 +94,38 @@ def video_decoder_missing(
     )
 
 
+def mistral_image_decoder_missing(
+    backend: str, cause: str | None = None
+) -> MissingMediaDecoderError:
+    """Build the error for still-image input on the Mistral tokenizer path.
+
+    Not a video case: ``mistral_common`` resizes every still image with
+    ``cv2.resize`` inside ``transform_image``
+    (``mistral_common.tokens.tokenizers.image``) before normalization, so a
+    model served with ``--tokenizer-mode mistral`` needs OpenCV for plain JPEG
+    and PNG input. NVDEC decodes video, never a still image, so unlike video
+    there is no hardware alternative here.
+
+    Upstream's own message recommends ``pip install mistral-common[opencv]``.
+    That is the wrong remedy for these images -- it resolves an unbounded
+    OpenCV version and pulls transitive dependencies into a pinned stack --
+    so this message names the validated, bounded spec instead.
+    """
+    return MissingMediaDecoderError(
+        _with_cause(
+            "Cannot process image input: this model tokenizes images through "
+            "mistral_common (--tokenizer-mode mistral), which resizes them with "
+            "OpenCV ('cv2'). This image deliberately does not ship OpenCV, and "
+            "NVDEC decodes video only, so there is no hardware alternative for "
+            "still images. To enable image input, "
+            + _install_hint(backend, "opencv-python-headless")
+            + ". A model that also ships a Hugging Face processor can instead "
+            "be served with --tokenizer-mode auto, which needs no OpenCV.",
+            cause,
+        )
+    )
+
+
 def audio_decoder_missing(
     backend: str, cause: str | None = None
 ) -> MissingMediaDecoderError:

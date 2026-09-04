@@ -9,6 +9,7 @@ import dynamo.common.multimodal.codec_errors as codec_errors
 from dynamo.common.multimodal.codec_errors import (
     MissingMediaDecoderError,
     audio_decoder_missing,
+    mistral_image_decoder_missing,
     video_decoder_missing,
 )
 from dynamo.common.utils.install_media_decoders import VALIDATED_SPECS
@@ -77,6 +78,29 @@ def test_audio_message_has_no_hardware_alternative():
     assert "install_media_decoders vllm" in msg
 
 
+def test_mistral_image_message_names_cv2_spec_and_installer():
+    err = mistral_image_decoder_missing("vllm")
+
+    msg = str(err)
+    assert isinstance(err, MissingMediaDecoderError)
+    assert "cv2" in msg
+    assert VALIDATED_SPECS["opencv-python-headless"] in msg
+    assert "install_media_decoders vllm" in msg
+    # Still images, so the message must not send the reader looking for a
+    # codec or for the NVDEC capability that cannot help here.
+    assert "NVDEC decodes video only" in msg
+
+
+def test_mistral_image_message_does_not_repeat_upstream_remedy():
+    """mistral_common's own ImportError suggests `pip install
+    mistral-common[opencv]`: unbounded version, full dependency resolution
+    against the image's pinned stack. Ours must not echo it."""
+    msg = str(mistral_image_decoder_missing("vllm"))
+
+    assert "mistral-common[opencv]" not in msg
+    assert "pip install --no-deps" in msg
+
+
 def test_cause_text_is_appended_and_optional(monkeypatch):
     """The underlying decoder text must survive wraps whose handlers ship
     only str(exc) to the client; absent a cause, no dangling suffix."""
@@ -89,6 +113,8 @@ def test_cause_text_is_appended_and_optional(monkeypatch):
     assert "decoder reported" not in str(without)
     audio = audio_decoder_missing("vllm", cause="Please install vllm[audio]")
     assert "(decoder reported: Please install vllm[audio])" in str(audio)
+    image = mistral_image_decoder_missing("vllm", cause="`opencv` is not installed")
+    assert "(decoder reported: `opencv` is not installed)" in str(image)
 
 
 def test_error_is_not_a_value_error():

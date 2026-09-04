@@ -16,6 +16,7 @@ Installing an additional decoder package covers what remains:
 
 - **AAC and other compressed audio**, which NVDEC does not decode at all.
 - **H.264 and H.265 on hosts where NVDEC is unavailable** — no video decode engine on the GPU, or a container without the `video` capability.
+- **Still images on Mistral-tokenizer models**, described in [Still images on the Mistral tokenizer path](#still-images-on-the-mistral-tokenizer-path) below. This one is not about video at all.
 
 Each backend decodes such input through a specific Python package whose wheel bundles its own FFmpeg, so the support is added with a plain `pip install` — no image rebuild. **Nothing installs automatically.** There is no environment switch and no startup hook: an operator runs the install as a deliberate, visible step, so a deployment that broadens the image's codec surface says so in its Dockerfile, pod spec, or runbook.
 
@@ -27,11 +28,36 @@ Each backend decodes such input through a specific Python package whose wheel bu
 | Backend | Input | Package (validated version bounds) | Import |
 |---------|-------|------------------------------------|--------|
 | vLLM | video | `opencv-python-headless>=4.13.0.92,<5` | `cv2` |
+| vLLM | image, with `--tokenizer-mode mistral` | `opencv-python-headless>=4.13.0.92,<5` | `cv2` |
 | vLLM | audio | `av>=18.0.0,<19` | `av` |
 | SGLang | video | `decord2>=3.4.0,<4` | `decord` |
 | TensorRT-LLM | video | `opencv-python-headless>=4.13.0.92,<5` | `cv2` |
 
 The lower bound of each spec is the version validated against Dynamo's multimodal test suite; the upper bound excludes the next major release so an install cannot silently pick up an unvalidated version. PyNvVideoCodec is not in this list because the images already ship it — it is the NVDEC path, not a fallback, so there is nothing to install. torchcodec is left out because no Dynamo decode path imports it.
+
+## Still images on the Mistral tokenizer path
+
+Serving a multimodal Mistral-family model with `--tokenizer-mode mistral` tokenizes images through `mistral_common`, which resizes every image with OpenCV before normalizing it. That makes `opencv-python-headless` a requirement for plain JPEG and PNG input on this path — no video is involved, and NVDEC never decodes a still image, so there is no hardware alternative here.
+
+Without the install, the vLLM worker refuses to start and names the package:
+
+```text
+Cannot process image input: this model tokenizes images through mistral_common
+(--tokenizer-mode mistral), which resizes them with OpenCV ('cv2'). ...
+```
+
+Install the same validated spec as the vLLM rows above, with either command:
+
+```bash
+pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5'
+# or
+python -m dynamo.common.utils.install_media_decoders vllm
+```
+
+> [!NOTE]
+> Upstream `mistral_common` raises ``ImportError: `opencv` is not installed`` and suggests `pip install mistral-common[opencv]`. Do not use that command here: it resolves an unbounded OpenCV version and pulls transitive dependencies into the image's pinned stack. The bounded, `--no-deps` install above is the supported one.
+
+The requirement follows the tokenizer mode, not the model. A model that also ships a Hugging Face processor can be served with `--tokenizer-mode auto` instead, which imports no OpenCV.
 
 ## Install with pip
 
