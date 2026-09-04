@@ -101,11 +101,18 @@ def _install_fake_engine(fake_engine_factory, fake_model: _FakeEngineModel) -> N
     fake_engine_factory.last_kwargs = None
 
 
+# These tests replace the engine factory, so the value is never used against a
+# real database -- it only has to be non-None so that version resolution
+# short-circuits and the tests stay independent of the installed wheel.
+_STUB_BACKEND_VERSION = "test-backend-version"
+
+
 def _config(
     *,
     dp: int = 1,
     min_observations: int = 5,
     speculative_nextn: int = 0,
+    backend_version: str | None = _STUB_BACKEND_VERSION,
 ) -> PlannerConfig:
     pick = PickedParallelConfig(dp=dp)
     return PlannerConfig.model_construct(
@@ -113,6 +120,7 @@ def _config(
             hf_id="Qwen/Qwen3-0.6B",
             system="h200_sxm",
             backend="vllm",
+            backend_version=backend_version,
             prefill_pick=pick,
             decode_pick=pick,
         ),
@@ -541,3 +549,204 @@ def test_adapter_does_not_expose_legacy_prediction_passthroughs():
         "find_best_engine_agg_rps",
     ):
         assert not hasattr(PlannerEnginePerfModel, name)
+
+
+def _ready_engine() -> _FakeEngineModel:
+    return _FakeEngineModel(
+        diagnostics={
+            "source": "aic",
+            "readiness": "ready",
+            "retained_observations": 0,
+            "correction_ready_buckets": 0,
+            "last_warning": None,
+        }
+    )
+
+
+@pytest.fixture
+def stub_latest_database_version(monkeypatch):
+    """Stub the packaged AIC perf-database version lookup."""
+
+    def install(version):
+        lookups = []
+
+        def fake(system, backend):
+            lookups.append((system, backend))
+            return version
+
+        monkeypatch.setattr(
+            aic_adapter,
+            "get_latest_database_version",
+            fake,
+        )
+        return lookups
+
+    return install
+
+
+def test_missing_backend_version_resolves_packaged_database_version(
+    fake_engine_factory, stub_latest_database_version
+):
+    """A hand-written config without backend_version must still query natively."""
+    lookups = stub_latest_database_version("0.24.0")
+    _install_fake_engine(fake_engine_factory, _ready_engine())
+
+    PlannerEnginePerfModel(
+        worker_type="decode",
+        config=_config(backend_version=None),
+        capabilities=_caps(),
+    )
+
+    assert fake_engine_factory.last_kwargs is not None
+    aic_config = fake_engine_factory.last_kwargs["aic_config"]
+    assert aic_config is not None
+    assert aic_config["backend_version"] == "0.24.0"
+    assert lookups == [("h200_sxm", "vllm")]
+
+
+def test_unresolvable_backend_version_falls_back_to_regression(
+    fake_engine_factory, stub_latest_database_version
+):
+    """No packaged database means FPM regression, not a hard native failure."""
+    stub_latest_database_version(None)
+    _install_fake_engine(fake_engine_factory, _ready_engine())
+
+    PlannerEnginePerfModel(
+        worker_type="decode",
+        config=_config(backend_version=None),
+        capabilities=_caps(),
+    )
+
+    assert fake_engine_factory.last_kwargs is not None
+    assert fake_engine_factory.last_kwargs["aic_config"] is None
+
+
+def test_explicit_backend_version_takes_precedence_over_lookup(
+    fake_engine_factory, stub_latest_database_version
+):
+    stub_latest_database_version("9.9.9")
+    _install_fake_engine(fake_engine_factory, _ready_engine())
+
+    PlannerEnginePerfModel(
+        worker_type="decode",
+        config=_config(backend_version="0.19.0"),
+        capabilities=_caps(),
+    )
+
+    assert fake_engine_factory.last_kwargs is not None
+    aic_config = fake_engine_factory.last_kwargs["aic_config"]
+    assert aic_config is not None
+    assert aic_config["backend_version"] == "0.19.0"
+
+
+def _real_engine_config(backend_version):
+    """Engine config in the shape `_build_aic_config` emits."""
+    return {
+        "schema_version": 1,
+        "model_name": "nvidia/Llama-3.1-8B-Instruct-FP8",
+        "system_name": "h200_sxm",
+        "backend": "vllm",
+        "backend_version": backend_version,
+        "kv_block_size": 16,
+        "tp_size": 1,
+        "pp_size": 1,
+        "moe_tp_size": 1,
+        "moe_ep_size": 1,
+        "attention_dp_size": 1,
+        "cp_size": None,
+        "weight_dtype": None,
+        "moe_dtype": None,
+        "activation_dtype": None,
+        "kv_cache_dtype": None,
+        "nextn": None,
+        "extra": {},
+    }
+
+
+_REAL_ENGINE_OPTIONS = {
+    "max_observations": 16,
+    "min_observations": 5,
+    "bucket_count": 16,
+    "max_num_tokens": 8192,
+    "max_batch_size": 512,
+    "max_kv_tokens": 2_000_000,
+}
+
+
+def test_aic_core_rejects_missing_backend_version():
+    """Pin the upstream contract the adapter's version resolution works around.
+
+    aiconfigurator-core raises ``InvalidEngineConfig`` for a missing
+    ``backend_version``, and that variant is not fallback-safe, so the wheel
+    does not degrade to regression on its own.
+    """
+    aic_sdk = pytest.importorskip("aiconfigurator_core.sdk")
+
+    with pytest.raises(ValueError, match="backend_version is required"):
+        aic_sdk.RustForwardPassPerfModel.best_available(
+            _real_engine_config(None), _REAL_ENGINE_OPTIONS
+        )
+
+
+def test_aic_core_accepts_resolved_backend_version():
+    """The same config succeeds once the packaged version is supplied."""
+    aic_sdk = pytest.importorskip("aiconfigurator_core.sdk")
+    perf_database = pytest.importorskip("aiconfigurator_core.sdk.perf_database")
+
+    version = perf_database.get_latest_database_version("h200_sxm", "vllm")
+    if version is None:
+        pytest.skip("wheel ships no h200_sxm/vllm performance database")
+
+    model = aic_sdk.RustForwardPassPerfModel.best_available(
+        _real_engine_config(version), _REAL_ENGINE_OPTIONS
+    )
+
+    assert model.diagnostics()["source"] == "aic"
+
+
+def test_config_without_backend_version_initializes_native_model():
+    """End-to-end guard against silent SLA-autoscaling failure.
+
+    Uses the real wheel: a hand-written config that omits ``backend_version``
+    must still produce a usable native model instead of leaving the planner
+    permanently unable to estimate.
+    """
+    perf_database = pytest.importorskip("aiconfigurator_core.sdk.perf_database")
+    if perf_database.get_latest_database_version("h200_sxm", "vllm") is None:
+        pytest.skip("wheel ships no h200_sxm/vllm performance database")
+
+    pick = PickedParallelConfig(dp=1)
+    config = PlannerConfig.model_construct(
+        aic_perf_model=AICPerfModelSpec.model_construct(
+            hf_id="nvidia/Llama-3.1-8B-Instruct-FP8",
+            system="h200_sxm",
+            backend="vllm",
+            backend_version=None,
+            prefill_pick=pick,
+            decode_pick=pick,
+        ),
+        max_num_fpm_samples=16,
+        load_min_observations=5,
+        fpm_sample_bucket_size=16,
+        ttft_ms=500.0,
+        itl_ms=50.0,
+        speculative_nextn=0,
+    )
+
+    model = PlannerEnginePerfModel(
+        worker_type="decode",
+        config=config,
+        capabilities=EngineCapabilities(
+            max_num_batched_tokens=8192,
+            max_num_seqs=512,
+            max_kv_tokens=2_000_000,
+            kv_cache_block_size=16,
+        ),
+    )
+
+    capacity = model.find_engine_capacity_rps(
+        isl=1000, osl=200, ttft_sla_ms=500.0, itl_sla_ms=50.0
+    )
+
+    assert capacity is not None
+    assert capacity.rps > 0
