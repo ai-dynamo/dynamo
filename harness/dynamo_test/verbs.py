@@ -75,8 +75,18 @@ __all__ = [
 
 
 class Phase(str, Enum):
-    """When a verb may run. Enforced by the receiver, not by convention."""
+    """Where a run is, and therefore what may be called.
 
+    One enum, not two. A verb's declared phase and the receiver's current phase
+    are the same question asked from opposite ends, and modelling them
+    separately lets them disagree.
+
+    ``PLAN`` is before anything has been touched; ``ARRANGE`` is setup that still
+    counts as acting; ``COLLECT`` gathers evidence before teardown; ``CHECK``
+    judges the sealed bundle and cannot reach the system at all.
+    """
+
+    PLAN = "plan"
     ARRANGE = "arrange"
     ACT = "act"
     COLLECT = "collect"

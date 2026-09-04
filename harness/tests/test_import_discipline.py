@@ -36,6 +36,8 @@ TIER_0 = {
     "catalog.py",
     "dialect.py",
     "evidence.py",
+    "sut.py",
+    "local.py",
 }
 
 # The one module permitted to import pytest, once it exists.
@@ -67,6 +69,7 @@ STDLIB_OK = {
     "re",
     "shlex",
     "shutil",
+    "signal",
     "socket",
     "statistics",
     "string",

@@ -8,6 +8,7 @@ design — no ``dynamo.*``. Welding the harness to the runtime would make it
 impossible to point one suite at an older release.
 """
 
+from . import catalog as _catalog  # noqa: F401  (registers the standard verbs)
 from .argv import ArgForm, ArgV, is_shell_command_flag
 from .dialect import DIALECTS, Dialect, EngineDialect, detect, for_backend
 from .evidence import Evidence, Outcome, Producer, Promise, Recorder, Seal, Verdict
@@ -23,6 +24,7 @@ from .roles import (
     UnknownRole,
     at,
 )
+from .sut import Handle, NotGranted, PhaseError, Provider, Sut
 from .verbs import (
     REGISTRY,
     Contribution,
@@ -57,6 +59,13 @@ __all__ = [
     "Recorder",
     "Seal",
     "Verdict",
+    # the system under test
+    "Handle",
+    "NotGranted",
+    "Phase",
+    "PhaseError",
+    "Provider",
+    "Sut",
     # roles and selection
     "Policy",
     "PortName",
