@@ -13,7 +13,7 @@ use dynamo_runtime::logging::{DistributedTraceContext, otel_parent_context_from_
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, SingleIn};
 use dynamo_runtime::protocols::annotated::Annotated as RsAnnotated;
 
-use crate::to_pyerr;
+use crate::{errors::routed_engine_error_to_pyerr, to_pyerr};
 
 #[pyclass]
 pub struct RoutedEngine {
@@ -68,7 +68,10 @@ impl RoutedEngine {
         pyo3_async_runtimes::tokio::future_into_py(
             py,
             async move {
-                let mut stream = inner.generate(request_context).await.map_err(to_pyerr)?;
+                let mut stream = inner
+                    .generate(request_context)
+                    .await
+                    .map_err(routed_engine_error_to_pyerr)?;
                 let task_context = stream.context();
                 let (tx, rx) = tokio::sync::mpsc::channel::<RsAnnotated<PyObject>>(32);
 
