@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for OmniConfig validation."""
+"""Unit tests for OmniConfig validation and omni argument parsing."""
 
+import contextlib
 import dataclasses
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +15,7 @@ try:
         OmniConfig,
         OmniDiffusionKwargs,
         OmniParallelKwargs,
+        parse_omni_args,
     )
 except ImportError:
     pytest.skip("vLLM omni dependencies not available", allow_module_level=True)
@@ -167,6 +170,128 @@ def test_omni_router_with_stage_configs_path_valid(tmp_path):
         omni_router=True, stage_configs_path=str(tmp_path / "stages.yaml")
     )
     config.validate()
+
+
+# --- parse_omni_args() on a host with no accelerator ---
+
+_PLATFORM_UNSET = object()
+
+
+@contextlib.contextmanager
+def _no_accelerator():
+    """Pin the platform a host with no accelerator resolves to.
+
+    Every builtin plugin declines there and vLLM falls back to
+    ``UnspecifiedPlatform``, whose ``device_type`` is the empty string -- the
+    state ``DeviceConfig.__post_init__`` raises on. Restores exactly the way
+    ``vllm_cpu_platform_when_no_accelerator`` does: *delete* the module-dict
+    entry when there was none, so the PEP 562 lazy ``__getattr__`` in
+    ``vllm.platforms`` is re-armed for later tests on this worker.
+    """
+    import vllm.platforms as vllm_platforms
+    from vllm.platforms.interface import UnspecifiedPlatform
+
+    previous = vllm_platforms.__dict__.get("current_platform", _PLATFORM_UNSET)
+    vllm_platforms.current_platform = UnspecifiedPlatform()
+    try:
+        yield
+    finally:
+        if previous is _PLATFORM_UNSET:
+            del vllm_platforms.current_platform
+        else:
+            vllm_platforms.current_platform = previous
+
+
+def _router_argv(tmp_path, *extra):
+    return [
+        "dynamo.vllm.omni",
+        "--stage-configs-path",
+        str(tmp_path / "stages.yaml"),
+        "--model",
+        "test-model",
+        *extra,
+    ]
+
+
+def test_stage_router_parses_without_an_accelerator(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "argv", _router_argv(tmp_path, "--omni-router"))
+
+    with _no_accelerator():
+        config = parse_omni_args()
+
+    assert config.omni_router is True
+    assert config.model == "test-model"
+    assert config.engine_args.model == "test-model"
+    assert config.engine_args.trust_remote_code is False
+
+
+def test_stage_router_selected_by_environment_parses_without_an_accelerator(
+    monkeypatch, tmp_path
+):
+    # The containerized deployment shape: the role comes from DYN_OMNI_ROUTER
+    # with no --omni-router token on the command line at all.
+    monkeypatch.setenv("DYN_OMNI_ROUTER", "true")
+    monkeypatch.setattr(sys, "argv", _router_argv(tmp_path))
+
+    with _no_accelerator():
+        config = parse_omni_args()
+
+    assert config.omni_router is True
+    assert config.model == "test-model"
+
+
+def test_stage_router_ignores_engine_option_passthrough(monkeypatch, tmp_path):
+    # The launch scripts forward their EXTRA_ARGS to every omni process, so
+    # engine-only flags reach the router and must not abort it.
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        _router_argv(
+            tmp_path,
+            "--omni-router",
+            "--gpu-memory-utilization",
+            "0.9",
+            "--enable-lora",
+        ),
+    )
+
+    with _no_accelerator():
+        config = parse_omni_args()
+
+    assert config.omni_router is True
+    assert config.model == "test-model"
+
+
+def test_stage_router_honors_negated_flag_over_environment(monkeypatch, tmp_path):
+    # --no-omni-router must win over a truthy DYN_OMNI_ROUTER, the way argparse
+    # itself resolves a flag against its env-derived default. Losing that would
+    # route an engine-building worker onto the reduced parser.
+    monkeypatch.setenv("DYN_OMNI_ROUTER", "true")
+    monkeypatch.setattr(sys, "argv", _router_argv(tmp_path, "--no-omni-router"))
+
+    with _no_accelerator(), pytest.raises(RuntimeError, match="Failed to infer device"):
+        parse_omni_args()
+
+
+def test_stage_worker_still_requires_an_accelerator(monkeypatch, tmp_path):
+    # Negative control: --stage-id builds an engine, so it must keep failing
+    # loudly here rather than being swept up by the router's reduced parser.
+    monkeypatch.setattr(sys, "argv", _router_argv(tmp_path, "--stage-id", "0"))
+
+    with _no_accelerator(), pytest.raises(RuntimeError, match="Failed to infer device"):
+        parse_omni_args()
+
+
+def test_parse_rejects_stage_id_combined_with_omni_router(monkeypatch, tmp_path):
+    # The role pre-scan must not swallow the existing mutual-exclusion check.
+    # Runs under the module fixture's resolvable platform, not _no_accelerator,
+    # because --stage-id keeps this argv on the full engine parser.
+    monkeypatch.setattr(
+        sys, "argv", _router_argv(tmp_path, "--stage-id", "0", "--omni-router")
+    )
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        parse_omni_args()
 
 
 # --- vllm_omni API compatibility guards ---
