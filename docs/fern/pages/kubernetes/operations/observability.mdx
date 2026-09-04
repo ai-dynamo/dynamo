@@ -358,12 +358,13 @@ defaults to `9090`:
 
 | Probe | Path | Period | Timeout | Failure threshold |
 | --- | --- | --- | --- | --- |
-| Liveness | `/live` | 5 seconds | 30 seconds | 1 |
+| Liveness | `/live` | 5 seconds | 4 seconds | 1 for unknown or pre-1.5.0 runtimes; 3 for runtime 1.5.0 and later |
 | Readiness | `/health` | 10 seconds | 30 seconds | 60 |
 | Startup | `/live` | 10 seconds | 5 seconds | 720 |
 
-The worker startup probe allows approximately two hours for model download and engine warm-up.
-User-specified probes take precedence over these defaults. See the
+The worker startup probe allows approximately two hours for model download and engine warm-up. The
+operator keeps the single-failure liveness behavior for custom images whose runtime version cannot
+be resolved. User-specified probes take precedence over these defaults. See the
 [API Reference](../../reference/kubernetes-api/full-api-reference.mdx) for defaults that vary by component type.
 
 </Step>

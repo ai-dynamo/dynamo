@@ -28,6 +28,10 @@ func NewWorkerDefaults() *WorkerDefaults {
 func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
 	container := w.getCommonContainer(context)
 	canaryHealthChecksEnabled := runtimefeatures.CanaryHealthChecks.Enabled(context.RuntimeVersion)
+	livenessFailureThreshold := int32(1)
+	if runtimefeatures.IncreasedWorkerFailureThreshold.Enabled(context.RuntimeVersion) {
+		livenessFailureThreshold = 3
+	}
 
 	// Add system port
 	container.Ports = []corev1.ContainerPort{
@@ -43,6 +47,7 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 		},
 	}
 
+	// Restart legacy workers after one failed liveness check and newer workers after three.
 	container.LivenessProbe = &corev1.Probe{
 		ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{
@@ -52,7 +57,7 @@ func (w *WorkerDefaults) GetBaseContainer(context ComponentContext) (corev1.Cont
 		},
 		PeriodSeconds:    5,
 		TimeoutSeconds:   4, // TimeoutSeconds should be < PeriodSeconds
-		FailureThreshold: 1, // A single failed liveness check restarts the Pod.
+		FailureThreshold: livenessFailureThreshold,
 	}
 
 	// ReadinessProbe in Dynamo worker context doesn't determine that the worker is ready to receive traffic
