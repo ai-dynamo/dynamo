@@ -9,6 +9,7 @@ from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.connectors.base import PlannerConnector, WorkerInfoProvider
 from dynamo.planner.connectors.global_planner import GlobalPlannerConnector
 from dynamo.planner.connectors.kubernetes import KubernetesConnector
+from dynamo.planner.connectors.redis_connector import RedisConnector
 from dynamo.planner.connectors.virtual import VirtualConnector
 from dynamo.planner.environment.base import PlannerEnvironmentImpl
 from dynamo.planner.environment.interface import PlannerEnvironment
@@ -63,6 +64,11 @@ def construct_connector(
             runtime=runtime,
             dynamo_namespace=config.namespace,
             worker_info_provider=worker_info_provider,
+            model_name=config.model_name,
+        )
+    if config.environment == "redis":
+        return RedisConnector(
+            dynamo_namespace=config.namespace,
             model_name=config.model_name,
         )
     raise ValueError(f"Invalid environment: {config.environment}")
