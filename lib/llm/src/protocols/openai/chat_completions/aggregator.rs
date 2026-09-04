@@ -2315,6 +2315,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_finished_tool_call_with_no_argument_bytes_remains_valid() {
+        let call = dynamo_protocols::types::ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some("first".to_string()),
+            r#type: Some(dynamo_protocols::types::FunctionType::Function),
+            function: Some(dynamo_protocols::types::FunctionCallStream {
+                name: Some("get_weather".to_string()),
+                arguments: None,
+            }),
+        };
+        let result = DeltaAggregator::apply(
+            Box::pin(stream::iter(vec![create_test_delta_with_tool_chunks(
+                0,
+                vec![call],
+                Some(dynamo_protocols::types::FinishReason::ToolCalls),
+                Some(dynamo_protocols::types::Role::Assistant),
+            )])),
+            ParsingOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let tool_calls = result.inner.choices[0]
+            .message
+            .tool_calls
+            .as_ref()
+            .expect("a finished parameterless call must remain valid");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].function.name, "get_weather");
+        assert_eq!(tool_calls[0].function.arguments, "");
+        assert_eq!(
+            result.inner.choices[0].finish_reason,
+            Some(dynamo_protocols::types::FinishReason::ToolCalls)
+        );
+    }
+
     /// `phi4` opens a call with the bare word `functools`, so cutting content at every
     /// configured marker would truncate an ordinary answer about that Python module.
     #[tokio::test]

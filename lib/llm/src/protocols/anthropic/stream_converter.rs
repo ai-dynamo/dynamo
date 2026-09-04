@@ -196,8 +196,14 @@ impl AnthropicStreamConverter {
                 .iter()
                 .map(|(arguments, _)| arguments.as_str())
                 .collect();
-            let arguments_are_valid =
-                raw.is_empty() || serde_json::from_str::<serde_json::Value>(&raw).is_ok();
+            let arguments_are_valid = if raw.is_empty() {
+                // An empty argument string is valid for a completed call, but at a
+                // token-limit finish it means generation stopped immediately after
+                // the name. Keep the terminal rule aligned with the unary converter.
+                !(truncated && Some(call_index) == last_call)
+            } else {
+                serde_json::from_str::<serde_json::Value>(&raw).is_ok()
+            };
             let repair = truncated && Some(call_index) == last_call && !arguments_are_valid;
             let repaired_input = repair
                 .then(|| super::types::tool_use_input(&tool_call.name, &raw, true))
@@ -1414,6 +1420,33 @@ mod tests {
             event_types(&conv.emit_end_events_tagged()),
             vec!["message_delta", "message_stop"]
         );
+    }
+
+    #[test]
+    fn test_length_drops_tool_call_with_empty_arguments() {
+        let mut conv = AnthropicStreamConverter::new("test-model".into(), 0);
+        conv.process_chunk_tagged(&tool_call_chunk(
+            0,
+            Some("call-1"),
+            Some("get_weather"),
+            Some(""),
+        ));
+
+        let mut events = conv.process_chunk_tagged(&finish_chunk(FinishReason::Length));
+        events.extend(conv.emit_end_events_tagged());
+
+        assert!(events.iter().all(|event| !matches!(
+            &event.data,
+            AnthropicStreamEvent::ContentBlockStart {
+                content_block: AnthropicResponseContentBlock::ToolUse { .. },
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.data,
+            AnthropicStreamEvent::MessageDelta { delta, .. }
+                if delta.stop_reason == Some(AnthropicStopReason::MaxTokens)
+        )));
     }
 
     #[test]
