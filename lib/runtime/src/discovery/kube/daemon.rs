@@ -23,7 +23,6 @@ mod state;
 use state::{BatchChanges, CachedCrMetadata, JoinTable, ReadinessIndex, ReadyEntry, StateChange};
 
 const SOURCE_CHANNEL_CAPACITY: usize = 1024;
-const SOURCE_BATCH_LIMIT: usize = 256;
 
 #[derive(Debug, PartialEq, Eq)]
 enum ReadinessEvent {
@@ -263,8 +262,9 @@ impl DiscoveryDaemon {
         let mut valid_cr_cache: HashMap<String, CachedCrMetadata> = HashMap::new();
 
         loop {
-            let (first_readiness, first_cr) = tokio::select! {
-                biased;
+            let mut changes = BatchChanges::default();
+
+            tokio::select! {
                 _ = self.cancel_token.cancelled() => {
                     tracing::info!("Discovery daemon received cancellation");
                     break;
@@ -273,66 +273,26 @@ impl DiscoveryDaemon {
                     let Some(event) = event else {
                         anyhow::bail!("Readiness reflector stream stopped");
                     };
-                    (Some(event), None)
+                    apply_readiness_event(
+                        event,
+                        &source,
+                        &mut readiness_index,
+                        &mut join_table,
+                        &mut changes,
+                    );
                 }
                 event = cr_rx.recv() => {
                     let Some(event) = event else {
                         anyhow::bail!("DynamoWorkerMetadata reflector stream stopped");
                     };
-                    (None, Some(event))
+                    apply_cr_event(
+                        event,
+                        &cr_reader,
+                        &mut valid_cr_cache,
+                        &mut join_table,
+                        &mut changes,
+                    );
                 }
-            };
-
-            let mut readiness_events = Vec::new();
-            let mut cr_events = Vec::new();
-            if let Some(event) = first_readiness {
-                readiness_events.push(event);
-            }
-            if let Some(event) = first_cr {
-                cr_events.push(event);
-            }
-
-            // The biased select chooses only the first wake. Alternate across
-            // both bounded queues before publishing so neither source can
-            // remain stale under sustained churn from the other.
-            let mut batch_len = 1;
-            while batch_len < SOURCE_BATCH_LIMIT {
-                let mut progressed = false;
-                if let Ok(event) = readiness_rx.try_recv() {
-                    readiness_events.push(event);
-                    batch_len += 1;
-                    progressed = true;
-                }
-                if batch_len < SOURCE_BATCH_LIMIT
-                    && let Ok(event) = cr_rx.try_recv()
-                {
-                    cr_events.push(event);
-                    batch_len += 1;
-                    progressed = true;
-                }
-                if !progressed {
-                    break;
-                }
-            }
-
-            let mut changes = BatchChanges::default();
-            for event in readiness_events {
-                apply_readiness_event(
-                    event,
-                    &source,
-                    &mut readiness_index,
-                    &mut join_table,
-                    &mut changes,
-                );
-            }
-            for event in cr_events {
-                apply_cr_event(
-                    event,
-                    &cr_reader,
-                    &mut valid_cr_cache,
-                    &mut join_table,
-                    &mut changes,
-                );
             }
 
             let publication = changes.finish(&join_table);
