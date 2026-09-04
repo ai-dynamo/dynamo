@@ -287,8 +287,25 @@ func (r *DynamoComponentDeploymentReconciler) recordReconcileError(
 	}
 
 	ownershipConflictCondition, ownershipConflictTransition := applyOwnershipConflict(dcd.Status.Conditions, dcd.Generation, reconcileErr)
-	if ownershipConflictCondition != nil && ownershipConflictCondition.Status == metav1.ConditionTrue {
-		r.recordOwnershipConflict(ctx, req, dcd, *ownershipConflictCondition, ownershipConflictTransition)
+	if ownershipConflictCondition != nil {
+		updated, statusErr := r.setStatusConditions(ctx, req,
+			metav1.Condition{
+				Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: dcd.Generation,
+				Reason:             ownershipConflictCondition.Reason,
+				Message:            ownershipConflictCondition.Message,
+			},
+			*ownershipConflictCondition,
+		)
+		if statusErr != nil {
+			logs.Error(statusErr, "Failed to update DynamoComponentDeployment status after ownership conflict")
+			return
+		}
+		if ownershipConflictTransition == ownershipConflictRaised && r.Recorder != nil {
+			r.Recorder.Eventf(updated, nil, corev1.EventTypeWarning, ownershipConflictCondition.Reason, "Reconcile",
+				"Refusing to reconcile a resource with conflicting controller ownership: %s", ownershipConflictCondition.Message)
+		}
 		return
 	}
 
@@ -303,33 +320,6 @@ func (r *DynamoComponentDeploymentReconciler) recordReconcileError(
 		},
 	); statusErr != nil {
 		logs.Error(statusErr, "Failed to update DynamoComponentDeployment status after reconcile error")
-	}
-}
-
-func (r *DynamoComponentDeploymentReconciler) recordOwnershipConflict(
-	ctx context.Context,
-	req ctrl.Request,
-	dcd *nvidiacomv1beta1.DynamoComponentDeployment,
-	ownershipConflictCondition metav1.Condition,
-	ownershipConflictTransition ownershipConflictTransition,
-) {
-	updated, err := r.setStatusConditions(ctx, req,
-		metav1.Condition{
-			Type:               nvidiacomv1beta1.DynamoComponentDeploymentConditionTypeAvailable,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: dcd.Generation,
-			Reason:             ownershipConflictCondition.Reason,
-			Message:            ownershipConflictCondition.Message,
-		},
-		ownershipConflictCondition,
-	)
-	if err != nil {
-		log.FromContext(ctx).Error(err, "Failed to update DynamoComponentDeployment status after ownership conflict")
-		return
-	}
-	if ownershipConflictTransition == ownershipConflictRaised && r.Recorder != nil {
-		r.Recorder.Eventf(updated, nil, corev1.EventTypeWarning, ownershipConflictCondition.Reason, "Reconcile",
-			"Refusing to reconcile a resource with conflicting controller ownership: %s", ownershipConflictCondition.Message)
 	}
 }
 
