@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import httpx
+import kr8s
 import pytest
 import requests
 import yaml
@@ -45,15 +46,22 @@ def test_logging_config_reads_existing_v1beta1_env(tmp_path) -> None:
     assert deployment_spec.get_logging_config()["jsonl_enabled"] is True
 
 
-def test_get_pods_retries_transient_vcluster_disconnect(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    "connection_error",
+    [
+        httpx.RemoteProtocolError("tunnel disconnected"),
+        kr8s.APITimeoutError("vCluster request timed out"),
+    ],
+)
+def test_get_pods_retries_transient_vcluster_disconnect(
+    monkeypatch, tmp_path, connection_error
+) -> None:
     deployment = managed_deployment(tmp_path)
     pod = MagicMock()
-    get_pods = MagicMock(
-        side_effect=[httpx.RemoteProtocolError("tunnel disconnected"), [pod]]
-    )
+    get_pods = MagicMock(side_effect=[connection_error, [pod]])
     sleep = MagicMock()
     monkeypatch.setattr("tests.deploy.dgd_utils.kr8s.get", get_pods)
-    monkeypatch.setattr("tests.deploy.dgd_utils.time.sleep", sleep)
+    monkeypatch.setattr("tests.deploy.vcluster_utils.time.sleep", sleep)
 
     result = deployment.get_pods(["Frontend"])
 
@@ -78,7 +86,7 @@ async def test_delete_deployment_retries_vcluster_connection_failure(
         ]
     )
     sleep = AsyncMock()
-    monkeypatch.setattr("tests.deploy.dgd_utils.asyncio.sleep", sleep)
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
 
     await deployment._delete_deployment()
 
@@ -86,17 +94,35 @@ async def test_delete_deployment_retries_vcluster_connection_failure(
     sleep.assert_awaited_once_with(5)
 
 
+@pytest.mark.parametrize(
+    "cleanup_error",
+    [
+        httpx.ConnectError("tunnel unavailable"),
+        kr8s.APITimeoutError("vCluster request timed out"),
+    ],
+)
 async def test_context_exit_preserves_original_error_when_cleanup_fails(
-    tmp_path,
+    tmp_path, cleanup_error
 ) -> None:
     deployment = managed_deployment(tmp_path)
-    deployment._cleanup = AsyncMock(
-        side_effect=httpx.ConnectError("tunnel unavailable")
-    )
+    deployment._cleanup = AsyncMock(side_effect=cleanup_error)
 
     result = await deployment.__aexit__(ValueError, ValueError("test failed"), None)
 
     assert result is False
+
+
+async def test_context_enter_preserves_setup_error_when_cleanup_times_out(
+    tmp_path,
+) -> None:
+    deployment = managed_deployment(tmp_path)
+    deployment._init_kubernetes = AsyncMock(side_effect=ValueError("setup failed"))
+    deployment._cleanup = AsyncMock(
+        side_effect=kr8s.APITimeoutError("vCluster request timed out")
+    )
+
+    with pytest.raises(ValueError, match="setup failed"):
+        await deployment.__aenter__()
 
 
 async def test_context_exit_reraises_unexpected_cleanup_error(tmp_path) -> None:

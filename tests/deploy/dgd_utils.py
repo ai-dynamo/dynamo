@@ -10,6 +10,7 @@ import re
 import secrets
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, List, Literal, Optional
 
 import aiohttp
@@ -22,6 +23,11 @@ from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+from tests.deploy.vcluster_utils import (
+    VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
+    retry_vcluster_api,
+    retry_vcluster_api_async,
+)
 from tests.utils.client import send_request
 from tests.utils.test_output import resolve_test_output_path
 
@@ -52,8 +58,12 @@ DEFAULT_REQUEST_TIMEOUT = 120
 # Minimum response content length to validate that the model is generating meaningful output.
 # This matches the validation threshold from the original shell-based deployment tests.
 MIN_RESPONSE_CONTENT_LENGTH = 100
-VCLUSTER_CONNECTION_RETRY_LIMIT = 3
-VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS = 5
+PORT_FORWARD_REQUEST_RETRY_LIMIT = 1
+_KR8S_VCLUSTER_CONNECTION_ERRORS = (httpx.TransportError, kr8s.APITimeoutError)
+_VCLUSTER_CLEANUP_ERRORS = (
+    aiohttp.ClientConnectionError,
+    *_KR8S_VCLUSTER_CONNECTION_ERRORS,
+)
 
 
 def validate_chat_response(
@@ -1480,39 +1490,30 @@ class ManagedDeployment:
         if not service_names:
             service_names = [service.name for service in self.deployment_spec.services]
 
-        for attempt in range(VCLUSTER_CONNECTION_RETRY_LIMIT + 1):
-            try:
-                result: dict[str, list[Pod]] = {}
-                for original_name in service_names:
-                    # List pods using stable labels that are not affected by worker hash suffixes.
-                    label_selector = (
-                        f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name},"
-                        f"nvidia.com/dynamo-component={original_name}"
-                    )
-
-                    result[original_name] = list(  # type: ignore[arg-type]
-                        kr8s.get(
-                            "pods",
-                            namespace=self.namespace,
-                            label_selector=label_selector,
-                        )
-                    )
-                return result
-            except httpx.TransportError as error:
-                if attempt == VCLUSTER_CONNECTION_RETRY_LIMIT:
-                    raise
-                self._logger.warning(
-                    "vCluster API connection failed while listing pods; "
-                    "the port-forward watchdog may restore the tunnel, "
-                    "retrying in %ss (%s/%s): %s",
-                    VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
-                    attempt + 1,
-                    VCLUSTER_CONNECTION_RETRY_LIMIT,
-                    error,
+        def list_pods() -> dict[str, list[Pod]]:
+            result: dict[str, list[Pod]] = {}
+            for original_name in service_names:
+                # List pods using stable labels that are not affected by worker hash suffixes.
+                label_selector = (
+                    f"nvidia.com/dynamo-graph-deployment-name={self._deployment_name},"
+                    f"nvidia.com/dynamo-component={original_name}"
                 )
-                time.sleep(VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
 
-        raise AssertionError("unreachable")
+                result[original_name] = list(  # type: ignore[arg-type]
+                    kr8s.get(
+                        "pods",
+                        namespace=self.namespace,
+                        label_selector=label_selector,
+                    )
+                )
+            return result
+
+        return retry_vcluster_api(
+            "listing pods",
+            list_pods,
+            _KR8S_VCLUSTER_CONNECTION_ERRORS,
+            self._logger,
+        )
 
     def get_pod_manifest_logs_metrics(self, service_name: str, pod: Pod, suffix=""):
         directory = os.path.join(self.log_dir, service_name)
@@ -1636,34 +1637,24 @@ class ManagedDeployment:
         if not self._deployment_name or self._custom_api is None:
             return
 
-        for attempt in range(VCLUSTER_CONNECTION_RETRY_LIMIT + 1):
-            try:
-                await self._custom_api.delete_namespaced_custom_object(
+        try:
+            await retry_vcluster_api_async(
+                f"deleting deployment {self.namespace}/{self._deployment_name}",
+                partial(
+                    self._custom_api.delete_namespaced_custom_object,
                     group="nvidia.com",
                     version=self.deployment_spec.api_version,
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self._deployment_name,
-                )
+                ),
+                (aiohttp.ClientConnectionError,),
+                self._logger,
+            )
+        except exceptions.ApiException as error:
+            if error.status == 404:  # Ignore if already deleted
                 return
-            except exceptions.ApiException as error:
-                if error.status == 404:  # Ignore if already deleted
-                    return
-                raise
-            except aiohttp.ClientConnectionError as error:
-                if attempt == VCLUSTER_CONNECTION_RETRY_LIMIT:
-                    raise
-                self._logger.warning(
-                    "vCluster API connection failed while deleting deployment %s; "
-                    "the port-forward watchdog may restore the tunnel, "
-                    "retrying in %ss (%s/%s): %s",
-                    self._deployment_name,
-                    VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
-                    attempt + 1,
-                    VCLUSTER_CONNECTION_RETRY_LIMIT,
-                    error,
-                )
-                await asyncio.sleep(VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
+            raise
 
     def port_forward(
         self, pod: Pod, remote_port: int, max_connection_attempts: int = 3
@@ -1773,7 +1764,9 @@ class ManagedDeployment:
         """Retry one request after rebuilding a dropped pod port-forward."""
         active_port_forward = port_forward
 
-        for attempt in range(2):
+        # Inference POSTs may have reached the backend before their connection
+        # failed, so rebuild the port-forward and replay each request only once.
+        for attempt in range(PORT_FORWARD_REQUEST_RETRY_LIMIT + 1):
             url = f"http://localhost:{active_port_forward.local_port}{endpoint}"
             try:
                 return request_sender(url, payload, timeout=timeout, method="POST")
@@ -1782,7 +1775,7 @@ class ManagedDeployment:
                 requests.Timeout,
                 httpx.TransportError,
             ) as error:
-                if attempt == 1:
+                if attempt == PORT_FORWARD_REQUEST_RETRY_LIMIT:
                     raise
 
                 self._logger.warning(
@@ -1856,7 +1849,7 @@ class ManagedDeployment:
         except BaseException:
             try:
                 await self._cleanup()
-            except (aiohttp.ClientConnectionError, httpx.TransportError):
+            except _VCLUSTER_CLEANUP_ERRORS:
                 self._logger.exception(
                     "vCluster connection failed during cleanup after deployment "
                     "setup failure; preserving the original error"
@@ -1871,7 +1864,7 @@ class ManagedDeployment:
 
         try:
             await self._cleanup()
-        except (aiohttp.ClientConnectionError, httpx.TransportError):
+        except _VCLUSTER_CLEANUP_ERRORS:
             self._logger.exception(
                 "vCluster connection failed during cleanup after test failure; "
                 "preserving the original error"

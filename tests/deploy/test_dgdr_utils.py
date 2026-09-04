@@ -221,7 +221,7 @@ async def test_wait_for_phase_retries_vcluster_connection_refusals(
         ]
     )
     sleep = AsyncMock()
-    monkeypatch.setattr("tests.deploy.dgdr_utils.asyncio.sleep", sleep)
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
 
     result = await manager.wait_for_phase("request", "Ready", timeout=30)
 
@@ -243,7 +243,7 @@ async def test_wait_for_phase_limits_vcluster_connection_retries(
         )
     )
     sleep = AsyncMock()
-    monkeypatch.setattr("tests.deploy.dgdr_utils.asyncio.sleep", sleep)
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
 
     with pytest.raises(aiohttp.ClientConnectorError, match="tunnel unavailable"):
         await manager.wait_for_phase("request", "Ready", timeout=30)
@@ -264,7 +264,7 @@ async def test_get_output_dgd_retries_vcluster_connection_refusal(
         ]
     )
     sleep = AsyncMock()
-    monkeypatch.setattr("tests.deploy.dgdr_utils.asyncio.sleep", sleep)
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
 
     result = await manager.get_output_dgd("request")
 
@@ -284,7 +284,7 @@ async def test_cleanup_retries_vcluster_connection_failures(monkeypatch) -> None
     manager._wait_until_dgdr_absent = AsyncMock()
     manager._delete_output_configmap = AsyncMock()
     sleep = AsyncMock()
-    monkeypatch.setattr("tests.deploy.dgdr_utils.asyncio.sleep", sleep)
+    monkeypatch.setattr("tests.deploy.vcluster_utils.asyncio.sleep", sleep)
 
     await manager.cleanup(failed=False)
 

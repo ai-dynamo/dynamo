@@ -14,12 +14,18 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Awaitable, Callable, ParamSpec, TypeVar
 
 import aiohttp
 import yaml
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
+
+from tests.deploy.vcluster_utils import (
+    VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
+    retry_vcluster_api_async,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +45,6 @@ _MAX_DGDR_NAME_LENGTH = (
 )
 _MAX_LABEL_VALUE_LENGTH = 63
 _NAME_DIGEST_LENGTH = 6
-_VCLUSTER_CONNECTION_RETRY_LIMIT = 3
-_VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS = 5
 _RetryParams = ParamSpec("_RetryParams")
 _RetryResult = TypeVar("_RetryResult")
 PHASE_ORDER = {
@@ -306,24 +310,12 @@ class ManagedDGDR:
         **kwargs: _RetryParams.kwargs,
     ) -> _RetryResult:
         """Retry a vCluster API operation while its port-forward recovers."""
-        for attempt in range(_VCLUSTER_CONNECTION_RETRY_LIMIT + 1):
-            try:
-                return await request(*args, **kwargs)
-            except aiohttp.ClientConnectionError as error:
-                if attempt == _VCLUSTER_CONNECTION_RETRY_LIMIT:
-                    raise
-                logger.warning(
-                    "vCluster API connection failed while %s; the port-forward "
-                    "watchdog may restore the tunnel, retrying in %ss (%s/%s): %s",
-                    operation,
-                    _VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
-                    attempt + 1,
-                    _VCLUSTER_CONNECTION_RETRY_LIMIT,
-                    error,
-                )
-                await asyncio.sleep(_VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
-
-        raise AssertionError("unreachable")
+        return await retry_vcluster_api_async(
+            operation,
+            partial(request, *args, **kwargs),
+            (aiohttp.ClientConnectionError,),
+            logger,
+        )
 
     async def _delete_if_exists(
         self,
@@ -452,7 +444,7 @@ class ManagedDGDR:
                 )
             ):
                 return result
-            await asyncio.sleep(_VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
+            await asyncio.sleep(VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
         raise TimeoutError(
             f"Timed out after {timeout}s waiting for DGDR "
             f"{self.config.namespace}/{name} to reach {target}; last phase={last_phase}"
