@@ -35,7 +35,7 @@ flowchart LR
         direction TB
         Pipecat["Same Pipecat pipeline"]
         STTClient["OpenAI Realtime STT<br/>WebSocket"]
-        LLMClient["NvidiaLLMService<br/>OpenAI HTTP"]
+        LLMClient["OpenAI-compatible LLM<br/>HTTP or Realtime WebSocket"]
         TTSClient["OpenAI-compatible TTS<br/>Streaming HTTP"]
     end
 
@@ -68,8 +68,9 @@ flowchart LR
     Frontend --> ASRWorker
     ASRWorker <-->|"Speech NIM streaming gRPC"| ASR
 
+    STTClient -.->|"transcript deltas"| LLMClient
     Pipecat --> LLMClient
-    LLMClient -->|"/v1/chat/completions"| Frontend
+    LLMClient -->|"/v1/chat/completions<br/>or /v1/realtime"| Frontend
     Frontend --> LLMWorker
 
     Pipecat --> TTSClient
@@ -285,6 +286,39 @@ python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py
 
 The check reports TTS TTFB, ASR first-transcript latency, PCM RMS, and the final
 transcript. It fails on an API error, silent audio, or an empty transcript.
+
+### Measure ASR-to-LLM handoff
+
+The smoke client can pass ASR output to the LLM and report time to first text
+and total LLM latency. With the default DGD, measure streamed chat completions:
+
+```bash
+python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
+  --llm-transport chat
+```
+
+To test LLM prefill while speech is still being transcribed, use a Dynamo vLLM
+image containing [incremental realtime text support](https://github.com/ai-dynamo/dynamo/pull/14326),
+add `--realtime` to the `VllmWorker` arguments in `deploy/agg.yaml`, and redeploy
+the DGD. Then run:
+
+```bash
+python3 examples/nemotron_speech_cascaded_pipeline/smoke_speech_loop.py \
+  --llm-transport realtime
+```
+
+Pipecat remains the orchestrator in the UI deployment. It opens separate ASR
+and LLM WebSockets through the Dynamo frontend, forwards ASR deltas with
+Dynamo's `input_text_buffer.append` extension, commits the final transcript,
+and then requests a response. If ASR revises an interim hypothesis, the client
+clears the speculative text and replays the final transcript before commit.
+This smoke client mirrors that endpoint flow without running Pipecat.
+
+For an established Realtime connection without overlapping prefill, run
+`--llm-transport realtime-atomic`. Compare it with `realtime` using the same
+image, model, speech, instructions, and output-token limit.
+`llm_ttft_from_asr_final_ms` measures the post-transcription handoff, while
+`asr_start_to_llm_first_token_ms` covers the full ASR-to-first-token path.
 
 The TTS adapter requires a Dynamo runtime with streaming
 `/v1/audio/speech` support. The realtime ASR adapter disables server VAD
