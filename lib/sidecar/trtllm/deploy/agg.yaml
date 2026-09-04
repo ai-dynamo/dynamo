@@ -6,8 +6,8 @@
 # Worker pod = two containers:
 #   - main: Dynamo worker (dynamo-trtllm-sidecar), no GPU; talks to the engine
 #     over gRPC on 127.0.0.1. Must be named "main" (operator injects env + probes).
-#   - trtllm-engine: stock TRT-LLM image, holds the GPU, runs the gRPC server as
-#     a native sidecar (see initContainers).
+#   - trtllm-engine: TRT-LLM image with OpenEngine gRPC support, holds the GPU,
+#     runs the OpenEngine gRPC server as a native sidecar (see initContainers).
 #
 # The engine's gRPC has no auth/TLS; safe only because it stays on loopback.
 
@@ -42,20 +42,26 @@ spec:
     podTemplate:
       spec:
         # trtllm-engine as a native sidecar (initContainer + restartPolicy: Always):
-        # starts before `main`, stops after. --grpc needs rc21; rc22 crashes on
-        # startup (protobuf version mismatch).
+        # starts before `main`, stops after.
         initContainers:
         - name: trtllm-engine
-          image: nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc21
+          # Build your own: no published TensorRT-LLM release ships OpenEngine
+          # gRPC yet. The image must serve `--grpc-protocol openengine`, expose
+          # the Control service (the sidecar needs GetModelInfo to start, and
+          # the probes below call Health), and have the OpenEngine Python
+          # bindings installed ("tensorrt_llm[openengine]") for those probes.
+          image: <trtllm-image-with-openengine>
           restartPolicy: Always
-          # gRPC HealthCheck via exec (tcpSocket/grpc: dial the pod IP, not the
-          # loopback engine). startupProbe gates `main`; readinessProbe drops dead workers.
+          # Readiness via the OpenEngine Control.Health RPC, which reports the
+          # engine's own state (grpc + model, plus kv_connector when configured)
+          # rather than just a connectable socket.
+          # startupProbe gates `main`; readinessProbe drops dead workers.
           startupProbe:
             exec:
               command:
               - python3
               - -c
-              - import grpc; grpc.insecure_channel('127.0.0.1:50051').unary_unary('/trtllm.TrtllmService/HealthCheck')(b'', timeout=3)
+              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
             periodSeconds: 5
             timeoutSeconds: 10     # must exceed the RPC timeout + interpreter spawn
             failureThreshold: 60   # ~5 min for model load; raise for big models
@@ -64,7 +70,7 @@ spec:
               command:
               - python3
               - -c
-              - import grpc; grpc.insecure_channel('127.0.0.1:50051').unary_unary('/trtllm.TrtllmService/HealthCheck')(b'', timeout=3)
+              - import grpc; from openengine.v1 import lifecycle_pb2, openengine_pb2_grpc; s=openengine_pb2_grpc.ControlStub(grpc.insecure_channel('127.0.0.1:50051')); r=s.Health(lifecycle_pb2.HealthRequest(), timeout=3); exit(0 if r.state==lifecycle_pb2.HEALTH_STATE_READY else 1)
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 3
@@ -84,6 +90,8 @@ spec:
           args:
           - Qwen/Qwen3-0.6B
           - --grpc
+          - --grpc-protocol
+          - openengine
           - --host
           - 127.0.0.1
           - --port
@@ -108,10 +116,6 @@ spec:
           - 127.0.0.1:50051
           - --model-path
           - Qwen/Qwen3-0.6B
-          # Engine reports 0 for context length; set it here or requests that
-          # omit max_tokens are rejected.
-          - --context-length
-          - "40960"
           envFrom:
           - secretRef:
               name: hf-token-secret

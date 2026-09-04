@@ -25,9 +25,9 @@ use tonic_health::ServingStatus as HealthServingStatus;
 use crate::client::{CONTROL_SERVICE, INFERENCE_SERVICE, VllmClient};
 use crate::convert::{ResponseState, build_generate_request};
 use crate::engine::VllmSidecarEngine;
-use crate::json::{json_to_struct, struct_to_json};
 use crate::model::DiscoveredModel;
 use crate::proto as pb;
+use dynamo_sidecar_common::{json_to_struct, struct_to_json};
 
 #[derive(Clone, Default)]
 struct FakeVllm {
@@ -123,7 +123,7 @@ impl pb::inference_server::Inference for FakeVllm {
             .kv
             .as_ref()
             .and_then(|kv| kv.kv_transfer_params.clone())
-            .map(struct_to_json)
+            .map(|value| struct_to_json(value, "vLLM", "kv_transfer_params"))
             .transpose()
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let is_prefill = request_kv
@@ -197,7 +197,7 @@ impl pb::inference_server::Inference for FakeVllm {
                 }
             } else {
                 let kv = is_prefill.then(|| {
-                    json_to_struct(handoff.clone()).expect("encode handoff")
+                    json_to_struct(handoff.clone(), "kv_transfer_params").expect("encode handoff")
                 });
                 yield sequence_response(true, wants_logprobs, kv);
             }
@@ -748,7 +748,12 @@ async fn aggregated_generation_converts_request_stream_and_usage() {
     assert!(kv.bypass_prefix_cache);
     assert_eq!(kv.cache_salt, "dynamo-cache-salt:cache-salt");
     assert_eq!(
-        struct_to_json(kv.kv_transfer_params.clone().unwrap()).unwrap(),
+        struct_to_json(
+            kv.kv_transfer_params.clone().unwrap(),
+            "vLLM",
+            "kv_transfer_params"
+        )
+        .unwrap(),
         json!({"connector_data": {"values": [1, true, null]}})
     );
 }
@@ -872,6 +877,8 @@ async fn multimodal_image_is_forwarded_with_uuid() {
             .as_ref()
             .and_then(|kv| kv.kv_transfer_params.clone())
             .expect("decode KV handoff"),
+        "vLLM",
+        "kv_transfer_params",
     )
     .expect("decode KV JSON");
     assert!(
@@ -938,7 +945,12 @@ async fn prefill_decode_handoff_is_opaque_and_repeatable() {
 
         let requests = server.service.requests.lock().await;
         let decode_wire = requests.last().unwrap().kv.as_ref().unwrap();
-        let decoded = struct_to_json(decode_wire.kv_transfer_params.clone().unwrap()).unwrap();
+        let decoded = struct_to_json(
+            decode_wire.kv_transfer_params.clone().unwrap(),
+            "vLLM",
+            "kv_transfer_params",
+        )
+        .unwrap();
         // Every field round-trips opaquely except remote_port, which the sidecar
         // stringifies so vLLM builds a valid NIXL side-channel URL (a protobuf
         // Struct number would reach the engine as `20097.0`).

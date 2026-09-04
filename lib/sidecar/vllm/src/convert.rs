@@ -7,8 +7,8 @@ use dynamo_backend_common::{
 };
 
 use crate::client;
-use crate::json::{json_to_struct, struct_to_json};
 use crate::proto as pb;
+use dynamo_sidecar_common::{json_to_struct, struct_to_json};
 
 const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
 const MULTIMODAL_PROMPT_TOKEN_IDS_KEY: &str = "_dynamo_sidecar_multimodal_prompt_token_ids";
@@ -507,7 +507,9 @@ fn build_kv_parameters(
         cache_salt: cache_salt
             .map(|cache_salt| format!("{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"))
             .unwrap_or_default(),
-        kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
+        kv_transfer_params: kv_transfer_params
+            .map(|value| json_to_struct(value, "kv_transfer_params"))
+            .transpose()?,
         ec_transfer_params: None,
     })
 }
@@ -766,7 +768,10 @@ impl ResponseState {
             pb::finish_info::StopReason::StopString(value) => StopReason::String(value),
         });
         mapped.completion_usage = Some(usage(self.prompt_tokens, completion_tokens));
-        mapped.disaggregated_params = finish.kv_transfer_params.map(struct_to_json).transpose()?;
+        mapped.disaggregated_params = finish
+            .kv_transfer_params
+            .map(|value| struct_to_json(value, "vLLM", "kv_transfer_params"))
+            .transpose()?;
         if self.is_prefill && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
                 "prefill terminal is missing kv_transfer_params",

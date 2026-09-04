@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Dynamo backend for TensorRT-LLM's native `trtllm.TrtllmService` gRPC server.
+//! Dynamo backend for TensorRT-LLM's OpenEngine (`openengine.v1`) gRPC server.
 
 use std::sync::Arc;
 
@@ -32,10 +32,13 @@ pub struct TrtllmSidecarEngine {
     endpoint: GrpcEndpoint,
     transport: GrpcTransportConfig,
     model: ConfiguredModel,
+    /// Disaggregation role this worker plays. Selects the `context_only` /
+    /// `kv.session` divergence in `convert`.
+    mode: DisaggregationMode,
     client: OnceCell<TrtllmClient>,
-    /// Resolved model context length (`--context-length`, else `GetModelInfo`),
-    /// cached at `start` so `generate` can derive a default `max_tokens` for
-    /// requests that omit one.
+    /// Model context length reported by `Control.GetModelInfo`, cached at
+    /// `start` so `generate` can derive a default `max_tokens` for requests
+    /// that omit one.
     context_length: OnceCell<u32>,
     cancel: CancellationToken,
 }
@@ -45,11 +48,13 @@ impl TrtllmSidecarEngine {
         endpoint: GrpcEndpoint,
         transport: GrpcTransportConfig,
         model: ConfiguredModel,
+        mode: DisaggregationMode,
     ) -> Self {
         Self {
             endpoint,
             transport,
             model,
+            mode,
             client: OnceCell::new(),
             context_length: OnceCell::new(),
             cancel: CancellationToken::new(),
@@ -70,15 +75,10 @@ impl TrtllmSidecarEngine {
         if args.model_path.trim().is_empty() {
             return Err(client::invalid_argument("model-path must not be empty"));
         }
-        if args.context_length == Some(0) {
+        let mode = args.sidecar.common.disaggregation_mode;
+        if mode.is_encode() {
             return Err(client::invalid_argument(
-                "context-length must be greater than zero",
-            ));
-        }
-        if args.sidecar.common.disaggregation_mode != DisaggregationMode::Aggregated {
-            return Err(client::invalid_argument(
-                "the TensorRT-LLM sidecar supports aggregated serving only; the Generate \
-                 response contract carries no disaggregation handoff",
+                "encode mode is not supported by the TensorRT-LLM sidecar",
             ));
         }
         if args.sidecar.common.route_to_encoder {
@@ -91,12 +91,19 @@ impl TrtllmSidecarEngine {
         let transport = args.sidecar.grpc.config();
         let model = ConfiguredModel {
             source: args.model_path,
-            context_length: args.context_length,
+            // Resolved from the server's `Control.GetModelInfo` at `start`.
+            context_length: None,
         };
-        let engine = Self::new(endpoint, transport, model.clone());
+        let engine = Self::new(endpoint, transport, model.clone(), mode);
         let config = WorkerConfig {
             namespace: args.sidecar.common.namespace,
-            component: args.sidecar.common.component,
+            // Prefill workers register under their own component so the
+            // frontend's prefill router can target them separately.
+            component: if mode == DisaggregationMode::Aggregated {
+                args.sidecar.common.component
+            } else {
+                mode.discovery_component().to_string()
+            },
             endpoint: args.sidecar.common.endpoint,
             endpoint_types: args.sidecar.common.endpoint_types,
             custom_jinja_template: args.sidecar.common.custom_jinja_template,
@@ -109,7 +116,7 @@ impl TrtllmSidecarEngine {
                 .common
                 .exclude_tools_when_tool_choice_none,
             enable_kv_routing: false,
-            disaggregation_mode: DisaggregationMode::Aggregated,
+            disaggregation_mode: mode,
             route_to_encoder: false,
             ..Default::default()
         };
@@ -131,19 +138,28 @@ impl LLMEngine for TrtllmSidecarEngine {
         let client = TrtllmClient::connect(&self.endpoint, self.transport).await?;
         let connection_count = client.connection_count();
 
-        // Prefer a server-reported context length; fall back to the configured
-        // `--context-length`. GetModelInfo returns zero on current TRT-LLM
-        // releases, so the argument is currently the only source. The resolved
-        // value backs the default-`max_tokens` path in `convert::max_tokens`.
+        // The server owns the context length: it backs both the registered
+        // context window and the default-`max_tokens` path in
+        // `convert::max_tokens`. Fail startup rather than serve with an unknown
+        // window, which would reject every request that omits `max_tokens`.
         let mut model = self.model.clone();
-        match client.model_info().await {
-            Ok(Some(context_length)) => model.context_length = Some(context_length),
-            Ok(None) => {}
-            Err(error) => tracing::warn!(%error, "GetModelInfo failed; using --context-length"),
-        }
-        if let Some(context_length) = model.context_length {
-            let _ = self.context_length.set(context_length);
-        }
+        let context_length = client
+            .model_info(&self.model.source)
+            .await
+            .map_err(|error| {
+                client::engine_shutdown(format!(
+                    "Control.GetModelInfo failed, so the model context length is unknown: \
+                     {error}. The TensorRT-LLM server must implement the OpenEngine Control \
+                     service."
+                ))
+            })?
+            .ok_or_else(|| {
+                client::engine_shutdown(
+                    "Control.GetModelInfo reported no max_context_length for this model",
+                )
+            })?;
+        model.context_length = Some(context_length);
+        let _ = self.context_length.set(context_length);
 
         self.client
             .set(client)
@@ -152,6 +168,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             endpoint = %self.endpoint,
             connections = connection_count,
             model = %model.source,
+            context_length,
             "TensorRT-LLM gRPC is ready"
         );
         Ok(model.engine_config())
@@ -167,9 +184,14 @@ impl LLMEngine for TrtllmSidecarEngine {
             .get()
             .ok_or_else(|| client::engine_shutdown("TensorRT-LLM sidecar is not started"))?;
         let request_id = ctx.id().to_string();
-        let proto_request =
-            build_generate_request(&request, &request_id, self.context_length.get().copied())?;
-        let mut state = ResponseState::new(&request);
+        let proto_request = build_generate_request(
+            &request,
+            &request_id,
+            &self.model.source,
+            self.context_length.get().copied(),
+            self.mode,
+        )?;
+        let mut state = ResponseState::new(&request, self.mode);
         let cancel = self.cancel.clone();
 
         let stream = tokio::select! {
@@ -233,7 +255,7 @@ impl LLMEngine for TrtllmSidecarEngine {
             return;
         };
         if let Err(error) = client.abort(ctx.id().to_string()).await {
-            tracing::debug!(request_id = ctx.id(), %error, "TensorRT-LLM Abort RPC failed");
+            tracing::warn!(request_id = ctx.id(), %error, "TensorRT-LLM Control.Abort failed");
         }
     }
 

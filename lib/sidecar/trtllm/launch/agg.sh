@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated serving through TensorRT-LLM's native gRPC server (1 GPU).
+# Aggregated serving through TensorRT-LLM's OpenEngine gRPC server (1 GPU).
 
 set -e
 
@@ -39,7 +39,6 @@ while [[ $# -gt 0 ]]; do
             echo "  DYN_HTTP_PORT           Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT         Dynamo sidecar system port (default: 8081)"
             echo "  TRTLLM_GRPC_PORT        TensorRT-LLM gRPC port (default: 50051)"
-            echo "  TRTLLM_CONTEXT_LENGTH   Registered model context length (default: 4096)"
             exit 0
             ;;
         *)
@@ -62,7 +61,6 @@ trap trtllm_exit_trap EXIT
 
 TRTLLM_PYTHON="${TRTLLM_PYTHON:-python3}"
 TRTLLM_GRPC_PORT="${TRTLLM_GRPC_PORT:-50051}"
-TRTLLM_CONTEXT_LENGTH="${TRTLLM_CONTEXT_LENGTH:-4096}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -74,16 +72,16 @@ if [[ -n "$GPU_MEM_ARGS" ]]; then
     TRTLLM_GPU_MEM_ARGS=(--extra_llm_api_options "$TRTLLM_EXTRA_CONFIG")
 fi
 
-print_launch_banner "Launching TensorRT-LLM Native-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
-    "TensorRT-LLM gRPC: 127.0.0.1:${TRTLLM_GRPC_PORT}" \
-    "Context length:    ${TRTLLM_CONTEXT_LENGTH}"
+print_launch_banner "Launching TensorRT-LLM OpenEngine-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
+    "TensorRT-LLM gRPC: 127.0.0.1:${TRTLLM_GRPC_PORT}"
 
 python3 -m dynamo.frontend &
 
-# TensorRT-LLM's native gRPC listener is unauthenticated; keep it on loopback.
+# TensorRT-LLM's OpenEngine gRPC listener is unauthenticated; keep it on loopback.
 CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
 "$TRTLLM_PYTHON" -m tensorrt_llm.commands.serve "$MODEL" \
     --grpc \
+    --grpc-protocol openengine \
     --host 127.0.0.1 \
     --port "$TRTLLM_GRPC_PORT" \
     "${TRTLLM_GPU_MEM_ARGS[@]}" \
@@ -92,7 +90,6 @@ CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
 DYN_SYSTEM_PORT="${DYN_SYSTEM_PORT:-8081}" \
     dynamo-trtllm-sidecar \
     --trtllm-endpoint "127.0.0.1:${TRTLLM_GRPC_PORT}" \
-    --model-path "$MODEL" \
-    --context-length "$TRTLLM_CONTEXT_LENGTH" &
+    --model-path "$MODEL" &
 
 wait_any_exit
