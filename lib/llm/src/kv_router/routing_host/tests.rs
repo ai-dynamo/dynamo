@@ -1426,6 +1426,7 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     let metrics = router.request_metrics.clone();
     let started_before = metrics.requests_started_total().get();
     let completed_before = metrics.requests_total.get();
+    let duration_before = metrics.request_duration_seconds.get_sample_count();
 
     let controller = Controller::new("pre-admission-cancellation".to_string());
     controller.stop();
@@ -1453,6 +1454,10 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     drop(cancelled_guard);
     assert_eq!(metrics.requests_started_total().get(), started_before + 1);
     assert_eq!(metrics.requests_total.get(), completed_before);
+    assert_eq!(
+        metrics.request_duration_seconds.get_sample_count(),
+        duration_before
+    );
 
     let mut failed_input = request();
     failed_input.migration_state = Some(Default::default());
@@ -1484,6 +1489,10 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     drop(completed_guard);
     assert_eq!(metrics.requests_started_total().get(), started_before + 3);
     assert_eq!(metrics.requests_total.get(), completed_before + 1);
+    assert_eq!(
+        metrics.request_duration_seconds.get_sample_count(),
+        duration_before + 1
+    );
 
     let mut builtin_guard = RequestGuard::<DefaultWorkerSelector>::new_builtin(
         Arc::clone(&metrics),
@@ -1496,6 +1505,10 @@ async fn router_request_counters_follow_admission_and_completion_lifecycle() {
     builtin_guard.abort().await;
     drop(builtin_guard);
     assert_eq!(metrics.requests_total.get(), completed_before + 1);
+    assert_eq!(
+        metrics.request_duration_seconds.get_sample_count(),
+        duration_before + 1
+    );
 
     drop(router);
     runtime.shutdown();

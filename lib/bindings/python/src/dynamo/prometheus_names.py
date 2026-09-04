@@ -450,6 +450,8 @@ class router:
     REQUESTS_STARTED_TOTAL = "router_requests_started_total"
     # Total number of requests processed by the router
     REQUESTS_TOTAL = "router_requests_total"
+    # Duration of requests observed by the router (seconds)
+    REQUEST_DURATION_SECONDS = "router_request_duration_seconds"
     # Total number of remote indexer overlap queries that failed
     REMOTE_INDEXER_QUERY_FAILURES_TOTAL = "router_remote_indexer_query_failures_total"
     # Total number of remote indexer routing-decision writes that failed

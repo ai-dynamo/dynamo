@@ -638,6 +638,9 @@ pub mod router {
     /// Total number of requests processed by the router
     pub const REQUESTS_TOTAL: &str = "router_requests_total";
 
+    /// Duration of requests observed by the router (seconds)
+    pub const REQUEST_DURATION_SECONDS: &str = "router_request_duration_seconds";
+
     /// Total number of remote indexer overlap queries that failed
     pub const REMOTE_INDEXER_QUERY_FAILURES_TOTAL: &str =
         "router_remote_indexer_query_failures_total";

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use crate::{
     kv_router::{
@@ -249,6 +249,7 @@ impl CanonicalOutputTracker {
 struct RequestObservability {
     tracker: Option<Arc<RequestTracker>>,
     request_metrics: Arc<RouterRequestMetrics>,
+    started_at: Instant,
     cumulative_osl: usize,
     metrics_recorded: bool,
     first_token_recorded: bool,
@@ -264,6 +265,7 @@ impl RequestObservability {
         Self {
             tracker,
             request_metrics,
+            started_at: Instant::now(),
             cumulative_osl: 0,
             metrics_recorded: false,
             first_token_recorded: false,
@@ -359,6 +361,9 @@ impl RequestObservability {
                 .output_sequence_tokens
                 .observe(self.cumulative_osl as f64);
         }
+        self.request_metrics
+            .request_duration_seconds
+            .observe(self.started_at.elapsed().as_secs_f64());
         self.request_metrics.requests_total.inc();
     }
 }

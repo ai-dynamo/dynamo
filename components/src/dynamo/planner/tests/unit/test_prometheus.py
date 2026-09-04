@@ -549,6 +549,17 @@ class TestPrometheusAPIClientRouterSource:
         expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.TIME_TO_FIRST_TOKEN_SECONDS}"
         assert expected_metric in call_args
 
+    def test_get_avg_request_duration_dispatches_to_router_histogram(
+        self, router_client
+    ):
+        """Router-source duration must come from the router request lifecycle."""
+        result = router_client.get_avg_request_duration("60s", "mymodel")
+        assert result == 42.0
+
+        call_args = str(router_client.prom.custom_query.call_args)
+        expected_metric = f"{prometheus_names.name_prefix.COMPONENT}_{prometheus_names.router.REQUEST_DURATION_SECONDS}"
+        assert expected_metric in call_args
+
     def test_get_avg_input_sequence_tokens_dispatches_to_router_histogram(
         self, router_client
     ):

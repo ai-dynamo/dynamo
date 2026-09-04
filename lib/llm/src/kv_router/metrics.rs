@@ -17,8 +17,8 @@
 //!   - Frontend (aggregated and disaggregated): available on default port 8000
 //!   - Standalone router: not created (frontend-only)
 //!
-//! - [`RouterRequestMetrics`]: Per-request aggregate histograms and counters (TTFT, ITL,
-//!   tokens, KV hit rate, and non-max-overlap routing decisions).
+//! - [`RouterRequestMetrics`]: Per-request aggregate histograms and counters (duration,
+//!   TTFT, ITL, tokens, KV hit rate, and non-max-overlap routing decisions).
 //!   Registered on the DRT `MetricsRegistry` hierarchy via `Component::metrics()`.
 //!   Eagerly created so they appear as zeros before any requests arrive.
 //!   Populated by `RoutingHost::generate()` and its `RequestGuard` as it observes
@@ -844,6 +844,7 @@ impl RoutingOverheadMetrics {
 /// independently.
 pub struct RouterRequestMetrics {
     pub requests_total: prometheus::IntCounter,
+    pub request_duration_seconds: prometheus::Histogram,
     pub time_to_first_token_seconds: prometheus::Histogram,
     pub inter_token_latency_seconds: prometheus::Histogram,
     pub input_sequence_tokens: prometheus::Histogram,
@@ -906,6 +907,14 @@ impl RouterRequestMetrics {
                         extra_labels,
                     )
                     .expect("failed to create router_requests_total");
+                let request_duration_seconds = metrics
+                    .create_histogram(
+                        &router_metric(frontend_service::REQUEST_DURATION_SECONDS),
+                        "Duration of dispatched requests observed at the router",
+                        extra_labels,
+                        Some(generate_log_buckets(1.0, 512.0, 10)),
+                    )
+                    .expect("failed to create router_request_duration_seconds");
                 let time_to_first_token_seconds = metrics
                     .create_histogram(
                         &router_metric(frontend_service::TIME_TO_FIRST_TOKEN_SECONDS),
@@ -991,6 +1000,7 @@ impl RouterRequestMetrics {
                 overlap_blocks_lost.with_label_values(&[WORKER_TYPE_PREFILL]);
                 Arc::new(Self {
                     requests_total,
+                    request_duration_seconds,
                     time_to_first_token_seconds,
                     inter_token_latency_seconds,
                     input_sequence_tokens,

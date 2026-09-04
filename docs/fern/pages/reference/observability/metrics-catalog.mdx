@@ -273,6 +273,10 @@ The router exposes metrics for routing decisions and overhead. Not every metric 
   Total requests processed by the router.
 </ParamField>
 
+<ParamField path="dynamo_component_router_request_duration_seconds" type="histogram">
+  Duration in seconds from router admission to request completion or termination.
+</ParamField>
+
 <ParamField path="dynamo_component_router_time_to_first_token_seconds" type="histogram">
   Time to first token in seconds.
 </ParamField>
