@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Apply Dynamo request contracts to the custom parser qualification matrix."""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import importlib
+import json
+import sys
+from pathlib import Path
+from typing import Any, Iterable
+
+RAW_REASONING_MARKERS = ("</think>", "<mm:think>", "</mm:think>")
+
+
+def apply_request_contract(
+    cases: Iterable[Any], contract: dict[str, Any]
+) -> tuple[Any, ...]:
+    enabled = contract.get("enabled", {})
+    disabled = contract.get("disabled", {})
+    if not isinstance(enabled, dict) or not isinstance(disabled, dict):
+        raise ValueError("request contract enabled/disabled values must be objects")
+    if not enabled and not disabled:
+        return tuple(cases)
+    result: list[Any] = []
+    for case in cases:
+        overrides = dict(getattr(case, "request_overrides", None) or {})
+        current = overrides.get("chat_template_kwargs")
+        current = dict(current) if isinstance(current, dict) else {}
+        is_disabled = any(value is False for value in current.values())
+        expected = disabled if is_disabled else enabled
+        if expected:
+            current.update(expected)
+            overrides["chat_template_kwargs"] = current
+        result.append(dataclasses.replace(case, request_overrides=overrides))
+    return tuple(result)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--custom-root", type=Path, required=True)
+    parser.add_argument("--request-contract-json", required=True)
+    args, report_args = parser.parse_known_args(argv)
+    if report_args[:1] == ["--"]:
+        report_args = report_args[1:]
+    contract = json.loads(args.request_contract_json)
+    if not isinstance(contract, dict):
+        raise ValueError("request contract must be an object")
+    custom_root = args.custom_root.resolve()
+    if not (custom_root / "tool_calling_static_report.py").exists():
+        raise ValueError(f"custom tool-calling tests are missing: {custom_root}")
+    sys.path.insert(0, str(custom_root))
+    report = importlib.import_module("tool_calling_static_report")
+    original_build_cases = report.probe.build_cases
+    original_validate_result = report.probe.validate_result
+
+    def contracted_build_cases(profile: str = "generic") -> tuple[Any, ...]:
+        return apply_request_contract(original_build_cases(profile), contract)
+
+    def validate_with_reasoning_markers(case: Any, result: Any) -> tuple[Any, Any]:
+        errors, warnings = original_validate_result(case, result)
+        raw = json.dumps(result.raw_response, sort_keys=True, ensure_ascii=False)
+        for marker in RAW_REASONING_MARKERS:
+            marker_found = False
+            if marker in (result.content or ""):
+                marker_found = True
+                errors.append(
+                    report.probe.error(
+                        "reasoning_marker_leaked_to_content",
+                        f"content contains {marker!r}",
+                    )
+                )
+            if marker in (result.reasoning_content or ""):
+                marker_found = True
+                errors.append(
+                    report.probe.error(
+                        "reasoning_marker_leaked_to_reasoning",
+                        f"reasoning contains {marker!r}",
+                    )
+                )
+            if not marker_found and marker in raw:
+                errors.append(
+                    report.probe.error(
+                        "reasoning_marker_leaked_in_response",
+                        f"response contains {marker!r}",
+                    )
+                )
+        return errors, warnings
+
+    report.probe.build_cases = contracted_build_cases
+    report.probe.validate_result = validate_with_reasoning_markers
+    original_argv = sys.argv
+    try:
+        sys.argv = [str(custom_root / "tool_calling_static_report.py"), *report_args]
+        return int(report.main())
+    finally:
+        sys.argv = original_argv
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
