@@ -109,7 +109,7 @@ same review as the change it covers:
 ```yaml
 ownership_transfers:
   - glob: lib/kv-router/
-    removing: [runtime]
+    removing: ['@ai-dynamo/dynamo-runtime-codeowners']
     reason: router team took the subtree over in DIS-1234
 ```
 
@@ -120,17 +120,21 @@ path:
 ```yaml
 ownership_transfers:
   - glob: '*'
-    removing: [frontend]
+    removing: ['@ai-dynamo/dynamo-frontend-codeowners']
     reason: team renamed on GitHub
 ```
 
-`removing` takes area labels; it also takes a `@org/team` handle outright,
-which is the clearer spelling when a label survives a reassignment and now
-names the incoming team.
+`removing` names the outgoing owner handle, which is the exact string the
+failure message prints -- copy it from there. Area labels are rejected. A
+label is a pointer: repoint its `github_team` and an approval written against
+the label silently follows to whichever team the label names next, so the
+approval for handing team A's code to team B would go on to approve handing
+team B's code to team C.
 
-Entries are self-cleaning. One that matches no actual removal fails the build,
-so a hand-off cannot be left behind as a standing exemption for the next
-change to inherit.
+An acknowledgement is live for exactly one change, the one whose diff carries
+it. An entry landed ahead of its removal fails as inert; one already on the
+base branch is spent and approves nothing further. Prune spent entries -- they
+warn until you do.
 
 ## External contributors
 

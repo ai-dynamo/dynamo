@@ -327,11 +327,21 @@ def _transfer_entries(spec: dict) -> list[dict]:
         if (
             not isinstance(removing, list)
             or not removing
-            or not all(isinstance(label, str) and label for label in removing)
+            or not all(isinstance(team, str) and team for team in removing)
         ):
             raise SystemExit(
                 f"areas.yaml: ownership_transfers entry {entry!r} needs a "
-                "non-empty 'removing' list of owner labels"
+                "non-empty 'removing' list of owner handles"
+            )
+        bare = [team for team in removing if not team.startswith("@")]
+        if bare:
+            raise SystemExit(
+                f"areas.yaml: ownership_transfers entry {entry!r} names "
+                f"{bare} by area label. Name the outgoing owner handle "
+                "instead (the '@org/team' the failure message prints). A "
+                "label is a pointer: repoint its github_team and the "
+                "approval silently follows to whichever team the label "
+                "names next."
             )
     return entries
 
@@ -348,42 +358,45 @@ def _transfer_key(glob: str) -> str:
     return "*" if glob == "*" else anchor(glob)
 
 
-def _transfer_teams(labels: list[str], label_teams: dict[str, set[str]]) -> set[str]:
-    """Teams an acknowledgement's ``removing`` list names.
-
-    A label resolves to every team it has named across the two revisions, not
-    just the current one. A reassignment keeps the label and repoints it, so
-    a head-only reading would resolve the entry to the team arriving rather
-    than the one leaving -- reporting the removal as unacknowledged and the
-    entry as inert, both at once, for a correctly written hand-off. An entry
-    may also name a team outright, which the fallback passes through.
-    """
-    teams: set[str] = set()
-    for label in labels:
-        teams |= label_teams.get(label) or {label}
-    return teams
+def _transfer_pairs(spec: dict | None) -> set[tuple[str, str]]:
+    """``(glob key, team)`` pairs a spec's ``ownership_transfers`` declares."""
+    if spec is None:
+        return set()
+    return {
+        (_transfer_key(entry["glob"]), team)
+        for entry in _transfer_entries(spec)
+        for team in entry["removing"]
+    }
 
 
 def _acknowledged_removals(
-    spec: dict, label_teams: dict[str, set[str]]
+    spec: dict, base_spec: dict | None = None
 ) -> dict[str, set[str]]:
-    """Teams each ``ownership_transfers`` entry records as deliberately gone.
+    """Teams this change records as deliberately losing ownership.
 
     Registered under both the written and the anchored spelling of the glob,
     so ``lib/`` in a transfer entry still matches ``/lib/`` in the grant it
     covers. Without that, a benign spelling difference costs the author two
     failures at once: the removal reads as unacknowledged and the entry reads
     as inert.
+
+    An acknowledgement is spent by the change that introduces it. A pair the
+    merge-base already carries approved a removal that has already landed and
+    been reviewed; leaving it live would let it wave through a later removal
+    nobody looked at, which is how a one-time hand-off becomes a standing
+    exemption. Together with the inert check -- which blocks an entry landed
+    ahead of its removal -- an acknowledgement is live for exactly one
+    change, the one whose diff carries it.
     """
+    spent = _transfer_pairs(base_spec)
     acknowledged: dict[str, set[str]] = {}
-    for entry in _transfer_entries(spec):
-        teams = _transfer_teams(entry["removing"], label_teams)
-        acknowledged.setdefault(_transfer_key(entry["glob"]), set()).update(teams)
+    for key, team in _transfer_pairs(spec) - spent:
+        acknowledged.setdefault(key, set()).add(team)
     return acknowledged
 
 
 def unmatched_transfers(
-    removals: list[WeakenedDeclaration], spec: dict, label_teams: dict[str, set[str]]
+    removals: list[WeakenedDeclaration], spec: dict
 ) -> set[tuple[str, str]]:
     """Acknowledged ``(glob, owner)`` pairs that match no actual removal.
 
@@ -392,23 +405,21 @@ def unmatched_transfers(
     one, and the misspelling would sit there forever -- exactly the rot the
     self-cleaning rule exists to prevent.
 
-    Reported as the author spelled it, so the message names a line they can
-    find rather than a team the label resolved to behind them.
+    Judged over every entry, not just the live ones, so a spent entry surfaces
+    as inert and gets pruned rather than accumulating as noise.
     """
     live = {(anchor(entry.glob), team) for entry in removals for team in entry.lost}
     losing = {team for _, team in live}
     unmatched: set[tuple[str, str]] = set()
     for entry in _transfer_entries(spec):
-        for label in entry["removing"]:
-            teams = _transfer_teams([label], label_teams)
-            matched = any(
+        for team in entry["removing"]:
+            matched = (
                 team in losing
                 if entry["glob"] == "*"
                 else (anchor(entry["glob"]), team) in live
-                for team in teams
             )
             if not matched:
-                unmatched.add((entry["glob"], label))
+                unmatched.add((entry["glob"], team))
     return unmatched
 
 
@@ -594,7 +605,8 @@ def strict_failure(
         return (
             f"!! strict: {len(weakened)} ownership declaration(s) removed "
             "while their files remain tracked -- restore them in areas.yaml, "
-            "or record the hand-off under 'ownership_transfers'"
+            "or record the hand-off under 'ownership_transfers', naming the "
+            "lost owner handle printed above"
         )
     if inert_transfers:
         return (
@@ -787,7 +799,6 @@ def split_transfers(
     removals: list[WeakenedDeclaration],
     head_spec: dict,
     base_spec: dict | None,
-    label_teams: dict[str, set[str]],
 ) -> tuple[list[str], list[str]]:
     """Split unmatched acknowledgements into blocking and inherited.
 
@@ -797,41 +808,13 @@ def split_transfers(
     merge-base and no removal can be observed. Same split the stale-glob gate
     makes between what a branch orphaned and what it inherited.
     """
-    unmatched = unmatched_transfers(removals, head_spec, label_teams)
+    unmatched = unmatched_transfers(removals, head_spec)
     inherited = (
-        unmatched_transfers(removals, base_spec, label_teams)
-        if base_spec is not None
-        else unmatched
+        unmatched_transfers(removals, base_spec) if base_spec is not None else unmatched
     )
     return describe_transfers(unmatched - inherited), describe_transfers(
         unmatched & inherited
     )
-
-
-def _removal_label_map(
-    base_spec: dict | None, model: ResolvedModel
-) -> dict[str, set[str]]:
-    """Every team each label has named across both revisions.
-
-    A hand-off can delete the area it hands off from, and then the label the
-    transfer entry names exists only in the base. Head-only resolution would
-    leave it as a bare label, never matching the resolved team in the loss, so
-    the entry would read as both unacknowledged and inert at once. A
-    reassignment is the mirror image: the label survives and points somewhere
-    new, so head-only resolution names the arriving team instead of the
-    departing one. Keeping both readings covers each case, and costs nothing
-    -- a label that never moved resolves to a one-element set.
-    """
-    label_teams = {label: {team} for label, team in model.label_to_team().items()}
-    if base_spec is None:
-        return label_teams
-    try:
-        base_map = compute_resolution(base_spec).label_to_team()
-    except SystemExit:
-        return label_teams
-    for label, team in base_map.items():
-        label_teams.setdefault(label, set()).add(team)
-    return label_teams
 
 
 def _merge_base_spec(repo: str, base: str, areas: str) -> dict | None:
@@ -879,9 +862,8 @@ def main() -> int:
         newly_stale = newly_stale_patterns(dead, base_paths)
     base_spec = _merge_base_spec(args.repo, args.base, args.areas)
     removals = weakened_declarations(base_spec, spec, tree)
-    label_map = _removal_label_map(base_spec, model)
-    weakened = unacknowledged(removals, _acknowledged_removals(spec, label_map))
-    inert, stale_inherited = split_transfers(removals, spec, base_spec, label_map)
+    weakened = unacknowledged(removals, _acknowledged_removals(spec, base_spec))
+    inert, stale_inherited = split_transfers(removals, spec, base_spec)
     _print_summary(model, tree, unmatched, dead, newly_stale, violations)
     print_shared_additivity_violations(additivity)
     print_weakened_declarations(weakened)
