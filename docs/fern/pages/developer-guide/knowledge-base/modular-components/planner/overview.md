@@ -18,9 +18,20 @@ LLM inference breaks these assumptions:
 
 The Dynamo **Planner** is an autoscaler purpose-built for these constraints. It understands engine profiling data, tracks per-worker GPU utilization, predicts traffic patterns, and makes scaling decisions that directly target TTFT and ITL SLAs — not proxy metrics.
 
-## Getting Started: Optimization Targets
+## Optimization Targets and Scaling Methods
 
-The planner offers four `optimization_target` settings that control how scaling decisions are made:
+Planner configuration has two separate layers:
+
+| Concept | Configuration | Purpose |
+|---------|---------------|---------|
+| **Optimization target** | `optimization_target` | Defines the objective and policy the Planner uses to decide when capacity should change. |
+| **Scaling method** | `enable_throughput_scaling`, `enable_load_scaling` | Defines the mechanism that turns traffic or engine signals into replica recommendations. These fields are selectable only with the `sla` target. |
+
+An optimization target is not a scaling method. In particular, the `throughput` optimization target uses load-based scaling with built-in thresholds; it does not enable the throughput-based scaling method.
+
+### Optimization Targets
+
+The Planner offers four optimization targets:
 
 | Target | Description | Requires SLA? | Requires Profiling? |
 |--------|-------------|:-------------:|:-------------------:|
@@ -29,20 +40,31 @@ The planner offers four `optimization_target` settings that control how scaling 
 | **`load`** | Uses user-defined prefill queue token and decode KV cache utilization thresholds. | No | No |
 | **`sla`** | Targets specific TTFT/ITL SLA values through the Planner engine-query layer and the AIConfigurator compatibility API in the `aisimulate` wheel: native AIC estimates when available, online FPM tuning, and FPM regression fallback. | Yes (`ttft_ms`, `itl_ms`) | Recommended |
 
+### Scaling Methods
+
+The Planner implements two scaling methods:
+
+- **Throughput-based scaling (`sla` target only)**: Uses the Planner engine-query layer and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. Forward-pass estimates come from the AIConfigurator compatibility API in the `aisimulate` wheel, with self-benchmark or profiler FPM bootstrap data and live FPM tuning. Adjusts on a longer interval (default 180s). The default `throughput` target instead uses load-based queue and KV-utilization thresholds.
+- **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and queries the same Planner engine-query layer for short-term TTFT/ITL estimates. No pre-deployment data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
+
+When both methods are enabled for the `sla` target, throughput-based scaling provides a capacity floor for long-term planning while load-based scaling handles real-time adjustments above that floor.
+
+### Target and Scaling Method Compatibility
+
+| Optimization Target | Throughput-Based | Load-Based | Behavior |
+|---------------------|:----------------:|:----------:|----------|
+| **`throughput`** (default) | — | ✅ Always enabled | Uses built-in queue-depth and KV-utilization thresholds. |
+| **`latency`** | — | ✅ Always enabled | Uses more aggressive built-in thresholds. |
+| **`load`** | — | ✅ Always enabled | Uses the queue-token and KV-utilization thresholds you configure. |
+| **`sla`** | ✅ Optional; enabled by default | ✅ Optional | Honors `enable_throughput_scaling` and `enable_load_scaling`; at least one must be enabled. |
+
+For `throughput`, `latency`, and `load`, the Planner enables load-based scaling, disables throughput-based scaling, and ignores both `enable_*_scaling` fields. The `sla` target is the only target that lets you select either scaling method or combine them.
+
 **We recommend starting with the default `throughput` target** because it requires no configuration. Switch to `latency` for latency-sensitive workloads, `load` for explicit prefill queue token and decode KV cache utilization thresholds, or `sla` for precise SLA targeting with native AIC or FPM-based performance modeling.
 
 > **New to the Planner?** Start with the [Planner Guide](planner-guide.md) for a complete workflow including profiling and deployment.
 
 > **Need multi-DGD coordination?** See the [Global Planner Guide](global-planner-guide.md) for shared-policy coordination across multiple DGDs and single-endpoint multi-pool deployments.
-
-## Scaling Modes
-
-The Planner supports two scaling modes that can run independently or together:
-
-- **Throughput-based scaling (`sla` target only)**: Uses the Planner engine-query layer and traffic prediction to compute the replica count needed to meet TTFT and ITL targets. Forward-pass estimates come from the AIConfigurator compatibility API in the `aisimulate` wheel, with self-benchmark or profiler FPM bootstrap data and live FPM tuning. Adjusts on a longer interval (default 180s). The default `throughput` target instead uses load-based queue and KV-utilization thresholds.
-- **Load-based scaling**: Uses ForwardPassMetrics (FPM) from the Dynamo event plane and queries the same Planner engine-query layer for short-term TTFT/ITL estimates. No pre-deployment data or KV Router required. Adjusts on a short interval (default 5s) to respond quickly to bursts.
-
-When both modes are enabled, throughput-based scaling provides a capacity floor (long-term planning) while load-based scaling handles real-time adjustments above that floor.
 
 ## Feature Matrix
 
@@ -69,13 +91,13 @@ When both modes are enabled, throughput-based scaling provides a capacity floor 
 
 **Legend:** ✅ Supported; — Not applicable.
 
-Router mode does not constrain either scaling mode. Load-based scaling consumes FPM directly from the engines through the Dynamo event plane, so it does not require the KV router. When runtime metrics are available, both scaling modes account for KV cache reuse through KV hit rate and speculative decoding through accepted tokens per forward pass. The Planner uses these signals for capacity estimates; it does not enable the engine features.
+Router mode does not constrain either scaling method. Load-based scaling consumes FPM directly from the engines through the Dynamo event plane, so it does not require the KV router. When runtime metrics are available, both scaling methods account for KV cache reuse through KV hit rate and speculative decoding through accepted tokens per forward pass. The Planner uses these signals for capacity estimates; it does not enable the engine features.
 
-## When to Use Which Mode
+## When to Use Each Scaling Method
 
-- **Throughput-based scaling** should be enabled for SLA mode when you want stable, prediction-based capacity planning. Native AIC or bootstrap FPMs make it ready sooner; otherwise it warms from live FPMs.
+- **Throughput-based scaling** should be enabled for the `sla` target when you want stable, prediction-based capacity planning. Native AIC or bootstrap FPMs make it ready sooner; otherwise it warms from live FPMs.
 - **Load-based scaling** should be enabled when traffic is bursty or hard to predict. It reacts quickly to real-time load changes without requiring pre-deployment data.
-- **Both modes together**: For the best of both worlds, enable both. Throughput-based scaling provides a lower bound (long-term capacity), while load-based scaling handles bursts above that floor. When both are enabled, use a longer `throughput_adjustment_interval_seconds` than `load_adjustment_interval_seconds`.
+- **Both methods together**: For the best of both worlds, enable both. Throughput-based scaling provides a lower bound (long-term capacity), while load-based scaling handles bursts above that floor. When both are enabled, use a longer `throughput_adjustment_interval_seconds` than `load_adjustment_interval_seconds`.
 
 ## Quick Start
 
@@ -84,7 +106,7 @@ Router mode does not constrain either scaling mode. Load-based scaling consumes 
 - Dynamo platform installed on Kubernetes ([Installation Guide](../../../../kubernetes/installation/install-dynamo.md))
 - kube-prometheus-stack installed ([Metrics Setup](../../../../kubernetes/operations/observability.mdx))
 
-### Default Mode (zero config)
+### Default Target (zero config)
 
 The planner works out of the box with no configuration needed. By default, `optimization_target` is set to `throughput`, which uses static thresholds on queue depth and KV cache utilization — no SLAs or profiling required:
 
