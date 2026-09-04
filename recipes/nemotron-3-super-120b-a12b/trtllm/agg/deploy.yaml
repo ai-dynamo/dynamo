@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config
+data:
+  config.yaml: |
+    backend: pytorch
+    max_batch_size: 128
+    max_num_tokens: 262144
+    tensor_parallel_size: 4
+    enable_attention_dp: false
+    enable_chunked_prefill: True
+    pipeline_parallel_size: 1
+    print_iter_log: true
+    kv_cache_config:
+      free_gpu_memory_fraction: 0.40
+      enable_block_reuse: false
+      dtype: fp8
+    cuda_graph_config:
+      enable_padding: false
+    trust_remote_code: true
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: nemotron-3-super-120b-a12b-agg
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - nemotron-3-super-120b-a12b-agg
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - python3 -m dynamo.frontend --router-mode kv --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+      replicas: 1
+    TrtllmWorker:
+      componentType: worker
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${MODEL_NAME}" \
+              --served-model-name "${MODEL_NAME}" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --tensor-parallel-size 4 \
+              --dyn-reasoning-parser deepseek_r1 \
+              --dyn-tool-call-parser qwen3_coder
+          command:
+          - /bin/sh
+          - -c
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          env:
+          - name: MODEL_NAME
+            value: nvidia/nemotron-3-super-120b-a12b
+          - name: ENGINE_ARGS
+            value: /opt/dynamo/configs/config.yaml
+          - name: HF_HOME
+            value: /opt/models
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: llm-config
+            readOnly: true
+          workingDir: /workspace/examples/backends/trtllm
+        volumes:
+        - configMap:
+            name: llm-config
+          name: llm-config
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"
