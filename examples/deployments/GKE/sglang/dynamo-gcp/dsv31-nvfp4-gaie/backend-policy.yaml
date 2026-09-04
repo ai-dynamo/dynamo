@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# GCPBackendPolicy — GKE LB timeout/draining for InferencePool headless Services (auto-suffixed names).
+# If 504s persist, confirm target Service names match the cluster:
+#   kubectl get svc -n dynamo-system | grep -E 'nvfp4-agg-gaie-pool-ips|nvfp4-disagg-gaie-pool-ips'
+#
+# Deploy: kubectl apply -f backend-policy.yaml -n dynamo-system
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: nvfp4-agg-gaie-backend-policy
+  namespace: dynamo-system
+spec:
+  default:
+    timeoutSec: 600
+    connectionDraining:
+      drainingTimeoutSec: 600
+  targetRef:
+    group: ""
+    kind: Service
+    name: REPLACE_ME_AGG_POOL_IPS_SERVICE
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: nvfp4-disagg-gaie-backend-policy
+  namespace: dynamo-system
+spec:
+  default:
+    timeoutSec: 600
+    connectionDraining:
+      drainingTimeoutSec: 600
+  targetRef:
+    group: ""
+    kind: Service
+    name: REPLACE_ME_DISAGG_POOL_IPS_SERVICE
