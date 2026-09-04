@@ -46,6 +46,7 @@ use crate::tracking_hash::{TrackingHashContext, TrackingHashScope};
 
 use super::catalog::WorkerCatalog;
 use super::error::SelectionError;
+use super::ingress::{KvEventIngress, ZmqDirectIngress};
 use super::input::{PromptRequest, TrackingHashInput};
 use super::pending::{PendingSelection, SelectionCache, SelectionCacheConfig};
 use super::types::{
@@ -208,12 +209,12 @@ pub struct HostCache {
 }
 
 /// Where a partition's KV index comes from and who feeds it.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub enum KvIndexSource {
-    /// The core builds the index and subscribes to each worker rank's KV
-    /// events over ZMQ; workers need KV-event endpoints to be schedulable.
-    #[default]
-    Owned,
+    /// The core builds the index and the ingress feeds it with worker KV
+    /// events; the ingress decides what metadata a worker needs to be
+    /// schedulable. Defaults to [`ZmqDirectIngress`].
+    Owned(Arc<dyn KvEventIngress>),
     /// The host built this index and feeds it (its own event ingress and
     /// recovery). Every partition uses it; the core reads it for selection
     /// and dequeue-time refresh but never writes to it, and workers need no
@@ -224,10 +225,16 @@ pub enum KvIndexSource {
     Remote(String),
 }
 
+impl Default for KvIndexSource {
+    fn default() -> Self {
+        Self::Owned(Arc::new(ZmqDirectIngress))
+    }
+}
+
 impl std::fmt::Debug for KvIndexSource {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Owned => formatter.write_str("Owned"),
+            Self::Owned(_) => formatter.write_str("Owned"),
             Self::Provided(indexer) => formatter
                 .debug_struct("Provided")
                 .field("remote", &indexer.is_remote())
@@ -588,8 +595,10 @@ impl SelectionCore {
             .kv_router_config
             .queueing_enabled(Some(&record.model_name))
             .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
-        let reasons =
-            record.missing_schedulable_metadata(queueing_enabled, self.listens_for_kv_events);
+        let mut reasons = record.missing_schedulable_metadata(queueing_enabled);
+        if let Some(ingress) = self.ingress() {
+            reasons.extend(ingress.missing_metadata(&record));
+        }
         if !reasons.is_empty() {
             let updated = self
                 .catalog
@@ -602,8 +611,8 @@ impl SelectionCore {
         if let Err(error) = self.ensure_entry(&record) {
             return self.mark_incomplete_after_reconcile_error(worker_id, record.key(), error);
         }
-        if self.listens_for_kv_events
-            && let Err(error) = self.register_indexer_listeners(&record).await
+        if let Some(ingress) = self.ingress()
+            && let Err(error) = ingress.attach(&self.indexer_registry, &record).await
         {
             self.cleanup_indexer_registration(&record).await;
             return self.mark_incomplete_after_reconcile_error(worker_id, record.key(), error);
@@ -726,7 +735,7 @@ impl SelectionCore {
                     KvIndexSource::Provided(indexer) => {
                         (Indexer::clone(indexer), indexer.supports_overlap_refresh())
                     }
-                    KvIndexSource::Owned | KvIndexSource::Remote(_) => (
+                    KvIndexSource::Owned(_) | KvIndexSource::Remote(_) => (
                         self.indexer_registry
                             .get_or_create_indexer(key.clone(), block_size),
                         true,
@@ -791,64 +800,20 @@ impl SelectionCore {
         Ok(entry)
     }
 
-    async fn register_indexer_listeners(
-        &self,
-        record: &WorkerCatalogRecord,
-    ) -> Result<(), SelectionError> {
-        let block_size = record
-            .block_size
-            .ok_or_else(|| SelectionError::BadRequest("block_size is required".to_string()))?;
-        let mut endpoints: Vec<_> = record.listener_endpoints().into_iter().collect();
-        endpoints.sort_by_key(|(dp_rank, _)| *dp_rank);
-        for (dp_rank, endpoint) in endpoints {
-            crate::services::common::zmq::validate_endpoint(&endpoint).map_err(|error| {
-                SelectionError::BadRequest(format!(
-                    "invalid kv_events endpoint for worker {} dp_rank {dp_rank}: {error}",
-                    record.worker_id
-                ))
-            })?;
-            if let Some(replay_endpoint) = record.replay_endpoint.as_deref() {
-                crate::services::common::zmq::validate_endpoint(replay_endpoint).map_err(
-                    |error| {
-                        SelectionError::BadRequest(format!(
-                            "invalid replay endpoint for worker {} dp_rank {dp_rank}: {error}",
-                            record.worker_id
-                        ))
-                    },
-                )?;
-            }
-            self.indexer_registry
-                .register(
-                    record.worker_id,
-                    endpoint,
-                    dp_rank,
-                    record.model_name.clone(),
-                    record.routing_group.clone(),
-                    block_size,
-                    record.replay_endpoint.clone(),
-                )
-                .await
-                .map_err(|error| SelectionError::BadRequest(error.to_string()))?;
+    /// The ingress feeding core-owned indexes, when this core listens for KV events.
+    fn ingress(&self) -> Option<&dyn KvEventIngress> {
+        match &self.host.cache.index {
+            KvIndexSource::Owned(ingress) if self.listens_for_kv_events => Some(ingress.as_ref()),
+            _ => None,
         }
-        Ok(())
     }
 
     async fn cleanup_indexer_registration(&self, record: &WorkerCatalogRecord) {
         if matches!(self.host.cache.index, KvIndexSource::Provided(_)) {
             return;
         }
-        if self.listens_for_kv_events {
-            if let Err(error) = self
-                .indexer_registry
-                .deregister(record.worker_id, &record.model_name, &record.routing_group)
-                .await
-            {
-                tracing::debug!(
-                    worker_id = record.worker_id,
-                    error = %error,
-                    "indexer deregistration skipped or failed"
-                );
-            }
+        if let Some(ingress) = self.ingress() {
+            ingress.detach(&self.indexer_registry, record).await;
             return;
         }
 

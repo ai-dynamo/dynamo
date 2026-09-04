@@ -229,11 +229,7 @@ impl WorkerCatalogRecord {
         }
     }
 
-    pub(super) fn missing_schedulable_metadata(
-        &self,
-        queueing_enabled: bool,
-        kv_events_enabled: bool,
-    ) -> Vec<String> {
+    pub(super) fn missing_schedulable_metadata(&self, queueing_enabled: bool) -> Vec<String> {
         let mut missing = Vec::new();
 
         if self.endpoint.as_deref().is_none_or(str::is_empty) {
@@ -249,18 +245,6 @@ impl WorkerCatalogRecord {
             missing
                 .push("max_num_batched_tokens is required while queueing is enabled".to_string());
         }
-        if kv_events_enabled {
-            let endpoints = self.listener_endpoints();
-            for rank in self.dp_ranks() {
-                if endpoints
-                    .get(&rank)
-                    .is_none_or(|endpoint| endpoint.is_empty())
-                {
-                    missing.push(format!("kv_events endpoint is required for dp_rank {rank}"));
-                }
-            }
-        }
-
         missing
     }
 }

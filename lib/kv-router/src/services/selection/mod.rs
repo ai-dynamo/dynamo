@@ -9,6 +9,7 @@
 mod catalog;
 mod core;
 mod error;
+mod ingress;
 mod input;
 mod membership;
 mod pending;
@@ -31,6 +32,7 @@ pub use core::{
     SelectionServiceConfig,
 };
 pub use error::SelectionError;
+pub use ingress::{KvEventIngress, ZmqDirectIngress};
 pub use input::PromptRequest;
 pub use membership::{CatalogObserver, CatalogReconciler, WorkerCatalogSource};
 pub use pending::SelectionCacheConfig;
