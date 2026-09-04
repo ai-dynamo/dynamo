@@ -18,6 +18,33 @@ LLM inference breaks these assumptions:
 
 The Dynamo **Planner** is an autoscaler purpose-built for these constraints. It understands engine profiling data, tracks per-worker GPU utilization, predicts traffic patterns, and makes scaling decisions that directly target TTFT and ITL SLAs — not proxy metrics.
 
+## Feature Matrix
+
+| Feature | Throughput-Based | Load-Based |
+|---------|:----------------:|:-------------------------:|
+| **Deployment** | | |
+| Disaggregated | ✅ | ✅ |
+| Aggregated | ✅ | ✅ |
+| **LLM Framework** | | |
+| SGLang | ✅ | ✅ |
+| TensorRT-LLM | ✅ | ✅ |
+| vLLM | ✅ | ✅ |
+| **Requires Pre-deployment Data** | No; recommended for faster warmup when native AIC is unavailable | No |
+| **Load Predictors** | ARIMA, Prophet, Kalman, Constant | — |
+| **Router** | | |
+| Standard routing (round-robin, random, etc.) | ✅ | ✅ |
+| KV-aware routing | ✅ | ✅ |
+| **Inference Optimizations** | | |
+| KV cache reuse | ✅ | ✅ |
+| Speculative decoding | ✅ | ✅ |
+| **Connectors** | | |
+| KubernetesConnector | ✅ | ✅ |
+| VirtualConnector | ✅ | ✅ |
+
+**Legend:** ✅ Supported; — Not applicable.
+
+Router mode does not constrain either scaling method. Load-based scaling consumes FPM directly from the engines through the Dynamo event plane, so it does not require the KV router. When runtime metrics are available, both scaling methods account for KV cache reuse through KV hit rate and speculative decoding through accepted tokens per forward pass. The Planner uses these signals for capacity estimates; it does not enable the engine features.
+
 ## Optimization Targets and Scaling Methods
 
 Planner configuration has two separate layers:
@@ -65,33 +92,6 @@ For `throughput`, `latency`, and `load`, the Planner enables load-based scaling,
 > **New to the Planner?** Start with the [Planner Guide](planner-guide.md) for a complete workflow including profiling and deployment.
 
 > **Need multi-DGD coordination?** See the [Global Planner Guide](global-planner-guide.md) for shared-policy coordination across multiple DGDs and single-endpoint multi-pool deployments.
-
-## Feature Matrix
-
-| Feature | Throughput-Based | Load-Based |
-|---------|:----------------:|:-------------------------:|
-| **Deployment** | | |
-| Disaggregated | ✅ | ✅ |
-| Aggregated | ✅ | ✅ |
-| **LLM Framework** | | |
-| SGLang | ✅ | ✅ |
-| TensorRT-LLM | ✅ | ✅ |
-| vLLM | ✅ | ✅ |
-| **Requires Pre-deployment Data** | No; recommended for faster warmup when native AIC is unavailable | No |
-| **Load Predictors** | ARIMA, Prophet, Kalman, Constant | — |
-| **Router** | | |
-| Standard routing (round-robin, random, etc.) | ✅ | ✅ |
-| KV-aware routing | ✅ | ✅ |
-| **Inference Optimizations** | | |
-| KV cache reuse | ✅ | ✅ |
-| Speculative decoding | ✅ | ✅ |
-| **Connectors** | | |
-| KubernetesConnector | ✅ | ✅ |
-| VirtualConnector | ✅ | ✅ |
-
-**Legend:** ✅ Supported; — Not applicable.
-
-Router mode does not constrain either scaling method. Load-based scaling consumes FPM directly from the engines through the Dynamo event plane, so it does not require the KV router. When runtime metrics are available, both scaling methods account for KV cache reuse through KV hit rate and speculative decoding through accepted tokens per forward pass. The Planner uses these signals for capacity estimates; it does not enable the engine features.
 
 ## When to Use Each Scaling Method
 
