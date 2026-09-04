@@ -48,7 +48,7 @@ spec:
       envs:
       - name: SPECIFIC_ENV_VAR
         value: some_specific_value
-    VllmWorker:
+    worker:
       replicas: 1
       envs:
       - name: SPECIFIC_ENV_VAR

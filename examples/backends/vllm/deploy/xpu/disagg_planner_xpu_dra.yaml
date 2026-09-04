@@ -76,7 +76,7 @@ spec:
           name: planner-profile-data
     replicas: 1
     type: planner
-  - name: VllmDecodeWorker
+  - name: decode
     podTemplate:
       spec:
         containers:
@@ -112,7 +112,7 @@ spec:
           resourceClaimTemplateName: gpu-template
     replicas: 1
     type: decode
-  - name: VllmPrefillWorker
+  - name: prefill
     podTemplate:
       spec:
         containers:

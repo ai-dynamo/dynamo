@@ -51,8 +51,8 @@ from tests.utils.client import send_request, wait_for_model_availability
 logger = logging.getLogger(__name__)
 
 EFA_MODEL_NAME = "Qwen/Qwen3-0.6B"
-PREFILL_SERVICE = "VllmPrefillWorker"
-DECODE_SERVICE = "VllmDecodeWorker"
+PREFILL_SERVICE = "prefill"
+DECODE_SERVICE = "decode"
 
 # Comfortably under the test's own pytest timeout below, so a deployment that
 # never becomes ready loses the race to _wait_for_condition, which raises with

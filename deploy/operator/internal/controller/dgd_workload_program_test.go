@@ -655,7 +655,7 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 		},
 		{
 			name:             "existing DCD follows automatic wait policy while native capture is pending",
-			dcdName:          "vllm-disagg-planner-vllmdecodeworker-2dad72b9",
+			dcdName:          "vllm-disagg-planner-decode-2dad72b9",
 			existingReplicas: ptr.To(int32(2)),
 			checkpointInfo: &checkpoint.CheckpointInfo{
 				Enabled:          true,
@@ -668,7 +668,7 @@ func TestComponentWorkloadsReconciler_PreserveExistingDCDState(t *testing.T) {
 		},
 		{
 			name:             "explicit pending snapshot applies wait policy to an existing DCD",
-			dcdName:          "vllm-disagg-planner-vllmdecodeworker-explicit",
+			dcdName:          "vllm-disagg-planner-decode-explicit",
 			existingReplicas: ptr.To(int32(2)),
 			checkpointInfo: &checkpoint.CheckpointInfo{
 				Enabled:       true,

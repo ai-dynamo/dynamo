@@ -929,8 +929,8 @@ class TestAssembleFinalConfig:
         dgd_config = {
             "spec": {
                 "components": [
-                    {"name": "VllmPrefillWorker", "type": "worker"},
-                    {"name": "VllmDecodeWorker", "type": "worker"},
+                    {"name": "prefill", "type": "worker"},
+                    {"name": "decode", "type": "worker"},
                 ]
             }
         }
@@ -943,10 +943,10 @@ class TestAssembleFinalConfig:
             component["name"]: component
             for component in dgd_config["spec"]["components"]
         }
-        assert components["VllmPrefillWorker"]["scalingAdapter"] == {"enabled": True}
-        assert components["VllmPrefillWorker"]["type"] == "prefill"
-        assert "scalingAdapter" not in components["VllmDecodeWorker"]
-        assert components["VllmDecodeWorker"]["type"] == "worker"
+        assert components["prefill"]["scalingAdapter"] == {"enabled": True}
+        assert components["prefill"]["type"] == "prefill"
+        assert "scalingAdapter" not in components["decode"]
+        assert components["decode"]["type"] == "worker"
 
     @pytest.mark.pre_merge
     @pytest.mark.gpu_0
@@ -1460,7 +1460,7 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             "spec": {
                 "components": [
                     {"name": "Frontend", "type": "frontend"},
-                    {"name": "VllmWorker", "type": "worker"},
+                    {"name": "worker", "type": "worker"},
                 ]
             },
         }
@@ -1567,8 +1567,8 @@ class TestRunProfileSkipsInterpolationForAggConfig:
             "spec": {
                 "components": [
                     {"name": "Frontend", "type": "frontend"},
-                    {"name": "VllmPrefillWorker", "type": "prefill"},
-                    {"name": "VllmDecodeWorker", "type": "decode"},
+                    {"name": "prefill", "type": "prefill"},
+                    {"name": "decode", "type": "decode"},
                 ]
             },
         }

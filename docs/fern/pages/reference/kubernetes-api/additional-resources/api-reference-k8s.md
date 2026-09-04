@@ -2571,6 +2571,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `profilingJob` _[JobSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#jobspec-v1-batch)_ | ProfilingJob allows overriding the profiling Job specification.<br />Fields set here are merged into the controller-generated Job spec. |  | Optional: \{\} <br /> |
+| `trustRemoteCode` _boolean_ | TrustRemoteCode explicitly permits generated vLLM and SGLang workers to<br />execute custom code from the configured model repository. When enabled,<br />the profiler adds --trust-remote-code to every generated worker component<br />after the deployment topology has been generated. Enable this setting only<br />for model repositories you trust. | false | Optional: \{\} <br /> |
 | `dgd` _[RawExtension](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#rawextension-runtime-pkg)_ | DGD provides a partial, versioned DynamoGraphDeployment override for the<br />profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or<br />nvidia.com/v1beta1 and kind to DynamoGraphDeployment.<br />The profiler merges the override using the schema for its declared version.<br />If the generated DGD uses another supported version, the complete DGD is<br />converted before the merge and converted back afterward. The final DGD<br />selected or created by a DGDR is nvidia.com/v1beta1.<br />The override can update DGD fields, but topology entries are limited to<br />services or components already present in the generated DGD. Metadata labels<br />and annotations are merged, metadata.name selects the final DGD name, and<br />other identity or runtime metadata is ignored.<br />V1alpha1 worker argument lists retain legacy append behavior. V1beta1 follows<br />structural schema merge behavior, including map-list merging and atomic-list<br />replacement.<br />The raw embedded resource preserves either supported schema. The API server<br />validates that it has apiVersion and kind; override processing validates the<br />DGD kind, supported version, and field schema. |  | EmbeddedResource: \{\} <br />Optional: \{\} <br /> |
 
 
@@ -3865,7 +3866,6 @@ For users who want to understand the implementation details or contribute to the
 - **Checkpoint / Restore**:
   - [`internal/checkpoint/podspec.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/podspec.go) - Checkpoint env var injection and volume setup
   - [`internal/checkpoint/resolve.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resolve.go) - Checkpoint resolution logic
-  - [`internal/checkpoint/resource.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resource.go) - Checkpoint resource management
 - **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/consts/consts.go) - Defines annotation keys and other constants
 
 ## Notes

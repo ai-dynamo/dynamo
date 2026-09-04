@@ -63,7 +63,7 @@ spec:
                 - {name: model-cache, mountPath: /model-cache}
           volumes:
             - {name: model-cache, persistentVolumeClaim: {claimName: model-cache}}
-    - name: VllmWorker
+    - name: worker
       replicas: 2
       type: worker
       # tmpfs at /dev/shm for the vLLM multiprocess executor's TP4 IPC buffers.

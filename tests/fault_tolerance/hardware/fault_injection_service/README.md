@@ -54,7 +54,7 @@ kubectl -n fault-injection-system port-forward svc/fault-injection-api 8080:8080
 # In another shell:
 curl -X POST http://localhost:8080/api/v1/faults/gpu/inject \
   -H "Content-Type: application/json" \
-  -d '{"target_pod": "vllm-worker-0", "fault_type": "XID_ERROR", "severity": "HIGH"}'
+  -d '{"target_pod": "worker-0", "fault_type": "XID_ERROR", "severity": "HIGH"}'
 ```
 
 For the full API reference (supported fault types, XID codes, network-partition shapes, recovery calls) see [`docs/design-docs/fault-tolerance-testing.md`](../../../../docs/fern/pages/developer-guide/knowledge-base/concepts/fault-tolerance/fault-tolerance-testing.md#hardware-fault-injection).

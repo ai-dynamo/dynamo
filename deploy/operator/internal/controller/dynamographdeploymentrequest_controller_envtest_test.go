@@ -3206,7 +3206,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: registry.example/runtime:1.1.0
-    VllmWorker:
+    worker:
       replicas: 2
       extraPodSpec:
         mainContainer:
