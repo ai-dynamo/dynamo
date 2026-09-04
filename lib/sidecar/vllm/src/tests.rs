@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
     DisaggregationMode, FinishReason, GenerateContext, LLMEngine, MultimodalData, OutputOptions,
@@ -546,6 +547,7 @@ fn sequence_response(
                 kv_transfer_params,
                 ec_transfer_params: None,
             }),
+            routed_experts: None,
         }),
     }
 }
@@ -579,6 +581,7 @@ fn encode_response(ec_transfer_params: Option<prost_types::Struct>) -> pb::Gener
                 kv_transfer_params: None,
                 ec_transfer_params,
             }),
+            routed_experts: None,
         }),
     }
 }
@@ -866,6 +869,84 @@ fn oversized_logprob_counts_are_rejected() {
     )
     .expect_err("oversized prompt logprobs must fail");
     assert!(prompt_error.to_string().contains("must fit in i32"));
+}
+
+#[test]
+fn terminal_routed_experts_are_forwarded_with_prompt_logprobs() {
+    let request = request();
+    let mut state =
+        ResponseState::new(&request, DisaggregationMode::Aggregated).expect("valid response state");
+    let mut response = sequence_response(true, true, None);
+    response.prompt_info = Some(pb::PromptInfo {
+        num_prompt_tokens: 3,
+        token_ids: vec![11, 22, 33],
+        logprobs: vec![0.0, -0.2, -0.3],
+        ranks: vec![0, 1, 2],
+        candidate_tokens: vec![pb::CandidateTokenInfo::default(); 3],
+    });
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::OpaqueData {
+        data: b"\x93NUMPY\x01\x00native".to_vec(),
+    });
+
+    let output = state
+        .convert(response)
+        .expect("opaque routed data")
+        .expect("terminal output");
+    let engine_data = output.engine_data.expect("terminal engine data");
+    assert_eq!(engine_data["routed_experts"], json!("k05VTVBZAQBuYXRpdmU="));
+    assert!(engine_data["prompt_logprobs"].is_array());
+}
+
+#[test]
+fn large_terminal_routed_experts_are_not_truncated() {
+    let request = request();
+    let mut state =
+        ResponseState::new(&request, DisaggregationMode::Aggregated).expect("valid response state");
+    let payload = (0..(6 * 1024 * 1024 + 17))
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let mut response = sequence_response(true, true, None);
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::OpaqueData {
+        data: payload.clone(),
+    });
+
+    let output = state
+        .convert(response)
+        .expect("large opaque routed data")
+        .expect("terminal output");
+    let encoded = output.engine_data.as_ref().unwrap()["routed_experts"]
+        .as_str()
+        .expect("base64 routed data");
+    assert_eq!(BASE64_STANDARD.decode(encoded).unwrap(), payload);
+}
+
+#[test]
+fn nonterminal_routed_experts_are_rejected() {
+    let request = request();
+    let mut state =
+        ResponseState::new(&request, DisaggregationMode::Aggregated).expect("valid response state");
+    let mut response = sequence_response(false, true, None);
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::OpaqueData { data: vec![1] });
+
+    let error = state
+        .convert(response)
+        .expect_err("opaque routed data must be terminal");
+    assert!(error.to_string().contains("nonterminal"));
+}
+
+#[test]
+fn encoder_routed_experts_are_rejected() {
+    let request = epd_image_request();
+    let mut response = encode_response(Some(
+        json_to_struct(encoder_handoff()).expect("encoder handoff"),
+    ));
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::OpaqueData { data: vec![1] });
+
+    let error = ResponseState::new(&request, DisaggregationMode::Encode)
+        .expect("valid response state")
+        .convert(response)
+        .expect_err("encoder output cannot carry routed experts");
+    assert!(error.to_string().contains("encoder response"));
 }
 
 struct FakeServer {
@@ -2254,7 +2335,10 @@ fn image_features(kwargs: serde_json::Value) -> serde_json::Value {
 
 #[test]
 fn preprocessed_multimodal_features_are_forwarded_to_vllm_grpc() {
-    let request = request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+    let mut request =
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+    request.extra_args.as_mut().unwrap()["vllm_tito"]["sampling_params"]["routed_experts_prompt_start"] =
+        json!(2);
 
     let wire = build_generate_request(
         request,
@@ -2272,6 +2356,61 @@ fn preprocessed_multimodal_features_are_forwarded_to_vllm_grpc() {
     assert_eq!(feature.mm_hash.as_deref(), Some("image-hash-a"));
     assert_eq!((feature.offset, feature.length), (1, 2));
     assert_eq!(feature.kwargs.as_ref().map(Vec::len), Some(64));
+    assert_eq!(
+        wire.response
+            .expect("response options")
+            .routed_experts_prompt_start,
+        Some(2)
+    );
+}
+
+#[test]
+fn routed_expert_prompt_start_rejects_invalid_values() {
+    for value in [
+        json!(-1),
+        json!(1.5),
+        json!("2"),
+        json!(u64::from(u32::MAX) + 1),
+    ] {
+        let mut request =
+            request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+        request.extra_args.as_mut().unwrap()["vllm_tito"]["sampling_params"]["routed_experts_prompt_start"] =
+            value;
+
+        let error = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("invalid routed expert prompt start must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("routed_experts_prompt_start must be an unsigned 32-bit integer")
+        );
+    }
+}
+
+#[test]
+fn routed_expert_prompt_start_must_be_inside_request_tokens() {
+    for start in [3, 4] {
+        let mut request =
+            request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+        request.extra_args.as_mut().unwrap()["vllm_tito"]["sampling_params"]["routed_experts_prompt_start"] =
+            json!(start);
+
+        let error = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("routed expert prompt start must index the request tokens");
+        assert!(
+            error
+                .to_string()
+                .contains("must be less than the request token count 3")
+        );
+    }
 }
 
 #[test]
