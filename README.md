@@ -301,3 +301,5 @@ To quickly setup both: `docker compose -f dev/docker-compose.yml up -d`
 [migration]: docs/fault-tolerance/request-migration.md
 [lora]: examples/backends/vllm/deploy/lora/README.md
 [tools]: docs/fern/pages/use-cases/tool-calling-and-reasoning/tool-call-parsing.mdx
+
+<!-- Temporary workstation setup smoke test; do not merge. -->
