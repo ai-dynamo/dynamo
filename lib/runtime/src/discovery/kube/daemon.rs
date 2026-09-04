@@ -26,6 +26,10 @@ struct CachedCrMetadata {
     metadata: Arc<DiscoveryMetadata>,
     generation: i64,
     uid: Option<String>,
+    /// UID of the Pod that owns this CR (from `metadata.ownerReferences`).
+    /// Required for incarnation-safe join: a new Pod with the same name must
+    /// not match a CR whose owner is a different (old) Pod UID.
+    owner_pod_uid: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,7 +39,10 @@ struct CrRevision {
 }
 
 struct JoinTable {
-    left: HashMap<String, u64>,
+    /// cr_name → (instance_id, pod_uid). Pod UID carried so every join also
+    /// validates the CR owner, preventing a new incarnation from matching an
+    /// old incarnation's metadata before GC removes the stale CR.
+    left: HashMap<String, (u64, String)>,
     right: HashMap<String, CachedCrMetadata>,
     known: HashMap<u64, Arc<DiscoveryMetadata>>,
     revisions: HashMap<u64, CrRevision>,
@@ -51,14 +58,23 @@ impl JoinTable {
         }
     }
 
-    fn apply_readiness_scan(&mut self, new_left: HashMap<String, u64>) -> Vec<DiscoveryEvent> {
+    fn apply_readiness_scan(
+        &mut self,
+        new_left: HashMap<String, (u64, String)>,
+    ) -> Vec<DiscoveryEvent> {
         let mut events = Vec::new();
 
+        // Departed: cr_key gone entirely, or same cr_key but pod UID changed (new incarnation).
         let departed: Vec<(String, u64)> = self
             .left
             .iter()
-            .filter(|(k, _)| !new_left.contains_key(*k))
-            .map(|(k, v)| (k.clone(), *v))
+            .filter(|(k, (_, old_uid))| {
+                new_left
+                    .get(*k)
+                    .map(|(_, new_uid)| new_uid != old_uid)
+                    .unwrap_or(true)
+            })
+            .map(|(k, (id, _))| (k.clone(), *id))
             .collect();
 
         for (cr_key, instance_id) in departed {
@@ -76,15 +92,27 @@ impl JoinTable {
             }
         }
 
-        let arrived: Vec<(String, u64)> = new_left
+        // Arrived: new cr_key, or same cr_key with changed pod UID (departed processing already
+        // removed the old entry from self.left, so !contains_key catches both cases).
+        let arrived: Vec<(String, u64, String)> = new_left
             .iter()
             .filter(|(k, _)| !self.left.contains_key(*k))
-            .map(|(k, v)| (k.clone(), *v))
+            .map(|(k, (id, pod_uid))| (k.clone(), *id, pod_uid.clone()))
             .collect();
 
-        for (cr_key, instance_id) in arrived {
-            self.left.insert(cr_key.clone(), instance_id);
+        for (cr_key, instance_id, pod_uid) in arrived {
+            self.left
+                .insert(cr_key.clone(), (instance_id, pod_uid.clone()));
             if let Some(cached) = self.right.get(&cr_key) {
+                if cached.owner_pod_uid.as_deref() != Some(&pod_uid) {
+                    tracing::debug!(
+                        cr_key = %cr_key,
+                        pod_uid = %pod_uid,
+                        cr_owner = ?cached.owner_pod_uid,
+                        "Pod UID does not match CR owner, not joining"
+                    );
+                    continue;
+                }
                 for instance in cached.metadata.get_all() {
                     events.push(DiscoveryEvent::Added(instance));
                 }
@@ -122,18 +150,19 @@ impl JoinTable {
 
         for cr_key in removed {
             self.right.remove(&cr_key);
-            if let Some(&instance_id) = self.left.get(&cr_key)
-                && let Some(metadata) = self.known.remove(&instance_id)
-            {
-                self.revisions.remove(&instance_id);
-                for instance in metadata.get_all() {
-                    events.push(DiscoveryEvent::Removed(instance.id()));
+            if let Some((instance_id, _)) = self.left.get(&cr_key) {
+                let instance_id = *instance_id;
+                if let Some(metadata) = self.known.remove(&instance_id) {
+                    self.revisions.remove(&instance_id);
+                    for instance in metadata.get_all() {
+                        events.push(DiscoveryEvent::Removed(instance.id()));
+                    }
+                    tracing::info!(
+                        cr_key = %cr_key,
+                        instance_id = format!("{instance_id:x}"),
+                        "CR removed, evicted from known"
+                    );
                 }
-                tracing::info!(
-                    cr_key = %cr_key,
-                    instance_id = format!("{instance_id:x}"),
-                    "CR removed, evicted from known"
-                );
             }
         }
 
@@ -142,11 +171,44 @@ impl JoinTable {
                 generation: new_cached.generation,
                 uid: new_cached.uid.clone(),
             };
-            self.right.insert(cr_key.clone(), new_cached.clone());
+            // insert returns the old entry so we can detect owner UID changes
+            let old_right = self.right.insert(cr_key.clone(), new_cached.clone());
 
-            let Some(&instance_id) = self.left.get(cr_key) else {
-                continue;
+            let (instance_id, pod_uid) = match self.left.get(cr_key) {
+                Some((id, uid)) => (*id, uid.clone()),
+                None => continue,
             };
+
+            let uid_matches = new_cached.owner_pod_uid.as_deref() == Some(&pod_uid);
+            let old_uid_matched =
+                old_right.as_ref().and_then(|o| o.owner_pod_uid.as_deref()) == Some(&pod_uid);
+
+            if !uid_matches {
+                if old_uid_matched {
+                    // CR owner changed away from the current pod → evict
+                    if let Some(metadata) = self.known.remove(&instance_id) {
+                        self.revisions.remove(&instance_id);
+                        for instance in metadata.get_all() {
+                            events.push(DiscoveryEvent::Removed(instance.id()));
+                        }
+                        tracing::info!(
+                            cr_key = %cr_key,
+                            instance_id = format!("{instance_id:x}"),
+                            pod_uid = %pod_uid,
+                            cr_owner = ?new_cached.owner_pod_uid,
+                            "CR owner changed, evicted from known"
+                        );
+                    }
+                } else {
+                    tracing::debug!(
+                        cr_key = %cr_key,
+                        pod_uid = %pod_uid,
+                        cr_owner = ?new_cached.owner_pod_uid,
+                        "Pod UID does not match CR owner, skipping join"
+                    );
+                }
+                continue;
+            }
 
             let old_revision = self.revisions.get(&instance_id).cloned();
 
@@ -216,19 +278,16 @@ impl DiscoverySource {
 
                 let stream = reflector(writer, watcher(api, labels))
                     .default_backoff()
-                    .touched_objects()
                     .for_each(move |res| {
                         match res {
-                            Ok(obj) => {
-                                tracing::debug!(
-                                    name = obj.metadata.name.as_deref().unwrap_or("?"),
-                                    "EndpointSlice reflector updated"
-                                );
+                            Ok(watcher::Event::Apply(_))
+                            | Ok(watcher::Event::Delete(_))
+                            | Ok(watcher::Event::InitDone) => {
                                 notify.notify_one();
                             }
+                            Ok(watcher::Event::Init) | Ok(watcher::Event::InitApply(_)) => {}
                             Err(e) => {
                                 tracing::warn!("EndpointSlice reflector error: {e}");
-                                notify.notify_one();
                             }
                         }
                         futures::future::ready(())
@@ -246,19 +305,16 @@ impl DiscoverySource {
 
                 let stream = reflector(writer, watcher(api, labels))
                     .default_backoff()
-                    .touched_objects()
                     .for_each(move |res| {
                         match res {
-                            Ok(obj) => {
-                                tracing::debug!(
-                                    name = obj.metadata.name.as_deref().unwrap_or("?"),
-                                    "Pod reflector updated"
-                                );
+                            Ok(watcher::Event::Apply(_))
+                            | Ok(watcher::Event::Delete(_))
+                            | Ok(watcher::Event::InitDone) => {
                                 notify.notify_one();
                             }
+                            Ok(watcher::Event::Init) | Ok(watcher::Event::InitApply(_)) => {}
                             Err(e) => {
                                 tracing::warn!("Pod reflector error: {e}");
-                                notify.notify_one();
                             }
                         }
                         futures::future::ready(())
@@ -270,19 +326,19 @@ impl DiscoverySource {
         }
     }
 
-    fn ready_entries(&self) -> HashMap<String, u64> {
+    fn ready_entries(&self) -> HashMap<String, (u64, String)> {
         match self {
             Self::EndpointSlice(reader) => reader
                 .state()
                 .iter()
                 .flat_map(|s| extract_endpoint_info(s.as_ref()))
-                .map(|(id, key)| (key, id))
+                .map(|(id, key, pod_uid)| (key, (id, pod_uid)))
                 .collect(),
             Self::Pod(reader) => reader
                 .state()
                 .iter()
                 .flat_map(|p| extract_ready_containers(p.as_ref()))
-                .map(|(id, key)| (key, id))
+                .map(|(id, key, pod_uid)| (key, (id, pod_uid)))
                 .collect(),
         }
     }
@@ -334,19 +390,16 @@ impl DiscoveryDaemon {
         let cr_notify_clone = cr_notify.clone();
         let cr_reflector_stream = reflector(cr_writer, watcher(metadata_crs, Config::default()))
             .default_backoff()
-            .touched_objects()
             .for_each(move |res| {
                 match res {
-                    Ok(obj) => {
-                        tracing::debug!(
-                            cr_name = obj.metadata.name.as_deref().unwrap_or("unknown"),
-                            "DynamoWorkerMetadata CR reflector updated"
-                        );
+                    Ok(watcher::Event::Apply(_))
+                    | Ok(watcher::Event::Delete(_))
+                    | Ok(watcher::Event::InitDone) => {
                         cr_notify_clone.notify_one();
                     }
+                    Ok(watcher::Event::Init) | Ok(watcher::Event::InitApply(_)) => {}
                     Err(e) => {
                         tracing::warn!("DynamoWorkerMetadata CR reflector error: {e}");
-                        cr_notify_clone.notify_one();
                     }
                 }
                 futures::future::ready(())
@@ -417,6 +470,13 @@ fn scan_cr_store(
 
         observed.insert(cr_name.clone());
 
+        let owner_pod_uid = arc_cr
+            .metadata
+            .owner_references
+            .as_ref()
+            .and_then(|refs| refs.iter().find(|o| o.kind == "Pod"))
+            .map(|o| o.uid.clone());
+
         if arc_cr.spec.data.is_null() {
             tracing::debug!(
                 cr_name = %cr_name,
@@ -441,6 +501,7 @@ fn scan_cr_store(
                     metadata: Arc::new(metadata),
                     generation,
                     uid,
+                    owner_pod_uid,
                 };
                 valid_cr_cache.insert(cr_name.clone(), cached.clone());
                 new_right.insert(cr_name.clone(), cached);
@@ -527,11 +588,14 @@ mod tests {
     use crate::discovery::DiscoveryEvent;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ManagedFieldsEntry;
 
+    const TEST_POD_UID: &str = "pod-uid-test";
+
     fn make_cached(uid: &str, generation: i64) -> CachedCrMetadata {
         CachedCrMetadata {
             metadata: Arc::new(DiscoveryMetadata::new()),
             generation,
             uid: Some(uid.to_string()),
+            owner_pod_uid: Some(TEST_POD_UID.to_string()),
         }
     }
 
@@ -551,14 +615,22 @@ mod tests {
             metadata: Arc::new(meta),
             generation,
             uid: Some(uid.to_string()),
+            owner_pod_uid: Some(TEST_POD_UID.to_string()),
         }
+    }
+
+    fn readiness(entries: &[(&str, u64)]) -> HashMap<String, (u64, String)> {
+        entries
+            .iter()
+            .map(|(k, id)| (k.to_string(), (*id, TEST_POD_UID.to_string())))
+            .collect()
     }
 
     #[test]
     fn join_table_detects_cr_recreated_with_same_generation() {
         let mut table = JoinTable::new();
 
-        table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
+        table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
 
         table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
@@ -583,7 +655,7 @@ mod tests {
     fn join_table_removes_immediately_when_pod_not_ready() {
         let mut table = JoinTable::new();
 
-        table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
+        table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
         table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
             make_cached_with_endpoint("uid-1", 1),
@@ -604,7 +676,7 @@ mod tests {
     fn join_table_adds_when_cr_arrives_after_pod_ready() {
         let mut table = JoinTable::new();
 
-        let events = table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
+        let events = table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
         assert!(events.is_empty(), "no CR yet, should have no events");
         assert!(!table.known.contains_key(&1u64));
 
@@ -620,7 +692,7 @@ mod tests {
     fn join_table_evicts_when_cr_removed() {
         let mut table = JoinTable::new();
 
-        table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
+        table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
         table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
             make_cached_with_endpoint("uid-1", 1),
@@ -640,7 +712,7 @@ mod tests {
     fn join_table_no_change_on_same_revision() {
         let mut table = JoinTable::new();
 
-        table.apply_readiness_scan(HashMap::from([("worker-a".to_string(), 1u64)]));
+        table.apply_readiness_scan(readiness(&[("worker-a", 1u64)]));
         table.apply_cr_scan(HashMap::from([(
             "worker-a".to_string(),
             make_cached_with_endpoint("uid-1", 1),
@@ -670,6 +742,119 @@ mod tests {
         cache.insert("worker-a".to_string(), make_cached("uid-1", 7));
 
         assert!(cached_metadata_for_invalid_cr("worker-a", Some("uid-2"), &cache).is_none());
+    }
+
+    #[test]
+    fn join_requires_matching_pod_uid() {
+        // Pod U2 arrives while old CR still has owner=U1 — must not join.
+        let mut table = JoinTable::new();
+
+        let new_left: HashMap<String, (u64, String)> =
+            HashMap::from([("worker-0".to_string(), (1u64, "pod-uid-U2".to_string()))]);
+        table.apply_readiness_scan(new_left);
+
+        let mut cr = make_cached_with_endpoint("cr-uid-1", 1);
+        cr.owner_pod_uid = Some("pod-uid-U1".to_string()); // old owner
+        let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr)]));
+
+        assert!(
+            events.is_empty(),
+            "stale CR owner must not join new pod incarnation"
+        );
+        assert!(!table.known.contains_key(&1u64));
+    }
+
+    #[test]
+    fn join_succeeds_when_pod_uid_matches_cr_owner() {
+        let mut table = JoinTable::new();
+
+        let new_left: HashMap<String, (u64, String)> =
+            HashMap::from([("worker-0".to_string(), (1u64, "pod-uid-U1".to_string()))]);
+        table.apply_readiness_scan(new_left);
+
+        let mut cr = make_cached_with_endpoint("cr-uid-1", 1);
+        cr.owner_pod_uid = Some("pod-uid-U1".to_string());
+        let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr)]));
+
+        assert!(
+            !events.is_empty(),
+            "matching UIDs must produce Added events"
+        );
+        assert!(table.known.contains_key(&1u64));
+    }
+
+    #[test]
+    fn new_pod_replaces_old_pod_after_uid_change() {
+        // Full incarnation cycle: U1 joins, U2 replaces, then U2's CR arrives.
+        let mut table = JoinTable::new();
+
+        // U1 ready + CR owner U1 → joined
+        let mut cr_u1 = make_cached_with_endpoint("cr-uid-1", 1);
+        cr_u1.owner_pod_uid = Some("pod-uid-U1".to_string());
+        table.apply_readiness_scan(HashMap::from([(
+            "worker-0".to_string(),
+            (1u64, "pod-uid-U1".to_string()),
+        )]));
+        table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr_u1.clone())]));
+        assert!(table.known.contains_key(&1u64), "U1 should be in known");
+
+        // U2 replaces U1 in readiness (EndpointSlice updated)
+        let events = table.apply_readiness_scan(HashMap::from([(
+            "worker-0".to_string(),
+            (1u64, "pod-uid-U2".to_string()),
+        )]));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::Removed(_))),
+            "U1 departure must emit Removed"
+        );
+        assert!(!table.known.contains_key(&1u64), "U1 should be evicted");
+
+        // Old CR still present (GC hasn't run) — must not rejoin U2
+        let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr_u1.clone())]));
+        assert!(
+            events.is_empty(),
+            "old CR must not rejoin new pod incarnation"
+        );
+
+        // New CR with owner U2 arrives → U2 joins
+        let mut cr_u2 = make_cached_with_endpoint("cr-uid-2", 1);
+        cr_u2.owner_pod_uid = Some("pod-uid-U2".to_string());
+        let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr_u2)]));
+        assert!(
+            events.iter().any(|e| matches!(e, DiscoveryEvent::Added(_))),
+            "U2 + matching CR must produce Added"
+        );
+        assert!(table.known.contains_key(&1u64), "U2 should be in known");
+    }
+
+    #[test]
+    fn cr_owner_change_evicts_joined_pod() {
+        // CR owner changes in-place while pod U1 is still ready → evict U1.
+        let mut table = JoinTable::new();
+
+        let mut cr = make_cached_with_endpoint("cr-uid-1", 1);
+        cr.owner_pod_uid = Some("pod-uid-U1".to_string());
+        table.apply_readiness_scan(HashMap::from([(
+            "worker-0".to_string(),
+            (1u64, "pod-uid-U1".to_string()),
+        )]));
+        table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr)]));
+        assert!(table.known.contains_key(&1u64));
+
+        // CR updated with new owner U2 (in-place, same CR object, different owner)
+        let mut cr_new_owner = make_cached_with_endpoint("cr-uid-1", 2);
+        cr_new_owner.owner_pod_uid = Some("pod-uid-U2".to_string());
+        let events = table.apply_cr_scan(HashMap::from([("worker-0".to_string(), cr_new_owner)]));
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, DiscoveryEvent::Removed(_))),
+            "CR owner change must evict the joined pod"
+        );
+        assert!(!table.known.contains_key(&1u64));
     }
 
     #[test]
