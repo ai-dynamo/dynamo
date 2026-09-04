@@ -118,13 +118,44 @@ def _declared_tool_call_parser(spec: DeploymentSpec) -> ParserScan:
     return ParserScan(None, tuple(unreadable))
 
 
+# ``--model $MODEL_PATH`` / ``--model "${MODEL_ID}"``: the manifest names an
+# environment variable the deployment expands at pod start, so the literal text
+# is not a model id. 47 of the 178 recipes that declare a DGD do this.
+_UNRESOLVED_VAR = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
+
+
+def _resolve_model(
+    explicit: Optional[str], endpoint: Optional[str], manifest: Optional[str]
+) -> Optional[str]:
+    """Decide which model id to send, in order of authority.
+
+    1. ``--recipe-model``, because the operator said so.
+    2. ``/v1/models``, because it reports what the frontend actually advertises
+       after the deployment expanded whatever the manifest left unresolved.
+    3. the manifest, and only when it is a literal rather than a ``${VAR}``.
+
+    The manifest used to come first. A truthy ``"${MODEL_PATH}"`` then
+    suppressed the endpoint lookup and every request named a model the frontend
+    had never heard of.
+    """
+    if explicit:
+        return explicit
+    if endpoint:
+        return endpoint
+    if manifest and not _UNRESOLVED_VAR.search(manifest):
+        return manifest
+    return None
+
+
 def _served_model(spec: DeploymentSpec) -> Optional[str]:
     """Best-effort model name from the manifest's worker args.
 
-    Only about a third of the recipe corpus passes ``--model`` on the command
-    line; the rest configure it through an engine config file or ConfigMap. For
-    those, ``_model_from_endpoint`` reads it back off the running deployment
-    instead, which is authoritative anyway.
+    Weaker than ``/v1/models`` in two ways, so it is only a fallback. Only about
+    a third of the corpus passes ``--model`` on the command line at all; and of
+    those that do, many pass an unexpanded ``${MODEL_PATH}``. Returning that
+    string would be worse than returning nothing, because a truthy value
+    suppresses the endpoint lookup and the test then sends requests naming a
+    model that does not exist.
     """
     for service in spec.services:
         try:
@@ -169,6 +200,7 @@ async def test_recipe_executes_tools_end_to_end(
     request: pytest.FixtureRequest,
     image: Optional[str],
     namespace: str,
+    skip_service_restart: bool,
     record_property: Any,
 ):
     """Deploy --recipe, then prove the model actually uses real tool output."""
@@ -195,9 +227,13 @@ async def test_recipe_executes_tools_end_to_end(
         )
     parser = scan.parser
 
-    model_hint = request.config.getoption("--recipe-model") or _served_model(
-        deployment_spec
-    )
+    # Only an explicit --recipe-model overrides the endpoint. The manifest is a
+    # weaker source: 47 of the 178 recipes pass --model "${MODEL_PATH}" or
+    # similar, and the deployment resolves that from the environment at pod
+    # start. Letting the manifest win means sending requests with the literal
+    # string "${MODEL_PATH}" as the model id.
+    model_hint = request.config.getoption("--recipe-model")
+    manifest_model = _served_model(deployment_spec)
 
     if image:
         deployment_spec.set_image(image)
@@ -213,7 +249,7 @@ async def test_recipe_executes_tools_end_to_end(
         recipe,
         deployment_spec.name,
         namespace,
-        model_hint or "<from /v1/models>",
+        model_hint or manifest_model or "<from /v1/models>",
         parser,
     )
 
@@ -222,6 +258,12 @@ async def test_recipe_executes_tools_end_to_end(
         deployment_spec=deployment_spec,
         namespace=namespace,
         readiness_timeout=request.config.getoption("--recipe-deploy-timeout"),
+        # ManagedDeployment defaults this to False, which restarts the
+        # namespace-wide dynamo-platform-{nats,etcd} StatefulSets and deletes
+        # their PVCs -- interrupting every other deployment sharing the
+        # namespace. The shared fixture defaults to True for deploy tests; take
+        # it rather than inheriting the destructive default.
+        skip_service_restart=skip_service_restart,
     ) as deployment:
         frontend_pods = deployment.get_pods([deployment.frontend_service_name]).get(
             deployment.frontend_service_name, []
@@ -237,11 +279,13 @@ async def test_recipe_executes_tools_end_to_end(
         base_url = f"http://localhost:{port_forward.local_port}"
         logger.info("Frontend reachable at %s", base_url)
 
-        model = model_hint or _model_from_endpoint(base_url)
+        model = _resolve_model(
+            model_hint, _model_from_endpoint(base_url), manifest_model
+        )
         assert model, (
-            f"could not determine the served model for {recipe}: it is not in "
-            "the manifest args and /v1/models never reported one. Pass "
-            "--recipe-model explicitly."
+            f"could not determine the served model for {recipe}: /v1/models "
+            f"never reported one and the manifest says {manifest_model!r}. "
+            "Pass --recipe-model explicitly."
         )
         record_property("model", model)
 
@@ -379,3 +423,71 @@ def test_unparseable_args_report_undetermined_not_absent(tmp_path):
     assert scan.parser is None
     assert scan.undetermined, "must say 'undetermined', not 'no parser configured'"
     assert "VllmDecodeWorker" in scan.unreadable
+
+
+# ---------------------------------------------------------------------------
+# Unit coverage for model resolution (no cluster required)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+@pytest.mark.parametrize(
+    "value, unresolved",
+    [
+        ("${MODEL_PATH}", True),
+        ("$MODEL_PATH", True),
+        ("$model_path", True),
+        ("${MODEL_ID}", True),
+        ("Qwen/Qwen3-0.6B", False),
+        ("moonshotai/Kimi-K3", False),
+        ("nvidia/model-v1.2", False),
+    ],
+)
+def test_unexpanded_variables_are_recognised(value, unresolved):
+    """A manifest value naming an environment variable is not a model id.
+
+    47 of the 178 recipes that declare a DGD pass one; the deployment expands it
+    at pod start, so the literal text never identifies a model.
+    """
+    assert bool(_UNRESOLVED_VAR.search(value)) is unresolved
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_the_endpoint_outranks_the_manifest():
+    """`/v1/models` is authoritative; the manifest is a last resort.
+
+    Previously the manifest value was tried first, so a truthy `"${MODEL_PATH}"`
+    suppressed the endpoint lookup entirely and the test then asked the frontend
+    for a model named `"${MODEL_PATH}"`.
+    """
+
+    resolve = _resolve_model
+
+    # The case the reviewer found: Kimi K3 declares ${MODEL_PATH} but advertises
+    # its real id through ${SERVED_MODEL_NAME}.
+    assert resolve(None, "moonshotai/Kimi-K3", "${MODEL_PATH}") == "moonshotai/Kimi-K3"
+    # An explicit --recipe-model still wins over everything.
+    assert resolve("override/model", "moonshotai/Kimi-K3", None) == "override/model"
+    # The manifest is used only when the endpoint says nothing and it is literal.
+    assert resolve(None, None, "Qwen/Qwen3-0.6B") == "Qwen/Qwen3-0.6B"
+    # An unexpanded variable is never used, even as a last resort.
+    assert resolve(None, None, "${MODEL_PATH}") is None
+
+
+@pytest.mark.unit
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
+def test_the_deployment_test_takes_the_shared_restart_fixture():
+    """`ManagedDeployment` defaults `skip_service_restart` to False, which
+    restarts namespace-wide NATS and etcd and deletes their PVCs. Every other
+    deploy test takes the shared fixture, which defaults to True; this one must
+    too, or one recipe run interrupts every other deployment in the namespace.
+    """
+    import inspect
+
+    params = inspect.signature(test_recipe_executes_tools_end_to_end).parameters
+    assert "skip_service_restart" in params
