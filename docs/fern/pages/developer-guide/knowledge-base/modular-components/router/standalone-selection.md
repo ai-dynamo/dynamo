@@ -69,6 +69,7 @@ APIs. Those bindings should wrap `SelectionService` rather than construct
 | `--remote-indexer-url` | none | Base URL of a [standalone indexer](standalone-indexer.md) that serves the primary KV index. The selector then does not subscribe to worker KV events; workers publish to the indexer instead. Requires `use_kv_events=true`. |
 | `--replica-sync-port` | none | Local ZMQ PUB port for active-load lifecycle events. The selector binds `tcp://*:<port>` internally. |
 | `--replica-sync-peers` | none | Comma-separated ZMQ PUB endpoints for selector peers. Requires `--replica-sync-port`. |
+| `--session-affinity-ttl-secs` | none | Pin each request `session_id` to the worker that served it for this long after its last request. Bindings replicate to peers over the replica mesh (`dynamo.session-affinity.v1` topic). |
 | `--selection-cache-ttl-secs` | `120` | Seconds an unclaimed pending selection lives before eviction. |
 | `--selection-cache-max-entries` | `4096` | Maximum resident pending selections, evicting oldest first. |
 | `--selection-cache-max-bytes` | `268435456` | Approximate byte budget across resident pending selections. |

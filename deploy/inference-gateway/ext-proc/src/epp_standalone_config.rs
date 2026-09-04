@@ -170,6 +170,10 @@ pub struct EppStandaloneConfig {
     /// throughput throttle). Excess requests are shed with a 503, not queued.
     #[validate(range(min = 1, message = "DYN_EPP_MAX_INFLIGHT_REQUESTS must be >= 1"))]
     pub max_inflight_requests: usize,
+    /// Pin each `x-dynamo-session-id` to the worker that served it for this
+    /// long after its last request (`DYN_EPP_SESSION_AFFINITY_TTL_SECS`).
+    /// `None` disables session affinity.
+    pub session_affinity_ttl_secs: Option<f64>,
 }
 
 impl EppStandaloneConfig {
@@ -233,6 +237,7 @@ impl EppStandaloneConfig {
             max_num_batched_tokens: opt_parse::<u64>(get, "DYN_EPP_MAX_NUM_BATCHED_TOKENS")?,
             max_inflight_requests: opt_parse::<usize>(get, "DYN_EPP_MAX_INFLIGHT_REQUESTS")?
                 .unwrap_or(DEFAULT_MAX_INFLIGHT_REQUESTS),
+            session_affinity_ttl_secs: opt_parse::<f64>(get, "DYN_EPP_SESSION_AFFINITY_TTL_SECS")?,
         })
     }
 

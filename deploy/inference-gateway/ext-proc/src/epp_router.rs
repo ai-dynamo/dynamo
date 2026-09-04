@@ -70,6 +70,9 @@ impl RenderClient {
     }
 }
 
+/// Session id the standalone EPP pins to a worker when session affinity is on.
+const HEADER_SESSION_ID: &str = "x-dynamo-session-id";
+
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
     renderer: RenderClient,
@@ -341,6 +344,7 @@ impl EndpointPicker for EppRouter {
             model_name: self.model_name.clone(),
             reservation_id: reservation_id.clone(),
             token_ids: tokens,
+            session_id: first_header(&req.headers, HEADER_SESSION_ID).map(str::to_owned),
             // `None` on the ordinary path: the selector schedules over its
             // catalog; `Some` only carries an Envoy subset constraint.
             allowed_worker_ids: allowed,

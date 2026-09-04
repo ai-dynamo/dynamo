@@ -151,6 +151,7 @@ mod tests {
             total_kv_blocks: Some(1000),
             max_num_batched_tokens: Some(8192),
             max_inflight_requests: 1024,
+            session_affinity_ttl_secs: None,
         }
     }
 

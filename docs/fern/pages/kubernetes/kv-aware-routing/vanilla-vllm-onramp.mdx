@@ -504,6 +504,7 @@ For a single EPP replica, set `spec.replicas: 1` and remove `DYN_EPP_PEER_SERVIC
 | `DYN_EPP_SELECTION_INDEXER_THREADS` | No | KV indexer thread count; defaults to `4`. |
 | `DYN_EPP_TOKENIZATION_TIMEOUT_MS` | No | Render request timeout; defaults to `5000`. |
 | `DYN_EPP_TOKENIZER_MAX_RESPONSE_BYTES` | No | Maximum render response size; defaults to `16777216`. |
+| `DYN_EPP_SESSION_AFFINITY_TTL_SECS` | No | Pin each `x-dynamo-session-id` to the worker that served it for this many seconds after its last request; the binding replicates to peer EPPs over the replica mesh. Unset disables session affinity. |
 | `DYN_EPP_MAX_INFLIGHT_REQUESTS` | No | Concurrent EPP request guardrail; defaults to `1024`, and excess requests receive `503`. |
 | `DYN_EPP_PEER_SERVICE` | No | Existing EPP Service used to discover sibling replicas. Enables replica sync. |
 | `DYN_EPP_REPLICA_SYNC_PORT` | No | ZMQ port every replica binds and dials for replica sync; defaults to `9092`. All replicas selected by `DYN_EPP_PEER_SERVICE` must use the same value. |
