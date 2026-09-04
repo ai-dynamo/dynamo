@@ -80,6 +80,23 @@ pub fn connection_timeout(message: impl Into<String>) -> DynamoError {
     backend(BackendError::ConnectionTimeout, message)
 }
 
+fn typed(kind: ErrorType, message: impl Into<String>) -> DynamoError {
+    DynamoError::builder()
+        .error_type(kind)
+        .message(message)
+        .build()
+}
+
+/// One worker is out of capacity while others may still have room. The router
+/// sheds and migrates on this; flattening it to `Unknown` costs that behaviour.
+pub fn worker_overloaded(message: impl Into<String>) -> DynamoError {
+    typed(ErrorType::WorkerOverloaded, message)
+}
+
+pub fn cancelled(message: impl Into<String>) -> DynamoError {
+    typed(ErrorType::Cancelled, message)
+}
+
 pub fn status_to_dynamo(rpc: &str, status: tonic::Status) -> DynamoError {
     status_to_dynamo_parts(rpc, status.message(), status.code())
 }
@@ -101,6 +118,9 @@ fn status_to_dynamo_parts(rpc: &str, message: &str, code: tonic::Code) -> Dynamo
         | tonic::Code::FailedPrecondition
         | tonic::Code::AlreadyExists => BackendError::InvalidArgument,
         tonic::Code::Unavailable => BackendError::CannotConnect,
+        tonic::Code::ResourceExhausted => {
+            return worker_overloaded(format!("{rpc}: {message} (ResourceExhausted)"));
+        }
         tonic::Code::Cancelled => BackendError::Cancelled,
         tonic::Code::DeadlineExceeded => BackendError::ConnectionTimeout,
         _ => BackendError::Unknown,

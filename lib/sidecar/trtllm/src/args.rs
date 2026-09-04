@@ -6,7 +6,7 @@ use dynamo_sidecar_common::SidecarArgs;
 #[derive(clap::Parser, Clone, Debug)]
 #[command(
     name = "dynamo-trtllm-sidecar",
-    about = "Run a Dynamo worker against TensorRT-LLM's native gRPC TrtllmService"
+    about = "Run a Dynamo worker against TensorRT-LLM's OpenEngine gRPC server"
 )]
 pub(crate) struct Args {
     #[command(flatten)]

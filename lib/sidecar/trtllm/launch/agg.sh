@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Aggregated serving through TensorRT-LLM's native gRPC server (1 GPU).
+# Aggregated serving through TensorRT-LLM's OpenEngine gRPC server (1 GPU).
 
 set -e
 
@@ -86,11 +86,14 @@ if [[ -n "$TRTLLM_CONTEXT_LENGTH" ]]; then
     TRTLLM_CONTEXT_LENGTH_ARGS=(--context-length "$TRTLLM_CONTEXT_LENGTH")
 fi
 
-# `--grpc` needs `smg-grpc-proto`, which TRT-LLM keeps behind its optional
-# `grpc-smg` extra. Constraint copied from that extra so we resolve what
-# upstream resolves.
-if ! "$TRTLLM_PYTHON" -c "import smg_grpc_proto" >/dev/null 2>&1; then
-    "$TRTLLM_PYTHON" -m pip install --no-cache-dir "smg-grpc-proto>=0.4.2"
+# `--grpc-protocol openengine` needs the OpenEngine bindings, which resolve only
+# from a custom index and which TRT-LLM keeps behind its optional `openengine`
+# extra. Constraints copied from that extra so we resolve what upstream does.
+if ! "$TRTLLM_PYTHON" -c "import openengine.v1" >/dev/null 2>&1; then
+    "$TRTLLM_PYTHON" -m pip install --no-cache-dir \
+        --extra-index-url https://buf.build/gen/python \
+        "openengine-openengine-grpc-python" \
+        "openengine-openengine-protocolbuffers-python"
 fi
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
@@ -102,16 +105,17 @@ if [[ -n "$GPU_MEM_ARGS" ]]; then
     TRTLLM_GPU_MEM_ARGS=(--extra_llm_api_options "$TRTLLM_EXTRA_CONFIG")
 fi
 
-print_launch_banner "Launching TensorRT-LLM Native-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
+print_launch_banner "Launching TensorRT-LLM OpenEngine-gRPC Sidecar (1 GPU)" "$MODEL" "$HTTP_PORT" \
     "TensorRT-LLM gRPC: 127.0.0.1:${TRTLLM_GRPC_PORT}" \
     "Context length:    ${TRTLLM_CONTEXT_LENGTH:-from engine report}"
 
 python3 -m dynamo.frontend &
 
-# TensorRT-LLM's native gRPC listener is unauthenticated; keep it on loopback.
+# TensorRT-LLM's OpenEngine gRPC listener is unauthenticated; keep it on loopback.
 CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES" \
 "$TRTLLM_PYTHON" -m tensorrt_llm.commands.serve "$MODEL" \
     --grpc \
+    --grpc-protocol openengine \
     --host 127.0.0.1 \
     --port "$TRTLLM_GRPC_PORT" \
     "${TRTLLM_MAX_SEQ_LEN_ARGS[@]}" \
