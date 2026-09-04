@@ -269,9 +269,7 @@ mod tests {
     use crate::{
         discovery::ModelManager,
         kv_router::prefill_router::PrefillBinding,
-        kv_router::{
-            KvPushRouter, KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext,
-        },
+        kv_router::{KvPushRouter, KvRouter, RouterLoadSource, RoutingHost, RoutingLoadContext},
         local_model::runtime_config::PREFILL_CONTINUE_CAPABILITY,
         protocols::common::{
             FinishReason,

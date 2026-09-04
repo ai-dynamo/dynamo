@@ -1,4 +1,9 @@
-# Prefill Continues Decode
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: Prefill Continues Decode
+subtitle: Let a prefill worker finish a request when decode is full
+---
 
 **Experimental.** A prefill worker keeps a request and generates the whole response, instead of
 handing it to a decode worker. No KV transfer happens. It is worth doing only when decode is the
