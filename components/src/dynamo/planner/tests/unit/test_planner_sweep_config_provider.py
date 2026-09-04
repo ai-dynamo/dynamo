@@ -418,6 +418,7 @@ def test_scaling_policy_materializes_legacy_planner_payload() -> None:
         "enable_load_scaling": False,
         "throughput_adjustment_interval_seconds": 180,
         "load_adjustment_interval_seconds": 5,
+        "max_throughput_scaling_replicas": 8,
         "max_num_fpm_samples": 128,
         "fpm_sample_bucket_size": 64,
         "load_predictor": "constant",
@@ -450,6 +451,7 @@ def test_custom_float_interval_resolves_predictor_and_preserves_selection() -> N
             "fpm_sampling": {"preset": ["default"]},
             "load_sensitivity": {"preset": ["default"]},
             "load_predictor": {"preset": ["constant_last"]},
+            "max_throughput_scaling_replicas": 3,
         },
         _sweep_context(),
     )
@@ -466,11 +468,13 @@ def test_custom_float_interval_resolves_predictor_and_preserves_selection() -> N
 
     assert replay_spec.config["scaling_policy"] == custom_policy
     assert replay_spec.config["throughput_adjustment_interval_seconds"] == 180
+    assert replay_spec.config["max_throughput_scaling_replicas"] == 3
     assert replay_spec.config["load_predictor"] == "constant"
     planner_config = replay_spec.runtime_hooks[0].config["planner_config"]
     assert isinstance(planner_config, dict)
     assert "scaling_policy" not in planner_config
     assert planner_config["load_predictor"] == "constant"
+    assert planner_config["max_throughput_scaling_replicas"] == 3
 
 
 def test_disaggregated_scaling_preserves_both_engine_gpu_counts() -> None:

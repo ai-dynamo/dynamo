@@ -4,6 +4,7 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    ops::Range,
     str::FromStr,
 };
 
@@ -31,6 +32,9 @@ pub const TOPOLOGY_TAINT_PREFIX: &str = "dynamo.topology/";
 
 /// Runtime-data key for an engine-published token-overflow contract.
 pub const TOKEN_BUDGET_RUNTIME_KEY: &str = "token_budget";
+
+/// Resource-safety bound for rank ranges advertised by one worker.
+pub(crate) const MAX_DATA_PARALLEL_RANKS_PER_WORKER: u32 = 4096;
 
 /// Runtime-data key indicating that a backend expects tool structural tags to
 /// exclude reasoning and manages grammar activation around reasoning itself.
@@ -90,6 +94,13 @@ pub const ENV_TOKENIZER_FALLBACK: &str = "DYN_TOKENIZER_FALLBACK";
 /// `ModelType::Chat` / `ModelType::Completions`: other backends expose those
 /// surfaces without implementing vLLM's Generate contract.
 pub const VLLM_INFERENCE_V1_GENERATE_CAPABILITY: &str = "vllm_inference_v1_generate";
+
+/// Worker-reported Qwen3 video prompt-expansion contract used by vLLM.
+///
+/// Absence disables exact video routing so a newer frontend remains safe with
+/// older workers that predate this runtime contract.
+pub const VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY: &str =
+    "vllm_qwen_video_processor_contract";
 
 /// Worker-reported vLLM setting that makes multimodal cache identities depend
 /// on the active LoRA adapter. Missing and explicit `false` are equivalent.
@@ -192,8 +203,13 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u32>,
 
-    /// Physical KV-cache capacity for each router-visible data-parallel rank.
-    /// This is per rank, never the aggregate capacity of the worker process.
+    /// Compatibility KV-cache capacity applied to each router-visible data-parallel rank.
+    /// Some adapters derive this scalar from aggregate or representative-rank data.
+    ///
+    /// TODO(rank-aware-kv-capacity): Add an additive per-rank advertisement whose resolver
+    /// preserves exact/conservative/estimated provenance. Exact heterogeneous producers must
+    /// dual-write their minimum here for old readers; aggregate division stays an adapter-only
+    /// estimate and must not silently become a hard-admission denominator.
     pub total_kv_blocks: Option<u64>,
 
     pub max_num_seqs: Option<u64>,
@@ -548,6 +564,16 @@ fn validate_kv_transfer_domain(domain: &str) -> Result<(), ValidationError> {
 }
 
 fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), ValidationError> {
+    if config.data_parallel_size == 0 {
+        return Err(validation_error(
+            "invalid_data_parallel_size",
+            "data_parallel_size must be at least 1",
+        ));
+    }
+    config
+        .data_parallel_rank_range()
+        .map_err(|error| validation_error("invalid_data_parallel_rank_range", error))?;
+
     if let Some(parser) = config
         .tool_call_parser
         .as_deref()
@@ -619,6 +645,23 @@ impl ModelRuntimeConfig {
 
     pub fn validate_config(&self) -> Result<(), String> {
         self.validate().map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn data_parallel_rank_range(&self) -> Result<Range<u32>, String> {
+        if self.data_parallel_size == 0 {
+            return Err("data_parallel_size must be at least 1".to_string());
+        }
+        if self.data_parallel_size > MAX_DATA_PARALLEL_RANKS_PER_WORKER {
+            return Err(format!(
+                "data_parallel_size {} exceeds the supported maximum {}",
+                self.data_parallel_size, MAX_DATA_PARALLEL_RANKS_PER_WORKER
+            ));
+        }
+        let end = self
+            .data_parallel_start_rank
+            .checked_add(self.data_parallel_size)
+            .ok_or_else(|| "data-parallel rank range overflows u32".to_string())?;
+        Ok(self.data_parallel_start_rank..end)
     }
 
     pub fn set_engine_specific<T: Serialize>(&mut self, key: &str, value: T) -> anyhow::Result<()> {
@@ -1205,6 +1248,36 @@ mod tests {
             },
         ] {
             config.validate_config().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_validate_config_rejects_invalid_data_parallel_ranges() {
+        for (config, expected_error) in [
+            (
+                ModelRuntimeConfig {
+                    data_parallel_size: 0,
+                    ..Default::default()
+                },
+                "data_parallel_size must be at least 1",
+            ),
+            (
+                ModelRuntimeConfig {
+                    data_parallel_size: MAX_DATA_PARALLEL_RANKS_PER_WORKER + 1,
+                    ..Default::default()
+                },
+                "exceeds the supported maximum",
+            ),
+            (
+                ModelRuntimeConfig {
+                    data_parallel_start_rank: u32::MAX,
+                    ..Default::default()
+                },
+                "data-parallel rank range overflows u32",
+            ),
+        ] {
+            let error = config.validate_config().unwrap_err();
+            assert!(error.contains(expected_error), "{error}");
         }
     }
 

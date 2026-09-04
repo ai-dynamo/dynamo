@@ -20,7 +20,7 @@ outputs:
     description: 'Whether operator files changed'
     value: ${{ steps.filter.outputs.operator_any_modified }}
   snapshot:
-    description: 'Whether shared snapshot/DynamoCheckpoint files changed'
+    description: 'Whether shared standalone Snapshot integration files changed'
     value: ${{ steps.filter.outputs.snapshot_any_modified }}
   snapshot_vllm:
     description: 'Whether vLLM snapshot lifecycle files changed'

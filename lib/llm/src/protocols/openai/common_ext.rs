@@ -72,7 +72,6 @@ pub struct CommonExt {
     /// If specified, the output will follow the whitespace pattern. Can be a string or null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    #[allow(unused)] // Not used
     pub guided_whitespace_pattern: Option<String>,
 
     /// Whether to skip special tokens in the decoded output.

@@ -790,9 +790,14 @@ fn build_engine_config(
     let dp_size = client::json_u32(&discovery.server_info, "dp_size")
         .unwrap_or(1)
         .max(1);
+    let enable_dp_attention = discovery
+        .server_info
+        .get("enable_dp_attention")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let max_num_seqs =
         client::json_u64(&discovery.server_info, "max_running_requests").map(|value| {
-            if dp_size > 1 {
+            if enable_dp_attention && dp_size > 1 {
                 value / u64::from(dp_size)
             } else {
                 value
@@ -801,18 +806,10 @@ fn build_engine_config(
     let max_num_batched_tokens =
         client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
 
-    let enable_dp_attention = discovery
-        .server_info
-        .get("enable_dp_attention")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let (data_parallel_start_rank, data_parallel_size) = if enable_dp_attention && dp_size > 1 {
-        // Native gRPC is exposed by the rank-zero frontend for the complete
-        // multi-node SGLang endpoint, so one sidecar registers every DP rank.
-        (Some(0), Some(dp_size))
-    } else {
-        (Some(0), Some(1))
-    };
+    // Native gRPC is exposed by the rank-zero frontend for the complete
+    // SGLang endpoint, so one sidecar registers every pure- or attention-DP rank.
+    let data_parallel_start_rank = Some(0);
+    let data_parallel_size = Some(dp_size);
 
     if mode.is_prefill() && (bootstrap_host.is_none() || bootstrap_port.is_none()) {
         return Err(client::protocol_error(
@@ -950,6 +947,43 @@ mod tests {
 
         assert_eq!(registration.data_parallel_start_rank, Some(0));
         assert_eq!(registration.data_parallel_size, Some(16));
+    }
+
+    #[test]
+    fn pure_dp_preserves_per_rank_max_num_seqs() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "dp_size": 4,
+                "enable_dp_attention": false,
+                "max_running_requests": 256,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let registration = config.llm.unwrap();
+        assert_eq!(registration.max_num_seqs, Some(256));
+        assert_eq!(registration.data_parallel_start_rank, Some(0));
+        assert_eq!(registration.data_parallel_size, Some(4));
+    }
+
+    #[test]
+    fn attention_dp_normalizes_aggregate_max_num_seqs_per_rank() {
+        let config = build_engine_config(
+            &discovery(json!({
+                "dp_size": 4,
+                "enable_dp_attention": true,
+                "max_running_requests": 256,
+            })),
+            DisaggregationMode::Decode,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(config.llm.unwrap().max_num_seqs, Some(64));
     }
 
     #[test]

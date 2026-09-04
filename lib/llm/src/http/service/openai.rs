@@ -1405,8 +1405,10 @@ async fn completions_batch(
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateEmbeddingRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateEmbeddingRequest = parse_json_request("embeddings", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.inner.model)?;
@@ -1562,8 +1564,10 @@ async fn embeddings(
 async fn classify(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateClassifyRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateClassifyRequest = parse_json_request("classify", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
@@ -1839,8 +1843,10 @@ fn build_pooling_binary_response(
 async fn pooling(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreatePoolingRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreatePoolingRequest = parse_json_request("pooling", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
@@ -4283,13 +4289,24 @@ pub fn responses_router(
 async fn images(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateImageRequest>,
+    body: Body,
+) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: NvCreateImageRequest = parse_json_request("images", &body)?;
+    images_with_request(state, headers, request).await
+}
+
+async fn images_with_request(
+    state: Arc<service_v2::State>,
+    headers: HeaderMap,
+    mut request: NvCreateImageRequest,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
     // ImageModel enum into a string; see below)
     check_ready(&state)?;
 
+    request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
@@ -4383,8 +4400,10 @@ async fn images(
 async fn images_edits(
     state: State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateImageRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let request: NvCreateImageRequest = parse_json_request("image edits", &body)?;
     if request.input_reference.is_none() {
         let code = StatusCode::BAD_REQUEST;
         return Err((
@@ -4398,7 +4417,7 @@ async fn images_edits(
             }),
         ));
     }
-    images(state, headers, Json(request)).await
+    images_with_request(state.0, headers, request).await
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Images endpoints.
@@ -4424,12 +4443,15 @@ pub fn images_router(
 async fn videos(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateVideoRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateVideoRequest = parse_json_request("videos", &body)?;
     // return a 503 if the service or model is not ready
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
+    request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let request_id = request.id().to_string();
@@ -4546,11 +4568,14 @@ async fn videos(
 async fn video_stream(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateVideoRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateVideoRequest = parse_json_request("video stream", &body)?;
     check_ready(&state)?;
     check_model_serving_ready(&state, &request.model)?;
 
+    request.nest_passthrough();
     let request_id = get_or_create_request_id(&headers);
     let request = context_from_headers(request, request_id, &headers)?;
     let model = request.model.clone();
@@ -4741,8 +4766,10 @@ fn decode_audio_chunks(response: &NvAudioSpeechResponse) -> Result<Vec<Bytes>, S
 async fn handler_audio_speech(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(mut request): Json<NvCreateAudioSpeechRequest>,
+    body: Body,
 ) -> Result<Response, ErrorResponse> {
+    let body = read_json_request_body(&headers, body).await?;
+    let mut request: NvCreateAudioSpeechRequest = parse_json_request("audio speech", &body)?;
     // return a 503 if the service is not ready
     // (per-model readiness check is deferred until after we resolve the
     // Option<String> model field; see below)
@@ -4765,6 +4792,7 @@ async fn handler_audio_speech(
             .get_or_insert_default()
             .frontend_accepts_audio_chunks = Some(true);
     }
+    request.nest_passthrough();
     let request = context_from_headers(request, request_id, &headers)?;
 
     // model is optional in the request; fall back to a model that can actually
@@ -5090,8 +5118,8 @@ mod tests {
 
     use super::*;
     use crate::discovery::ModelManagerError;
-    use crate::protocols::common::StopConditionsProvider;
     use crate::protocols::common::extensions::{AgentCompaction, NvExt};
+    use crate::protocols::common::{SamplingOptionsProvider, StopConditionsProvider};
     use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
     use crate::protocols::openai::common_ext::CommonExt;
     use crate::protocols::openai::completions::NvCreateCompletionRequest;
@@ -5635,6 +5663,29 @@ mod tests {
         let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(response.0, StatusCode::BAD_REQUEST);
         assert_eq!(response.1.message, "custom error message");
+    }
+
+    #[test]
+    fn guided_decoding_conflict_maps_to_bounded_bad_request() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "guided_json": {
+                "type": "object",
+                "description": "x".repeat(1_200_000),
+            },
+            "guided_regex": "a+",
+        }))
+        .expect("request should deserialize");
+
+        let error = request.extract_sampling_options().unwrap_err();
+        let response = ErrorMessage::from_anyhow(error, BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.1.message,
+            "Only one guided-decoding constraint can be set; received: json, regex"
+        );
     }
 
     #[test]

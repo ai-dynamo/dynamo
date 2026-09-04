@@ -114,7 +114,12 @@ jobs:
           'pyyaml>=6.0' \
           'pydantic>=2' \
           'pytest-asyncio>=1.0' \
-          'pytest-benchmark>=4'
+          'pytest-benchmark>=4' \
+          'pytest-timeout==2.4.0'
+    - name: Install qualified Kustomize renderer
+      run: |
+        go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1
+        echo "KUSTOMIZE_BIN=$(go env GOPATH)/bin/kustomize" >> "$GITHUB_ENV"
     - name: Check generated recipe manifests
       run: python3 scripts/kustomize-matrix.py check
     - name: Test recipe generators and docs artifacts
@@ -457,6 +462,7 @@ jobs:
         compile_bench multiturn --bench multiturn_bench
         compile_bench satf --bin request_trace_to_satf
         compile_bench request-trace-to-mooncake --bin request_trace_to_mooncake
+        compile_bench weka-to-agentic-mooncake --bin weka_to_agentic_mooncake
         compile_bench offline-replay --bench offline_replay_bench
         compile_bench mooncake --bench mooncake_bench
         compile_bench active-sequences --bench active_sequences_bench
@@ -465,6 +471,9 @@ jobs:
 
         cargo test --locked --no-default-features -p dynamo-bench \
           --features request-trace-to-mooncake --test request_trace_to_mooncake
+
+        cargo test --locked --no-default-features -p dynamo-bench \
+          --features weka-to-agentic-mooncake --test weka_to_agentic_mooncake
 
         cargo test --locked -p dynamo-llm --no-default-features \
           --features kv-router-stress --bench kv_router_bench --no-run
@@ -533,6 +542,8 @@ jobs:
         lint_bench multiturn --bench multiturn_bench
         lint_bench satf --bin request_trace_to_satf
         lint_bench request-trace-to-mooncake --bin request_trace_to_mooncake
+        lint_bench weka-to-agentic-mooncake --bin weka_to_agentic_mooncake
+        lint_bench weka-to-agentic-mooncake --test weka_to_agentic_mooncake
         lint_bench offline-replay --bench offline_replay_bench
         lint_bench mooncake --bench mooncake_bench
         lint_bench active-sequences --bench active_sequences_bench
