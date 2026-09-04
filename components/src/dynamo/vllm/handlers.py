@@ -1690,15 +1690,23 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # watchdog thread do the exit; wait_for stays as the cooperative first
         # attempt so a cancellable hang unwinds cleanly.
         def _deadline_exceeded() -> None:
-            logger.error(
-                "[ElasticEP] Scale to dp=%s exceeded its %ss deadline and did not "
-                "answer cancellation; the engine is wedged. Exiting so the worker "
-                "restarts clean at its previous size. Tune with %s.",
-                new_dp_size,
-                _SCALE_EP_TIMEOUT_S,
-                _SCALE_EP_TIMEOUT_ENV,
-            )
-            logging.shutdown()
+            # Runs on the timer thread and MUST exit unconditionally. Do not touch
+            # logging here: the main thread may be wedged while holding a logging
+            # handler lock (e.g. blocked writing to a full stdout pipe), which would
+            # make logger.*/logging.shutdown() block on that lock and defeat the one
+            # exit that exists to bound exactly this hang. os.write to fd 2 takes no
+            # Python-level lock.
+            try:
+                os.write(
+                    2,
+                    f"[ElasticEP] scale to dp={new_dp_size} exceeded its "
+                    f"{_SCALE_EP_TIMEOUT_S}s deadline and did not answer "
+                    f"cancellation; the engine is wedged. Hard-exiting so the worker "
+                    f"restarts clean at its previous size. Tune with "
+                    f"{_SCALE_EP_TIMEOUT_ENV}.\n".encode(),
+                )
+            except Exception:
+                pass
             os._exit(1)
 
         watchdog = threading.Timer(
