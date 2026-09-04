@@ -617,8 +617,6 @@ where
         let topology_constraints =
             self.preflight_kv_transfer_constraints(Some(endpoint_id), worker_id)?;
 
-        // An `n > 1` request fans out into `n` single-sample sub-requests on
-        // the worker; draw one room each so all keep `room % dp_size == dp_rank`.
         let parallel_samples = parallel_sample_count(request);
         let bootstrap_info = self
             .model_manager

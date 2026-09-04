@@ -676,7 +676,6 @@ mod tests {
 
         let value = serde_json::to_value(&info).unwrap();
         assert_eq!(value["handoff_id"], handoff_id.to_string());
-        // `n == 1` requests keep the pre-fan-out wire format.
         assert!(value.get("bootstrap_rooms").is_none());
         assert!(value.get("mocker_handoff_protocol_version").is_none());
         assert!(value.get("mocker_handoff_role").is_none());
