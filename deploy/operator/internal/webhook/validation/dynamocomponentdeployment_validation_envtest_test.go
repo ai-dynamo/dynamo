@@ -958,7 +958,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 					MaxReplicas: 10,
 				},
 			}),
-			wantWarnings: []string{"spec.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md"},
+			wantWarnings: []string{"spec.autoscaling is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See https://docs.nvidia.com/dynamo/dev/reference/kubernetes-api/full-api-reference#dynamographdeploymentscalingadapter"},
 		},
 		{
 			name: "deprecated dynamo namespace warning shows calculated namespace",
