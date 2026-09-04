@@ -36,8 +36,9 @@ use crate::protocols::openai::common_ext::CommonExt;
 fn push_system_message(content: String, messages: &mut Vec<ChatCompletionRequestMessage>) {
     messages.push(ChatCompletionRequestMessage::System(
         ChatCompletionRequestSystemMessage {
-            content: ChatCompletionRequestSystemMessageContent::Text(content),
+            content: Some(ChatCompletionRequestSystemMessageContent::Text(content)),
             name: None,
+            tools: None,
         },
     ));
 }
@@ -99,6 +100,7 @@ impl TryFrom<AnthropicCreateMessageRequest> for NvCreateChatCompletionRequest {
                             name: None,
                             audio: None,
                             tool_calls: None,
+                            partial: None,
                             function_call: None,
                         },
                     ));
@@ -463,6 +465,7 @@ fn convert_assistant_blocks(
             name: None,
             audio: None,
             tool_calls: tc,
+            partial: None,
             #[allow(deprecated)]
             function_call: None,
         },
@@ -1025,7 +1028,7 @@ mod tests {
         ));
         match &chat_req.inner.messages[1] {
             ChatCompletionRequestMessage::System(system) => match &system.content {
-                ChatCompletionRequestSystemMessageContent::Text(text) => {
+                Some(ChatCompletionRequestSystemMessageContent::Text(text)) => {
                     assert_eq!(text, "Keep answers short.\nUse the available shell.");
                 }
                 other => panic!("expected text content, got {other:?}"),
