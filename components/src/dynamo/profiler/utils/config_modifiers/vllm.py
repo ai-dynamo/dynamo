@@ -112,7 +112,6 @@ def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[s
 
 
 def _remove_disaggregation_mode_args(args: list[str]) -> list[str]:
-    """Remove every spaced and equals-form disaggregation mode argument."""
     filtered_args: list[str] = []
     index = 0
     while index < len(args):
