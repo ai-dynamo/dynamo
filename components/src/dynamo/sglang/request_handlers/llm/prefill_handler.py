@@ -18,7 +18,10 @@ from dynamo.sglang.engine_generate import (
     native_generate_stream,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
-from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_handlers.handler_base import (
+    BaseWorkerHandler,
+    validate_disaggregated_n,
+)
 from dynamo.sglang.request_handlers.llm.decode_handler import _sampling_option_params
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     build_disagg_mm_kwargs,
@@ -90,9 +93,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             # DisaggPreprocessedRequest format
             inner_request = request["request"]
             sampling_params = request.get("sampling_params", {})
+            validate_disaggregated_n(sampling_params.get("n"))
         else:
             inner_request = request
             sampling_opts = request.get("sampling_options", {})
+            validate_disaggregated_n(sampling_opts.get("n"))
             stop_conditions = request.get("stop_conditions", {})
             sampling_params = {
                 "n": sampling_opts.get("n"),

@@ -35,7 +35,10 @@ from dynamo.sglang.engine_generate import (
     native_generate_stream,
 )
 from dynamo.sglang.publisher import DynamoSglangPublisher
-from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_handlers.handler_base import (
+    BaseWorkerHandler,
+    validate_disaggregated_n,
+)
 from dynamo.sglang.request_handlers.llm.mm_disagg_utils import (
     AUDIO_URL_KEY,
     IMAGE_URL_KEY,
@@ -456,6 +459,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **self._get_guided_decoding_params(request.get("guided_decoding")),
             }
 
+        if self.serving_mode == DisaggregationMode.DECODE:
+            validate_disaggregated_n(param_mapping.get("n"))
+
         # Keep max_new_tokens even when None — SGLang treats None as "generate
         # until EOS/context-length" whereas omitting it triggers a default of 128.
         keep_if_none = {"max_new_tokens"}
@@ -519,6 +525,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             routed_dp_rank=routing.get("dp_rank"),
             lora_path=self._resolve_lora(request),
         )
+        if self.serving_mode == DisaggregationMode.DECODE:
+            validate_disaggregated_n((native_request.sampling_params or {}).get("n"))
         return native_generate_stream(self.engine, native_request)
 
     async def generate(
