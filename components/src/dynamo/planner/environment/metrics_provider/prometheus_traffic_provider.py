@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from dataclasses import dataclass
 from typing import Optional
 
 from dynamo.planner.config.planner_config import PlannerConfig
@@ -18,6 +20,15 @@ from dynamo.planner.monitoring.traffic_metrics import Metrics, PrometheusAPIClie
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class _QueryContext:
+    model_name: str
+    namespace: str
+    backend: str
+    component_name: Optional[str]
+    endpoint: Optional[str]
+
+
 class PrometheusTrafficProvider(TrafficMetricsProvider):
     def __init__(
         self,
@@ -27,6 +38,8 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
         metrics_state: Metrics,
         namespace_source: Optional[RuntimeNamespaceSource] = None,
     ) -> None:
+        self._collection_lock = asyncio.Lock()
+        self._collection_task: Optional[asyncio.Task[Metrics]] = None
         self.config = config
         self.state_source = state_source
         self.metrics_state = metrics_state
@@ -48,37 +61,19 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
             self.prometheus_traffic_client.warn_if_router_not_scraped()
 
     async def collect_traffic(self) -> Optional[TrafficObservation]:
-        model_name = self._model_name()
-        if model_name is None:
-            logger.info("Model name is not available, skipping traffic collection")
+        duration_s = self.config.throughput_adjustment_interval_seconds
+        result = await self._collect_metrics(f"{duration_s}s", full=True)
+        if result is None:
             return None
-
-        interval_str = f"{self.config.throughput_adjustment_interval_seconds}s"
         m = self.metrics_state
-        ttft = self.prometheus_traffic_client.get_avg_time_to_first_token(
-            interval_str, model_name
-        )
-        m.ttft = ttft * 1000 if ttft is not None else None
-        itl = self.prometheus_traffic_client.get_avg_inter_token_latency(
-            interval_str, model_name
-        )
-        m.itl = itl * 1000 if itl is not None else None
-        m.num_req = self.prometheus_traffic_client.get_avg_request_count(
-            interval_str, model_name
-        )
-        m.request_duration = self.prometheus_traffic_client.get_avg_request_duration(
-            interval_str, model_name
-        )
-        m.isl = self.prometheus_traffic_client.get_avg_input_sequence_tokens(
-            interval_str, model_name
-        )
-        m.osl = self.prometheus_traffic_client.get_avg_output_sequence_tokens(
-            interval_str, model_name
-        )
-        m.kv_hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
-            interval_str, model_name, namespace=self._runtime_namespace()
-        )
-        m.accept_length = self.collect_accept_length(interval_str)
+        m.ttft = result.ttft
+        m.itl = result.itl
+        m.num_req = result.num_req
+        m.request_duration = result.request_duration
+        m.isl = result.isl
+        m.osl = result.osl
+        m.kv_hit_rate = result.kv_hit_rate
+        m.accept_length = result.accept_length
 
         normalized_idle_metrics = m.normalize_idle_nans()
         if normalized_idle_metrics:
@@ -106,7 +101,7 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
         )
 
         return TrafficObservation(
-            duration_s=self.config.throughput_adjustment_interval_seconds,
+            duration_s=duration_s,
             num_req=m.num_req,
             isl=m.isl,
             osl=m.osl,
@@ -114,37 +109,114 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
             accept_length=m.accept_length,
         )
 
-    def collect_accept_length(self, interval_str: str) -> Optional[float]:
-        if self.config.mode not in ("disagg", "decode", "agg"):
-            return None
-        state = self.state_source.deployment_state()
+    async def _collect_metrics(
+        self, interval_str: str, *, full: bool
+    ) -> Optional[Metrics]:
+        async with self._collection_lock:
+            # Cancellation cannot stop Requests in a thread. Wait for the previous
+            # batch before reusing its session, even if its caller was cancelled.
+            if self._collection_task is not None:
+                await asyncio.wait({self._collection_task})
+            context = self._query_context()
+            if context is None:
+                logger.info("Model name is not available, skipping traffic collection")
+                return None
+            task = asyncio.create_task(
+                asyncio.to_thread(self._query_metrics, interval_str, context, full=full)
+            )
+            self._collection_task = task
+            # Retrieve failures even when the caller abandons the shielded task.
+            task.add_done_callback(self._collection_done)
+            return await asyncio.shield(task)
+
+    @staticmethod
+    def _collection_done(task: asyncio.Task[Metrics]) -> None:
+        if not task.cancelled():
+            task.exception()
+
+    def _query_context(self) -> Optional[_QueryContext]:
         model_name = self._model_name()
-        decode_info = state.decode.info
-        if model_name is None or decode_info is None:
+        if model_name is None:
             return None
-        if not decode_info.component_name or not decode_info.endpoint:
+        decode_info = self.state_source.deployment_state().decode.info
+        collect_accept = self.config.mode in ("disagg", "decode", "agg")
+        return _QueryContext(
+            model_name=model_name,
+            namespace=self._runtime_namespace(),
+            backend=self.config.backend,
+            component_name=(
+                decode_info.component_name if collect_accept and decode_info else None
+            ),
+            endpoint=decode_info.endpoint if collect_accept and decode_info else None,
+        )
+
+    def _query_metrics(
+        self, interval_str: str, context: _QueryContext, *, full: bool
+    ) -> Metrics:
+        # Only local results and the synchronous client are accessed off-loop.
+        m = Metrics()
+        if full:
+            ttft = self.prometheus_traffic_client.get_avg_time_to_first_token(
+                interval_str, context.model_name
+            )
+            m.ttft = ttft * 1000 if ttft is not None else None
+            itl = self.prometheus_traffic_client.get_avg_inter_token_latency(
+                interval_str, context.model_name
+            )
+            m.itl = itl * 1000 if itl is not None else None
+            m.num_req = self.prometheus_traffic_client.get_avg_request_count(
+                interval_str, context.model_name
+            )
+            m.request_duration = (
+                self.prometheus_traffic_client.get_avg_request_duration(
+                    interval_str, context.model_name
+                )
+            )
+            m.isl = self.prometheus_traffic_client.get_avg_input_sequence_tokens(
+                interval_str, context.model_name
+            )
+            m.osl = self.prometheus_traffic_client.get_avg_output_sequence_tokens(
+                interval_str, context.model_name
+            )
+        m.kv_hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
+            interval_str, context.model_name, namespace=context.namespace
+        )
+        m.accept_length = self._query_accept_length(interval_str, context)
+
+        return m
+
+    def collect_accept_length(self, interval_str: str) -> Optional[float]:
+        context = self._query_context()
+        if context is None:
+            return None
+        return self._query_accept_length(interval_str, context)
+
+    def _query_accept_length(
+        self, interval_str: str, context: _QueryContext
+    ) -> Optional[float]:
+        if not context.component_name or not context.endpoint:
             return None
         return self.prometheus_traffic_client.get_avg_spec_decode_accept_length(
             interval_str,
-            self.config.backend,
-            decode_info.component_name,
-            model_name,
-            namespace=self._runtime_namespace(),
-            endpoint_name=decode_info.endpoint,
+            context.backend,
+            context.component_name,
+            context.model_name,
+            namespace=context.namespace,
+            endpoint_name=context.endpoint,
         )
 
     async def collect_kv_hit_rate_observation(
         self, duration_s: float
     ) -> Optional[TrafficObservation]:
-        model_name = self._model_name()
-        if model_name is None or duration_s <= 0:
+        if duration_s <= 0:
             return None
 
         interval_str = f"{int(duration_s)}s"
-        hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
-            interval_str, model_name, namespace=self._runtime_namespace()
-        )
-        accept_length = self.collect_accept_length(interval_str)
+        result = await self._collect_metrics(interval_str, full=False)
+        if result is None:
+            return None
+        hit_rate = result.kv_hit_rate
+        accept_length = result.accept_length
         self.metrics_state.kv_hit_rate = hit_rate
         self.metrics_state.accept_length = accept_length
         hit_rate_str = f"{hit_rate:.3f}" if hit_rate is not None else "n/a"
