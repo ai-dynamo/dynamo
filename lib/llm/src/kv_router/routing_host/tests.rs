@@ -20,6 +20,10 @@ use dynamo_runtime::{
     discovery::EventTransportKind,
     distributed::{DiscoveryBackend, DistributedConfig, RequestPlaneMode},
     error::{BackendError, ErrorType, match_error_chain},
+    logging::{
+        DistributedTraceIdLayer, inject_trace_headers_into_map,
+        make_handle_payload_span_from_tcp_headers,
+    },
     pipeline::{
         AddressedRequest, AsyncEngineContext, Context, ManyIn, Operator, PushRouter, RouterMode,
         ServerStreamingEngine, StreamingDispatch, context::Controller,
@@ -28,6 +32,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 use tokio::sync::watch;
+use tracing_subscriber::layer::SubscriberExt;
 
 use super::*;
 use crate::{
@@ -92,6 +97,72 @@ fn selector_state_remains_owned_by_the_scheduler_actor() {
     fn assert_send_sync<T: Send + Sync>() {}
 
     assert_send_sync::<RoutingHost<WorkerSelectionPolicy>>();
+}
+
+#[test]
+fn route_request_span_propagates_distributed_trace_context() {
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+
+    const TRACE_ID: &str = "11111111111111111111111111111111";
+    const PARENT_SPAN_ID: &str = "2222222222222222";
+    const REQUEST_ID: &str = "33333333-3333-4333-8333-333333333333";
+
+    let provider = SdkTracerProvider::builder()
+        .with_sampler(Sampler::ParentBased(Box::new(Sampler::AlwaysOn)))
+        .build();
+    let tracer = provider.tracer("kv-router-test");
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .with(DistributedTraceIdLayer);
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let mut inbound_headers = HashMap::from([
+        (
+            "traceparent".to_string(),
+            format!("00-{TRACE_ID}-{PARENT_SPAN_ID}-00"),
+        ),
+        ("tracestate".to_string(), "vendor=dynamo".to_string()),
+        ("x-request-id".to_string(), "external-1".to_string()),
+        ("request-id".to_string(), REQUEST_ID.to_string()),
+    ]);
+    let ingress_span = make_handle_payload_span_from_tcp_headers(
+        &inbound_headers,
+        "frontend",
+        "generate",
+        "test",
+        1,
+    );
+    let trace_context = ingress_span
+        .in_scope(get_distributed_tracing_context)
+        .expect("ingress span must expose its distributed trace context");
+    let worker = WorkerWithDpRank::new(7, 3);
+
+    let span = route_request_span(
+        "trace-propagation",
+        &worker,
+        2,
+        &RequestPhase::Aggregated,
+        Some(&trace_context),
+    );
+    assert_eq!(
+        span.metadata().map(|metadata| metadata.target()),
+        Some("request_span")
+    );
+
+    inbound_headers.clear();
+    span.in_scope(|| inject_trace_headers_into_map(&mut inbound_headers));
+    let traceparent = inbound_headers
+        .get("traceparent")
+        .expect("route span must provide an outbound trace context");
+    let fields = traceparent.split('-').collect::<Vec<_>>();
+
+    assert_eq!(fields.len(), 4);
+    assert_eq!(fields[1], TRACE_ID);
+    assert_ne!(fields[2], trace_context.span_id);
+    assert_eq!(fields[3], "00");
+    assert_eq!(inbound_headers["tracestate"], "vendor=dynamo");
+    assert_eq!(inbound_headers["x-request-id"], "external-1");
+    assert_eq!(inbound_headers["request-id"], REQUEST_ID);
 }
 
 #[test]

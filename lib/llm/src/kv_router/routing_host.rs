@@ -14,6 +14,10 @@ use dynamo_kv_router::{
 };
 use dynamo_runtime::{
     error::{DynamoError, ErrorType, match_error_chain},
+    logging::{
+        DistributedTraceContext, get_distributed_tracing_context,
+        otel_parent_context_from_distributed,
+    },
     metrics::frontend_perf::{STAGE_ROUTE, StageGuard},
     pipeline::{
         AsyncEngine, AsyncEngineContext, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
@@ -25,7 +29,8 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
-use tracing::Instrument;
+use tracing::{Instrument, Span};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use crate::{
     kv_router::{
@@ -72,6 +77,47 @@ pub(crate) fn is_cancelled(error: &Error) -> bool {
 
 fn route_target(worker: WorkerWithDpRank) -> AffinityTarget {
     AffinityTarget::new(worker.worker_id, Some(worker.dp_rank))
+}
+
+fn route_request_span(
+    context_id: &str,
+    worker: &WorkerWithDpRank,
+    overlap_blocks: u32,
+    phase: &RequestPhase,
+    trace_context: Option<&DistributedTraceContext>,
+) -> Span {
+    let request_id = trace_context
+        .and_then(|context| context.request_id.as_deref())
+        .unwrap_or(context_id);
+    let span = tracing::info_span!(
+        target: "request_span",
+        "kv_router.route_request",
+        otel.kind = "client",
+        request_id = %request_id,
+        worker_id = tracing::field::Empty,
+        dp_rank = worker.dp_rank,
+        overlap_blocks,
+        phase = ?phase,
+        "request.attempt" = tracing::field::Empty,
+        "request.outcome" = tracing::field::Empty,
+        "migration.is_retry" = tracing::field::Empty,
+        "migration.reason" = tracing::field::Empty,
+        "migration.from_worker_id" = tracing::field::Empty,
+        "migration.tokens_completed" = tracing::field::Empty,
+        "cancellation.signal" = tracing::field::Empty,
+        "error.type" = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+        otel.status_description = tracing::field::Empty,
+        trace_id = trace_context.map(|context| context.trace_id.as_str()),
+        parent_id = trace_context.map(|context| context.span_id.as_str()),
+        trace_flags = trace_context.map(|context| context.trace_flags.as_str()),
+        tracestate = trace_context.and_then(|context| context.tracestate.as_deref()),
+        x_request_id = trace_context.and_then(|context| context.x_request_id.as_deref()),
+    );
+    if let Some(parent) = trace_context.and_then(otel_parent_context_from_distributed) {
+        let _ = span.set_parent(parent);
+    }
+    span
 }
 
 fn monitor_response_stream<Sel>(
