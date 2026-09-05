@@ -497,8 +497,56 @@ def test_get_kv_cache_dtype_bytes_supports_int8():
     assert get_kv_cache_dtype_bytes(cfg, "auto") == 2  # model default dtype
 
 
-def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
-    """Use the language-model config when Transformers exposes a multimodal wrapper."""
+def test_compute_kv_bytes_reads_local_config_json_without_transformers(
+    monkeypatch, tmp_path
+):
+    """A local model directory must be sized from config.json alone.
+
+    Importing transformers and instantiating its config classes (which import
+    torch) cost ~12 s per mocker start; the local path must not touch them.
+    """
+    from dynamo.mocker.utils import kv_cache
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "num_hidden_layers": 2,
+                "num_key_value_heads": 4,
+                "num_attention_heads": 8,
+                "hidden_size": 64,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
+    monkeypatch.setitem(sys.modules, "transformers", None)  # import would fail
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_unwraps_multimodal_text_config_json(tmp_path):
+    from dynamo.mocker.utils import kv_cache
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "some_vlm",
+                "vision_config": {"hidden_size": 1},
+                "text_config": {
+                    "num_hidden_layers": 2,
+                    "num_key_value_heads": 4,
+                    "num_attention_heads": 8,
+                    "hidden_size": 64,
+                    "dtype": "bfloat16",
+                },
+            }
+        )
+    )
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_uses_transformers_text_config_for_hub_ids(monkeypatch):
+    """A bare hub ID still resolves through transformers, unwrapping wrappers."""
     from dynamo.mocker.utils import kv_cache
 
     text_config = SimpleNamespace(
@@ -509,43 +557,18 @@ def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
         dtype="bfloat16",
     )
     config = SimpleNamespace(get_text_config=lambda: text_config)
-    monkeypatch.setattr(kv_cache, "_load_config", lambda model_path: config)
-
-    assert kv_cache.compute_kv_bytes_per_token("model") == 256
-
-
-def test_load_config_stays_offline_for_local_directories(monkeypatch, tmp_path):
-    """A cached snapshot directory must never trigger a hub round trip.
-
-    The mocker resolves hub IDs to the local cache before estimating KV bytes;
-    ``local_files_only`` is what turns that into a no-network load. A bare hub
-    ID keeps resolving through the hub as before.
-    """
-    from dynamo.mocker.utils import kv_cache
-
-    calls: list[tuple[str, dict]] = []
 
     class FakeAutoConfig:
         @staticmethod
         def from_pretrained(model_path, **kwargs):
-            calls.append((model_path, kwargs))
-            return SimpleNamespace()
+            assert model_path == "org/model"
+            return config
 
     monkeypatch.setitem(
         sys.modules, "transformers", SimpleNamespace(AutoConfig=FakeAutoConfig)
     )
 
-    kv_cache._load_config(str(tmp_path))
-    kv_cache._load_config("org/model")
-
-    assert calls[0] == (
-        str(tmp_path),
-        {"trust_remote_code": False, "local_files_only": True},
-    )
-    assert calls[1] == (
-        "org/model",
-        {"trust_remote_code": False, "local_files_only": False},
-    )
+    assert kv_cache.compute_kv_bytes_per_token("org/model") == 256
 
 
 def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):

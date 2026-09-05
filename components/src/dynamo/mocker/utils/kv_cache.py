@@ -1,6 +1,7 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import os
 from typing import Any
@@ -50,26 +51,60 @@ def get_kv_cache_dtype_bytes(config: Any, kv_cache_dtype: str = "auto") -> int:
     Follows vLLM's --kv-cache-dtype convention.
     """
     if kv_cache_dtype == "auto":
-        dtype = _normalize_dtype_str(getattr(config, "dtype", "float16"))
+        dtype = _normalize_dtype_str(
+            _config_get(config, "dtype", "torch_dtype") or "float16"
+        )
         return TORCH_DTYPE_BYTES.get(dtype, 2)
     return TORCH_DTYPE_BYTES.get(kv_cache_dtype, 2)
 
 
-def _load_config(model_path: str) -> Any:
-    """Load the Hugging Face config for ``model_path``.
+def _config_get(config: Any, *names: str) -> Any:
+    """Return the first non-None value among ``names`` from a dict or config object."""
+    for name in names:
+        value = (
+            config.get(name)
+            if isinstance(config, dict)
+            else getattr(config, name, None)
+        )
+        if value is not None:
+            return value
+    return None
 
-    ``transformers`` is imported here rather than at module import so the mocker
-    only pays for it when the KV-bytes estimate is actually needed. A local
-    directory is loaded with ``local_files_only=True`` so a cached model never
-    triggers a hub round trip; a bare hub ID still resolves through the hub.
+
+# Keys under which multimodal wrappers nest their language-model config. Mirrors
+# what transformers' ``get_text_config`` unwraps for the raw config.json path.
+_TEXT_CONFIG_KEYS = ("text_config", "llm_config", "language_config", "decoder")
+
+
+def _text_config(config: dict[str, Any]) -> dict[str, Any]:
+    if "num_hidden_layers" in config and "hidden_size" in config:
+        return config
+    for key in _TEXT_CONFIG_KEYS:
+        sub = config.get(key)
+        if isinstance(sub, dict) and "num_hidden_layers" in sub:
+            return sub
+    return config
+
+
+def _load_config(model_path: str) -> Any:
+    """Return the model's text config for ``model_path`` as a dict or config object.
+
+    A local directory is read straight from its config.json. Importing
+    ``transformers`` costs several seconds and instantiating its config classes
+    imports ``torch``; together that was ~12 s of every mocker start, so the
+    common path (the mocker resolves hub IDs to the local cache first) must not
+    touch either. A bare hub ID still goes through transformers as before.
     """
+    if os.path.isdir(model_path):
+        with open(os.path.join(model_path, "config.json")) as f:
+            return _text_config(json.load(f))
+
     from transformers import AutoConfig
 
-    return AutoConfig.from_pretrained(
-        model_path,
-        trust_remote_code=False,
-        local_files_only=os.path.isdir(model_path),
-    )
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=False)
+    if hasattr(config, "get_text_config"):
+        config = config.get_text_config()
+    return config
 
 
 def compute_kv_bytes_per_token(
@@ -91,15 +126,12 @@ def compute_kv_bytes_per_token(
     """
     try:
         config = _load_config(model_path)
-        if hasattr(config, "get_text_config"):
-            config = config.get_text_config()
-        num_layers = config.num_hidden_layers
-        num_kv_heads = getattr(config, "num_key_value_heads", None)
+        num_layers = _config_get(config, "num_hidden_layers")
+        num_attention_heads = _config_get(config, "num_attention_heads")
+        num_kv_heads = _config_get(config, "num_key_value_heads", "num_kv_heads")
         if num_kv_heads is None:
-            num_kv_heads = getattr(config, "num_kv_heads", None)
-        if num_kv_heads is None:
-            num_kv_heads = config.num_attention_heads
-        head_dim = config.hidden_size // config.num_attention_heads
+            num_kv_heads = num_attention_heads
+        head_dim = _config_get(config, "hidden_size") // num_attention_heads
         dtype_bytes = get_kv_cache_dtype_bytes(config, kv_cache_dtype)
         kv_bytes = num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
         logger.debug(
