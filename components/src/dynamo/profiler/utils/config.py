@@ -221,6 +221,29 @@ def remove_valued_arguments(args: list[str], key: str) -> list[str]:
     return args
 
 
+def remove_all_argument_occurrences(args: list[str], arg_name: str) -> list[str]:
+    """Drop every occurrence of a valued argument in both CLI spellings.
+
+    Handles ``--arg value`` and ``--arg=value``, and returns a new list rather
+    than mutating the input. Unlike :func:`remove_valued_arguments`, no
+    occurrence survives, so the backend parser cannot consume a duplicate that
+    an earlier removal left behind.
+    """
+    filtered: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == arg_name:
+            index += 2 if index + 1 < len(args) else 1
+            continue
+        if isinstance(arg, str) and arg.startswith(f"{arg_name}="):
+            index += 1
+            continue
+        filtered.append(arg)
+        index += 1
+    return filtered
+
+
 def sanitize_cli_args(args: list[str]) -> list[str]:
     """Strip valued arguments whose value is the literal string ``"None"``.
 
@@ -557,20 +580,9 @@ def set_unique_argument_value(args: list[str], arg_name: str, value: str) -> lis
     for identity-bearing arguments where appended DGD overrides must not leave
     a later conflicting value for the backend parser to consume.
     """
-    filtered: list[str] = []
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if arg == arg_name:
-            index += 2 if index + 1 < len(args) else 1
-            continue
-        if isinstance(arg, str) and arg.startswith(f"{arg_name}="):
-            index += 1
-            continue
-        filtered.append(arg)
-        index += 1
-
-    return append_argument(filtered, [arg_name, value])
+    return append_argument(
+        remove_all_argument_occurrences(args, arg_name), [arg_name, value]
+    )
 
 
 def set_unique_env_value(
