@@ -762,20 +762,13 @@ impl ModelManager {
     /// Warn when the group being committed carries a different alias set than the
     /// sibling groups already committed under the same primary model name.
     ///
-    /// A disaggregated deployment commits one group per worker role, each keyed
-    /// separately, and each group only claims the aliases its own representative card
-    /// carries. Nothing fans an alias out across roles, so passing
-    /// `--served-model-name "primary,alias"` to only one of the two worker launches
-    /// leaves the alias reserved but backed by a single role. Its readiness DNF is then
-    /// unsatisfiable, so the alias is dropped from `/v1/models` and answers 503 while the
-    /// primary name serves normally. This warning is the only signal an operator gets
-    /// for that state.
+    /// An alias only some of the role-specific groups claim has an unsatisfiable
+    /// readiness DNF, so it never reaches `/v1/models` and answers 503 while the
+    /// primary name serves normally.
     ///
-    /// This must stay a warning and never become a rejection. Per `lib/llm/AGENTS.md` a
-    /// frontend interoperates with workers from the current release and the two before
-    /// it, so it can legitimately see one worker that advertises aliases alongside an
-    /// older one that does not. Failing that closed would fail discovery on a valid
-    /// rolling upgrade.
+    /// This must stay a warning and never a rejection: per `lib/llm/AGENTS.md` a
+    /// frontend interoperates with workers from the current release and the two
+    /// before it, so divergence is legitimate mid rolling upgrade.
     fn warn_on_alias_divergence(&self, primary: &str, aliases: &[String], role: &str) {
         let mut sibling_aliases: BTreeSet<String> = BTreeSet::new();
         let mut has_sibling = false;
@@ -3395,7 +3388,6 @@ mod tests {
         assert_eq!(manager.resolve_canonical_name("alias"), "alias");
     }
 
-    /// One `tracing` event: its message plus its fields rendered as strings.
     #[derive(Debug, Clone)]
     struct CapturedEvent {
         message: String,
@@ -3454,7 +3446,6 @@ mod tests {
         }
     }
 
-    /// Run `body` with every `tracing` event emitted on this thread collected.
     fn capture_events<T>(body: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
         use tracing_subscriber::layer::SubscriberExt;
 
