@@ -65,7 +65,7 @@ subtitle: Definitions of core Dynamo terms covering disaggregated serving, KV ca
 ## N
 **Namespace** - Dynamo's logical grouping mechanism for related components. Similar to directories in a file system, they prevent collisions between different deployments.
 
-**NIXL (NVIDIA Inference tranXfer Library)** - High-performance data transfer library optimized for inference workloads, supporting direct GPU-to-GPU transfers and multiple memory hierarchies.
+**NIXL (NVIDIA Inference Xfer Library)** - High-performance data transfer library optimized for inference workloads, supporting direct GPU-to-GPU transfers and multiple memory hierarchies.
 
 ## P
 **PagedAttention** - Memory management technique from vLLM that efficiently manages KV cache by chunking requests into blocks.
