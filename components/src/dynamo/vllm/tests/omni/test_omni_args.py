@@ -228,8 +228,7 @@ def test_stage_router_parses_without_an_accelerator(monkeypatch, tmp_path):
 def test_stage_router_selected_by_environment_parses_without_an_accelerator(
     monkeypatch, tmp_path
 ):
-    # The containerized deployment shape: the role comes from DYN_OMNI_ROUTER
-    # with no --omni-router token on the command line at all.
+    # This is how the containerized deployment selects the router.
     monkeypatch.setenv("DYN_OMNI_ROUTER", "true")
     monkeypatch.setattr(sys, "argv", _router_argv(tmp_path))
 
@@ -310,14 +309,17 @@ def test_stage_router_ignores_negated_flag_after_end_of_options(monkeypatch, tmp
     assert config.model == "test-model"
 
 
-def test_parse_rejects_stage_id_combined_with_omni_router(monkeypatch, tmp_path):
-    # The role pre-scan must not swallow the existing mutual-exclusion check.
-    # No _no_accelerator here: --stage-id keeps this argv on the full parser.
+def test_stage_id_keeps_the_full_parser_alongside_omni_router(monkeypatch, tmp_path):
+    # --stage-id outranks --omni-router in the pre-scan, so this argv must still
+    # build the engine parser. The device error is what observes that choice:
+    # the reduced router parser resolves no device, so it would run on to the
+    # mutual-exclusion ValueError instead -- a result this argv also produces
+    # when the pre-scan is wrong, which is why it is asserted elsewhere.
     monkeypatch.setattr(
         sys, "argv", _router_argv(tmp_path, "--stage-id", "0", "--omni-router")
     )
 
-    with pytest.raises(ValueError, match="mutually exclusive"):
+    with _no_accelerator(), pytest.raises(RuntimeError, match="Failed to infer device"):
         parse_omni_args()
 
 
