@@ -2237,3 +2237,68 @@ async fn engine_shutdown_after_cancel_frame_migrates_and_reselects() {
     );
     harness.runtime.shutdown();
 }
+
+/// The one decode-load source both gates read.
+mod decode_occupancy {
+    use super::super::RoutePlanSignals;
+    use crate::kv_router::protocols::WorkerWithDpRank;
+
+    /// A signal set whose logical footprint disagrees with the worker report.
+    /// 0.112 against 0.398 are the numbers this trace actually produced.
+    fn signals(authoritative_kv: Option<(u64, u64)>) -> RoutePlanSignals {
+        RoutePlanSignals {
+            worker: WorkerWithDpRank {
+                worker_id: 1,
+                dp_rank: 0,
+            },
+            overlap_blocks: 0,
+            cached_tokens: 0,
+            potential_decode_blocks: 467,
+            authoritative_kv,
+        }
+    }
+
+    #[test]
+    fn it_reads_the_worker_report_not_the_logical_footprint() {
+        let occupancy = signals(Some((1_659, 4_168))).decode_occupancy().unwrap();
+        assert!((occupancy - 0.398).abs() < 0.001);
+
+        // The logical footprint on the same signals is 0.112. A gate at 0.2
+        // answers "busy" on one and "has room" on the other, which is the bug.
+        assert_eq!(
+            signals(Some((1_659, 4_168))).decode_load_exceeds(0.2),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn an_unreported_worker_is_unknown_and_never_falls_back() {
+        assert_eq!(signals(None).decode_occupancy(), None);
+        assert_eq!(signals(None).decode_load_exceeds(0.2), None);
+    }
+
+    #[test]
+    fn a_worker_with_no_capacity_is_unreadable_not_empty() {
+        assert_eq!(signals(Some((0, 0))).decode_occupancy(), None);
+        assert_eq!(signals(Some((0, 0))).decode_load_exceeds(0.2), None);
+    }
+
+    /// The two consumers must classify one snapshot alike. The prefill-continue
+    /// policy compares its own threshold against `decode_occupancy`, and the
+    /// conditional bypass gate calls `decode_load_exceeds`. Both must agree, or
+    /// a bypass can add prefill work to a worker the other gate calls busy.
+    #[test]
+    fn both_consumers_classify_one_snapshot_alike() {
+        for used in [0_u64, 400, 833, 834, 1_659, 4_168] {
+            let signals = signals(Some((used, 4_168)));
+            let occupancy = signals.decode_occupancy().unwrap();
+            for threshold in [0.0, 0.2, 0.5, 0.9] {
+                assert_eq!(
+                    Some(occupancy > threshold),
+                    signals.decode_load_exceeds(threshold),
+                    "used={used} threshold={threshold}"
+                );
+            }
+        }
+    }
+}

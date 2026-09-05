@@ -70,7 +70,10 @@ from .embedding_worker_processes import (
     start_embedding_parent_watchdog,
 )
 from .engine_generate import publish_engine_generate_capability
-from .handlers import apply_data_parallel_runtime_config
+from .handlers import (
+    apply_data_parallel_runtime_config,
+    publish_prefill_continue_capability,
+)
 from .headless import run_dynamo_headless
 from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
 from .kv_connector_protocols import (
@@ -891,6 +894,9 @@ async def register_vllm_model(
     runtime_config.kv_state_endpoint = config.kv_state_endpoint
     if state_agent_enabled:
         runtime_config.kv_event_source_mode = "state_agent_v2"
+
+    if publish_prefill_continue_capability(runtime_config, worker_type):
+        logging.info("Published prefill-continues-decode capability")
 
     # Add tool/reasoning parsers for decode/aggregated workers. Prefill
     # workers have no OpenAI surface and don't run a parser — key off

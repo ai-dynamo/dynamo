@@ -492,7 +492,10 @@ where
             );
         }
         if let Some(tracker) = tracker {
-            let worker_type = if tracker.phase() == RequestPhase::Prefill {
+            let worker_type = if matches!(
+                tracker.phase(),
+                RequestPhase::Prefill | RequestPhase::Continuation
+            ) {
                 WORKER_TYPE_PREFILL
             } else {
                 WORKER_TYPE_DECODE

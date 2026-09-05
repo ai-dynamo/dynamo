@@ -330,6 +330,25 @@ impl WorkerLoadState {
             && (used_blocks as f64) > (active_decode_blocks_threshold * total_blocks as f64)
     }
 
+    /// Authoritative backend KV occupancy for one rank, as `(used, total)`.
+    ///
+    /// `kv_used_blocks` is published by the worker itself; the vLLM publisher
+    /// sets it to `num_gpu_blocks * kv_cache_usage`, against the same
+    /// per-rank block count that fills `kv_total_blocks`. The ratio is
+    /// therefore identical to the engine's own `kv_cache_usage_perc` on any
+    /// block geometry. The router's `active_decode_blocks` is a different
+    /// quantity -- the unique LOGICAL footprint of sequences this router
+    /// tracks, after shared-prefix accounting -- and reads far lower.
+    pub fn kv_occupancy(&self, dp_rank: u32) -> Option<(u64, u64)> {
+        // Deliberately NO staleness window. The worker publishes on CHANGE, so
+        // silence means "unchanged", not "gone" -- a plateau at high occupancy
+        // is exactly when a time-based expiry would blind this gate. Liveness
+        // is membership: these states are dropped when the worker leaves.
+        let used = *self.kv_used_blocks.get(&dp_rank)?;
+        let total = *self.kv_total_blocks.get(&dp_rank)?;
+        (total > 0).then_some((used, total))
+    }
+
     fn current_decode_overloaded(&self, dp_rank: u32, active_decode_blocks_threshold: f64) -> bool {
         let Some(&total_blocks) = self.kv_total_blocks.get(&dp_rank) else {
             return false;
@@ -639,6 +658,14 @@ impl Drop for MonitorLifecycle {
 }
 
 impl KvWorkerMonitor {
+    /// Authoritative backend KV occupancy for one worker rank, `(used, total)`.
+    /// See `WorkerLoadState::kv_occupancy`.
+    pub fn kv_occupancy(&self, worker_id: u64, dp_rank: u32) -> Option<(u64, u64)> {
+        self.worker_load_states
+            .get(&worker_id)
+            .and_then(|state| state.kv_occupancy(dp_rank))
+    }
+
     pub(crate) fn new(
         client: Client,
         source: RouterLoadSource,
@@ -1569,6 +1596,48 @@ mod tests {
             Some(0.6),
         );
         assert!(!state.is_overloaded(Some(0.6), Some(u64::MAX), Some(2.0)));
+    }
+
+    #[test]
+    fn kv_occupancy_reports_a_fresh_worker_value() {
+        let mut state = WorkerLoadState::default();
+        state.kv_used_blocks.insert(0, 1_659);
+        state.kv_total_blocks.insert(0, 4_168);
+
+        assert_eq!(state.kv_occupancy(0), Some((1_659, 4_168)));
+    }
+
+    #[test]
+    fn kv_occupancy_is_none_when_the_worker_never_reported() {
+        let mut state = WorkerLoadState::default();
+        // The router's own estimate is present; the worker's is not. The gate
+        // must not silently fall back to it -- that is the bug this replaced.
+        state.active_decode_blocks.insert(0, 462);
+        state.kv_total_blocks.insert(0, 4_168);
+
+        assert_eq!(state.kv_occupancy(0), None);
+    }
+
+    #[test]
+    fn kv_occupancy_is_none_when_capacity_is_zero() {
+        let mut state = WorkerLoadState::default();
+        state.kv_used_blocks.insert(0, 0);
+        state.kv_total_blocks.insert(0, 0);
+
+        assert_eq!(state.kv_occupancy(0), None);
+    }
+
+    #[test]
+    fn scheduler_observations_do_not_produce_occupancy() {
+        // LoadObservation::Scheduler carries no kv_used_blocks, so a deployment
+        // fed only by the scheduler plane leaves the gate permanently unknown.
+        // This test pins that so the failure is visible rather than silent.
+        let mut state = WorkerLoadState::default();
+        state.kv_total_blocks.insert(0, 4_168);
+        state.active_decode_blocks.insert(0, 462);
+        state.active_prefill_tokens.insert(0, 0);
+
+        assert_eq!(state.kv_occupancy(0), None);
     }
 
     #[test]

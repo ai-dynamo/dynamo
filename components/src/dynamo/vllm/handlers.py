@@ -6,6 +6,7 @@ import base64
 import functools
 import importlib
 import inspect
+import json
 import logging
 import math
 import os
@@ -118,6 +119,31 @@ logger = logging.getLogger(__name__)
 # DECODE-mode worker, the request runs as local prefill+decode instead of
 # expecting KV-transfer metadata from an upstream prefill worker.
 BYPASS_REMOTE_PREFILL_ANNOTATION = "x-bypass-remote-prefill"
+# Set by the router when the decode pool has no room for this request. The
+# prefill worker then generates the whole response instead of handing off.
+PREFILL_CONTINUE_ANNOTATION = "x-prefill-continue"
+# Runtime-config key this worker publishes so the router knows the marker above
+# will be honored. A worker that does not publish it ignores the marker and
+# answers with a handoff message, so the router must never mark its requests.
+# Must match PREFILL_CONTINUE_CAPABILITY in lib/llm/src/local_model/runtime_config.rs.
+PREFILL_CONTINUE_CAPABILITY = "prefill_continue"
+
+
+def publish_prefill_continue_capability(
+    runtime_config: ModelRuntimeConfig,
+    worker_type: WorkerType,
+) -> bool:
+    """Tell the router this worker honors PREFILL_CONTINUE_ANNOTATION.
+
+    Only a prefill worker can be asked to keep decoding, so only a prefill
+    worker declares it. The router refuses to mark a request unless every
+    worker in the pool declared it.
+    """
+    if worker_type != WorkerType.Prefill:
+        return False
+    runtime_config.set_engine_specific(PREFILL_CONTINUE_CAPABILITY, json.dumps(True))
+    return True
+
 
 _GENERATE_REASONING_SUPPORT_CACHE_ATTR = "_dynamo_generate_reasoning_support"
 _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
@@ -3964,19 +3990,32 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             enable_rl=self.config.enable_rl,
         )
 
-        # One protocol instance per request; carries per-request state
-        # (e.g. Mooncake's transfer_id) into the response loop below.
-        kv_protocol: KvConnectorProtocol = make_kv_connector_protocol(
-            self.engine_client.vllm_config
+        # Match the bare marker and its "marker:value" form, mirroring the
+        # router-side strip. Annotation values are read off a "marker:" prefix.
+        prefill_continues = any(
+            annotation == PREFILL_CONTINUE_ANNOTATION
+            or annotation.startswith(f"{PREFILL_CONTINUE_ANNOTATION}:")
+            for annotation in (request.get("annotations") or [])
         )
-        _update_kv_transfer_params(
-            sampling_params,
-            kv_protocol.prefill_request_kv_transfer_params(),
-            preserve_router_hint=True,
-        )
-        # Override for prefill: only generate 1 token
-        sampling_params.max_tokens = 1
-        sampling_params.min_tokens = 1
+
+        # A continuation is served whole here, so no handoff is set up and none is
+        # advertised. Some connectors mint per-request transfer state as soon as
+        # the protocol is built, so a continuation builds none at all.
+        kv_protocol: KvConnectorProtocol | None = None
+        if not prefill_continues:
+            # One protocol instance per request; carries per-request state
+            # (e.g. Mooncake's transfer_id) into the response loop below.
+            kv_protocol = make_kv_connector_protocol(self.engine_client.vllm_config)
+            # do_remote_decode is what puts the engine into handoff mode, and on
+            # some architectures it also truncates the prompt.
+            _update_kv_transfer_params(
+                sampling_params,
+                kv_protocol.prefill_request_kv_transfer_params(),
+                preserve_router_hint=True,
+            )
+            # Override for prefill: only generate 1 token
+            sampling_params.max_tokens = 1
+            sampling_params.min_tokens = 1
 
         # Extract LoRA request if present
         model_name = request.get("model")
@@ -4023,44 +4062,74 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 self.runtime.shutdown()
                 os._exit(1)
 
+            # A continuation streams deltas, so usage has to accumulate. A
+            # one-token handoff has a single chunk and is unaffected.
+            total_output_tokens_by_index: Dict[int, int] = {}
+            has_kv_params = False
+
             async for res in gen:
                 logger.debug(f"kv transfer params: {res.kv_transfer_params}")
 
                 token_ids = res.outputs[0].token_ids if res.outputs else []
+                for output in res.outputs or []:
+                    output_idx = getattr(output, "index", 0) or 0
+                    new_tokens = len(output.token_ids or [])
+                    total_output_tokens_by_index[output_idx] = (
+                        total_output_tokens_by_index.get(output_idx, 0) + new_tokens
+                    )
 
-                # For prefill worker, only one res will be generated,
-                # so we can always build embedding params here without conditionals
+                # A handoff yields exactly one result, so its embedding params are
+                # built unconditionally. A continuation yields many and hands off
+                # nothing, so it builds none.
                 embedding_params = (
-                    self._multimodal_request_processor.build_prefill_handoff(
+                    None
+                    if prefill_continues
+                    else self._multimodal_request_processor.build_prefill_handoff(
                         multi_modal_data=multi_modal_data,
                         prompt_token_ids=list(res.prompt_token_ids or []),
                         mm_processor_kwargs=mm_processor_kwargs,
                     )
                 )
 
-                output: Dict[str, Any] = {
+                chunk: Dict[str, Any] = {
                     "token_ids": list(token_ids),
-                    "disaggregated_params": self._build_disaggregated_params(
-                        kv_protocol.decode_request_kv_transfer_params(res),
-                        embedding_params,
+                    "disaggregated_params": (
+                        None
+                        if kv_protocol is None
+                        else self._build_disaggregated_params(
+                            kv_protocol.decode_request_kv_transfer_params(res),
+                            embedding_params,
+                        )
                     ),
                     "completion_usage": BaseWorkerHandler._build_completion_usage(
                         request_output=res,
+                        completion_token_counts=total_output_tokens_by_index,
                     ),
                 }
 
-                # Log prefill completion with LoRA info
-                self._log_with_lora_context(
-                    "Prefill completed for request {request_id}{lora_info}: "
-                    "generated {token_count} token(s), has_kv_params={has_kv_params}",
-                    request_id,
-                    lora_request,
-                    level="info" if lora_request else "debug",
-                    token_count=len(token_ids),
-                    has_kv_params=res.kv_transfer_params is not None,
-                )
+                # A continuation is the whole response, so report why it ended:
+                # the client needs it to know the stream is over. The one-token
+                # prefill reports nothing, because there a finish reason means
+                # "this request is already complete" to the router; on a
+                # continuation the router never inspects the stream at all.
+                finish_reason = res.outputs[0].finish_reason if res.outputs else None
+                if prefill_continues and finish_reason:
+                    chunk["finish_reason"] = normalize_finish_reason(finish_reason)
 
-                yield output
+                has_kv_params = res.kv_transfer_params is not None
+                yield chunk
+
+            # One line per request. A continuation yields many chunks, so logging
+            # inside the loop would repeat this once per token.
+            self._log_with_lora_context(
+                "Prefill completed for request {request_id}{lora_info}: "
+                "generated {token_count} token(s), has_kv_params={has_kv_params}",
+                request_id,
+                lora_request,
+                level="info" if lora_request else "debug",
+                token_count=sum(total_output_tokens_by_index.values()),
+                has_kv_params=has_kv_params,
+            )
 
     def _build_disaggregated_params(
         self, kv_transfer_params, embedding_params=None, expanded_prompt_token_ids=None

@@ -314,6 +314,10 @@ impl RequestObservability {
         if !self.first_token_recorded && new_tokens > 0 {
             if let Some(tracker) = &self.tracker {
                 tracker.record_first_token();
+                // Deliberately `Decode` only. A continuation is in its own
+                // phase here, and there is no KV transfer to measure on it, so
+                // leaving the transfer latency unset is the honest answer
+                // rather than a missed case.
                 if tracker.phase() == RequestPhase::Decode {
                     tracker.record_decode_first_token();
                 }

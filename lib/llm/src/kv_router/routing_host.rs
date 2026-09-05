@@ -9,7 +9,7 @@ use std::{
 };
 
 use dynamo_kv_router::{
-    protocols::{TokensWithHashes, WorkerConfigLike, WorkerWithDpRank},
+    protocols::{TokensWithHashes, WorkerConfigLike, WorkerId, WorkerWithDpRank},
     selector::{WorkerInputs, WorkerSelector},
 };
 use dynamo_runtime::{
@@ -281,8 +281,18 @@ pub(crate) struct RoutePlanSignals {
     pub(crate) worker: WorkerWithDpRank,
     pub(crate) overlap_blocks: u32,
     pub(crate) cached_tokens: usize,
+    /// The router's own logical footprint for the selected worker. Kept for
+    /// diagnostics only: it is not a capacity fraction and no gate reads it.
     pub(crate) potential_decode_blocks: u64,
-    pub(crate) total_kv_blocks: Option<u64>,
+    /// Backend KV occupancy as the worker itself reports it, `(used, total)`.
+    ///
+    /// `potential_decode_blocks` above is a different quantity: the unique
+    /// LOGICAL footprint of sequences this router tracks, after shared-prefix
+    /// accounting. On a prefix-heavy workload it reads far below true
+    /// occupancy, so a threshold calibrated on it is not portable. `None` when
+    /// the worker has not reported; callers that need occupancy must treat
+    /// that as unknown rather than falling back to the logical estimate.
+    pub(crate) authoritative_kv: Option<(u64, u64)>,
 }
 
 impl RoutePreview {
@@ -292,9 +302,21 @@ impl RoutePreview {
 }
 
 impl RoutePlanSignals {
+    /// What the selected worker and rank reports it is holding, as a fraction
+    /// of what it can hold. The one source every decode-load gate reads.
+    ///
+    /// `None` when the worker has not reported, or reports no capacity. Every
+    /// consumer must refuse on it. `potential_decode_blocks` is not a fallback:
+    /// it is a logical footprint, so a threshold tuned on one is meaningless
+    /// against the other.
+    pub(crate) fn decode_occupancy(self) -> Option<f64> {
+        let (used, total) = self.authoritative_kv?;
+        (total > 0).then(|| used as f64 / total as f64)
+    }
+
     pub(crate) fn decode_load_exceeds(self, threshold: f64) -> Option<bool> {
-        let total_kv_blocks = self.total_kv_blocks?;
-        Some(self.potential_decode_blocks as f64 > threshold * total_kv_blocks as f64)
+        self.decode_occupancy()
+            .map(|occupancy| occupancy > threshold)
     }
 }
 
@@ -322,6 +344,16 @@ impl<Sel> RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
+    /// Instance IDs this host could route to right now.
+    ///
+    /// Broader than the runtime-config watch, which only lists workers that
+    /// have both registered and had a card discovered. A capability gate must
+    /// read this set, or a worker that is already selectable but whose card has
+    /// not landed yet is invisible to it.
+    pub(crate) fn routable_instance_ids(&self) -> Vec<WorkerId> {
+        self.inner.client.instance_ids_avail()
+    }
+
     pub fn new(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter<Sel>>,

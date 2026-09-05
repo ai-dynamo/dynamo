@@ -584,6 +584,8 @@ navigation:
         contents:
           - page: Conditional Disaggregation
             path: pages/developer-guide/advanced-customizations/conditional-disaggregation.md
+          - page: Prefill Continues Decode
+            path: pages/developer-guide/advanced-customizations/prefill-continues-decode.md
           - page: Building from Source
             path: pages/developer-guide/advanced-customizations/building-from-source.md
           - section: Writing Custom Backends

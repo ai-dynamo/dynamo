@@ -65,7 +65,7 @@ The config fields map to these policy settings:
 | `eff_isl_threshold` | `2048` | For `isl_bounding` and the ISL condition within `isl_or_load`, require effective ISL to be below this many tokens. |
 | `eff_isl_ratio_threshold` | `0.7` | For `isl_bounding` and the ISL condition within `isl_or_load`, require the `effective ISL : raw ISL` ratio to be below this value. Must be in `[0.0, 1.0]`. |
 | `prefill_busy_threshold` | Unset | Sets the prefill busy threshold for `prefill_load` and `isl_or_load`. When unset, those policies inherit `--router-queue-threshold` if it is set. |
-| `decode_busy_threshold` | Unset | Decode-busy guard. When unset, the guard is disabled. When set, conditional disaggregation uses the normal remote-prefill path if the selected decode worker's projected active decode KV blocks exceed this fraction of KV capacity. If the selected decode worker does not report KV capacity, the router falls back to the normal prefill-decode disaggregation path instead. This uses router-side active decode block accounting. |
+| `decode_busy_threshold` | Unset | Decode-busy guard. When unset, the guard is disabled. When set, conditional disaggregation uses the normal remote-prefill path if the selected decode worker reports it is holding more than this fraction of its KV capacity. This reads the worker's own report, not router-side block accounting. If the worker has not reported, the router falls back to the normal prefill-decode disaggregation path instead. **Recalibrate this value.** It previously read the router's logical footprint, which on a prefix-heavy workload runs well below what the worker reports, so a threshold tuned against the old quantity fires far more often now. |
 
 The available policies are:
 

@@ -65,6 +65,7 @@ use prometheus::{
 use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::indexer::ApproximateLruStats;
+use dynamo_kv_router::prefill_continue::PrefillContinueSkip;
 
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
@@ -655,6 +656,206 @@ pub fn register_router_queue_metrics(
     registry.register(Box::new(m.pending_isl_tokens.clone()))?;
     registry.register(Box::new(m.pending_cached_tokens.clone()))?;
     registry.register(Box::new(m.backpressure_total.clone()))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Prefill-continues-decode metrics
+// ---------------------------------------------------------------------------
+
+/// Why the router did or did not keep a request generating on its prefill
+/// worker.
+///
+/// The feature's failure mode is silence: it is default-off, every gate fails
+/// closed, and a misconfigured deployment looks exactly like an idle one. These
+/// answer "why did it never fire?" without turning on debug logging.
+pub struct PrefillContinueMetrics {
+    /// Each pre-routing decision the router actually made, labelled `continue`
+    /// or the refusal reason.
+    ///
+    /// A request arriving while the feature is off is not counted: the router
+    /// returns before deciding, and counting one per request would duplicate an
+    /// existing request counter to say nothing. `disabled` therefore stays at
+    /// zero, and every series at zero is itself the signal that the feature is
+    /// off.
+    ///
+    /// `continue` counts requests the router *asked* to continue, not ones that
+    /// did. Dispatch can still withdraw the ask once it knows the worker, so
+    /// continuations actually served is `continue` minus `demotions_total`.
+    pub decisions_total: IntCounterVec,
+    /// Continuations the router asked for and then withdrew at dispatch, once
+    /// the chosen worker was known.
+    pub demotions_total: IntCounterVec,
+    /// Continuations generating right now, summed over the prefill pool.
+    pub active: IntGauge,
+    /// What the selected decode worker reported it was holding, as a fraction
+    /// of its capacity. The calibration arm reads this to choose
+    /// `prefill_continue_decode_busy_threshold`.
+    pub decode_occupancy: prometheus::Histogram,
+    /// Every attempted decode-occupancy read, by outcome.
+    ///
+    /// The histogram counts readings that succeeded, so on its own it cannot
+    /// say what share of probes had a source at all. The decision counters
+    /// cannot either: the prefill interlock is evaluated first, so a busy
+    /// prefill worker masks `decode_load_unknown`. This is the denominator.
+    pub decode_occupancy_reads_total: IntCounterVec,
+}
+
+pub static PREFILL_CONTINUE_METRICS: LazyLock<PrefillContinueMetrics> = LazyLock::new(|| {
+    PrefillContinueMetrics {
+        decisions_total: IntCounterVec::new(
+            Opts::new(
+                format!("{}_prefill_continue_decisions_total", name_prefix::FRONTEND),
+                "Prefill-continuation decisions the router made, by outcome. All series \
+                 zero means the feature is off; it is registered either way so the absence \
+                 of a decision is readable",
+            ),
+            &["decision"],
+        )
+        .expect("Failed to create prefill_continue_decisions_total counter"),
+        demotions_total: IntCounterVec::new(
+            Opts::new(
+                format!("{}_prefill_continue_demotions_total", name_prefix::FRONTEND),
+                "Continuations withdrawn at dispatch once the worker was known, by reason",
+            ),
+            &["reason"],
+        )
+        .expect("Failed to create prefill_continue_demotions_total counter"),
+        active: IntGauge::new(
+            format!("{}_prefill_continue_active", name_prefix::FRONTEND),
+            "Continuations currently generating on prefill workers, across every prefill pool \
+             in this process",
+        )
+        .expect("Failed to create prefill_continue_active gauge"),
+        decode_occupancy: prometheus::Histogram::with_opts(
+            HistogramOpts::new(
+                format!(
+                    "{}_prefill_continue_decode_occupancy",
+                    name_prefix::FRONTEND
+                ),
+                "Decode KV occupancy the router read when deciding, as a fraction of the \
+                 selected worker's capacity. Only successful reads land here; \
+                 decode_occupancy_reads_total is the denominator",
+            )
+            // Occupancy is a fraction, so the range is fixed and even steps
+            // read directly as a threshold sweep.
+            // Divide rather than multiply: `3.0 * 0.05` is 0.15000000000000002,
+            // which reads badly as a `le` label on a threshold sweep.
+            .buckets((0..=20).map(|step| f64::from(step) / 20.0).collect()),
+        )
+        .expect("Failed to create prefill_continue_decode_occupancy histogram"),
+        decode_occupancy_reads_total: IntCounterVec::new(
+            Opts::new(
+                format!(
+                    "{}_prefill_continue_decode_occupancy_reads_total",
+                    name_prefix::FRONTEND
+                ),
+                "Decode-occupancy probes the router attempted, by outcome. `known` over the \
+                 sum is the source coverage the calibration arm has to establish",
+            ),
+            &["outcome"],
+        )
+        .expect("Failed to create prefill_continue_decode_occupancy_reads_total counter"),
+    }
+});
+
+/// `outcome` label values for an attempted decode-occupancy read.
+pub mod prefill_continue_occupancy_read {
+    /// The worker reported, and the reading is in the histogram.
+    pub const KNOWN: &str = "known";
+    /// The route preview succeeded, but that worker has published no occupancy.
+    pub const UNREPORTED: &str = "unreported";
+    /// The route preview itself failed, including on a cancelled request.
+    pub const PREVIEW_FAILED: &str = "preview_failed";
+    /// The decode set is not KV-routed, so no preview exists to ask.
+    pub const NO_KV_PLANE: &str = "no_kv_plane";
+
+    pub const ALL: &[&str] = &[KNOWN, UNREPORTED, PREVIEW_FAILED, NO_KV_PLANE];
+}
+
+/// `decision` label values the router settles before it asks the policy.
+///
+/// The policy's own refusals come from [`PrefillContinueSkip::as_str`].
+pub mod prefill_continue_decision {
+    /// The router asked the worker to continue.
+    pub const CONTINUE: &str = "continue";
+    /// The pool declared no support, so no worker could be asked.
+    pub const POOL_UNDECLARED: &str = "pool_undeclared";
+    /// Nothing was routable, so there was no pool to ask.
+    pub const NO_ROUTABLE_WORKERS: &str = "no_routable_workers";
+}
+
+/// `reason` label values for continuations withdrawn at dispatch.
+pub mod prefill_continue_demotion {
+    /// The chosen worker had not declared support for the marker.
+    pub const WORKER_UNDECLARED: &str = "worker_undeclared";
+    /// No cap was configured, so the bound could not be applied.
+    pub const NO_CAP_CONFIGURED: &str = "no_cap_configured";
+    /// The chosen worker was already at its cap.
+    pub const WORKER_AT_CAP: &str = "worker_at_cap";
+}
+
+impl PrefillContinueMetrics {
+    /// Record one pre-routing decision, by outcome.
+    pub fn record_decision(&self, outcome: &str) {
+        self.decisions_total.with_label_values(&[outcome]).inc();
+    }
+
+    /// Record one continuation withdrawn at dispatch, by reason.
+    pub fn record_demotion(&self, reason: &str) {
+        self.demotions_total.with_label_values(&[reason]).inc();
+    }
+}
+
+/// Every reason a continuation can be withdrawn once the worker is known.
+const PREFILL_CONTINUE_DEMOTION_REASONS: &[&str] = &[
+    prefill_continue_demotion::WORKER_UNDECLARED,
+    prefill_continue_demotion::NO_CAP_CONFIGURED,
+    prefill_continue_demotion::WORKER_AT_CAP,
+];
+
+/// Create every series up front, so "it never fired" reads as a zero rather
+/// than as an empty query.
+///
+/// A counter vector with no observations exposes no samples at all, so a
+/// default-off deployment would publish nothing and an operator could not tell
+/// the feature apart from a broken exporter. The label set is finite and small,
+/// so materializing all of it costs nothing and removes the ambiguity.
+///
+/// `disabled` is materialized but never incremented: the router returns before
+/// deciding when the feature is off, rather than counting a decision per
+/// request that it did not make. Every series sitting at zero *is* the signal
+/// that the feature is off.
+fn materialize_prefill_continue_series(m: &PrefillContinueMetrics) {
+    for label in [
+        prefill_continue_decision::CONTINUE,
+        prefill_continue_decision::POOL_UNDECLARED,
+        prefill_continue_decision::NO_ROUTABLE_WORKERS,
+    ] {
+        m.decisions_total.with_label_values(&[label]);
+    }
+    for reason in PrefillContinueSkip::ALL {
+        m.decisions_total.with_label_values(&[reason.as_str()]);
+    }
+    for reason in PREFILL_CONTINUE_DEMOTION_REASONS {
+        m.demotions_total.with_label_values(&[reason]);
+    }
+    for outcome in prefill_continue_occupancy_read::ALL {
+        m.decode_occupancy_reads_total.with_label_values(&[outcome]);
+    }
+}
+
+/// Register the prefill-continuation metrics with the given registry.
+pub fn register_prefill_continue_metrics(
+    registry: &prometheus::Registry,
+) -> Result<(), prometheus::Error> {
+    let m = &*PREFILL_CONTINUE_METRICS;
+    materialize_prefill_continue_series(m);
+    registry.register(Box::new(m.decisions_total.clone()))?;
+    registry.register(Box::new(m.demotions_total.clone()))?;
+    registry.register(Box::new(m.active.clone()))?;
+    registry.register(Box::new(m.decode_occupancy.clone()))?;
+    registry.register(Box::new(m.decode_occupancy_reads_total.clone()))?;
     Ok(())
 }
 
@@ -1684,5 +1885,90 @@ mod kv_publisher_registration_tests {
                 .contains("conflicts with auto-injected const label"),
             "unexpected error: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod prefill_continue_metric_tests {
+    use super::*;
+
+    /// The whole point of these counters is answering "why did it never fire?".
+    /// A default-off deployment must therefore publish zeros, not nothing: an
+    /// empty query is indistinguishable from a broken exporter.
+    #[test]
+    fn a_registry_publishes_every_decision_series_before_anything_happens() {
+        let registry = prometheus::Registry::new();
+        register_prefill_continue_metrics(&registry).expect("registration");
+
+        let names: std::collections::HashSet<String> = registry
+            .gather()
+            .iter()
+            .flat_map(|family| {
+                let metric_name = family.name().to_string();
+                family.get_metric().iter().map(move |metric| {
+                    let label = metric
+                        .get_label()
+                        .iter()
+                        .map(|l| format!("{}={}", l.name(), l.value()))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("{metric_name}{{{label}}}")
+                })
+            })
+            .collect();
+
+        for reason in PrefillContinueSkip::ALL {
+            let series = format!(
+                "{}_prefill_continue_decisions_total{{decision={}}}",
+                name_prefix::FRONTEND,
+                reason.as_str()
+            );
+            assert!(names.contains(&series), "missing {series} in {names:?}");
+        }
+        for label in [
+            prefill_continue_decision::CONTINUE,
+            prefill_continue_decision::POOL_UNDECLARED,
+            prefill_continue_decision::NO_ROUTABLE_WORKERS,
+        ] {
+            let series = format!(
+                "{}_prefill_continue_decisions_total{{decision={label}}}",
+                name_prefix::FRONTEND
+            );
+            assert!(names.contains(&series), "missing {series}");
+        }
+        for reason in PREFILL_CONTINUE_DEMOTION_REASONS {
+            let series = format!(
+                "{}_prefill_continue_demotions_total{{reason={reason}}}",
+                name_prefix::FRONTEND
+            );
+            assert!(names.contains(&series), "missing {series}");
+        }
+        assert!(
+            names.contains(&format!(
+                "{}_prefill_continue_decode_occupancy{{}}",
+                name_prefix::FRONTEND
+            )),
+            "missing the occupancy histogram in {names:?}"
+        );
+    }
+
+    /// The calibration arm reads this histogram to pick a threshold, so its
+    /// buckets must span the whole range a fraction can take. A reading that
+    /// lands only in `+Inf` carries no information about where the line is.
+    #[test]
+    fn the_occupancy_histogram_covers_the_whole_fraction_range() {
+        use prometheus::core::Collector;
+        let families = PREFILL_CONTINUE_METRICS.decode_occupancy.collect();
+        let bounds: Vec<f64> = families[0].get_metric()[0]
+            .get_histogram()
+            .get_bucket()
+            .iter()
+            .map(|bucket| bucket.upper_bound())
+            .collect();
+
+        assert_eq!(bounds.len(), 21);
+        assert_eq!(bounds.first(), Some(&0.0));
+        // A full worker must not fall off the end into +Inf.
+        assert_eq!(bounds.last(), Some(&1.0));
     }
 }

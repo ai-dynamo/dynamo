@@ -86,23 +86,23 @@ where
     }
 
     fn route_signals(&self, selection: &WorkerSelection) -> RoutePlanSignals {
-        let total_kv_blocks = match selection.selected_worker_load {
-            Some(load) => load
-                .total_kv_blocks
-                .and_then(|blocks| blocks.try_into().ok()),
-            None => self
-                .kv_router()
-                .workers_with_configs
-                .borrow()
-                .get(&selection.worker.worker_id)
-                .and_then(WorkerConfigLike::total_kv_blocks),
-        };
+        // The worker's own occupancy, where it has reported one. Read from the
+        // load monitor rather than derived here: the same field already decides
+        // decode overload in `worker_monitor`, so the two cannot drift apart.
+        let authoritative_kv = self
+            .routing_context
+            .as_ref()
+            .and_then(|context| context.monitor())
+            .and_then(|monitor| {
+                monitor.kv_occupancy(selection.worker.worker_id, selection.worker.dp_rank)
+            });
+
         RoutePlanSignals {
             worker: selection.worker,
             overlap_blocks: selection.overlap_amount,
             cached_tokens: selection.cached_tokens,
             potential_decode_blocks: selection.potential_decode_blocks,
-            total_kv_blocks,
+            authoritative_kv,
         }
     }
 

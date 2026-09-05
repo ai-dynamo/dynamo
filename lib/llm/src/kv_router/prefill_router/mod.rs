@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, OnceLock};
 
@@ -15,7 +16,8 @@ use dynamo_kv_router::{
     PrefillLoadEstimator,
     conditional_disagg::ConditionalDisaggPolicy,
     config::RouterConfigOverride,
-    protocols::RoutingConstraints,
+    prefill_continue::{PrefillContinueDecisionInput, PrefillContinuePolicy},
+    protocols::{RoutingConstraints, WorkerId},
     scheduling::QueueRejection,
     selector::{DefaultWorkerSelector, WorkerSelector},
 };
@@ -28,21 +30,28 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 
+use census::{ContinuationCensus, ContinuationPermit};
+
 use crate::{
-    discovery::ModelManager,
+    discovery::{ModelManager, RuntimeConfigWatch},
+    kv_router::metrics::{
+        PREFILL_CONTINUE_METRICS, prefill_continue_decision, prefill_continue_demotion,
+        prefill_continue_occupancy_read,
+    },
     kv_router::{RoutingHost, WorkerSelectorFactory},
-    local_model::runtime_config::ModelRuntimeConfig,
+    local_model::runtime_config::{ModelRuntimeConfig, PREFILL_CONTINUE_CAPABILITY},
     protocols::common::{
         extensions::{SESSION_AFFINITY_CONTEXT_KEY, SessionAffinityId},
         llm_backend::{LLMEngineOutput, PreprocessedRequest},
         preprocessor::{BootstrapInfo, PrefillResult, TraceLink},
-        timing::{RequestPhase, RequestTracker},
+        timing::{RequestPhase, RequestTracker, WORKER_TYPE_PREFILL},
     },
     session_affinity::{AffinityTarget, SessionAffinityMode},
 };
 
 mod activation;
 mod admission;
+mod census;
 mod conditional_bypass;
 mod query;
 pub use query::PrefillReservation;
@@ -106,6 +115,11 @@ enum PrefillOutcome {
     Terminal {
         output: Box<Annotated<LLMEngineOutput>>,
     },
+    /// The prefill worker is serving the whole request, so its stream is the
+    /// response. Nothing is consumed and no decode leg is dispatched.
+    Continuation {
+        stream: ManyOut<Annotated<LLMEngineOutput>>,
+    },
 }
 
 fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
@@ -122,8 +136,15 @@ fn extract_bootstrap_info(params: &serde_json::Value) -> Option<BootstrapInfo> {
 
 struct PreparedPrefill {
     worker_id: u64,
+    /// Resolved at dispatch, so the continuation phase can attribute its
+    /// per-worker metrics to the same rank the request actually ran on.
+    dp_rank: Option<u32>,
     bootstrap_info: Option<BootstrapInfo>,
     topology_constraints: Option<RoutingConstraints>,
+    /// Present only when the request is going out as a continuation. Its
+    /// absence on a request that asked to continue means dispatch demoted it
+    /// back to today's handoff.
+    continuation_permit: Option<ContinuationPermit>,
 }
 
 /// Advisory prefill worker selection result.
@@ -159,6 +180,34 @@ fn strip_terminal_disaggregated_params(
 /// Annotation marker set when conditional disagg routes a request directly to
 /// a DECODE-mode worker to run prefill+decode locally.
 pub(crate) const BYPASS_REMOTE_PREFILL_ANNOTATION: &str = "x-bypass-remote-prefill";
+
+/// Annotation marker set when the router asks a PREFILL-mode worker to keep
+/// generating instead of handing the request to a decode worker. The worker will
+/// read it to keep the request's own token budget and skip the decode handoff.
+pub(crate) const PREFILL_CONTINUE_ANNOTATION: &str = "x-prefill-continue";
+
+/// Drop any client-supplied copy of the router-owned routing markers.
+///
+/// Both markers select a routing path, so honoring a client copy would let a
+/// caller pick its own. The router stamps them itself after its policies run.
+///
+/// Matches the bare marker and its `marker:value` form, because
+/// `PreprocessedRequest::get_annotation_value` reads values off a `marker:`
+/// prefix. Stripping only the bare form would leave `x-prefill-continue:1`
+/// intact for any future valued read.
+fn strip_router_owned_annotations(annotations: &mut Vec<String>) {
+    fn is_router_owned(annotation: &str, marker: &str) -> bool {
+        annotation == marker
+            || (annotation.len() > marker.len()
+                && annotation.starts_with(marker)
+                && annotation.as_bytes()[marker.len()] == b':')
+    }
+
+    annotations.retain(|annotation| {
+        !is_router_owned(annotation, BYPASS_REMOTE_PREFILL_ANNOTATION)
+            && !is_router_owned(annotation, PREFILL_CONTINUE_ANNOTATION)
+    });
+}
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
@@ -201,6 +250,10 @@ where
     session_affinity_ttl: Option<std::time::Duration>,
     session_affinity_mode: SessionAffinityMode,
     conditional_disagg_policy: Box<dyn ConditionalDisaggPolicy>,
+    prefill_continue_policy: PrefillContinuePolicy,
+    /// Continuations in flight per prefill worker. The only bound that can see
+    /// a continuation after its first token.
+    continuations: Arc<ContinuationCensus>,
     /// Resolved once at construction: dedicated threshold if set, otherwise
     /// `router_queue_threshold`. `None` means the prefill-load condition is disabled.
     conditional_disagg_prefill_busy_threshold: Option<f64>,
@@ -228,6 +281,351 @@ where
     /// `PrefillRouter` because it is unknowable until a target is discovered,
     /// and changes when the binding is rebuilt.
     prefill_router_mode: RouterMode,
+    /// Live per-worker runtime configuration for the prefill endpoint.
+    ///
+    /// Read rather than snapshotted, because the binding is only rebuilt when
+    /// the endpoint itself changes: a worker joining an existing endpoint would
+    /// never be seen by a value captured at activation.
+    prefill_runtime_configs: RuntimeConfigWatch,
+}
+
+/// Why the router may not ask this prefill pool for a continuation.
+///
+/// Carries the reason rather than a bare `false`, for the same reason
+/// [`PrefillContinueSkip`] does: during bring-up this gate is the likeliest
+/// explanation for "the feature never fired", and an operator needs to be told
+/// which worker is holding it back.
+#[derive(Debug, PartialEq, Eq)]
+enum PrefillPoolCapability {
+    /// Every routable worker declared it understands the marker.
+    Supported,
+    /// Nothing to route to, so nothing declared anything.
+    NoRoutableWorkers,
+    /// These routable workers did not declare support. A worker with no card
+    /// yet lands here too: absent is not a yes.
+    Undeclared(Vec<WorkerId>),
+}
+
+/// Ask whether every worker the router could pick declared it understands the
+/// continuation marker.
+///
+/// Unanimous, not first-wins. One worker that ignores the marker answers with a
+/// handoff message and pins cache blocks, so a mixed pool turns the feature off
+/// rather than gambling on which worker gets selected.
+///
+/// The question is asked of `routable`, not of the config map, because the two
+/// are not the same set. The map holds only workers that have both registered
+/// and had a card discovered, so a worker that is already selectable but whose
+/// card has not arrived yet is missing from it entirely — and a check that only
+/// walked the map would read unanimous while that worker took a marked request.
+///
+/// Both inputs are sampled before a worker is selected, and they are sampled
+/// separately, so this narrows the window rather than closing it: a worker that
+/// becomes routable afterwards can still be handed a marked request. Closing it
+/// for good means re-checking the chosen worker at dispatch.
+fn prefill_pool_capability(
+    routable: &[WorkerId],
+    runtime_configs: &HashMap<WorkerId, ModelRuntimeConfig>,
+) -> PrefillPoolCapability {
+    if routable.is_empty() {
+        return PrefillPoolCapability::NoRoutableWorkers;
+    }
+    // The same truthy vocabulary every other runtime capability uses. Being
+    // stricter here would refuse a backend that spells the flag as a string,
+    // and refuse it silently.
+    let undeclared: Vec<WorkerId> = routable
+        .iter()
+        .copied()
+        .filter(|worker_id| {
+            !runtime_configs.get(worker_id).is_some_and(|config| {
+                config.supports_runtime_capability(PREFILL_CONTINUE_CAPABILITY)
+            })
+        })
+        .collect();
+    if undeclared.is_empty() {
+        PrefillPoolCapability::Supported
+    } else {
+        PrefillPoolCapability::Undeclared(undeclared)
+    }
+}
+
+/// Read the live pool state and say whether a continuation may be asked for,
+/// logging the reason when it may not.
+fn prefill_pool_allows_continuation<Sel>(
+    binding: &PrefillBinding<Sel>,
+    routable: &[WorkerId],
+    request_id: &str,
+) -> bool
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    // The watch guard lives only for this statement, so no lock is held across
+    // the awaits that follow.
+    let capability = prefill_pool_capability(routable, &binding.prefill_runtime_configs.borrow());
+    match capability {
+        PrefillPoolCapability::Supported => true,
+        PrefillPoolCapability::NoRoutableWorkers => {
+            PREFILL_CONTINUE_METRICS
+                .record_decision(prefill_continue_decision::NO_ROUTABLE_WORKERS);
+            tracing::debug!(
+                request_id,
+                "Prefill continuation declined: no routable prefill workers"
+            );
+            false
+        }
+        PrefillPoolCapability::Undeclared(undeclared) => {
+            PREFILL_CONTINUE_METRICS.record_decision(prefill_continue_decision::POOL_UNDECLARED);
+            tracing::debug!(
+                request_id,
+                ?undeclared,
+                routable = routable.len(),
+                "Prefill continuation declined: these routable prefill workers did not declare \
+                 support for the continuation marker, so the whole pool hands off as today"
+            );
+            false
+        }
+    }
+}
+
+/// Put a request that asked to continue back on today's handoff path.
+///
+/// Both halves of the ask have to come off together. Leaving the marker on
+/// would have the worker generate a whole response that nothing returns;
+/// leaving the budget unclamped would have it generate one that nothing reads.
+fn demote_to_handoff(request: &mut PreprocessedRequest) {
+    request
+        .annotations
+        .retain(|annotation| annotation != PREFILL_CONTINUE_ANNOTATION);
+    request.stop_conditions.max_tokens = Some(1);
+}
+
+impl<Sel> PrefillRouter<Sel>
+where
+    Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
+{
+    /// Decide, before routing, whether this request should keep generating on
+    /// its prefill worker.
+    ///
+    /// Every signal here is a property of the pool or the request, because a
+    /// worker has usually not been chosen yet — the exception is a request that
+    /// names its own, which is asked about directly. Either way the per-worker
+    /// bound and the chosen worker's capability are settled again at dispatch,
+    /// which is the authoritative check.
+    async fn wants_prefill_continuation(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        binding: &PrefillBinding<Sel>,
+        request_id: &str,
+    ) -> bool {
+        if !self.prefill_continue_policy.is_enabled() {
+            return false;
+        }
+        // One sample of the pool, read by both the capability gate and the
+        // census, so the two cannot disagree about who is routable.
+        let routable = binding.router.routable_instance_ids();
+        if !prefill_pool_allows_continuation(binding, &routable, request_id) {
+            return false;
+        }
+
+        // Cheap gates first. Each probe below costs a scheduler selection, and
+        // a request a cheap gate already refuses must not pay for one.
+        // At a cap of zero that would be every request.
+        let budget = request.stop_conditions.max_tokens;
+        // `best_of` generates sequences that `n` does not return, so it is the
+        // larger of the two that decides how many actually run. Request tracing
+        // refuses both for the same reason.
+        let sequences = request
+            .sampling_options
+            .n
+            .max(request.sampling_options.best_of);
+        // An externally routed request already names its worker, so ask that
+        // worker rather than the pool. Otherwise the emptiest worker's count
+        // is the only honest answer available before selection.
+        let active = match request.routing.as_ref().and_then(|r| r.prefill_worker_id) {
+            Some(worker_id) => Some(self.continuations.in_flight(worker_id)),
+            None => self.continuations.min_in_flight(&routable),
+        };
+        if let Some(reason) = self
+            .prefill_continue_policy
+            .preflight(budget, active, sequences)
+        {
+            PREFILL_CONTINUE_METRICS.record_decision(reason.as_str());
+            tracing::debug!(
+                request_id,
+                ?reason,
+                "Prefill continuation declined before measuring load"
+            );
+            return false;
+        }
+
+        // The override continues without consulting decode load, so measuring
+        // it would buy an answer nothing reads.
+        let measured = if self.prefill_continue_policy.needs_decode_load() {
+            self.peek_decode_headroom(request, request_id).await
+        } else {
+            PrefillContinueDecisionInput::new(None)
+        };
+        let input = measured
+            .with_prefill_worker_busy(self.peek_prefill_busy(request, binding, request_id).await)
+            .with_remaining_budget_tokens(budget)
+            .with_active_continuations(active)
+            .with_sequences(sequences);
+
+        let decision = self.prefill_continue_policy.decide(input);
+        match decision.skip_reason() {
+            Some(reason) => {
+                PREFILL_CONTINUE_METRICS.record_decision(reason.as_str());
+                tracing::debug!(
+                    request_id,
+                    ?reason,
+                    "Prefill continuation declined before routing"
+                );
+            }
+            None => PREFILL_CONTINUE_METRICS.record_decision(prefill_continue_decision::CONTINUE),
+        }
+        decision.should_continue()
+    }
+
+    /// Read the decode pool's headroom for this request.
+    ///
+    /// A preview needs a KV-routed decode set, so anything else reports nothing
+    /// and the policy refuses on `DecodeLoadUnknown`. That is the honest
+    /// answer: without the preview there is no way to tell a full decode pool
+    /// from an idle one.
+    ///
+    /// A cancelled request is reported as unknown like any other failure, which
+    /// refuses, and the ordinary handoff it falls back to then fails on the
+    /// same cancelled context. Deliberate, unlike the sibling decision, which
+    /// re-raises cancellation because it is about to dispatch on it.
+    async fn peek_decode_headroom(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        request_id: &str,
+    ) -> PrefillContinueDecisionInput {
+        let unknown = PrefillContinueDecisionInput::new(None);
+        // Counted on every path below, before the prefill interlock can mask
+        // the result. Without this there is no denominator for source coverage.
+        let record = |outcome: &str| {
+            PREFILL_CONTINUE_METRICS
+                .decode_occupancy_reads_total
+                .with_label_values(&[outcome])
+                .inc();
+        };
+        let Some(decode_host) = self.decode_routing_host.get() else {
+            record(prefill_continue_occupancy_read::NO_KV_PLANE);
+            return unknown;
+        };
+        // Ask the host, not the mode flag: `kv_router()` panics on a host with
+        // no KV plane, and the two could otherwise disagree.
+        if decode_host.kv_router_if_enabled().is_none() {
+            record(prefill_continue_occupancy_read::NO_KV_PLANE);
+            return unknown;
+        }
+        match decode_host
+            .preview_kv_route(request, RequestPhase::Decode)
+            .await
+        {
+            Ok(preview) => {
+                let signals = preview.signals();
+                // The same accessor the sibling bypass gate reads, so the two
+                // cannot classify one snapshot differently.
+                match signals.decode_occupancy() {
+                    Some(occupancy) => {
+                        // Recorded on every read, whatever the gate then does
+                        // with it.
+                        record(prefill_continue_occupancy_read::KNOWN);
+                        PREFILL_CONTINUE_METRICS.decode_occupancy.observe(occupancy);
+                        // The raw pair is logged, not decided on: the gate
+                        // needs one number.
+                        let (used, total) = signals.authoritative_kv.unwrap_or_default();
+                        tracing::debug!(
+                            request_id,
+                            worker_id = signals.worker.worker_id,
+                            dp_rank = signals.worker.dp_rank,
+                            used,
+                            total,
+                            occupancy,
+                            "Decode occupancy read from the worker"
+                        );
+                        PrefillContinueDecisionInput::new(Some(occupancy))
+                    }
+                    None => {
+                        record(prefill_continue_occupancy_read::UNREPORTED);
+                        // Say this loudly once, but not on a healthy cold
+                        // start: capacity is seeded at discovery while usage
+                        // waits for the worker's first `ActiveLoad`, so a
+                        // working worker reads unknown for its first few
+                        // requests. A plane that never publishes clears this
+                        // immediately. Per-worker coverage lives in
+                        // `decode_occupancy_reads_total`, not here.
+                        const SETTLING_READS: u64 = 100;
+                        static WARNED: std::sync::Once = std::sync::Once::new();
+                        let unreported = PREFILL_CONTINUE_METRICS
+                            .decode_occupancy_reads_total
+                            .with_label_values(&[prefill_continue_occupancy_read::UNREPORTED])
+                            .get();
+                        if unreported >= SETTLING_READS {
+                            WARNED.call_once(|| {
+                                tracing::warn!(
+                                    worker_id = signals.worker.worker_id,
+                                    dp_rank = signals.worker.dp_rank,
+                                    "Prefill continuation is enabled but this decode worker \
+                                 reports no KV occupancy, so every request will hand off. \
+                                 The worker must publish ActiveLoad with kv_used_blocks"
+                                );
+                            });
+                        }
+                        tracing::debug!(
+                            request_id,
+                            worker_id = signals.worker.worker_id,
+                            dp_rank = signals.worker.dp_rank,
+                            "No worker-reported KV occupancy; treating decode load as unavailable"
+                        );
+                        unknown
+                    }
+                }
+            }
+            Err(error) => {
+                record(prefill_continue_occupancy_read::PREVIEW_FAILED);
+                tracing::debug!(
+                    request_id,
+                    %error,
+                    "Decode headroom probe failed; treating decode load as unavailable"
+                );
+                unknown
+            }
+        }
+    }
+
+    /// Read whether the prefill worker this request would land on is over its
+    /// own busy line.
+    ///
+    /// Probes the caller's binding rather than re-reading it, so the interlock
+    /// cannot end up asking a different pool than the capability gate did.
+    async fn peek_prefill_busy(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        binding: &PrefillBinding<Sel>,
+        request_id: &str,
+    ) -> Option<bool> {
+        // The policy owns the threshold, so the probe and the judgement cannot
+        // disagree about which one is in force.
+        let threshold = self.prefill_continue_policy.interlock_threshold()?;
+        match binding.router.prefill_worker_busy(request, threshold).await {
+            Ok(busy) => Some(busy),
+            Err(error) => {
+                // Cancellation lands here too, like any other failure: unknown
+                // refuses, and the handoff it falls back to fails on the same
+                // dead context a moment later.
+                tracing::debug!(
+                    request_id,
+                    %error,
+                    "Prefill-load probe failed; treating prefill load as unavailable"
+                );
+                None
+            }
+        }
+    }
 }
 
 struct PrefillBuildContext<Sel>
@@ -292,11 +690,7 @@ where
         let metadata = context.metadata().clone();
         let engine_ctx = context.context();
 
-        // Conditional-disagg bypass is a router-owned decision. Drop any
-        // client-supplied marker before the policy runs so normal disagg
-        // requests cannot accidentally or maliciously skip remote prefill.
-        req.annotations
-            .retain(|annotation| annotation != BYPASS_REMOTE_PREFILL_ANNOTATION);
+        strip_router_owned_annotations(&mut req.annotations);
 
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
@@ -387,9 +781,32 @@ where
         let tracker = req.tracker.as_ref().unwrap();
         let prefill_phase_barrier = tracker.set_phase(RequestPhase::Prefill).await;
 
-        // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
+        // The binding is what makes a prefill hop possible at all, so read it
+        // before building the hop. It also carries the prefill pool's declared
+        // capabilities, which the continuation decision below needs.
+        let Some(binding) = self.binding.load_full() else {
+            return next.generate(context.map(|_| req)).await;
+        };
+
+        // The probes below want a request context, as the conditional-disagg
+        // decision above did. Borrow one and take it back apart.
+        let continue_request = context.map(|_| req);
+        let prefill_continues = self
+            .wants_prefill_continuation(&continue_request, &binding, &request_id)
+            .await;
+        (req, context) = continue_request.into_parts();
+
+        // Prepare prefill request with max_tokens = 1 (clone after tracker is set).
+        // A continuation is the whole response, so it keeps the request's own
+        // budget; clamping it here would silently reduce the feature to a no-op.
         let mut prefill_req = req.clone();
-        prefill_req.stop_conditions.max_tokens = Some(1);
+        if prefill_continues {
+            prefill_req
+                .annotations
+                .push(PREFILL_CONTINUE_ANNOTATION.to_string());
+        } else {
+            prefill_req.stop_conditions.max_tokens = Some(1);
+        }
 
         // Try to resolve prefill worker upfront: if we can get bootstrap info early,
         // spawn prefill in background and proceed to decode immediately.
@@ -402,18 +819,19 @@ where
         let mut prefill_context =
             Context::with_id_and_metadata(prefill_req, request_id.clone(), metadata.clone());
         propagate_first_response_guard(&context, &mut prefill_context)?;
+        // Kept so the continuation arm can link this context to the client's
+        // once dispatch confirms the request really is continuing. Linking here
+        // would be too early: dispatch can still demote, and `link_child` has
+        // no inverse, so the handoff path would be left carrying a cancel route
+        // into the prefill leg that it does not have today.
+        let prefill_ctx = prefill_context.context();
         if let Some(session_affinity) = session_affinity {
             prefill_context.insert(
                 SESSION_AFFINITY_CONTEXT_KEY,
                 session_affinity.as_ref().clone(),
             );
         }
-        let Some(binding) = self.binding.load_full() else {
-            return next.generate(context.map(|_| req)).await;
-        };
-
-        // Keyed on the prefill mode, not the decode set's, and checked after
-        // the binding loads because that is where the prefill mode lives.
+        // Keyed on the prefill mode, not the decode set's.
         if binding.prefill_router_mode.is_direct_routing() && preselected_worker.is_none() {
             return Err(anyhow::anyhow!(
                 "Prefill worker ID required in Direct routing mode but none found in request. \
@@ -422,15 +840,65 @@ where
         }
 
         let router = &binding.router;
-        let endpoint_id = &binding.endpoint_id;
         let prefill_result: Result<(PrefillOutcome, Option<RoutingConstraints>)> = async {
             let (prepared, prefill_stream) = router
                 .select_and_dispatch_prefill(prefill_context, |request, target| {
-                    self.prepare_prefill_dispatch(request, target, endpoint_id)
+                    self.prepare_prefill_dispatch(request, target, &binding, prefill_continues)
                 })
                 .await?;
             let topology_constraints = prepared.topology_constraints;
-            let outcome = if let Some(bootstrap_info) = prepared.bootstrap_info {
+            // Not `prefill_continues`: dispatch has the last word, because only
+            // it knew which worker was chosen.
+            let outcome = if let Some(permit) = prepared.continuation_permit {
+                // Outranks bootstrap: that path backgrounds the prefill stream and
+                // dispatches a decode leg, which would discard the response. Drop
+                // the phase permit as the ordinary path does, so a migration retry
+                // can set Prefill again.
+                drop(prefill_phase_barrier);
+                // Move the request out of its prefill phase even though the
+                // worker does not change.
+                //
+                // The frontend latches worker attribution from the tracker on
+                // the first response chunk and resolves the inter-token latency
+                // gauge from the decode worker it finds there. A continuation
+                // never dispatches one, so that latch saw nothing and the gauge
+                // was never written: inter-token latency was emitted for every
+                // arm except the ones running this feature. Recording it here,
+                // before the stream can be polled, is what fixes it.
+                //
+                // `Continuation` records the same worker as both legs and stays
+                // distinct from `Aggregated`, so the arm is still tellable apart
+                // in an A/B. Note the decode worker type is recorded as
+                // `prefill`; see the field's doc for why, and query it that way.
+                //
+                // The barrier above must be dropped first: the phase semaphore
+                // holds a single permit, so setting a phase while holding it
+                // would deadlock. The permit taken here is bound, not dropped,
+                // so it covers the recording below.
+                if let Some(tracker) = tracker.as_ref() {
+                    let _continuation_phase_permit =
+                        tracker.set_phase(RequestPhase::Continuation).await;
+                    tracker.record_worker(
+                        prepared.worker_id,
+                        prepared.dp_rank,
+                        WORKER_TYPE_PREFILL,
+                    );
+                }
+                // The prefill context has its own controller, so a cancel would
+                // not reach the worker on a stream we hand back to the client.
+                // Link it, as Migration does for its retry children.
+                engine_ctx.link_child(prefill_ctx.clone());
+                // link_child does not replay state already set, so a cancel that
+                // arrived before the link would be lost and the worker would
+                // generate a whole response for a client that is gone. Migration
+                // guards the same race the same way.
+                if engine_ctx.is_stopped() || engine_ctx.is_killed() {
+                    prefill_ctx.stop_generating();
+                }
+                PrefillOutcome::Continuation {
+                    stream: permit.into_stream(prefill_stream),
+                }
+            } else if let Some(bootstrap_info) = prepared.bootstrap_info {
                 self.spawn_prefill_task(prefill_stream, tracker, prefill_phase_barrier);
                 PrefillOutcome::Bootstrap {
                     bootstrap_info,
@@ -500,6 +968,7 @@ where
                     engine_ctx,
                 ));
             }
+            PrefillOutcome::Continuation { stream } => return Ok(stream),
             outcome => outcome,
         };
 
@@ -543,6 +1012,9 @@ where
                 decode_req.migration_link = worker_link;
                 decode_req.routing_mut().prefill_worker_id = Some(worker_id);
             }
+            PrefillOutcome::Continuation { .. } => {
+                unreachable!("a continuation returns its stream before decode routing")
+            }
             PrefillOutcome::Terminal { .. } => {
                 unreachable!("terminal prefill outcomes return before decode routing")
             }
@@ -574,6 +1046,16 @@ where
         self.conditional_disagg_policy.is_enabled()
     }
 
+    /// Whether this router needs the decode set's `RoutingHost` installed.
+    ///
+    /// Both pre-routing decisions read decode load through it, and without it
+    /// they can only ever answer "unknown", which both of them treat as a
+    /// refusal. So the host has to be installed for either feature, not just
+    /// the one that first needed it.
+    pub(crate) fn needs_decode_routing_host(&self) -> bool {
+        self.conditional_disagg_enabled() || self.prefill_continue_policy.is_enabled()
+    }
+
     pub(crate) fn set_decode_routing_host(
         &self,
         routing_host: Arc<RoutingHost<Sel>>,
@@ -598,11 +1080,21 @@ where
         &self,
         request: &mut PreprocessedRequest,
         target: AffinityTarget,
-        endpoint_id: &EndpointId,
+        binding: &PrefillBinding<Sel>,
+        wants_continuation: bool,
     ) -> anyhow::Result<PreparedPrefill> {
         let AffinityTarget { worker_id, dp_rank } = target;
+        let endpoint_id = &binding.endpoint_id;
         let topology_constraints =
             self.preflight_kv_transfer_constraints(Some(endpoint_id), worker_id)?;
+
+        // The continuation decision is only final here, because only here is
+        // the worker known. Everything before this ran against the pool.
+        let continuation_permit = if wants_continuation {
+            self.admit_continuation(request, worker_id, binding)
+        } else {
+            None
+        };
 
         let bootstrap_info = self
             .model_manager
@@ -630,9 +1122,75 @@ where
 
         Ok(PreparedPrefill {
             worker_id,
+            dp_rank,
             bootstrap_info,
             topology_constraints,
+            continuation_permit,
         })
+    }
+    /// Take a place in the census for `worker_id`, or put the request back on
+    /// today's handoff.
+    ///
+    /// Two things can refuse here, and both need the chosen worker:
+    ///
+    /// - the worker is already running its share of continuations, and
+    /// - the worker never declared it understands the marker. The pool check
+    ///   before routing reads the routable set, but that set is sampled before
+    ///   selection; a worker that appeared in between reaches this point
+    ///   unchecked. Asking again once it is chosen closes that window.
+    ///
+    /// Demoting means undoing both halves of the ask: the marker comes off, so
+    /// the worker builds its usual handoff, and the one-token clamp goes back
+    /// on, so it stops after the token that handoff carries.
+    fn admit_continuation(
+        &self,
+        request: &mut PreprocessedRequest,
+        worker_id: u64,
+        binding: &PrefillBinding<Sel>,
+    ) -> Option<ContinuationPermit> {
+        let declared = binding
+            .prefill_runtime_configs
+            .borrow()
+            .get(&worker_id)
+            .is_some_and(|config| config.supports_runtime_capability(PREFILL_CONTINUE_CAPABILITY));
+        if !declared {
+            PREFILL_CONTINUE_METRICS.record_demotion(prefill_continue_demotion::WORKER_UNDECLARED);
+            tracing::debug!(
+                worker_id,
+                "Prefill continuation demoted to a handoff: the selected worker never declared \
+                 support for the continuation marker"
+            );
+            demote_to_handoff(request);
+            return None;
+        }
+
+        // Refuse rather than run unbounded when no cap is configured. Startup
+        // validation asks for one, but it does not run on every path a router
+        // can be built from, so a config can still arrive here without one.
+        let Some(cap) = self.prefill_continue_policy.max_concurrent() else {
+            PREFILL_CONTINUE_METRICS.record_demotion(prefill_continue_demotion::NO_CAP_CONFIGURED);
+            tracing::debug!(
+                worker_id,
+                "Prefill continuation demoted to a handoff: no continuation cap is configured, \
+                 and the cap is the only bound on continuations that are already running"
+            );
+            demote_to_handoff(request);
+            return None;
+        };
+        if let Some(permit) = self.continuations.try_admit(worker_id, cap) {
+            return Some(permit);
+        }
+
+        PREFILL_CONTINUE_METRICS.record_demotion(prefill_continue_demotion::WORKER_AT_CAP);
+        tracing::debug!(
+            worker_id,
+            in_flight = self.continuations.in_flight(worker_id),
+            ?cap,
+            "Prefill continuation demoted to a handoff: the selected worker has no free \
+             continuation place"
+        );
+        demote_to_handoff(request);
+        None
     }
 
     fn preflight_kv_transfer_constraints(
@@ -737,6 +1295,15 @@ mod tests {
             request: SingleIn<PreprocessedRequest>,
         ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
             assert!(request.get_annotation_value("query_instance_id").is_some());
+            // The router owns both routing markers. Assert here, at the earliest
+            // return in generate(), that a client copy never reaches a worker.
+            assert!(!request.has_annotation(BYPASS_REMOTE_PREFILL_ANNOTATION));
+            assert!(!request.has_annotation(PREFILL_CONTINUE_ANNOTATION));
+            assert!(
+                request
+                    .get_annotation_value(PREFILL_CONTINUE_ANNOTATION)
+                    .is_none()
+            );
             self.requests.fetch_add(1, Ordering::Relaxed);
             let output = Annotated::from_data(LLMEngineOutput {
                 routing_data: Some(RoutingData {
@@ -1039,5 +1606,209 @@ mod tests {
             "bootstrap_room": 1,
         });
         assert!(extract_bootstrap_info(&params).is_none());
+    }
+
+    #[tokio::test]
+    async fn client_supplied_routing_markers_never_reach_a_worker() {
+        // The helper being correct is the easy half. This guards the half that
+        // matters: that generate() strips BEFORE its earliest return, so the
+        // ordering cannot silently regress under refactor.
+        let router = active_conditional_router();
+        let decode_host = Arc::new(QueryOnlyDecodeHost::default());
+        let next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
+            decode_host.clone();
+
+        let mut request = query_only_request();
+        request.annotations.extend([
+            BYPASS_REMOTE_PREFILL_ANNOTATION.to_string(),
+            PREFILL_CONTINUE_ANNOTATION.to_string(),
+            // the valued form a prefix-blind strip would miss
+            format!("{PREFILL_CONTINUE_ANNOTATION}:1"),
+        ]);
+
+        let mut response = router
+            .generate(SingleIn::new(request), next)
+            .await
+            .expect("query-only request should bypass conditional planning");
+        while response.next().await.is_some() {}
+
+        // The mock asserts the markers are gone; reaching it at all proves the
+        // strip ran before generate()'s earliest return.
+        assert_eq!(decode_host.requests.load(Ordering::Relaxed), 1);
+    }
+
+    /// A pool of workers. `true` publishes the capability; `false` publishes
+    /// nothing at all, which is how a worker that has never heard of the
+    /// feature looks.
+    fn pool(publishes: &[bool]) -> HashMap<WorkerId, ModelRuntimeConfig> {
+        publishes
+            .iter()
+            .enumerate()
+            .map(|(index, publishes)| {
+                let mut config = ModelRuntimeConfig::default();
+                if *publishes {
+                    config
+                        .set_engine_specific(PREFILL_CONTINUE_CAPABILITY, true)
+                        .unwrap();
+                }
+                (index as WorkerId, config)
+            })
+            .collect()
+    }
+
+    /// A one-worker pool that published `value` under the capability key.
+    fn pool_declaring<T: serde::Serialize>(value: T) -> HashMap<WorkerId, ModelRuntimeConfig> {
+        let mut config = ModelRuntimeConfig::default();
+        config
+            .set_engine_specific(PREFILL_CONTINUE_CAPABILITY, value)
+            .unwrap();
+        HashMap::from([(0, config)])
+    }
+
+    /// Every worker in `configs`, which is what the router can route to once
+    /// discovery has settled.
+    fn all_routable(configs: &HashMap<WorkerId, ModelRuntimeConfig>) -> Vec<WorkerId> {
+        let mut ids: Vec<WorkerId> = configs.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    #[test]
+    fn the_wire_constants_are_pinned() {
+        // The vLLM worker declares these separately, in Python. Every other
+        // test here refers to the symbol, so a rename on either side would
+        // disable the feature with both suites green, and the router would
+        // report a plain handoff — indistinguishable from the policy choosing
+        // one. The matching asserts are in
+        // components/src/dynamo/vllm/tests/test_vllm_worker_handler.py.
+        assert_eq!(PREFILL_CONTINUE_ANNOTATION, "x-prefill-continue");
+        assert_eq!(PREFILL_CONTINUE_CAPABILITY, "prefill_continue");
+    }
+
+    #[test]
+    fn a_unanimous_pool_supports_continuation() {
+        let configs = pool(&[true, true, true]);
+
+        assert_eq!(
+            prefill_pool_capability(&all_routable(&configs), &configs),
+            PrefillPoolCapability::Supported
+        );
+    }
+
+    #[test]
+    fn one_undeclared_worker_disables_the_whole_pool() {
+        let configs = pool(&[true, true, false]);
+
+        assert_eq!(
+            prefill_pool_capability(&all_routable(&configs), &configs),
+            PrefillPoolCapability::Undeclared(vec![2])
+        );
+    }
+
+    #[test]
+    fn a_pool_that_declared_nothing_names_every_worker() {
+        let configs = pool(&[false, false]);
+
+        assert_eq!(
+            prefill_pool_capability(&all_routable(&configs), &configs),
+            PrefillPoolCapability::Undeclared(vec![0, 1])
+        );
+    }
+
+    #[test]
+    fn a_routable_worker_with_no_card_yet_is_a_refusal() {
+        // The runtime-config watch lists only workers that both registered and
+        // had a card discovered, so a worker can be selectable before it
+        // appears there. Walking the map alone would read this pool as
+        // unanimous and send the marker to a worker of unknown capability.
+        let configs = pool(&[true, true]);
+        let mut routable = all_routable(&configs);
+        routable.push(99);
+
+        assert_eq!(
+            prefill_pool_capability(&routable, &configs),
+            PrefillPoolCapability::Undeclared(vec![99])
+        );
+    }
+
+    #[test]
+    fn an_empty_pool_is_not_capable() {
+        assert_eq!(
+            prefill_pool_capability(&[], &pool(&[])),
+            PrefillPoolCapability::NoRoutableWorkers
+        );
+    }
+
+    #[test]
+    fn an_explicit_false_declaration_is_a_refusal() {
+        assert_eq!(
+            prefill_pool_capability(&[0], &pool_declaring(false)),
+            PrefillPoolCapability::Undeclared(vec![0])
+        );
+    }
+
+    #[test]
+    fn a_string_encoded_declaration_is_accepted() {
+        // Deliberately the same truthy vocabulary as every other runtime
+        // capability. A backend that spells the flag as a string must not be
+        // refused, because that refusal would be silent.
+        for spelling in ["true", "1", "on", "yes"] {
+            assert_eq!(
+                prefill_pool_capability(&[0], &pool_declaring(spelling)),
+                PrefillPoolCapability::Supported,
+                "{spelling} should read as support"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_that_means_nothing_is_a_refusal() {
+        for value in [
+            serde_json::json!("banana"),
+            serde_json::json!(1),
+            serde_json::json!(null),
+        ] {
+            assert_eq!(
+                prefill_pool_capability(&[0], &pool_declaring(value.clone())),
+                PrefillPoolCapability::Undeclared(vec![0]),
+                "{value} must not read as support"
+            );
+        }
+    }
+
+    #[test]
+    fn strip_router_owned_annotations_drops_the_valued_form() {
+        // `get_annotation_value` reads values off a `marker:` prefix, so the
+        // valued form is a live bypass if the strip only matches the bare marker.
+        let mut annotations = vec![
+            format!("{PREFILL_CONTINUE_ANNOTATION}:1"),
+            format!("{BYPASS_REMOTE_PREFILL_ANNOTATION}:true"),
+            // a different marker that merely shares a prefix must survive
+            format!("{PREFILL_CONTINUE_ANNOTATION}-other"),
+        ];
+
+        strip_router_owned_annotations(&mut annotations);
+
+        assert_eq!(
+            annotations,
+            vec![format!("{PREFILL_CONTINUE_ANNOTATION}-other")]
+        );
+    }
+
+    #[test]
+    fn strip_router_owned_annotations_drops_every_copy_of_both_markers() {
+        // A client can send a marker more than once; every copy must go, and
+        // everything else must survive in order.
+        let mut annotations = vec![
+            "keep-me".to_string(),
+            BYPASS_REMOTE_PREFILL_ANNOTATION.to_string(),
+            "also-keep".to_string(),
+            PREFILL_CONTINUE_ANNOTATION.to_string(),
+            PREFILL_CONTINUE_ANNOTATION.to_string(),
+        ];
+
+        strip_router_owned_annotations(&mut annotations);
+
+        assert_eq!(annotations, vec!["keep-me", "also-keep"]);
     }
 }
