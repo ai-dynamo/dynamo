@@ -11,10 +11,13 @@
 //! large request payloads as Bytes instead of copying them into flattened buffers.
 
 use super::unified_client::{ClientStats, Headers, RequestPlaneClient};
+use crate::error::{DynamoError, ErrorType};
 use crate::metrics::transport_metrics::{
     TCP_BYTES_RECEIVED_TOTAL, TCP_BYTES_SENT_TOTAL, TCP_ERRORS_TOTAL,
 };
-use crate::pipeline::network::codec::TcpRequestFrame;
+use crate::pipeline::network::codec::{
+    TcpRequestFrame, TcpRequestMessage, check_tcp_request_max_message_size,
+};
 use crate::pipeline::network::get_tcp_max_message_size;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -43,6 +46,9 @@ use tokio_util::codec::FramedRead;
 
 /// Default timeout for TCP request acknowledgment
 const DEFAULT_TCP_REQUEST_TIMEOUT_SECS: u64 = 5;
+
+const MAX_MESSAGE_SIZE_USER_MESSAGE: &str = "Request payload is too large for this deployment. Reduce the input size or metadata size and retry.";
+const INVALID_REQUEST_USER_MESSAGE: &str = "Request cannot be encoded for this deployment. Reduce the endpoint path, metadata, or payload size and retry.";
 
 /// Default connection pool size per host.
 /// Ceiling: DEFAULT_POOL_SIZE(100) x REQUEST_CHANNEL_BUFFER(1024) = 102,400 concurrent
@@ -884,21 +890,14 @@ impl TcpConnection {
         Ok(())
     }
 
-    /// Send a request via lock-free SegQueue push (~20-40ns)
-    async fn send_request(&self, payload: Bytes, headers: &Headers) -> Result<Bytes> {
-        use crate::pipeline::network::codec::TcpRequestMessage;
-
+    /// Send an already-validated request.
+    async fn send_request_message(&self, request: TcpRequestMessage) -> Result<Bytes> {
         if !self.healthy.load(Ordering::Relaxed) {
             anyhow::bail!("Connection unhealthy (tasks failed)");
         }
         if self.closed.load(Ordering::Acquire) {
             anyhow::bail!("Connection closed (writer exited)");
         }
-
-        let endpoint_path = headers
-            .get("x-endpoint-path")
-            .ok_or_else(|| anyhow::anyhow!("Missing x-endpoint-path header for TCP request"))?
-            .to_string();
 
         let trace = latency_trace_enabled();
         let e2e_start = if trace {
@@ -907,25 +906,18 @@ impl TcpConnection {
             None
         };
 
-        // Bounded admission: block until a slot is free (channel_buffer hard limit).
-        // The permit is held for the duration of this call and released on drop,
-        // whether the caller returns normally, errors out, or the enclosing
-        // tokio::time::timeout drops this future mid-flight.
-        // This prevents unbounded SegQueue growth and heap OOM under overload.
-        // encode() runs AFTER acquire so callers blocked on the semaphore do not
-        // hold a pre-allocated encoded frame, bounding peak memory to
-        // channel_buffer * frame_size per connection.
+        // Bounded admission keeps queued and in-flight frames at or below
+        // channel_buffer. The permit is released on every return, error, and
+        // cancellation path.
         let _permit = self
             .admission
             .acquire()
             .await
             .map_err(|_| anyhow::anyhow!("Connection closed (admission gate shut)"))?;
 
-        // Header framing happens after admission is granted so callers blocked
-        // on the semaphore do not hold queued frame state. The payload remains
-        // a Bytes chunk and is not copied into a flattened request frame.
-        let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
-        let frame = request_msg.into_frame()?;
+        // Header serialization stays inside the admission bound. The payload
+        // remains in its original Bytes allocation.
+        let frame = request.into_frame().map_err(invalid_request_error)?;
 
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -988,6 +980,12 @@ impl TcpConnection {
         result
     }
 
+    #[cfg(test)]
+    async fn send_request(&self, payload: Bytes, headers: &Headers) -> Result<Bytes> {
+        let request = prepare_request(payload, headers.clone(), get_tcp_max_message_size())?;
+        self.send_request_message(request).await
+    }
+
     /// Check if connection is healthy
     fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Relaxed)
@@ -1013,6 +1011,50 @@ fn cannot_connect_error(addr: SocketAddr, error: anyhow::Error) -> anyhow::Error
             .cause(cause)
             .build()
     )
+}
+
+fn validate_request_frame_size(frame_len: usize, max_message_size: usize) -> Result<()> {
+    if let Err(cause) = check_tcp_request_max_message_size(frame_len, max_message_size) {
+        return Err(anyhow::anyhow!(
+            DynamoError::builder()
+                .error_type(ErrorType::InvalidArgument)
+                .message(MAX_MESSAGE_SIZE_USER_MESSAGE)
+                .cause(cause)
+                .build()
+        ));
+    }
+
+    Ok(())
+}
+
+fn invalid_request_error(cause: std::io::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .message(INVALID_REQUEST_USER_MESSAGE)
+            .cause(cause)
+            .build()
+    )
+}
+
+fn prepare_request(
+    payload: Bytes,
+    headers: Headers,
+    max_message_size: usize,
+) -> Result<TcpRequestMessage> {
+    let endpoint_path = headers
+        .get("x-endpoint-path")
+        .ok_or_else(|| {
+            invalid_request_error(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Missing x-endpoint-path header for TCP request",
+            ))
+        })?
+        .to_string();
+    let request = TcpRequestMessage::with_headers(endpoint_path, headers, payload);
+    let encoded_len = request.encoded_len().map_err(invalid_request_error)?;
+    validate_request_frame_size(encoded_len, max_message_size)?;
+    Ok(request)
 }
 
 /// Per-host connection pool with LRU lifecycle and ArcSwap-based snapshot.
@@ -1542,6 +1584,7 @@ impl TcpConnectionPool {
 pub struct TcpRequestClient {
     pool: Arc<TcpConnectionPool>,
     config: TcpRequestConfig,
+    max_message_size: usize,
     stats: Arc<TcpClientStats>,
 }
 
@@ -1566,6 +1609,7 @@ impl TcpRequestClient {
         Ok(Self {
             pool,
             config,
+            max_message_size: get_tcp_max_message_size(),
             stats: Arc::new(TcpClientStats {
                 requests_sent: AtomicU64::new(0),
                 responses_received: AtomicU64::new(0),
@@ -1633,16 +1677,24 @@ impl RequestPlaneClient for TcpRequestClient {
         mut headers: Headers,
     ) -> Result<Bytes> {
         tracing::debug!("TCP client sending request to address: {}", address);
-        self.stats.requests_sent.fetch_add(1, Ordering::Relaxed);
-        self.stats
-            .bytes_sent
-            .fetch_add(payload.len() as u64, Ordering::Relaxed);
+        let payload_len = payload.len();
 
         let (addr, endpoint_name) = Self::parse_address(&address)?;
 
         if let Some(endpoint_name) = endpoint_name {
             headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
         }
+
+        let request = prepare_request(payload, headers, self.max_message_size).map_err(|e| {
+            self.stats.errors.fetch_add(1, Ordering::Relaxed);
+            TCP_ERRORS_TOTAL.inc();
+            tracing::warn!(%addr, error = ?e, "TCP request validation failed");
+            e
+        })?;
+        self.stats.requests_sent.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .bytes_sent
+            .fetch_add(payload_len as u64, Ordering::Relaxed);
 
         // Get shared connection from pool (Arc, not exclusive borrow). Actual connection
         // failures are classified at the dial site; local pool errors retain their type.
@@ -1655,7 +1707,7 @@ impl RequestPlaneClient for TcpRequestClient {
 
         let result = tokio::time::timeout(
             self.config.request_timeout,
-            conn.send_request(payload, &headers),
+            conn.send_request_message(request),
         )
         .await;
 
@@ -1675,16 +1727,7 @@ impl RequestPlaneClient for TcpRequestClient {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
                 TCP_ERRORS_TOTAL.inc();
                 tracing::warn!("TCP request failed to {}: {}", addr, e);
-                let cause = crate::error::DynamoError::from(
-                    e.into_boxed_dyn_error() as Box<dyn std::error::Error + 'static>
-                );
-                Err(anyhow::anyhow!(
-                    crate::error::DynamoError::builder()
-                        .error_type(crate::error::ErrorType::CannotConnect)
-                        .message(format!("TCP request to {addr} failed"))
-                        .cause(cause)
-                        .build()
-                ))
+                Err(cannot_connect_error(addr, e))
             }
             Err(_) => {
                 self.stats.errors.fetch_add(1, Ordering::Relaxed);
@@ -1734,6 +1777,7 @@ impl RequestPlaneClient for TcpRequestClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::match_error_chain;
     use std::pin::Pin;
     use std::sync::atomic::AtomicUsize;
     use std::task::{Context, Poll};
@@ -1926,6 +1970,99 @@ mod tests {
         let client = client.unwrap();
         assert_eq!(client.transport_name(), "tcp");
         assert!(client.is_healthy());
+    }
+
+    #[test]
+    fn test_request_frame_size_validation() {
+        assert!(validate_request_frame_size(1024, 1024).is_ok());
+
+        let err = validate_request_frame_size(1025, 1024).unwrap_err();
+        assert!(match_error_chain(
+            err.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        let typed = err.downcast_ref::<DynamoError>().unwrap();
+        assert_eq!(typed.message(), MAX_MESSAGE_SIZE_USER_MESSAGE);
+        assert!(err.chain().any(|cause| cause.to_string().contains("1025")));
+    }
+
+    #[tokio::test]
+    async fn test_oversized_request_is_rejected_before_connect() {
+        let mut client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+        client.max_message_size = 64;
+
+        let err = client
+            .send_request(
+                "127.0.0.1:1/generate".to_string(),
+                Bytes::from(vec![0; 64]),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(match_error_chain(
+            err.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert!(!match_error_chain(
+            err.as_ref(),
+            &[ErrorType::CannotConnect],
+            &[]
+        ));
+        assert!(client.pool.hosts.is_empty());
+        assert_eq!(client.stats.requests_sent.load(Ordering::Relaxed), 0);
+        assert_eq!(client.stats.bytes_sent.load(Ordering::Relaxed), 0);
+        assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_unencodable_request_is_rejected_before_connect() {
+        let client = TcpRequestClient::with_config(TcpRequestConfig {
+            request_timeout: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(1),
+            pool_size: 1,
+            channel_buffer: 1,
+        })
+        .unwrap();
+        let endpoint = "x".repeat(u16::MAX as usize + 1);
+
+        let err = client
+            .send_request(
+                format!("127.0.0.1:1/{endpoint}"),
+                Bytes::from_static(b"ping"),
+                Headers::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(match_error_chain(
+            err.as_ref(),
+            &[ErrorType::InvalidArgument],
+            &[]
+        ));
+        assert!(!match_error_chain(
+            err.as_ref(),
+            &[ErrorType::CannotConnect],
+            &[]
+        ));
+        let typed = err.downcast_ref::<DynamoError>().unwrap();
+        assert_eq!(typed.message(), INVALID_REQUEST_USER_MESSAGE);
+        assert!(
+            err.chain()
+                .any(|cause| cause.to_string().contains("Endpoint path too long"))
+        );
+        assert!(client.pool.hosts.is_empty());
+        assert_eq!(client.stats.requests_sent.load(Ordering::Relaxed), 0);
+        assert_eq!(client.stats.bytes_sent.load(Ordering::Relaxed), 0);
+        assert_eq!(client.stats.errors.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
