@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import importlib.util
+import importlib
 import json
 import logging
 import os
@@ -454,18 +454,31 @@ def check_mistral_image_decoder(vllm_config: VllmConfig) -> None:
     Only ``--tokenizer-mode mistral`` routes through ``mistral_common``. The
     Hugging Face processor path imports no OpenCV, so it must not trip this.
 
-    Both config attributes are read defensively: a guard that runs on every
+    A deployment that sets ``--limit-mm-per-prompt image=0`` never reaches the
+    image tokenizer at all: vLLM leaves a zero-limit modality out of its
+    multimodal profiling. Such a worker starts without OpenCV today, and this
+    check must not be what stops it.
+
+    Every config attribute is read defensively: a guard that runs on every
     startup must never be the thing that breaks startup if vLLM moves them.
-    A move is caught loudly instead, by the contract test alongside this check.
+    A move is caught loudly instead, by the contract tests alongside this check.
     """
     model_config = vllm_config.model_config
     if not getattr(model_config, "is_multimodal_model", False):
         return
     if getattr(model_config, "tokenizer_mode", None) != "mistral":
         return
-    if importlib.util.find_spec("cv2") is not None:
+    mm_config = getattr(model_config, "multimodal_config", None)
+    get_limit_per_prompt = getattr(mm_config, "get_limit_per_prompt", None)
+    if callable(get_limit_per_prompt) and get_limit_per_prompt("image") == 0:
         return
-    raise mistral_image_decoder_missing("vllm")
+    # Import rather than probe for the spec. An OpenCV whose native libraries
+    # are absent is perfectly discoverable and still raises on import, and that
+    # deployment needs the same fast failure as one with no cv2 at all.
+    try:
+        importlib.import_module("cv2")
+    except ImportError as exc:
+        raise mistral_image_decoder_missing("vllm", str(exc)) from exc
 
 
 def setup_kv_event_publisher(

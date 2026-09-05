@@ -13,7 +13,9 @@ import dataclasses
 import importlib
 import importlib.machinery
 import importlib.util
+import pathlib
 import sys
+import tempfile
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -42,22 +44,27 @@ def _load_vllm_main() -> ModuleType:
     return importlib.import_module("dynamo.vllm.main")
 
 
-def _vllm_config(*, multimodal: bool, tokenizer_mode: str) -> SimpleNamespace:
-    return SimpleNamespace(
-        model_config=SimpleNamespace(
-            is_multimodal_model=multimodal, tokenizer_mode=tokenizer_mode
-        )
+def _vllm_config(
+    *, multimodal: bool, tokenizer_mode: str, image_limit: int | None = None
+) -> SimpleNamespace:
+    model_config = SimpleNamespace(
+        is_multimodal_model=multimodal, tokenizer_mode=tokenizer_mode
     )
+    if image_limit is not None:
+        model_config.multimodal_config = SimpleNamespace(
+            get_limit_per_prompt=lambda modality: image_limit
+        )
+    return SimpleNamespace(model_config=model_config)
 
 
 def _pin_cv2(monkeypatch, *, present: bool) -> None:
-    """Pin what ``find_spec("cv2")`` reports, in both directions.
+    """Pin what importing ``cv2`` does, in both directions.
 
-    ``importlib.util.find_spec`` consults ``sys.modules`` first: a ``None``
-    entry makes it return ``None``, and a module carrying a spec makes it
-    return that spec. Pinning both directions keeps the test meaningful on a
-    host that has opted into the documented install -- otherwise the failing
-    branch would never run there.
+    The import machinery consults ``sys.modules`` first: a ``None`` entry makes
+    the import raise ``ImportError``, and a module object is returned as-is.
+    Pinning both directions keeps the test meaningful on a host that has opted
+    into the documented install -- otherwise the failing branch would never run
+    there.
     """
     if present:
         stub = ModuleType("cv2")
@@ -78,11 +85,67 @@ def test_mistral_multimodal_without_cv2_fails_before_the_engine_starts(monkeypat
 
     msg = str(excinfo.value)
     assert "cv2" in msg
-    # The bounded spec and the installer command are what make the failure
-    # actionable; upstream's own suggestion is the wrong one for these images.
+    # Upstream's own suggestion is the wrong one for these images.
     assert VALIDATED_SPECS["opencv-python-headless"] in msg
     assert "install_media_decoders vllm" in msg
     assert "mistral-common[opencv]" not in msg
+
+
+def test_a_broken_cv2_install_fails_the_same_way_as_a_missing_one(monkeypatch):
+    """A discoverable ``cv2`` that cannot import is still no decoder.
+
+    ``opencv-python`` whose native libraries are absent installs a perfectly
+    findable ``cv2`` package that raises ``ImportError`` on import. Probing for
+    the spec would clear the preflight and hand that deployment the upstream
+    failure this check exists to replace, so the check imports instead.
+    """
+    vllm_main = _load_vllm_main()
+    monkeypatch.delitem(sys.modules, "cv2", raising=False)
+    directory = tempfile.mkdtemp()
+    pathlib.Path(directory, "cv2.py").write_text(
+        'raise ImportError("libGL.so.1: cannot open shared object file")\n'
+    )
+    monkeypatch.syspath_prepend(directory)
+    assert importlib.util.find_spec("cv2") is not None
+
+    with pytest.raises(MissingMediaDecoderError) as excinfo:
+        vllm_main.check_mistral_image_decoder(
+            _vllm_config(multimodal=True, tokenizer_mode="mistral")
+        )
+
+    # The underlying reason travels with the error, in the chain for a
+    # traceback and in the text for a handler that ships only str(exc).
+    assert isinstance(excinfo.value.__cause__, ImportError)
+    assert "libGL.so.1" in str(excinfo.value)
+
+
+def test_preflight_stays_silent_when_image_input_is_disabled(monkeypatch):
+    """``--limit-mm-per-prompt image=0`` never reaches the image tokenizer.
+
+    vLLM leaves a zero-limit modality out of its multimodal profiling, so such
+    a worker starts without OpenCV today. Requiring the install there would
+    break a working text- or audio-only deployment of a multimodal model.
+    """
+    vllm_main = _load_vllm_main()
+    _pin_cv2(monkeypatch, present=False)
+
+    assert (
+        vllm_main.check_mistral_image_decoder(
+            _vllm_config(multimodal=True, tokenizer_mode="mistral", image_limit=0)
+        )
+        is None
+    )
+
+
+def test_preflight_still_fires_when_image_input_is_allowed(monkeypatch):
+    """The other side of that limit check: a non-zero limit still needs cv2."""
+    vllm_main = _load_vllm_main()
+    _pin_cv2(monkeypatch, present=False)
+
+    with pytest.raises(MissingMediaDecoderError):
+        vllm_main.check_mistral_image_decoder(
+            _vllm_config(multimodal=True, tokenizer_mode="mistral", image_limit=1)
+        )
 
 
 @pytest.mark.parametrize(
@@ -93,7 +156,6 @@ def test_mistral_multimodal_without_cv2_fails_before_the_engine_starts(monkeypat
         # The Hugging Face processor path imports no OpenCV, so a multimodal
         # model on it must still start without the install.
         (True, "auto"),
-        (False, "auto"),
     ],
 )
 def test_preflight_stays_silent_off_the_mistral_image_path(
@@ -146,14 +208,18 @@ def test_vllm_model_config_still_exposes_the_attributes_the_preflight_reads():
     """The loud half of that defensiveness.
 
     Reading through ``getattr`` means a rename upstream would silently disable
-    the check. Pin the two names here so the rename fails CI instead.
+    the check. Pin every name it reads here so the rename fails CI instead.
     """
     model_config_cls = pytest.importorskip("vllm.config").ModelConfig
+    multimodal_config_cls = pytest.importorskip(
+        "vllm.config.multimodal"
+    ).MultiModalConfig
 
     assert hasattr(model_config_cls, "is_multimodal_model")
-    assert "tokenizer_mode" in {
-        field.name for field in dataclasses.fields(model_config_cls)
-    }
+    field_names = {field.name for field in dataclasses.fields(model_config_cls)}
+    assert "tokenizer_mode" in field_names
+    assert "multimodal_config" in field_names
+    assert callable(getattr(multimodal_config_cls, "get_limit_per_prompt", None))
 
 
 @pytest.mark.skipif(
