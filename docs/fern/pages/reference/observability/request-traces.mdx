@@ -27,7 +27,8 @@ one or more sinks. For the capture and replay workflow, see
 | `DYN_REQUEST_TRACE_FILE_ROLL_LINES` | unset | Positive integer records | Optional gzip roll threshold in records. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_ENDPOINT` | unset | ZMQ bind address | Optional PULL endpoint for harness tool events. Configure it on only one process. |
 | `DYN_REQUEST_TRACE_TOOL_EVENTS_ZMQ_TOPIC` | `agent-tool-events` | ZMQ topic | First-frame topic filter. |
-| `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` | unset | Header names | Comma- or whitespace-separated allowlist captured only on `request_payload` rows. Values are unredacted. |
+| `DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST` | unset | Header names or `prefix-*` | Comma- or whitespace-separated allowlist captured only on `request_payload` rows. Values are unredacted. |
+| `DYN_REQUEST_TRACE_HTTP_HEADER_DENY_LIST` | unset | Header names or `prefix-*` | Subtracted after the capture list matches. Never captures on its own. |
 
 Legacy `jsonl` and `jsonl_gz` sink values, `DYN_REQUEST_TRACE_OUTPUT_PATH`, and
 `DYN_REQUEST_TRACE_JSONL_*` remain migration aliases. `DYN_AUDIT_*` variables are migration shims,

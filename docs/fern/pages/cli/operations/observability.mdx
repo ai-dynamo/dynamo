@@ -228,6 +228,17 @@ To capture selected request headers, provide a comma- or whitespace-separated al
 export DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST='x-request-id,x-tenant-id'
 ```
 
+An entry ending in `*` captures a whole header family, which is useful behind a gateway that
+injects a set of headers whose exact names vary by version:
+
+```bash
+export DYN_REQUEST_TRACE_HTTP_HEADER_CAPTURE_LIST='x-someplatform-*,x-request-id'
+export DYN_REQUEST_TRACE_HTTP_HEADER_DENY_LIST='x-someplatform-internal-token'
+```
+
+The denylist takes the same syntax and is applied after the capture list matches, so it can
+subtract one header from a family without giving up the prefix entry. It only ever subtracts.
+
 Header matching is case-insensitive. Dynamo does not redact captured values.
 
 ### Export Payloads over OTLP
