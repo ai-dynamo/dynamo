@@ -55,6 +55,8 @@ pub enum ErrorType {
     ResponseTimeout,
     /// The request was cancelled (e.g., client disconnected).
     Cancelled,
+    /// The caller's request deadline elapsed before dispatch.
+    DeadlineExceeded,
     /// The capacity constraint cannot be relieved by selecting another worker.
     /// This most commonly means the whole eligible worker pool is exhausted.
     ResourceExhausted,
@@ -78,6 +80,7 @@ impl fmt::Display for ErrorType {
             ErrorType::ConnectionTimeout => write!(f, "ConnectionTimeout"),
             ErrorType::ResponseTimeout => write!(f, "ResponseTimeout"),
             ErrorType::Cancelled => write!(f, "Cancelled"),
+            ErrorType::DeadlineExceeded => write!(f, "DeadlineExceeded"),
             ErrorType::ResourceExhausted => write!(f, "ResourceExhausted"),
             ErrorType::WorkerOverloaded => write!(f, "WorkerOverloaded"),
             ErrorType::Unavailable => write!(f, "Unavailable"),
@@ -478,6 +481,7 @@ mod tests {
         );
         assert_eq!(ErrorType::ResponseTimeout.to_string(), "ResponseTimeout");
         assert_eq!(ErrorType::Cancelled.to_string(), "Cancelled");
+        assert_eq!(ErrorType::DeadlineExceeded.to_string(), "DeadlineExceeded");
         assert_eq!(
             ErrorType::ResourceExhausted.to_string(),
             "ResourceExhausted"

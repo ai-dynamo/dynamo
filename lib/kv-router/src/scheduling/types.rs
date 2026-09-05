@@ -116,6 +116,9 @@ pub enum KvSchedulerError {
     #[error("failed to initialize event publisher: {0}")]
     InitFailed(String),
 
+    #[error("request deadline exceeded")]
+    DeadlineExceeded,
+
     #[error(transparent)]
     WorkerSelectionPolicy(#[from] WorkerSelectionPolicyError),
 }
