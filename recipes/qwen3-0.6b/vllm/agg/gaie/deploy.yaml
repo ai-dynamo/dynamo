@@ -23,7 +23,7 @@ spec:
               value: "Qwen/Qwen3-0.6B"
             - name: DYN_DECODE_FALLBACK
               value: "true"
-    VllmDecodeWorker:
+    worker:
       componentType: worker
       envFromSecret: hf-token-secret
       volumeMounts:

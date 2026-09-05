@@ -27,6 +27,71 @@ except ImportError as exc:
     pytest.skip(f"Skip (missing dependency): {exc}", allow_module_level=True)
 
 
+def _component(name: str, component_type: str) -> dict:
+    return {
+        "name": name,
+        "type": component_type,
+        "podTemplate": {
+            "spec": {
+                "containers": [
+                    {
+                        "name": "main",
+                        "args": ["--model", "Qwen/Qwen3-0.6B"],
+                    }
+                ]
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("backend", "topology", "workers"),
+    [
+        ("vllm", "aggregate", [("worker", "worker")]),
+        ("vllm", "disaggregated", [("decode", "decode"), ("prefill", "prefill")]),
+        ("sglang", "aggregate", [("decode", "worker")]),
+        (
+            "sglang",
+            "disaggregated",
+            [("decode", "decode"), ("prefill", "prefill")],
+        ),
+    ],
+)
+def test_explicit_trust_remote_code_targets_selected_worker_roles(
+    backend: str,
+    topology: str,
+    workers: list[tuple[str, str]],
+) -> None:
+    blueprint = {
+        "apiVersion": "nvidia.com/v1beta1",
+        "kind": "DynamoGraphDeployment",
+        "spec": {
+            "components": [
+                _component("Frontend", "frontend"),
+                *(_component(name, component_type) for name, component_type in workers),
+            ]
+        },
+    }
+
+    materialized = materialize_dgd(
+        blueprint,
+        purpose=DGDMaterializationPurpose.FINAL_OUTPUT,
+        runtime_backend=backend,
+        trust_remote_code=True,
+    )
+
+    components = {
+        component["name"]: component for component in materialized["spec"]["components"]
+    }
+    for name, _ in workers:
+        args = components[name]["podTemplate"]["spec"]["containers"][0]["args"]
+        assert args.count("--trust-remote-code") == 1, topology
+    frontend_args = components["Frontend"]["podTemplate"]["spec"]["containers"][0][
+        "args"
+    ]
+    assert "--trust-remote-code" not in frontend_args
+
+
 def test_materialize_dgd_applies_transforms_once_in_fixed_order(monkeypatch) -> None:
     blueprint = {
         "spec": {

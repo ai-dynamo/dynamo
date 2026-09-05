@@ -759,7 +759,7 @@ def setup_vllm_engine(
     if component_gauges is not None:
         component_gauges.set_model_load_time(load_time)
 
-    logger.info(f"VllmWorker for {config.served_model_name} has been initialized")
+    logger.info(f"worker for {config.served_model_name} has been initialized")
 
     embedding_cleanup_resource: EmbeddingEngineCleanupResource | None = None
     if embedding_process_group is not None:

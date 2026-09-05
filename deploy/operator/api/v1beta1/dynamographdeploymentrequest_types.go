@@ -301,6 +301,15 @@ type OverridesSpec struct {
 	// +optional
 	ProfilingJob *batchv1.JobSpec `json:"profilingJob,omitempty"`
 
+	// TrustRemoteCode explicitly permits generated vLLM and SGLang workers to
+	// execute custom code from the configured model repository. When enabled,
+	// the profiler adds --trust-remote-code to every generated worker component
+	// after the deployment topology has been generated. Enable this setting only
+	// for model repositories you trust.
+	// +optional
+	// +kubebuilder:default=false
+	TrustRemoteCode bool `json:"trustRemoteCode,omitempty"`
+
 	// DGD provides a partial, versioned DynamoGraphDeployment override for the
 	// profiler-generated deployment. Set apiVersion to nvidia.com/v1alpha1 or
 	// nvidia.com/v1beta1 and kind to DynamoGraphDeployment.

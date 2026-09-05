@@ -101,7 +101,7 @@ def register_engine_metrics_callback(
         register_engine_metrics_callback(
             generate_endpoint, REGISTRY,
             metric_prefix_filters=["vllm:"],
-            namespace_name="prod", component_name="vllm-worker", endpoint_name="generate"
+            namespace_name="prod", component_name="worker", endpoint_name="generate"
         )
 
         # Include multiple metric prefixes
