@@ -226,67 +226,86 @@ impl HealthCheckManager {
 
         // Spawn task to send health check and wait for response
         tokio::spawn(async move {
-            let result = tokio::time::timeout(timeout, async {
+            // Phase 1, bounded by `request_timeout`: send the canary and get
+            // its first item, which carries the provisional verdict.
+            let first = tokio::time::timeout(timeout, async {
                 let request = SingleIn::new(payload);
                 match engine.generate(request).await {
                     Ok(mut response_stream) => {
-                        // Get the first response to verify endpoint is alive.
-                        // Check for errors
-                        let is_healthy = if let Some(response) = response_stream.next().await {
-                            if let Some(error) = response.err() {
-                                warn!(
-                                    "Health check error response from {}: {:?}",
-                                    endpoint_subject_owned, error
-                                );
-                                false
-                            } else {
-                                debug!("Health check successful for {}", endpoint_subject_owned);
-                                true
-                            }
-                        } else {
-                            warn!(
-                                "Health check got no response from {}",
-                                endpoint_subject_owned
-                            );
-                            false
-                        };
-
-                        tokio::spawn(async move {
-                            // We need to consume the rest of the stream to avoid warnings on the frontend.
-                            response_stream.for_each(|_| async {}).await;
-                        });
-
-                        // Update health status based on response
-                        system_health.lock().set_endpoint_health_status(
-                            &endpoint_subject_owned,
-                            if is_healthy {
-                                HealthStatus::Ready
-                            } else {
-                                HealthStatus::NotReady
-                            },
-                        );
+                        let first_item = response_stream.next().await;
+                        Ok((first_item, response_stream))
                     }
-                    Err(e) => {
-                        error!(
-                            "Health check request failed for {}: {}",
-                            endpoint_subject_owned, e
-                        );
-                        system_health.lock().set_endpoint_health_status(
-                            &endpoint_subject_owned,
-                            HealthStatus::NotReady,
-                        );
-                    }
+                    Err(e) => Err(e),
                 }
             })
             .await;
 
-            // Handle timeout
-            if result.is_err() {
-                warn!("Health check timeout for {}", endpoint_subject_owned);
-                system_health
-                    .lock()
-                    .set_endpoint_health_status(&endpoint_subject_owned, HealthStatus::NotReady);
-            }
+            let (provisionally_healthy, response_stream) = match first {
+                Err(_) => {
+                    warn!("Health check timeout for {}", endpoint_subject_owned);
+                    (false, None)
+                }
+                Ok(Err(e)) => {
+                    error!(
+                        "Health check request failed for {}: {}",
+                        endpoint_subject_owned, e
+                    );
+                    (false, None)
+                }
+                Ok(Ok((first_item, response_stream))) => match first_item {
+                    Some(response) => {
+                        if let Some(error) = response.err() {
+                            warn!(
+                                "Health check error response from {}: {:?}",
+                                endpoint_subject_owned, error
+                            );
+                            (false, Some(response_stream))
+                        } else {
+                            debug!("Health check successful for {}", endpoint_subject_owned);
+                            (true, Some(response_stream))
+                        }
+                    }
+                    None => {
+                        warn!(
+                            "Health check got no response from {}",
+                            endpoint_subject_owned
+                        );
+                        (false, Some(response_stream))
+                    }
+                },
+            };
+
+            // Phase 2, bounded by a second `request_timeout` window: the
+            // canary must also finish streaming. A stream that stalls after
+            // its first chunk means the engine is wedged mid-response — a
+            // state a first-chunk-only verdict can never see. Draining
+            // inline (instead of in a detached task) also ensures this task
+            // cannot outlive the canary it belongs to.
+            let is_healthy = match response_stream {
+                Some(response_stream) => {
+                    let drained =
+                        tokio::time::timeout(timeout, response_stream.for_each(|_| async {}))
+                            .await
+                            .is_ok();
+                    if !drained {
+                        warn!(
+                            "Health check stream from {} stalled after its first chunk",
+                            endpoint_subject_owned
+                        );
+                    }
+                    provisionally_healthy && drained
+                }
+                None => provisionally_healthy,
+            };
+
+            system_health.lock().set_endpoint_health_status(
+                &endpoint_subject_owned,
+                if is_healthy {
+                    HealthStatus::Ready
+                } else {
+                    HealthStatus::NotReady
+                },
+            );
 
             debug!("Health check completed for {}", endpoint_subject_owned);
         });
@@ -694,6 +713,141 @@ mod push_handler_notify_tests {
             endpoint,
             HealthStatus::Ready,
             "successful chunks should set Ready despite trailing error",
+        );
+    }
+
+    // =================================================================
+    // Canary streams that stall mid-response (#13429)
+    // =================================================================
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// Increments its counter when dropped; carried inside canary streams so
+    /// tests can assert the health checker releases them instead of parking
+    /// them in a task forever.
+    struct StreamDropGuard(Arc<AtomicUsize>);
+    impl Drop for StreamDropGuard {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Canary engine that streams one healthy chunk and then stalls forever
+    /// while `healed` is false; once `healed` is set, canary streams complete
+    /// normally.
+    struct StallingCanaryEngine {
+        healed: Arc<AtomicBool>,
+        canaries_issued: Arc<AtomicUsize>,
+        streams_dropped: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<TestRequest>, ManyOut<TestResponse>, anyhow::Error>
+        for StallingCanaryEngine
+    {
+        async fn generate(
+            &self,
+            input: SingleIn<TestRequest>,
+        ) -> anyhow::Result<ManyOut<TestResponse>> {
+            let (_data, ctx) = input.into_parts();
+            self.canaries_issued.fetch_add(1, Ordering::SeqCst);
+            let guard = StreamDropGuard(self.streams_dropped.clone());
+            let head = stream::iter(vec![Annotated::from_data(serde_json::json!({"token": 0}))]);
+            let tail: futures::stream::BoxStream<'static, TestResponse> =
+                if self.healed.load(Ordering::SeqCst) {
+                    Box::pin(stream::once(async move {
+                        let _guard = guard;
+                        Annotated::from_data(serde_json::json!({"token": 1}))
+                    }))
+                } else {
+                    Box::pin(stream::once(async move {
+                        let _guard = guard;
+                        std::future::pending::<()>().await;
+                        unreachable!()
+                    }))
+                };
+            Ok(ResponseStream::new(
+                Box::pin(head.chain(tail)),
+                ctx.context(),
+            ))
+        }
+    }
+
+    /// A canary whose stream stalls after a healthy first chunk must mark the
+    /// endpoint NotReady, and the stalled stream must be released rather than
+    /// parked in a detached drain task forever.
+    #[tokio::test]
+    async fn test_canary_stalled_after_first_chunk_sets_not_ready() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "stalled_mid_stream";
+        let healed = Arc::new(AtomicBool::new(false));
+        let canaries_issued = Arc::new(AtomicUsize::new(0));
+        let streams_dropped = Arc::new(AtomicUsize::new(0));
+        let engine: LocalAsyncEngine = Arc::new(StallingCanaryEngine {
+            healed,
+            canaries_issued: canaries_issued.clone(),
+            streams_dropped: streams_dropped.clone(),
+        });
+        let _notifier = register_endpoint(&drt, endpoint, engine);
+        start_manager(&drt, 400).await;
+
+        // First canary fires after 400ms; its drain window (request_timeout,
+        // 1s) expires ~1.4s in. Allow slack for CI schedulers.
+        tokio::time::sleep(Duration::from_millis(3000)).await;
+
+        assert!(
+            canaries_issued.load(Ordering::SeqCst) >= 2,
+            "canaries should keep firing"
+        );
+        assert!(
+            streams_dropped.load(Ordering::SeqCst) >= 1,
+            "stalled canary streams must be released when the drain window \
+             expires, not parked forever"
+        );
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "a canary stream that stalls after its first chunk means the \
+             engine is wedged mid-response",
+        );
+    }
+
+    /// An engine that recovers after a mid-stream stall must be promoted back
+    /// to Ready by a later completing canary — demotion is not sticky.
+    #[tokio::test]
+    async fn test_canary_recovery_after_stall_sets_ready_again() {
+        let drt = create_test_drt_async().await;
+        let endpoint = "stalled_then_healed";
+        let healed = Arc::new(AtomicBool::new(false));
+        let canaries_issued = Arc::new(AtomicUsize::new(0));
+        let streams_dropped = Arc::new(AtomicUsize::new(0));
+        let engine: LocalAsyncEngine = Arc::new(StallingCanaryEngine {
+            healed: healed.clone(),
+            canaries_issued: canaries_issued.clone(),
+            streams_dropped: streams_dropped.clone(),
+        });
+        let _notifier = register_endpoint(&drt, endpoint, engine);
+        start_manager(&drt, 400).await;
+
+        tokio::time::sleep(Duration::from_millis(3000)).await;
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::NotReady,
+            "wedged engine should be NotReady before recovery",
+        );
+
+        healed.store(true, Ordering::SeqCst);
+        // Verdicts from pre-recovery canaries land within one more drain
+        // window (~1.4s); completing canaries then land every 400ms.
+        tokio::time::sleep(Duration::from_millis(2600)).await;
+
+        assert_status(
+            &drt,
+            endpoint,
+            HealthStatus::Ready,
+            "a recovered engine must be promoted by the next completing canary",
         );
     }
 }
