@@ -549,7 +549,6 @@ impl GuidedDecodingOptions {
             self.regex.is_some(),
             self.choice.as_ref().is_some_and(|v| !v.is_empty()),
             self.grammar.is_some(),
-            self.whitespace_pattern.is_some(),
             self.structural_tag.is_some(),
         ]
         .iter()
@@ -1085,6 +1084,39 @@ mod tests {
         // All fields None (should be ok, but not useful)
         let opts = GuidedDecodingOptions::validated(None, None, None, None, None, None, None);
         assert!(opts.is_ok());
+    }
+
+    #[test]
+    fn whitespace_pattern_is_a_modifier_not_a_constraint() {
+        // guided_whitespace_pattern tunes how a json constraint is rendered, so it
+        // must combine with one, the same way guided_decoding_backend does.
+        let opts = GuidedDecodingOptions::validated(
+            Some(serde_json::json!({"type": "object"})),
+            None,
+            None,
+            None,
+            None,
+            Some(" ".to_string()),
+            None,
+        );
+        assert!(
+            opts.is_ok(),
+            "guided_json + whitespace_pattern was rejected"
+        );
+
+        // Two real constraints must still be rejected.
+        assert!(
+            GuidedDecodingOptions::validated(
+                Some(serde_json::json!({"type": "object"})),
+                Some(r"\d+".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .is_err()
+        );
     }
 
     #[test]
