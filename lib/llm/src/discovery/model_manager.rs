@@ -705,7 +705,7 @@ impl ModelManager {
         let role = representative
             .worker_type
             .map_or("unspecified", |worker_type| worker_type.as_str());
-        self.warn_on_alias_divergence(&primary, &aliases, role);
+        self.warn_on_alias_divergence(&primary, &namespace, &aliases, role);
 
         let worker_set = Arc::new(worker_set);
         self.get_or_create_model(&primary)
@@ -760,20 +760,29 @@ impl ModelManager {
     }
 
     /// Warn when the group being committed carries a different alias set than the
-    /// sibling groups already committed under the same primary model name.
+    /// sibling groups already committed under the same primary model name in the
+    /// same namespace.
     ///
     /// An alias only some of the role-specific groups claim has an unsatisfiable
     /// readiness DNF, so it never reaches `/v1/models` and answers 503 while the
-    /// primary name serves normally.
+    /// primary name serves normally. Roles only satisfy each other's `needs`
+    /// within one namespace, so two namespaces serving the same model name are
+    /// independent deployments and their alias sets are free to differ.
     ///
     /// This must stay a warning and never a rejection: per `lib/llm/AGENTS.md` a
     /// frontend interoperates with workers from the current release and the two
     /// before it, so divergence is legitimate mid rolling upgrade.
-    fn warn_on_alias_divergence(&self, primary: &str, aliases: &[String], role: &str) {
+    fn warn_on_alias_divergence(
+        &self,
+        primary: &str,
+        namespace: &str,
+        aliases: &[String],
+        role: &str,
+    ) {
         let mut sibling_aliases: BTreeSet<String> = BTreeSet::new();
         let mut has_sibling = false;
         for group in self.discovery_groups.iter() {
-            if group.primary != primary {
+            if group.primary != primary || group.namespace != namespace {
                 continue;
             }
             has_sibling = true;
@@ -796,6 +805,7 @@ impl ModelManager {
         }
         tracing::warn!(
             model_name = %primary,
+            namespace = %namespace,
             role = %role,
             claimed_by_siblings_only = ?missing_here,
             claimed_by_this_group_only = ?extra_here,
@@ -3489,18 +3499,29 @@ mod tests {
     }
 
     fn commit_alias_role(manager: &ModelManager, role: WorkerType, aliases: &[&str]) {
+        commit_alias_role_in(manager, "alias-deployment", role, aliases);
+    }
+
+    /// Commit one role of the alias topology into `namespace`. Every identifier is
+    /// namespace-qualified so the same role can be committed in two namespaces.
+    fn commit_alias_role_in(
+        manager: &ModelManager,
+        namespace: &str,
+        role: WorkerType,
+        aliases: &[&str],
+    ) {
         let card = alias_role_card(role, aliases);
         let worker_set = WorkerSet::new(
-            "alias-deployment".to_string(),
+            namespace.to_string(),
             card.mdcsum().to_string(),
             card.clone(),
         );
         manager
             .commit_discovery_group(
-                &format!("alias-group-{role}"),
-                &format!("{role}"),
+                &format!("alias-group-{namespace}-{role}"),
+                &format!("{namespace}-{role}"),
                 worker_set,
-                vec![(format!("alias-instance-{role}"), card)],
+                vec![(format!("alias-instance-{namespace}-{role}"), card)],
                 Vec::new(),
             )
             .unwrap();
@@ -3531,7 +3552,6 @@ mod tests {
             "matching alias sets must not warn: {events:#?}"
         );
 
-        // The behaviour the new logging must not disturb.
         assert_eq!(
             manager.resolve_canonical_name("shared-alias"),
             "alias-topology-model"
@@ -3567,16 +3587,12 @@ mod tests {
                 .contains("decode-only-alias")
         );
 
-        // The warning must not fail discovery closed: both groups committed and the
-        // primary still serves.
         assert!(
             manager
                 .get_model("alias-topology-model")
                 .unwrap()
                 .has_ready_workers()
         );
-        // And this is the state the warning exists to diagnose: the alias resolves but
-        // only the decode role backs it, so its `needs` are unsatisfiable.
         assert_eq!(
             manager.resolve_canonical_name("decode-only-alias"),
             "alias-topology-model"
@@ -3587,6 +3603,27 @@ mod tests {
                 .unwrap()
                 .has_ready_workers()
         );
+    }
+
+    #[test]
+    fn same_model_in_two_namespaces_may_carry_different_alias_sets() {
+        let manager = ModelManager::new();
+
+        let (_, events) = capture_events(|| {
+            commit_alias_role_in(&manager, "tenant-a", WorkerType::Aggregated, &["alias-a"]);
+            commit_alias_role_in(&manager, "tenant-b", WorkerType::Aggregated, &["alias-b"]);
+        });
+
+        assert!(
+            alias_divergence_events(&events).is_empty(),
+            "separate namespaces are separate deployments and must not warn: {events:#?}"
+        );
+        for alias in ["alias-a", "alias-b"] {
+            assert!(
+                manager.get_model(alias).unwrap().has_ready_workers(),
+                "{alias} is backed by a complete deployment and must be servable"
+            );
+        }
     }
 
     #[test]
