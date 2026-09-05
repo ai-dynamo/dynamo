@@ -1348,9 +1348,23 @@ fn graceful_shutdown_timeout() -> Duration {
 }
 
 fn graceful_shutdown_timeout_secs(value: Option<&str>, default: u64) -> u64 {
-    value
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(default)
+    use dynamo_runtime::config::environment_names::worker as env_worker;
+
+    // Warn on an unparseable value, as the neighbouring env readers do: silently
+    // substituting the default hides a typo that changes shutdown behaviour.
+    // Unset and empty stay quiet, matching `drain_timeout_secs`.
+    match value.filter(|value| !value.is_empty()) {
+        None => default,
+        Some(value) => value.parse::<u64>().unwrap_or_else(|_| {
+            tracing::warn!(
+                "Invalid {}={:?}; using default {}s",
+                env_worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
+                value,
+                default
+            );
+            default
+        }),
+    }
 }
 
 /// Compose the post-signal shutdown deadline from the drain+cleanup
