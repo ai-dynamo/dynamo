@@ -1002,8 +1002,11 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 		multinodeDeployer   MultinodeDeployer
 		initialPodSpec      *corev1.PodSpec
 		expectInitContainer bool
+		expectedInitName    string
+		expectedLeaderPort  string
 		expectedInitImage   string
 		expectedLeaderHost  string
+		expectRayScript     bool
 	}{
 		{
 			name:                "mp worker with Grove deployer injects init container",
@@ -1012,6 +1015,8 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			multinodeDeployer:   &GroveMultinodeDeployer{},
 			initialPodSpec:      mpMultinodePodSpec("vllm:latest"),
 			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-mp",
+			expectedLeaderPort:  commonconsts.VLLMMpMasterPort,
 			expectedInitImage:   "vllm:latest",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
@@ -1022,6 +1027,8 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			multinodeDeployer:   &LWSMultinodeDeployer{},
 			initialPodSpec:      mpMultinodePodSpec("vllm:v2"),
 			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-mp",
+			expectedLeaderPort:  commonconsts.VLLMMpMasterPort,
 			expectedInitImage:   "vllm:v2",
 			expectedLeaderHost:  "${LWS_LEADER_ADDRESS}",
 		},
@@ -1040,6 +1047,8 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				},
 			},
 			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-mp",
+			expectedLeaderPort:  commonconsts.VLLMMpMasterPort,
 			expectedInitImage:   "vllm:command",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
@@ -1062,6 +1071,8 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				},
 			},
 			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-mp",
+			expectedLeaderPort:  commonconsts.VLLMMpMasterPort,
 			expectedInitImage:   "vllm:shell-command",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
@@ -1087,7 +1098,7 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 			expectInitContainer: false,
 		},
 		{
-			name:              "non-mp worker command does not inject init container",
+			name:              "ray worker with Grove deployer injects init container with timeout",
 			numberOfNodes:     2,
 			role:              RoleWorker,
 			multinodeDeployer: &GroveMultinodeDeployer{},
@@ -1101,7 +1112,12 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 					},
 				},
 			},
-			expectInitContainer: false,
+			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader",
+			expectedLeaderPort:  VLLMPort,
+			expectedInitImage:   "vllm:latest",
+			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
+			expectRayScript:     true,
 		},
 		{
 			name:          "single node does not inject init container",
@@ -1131,6 +1147,8 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				return podSpec
 			}(),
 			expectInitContainer: true,
+			expectedInitName:    "wait-for-leader-mp",
+			expectedLeaderPort:  commonconsts.VLLMMpMasterPort,
 			expectedInitImage:   "vllm:latest",
 			expectedLeaderHost:  "${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}",
 		},
@@ -1149,12 +1167,21 @@ func TestVLLMBackend_UpdatePodSpec(t *testing.T) {
 				g.Expect(tt.initialPodSpec.Volumes).To(gomega.HaveLen(initialVolCount + 1))
 
 				injected := tt.initialPodSpec.InitContainers[len(tt.initialPodSpec.InitContainers)-1]
-				g.Expect(injected.Name).To(gomega.Equal("wait-for-leader-mp"))
+				g.Expect(injected.Name).To(gomega.Equal(tt.expectedInitName))
 				g.Expect(injected.Image).To(gomega.Equal(tt.expectedInitImage))
 
-				expectedCmd := fmt.Sprintf(
-					`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 /scripts/wait-for-leader.py`,
-					tt.expectedLeaderHost, commonconsts.VLLMMpMasterPort)
+				var expectedCmd string
+				if tt.expectRayScript {
+					// Ray workers use the bash script
+					expectedCmd = fmt.Sprintf(
+						`export LEADER_HOST="%s" LEADER_PORT="%s" && bash /scripts/wait-for-ray-leader.sh`,
+						tt.expectedLeaderHost, tt.expectedLeaderPort)
+				} else {
+					// MP workers use the Python script
+					expectedCmd = fmt.Sprintf(
+						`export LEADER_HOST="%s" LEADER_PORT="%s" && exec python3 /scripts/wait-for-leader.py`,
+						tt.expectedLeaderHost, tt.expectedLeaderPort)
+				}
 				g.Expect(injected.Command).To(gomega.Equal([]string{"sh", "-c", expectedCmd}))
 				g.Expect(injected.Env).To(gomega.BeEmpty())
 
@@ -1184,16 +1211,24 @@ func TestGenerateWaitLeaderConfigMap(t *testing.T) {
 	g.Expect(cm.Namespace).To(gomega.Equal("my-ns"))
 	g.Expect(cm.Labels).To(gomega.HaveKeyWithValue(commonconsts.KubeLabelDynamoGraphDeploymentName, "my-dgd"))
 	g.Expect(cm.Data).To(gomega.HaveKey("wait-for-leader.py"))
+	g.Expect(cm.Data).To(gomega.HaveKey("wait-for-ray-leader.sh"))
 
-	script := cm.Data["wait-for-leader.py"]
-	g.Expect(script).To(gomega.ContainSubstring(`os.environ["LEADER_HOST"]`))
-	g.Expect(script).To(gomega.ContainSubstring(`os.environ["LEADER_PORT"]`))
-	g.Expect(script).To(gomega.ContainSubstring("leader_pod_is_healthy"))
-	g.Expect(script).To(gomega.ContainSubstring("kubernetes.default.svc"))
-	g.Expect(script).To(gomega.ContainSubstring("fieldSelector=status.podIP="))
-	g.Expect(script).To(gomega.ContainSubstring("deletionTimestamp"))
-	g.Expect(script).To(gomega.ContainSubstring("socket.create_connection"))
-	g.Expect(script).To(gomega.ContainSubstring("time.sleep(5)"))
+	// Check Python script content
+	pythonScript := cm.Data["wait-for-leader.py"]
+	g.Expect(pythonScript).To(gomega.ContainSubstring(`os.environ["LEADER_HOST"]`))
+	g.Expect(pythonScript).To(gomega.ContainSubstring(`os.environ["LEADER_PORT"]`))
+	g.Expect(pythonScript).To(gomega.ContainSubstring("leader_pod_is_healthy"))
+	g.Expect(pythonScript).To(gomega.ContainSubstring("kubernetes.default.svc"))
+	g.Expect(pythonScript).To(gomega.ContainSubstring("fieldSelector=status.podIP="))
+	g.Expect(pythonScript).To(gomega.ContainSubstring("deletionTimestamp"))
+	g.Expect(pythonScript).To(gomega.ContainSubstring("socket.create_connection"))
+	g.Expect(pythonScript).To(gomega.ContainSubstring("time.sleep(5)"))
+
+	// Check Ray script content
+	rayScript := cm.Data["wait-for-ray-leader.sh"]
+	g.Expect(rayScript).To(gomega.ContainSubstring("Waiting for Ray leader to become available"))
+	g.Expect(rayScript).To(gomega.ContainSubstring("ray health-check --address \"${LEADER_HOST}:${LEADER_PORT}\""))
+	g.Expect(rayScript).To(gomega.ContainSubstring("sleep 5"))
 }
 
 func TestGetWaitLeaderConfigMapName(t *testing.T) {
