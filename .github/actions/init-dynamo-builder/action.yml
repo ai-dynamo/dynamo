@@ -22,14 +22,14 @@ description: 'Route buildkit workers and bootstrap buildx builder for dynamo bui
 #
 # Usage examples:
 #   # Initialize for both architectures with general flavor:
-#   - uses: ./.github/actions/init-dynamo-builder
+#   - uses: $/.github/actions/init-dynamo-builder
 #     with:
 #       builder_name: my-builder
 #       flavor: general
 #       arch: 'linux/amd64,linux/arm64'
 #
 #   # Initialize for single architecture with specific flavor and CUDA version:
-#   - uses: ./.github/actions/init-dynamo-builder
+#   - uses: $/.github/actions/init-dynamo-builder
 #     with:
 #       builder_name: my-builder
 #       flavor: vllm
@@ -140,7 +140,7 @@ runs:
         fi
 
     - name: Bootstrap buildkit
-      uses: ./.github/actions/bootstrap-buildkit
+      uses: $/.github/actions/bootstrap-buildkit
       with:
         builder_name: ${{ inputs.builder_name }}
         buildkit_worker_addresses: ${{ inputs.fresh_builder != 'true' && steps.prepare.outputs.worker_addresses || '' }}
