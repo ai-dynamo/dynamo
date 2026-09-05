@@ -1,0 +1,178 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: solar-open2-250b-vllm-b200-agg-chat
+spec:
+  backendFramework: vllm
+  env:
+  - name: DYN_ROUTER_MODE
+    value: kv
+  - name: HF_HOME
+    value: /shared-model-cache
+  - name: HF_HUB_CACHE
+    value: /shared-model-cache/hub
+  - name: HF_HUB_OFFLINE
+    value: '1'
+  - name: TRANSFORMERS_OFFLINE
+    value: '1'
+  - name: VLLM_WORKER_MULTIPROC_METHOD
+    value: spawn
+  - name: PYTHONHASHSEED
+    value: '0'
+  - name: NCCL_IB_DISABLE
+    value: '1'
+  - name: NCCL_CUMEM_ENABLE
+    value: '1'
+  - name: NCCL_NVLS_ENABLE
+    value: '1'
+  - name: VLLM_ALLREDUCE_USE_SYMM_MEM
+    value: '0'
+  - name: VLLM_ALLREDUCE_USE_FLASHINFER
+    value: '1'
+  - name: VLLM_USE_NCCL_SYMM_MEM
+    value: '0'
+  - name: VLLM_FLASHINFER_ALLREDUCE_BACKEND
+    value: mnnvl
+  components:
+  - name: Frontend
+    # Required by the operator: the container is referenced by digest and so has
+    # no parseable semantic-version tag. Publishing the image with a semver tag
+    # would allow this field to be removed.
+    runtimeVersionOverride: 1.4.1
+    type: frontend
+    replicas: 1
+    minAvailable: 1
+    podTemplate:
+      spec:
+        imagePullSecrets:
+        - name: nvcr-secret
+        containers:
+        - name: main
+          image: nvcr.io/nvstaging/nim/snarravula@sha256:c180f09606e3615206d8db4f0323e63ed23067c19091d3194ad7277cd3873cf3
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+          command:
+          - python3
+          - -m
+          - dynamo.frontend
+          args:
+          - --router-kv-events
+          - --event-plane=zmq
+          - --router-track-prefill-tokens
+          - --router-kv-overlap-score-credit-decay=0.1
+          - --router-min-initial-workers=2
+          - --dyn-chat-processor=vllm
+          - --tool-call-parser=solar_open2
+          - --reasoning-parser=solar_open2
+          - --enable-auto-tool-choice
+          - --default-chat-template-kwargs={"think_render_option":"preserved","reasoning_effort":"high"}
+          - --max-model-len=1048576
+          - --http-host=0.0.0.0
+          - --http-port=8000
+          ports:
+          - name: http
+            containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: '16'
+              memory: 128Gi
+          volumeMounts:
+          - name: runtime-tmp
+            mountPath: /tmp
+        volumes:
+        - name: runtime-tmp
+          emptyDir:
+            sizeLimit: 20Gi
+  - name: Worker
+    # Required by the operator: the container is referenced by digest and so has
+    # no parseable semantic-version tag. Publishing the image with a semver tag
+    # would allow this field to be removed.
+    runtimeVersionOverride: 1.4.1
+    type: worker
+    replicas: 2
+    minAvailable: 2
+    sharedMemorySize: 64Gi
+    podTemplate:
+      metadata:
+        labels: null
+      spec:
+        imagePullSecrets:
+        - name: nvcr-secret
+        containers:
+        - name: main
+          image: nvcr.io/nvstaging/nim/snarravula@sha256:c180f09606e3615206d8db4f0323e63ed23067c19091d3194ad7277cd3873cf3
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsUser: 0
+            capabilities:
+              add:
+              - IPC_LOCK
+              - SYS_PTRACE
+              - SYS_RESOURCE
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          args:
+          - --model=/shared-model-cache/hub/models--nota-ai--Solar-Open2-250B-Nota-NVFP4/snapshots/3cc673335f4c2f41181e05a98fc2b8324d586a64
+          - --served-model-name=solar-open2-250b
+          - --tensor-parallel-size=2
+          - --dtype=bfloat16
+          - --kv-cache-dtype=fp8
+          - --max-model-len=1048576
+          - --max-num-seqs=512
+          - --max-num-batched-tokens=32768
+          - --enable-chunked-prefill
+          - --no-async-scheduling
+          - --gpu-memory-utilization=0.95
+          - --disable-custom-all-reduce
+          - --moe-backend=flashinfer_trtllm
+          - --enable-flashinfer-autotune
+          - --compilation-config={"pass_config":{"fuse_allreduce_rms":true}}
+          - --enable-prefix-caching
+          - --reasoning-parser=solar_open2
+          - --logits-processors=vllm.v1.sample.logits_processor.solar_open2:SolarOpen2TemplateLogitsProcessor
+          - --kv-events-config={"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5571","enable_kv_cache_events":true}
+          resources:
+            limits:
+              nvidia.com/gpu: '2'
+            requests:
+              cpu: '16'
+              ephemeral-storage: 64Gi
+              memory: 544Gi
+              nvidia.com/gpu: '2'
+          volumeMounts:
+          - name: shared-model-cache
+            mountPath: /shared-model-cache
+          - name: runtime-tmp
+            mountPath: /tmp
+            # Engine initialisation (profile, KV cache, warmup) takes several minutes
+            # on top of weight load for this 250B checkpoint. Without this probe the
+            # pod reports Ready before the engine can serve and requests fail with
+            # HTTP 503. The frontend deliberately has no startupProbe: it does not
+            # serve /live on 9090.
+          startupProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 30
+            timeoutSeconds: 20
+            failureThreshold: 80
+        volumes:
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
+        - name: runtime-tmp
+          emptyDir:
+            sizeLimit: 100Gi

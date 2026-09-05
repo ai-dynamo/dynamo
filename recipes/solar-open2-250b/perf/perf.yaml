@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mooncake-aiperf-config
+data:
+  perf.yaml: |
+    schemaVersion: "2.0"
+
+    benchmark:
+      model: ${TARGET_MODEL}
+
+      tokenizer:
+        name: ${TOKENIZER}
+        trust_remote_code: true
+
+      endpoint:
+        url: ${INFERENCE_URL}
+        type: chat
+        streaming: true
+        timeout: 7200
+        use_server_token_count: true
+        extra:
+          ignore_eos: true
+
+      dataset:
+        type: file
+        path: ${TRACE_FILE}
+        format: mooncake_trace
+        sampling: sequential
+
+        cache_bust:
+          target: warmup_isolation_system
+
+        synthesis:
+          max_isl: ${MAX_ISL:1048576}
+          max_osl: ${CAP_OSL:12000}
+
+      warmup:
+        type: concurrency
+        concurrency: 16
+        requests: 16
+
+      profiling:
+        type: concurrency
+        concurrency: ${CONCURRENCY}
+        requests: ${REQUESTS}
+
+      runtime:
+        ui: none
+
+      artifacts:
+        dir: ${ARTIFACT_DIR}
+        summary: [json]
+        records: [jsonl]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mooncake-aiperf-job
+spec:
+  backoffLimit: 0
+
+  template:
+    spec:
+      restartPolicy: Never
+
+      containers:
+        - name: aiperf
+          image: nvcr.io/nvstaging/ai-dynamo/aiperf:0.13.0rc2
+          imagePullPolicy: IfNotPresent
+
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              export REQUESTS="$(wc -l < "$TRACE_FILE" | tr -d '[:space:]')"
+              exec aiperf profile --config /etc/aiperf/perf.yaml
+
+          env:
+            - name: TARGET_MODEL
+              value: "MODEL_ID"
+
+            - name: TOKENIZER
+              value: "MODEL_ID"
+
+            - name: INFERENCE_URL
+              value: "http://DGD_NAME-frontend:8000/v1/chat/completions"
+
+            - name: TRACE_FILE
+              value: "/model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl"
+
+            - name: CONCURRENCY
+              value: "64"
+
+            - name: MAX_ISL
+              value: "500000"
+
+            - name: CAP_OSL
+              value: "12000"
+
+            - name: ARTIFACT_DIR
+              value: "/model-cache/aiperf-artifacts"
+
+          volumeMounts:
+            - name: aiperf-config
+              mountPath: /etc/aiperf
+              readOnly: true
+
+            # Read the trace and write artifacts on the shared PVC.
+            - name: shared-model-cache
+              mountPath: /model-cache
+
+      volumes:
+        - name: aiperf-config
+          configMap:
+            name: mooncake-aiperf-config
+
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
