@@ -50,6 +50,17 @@ fn build_protos() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .type_attribute(".", "#[derive(serde::Serialize,serde::Deserialize)]")
         .compile_protos(&["src/grpc/protos/kserve.proto"], &["src/grpc/protos"])?;
+    println!("cargo:rerun-if-changed=src/kv_dc_relay/protocol/relay.proto");
+    let descriptor_path = PathBuf::from(env::var(OUT_DIR)?).join("relay_descriptor.bin");
+    tonic_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .bytes(["."])
+        .file_descriptor_set_path(descriptor_path)
+        .compile_protos(
+            &["src/kv_dc_relay/protocol/relay.proto"],
+            &["src/kv_dc_relay/protocol"],
+        )?;
     Ok(())
 }
 
