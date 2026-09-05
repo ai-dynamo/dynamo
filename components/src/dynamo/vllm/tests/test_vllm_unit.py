@@ -424,6 +424,24 @@ def test_parse_args_splits_served_model_name_into_aliases(mock_vllm_cli):
     assert config.served_model_aliases == ["alias-one", "alias-two"]
 
 
+def test_parse_args_logs_multi_name_registration(mock_vllm_cli, caplog):
+    mock_vllm_cli(
+        "--model",
+        "Qwen/Qwen3-0.6B",
+        "--served-model-name",
+        "primary",
+        "alias-one",
+    )
+    with caplog.at_level(logging.INFO, logger="dynamo.vllm.args"):
+        parse_args()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "Multi-name registration: primary='primary', aliases=['alias-one']" in message
+        for message in messages
+    ), messages
+
+
 def test_parse_args_splits_comma_packed_served_model_name(mock_vllm_cli):
     mock_vllm_cli(
         "--model",

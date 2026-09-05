@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
@@ -702,6 +702,11 @@ impl ModelManager {
         }
         self.validate_adapter_claims(&primary, adapters.iter().map(|(_, card)| card))?;
 
+        let role = representative
+            .worker_type
+            .map_or("unspecified", |worker_type| worker_type.as_str());
+        self.warn_on_alias_divergence(&primary, &namespace, &aliases, role);
+
         let worker_set = Arc::new(worker_set);
         self.get_or_create_model(&primary)
             .add_worker_set(worker_set_key.to_string(), worker_set.clone());
@@ -709,6 +714,15 @@ impl ModelManager {
             self.alias_to_primary.insert(alias.clone(), primary.clone());
             self.get_or_create_model(alias)
                 .add_worker_set(worker_set_key.to_string(), worker_set.clone());
+        }
+        if !aliases.is_empty() {
+            tracing::info!(
+                model_name = %primary,
+                aliases = ?aliases,
+                worker_set_key = %worker_set_key,
+                role = %role,
+                "Registered model aliases for discovery group"
+            );
         }
         for (_, adapter) in &adapters {
             let adapter_view = Arc::new(worker_set.adapter_view(adapter.clone()));
@@ -743,6 +757,61 @@ impl ModelManager {
         self.publish_catalog_locked();
         self.publish_lora_projection_locked(lora_after);
         Ok(())
+    }
+
+    /// Warn when the group being committed carries a different alias set than the
+    /// sibling groups already committed under the same primary model name in the
+    /// same namespace.
+    ///
+    /// An alias only some of the role-specific groups claim has an unsatisfiable
+    /// readiness DNF, so it never reaches `/v1/models` and answers 503 while the
+    /// primary name serves normally. Roles only satisfy each other's `needs`
+    /// within one namespace, so two namespaces serving the same model name are
+    /// independent deployments and their alias sets are free to differ.
+    ///
+    /// This must stay a warning and never a rejection: per `lib/llm/AGENTS.md` a
+    /// frontend interoperates with workers from the current release and the two
+    /// before it, so divergence is legitimate mid rolling upgrade.
+    fn warn_on_alias_divergence(
+        &self,
+        primary: &str,
+        namespace: &str,
+        aliases: &[String],
+        role: &str,
+    ) {
+        let mut sibling_aliases: BTreeSet<String> = BTreeSet::new();
+        let mut has_sibling = false;
+        for group in self.discovery_groups.iter() {
+            if group.primary != primary || group.namespace != namespace {
+                continue;
+            }
+            has_sibling = true;
+            sibling_aliases.extend(group.aliases.iter().cloned());
+        }
+        if !has_sibling {
+            return;
+        }
+        let incoming: BTreeSet<String> = aliases.iter().cloned().collect();
+        let missing_here: Vec<&str> = sibling_aliases
+            .difference(&incoming)
+            .map(String::as_str)
+            .collect();
+        let extra_here: Vec<&str> = incoming
+            .difference(&sibling_aliases)
+            .map(String::as_str)
+            .collect();
+        if missing_here.is_empty() && extra_here.is_empty() {
+            return;
+        }
+        tracing::warn!(
+            model_name = %primary,
+            namespace = %namespace,
+            role = %role,
+            claimed_by_siblings_only = ?missing_here,
+            claimed_by_this_group_only = ?extra_here,
+            "Alias set diverges across discovery groups for one model; an alias claimed \
+             by only some roles cannot become ready and will not be served"
+        );
     }
 
     fn validate_adapter_claims<'a>(
@@ -3327,6 +3396,275 @@ mod tests {
         assert!(manager.get_model("committed").is_none());
         assert!(manager.get_model("alias").is_none());
         assert_eq!(manager.resolve_canonical_name("alias"), "alias");
+    }
+
+    #[derive(Debug, Clone)]
+    struct CapturedEvent {
+        message: String,
+        fields: HashMap<String, String>,
+    }
+
+    impl CapturedEvent {
+        fn field(&self, name: &str) -> &str {
+            self.fields
+                .get(name)
+                .map(String::as_str)
+                .unwrap_or_default()
+        }
+    }
+
+    struct CaptureLayer(Arc<std::sync::Mutex<Vec<CapturedEvent>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Visitor(CapturedEvent);
+
+            impl Visitor {
+                fn put(&mut self, name: &str, value: String) {
+                    if name == "message" {
+                        self.0.message = value;
+                    } else {
+                        self.0.fields.insert(name.to_string(), value);
+                    }
+                }
+            }
+
+            impl tracing::field::Visit for Visitor {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.put(field.name(), format!("{value:?}"));
+                }
+
+                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                    self.put(field.name(), value.to_string());
+                }
+            }
+
+            let mut visitor = Visitor(CapturedEvent {
+                message: String::new(),
+                fields: HashMap::new(),
+            });
+            event.record(&mut visitor);
+            self.0.lock().unwrap().push(visitor.0);
+        }
+    }
+
+    fn capture_events<T>(body: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
+        let out = tracing::subscriber::with_default(subscriber, body);
+        let events = captured.lock().unwrap().clone();
+        (out, events)
+    }
+
+    fn alias_claim_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+        events
+            .iter()
+            .filter(|event| event.message.contains("Registered model aliases"))
+            .collect()
+    }
+
+    fn alias_divergence_events(events: &[CapturedEvent]) -> Vec<&CapturedEvent> {
+        events
+            .iter()
+            .filter(|event| event.message.contains("Alias set diverges"))
+            .collect()
+    }
+
+    /// A card for one role of a two-role prefill/decode topology. `needs` names the
+    /// peer role, so neither role is ready on its own.
+    fn alias_role_card(role: WorkerType, aliases: &[&str]) -> ModelDeploymentCard {
+        let mut card = ModelDeploymentCard::with_name_only("alias-topology-model");
+        card.worker_type = Some(role);
+        card.model_type = match role {
+            WorkerType::Prefill => crate::model_type::ModelType::empty(),
+            _ => crate::model_type::ModelType::Chat,
+        };
+        card.needs = match role {
+            WorkerType::Prefill => vec![vec![WorkerType::Decode]],
+            WorkerType::Decode => vec![vec![WorkerType::Prefill]],
+            _ => Vec::new(),
+        };
+        card.aliases = aliases.iter().map(|alias| alias.to_string()).collect();
+        card
+    }
+
+    fn commit_alias_role(manager: &ModelManager, role: WorkerType, aliases: &[&str]) {
+        commit_alias_role_in(manager, "alias-deployment", role, aliases);
+    }
+
+    /// Commit one role of the alias topology into `namespace`. Every identifier is
+    /// namespace-qualified so the same role can be committed in two namespaces.
+    fn commit_alias_role_in(
+        manager: &ModelManager,
+        namespace: &str,
+        role: WorkerType,
+        aliases: &[&str],
+    ) {
+        let card = alias_role_card(role, aliases);
+        let worker_set = WorkerSet::new(
+            namespace.to_string(),
+            card.mdcsum().to_string(),
+            card.clone(),
+        );
+        manager
+            .commit_discovery_group(
+                &format!("alias-group-{namespace}-{role}"),
+                &format!("{namespace}-{role}"),
+                worker_set,
+                vec![(format!("alias-instance-{namespace}-{role}"), card)],
+                Vec::new(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn disaggregated_pair_sharing_an_alias_reports_one_claim_per_role() {
+        let manager = ModelManager::new();
+
+        let (_, events) = capture_events(|| {
+            commit_alias_role(&manager, WorkerType::Prefill, &["shared-alias"]);
+            commit_alias_role(&manager, WorkerType::Decode, &["shared-alias"]);
+        });
+
+        let claims = alias_claim_events(&events);
+        assert_eq!(claims.len(), 2, "expected one claim per group: {events:#?}");
+        let roles = claims
+            .iter()
+            .map(|event| event.field("role"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(roles, BTreeSet::from(["decode", "prefill"]));
+        for claim in &claims {
+            assert_eq!(claim.field("model_name"), "alias-topology-model");
+            assert!(claim.field("aliases").contains("shared-alias"));
+        }
+        assert!(
+            alias_divergence_events(&events).is_empty(),
+            "matching alias sets must not warn: {events:#?}"
+        );
+
+        assert_eq!(
+            manager.resolve_canonical_name("shared-alias"),
+            "alias-topology-model"
+        );
+        assert!(
+            manager
+                .get_model("shared-alias")
+                .unwrap()
+                .has_ready_workers()
+        );
+    }
+
+    #[test]
+    fn disaggregated_pair_disagreeing_on_an_alias_warns_and_still_commits() {
+        let manager = ModelManager::new();
+
+        let (_, events) = capture_events(|| {
+            commit_alias_role(&manager, WorkerType::Prefill, &[]);
+            commit_alias_role(&manager, WorkerType::Decode, &["decode-only-alias"]);
+        });
+
+        let warnings = alias_divergence_events(&events);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one divergence warning: {events:#?}"
+        );
+        assert_eq!(warnings[0].field("role"), "decode");
+        assert_eq!(warnings[0].field("model_name"), "alias-topology-model");
+        assert!(
+            warnings[0]
+                .field("claimed_by_this_group_only")
+                .contains("decode-only-alias")
+        );
+
+        assert!(
+            manager
+                .get_model("alias-topology-model")
+                .unwrap()
+                .has_ready_workers()
+        );
+        assert_eq!(
+            manager.resolve_canonical_name("decode-only-alias"),
+            "alias-topology-model"
+        );
+        assert!(
+            !manager
+                .get_model("decode-only-alias")
+                .unwrap()
+                .has_ready_workers()
+        );
+    }
+
+    #[test]
+    fn same_model_in_two_namespaces_may_carry_different_alias_sets() {
+        let manager = ModelManager::new();
+
+        let (_, events) = capture_events(|| {
+            commit_alias_role_in(&manager, "tenant-a", WorkerType::Aggregated, &["alias-a"]);
+            commit_alias_role_in(&manager, "tenant-b", WorkerType::Aggregated, &["alias-b"]);
+        });
+
+        assert!(
+            alias_divergence_events(&events).is_empty(),
+            "separate namespaces are separate deployments and must not warn: {events:#?}"
+        );
+        for alias in ["alias-a", "alias-b"] {
+            assert!(
+                manager.get_model(alias).unwrap().has_ready_workers(),
+                "{alias} is backed by a complete deployment and must be servable"
+            );
+        }
+    }
+
+    #[test]
+    fn aggregated_group_with_aliases_reports_the_same_claim_shape() {
+        let manager = ModelManager::new();
+
+        let (_, events) = capture_events(|| {
+            commit_alias_role(&manager, WorkerType::Aggregated, &["shared-alias"]);
+        });
+
+        let claims = alias_claim_events(&events);
+        assert_eq!(claims.len(), 1, "expected one claim: {events:#?}");
+        assert_eq!(claims[0].field("role"), "aggregated");
+        assert_eq!(claims[0].field("model_name"), "alias-topology-model");
+        assert!(claims[0].field("aliases").contains("shared-alias"));
+        assert!(alias_divergence_events(&events).is_empty());
+        assert!(
+            manager
+                .get_model("shared-alias")
+                .unwrap()
+                .has_ready_workers()
+        );
+    }
+
+    #[test]
+    fn groups_without_aliases_emit_neither_new_event() {
+        let manager = ModelManager::new();
+
+        let (_, events) = capture_events(|| {
+            commit_alias_role(&manager, WorkerType::Prefill, &[]);
+            commit_alias_role(&manager, WorkerType::Decode, &[]);
+        });
+
+        assert!(
+            alias_claim_events(&events).is_empty(),
+            "a model without aliases must stay quiet: {events:#?}"
+        );
+        assert!(
+            alias_divergence_events(&events).is_empty(),
+            "two groups that both carry no alias do not diverge: {events:#?}"
+        );
     }
 
     #[test]
