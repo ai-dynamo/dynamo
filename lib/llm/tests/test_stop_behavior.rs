@@ -126,6 +126,18 @@ fn min_tokens_delays_stop() {
 }
 
 #[test]
+fn min_tokens_stops_at_eos_once_floor_is_reached() {
+    let mut decoder = make_decoder(None, Some(2), Some(vec![EOS]), None, false);
+    let result = decoder.process_token_ids(&[HI, THERE, EOS]).unwrap();
+
+    assert_eq!(result.text.as_deref(), Some("hithere"));
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::HiddenStopTokenDetected(id)) if id == EOS
+    ));
+}
+
+#[test]
 fn stop_token_priority_over_sequence() {
     let mut decoder = make_decoder(None, None, Some(vec![STOP]), Some(vec!["STOP"]), false);
     let result = decoder.process_token_ids(&[HI, STOP]).unwrap();

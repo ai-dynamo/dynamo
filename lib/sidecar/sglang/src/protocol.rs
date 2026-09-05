@@ -40,16 +40,10 @@ pub(crate) fn build_generate_request(
             .transpose()
             .map_err(|_| client::invalid_arg("max_tokens does not fit in i32"))?
     };
-    let min_new_tokens = if mode.is_prefill() {
-        None
-    } else {
-        request
-            .stop_conditions
-            .min_tokens
-            .map(i32::try_from)
-            .transpose()
-            .map_err(|_| client::invalid_arg("min_tokens does not fit in i32"))?
-    };
+    // SGLang rejects `min_new_tokens` without a tokenizer and this path never has one, so the
+    // `Decoder` in `lib/llm/src/backend.rs` enforces the floor and the engine is held open.
+    let hold_engine_open =
+        !mode.is_prefill() && request.stop_conditions.min_tokens.unwrap_or(0) > 0;
 
     let mut stop_token_ids = Vec::new();
     for tokens in [
@@ -68,6 +62,13 @@ pub(crate) fn build_generate_request(
             }
         }
     }
+    let mut stop = request.stop_conditions.stop.clone().unwrap_or_default();
+    if hold_engine_open {
+        // The `Decoder` withholds every stop until the floor is reached, stop strings
+        // included, so any stop left with the engine can end the stream below the floor.
+        stop_token_ids.clear();
+        stop.clear();
+    }
 
     let guided = request.sampling_options.guided_decoding.as_ref();
     let sampling_params = pb::SamplingParams {
@@ -79,10 +80,14 @@ pub(crate) fn build_generate_request(
         presence_penalty: request.sampling_options.presence_penalty,
         repetition_penalty: request.sampling_options.repetition_penalty,
         max_new_tokens,
-        min_new_tokens,
-        stop: request.stop_conditions.stop.clone().unwrap_or_default(),
+        min_new_tokens: None,
+        stop,
         stop_token_ids,
-        ignore_eos: request.stop_conditions.ignore_eos,
+        ignore_eos: if hold_engine_open {
+            Some(true)
+        } else {
+            request.stop_conditions.ignore_eos
+        },
         n: request.sampling_options.n.map(i32::from),
         json_schema: guided
             .and_then(|value| value.json.as_ref())
@@ -647,6 +652,54 @@ mod tests {
         assert_eq!(mapped.top_logprobs_num, Some(0));
         assert_eq!(mapped.logprob_start_len, Some(-1));
         assert_eq!(mapped.disaggregated_params.unwrap().bootstrap_port, 5001);
+    }
+
+    #[test]
+    fn decode_min_tokens_is_left_to_the_frontend_and_engine_is_held_open() {
+        let mut request = request();
+        request.stop_conditions.min_tokens = Some(4);
+        request.stop_conditions.stop_token_ids = Some(vec![7]);
+        request.stop_conditions.stop_token_ids_hidden = Some(vec![151643]);
+        request.stop_conditions.stop = Some(vec!["STOP".to_string()]);
+
+        let mapped = build_generate_request(
+            &request,
+            "rid-min",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        let sampling = mapped.sampling_params.unwrap();
+
+        assert_eq!(sampling.min_new_tokens, None);
+        assert!(sampling.stop_token_ids.is_empty());
+        assert!(sampling.stop.is_empty());
+        assert_eq!(sampling.ignore_eos, Some(true));
+        assert_eq!(sampling.max_new_tokens, Some(8));
+    }
+
+    #[test]
+    fn decode_without_min_tokens_keeps_engine_side_stopping() {
+        let mut request = request();
+        request.stop_conditions.stop_token_ids = Some(vec![7]);
+        request.stop_conditions.stop_token_ids_hidden = Some(vec![151643]);
+        request.stop_conditions.stop = Some(vec!["STOP".to_string()]);
+
+        let mapped = build_generate_request(
+            &request,
+            "rid-no-min",
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        let sampling = mapped.sampling_params.unwrap();
+
+        assert_eq!(sampling.min_new_tokens, None);
+        assert_eq!(sampling.stop_token_ids, vec![7, 151643]);
+        assert_eq!(sampling.stop, vec!["STOP".to_string()]);
+        assert_eq!(sampling.ignore_eos, None);
     }
 
     #[test]

@@ -434,11 +434,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             _plain = stop_conditions.get("stop_token_ids") or []
             _merged = list(set(_hidden).union(_plain))
             stop_token_ids = _merged if _merged else None
+            # SGLang rejects min_new_tokens without a tokenizer, so Dynamo's decoder
+            # enforces the floor and the engine is held open until it stops the request.
+            hold_engine_open = (stop_conditions.get("min_tokens") or 0) > 0
+            if hold_engine_open:
+                stop_token_ids = None
             param_mapping = {
                 "n": sampling_opts.get("n"),
                 "max_new_tokens": stop_conditions.get("max_tokens"),
-                "min_new_tokens": stop_conditions.get("min_tokens"),
-                "ignore_eos": stop_conditions.get("ignore_eos"),
+                "ignore_eos": True
+                if hold_engine_open
+                else stop_conditions.get("ignore_eos"),
                 "stop_token_ids": stop_token_ids,
                 **_sampling_option_params(sampling_opts),
                 **self._get_guided_decoding_params(
