@@ -2383,10 +2383,7 @@ async fn start_images_service(
 
 async fn post_images_generation(port: u16) -> reqwest::Response {
     reqwest::Client::new()
-        .post(format!(
-            "http://localhost:{}/v1/images/generations",
-            port
-        ))
+        .post(format!("http://localhost:{}/v1/images/generations", port))
         .json(&serde_json::json!({
             "model": "image-model",
             "prompt": "a red apple",
