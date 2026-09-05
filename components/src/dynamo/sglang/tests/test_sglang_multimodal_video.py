@@ -103,6 +103,44 @@ def test_extract_media_inputs_supports_mixed_image_and_video():
     assert video_urls == ["https://example.com/clip.mp4"]
 
 
+@pytest.mark.asyncio
+async def test_encode_media_uses_sglang_0_5_19_pipeline():
+    embeddings = torch.ones((4, 8))
+    preprocess_result = SimpleNamespace(grid_thw=[[1, 2, 2]])
+    encode_context = SimpleNamespace(
+        preprocess_result=preprocess_result,
+        aux_data={"example": "value"},
+    )
+    calls = []
+
+    class _Encoder:
+        async def _prepare_encode_context(
+            self, requests, modality, *, use_global_cache
+        ):
+            calls.append((requests, modality, use_global_cache))
+            return encode_context
+
+        async def _compute_embedding(self, context, *, keep_on_gpu):
+            assert context is encode_context
+            assert keep_on_gpu is False
+            return embeddings
+
+    handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
+    handler.encoder = _Encoder()
+
+    grid_thw, result, aux_data = await handler._encode_media(
+        ["https://example.com/image.png"], Modality.IMAGE
+    )
+
+    assert grid_thw == [[1, 2, 2]]
+    assert result is embeddings
+    assert aux_data == {"example": "value"}
+    requests, modality, use_global_cache = calls[0]
+    assert requests[0]["mm_items"] == ["https://example.com/image.png"]
+    assert modality == Modality.IMAGE
+    assert use_global_cache is False
+
+
 @pytest.mark.multimodal
 def test_extract_media_inputs_rejects_multimodal_cache_uuid():
     handler = MultimodalEncodeWorkerHandler.__new__(MultimodalEncodeWorkerHandler)
@@ -524,26 +562,35 @@ async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
     ndarray, and transformers >= 5.12 strict-rejects the resulting
     ``video_metadata=[None]``. ``_install_nvdec_video_metadata_shim`` wraps it so
     the ndarray carries a valid dict instead (validated end-to-end on gpu-ts
-    against the real ``MMEncoder._encode``: before FAIL -> after PASS).
+    against the real MMEncoder pipeline: before FAIL -> after PASS).
     """
-    es = pytest.importorskip("sglang.srt.disaggregation.encode_server")
+    try:
+        encoder_preprocessor = importlib.import_module(
+            "sglang.srt.disaggregation.encoder.preprocessor"
+        )
+    except ImportError:
+        encoder_preprocessor = pytest.importorskip(
+            "sglang.srt.disaggregation.encode_server"
+        )
     from dynamo.sglang.request_handlers.multimodal.encode_worker_handler import (
         _NVDEC_SHIM_FPS,
         _install_nvdec_video_metadata_shim,
     )
 
-    saved = es.preprocess_video
+    saved = encoder_preprocessor.preprocess_video
     try:
         _install_nvdec_video_metadata_shim()
-        assert getattr(es.preprocess_video, "_dynamo_nvdec_shim", False)
+        assert getattr(
+            encoder_preprocessor.preprocess_video, "_dynamo_nvdec_shim", False
+        )
 
         # Idempotent: a second install must not double-wrap.
-        wrapped = es.preprocess_video
+        wrapped = encoder_preprocessor.preprocess_video
         _install_nvdec_video_metadata_shim()
-        assert es.preprocess_video is wrapped
+        assert encoder_preprocessor.preprocess_video is wrapped
 
         frames = np.zeros((5, 8, 8, 3), dtype=np.uint8)
-        video, meta = await es.preprocess_video(frames)
+        video, meta = await encoder_preprocessor.preprocess_video(frames)
         assert video is frames
         assert meta == {
             "fps": _NVDEC_SHIM_FPS,
@@ -554,10 +601,10 @@ async def test_nvdec_video_metadata_shim_stamps_valid_metadata():
         }
 
         # Non-ndarray inputs keep None metadata (the shim only touches pixels).
-        _, meta_none = await es.preprocess_video("not-an-array")
+        _, meta_none = await encoder_preprocessor.preprocess_video("not-an-array")
         assert meta_none is None
     finally:
-        es.preprocess_video = saved
+        encoder_preprocessor.preprocess_video = saved
 
 
 # ---------------------------------------------------------------------------

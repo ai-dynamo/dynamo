@@ -180,6 +180,7 @@ STUB_MODULES = [
     "sglang.srt.utils",
     "sglang.srt.utils.hf_transformers_utils",
     "sglang.srt.utils.network",
+    "sglang.srt.utils.server_args_config_parser",
     "sglang.srt.utils.video_decoder",
     "sglang.srt.disaggregation",
     "sglang.srt.disaggregation.kv_events",
