@@ -22,6 +22,7 @@ from tests.utils.payloads import (
     ImageTokenMetricsPayload,
     KvEventMetricsPayload,
     LMCacheMetricsPayload,
+    LMCacheMPMetricsPayload,
     MetricsPayload,
     PoolingPayload,
     ResponsesPayload,
@@ -349,6 +350,23 @@ def metric_payload_default(
     else:
         # Default to base MetricsPayload for unknown backends
         return MetricsPayload(**common_args)
+
+
+def lmcache_mp_hit_metrics_payload(port: int) -> LMCacheMPMetricsPayload:
+    """Assert the LMCache MP server recorded pool lookup hits.
+
+    Targets the MP server's own HTTP metrics endpoint (``port`` is the
+    script's ``LMCACHE_HTTP_PORT``), not a worker system port, so the
+    harness's DefaultPort remapping leaves it untouched.
+    """
+    return LMCacheMPMetricsPayload(
+        body={},
+        repeat_count=1,
+        expected_log=[],
+        expected_response=[],
+        min_num_requests=0,
+        port=port,
+    )
 
 
 def image_token_metrics_payload(

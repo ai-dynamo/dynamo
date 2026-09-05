@@ -2074,6 +2074,37 @@ class LMCacheMetricsPayload(MetricsPayload):
 
 
 @dataclass
+class LMCacheMPMetricsPayload(MetricsPayload):
+    """Metrics validation against the LMCache MP server's own endpoint.
+
+    Asserts the shared pool served lookup hits. The hit counter is only
+    incremented by a lookup that found tokens in the pool, so a worker
+    that silently recomputes instead of loading can never satisfy it.
+    """
+
+    def _get_common_metric_checks(self) -> list[MetricCheck]:
+        # The MP server exposes lmcache_mp_* metrics only, none of the
+        # dynamo_component_* series the base class checks.
+        return []
+
+    def _get_backend_specific_checks(self) -> list[MetricCheck]:
+        def metric_pattern(name: str) -> str:
+            return rf"{name}(?:\{{[^}}]*\}})?\s+([\d.eE+-]+)"
+
+        return [
+            MetricCheck(
+                name="lmcache_mp_lookup_hit_tokens_total",
+                pattern=metric_pattern,
+                validator=lambda value: float(value) > 0,
+                error_msg=lambda name, value: (
+                    f"{name} should be > 0 after the KV handoff, but got {value}"
+                ),
+                success_msg=lambda name, value: f"SUCCESS: {name} = {value}",
+            ),
+        ]
+
+
+@dataclass
 class SGLangMetricsPayload(MetricsPayload):
     """Metrics validation for SGLang backend with auto-label checks"""
 
