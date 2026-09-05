@@ -67,6 +67,7 @@ to it — edit only the canonical copy. Reach for the right group first:
 - `configure-aiperf-benchmark` — freeze and render a comparable AIPerf workload for a deployed candidate
 - `run-aiperf-benchmark` — execute and collect one run-scoped AIPerf Kubernetes benchmark
 - `analyze-aiperf-results` — validate AIPerf evidence, evaluate SLOs, and compare valid same-series runs
+- `find-serving-recipe` — walk the ordered recipe catalogs with provenance gates and write a recipe dossier
 - `dynamo-router-starter` — start/patch router modes with smoke checks
 - `dynamo-interconnect-check` — validate NIXL/UCX/NCCL readiness for disaggregation
 - `troubleshoot-dynamo` — diagnose failed or unhealthy deployments
