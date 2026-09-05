@@ -212,15 +212,15 @@ type DynamoGraphDeploymentStatus struct {
 
 // ServiceCheckpointStatus contains checkpoint information for a single service.
 type ServiceCheckpointStatus struct {
-	// CheckpointName is the name of the associated Checkpoint CR
+	// CheckpointName is the name of the active PodSnapshot.
 	// +optional
 	CheckpointName string `json:"checkpointName,omitempty"`
-	// CheckpointID is the artifact ID used by the snapshot protocol
+	// CheckpointID is a deprecated legacy Dynamo artifact ID. Native standalone
+	// snapshots leave this field empty.
 	// +optional
 	CheckpointID string `json:"checkpointID,omitempty"`
-	// IdentityHash is the computed hash of the checkpoint identity
-	// Deprecated: automatic checkpoints use CheckpointID. This field is retained
-	// for older status consumers.
+	// IdentityHash is a deprecated legacy checkpoint identity hash. Native
+	// standalone snapshots leave this field empty.
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
 	// Ready indicates the checkpoint artifact is ready for future pods to restore.
