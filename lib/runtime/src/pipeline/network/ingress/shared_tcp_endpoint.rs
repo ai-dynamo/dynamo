@@ -512,8 +512,16 @@ impl SharedTcpServer {
             notify: Arc::new(Notify::new()),
         });
 
-        // Insert handler FIRST to ensure it's ready to receive requests
-        self.handlers.insert(endpoint_path, handler);
+        match self.handlers.entry(endpoint_path.clone()) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(handler);
+            }
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                anyhow::bail!(
+                    "Endpoint '{fqn_endpoint}' is already registered at '{endpoint_path}'"
+                );
+            }
+        }
 
         system_health.lock().set_endpoint_registered(&endpoint_name);
 
@@ -527,10 +535,16 @@ impl SharedTcpServer {
 
     pub async fn unregister_endpoint(&self, endpoint_path: &str, endpoint_name: &str) {
         if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
-            handler
-                .system_health
-                .lock()
-                .set_endpoint_health_status(endpoint_name, crate::HealthStatus::NotReady);
+            let has_another_registration = self.handlers.iter().any(|entry| {
+                entry.endpoint_name == endpoint_name
+                    && Arc::ptr_eq(&entry.system_health, &handler.system_health)
+            });
+            if !has_another_registration {
+                handler
+                    .system_health
+                    .lock()
+                    .set_endpoint_health_status(endpoint_name, crate::HealthStatus::NotReady);
+            }
             tracing::info!(
                 endpoint_name = %endpoint_name,
                 endpoint_path = %endpoint_path,
@@ -798,20 +812,10 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         .await
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
-        // With multiple workers per process, each registers with a unique key
-        // "{instance_id}/{endpoint_name}". Find and remove all matching entries.
-        let suffix = format!("/{endpoint_name}");
-        let keys_to_remove: Vec<String> = self
-            .handlers
-            .iter()
-            .filter(|entry| entry.key().ends_with(&suffix))
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in keys_to_remove {
-            self.unregister_endpoint(&key, endpoint_name).await;
-        }
+    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+        let endpoint_path = format!("{instance_id:x}/{endpoint_name}");
+        self.unregister_endpoint(&endpoint_path, endpoint_name)
+            .await;
         Ok(())
     }
 
@@ -897,6 +901,74 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn request_plane_cleanup_is_scoped_to_one_instance() {
+        let server =
+            SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), CancellationToken::new()).unwrap();
+        let system_health = Arc::new(Mutex::new(SystemHealth::new(
+            crate::HealthStatus::Ready,
+            vec![],
+            false,
+            "/health".to_string(),
+            "/live".to_string(),
+        )));
+
+        for instance_id in [1, 2] {
+            crate::pipeline::network::ingress::unified_server::RequestPlaneServer::register_endpoint(
+                server.as_ref(),
+                "shared".to_string(),
+                Arc::new(SlowMockHandler::new(Duration::ZERO)),
+                instance_id,
+                "test".to_string(),
+                "component".to_string(),
+                Arc::clone(&system_health),
+            )
+            .await
+            .unwrap();
+        }
+
+        let duplicate = crate::pipeline::network::ingress::unified_server::RequestPlaneServer::register_endpoint(
+            server.as_ref(),
+            "shared".to_string(),
+            Arc::new(SlowMockHandler::new(Duration::ZERO)),
+            2,
+            "test".to_string(),
+            "other-component".to_string(),
+            Arc::clone(&system_health),
+        )
+        .await;
+        assert!(duplicate.is_err());
+        assert_eq!(server.handlers.len(), 2);
+
+        crate::pipeline::network::ingress::unified_server::RequestPlaneServer::unregister_endpoint(
+            server.as_ref(),
+            "shared",
+            1,
+        )
+        .await
+        .unwrap();
+
+        assert!(!server.handlers.contains_key("1/shared"));
+        assert!(server.handlers.contains_key("2/shared"));
+        assert_eq!(
+            system_health.lock().get_endpoint_health_status("shared"),
+            Some(crate::HealthStatus::Ready)
+        );
+
+        crate::pipeline::network::ingress::unified_server::RequestPlaneServer::unregister_endpoint(
+            server.as_ref(),
+            "shared",
+            2,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            system_health.lock().get_endpoint_health_status("shared"),
+            Some(crate::HealthStatus::NotReady)
+        );
     }
 
     #[tokio::test]
