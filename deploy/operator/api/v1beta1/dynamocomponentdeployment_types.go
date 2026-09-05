@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
@@ -342,7 +343,7 @@ func (s *DynamoComponentDeploymentSharedSpec) IsInterPodGMSEnabled() bool {
 func (s *DynamoComponentDeploymentSharedSpec) IsGroveScalingGroupForced() bool {
 	return s.Experimental != nil &&
 		s.Experimental.Grove != nil &&
-		s.Experimental.Grove.ForceScalingGroup
+		ptr.Deref(s.Experimental.Grove.ForceScalingGroup, false)
 }
 
 // UsesPCSG reports whether Grove renders this component as a

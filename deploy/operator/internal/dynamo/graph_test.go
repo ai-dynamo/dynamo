@@ -5286,7 +5286,7 @@ func TestExpandRolesForComponent_SingleNodeForceScalingGroup(t *testing.T) {
 	component := &v1beta1.DynamoComponentDeploymentSharedSpec{
 		Replicas: ptr.To(int32(4)),
 		Experimental: &v1beta1.ExperimentalSpec{
-			Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+			Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
 		},
 	}
 	got := expandRolesForComponent("svc", component.Replicas, 1, component)
@@ -9012,7 +9012,7 @@ func TestGenerateGrovePodCliqueSet_SingleNodeForceScalingGroup(t *testing.T) {
 	beta := betaDGD(t, dgd)
 	require.Len(t, beta.Spec.Components, 1)
 	beta.Spec.Components[0].Experimental = &v1beta1.ExperimentalSpec{
-		Grove: &v1beta1.GroveSpec{ForceScalingGroup: true},
+		Grove: &v1beta1.GroveSpec{ForceScalingGroup: ptr.To(true)},
 	}
 
 	got, err := GenerateGrovePodCliqueSet(
