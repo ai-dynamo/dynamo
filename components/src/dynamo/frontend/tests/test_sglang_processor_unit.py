@@ -3917,7 +3917,64 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             eos_token_ids=[2, 3],
         )
 
-        assert post._strip_trailing_eos_token_ids([10, 3, 2]) == [10]
+        assert post._strip_trailing_stop_token_ids([10, 3, 2]) == [10]
+
+    def test_request_stop_token_id_is_hidden_by_python_frontend(self):
+        """Match the Rust frontend when SGLang returns a request stop token."""
+
+        class RequestTokenizer(self.ByteTokenizer):
+            chat_template = "{{ messages }}"
+            eos_token_id = 0
+
+            def encode(self, text, *, add_special_tokens=False):
+                del add_special_tokens
+                return list(text.encode())
+
+            def apply_chat_template(self, messages, **kwargs):
+                del messages, kwargs
+                return [1, 2, 3]
+
+        tokenizer = RequestTokenizer()
+        generated_ids = tokenizer.encode("Hello world", add_special_tokens=False)
+        assert len(generated_ids) >= 2
+        stop_token_id = generated_ids[-1]
+        visible_ids = generated_ids[:-1]
+        routed_engine = FakeRoutedEngine(
+            items=[
+                {
+                    # Native SGLang includes the matched stop position.
+                    "token_ids": generated_ids,
+                    "finish_reason": "stop",
+                }
+            ]
+        )
+        processor = SglangProcessor(
+            tokenizer=tokenizer,
+            routed_engine=routed_engine,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=[tokenizer.eos_token_id],
+        )
+        request = {
+            "model": MODEL,
+            "messages": [{"role": "user", "content": "Say hello"}],
+            "stop_token_ids": [stop_token_id],
+        }
+
+        async def collect():
+            return [item async for item in processor.generator(request)]
+
+        items = asyncio.run(collect())
+        content = "".join(
+            item["data"]["choices"][0]["delta"].get("content", "")
+            for item in items
+            if "data" in item
+        )
+
+        assert routed_engine.requests[0]["stop_conditions"]["stop_token_ids"] == [
+            stop_token_id
+        ]
+        assert content == tokenizer.decode(visible_ids, skip_special_tokens=True)
 
 
 # ---------------------------------------------------------------------------

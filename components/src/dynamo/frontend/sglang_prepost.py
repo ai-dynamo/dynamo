@@ -1013,6 +1013,7 @@ class SglangStreamingPostProcessor:
         eos_token_ids: list[int] | None = None,
         prompt_token_ids: list[int] | None = None,
         stop_strings: set[str] | None = None,
+        stop_token_ids: set[int] | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.tool_call_parser = tool_call_parser
@@ -1034,7 +1035,12 @@ class SglangStreamingPostProcessor:
         self._pending_guided_reasoning_parts: list[str] | None = (
             [] if self._is_json_array_parser and reasoning_parser is not None else None
         )
-        self._eos_token_ids = set(eos_token_ids or [])
+        # The frontend owns text shaping. Keep every stop token in the raw
+        # engine stream, but exclude model and request stop IDs when decoding
+        # user-visible text.
+        self._trailing_stop_token_ids = set(eos_token_ids or []) | set(
+            stop_token_ids or []
+        )
         self._stop_strings = stop_strings or set()
         self._pending_stop_text = ""
         self._locally_finished = False
@@ -1063,10 +1069,10 @@ class SglangStreamingPostProcessor:
         # Full text accumulator for robust finish-time re-parse.
         self._tool_text_parts: list[str] = []
 
-    def _strip_trailing_eos_token_ids(self, token_ids: list[int]) -> list[int]:
-        if not self._eos_token_ids:
+    def _strip_trailing_stop_token_ids(self, token_ids: list[int]) -> list[int]:
+        if not self._trailing_stop_token_ids:
             return token_ids
-        while token_ids and token_ids[-1] in self._eos_token_ids:
+        while token_ids and token_ids[-1] in self._trailing_stop_token_ids:
             token_ids.pop()
         return token_ids
 
@@ -1393,7 +1399,7 @@ class SglangStreamingPostProcessor:
         top_logprobs = engine_response.get("top_logprobs")
         if finish_reason is not None:
             raw_token_count = len(token_ids)
-            token_ids = self._strip_trailing_eos_token_ids(list(token_ids))
+            token_ids = self._strip_trailing_stop_token_ids(list(token_ids))
             retained_token_count = len(token_ids)
             if log_probs is not None and len(log_probs) == raw_token_count:
                 log_probs = log_probs[:retained_token_count]

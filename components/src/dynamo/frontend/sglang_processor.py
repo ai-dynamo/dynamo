@@ -146,6 +146,17 @@ def _request_stop_strings(request: dict[str, Any]) -> set[str]:
     return set()
 
 
+def _request_stop_token_ids(request: dict[str, Any]) -> list[int]:
+    """Return the request token stops forwarded to the engine."""
+    values: list[Any] = list(request.get("stop_token_ids") or [])
+    stop = request.get("stop")
+    if isinstance(stop, list) and all(
+        isinstance(item, int) and not isinstance(item, bool) for item in stop
+    ):
+        values.extend(stop)
+    return _normalize_eos_token_ids(values)
+
+
 def _tokenizer_eos_token_ids(tokenizer: Any) -> list[int]:
     eos_token_ids = _normalize_eos_token_ids(getattr(tokenizer, "eos_token_ids", None))
     if eos_token_ids:
@@ -378,13 +389,12 @@ def _build_dynamo_preproc(
     max_tokens = request.get("max_completion_tokens") or request.get("max_tokens")
 
     stop = request.get("stop")
-    stop_token_ids = request.get("stop_token_ids", [])
+    stop_token_ids = _request_stop_token_ids(request)
     if isinstance(stop, str):
         stop = [stop]
     elif isinstance(stop, list) and all(
         isinstance(item, int) and not isinstance(item, bool) for item in stop
     ):
-        stop_token_ids = [*stop_token_ids, *stop]
         stop = []
     elif stop is None:
         stop = []
@@ -612,6 +622,7 @@ class SglangProcessor:
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=pre.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
+            stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
         async for item in self._generate_and_stream(
@@ -674,6 +685,7 @@ class SglangProcessor:
             eos_token_ids=self.eos_token_ids,
             prompt_token_ids=preproc_result.prompt_token_ids,
             stop_strings=_request_stop_strings(request),
+            stop_token_ids=set(_request_stop_token_ids(request)),
         )
 
         async for item in self._generate_and_stream(
