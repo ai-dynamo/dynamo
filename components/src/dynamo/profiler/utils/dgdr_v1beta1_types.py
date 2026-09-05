@@ -61,6 +61,7 @@ class GPUSKUType(str, Enum):
     GB200SXM = "gb200_sxm"
     GB10 = "gb10"
     B200SXM = "b200_sxm"
+    RTXPRO6000Server = "rtx_pro_6000_server"
     H200SXM = "h200_sxm"
     H100SXM = "h100_sxm"
     H100PCIe = "h100_pcie"
