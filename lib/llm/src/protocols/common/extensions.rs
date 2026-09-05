@@ -1016,6 +1016,103 @@ mod tests {
     }
 
     #[test]
+    fn generation_artifact_parses_exact_presigned_target_and_redacts_debug() {
+        let url = "https://storage.example/object%2Fpart?signature=sentinel&part=1&part=2";
+        let nvext: NvExt = serde_json::from_value(serde_json::json!({
+            "generation_artifact": {
+                "format": "generation_artifact_v1",
+                "contents": ["moe_routes", "selected_logprobs"],
+                "delivery": {
+                    "mode": "object_store",
+                    "target": {
+                        "kind": "presigned_http_put",
+                        "url": url,
+                        "max_bytes": 67108864,
+                        "required_headers": {
+                            "content-type": "application/octet-stream",
+                            "x-amz-checksum-sha256": "header-sentinel"
+                        },
+                        "object_id": "opaque-object"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let serialized = serde_json::to_value(&nvext).unwrap();
+        assert_eq!(
+            serialized["generation_artifact"]["delivery"]["target"]["url"],
+            url
+        );
+        let debug = format!("{nvext:?}");
+        assert!(!debug.contains("sentinel"));
+        assert!(!debug.contains("header-sentinel"));
+        assert!(nvext.has_non_cache_salt_fields());
+
+        let selection = NvExtResponseFieldSelection::from_nvext(Some(&nvext));
+        assert!(selection.generation_artifact);
+        assert!(!selection.engine_data);
+    }
+
+    #[test]
+    fn generation_artifact_parses_managed_target_and_rejects_invalid_contracts() {
+        let nvext: NvExt = serde_json::from_value(serde_json::json!({
+            "generation_artifact": {
+                "format": "generation_artifact_v1",
+                "contents": ["moe_routes"],
+                "delivery": {
+                    "mode": "object_store",
+                    "target": {
+                        "kind": "managed_fsspec",
+                        "profile": "training-artifacts",
+                        "object_key": "run-42/request-1/artifact.dynexp"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(nvext).unwrap()["generation_artifact"]["contents"],
+            serde_json::json!(["moe_routes"])
+        );
+
+        for invalid in [
+            serde_json::json!({
+                "format": "other",
+                "contents": [],
+                "delivery": {"mode": "object_store", "target": {"kind": "managed_fsspec", "profile": "p", "object_key": "x"}}
+            }),
+            serde_json::json!({
+                "format": "generation_artifact_v1",
+                "contents": ["moe_routes", "moe_routes"],
+                "delivery": {"mode": "object_store", "target": {"kind": "managed_fsspec", "profile": "p", "object_key": "x"}}
+            }),
+            serde_json::json!({
+                "format": "generation_artifact_v1",
+                "contents": ["unknown"],
+                "delivery": {"mode": "object_store", "target": {"kind": "managed_fsspec", "profile": "p", "object_key": "x"}}
+            }),
+            serde_json::json!({
+                "format": "generation_artifact_v1",
+                "contents": [],
+                "delivery": {"mode": "object_store", "target": {"kind": "presigned_http_put", "url": "", "max_bytes": 1, "object_id": "x"}}
+            }),
+            serde_json::json!({
+                "format": "generation_artifact_v1",
+                "contents": [],
+                "delivery": {"mode": "object_store", "target": {"kind": "presigned_http_put", "url": "https://example/x", "max_bytes": 0, "object_id": "x"}}
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<NvExt>(serde_json::json!({
+                    "generation_artifact": invalid
+                }))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn apply_header_routing_overrides_sets_worker_fields() {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_WORKER_INSTANCE_ID, "123".parse().unwrap());

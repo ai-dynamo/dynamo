@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
@@ -48,6 +49,7 @@ def _output(
     finish_reason=None,
     stop_reason=None,
     logprobs=None,
+    routed_experts=None,
 ):
     return SimpleNamespace(
         index=index,
@@ -55,6 +57,7 @@ def _output(
         finish_reason=finish_reason,
         stop_reason=stop_reason,
         logprobs=logprobs,
+        routed_experts=routed_experts,
     )
 
 
@@ -84,7 +87,7 @@ def _handler_with_responses(responses):
     return handler
 
 
-async def _collect_handler_chunks(responses):
+async def _collect_handler_chunks(responses, generation_artifact_session=None):
     handler = _handler_with_responses(responses)
     chunks = []
     async for chunk in BaseWorkerHandler.generate_tokens(
@@ -92,9 +95,48 @@ async def _collect_handler_chunks(responses):
         prompt=None,
         sampling_params=SamplingParams(),
         request_id="req-1",
+        generation_artifact_session=generation_artifact_session,
     ):
         chunks.append(chunk)
     return chunks, handler
+
+
+class _RecordingArtifactSession:
+    def __init__(self):
+        self.records = []
+        self.finalizations = []
+
+    def record_chunk(
+        self,
+        *,
+        choice_index,
+        prompt_token_ids,
+        completion_token_ids,
+        selected_logprobs,
+        routed_experts,
+    ):
+        self.records.append(
+            {
+                "choice_index": choice_index,
+                "prompt_token_ids": prompt_token_ids,
+                "completion_token_ids": completion_token_ids,
+                "selected_logprobs": selected_logprobs,
+                "routed_experts": routed_experts,
+            }
+        )
+
+    async def finalize_choice(self, *, choice_index, token_start):
+        self.finalizations.append(
+            {"choice_index": choice_index, "token_start": token_start}
+        )
+        return {
+            "format": "generation_artifact_v1",
+            "contents": ["moe_routes", "selected_logprobs"],
+            "state": "ready",
+            "actual_bytes": 123,
+            "sha256": "a" * 64,
+            "object_id": "opaque-1",
+        }
 
 
 def test_build_sampling_params_forces_delta_token_mode():
@@ -243,3 +285,70 @@ async def test_generate_tokens_keeps_multichunk_delta_logprobs_aligned():
     assert [
         [entry[0]["token_id"] for entry in chunk["top_logprobs"]] for chunk in chunks
     ] == [[7], [8, 9]]
+
+
+@pytest.mark.asyncio
+async def test_generation_artifact_receives_raw_routes_and_terminal_receipt() -> None:
+    routes = np.array([[[0]], [[1]]], dtype=np.int32)
+    logprobs = [
+        {7: SimpleNamespace(logprob=-0.7, rank=1, decoded_token="a")},
+        {8: SimpleNamespace(logprob=-0.8, rank=1, decoded_token="b")},
+    ]
+    session = _RecordingArtifactSession()
+    responses = [
+        _request_output(
+            [_output([7], logprobs=logprobs[:1])], prompt_token_ids=[101]
+        ),
+        _request_output(
+            [
+                _output(
+                    [8],
+                    finish_reason="length",
+                    logprobs=logprobs[1:],
+                    routed_experts=routes,
+                )
+            ],
+            prompt_token_ids=[101],
+        ),
+    ]
+
+    chunks, _ = await _collect_handler_chunks(responses, session)
+
+    assert session.records[-1]["routed_experts"] is routes
+    assert session.records[-1]["prompt_token_ids"] == [101]
+    assert [record["completion_token_ids"] for record in session.records] == [[7], [8]]
+    assert [record["selected_logprobs"] for record in session.records] == [
+        [-0.7],
+        [-0.8],
+    ]
+    assert session.finalizations == [{"choice_index": 0, "token_start": 0}]
+    assert chunks[-1]["engine_data"]["generation_artifact"]["state"] == "ready"
+
+
+def test_generation_artifact_selected_logprobs_forces_capture_only() -> None:
+    request = {
+        "token_ids": [1, 2, 3],
+        "sampling_options": {},
+        "stop_conditions": {},
+        "output_options": {},
+        "extra_args": {
+            "nvext": {
+                "generation_artifact": {
+                    "format": "generation_artifact_v1",
+                    "contents": ["selected_logprobs"],
+                    "delivery": {
+                        "mode": "object_store",
+                        "target": {
+                            "kind": "managed_fsspec",
+                            "profile": "training",
+                            "object_key": "run/request.dynexp",
+                        },
+                    },
+                }
+            }
+        },
+    }
+
+    sampling_params = build_sampling_params(request, {})
+
+    assert sampling_params.logprobs == 0

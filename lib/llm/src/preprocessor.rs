@@ -8949,6 +8949,18 @@ mod tests {
                 "extra_fields": ["completion_token_ids"],
                 "metadata_upload": {
                     "url": "s3://bucket/root/rollouts"
+                },
+                "generation_artifact": {
+                    "format": "generation_artifact_v1",
+                    "contents": ["moe_routes"],
+                    "delivery": {
+                        "mode": "object_store",
+                        "target": {
+                            "kind": "managed_fsspec",
+                            "profile": "training",
+                            "object_key": "run/request.dynexp"
+                        }
+                    }
                 }
             }
         }))
@@ -8965,6 +8977,21 @@ mod tests {
             extra_args["nvext"]["metadata_upload"],
             serde_json::json!({
                 "url": "s3://bucket/root/rollouts"
+            })
+        );
+        assert_eq!(
+            extra_args["nvext"]["generation_artifact"],
+            serde_json::json!({
+                "format": "generation_artifact_v1",
+                "contents": ["moe_routes"],
+                "delivery": {
+                    "mode": "object_store",
+                    "target": {
+                        "kind": "managed_fsspec",
+                        "profile": "training",
+                        "object_key": "run/request.dynexp"
+                    }
+                }
             })
         );
         assert_eq!(extra_args["sampling_options"]["detokenize"], false);
