@@ -98,6 +98,12 @@ areas:
   - examples/backends/sglang/
   - lib/mocker/servers/sglang/
   - lib/sidecar/sglang/
+- label: backend-triton
+  github_team: '@ai-dynamo/dynamo-backend-triton-codeowners'
+  path_globs:
+  - components/src/dynamo/triton/**
+  - container/launch_message/triton.txt
+  - docs/backends/triton
 - label: kv-memory
   github_team: '@ai-dynamo/dynamo-kv-memory-codeowners'
   path_globs:
