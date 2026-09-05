@@ -227,8 +227,8 @@ def pytest_xdist_auto_num_workers(config: pytest.Config) -> int | None:
     if vram_limit is None:
         return None
 
-    # Delayed: vram_utils requires pynvml, which is unavailable on some
-    # CPU-only runners. This hook is only needed for GPU-parallel runs.
+    # Delayed: this logic is only relevant when --max-vram-gib is set, and
+    # detect_gpus() uses an optional pynvml import (may be absent on CPU-only runners).
     from tests.utils.pytest_parallel_gpu import _parse_cuda_visible
     from tests.utils.vram_utils import auto_worker_count, detect_gpus
 
