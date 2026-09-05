@@ -16,6 +16,7 @@ from dynamo.profiler.utils.config import (
     get_component_name_by_type,
     get_main_container,
     get_worker_component_from_config,
+    remove_all_argument_occurrences,
     remove_valued_arguments,
     set_argument_value,
     set_unique_argument_value,
@@ -238,9 +239,13 @@ class SGLangConfigModifier(BaseConfigModifier):
             args = break_arguments(args)
 
             # remove disagg flags
-            args = remove_valued_arguments(args, "--disaggregation-mode")
-            args = remove_valued_arguments(args, "--disaggregation-transfer-backend")
-            args = remove_valued_arguments(args, "--disaggregation-bootstrap-port")
+            args = remove_all_argument_occurrences(args, "--disaggregation-mode")
+            args = remove_all_argument_occurrences(
+                args, "--disaggregation-transfer-backend"
+            )
+            args = remove_all_argument_occurrences(
+                args, "--disaggregation-bootstrap-port"
+            )
 
             # disable prefix caching
             if "--disable-radix-cache" not in args:
@@ -276,9 +281,13 @@ class SGLangConfigModifier(BaseConfigModifier):
             args = break_arguments(args)
 
             # remove disagg flags
-            args = remove_valued_arguments(args, "--disaggregation-mode")
-            args = remove_valued_arguments(args, "--disaggregation-transfer-backend")
-            args = remove_valued_arguments(args, "--disaggregation-bootstrap-port")
+            args = remove_all_argument_occurrences(args, "--disaggregation-mode")
+            args = remove_all_argument_occurrences(
+                args, "--disaggregation-transfer-backend"
+            )
+            args = remove_all_argument_occurrences(
+                args, "--disaggregation-bootstrap-port"
+            )
 
             # enable prefix caching
             if "--disable-radix-cache" in args:

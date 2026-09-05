@@ -237,6 +237,49 @@ def test_convert_vllm_disagg_decode_removes_disaggregation_role() -> None:
     )
 
 
+def _use_equals_spelling(args: list[str], flag: str) -> None:
+    """Rewrite ``--flag value`` in place as the equivalent ``--flag=value``."""
+    index = args.index(flag)
+    args[index : index + 2] = [f"{flag}={args[index + 1]}"]
+
+
+def test_convert_vllm_prefill_to_aggregated_drops_equals_spelled_role() -> None:
+    """An aggregated candidate must not keep the prefill role it was converted from."""
+    modifier = CONFIG_MODIFIERS["vllm"]
+    config = modifier.load_default_config("disagg")
+    prefill_args = _main_container(_component_by_type(config, "prefill"))["args"]
+    _use_equals_spelling(prefill_args, "--disaggregation-mode")
+
+    converted = modifier.convert_config(config, target=EngineType.PREFILL)
+    converted_args = _main_container(_worker_components(converted)[0])["args"]
+
+    assert not any("--disaggregation-mode" in arg for arg in converted_args)
+
+
+@pytest.mark.parametrize(
+    ("target", "source_type"),
+    [(EngineType.PREFILL, "prefill"), (EngineType.DECODE, "decode")],
+)
+def test_convert_sglang_drops_equals_spelled_disaggregation_args(
+    target: EngineType, source_type: str
+) -> None:
+    """SGLang candidates must not inherit disaggregation wiring in either spelling."""
+    modifier = CONFIG_MODIFIERS["sglang"]
+    config = modifier.load_default_config("disagg")
+    source_args = _main_container(_component_by_type(config, source_type))["args"]
+    for flag in (
+        "--disaggregation-mode",
+        "--disaggregation-transfer-backend",
+        "--disaggregation-bootstrap-port",
+    ):
+        _use_equals_spelling(source_args, flag)
+
+    converted = modifier.convert_config(config, target=target)
+    converted_args = _main_container(_worker_components(converted)[0])["args"]
+
+    assert not any("--disaggregation" in arg for arg in converted_args)
+
+
 def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
     """AIC tuning args must not remove Dynamo's vLLM disaggregation contract."""
     modifier = CONFIG_MODIFIERS["vllm"]
