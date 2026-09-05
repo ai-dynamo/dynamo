@@ -19,7 +19,6 @@ from dynamo.profiler.utils.config import (
     get_main_container,
     get_worker_component_from_config,
     remove_all_argument_occurrences,
-    remove_valued_arguments,
     set_argument_value,
     set_unique_argument_value,
     setup_worker_component_resources,
@@ -421,7 +420,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = break_arguments(args)
 
         # Remove --tp alias if present, use --tensor-parallel-size as canonical form
-        args = remove_valued_arguments(args, "--tp")
+        args = remove_all_argument_occurrences(args, "--tp")
         args = set_argument_value(args, "--tensor-parallel-size", str(tp_size))
 
         get_main_container(worker_service).args = args
@@ -457,13 +456,13 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = break_arguments(args)
 
         # Remove aliases, use canonical forms
-        args = remove_valued_arguments(args, "--tp")
+        args = remove_all_argument_occurrences(args, "--tp")
         args = set_argument_value(args, "--tensor-parallel-size", str(tep_size))
-        args = remove_valued_arguments(args, "--dp")
+        args = remove_all_argument_occurrences(args, "--dp")
         args = set_argument_value(args, "--data-parallel-size", "1")
 
         # Remove hybrid load balancing flags - not compatible with DP=1
-        args = remove_valued_arguments(args, "--data-parallel-size-local")
+        args = remove_all_argument_occurrences(args, "--data-parallel-size-local")
         if "--data-parallel-hybrid-lb" in args:
             args.remove("--data-parallel-hybrid-lb")
 
@@ -503,9 +502,9 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = break_arguments(args)
 
         # Remove aliases, use canonical forms
-        args = remove_valued_arguments(args, "--tp")
+        args = remove_all_argument_occurrences(args, "--tp")
         args = set_argument_value(args, "--tensor-parallel-size", "1")
-        args = remove_valued_arguments(args, "--dp")
+        args = remove_all_argument_occurrences(args, "--dp")
         args = set_argument_value(args, "--data-parallel-size", str(dep_size))
 
         # Handle hybrid load balancing for multinode DEP
@@ -517,7 +516,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             )
         else:
             # Remove hybrid-lb flags if not needed or not multinode
-            args = remove_valued_arguments(args, "--data-parallel-size-local")
+            args = remove_all_argument_occurrences(args, "--data-parallel-size-local")
             if "--data-parallel-hybrid-lb" in args:
                 args.remove("--data-parallel-hybrid-lb")
 

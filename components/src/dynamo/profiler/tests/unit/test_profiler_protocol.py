@@ -256,6 +256,37 @@ def test_convert_vllm_prefill_to_aggregated_drops_equals_spelled_role() -> None:
     assert not any("--disaggregation-mode" in arg for arg in converted_args)
 
 
+def test_sglang_tp_sweep_drops_equals_spelled_parallelism_args() -> None:
+    """A TP sweep point must not inherit the user's DP/EP settings.
+
+    set_config_tp_size strips --dp/--ep so the point is pure tensor parallel, and
+    nothing later re-sets them, so a surviving copy silently changes what was
+    measured while GPU resources are still sized for tp_size alone.
+    """
+    from dynamo.planner.config.defaults import SubComponentType
+
+    modifier = CONFIG_MODIFIERS["sglang"]
+    config = modifier.load_default_config("agg")
+    worker = next(
+        component
+        for component in config["spec"]["components"]
+        if component.get("type") == "worker"
+    )
+    _main_container(worker)["args"].extend(["--dp-size=4", "--ep-size=8"])
+
+    converted = modifier.set_config_tp_size(
+        config, 2, component_type=SubComponentType.DECODE
+    )
+    converted_worker = next(
+        component
+        for component in converted["spec"]["components"]
+        if component.get("type") == "worker"
+    )
+    converted_args = _main_container(converted_worker)["args"]
+
+    assert not any("--dp" in arg or "--ep" in arg for arg in converted_args)
+
+
 @pytest.mark.parametrize(
     ("target", "source_type"),
     [(EngineType.PREFILL, "prefill"), (EngineType.DECODE, "decode")],
