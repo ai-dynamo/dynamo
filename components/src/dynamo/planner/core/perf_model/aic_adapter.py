@@ -136,6 +136,7 @@ class PlannerEnginePerfModel:
             options = self._build_options()
             self._engine_model = AicCoreEnginePerfModel.best_available(
                 aic_config=self._build_aic_config(),
+                legacy_aic_config=self._build_legacy_aic_config(),
                 worker_type=self._worker_type,
                 limits=limits,
                 options=options,
@@ -235,7 +236,56 @@ class PlannerEnginePerfModel:
             "max_kv_tokens": max_kv_tokens,
         }
 
-    def _build_aic_config(self) -> Optional[dict[str, Any]]:
+    def _build_aic_config(self) -> dict[str, Any]:
+        """Build Core's canonical forward-pass estimator config."""
+
+        spec = self._config.aic_perf_model
+        pick = self._pick_for_worker(spec) if spec is not None else None
+        if spec is None or pick is None:
+            backend = self._config.backend
+            if backend == "mocker":
+                backend = "vllm"
+            return {
+                "model": "dynamo/observed-fpm-regression",
+                "system": "dynamo_unconfigured",
+                "backend": backend,
+                "tp": 1,
+                "pp": 1,
+                "attention_dp": self._attention_dp_size() or 1,
+                "nextn": 0,
+                "forward_model": "op_level",
+                "database_mode": "SILICON",
+                "fallback_policy": "regression",
+            }
+        nextn = self._effective_speculative_nextn()
+        return {
+            "model": spec.hf_id,
+            "system": spec.system,
+            "backend": spec.backend,
+            "backend_version": spec.backend_version,
+            "kv_block_size": (
+                self._capabilities.kv_cache_block_size
+                if self._capabilities is not None
+                else None
+            ),
+            "tp": pick.tp,
+            "pp": pick.pp,
+            "moe_tp_size": pick.moe_tp,
+            "moe_ep_size": pick.moe_ep,
+            "attention_dp": pick.dp,
+            "gemm_quant_mode": spec.weight_dtype,
+            "moe_quant_mode": spec.moe_dtype,
+            "fmha_quant_mode": spec.activation_dtype,
+            "kvcache_quant_mode": spec.kv_cache_dtype,
+            "nextn": nextn if self._worker_type != "prefill" else 0,
+            "forward_model": "op_level",
+            "database_mode": "SILICON",
+            "fallback_policy": "regression",
+        }
+
+    def _build_legacy_aic_config(self) -> Optional[dict[str, Any]]:
+        """Temporary request for the pre-canonical aiconfigurator-core wheel."""
+
         spec = self._config.aic_perf_model
         if spec is None:
             return None
@@ -264,7 +314,7 @@ class PlannerEnginePerfModel:
             "moe_dtype": spec.moe_dtype,
             "activation_dtype": spec.activation_dtype,
             "kv_cache_dtype": spec.kv_cache_dtype,
-            "nextn": (nextn if self._worker_type != "prefill" and nextn > 0 else None),
+            "nextn": nextn if self._worker_type != "prefill" and nextn > 0 else None,
             "extra": {},
         }
 
