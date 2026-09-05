@@ -242,6 +242,7 @@
 /components/src/dynamo/common/lora/                                                                     @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/tests/                                                                    @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/utils/                                                                    @ai-dynamo/dynamo-runtime-codeowners
+/components/src/dynamo/experimental/                                                                    @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/memory/                                                                   @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/backend/                                                                  @ai-dynamo/dynamo-runtime-codeowners
 /components/src/dynamo/common/config_dump/                                                              @ai-dynamo/dynamo-runtime-codeowners
