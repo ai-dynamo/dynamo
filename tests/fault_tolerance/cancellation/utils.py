@@ -73,6 +73,7 @@ class CancellableRequest:
         self.session = requests.Session()
         self.response = None
         self.exception = None
+        self._response_ready = threading.Event()
         self._cancelled = False
         self._request_thread = None
         self._lock = threading.Lock()
@@ -105,6 +106,7 @@ class CancellableRequest:
                         and socket.socket == self.__class__._global_tracked_socket
                     ):
                         socket.socket = self.__class__._original_socket  # type: ignore[assignment,misc]
+                self._response_ready.set()
 
         with self._lock:
             if self._request_thread is not None:
@@ -179,8 +181,12 @@ class CancellableRequest:
                 f"HTTP {status_code}: {response_body}"
             )
 
-    def get_response(self):
-        """Get the response or raise exception if there was one"""
+    def get_response(self, timeout: float = 30.0):
+        """Wait for the request to produce a response or raise an exception."""
+        if not self._response_ready.wait(timeout):
+            raise requests.exceptions.Timeout(
+                f"Timed out after {timeout}s waiting for the HTTP response"
+            )
         if self._cancelled:
             raise requests.exceptions.RequestException("Request was cancelled")
         if self.exception:
