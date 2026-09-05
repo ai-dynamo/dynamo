@@ -49,6 +49,22 @@ func TestNormalizeJSON_OuterFieldWinsEmbeddedCollision(t *testing.T) {
 	}
 }
 
+func TestNormalizeJSON_PreservesLargeInteger(t *testing.T) {
+	const raw = `{"spec":{"components":[{"podTemplate":{"spec":{"terminationGracePeriodSeconds":9007199254740993}}}]}}`
+
+	t.Log("Normalize a DGD containing an int64 value beyond exact float64 precision")
+	normalized, err := normalizeV1Beta1JSON([]byte(raw), reflect.TypeOf(DynamoGraphDeployment{}))
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+
+	t.Log("Verify normalization preserves the original integer token")
+	const want = `"terminationGracePeriodSeconds":9007199254740993`
+	if !bytes.Contains(normalized, []byte(want)) {
+		t.Fatalf("normalized JSON does not contain %s: %s", want, normalized)
+	}
+}
+
 func TestRootMarshal_PreservesEmptyMetadata(t *testing.T) {
 	tests := []struct {
 		name string
