@@ -8,7 +8,6 @@ import msgspec
 import numpy as np
 import pytest
 import zstandard as zstd
-
 from dynamo.artifacts.format_v1 import (
     CODEC_NONE,
     CODEC_ZSTD,
@@ -53,7 +52,9 @@ def _artifact_view() -> GenerationArtifactView:
 @pytest.mark.parametrize("codec", [CODEC_NONE, CODEC_ZSTD])
 def test_generation_artifact_round_trip_is_deterministic(codec: int) -> None:
     encoded = encode_generation_artifact(_artifact_view(), codec=codec)
-    assert encoded.data == encode_generation_artifact(_artifact_view(), codec=codec).data
+    assert (
+        encoded.data == encode_generation_artifact(_artifact_view(), codec=codec).data
+    )
     assert encoded.byte_count == len(encoded.data)
     assert encoded.sha256 == hashlib.sha256(encoded.data).hexdigest()
 
@@ -127,7 +128,9 @@ def test_encoder_rejects_route_alignment_and_expert_range() -> None:
                         choice_index=0,
                         prompt_token_count=2,
                         sequence_token_ids=choice.sequence_token_ids,
-                        routed_experts=choice.routed_experts[:3],
+                        routed_experts=np.concatenate(
+                            [choice.routed_experts, choice.routed_experts[:1]], axis=0
+                        ),
                         router_ids=choice.router_ids,
                         expert_counts=choice.expert_counts,
                     ),
@@ -166,6 +169,71 @@ def test_encoder_rejects_selected_logprob_misalignment() -> None:
                         sequence_token_ids=choice.sequence_token_ids,
                         selected_logprobs=np.array([-0.1], dtype=np.float32),
                         selected_logprobs_token_start=2,
+                    ),
+                )
+            )
+        )
+
+
+def test_decoder_rejects_nonzero_padding_and_unknown_component() -> None:
+    encoded = bytearray(
+        encode_generation_artifact(_artifact_view(), codec=CODEC_NONE).data
+    )
+    _, _, _, _, manifest_bytes, _ = _PRELUDE.unpack_from(encoded)
+    padding_start = _PRELUDE.size + manifest_bytes
+    encoded[padding_start] = 1
+    with pytest.raises(GenerationArtifactFormatError, match="padding"):
+        decode_generation_artifact(bytes(encoded))
+
+    encoded = encode_generation_artifact(_artifact_view(), codec=CODEC_NONE).data
+    assert b"moe_routes" in encoded
+    with pytest.raises(GenerationArtifactFormatError, match="unsupported component"):
+        decode_generation_artifact(encoded.replace(b"moe_routes", b"bad_routes", 1))
+
+
+def test_decoder_rejects_short_and_invalid_tensor_encoding() -> None:
+    with pytest.raises(GenerationArtifactFormatError, match="length"):
+        decode_generation_artifact(b"DYNEXP1")
+
+    encoded = encode_generation_artifact(_artifact_view(), codec=CODEC_NONE).data
+    assert b"i64" in encoded
+    with pytest.raises(GenerationArtifactFormatError, match="tensor dtype"):
+        decode_generation_artifact(encoded.replace(b"i64", b"xxx", 1))
+
+
+def test_decoder_rejects_noncanonical_duplicate_manifest_keys() -> None:
+    manifest = b"\x82\xa7choices\x90\xa7choices\x90"
+    body = manifest + bytes((64 - len(manifest) % 64) % 64)
+    encoded = _PRELUDE.pack(b"DYNEXP1\0", 1, 0, CODEC_NONE, len(manifest), 0) + body
+    with pytest.raises(GenerationArtifactFormatError, match="canonical"):
+        decode_generation_artifact(encoded)
+
+
+def test_encoder_rejects_nonfinite_logprobs_and_empty_route_axes() -> None:
+    choice = _artifact_view().choices[0]
+    with pytest.raises(GenerationArtifactFormatError, match="finite"):
+        encode_generation_artifact(
+            GenerationArtifactView(
+                choices=(
+                    GenerationArtifactChoice(
+                        choice_index=0,
+                        prompt_token_count=2,
+                        sequence_token_ids=choice.sequence_token_ids,
+                        selected_logprobs=np.array([np.nan, -0.5]),
+                        selected_logprobs_token_start=2,
+                    ),
+                )
+            )
+        )
+    with pytest.raises(GenerationArtifactFormatError, match="routers"):
+        encode_generation_artifact(
+            GenerationArtifactView(
+                choices=(
+                    GenerationArtifactChoice(
+                        choice_index=0,
+                        prompt_token_count=2,
+                        sequence_token_ids=choice.sequence_token_ids,
+                        routed_experts=np.empty((4, 0, 1), dtype=np.int32),
                     ),
                 )
             )
