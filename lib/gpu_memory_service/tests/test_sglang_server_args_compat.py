@@ -3,8 +3,7 @@
 
 """CPU-only tests for the SGLang ServerArgs override ladder used by setup_gms."""
 
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 from _deps import HAS_GMS
@@ -15,7 +14,14 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
+from gpu_memory_service.integrations import sglang as gms_sglang
 from gpu_memory_service.integrations.sglang import override_server_args
+
+try:
+    from sglang.srt.arg_groups.overrides import resolved_view
+except ImportError:
+    # SGLang #36255 exposes ServerArgs._resolved() instead.
+    resolved_view = None
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -24,8 +30,6 @@ pytestmark = [
     pytest.mark.core,
     pytest.mark.gpu_0,
 ]
-
-_OVERRIDES_MODULE = "sglang.srt.arg_groups.overrides"
 
 
 class ResolvedServerArgs:
@@ -50,6 +54,16 @@ class ResolvedServerArgs:
         )
 
 
+class LegacyOverrideServerArgs:
+    """Double for SGLang 0.5.17 ServerArgs, which takes changes through override()."""
+
+    def __init__(self):
+        self.overrides = []
+
+    def override(self, source, **fields):
+        self.overrides.append((source, fields))
+
+
 @pytest.fixture
 def without_declare_late_resolution(monkeypatch):
     """Hide the module-level declaration API from the ladder.
@@ -58,7 +72,26 @@ def without_declare_late_resolution(monkeypatch):
     ``declare_late_resolution``, so the branch has to be unavailable however the
     SGLang in this image is built.
     """
-    monkeypatch.setitem(sys.modules, _OVERRIDES_MODULE, ModuleType(_OVERRIDES_MODULE))
+    monkeypatch.setattr(gms_sglang, "declare_late_resolution", None)
+
+
+def test_declaration_api_receives_source_and_fields(monkeypatch):
+    # Current SGLang exposes the declaration as a module-level function, which
+    # takes the ServerArgs as its first argument.
+    calls = []
+    monkeypatch.setattr(
+        gms_sglang,
+        "declare_late_resolution",
+        lambda server_args, source, **fields: calls.append((source, fields)),
+    )
+    server_args = ResolvedServerArgs()
+
+    override_server_args(server_args, "dynamo.gms", enable_memory_saver=True)
+
+    assert calls == [("dynamo.gms", {"enable_memory_saver": True})]
+    # The ladder stops at the first available branch.
+    assert server_args.declarations == []
+    assert server_args.assignments == []
 
 
 def test_resolved_server_args_gets_memory_saver_by_declaration(
@@ -70,6 +103,18 @@ def test_resolved_server_args_gets_memory_saver_by_declaration(
 
     assert server_args.declarations == [("dynamo.gms", {"enable_memory_saver": True})]
     assert server_args.assignments == []
+
+
+def test_legacy_override_server_args_gets_memory_saver_by_override(
+    without_declare_late_resolution,
+):
+    server_args = LegacyOverrideServerArgs()
+
+    override_server_args(server_args, "dynamo.gms", enable_memory_saver=True)
+
+    assert server_args.overrides == [("dynamo.gms", {"enable_memory_saver": True})]
+    # The field goes through override() rather than landing as an attribute.
+    assert not hasattr(server_args, "enable_memory_saver")
 
 
 def test_legacy_xpu_server_args_gets_memory_saver_by_assignment(
@@ -111,8 +156,6 @@ def _resolved_view(server_args):
     resolve = getattr(server_args, "_resolved", None)
     if callable(resolve):
         return resolve()
-    try:
-        from sglang.srt.arg_groups.overrides import resolved_view
-    except ImportError:
+    if resolved_view is None:
         return server_args
     return resolved_view(server_args)

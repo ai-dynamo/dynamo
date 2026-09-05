@@ -19,6 +19,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any, Type
 
+try:
+    from sglang.srt.arg_groups.overrides import declare_late_resolution
+except ImportError:
+    # SGLang 0.5.17 and the XPU 0.5.11 pin predate declarations.
+    declare_late_resolution = None
+
 if TYPE_CHECKING:
     from gpu_memory_service.integrations.sglang.model_loader import GMSModelLoader
 
@@ -49,12 +55,6 @@ def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
     standalone distribution that must not depend on ``dynamo.*``; keep the two
     ladders in step.
     """
-    try:
-        from sglang.srt.arg_groups.overrides import declare_late_resolution
-    except ImportError:
-        # SGLang 0.5.17 and the XPU 0.5.11 pin predate declarations.
-        declare_late_resolution = None  # type: ignore[assignment]
-
     if declare_late_resolution is not None:
         declare_late_resolution(server_args, source, **fields)
         return
