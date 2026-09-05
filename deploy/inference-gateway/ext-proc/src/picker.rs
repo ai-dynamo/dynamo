@@ -158,6 +158,11 @@ pub enum PickError {
     /// Malformed client input (unparseable body, or a 4xx from the tokenizer) → 400.
     #[error("tokenization failed: {0}")]
     TokenizationFailed(String),
+    /// Metadata headers exceeded the frontend's entry/size limits → 400. The
+    /// frontend rejects these requests too; the EPP surfaces the same client
+    /// error rather than silently dropping the metadata.
+    #[error("metadata headers invalid: {0}")]
+    MetadataHeadersInvalid(String),
     /// The upstream tokenization service could not be reached → 503.
     #[error("tokenization service unavailable")]
     TokenizerUnavailable,

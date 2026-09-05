@@ -27,6 +27,7 @@ use anyhow::Result;
 use tokio::sync::Semaphore;
 
 use dynamo_kv_router::services::selection::WorkerSelectionPolicyRegistry;
+use dynamo_llm::http::service::metadata::extract_metadata_from_header_pairs;
 use dynamo_llm::protocols::common::extensions::{
     AgentHints, HEADER_REQUEST_PRIORITY, HEADER_REQUEST_STRICT_PRIORITY, resolve_request_priority,
 };
@@ -38,6 +39,17 @@ use crate::pod_discovery::PodDiscovery;
 use crate::selector::{SelectRequest, Selector};
 use crate::topology_adapter::{RegistrationDefaults, TopologyAdapter};
 use crate::vllm_render_client::{VllmRenderClient, VllmRenderError};
+
+/// Resolve the request's scheduling policy class from the Dynamo metadata
+/// headers. Goes through the frontend's metadata extractor (rather than a
+/// hardcoded header name) so custom `DYN_METADATA_HEADER` prefixes, trimming,
+/// and duplicate handling stay aligned with the integrated router.
+fn requested_policy_class(headers: &[(String, String)]) -> Result<Option<String>, PickError> {
+    let metadata =
+        extract_metadata_from_header_pairs(headers.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .map_err(|e| PickError::MetadataHeadersInvalid(e.to_string()))?;
+    Ok(metadata.get("policy-class").cloned())
+}
 
 /// Standalone endpoint picker backed by the standalone selection service.
 pub struct EppRouter {
@@ -96,14 +108,14 @@ impl EppRouter {
     }
 
     /// Tokenize a chat body for routing → `(token_ids, priority_jump,
-    /// strict_priority)`. Priority uses header-over-body precedence via
-    /// [`resolve_request_priority`].
+    /// strict_priority, expected_output_tokens)`. Priority uses header-over-body
+    /// precedence via [`resolve_request_priority`]
     async fn tokenize(
         &self,
         request_body: bytes::Bytes,
         priority_header: Option<String>,
         strict_priority_header: Option<String>,
-    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>), TokenizeError> {
+    ) -> Result<(Vec<u32>, Option<f64>, Option<u32>, Option<u32>), TokenizeError> {
         // Parse only `nvext.agent_hints` for priority — the worker re-parses the
         // full body anyway, so we skip allocating the large `messages`/tools
         // fields. Malformed JSON still fails here (→ 400); a well-formed body that
@@ -115,13 +127,23 @@ impl EppRouter {
             priority_header.as_deref(),
             strict_priority_header.as_deref(),
         );
+        let expected_output_tokens = hints
+            .nvext
+            .as_ref()
+            .and_then(|n| n.agent_hints.as_ref())
+            .and_then(|h| h.osl);
         // Moves the `Bytes` into reqwest (zero-copy) rather than copying.
         let token_ids = self
             .renderer
             .render_chat(request_body)
             .await
             .map_err(TokenizeError::Render)?;
-        Ok((token_ids, resolved.priority_jump, resolved.strict_priority))
+        Ok((
+            token_ids,
+            resolved.priority_jump,
+            resolved.strict_priority,
+            expected_output_tokens,
+        ))
     }
 
     /// Ready workers inside an Envoy `candidate_subset`, resolved in a single index
@@ -268,10 +290,11 @@ impl EndpointPicker for EppRouter {
             first_header(&req.headers, HEADER_REQUEST_PRIORITY).map(str::to_owned);
         let strict_priority_header =
             first_header(&req.headers, HEADER_REQUEST_STRICT_PRIORITY).map(str::to_owned);
-        let (tokens, priority_jump, strict_priority) = self
+        let (tokens, priority_jump, strict_priority, expected_output_tokens) = self
             .tokenize(req.body.clone(), priority_header, strict_priority_header)
             .await
             .map_err(|e| e.into_pick_error(&req.request_id))?;
+        let policy_class = requested_policy_class(&req.headers)?;
 
         // EPP-minted booking key (not the reused `x-request-id`): stays
         // EPP-known/releasable and rides back on `PickResult::reservation_id`,
@@ -296,9 +319,12 @@ impl EndpointPicker for EppRouter {
             // Effective header-over-body values; `None` only when unset everywhere.
             priority_jump,
             strict_priority,
+            expected_output_tokens,
+            policy_class,
         };
 
         // On either error return below the guard (still armed) frees the booking.
+
         let resp = match self.selector.select_and_reserve(select_req).await {
             Ok(resp) => resp,
             Err(e) => return Err(PickError::RoutingFailed(e.to_string())),
@@ -452,6 +478,41 @@ impl TokenizeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requested_policy_class_uses_frontend_metadata_extraction() {
+        // The class rides a Dynamo metadata header; the extractor strips the
+        // prefix, trims, and honors the first of repeated headers.
+        let headers: Vec<(String, String)> = vec![
+            (
+                "x-dynamo-meta-policy-class".to_string(),
+                " latency ".to_string(),
+            ),
+            (
+                "x-dynamo-meta-policy-class".to_string(),
+                "throughput".to_string(),
+            ),
+            ("x-request-id".to_string(), "irrelevant".to_string()),
+        ];
+        assert_eq!(
+            requested_policy_class(&headers).unwrap().as_deref(),
+            Some("latency")
+        );
+
+        // Mixed-case header names match as well.
+        let headers: Vec<(String, String)> = vec![(
+            "X-Dynamo-Meta-Policy-Class".to_string(),
+            "express".to_string(),
+        )];
+        assert_eq!(
+            requested_policy_class(&headers).unwrap().as_deref(),
+            Some("express")
+        );
+
+        // No metadata header → no policy class.
+        let headers: Vec<(String, String)> = vec![("x-request-id".to_string(), "r1".to_string())];
+        assert_eq!(requested_policy_class(&headers).unwrap(), None);
+    }
 
     #[test]
     fn render_upstream_status_maps_to_correct_pick_error() {
