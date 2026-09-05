@@ -361,41 +361,79 @@ class AudioGenerationHandler:
         if ref_audio_str.startswith(("http://", "https://")):
             import ipaddress
             import socket
-            from urllib.parse import urlparse
+            from urllib.parse import urljoin, urlparse
 
             import aiohttp
 
-            parsed = urlparse(ref_audio_str)
-            if not parsed.hostname:
-                raise ValueError("Invalid ref_audio URL")
-            for info in socket.getaddrinfo(
-                parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM
-            ):
-                ip_str = str(info[4][0]).split("%", 1)[0]
-                addr = ipaddress.ip_address(ip_str)
-                if addr.is_private or addr.is_loopback:
-                    raise ValueError(
-                        f"ref_audio URL resolves to blocked address: {addr}"
-                    )
+            def _assert_public_url(url: str) -> None:
+                """Reject a URL that resolves to a non-public address (SSRF guard).
 
+                Every hostname the client can steer us to — the initial URL and
+                each redirect target — must resolve only to routable public
+                addresses. Validating solely the initial URL is bypassable: a
+                public URL can 302-redirect to an internal/metadata address.
+                """
+                parsed = urlparse(url)
+                if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                    raise ValueError("Invalid ref_audio URL")
+                default_port = 443 if parsed.scheme == "https" else 80
+                for info in socket.getaddrinfo(
+                    parsed.hostname,
+                    parsed.port or default_port,
+                    type=socket.SOCK_STREAM,
+                ):
+                    ip_str = str(info[4][0]).split("%", 1)[0]
+                    addr = ipaddress.ip_address(ip_str)
+                    if (
+                        addr.is_private
+                        or addr.is_loopback
+                        or addr.is_link_local
+                        or addr.is_reserved
+                        or addr.is_multicast
+                        or addr.is_unspecified
+                    ):
+                        raise ValueError(
+                            f"ref_audio URL resolves to blocked address: {addr}"
+                        )
+
+            # Follow redirects manually, re-validating every hop, so an
+            # attacker-supplied public URL cannot redirect into an internal or
+            # cloud-metadata address (SSRF via redirect bypass).
+            max_redirects = 5
+            current_url = ref_audio_str
+            audio_bytes = None
             async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    ref_audio_str,
-                    timeout=aiohttp.ClientTimeout(
-                        total=self.config.tts_ref_audio_timeout
-                    ),
-                ) as resp:
-                    if resp.status != 200:
-                        raise ValueError(
-                            f"Failed to download ref_audio: HTTP {resp.status}"
-                        )
-                    audio_bytes = await resp.read()
-                    if len(audio_bytes) > self.config.tts_ref_audio_max_bytes:
-                        raise ValueError(
-                            f"ref_audio too large "
-                            f"({len(audio_bytes)} bytes, "
-                            f"max {self.config.tts_ref_audio_max_bytes})"
-                        )
+                for _ in range(max_redirects + 1):
+                    _assert_public_url(current_url)
+                    async with session.get(
+                        current_url,
+                        allow_redirects=False,
+                        timeout=aiohttp.ClientTimeout(
+                            total=self.config.tts_ref_audio_timeout
+                        ),
+                    ) as resp:
+                        if resp.status in (301, 302, 303, 307, 308):
+                            location = resp.headers.get("Location")
+                            if not location:
+                                raise ValueError(
+                                    "ref_audio redirect is missing a Location header"
+                                )
+                            current_url = urljoin(current_url, location)
+                            continue
+                        if resp.status != 200:
+                            raise ValueError(
+                                f"Failed to download ref_audio: HTTP {resp.status}"
+                            )
+                        audio_bytes = await resp.read()
+                        if len(audio_bytes) > self.config.tts_ref_audio_max_bytes:
+                            raise ValueError(
+                                f"ref_audio too large "
+                                f"({len(audio_bytes)} bytes, "
+                                f"max {self.config.tts_ref_audio_max_bytes})"
+                            )
+                        break
+                else:
+                    raise ValueError("ref_audio exceeded the maximum redirect count")
         elif ref_audio_str.startswith("data:"):
             _, encoded = ref_audio_str.split(",", 1)
             audio_bytes = base64.b64decode(encoded)
