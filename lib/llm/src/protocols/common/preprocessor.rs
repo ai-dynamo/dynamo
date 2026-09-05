@@ -101,6 +101,12 @@ pub struct BootstrapInfo {
     /// Unique room ID for this request's KV transfer session
     pub bootstrap_room: u64,
 
+    /// One room per choice for an `n > 1` request the worker fans out into
+    /// single-sample sub-requests (SGLang PD). First entry is `bootstrap_room`;
+    /// absent for `n == 1`, so that wire format is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_rooms: Option<Vec<u64>>,
+
     /// Stable mocker lifecycle identity. Role, backend, and wire version are
     /// validated by the bootstrap registration and framing protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -664,11 +670,13 @@ mod tests {
             bootstrap_host: "127.0.0.1".to_string(),
             bootstrap_port: 1234,
             bootstrap_room: 7,
+            bootstrap_rooms: None,
             handoff_id: Some(handoff_id),
         };
 
         let value = serde_json::to_value(&info).unwrap();
         assert_eq!(value["handoff_id"], handoff_id.to_string());
+        assert!(value.get("bootstrap_rooms").is_none());
         assert!(value.get("mocker_handoff_protocol_version").is_none());
         assert!(value.get("mocker_handoff_role").is_none());
         assert!(value.get("mocker_handoff_engine_type").is_none());
@@ -678,6 +686,23 @@ mod tests {
                 .handoff_id,
             Some(handoff_id)
         );
+    }
+
+    #[test]
+    fn bootstrap_info_round_trips_per_choice_rooms() {
+        let info = BootstrapInfo {
+            bootstrap_host: "127.0.0.1".to_string(),
+            bootstrap_port: 1234,
+            bootstrap_room: 8,
+            bootstrap_rooms: Some(vec![8, 16, 24]),
+            handoff_id: None,
+        };
+
+        let value = serde_json::to_value(&info).unwrap();
+        assert_eq!(value["bootstrap_room"], 8);
+        assert_eq!(value["bootstrap_rooms"], serde_json::json!([8, 16, 24]));
+        let decoded: BootstrapInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.bootstrap_rooms, Some(vec![8, 16, 24]));
     }
 
     /// Covers the `is_probe` serde contract end-to-end: `rename = "_HEALTH_CHECK"`,

@@ -609,6 +609,7 @@ mod tests {
             bootstrap_host: "prefill".to_string(),
             bootstrap_port: 5000,
             bootstrap_room: i64::MAX as u64,
+            bootstrap_rooms: None,
             handoff_id: None,
         });
         let mapped =
@@ -834,6 +835,7 @@ mod tests {
             bootstrap_host: "prefill".to_string(),
             bootstrap_port: 5000,
             bootstrap_room: i64::MAX as u64 + 1,
+            bootstrap_rooms: None,
             handoff_id: None,
         });
         assert!(
