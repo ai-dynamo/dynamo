@@ -1,0 +1,377 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Stage Release RC: stage (or re-stage) an EXISTING release branch at a chosen rc
+# round via release.yml, then trigger the GitLab pipeline. Run once per rc round.
+# The branch + version stamp are created by "Cut Release Branch"; this workflow is
+# read-only on the tree. The devops ops gate and the reviewer approval that guard
+# the publish live in release.yml, so they bind this and every other caller.
+
+name: Stage Release RC
+
+on:
+  # TEMPORARY(1.5.0-rc3): push stages release/1.5.0 rc3 (all artifacts) with no
+  # dispatch inputs. REVERT before merge.
+  push:
+    branches:
+      - pull-request/13961
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: 'Existing release branch to stage: release/X.Y.Z[.devN|.postN] or a bare named release v<X.Y.Z>[-<name>]. Create it first with "Cut Release Branch". The tip is staged, so cherry-picks land in the next rc.'
+        required: true
+        type: string
+      release_version:
+        description: 'Numeric version to publish, X.Y.Z[.devN|.postN] (must match the branch; for a named branch it is the base the branch encodes).'
+        required: true
+        type: string
+      rc_round:
+        description: 'Internal staging RC: <round> or <round>.<sub> (e.g. 2 or 2.1 -> staging versions X.Y.Z-rc.2 / X.Y.Z-rc.2.1, a numerically-ordered SemVer pre-release; also the wheel rc<N> subpath). Re-stages of the same version need a distinct value (immutable registries). NO GitHub tag is created.'
+        required: false
+        type: string
+        default: '0'
+      containers:
+        description: 'Containers to stage: all | none | csv of vllm[:runtime|:efa],sglang[...],trtllm[...],frontend,operator,planner,sidecar.'
+        required: false
+        type: string
+        default: all
+      wheels:
+        description: 'Wheels to stage: all | none | csv of ai-dynamo,ai-dynamo-runtime,kvbm.'
+        required: false
+        type: string
+        default: all
+      crates:
+        description: 'Crates to stage: all | none | csv of crate names (must be dependency-closed).'
+        required: false
+        type: string
+        default: all
+      helm:
+        description: 'Helm charts to stage: all | none | platform.'
+        required: false
+        type: string
+        default: all
+      skip_gitlab_pipeline:
+        description: 'Skip the GitLab release automation pipeline trigger. Emergency use only.'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # RESOLVE TARGET (read-only) — validate inputs; resolve the branch tip SHA (the
+  # commit whose post-merge images this rc stages), the rc round, and the subsets.
+  # No ops gate here: the authoritative devops + approval gate for the publish path
+  # lives in release.yml (reached via invoke-release), which binds every caller.
+  resolve-target:
+    name: Resolve staging target
+    runs-on: prod-default-small-v2
+    environment: automated-release
+    permissions:
+      contents: read
+    outputs:
+      bump_sha: ${{ steps.target.outputs.bump_sha }}
+      rc_number: ${{ steps.target.outputs.rc_number }}
+      containers: ${{ steps.resolve.outputs.containers }}
+      wheels: ${{ steps.resolve.outputs.wheels }}
+      crates: ${{ steps.resolve.outputs.crates }}
+      helm: ${{ steps.resolve.outputs.helm }}
+    steps:
+      - name: Validate and resolve target SHA
+        id: target
+        env:
+          # TEMPORARY(1.5.0-rc3): fallbacks cover inputless push events. REVERT to bare inputs.*.
+          RELEASE_VERSION: ${{ inputs.release_version || '1.5.0' }}
+          RELEASE_BRANCH: ${{ inputs.release_branch || 'release/1.5.0' }}
+          RC_ROUND: ${{ inputs.rc_round || '3' }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
+            echo "::error::release_version must be X.Y.Z[.devN|.postN] (got '${RELEASE_VERSION}')"
+            exit 1
+          fi
+          # Only REAL release branches can be staged. A bare named release builds on
+          # its release/<branch> CI twin (post-merge fires only on main/release/*), so
+          # its images live under the twin's SHA — resolve from there.
+          if [[ "${RELEASE_BRANCH}" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+(\.(dev|post)[0-9]+)?$ ]]; then
+            CI_BRANCH="${RELEASE_BRANCH}"
+          elif [[ "${RELEASE_BRANCH}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._-]+)?$ ]]; then
+            CI_BRANCH="release/${RELEASE_BRANCH}"
+          else
+            echo "::error::release_branch must be a real release branch — release/X.Y.Z[.devN|.postN] or a bare named release v<X.Y.Z>[-<name>] (got '${RELEASE_BRANCH}'). Cut it first with 'Cut Release Branch'."
+            exit 1
+          fi
+          # A named branch encodes only its base; verify it matches release_version's base.
+          if [[ "${RELEASE_BRANCH}" =~ ^v[0-9] ]]; then
+            BASE="${RELEASE_VERSION%%.dev*}"; BASE="${BASE%%.post*}"
+            if [[ "${RELEASE_BRANCH}" != "v${BASE}" && "${RELEASE_BRANCH}" != "v${BASE}-"* ]]; then
+              echo "::error::named branch '${RELEASE_BRANCH}' must start with v${BASE} (the release_version base)"
+              exit 1
+            fi
+          fi
+          if ! [[ "${RC_ROUND}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::rc_round must be '<round>' or '<round>.<sub>' (non-negative integers; got '${RC_ROUND}')"
+            exit 1
+          fi
+          # Resolve the CI branch tip. git/ref/heads (singular) is an EXACT match —
+          # 404 if the branch was never cut.
+          HTTP=$(curl -sS -o "${RUNNER_TEMP}/ref.json" -w '%{http_code}' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/git/ref/heads/${CI_BRANCH}")
+          if [ "${HTTP}" != "200" ]; then
+            echo "::error::branch '${CI_BRANCH}' not found (HTTP ${HTTP}) — cut it first with 'Cut Release Branch'."
+            exit 1
+          fi
+          SHA=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['object']['sha'])" "${RUNNER_TEMP}/ref.json")
+          echo "bump_sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "rc_number=${RC_ROUND}" >> "$GITHUB_OUTPUT"
+          echo "Staging ${RELEASE_BRANCH} (CI branch ${CI_BRANCH}) @ ${SHA} as ${RELEASE_VERSION}-rc.${RC_ROUND}"
+
+      # Normalize the per-type fields to canonical subset strings (all|none|csv)
+      # for await-post-merge, release.yml, and the GitLab trigger. The container
+      # grammar expands <fw>[:runtime|:efa] (bare fw = both); unknown tokens fail fast.
+      - name: Resolve artifact selection
+        id: resolve
+        env:
+          # TEMPORARY(1.5.0-rc3): revert to bare inputs.release_version before merge.
+          RELEASE_VERSION: ${{ inputs.release_version || '1.5.0' }}
+          CONTAINERS: ${{ inputs.containers }}
+          WHEELS: ${{ inputs.wheels }}
+          CRATES: ${{ inputs.crates }}
+          HELM: ${{ inputs.helm }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY' > "${RUNNER_TEMP}/selection.env"
+          import os, re, sys
+
+          FRAMEWORKS = {"vllm", "sglang", "trtllm"}
+          VARIANTS = {"runtime", "efa"}
+          COMPONENTS = {"frontend", "operator", "planner", "sidecar"}
+          WHEEL_TOKENS = {"ai-dynamo", "ai-dynamo-runtime", "kvbm"}
+          HELM_TOKENS = {"platform"}
+
+          def fail(msg):
+              print(f"::error::{msg}", file=sys.stderr)
+              sys.exit(1)
+
+          def dedupe(xs):
+              seen = []
+              for x in xs:
+                  if x not in seen:
+                      seen.append(x)
+              return seen
+
+          def norm_containers(spec):
+              spec = (spec or "all").strip()
+              if spec == "all":
+                  return "all"
+              if spec in ("", "none"):
+                  return "none"
+              out = []
+              for tok in (t.strip() for t in spec.split(",") if t.strip()):
+                  if tok in COMPONENTS:
+                      out.append(tok)
+                      continue
+                  fw, _, var = tok.partition(":")
+                  if fw not in FRAMEWORKS:
+                      fail(f"unknown container token '{tok}'")
+                  if var == "":
+                      out += [f"{fw}-runtime", f"{fw}-efa"]
+                  elif var in VARIANTS:
+                      out.append(f"{fw}-{var}")
+                  else:
+                      fail(f"unknown variant in '{tok}' (use runtime|efa)")
+              # A separators-only spec (e.g. ',') is an empty selection, not 'all'.
+              return ",".join(dedupe(out)) or "none"
+
+          def norm_simple(spec, universe, label):
+              spec = (spec or "all").strip()
+              if spec == "all":
+                  return "all"
+              if spec in ("", "none"):
+                  return "none"
+              sel = [t.strip() for t in spec.split(",") if t.strip()]
+              bad = [t for t in sel if t not in universe]
+              if bad:
+                  fail(f"unknown {label} token(s) {bad}; valid: {sorted(universe)}")
+              sel = dedupe(sel)
+              # ai-dynamo hard-pins ai-dynamo-runtime==<version> in pyproject, so
+              # shipping it alone publishes a wheel whose only dependency does not
+              # exist at that version.
+              if label == "wheel" and "ai-dynamo" in sel and "ai-dynamo-runtime" not in sel:
+                  fail("wheels=ai-dynamo requires ai-dynamo-runtime (ai-dynamo pins "
+                       "ai-dynamo-runtime==<version>); add it or use wheels=all")
+              return ",".join(sel) or "none"
+
+          def norm_crates(spec):
+              spec = (spec or "all").strip()
+              if spec == "all":
+                  return "all"
+              if spec in ("", "none"):
+                  return "none"
+              # Closure is checked by stage_crates.py; the charset gate keeps
+              # arbitrary text out of $GITHUB_OUTPUT and the GitLab variables.
+              sel = dedupe(t.strip() for t in spec.split(",") if t.strip())
+              bad = [t for t in sel if not re.fullmatch(r"[A-Za-z0-9_-]+", t)]
+              if bad:
+                  fail(f"invalid crate token(s) {bad}; crate names are [A-Za-z0-9_-]+")
+              return ",".join(sel) or "none"
+
+          c = norm_containers(os.environ.get("CONTAINERS", "all"))
+          w = norm_simple(os.environ.get("WHEELS", "all"), WHEEL_TOKENS, "wheel")
+          cr = norm_crates(os.environ.get("CRATES", "all"))
+          h = norm_simple(os.environ.get("HELM", "all"), HELM_TOKENS, "helm")
+
+          # SemVer has no post-release form: .postN would sort before X.Y.Z or
+          # collide on crates.io — post releases ship containers/wheels only.
+          if re.search(r"\.post[0-9]+$", os.environ.get("RELEASE_VERSION", "")):
+              if cr != "none" or h != "none":
+                  fail("post releases (X.Y.Z.postN) cannot ship crates or helm charts "
+                       "(no SemVer post-release form); re-run with crates=none and helm=none")
+
+          print(f"containers={c}")
+          print(f"wheels={w}")
+          print(f"crates={cr}")
+          print(f"helm={h}")
+          PY
+          echo "Resolved selection:"
+          cat "${RUNNER_TEMP}/selection.env"
+          cat "${RUNNER_TEMP}/selection.env" >> "$GITHUB_OUTPUT"
+
+  # WAIT FOR POST-MERGE BUILDS (not tests) — poll ECR for only the SELECTED
+  # artifacts' image tags at the target SHA, so we proceed as soon as those builds
+  # finish (not the whole post-merge run). The SHA is unique, so a present tag is
+  # unambiguously that commit's output. ECR-capable runner (stage-wheels IRSA path).
+  await-post-merge:
+    name: Wait for post-merge builds
+    needs: [resolve-target]
+    runs-on: prod-tester-amd-v1
+    environment: automated-release
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Wait for the selected artifacts' build images in ECR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve-target.outputs.bump_sha }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_DEFAULT_REGION }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          CONTAINERS: ${{ needs.resolve-target.outputs.containers }}
+          WHEELS: ${{ needs.resolve-target.outputs.wheels }}
+          CRATES: ${{ needs.resolve-target.outputs.crates }}
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity >/dev/null || { echo "::error::no AWS credentials on this runner"; exit 1; }
+
+          # ECR tags this release will consume, derived from the selection. The
+          # container token -> source tag map mirrors release.yml's copy step; wheels
+          # come from the dynamo-runtime image, crates from dynamo-runtime-test.
+          CSET="${CONTAINERS:-all}"
+          ctr_selected() {
+            [ "${CSET}" = "all" ] && return 0
+            [ "${CSET}" = "none" ] && return 1
+            case ",${CSET}," in *,"$1",*) return 0 ;; esac
+            return 1
+          }
+          declare -A CTR=(
+            [vllm-runtime]=vllm-runtime     [vllm-efa]=vllm-runtime-efa
+            [sglang-runtime]=sglang-runtime [sglang-efa]=sglang-runtime-efa
+            [trtllm-runtime]=trtllm-runtime [trtllm-efa]=trtllm-runtime-efa
+            [frontend]=dynamo-frontend [operator]=operator [planner]=dynamo-planner
+            [sidecar]=dynamo-sidecar
+          )
+          declare -a TAGS=()
+          for tok in "${!CTR[@]}"; do
+            if ctr_selected "${tok}"; then TAGS+=("${SHA}-${CTR[$tok]}"); fi
+          done
+          if [ "${WHEELS:-all}" != "none" ]; then TAGS+=("${SHA}-dynamo-runtime"); fi
+          if [ "${CRATES:-all}" != "none" ]; then TAGS+=("${SHA}-dynamo-runtime-test"); fi
+
+          if [ ${#TAGS[@]} -eq 0 ]; then
+            echo "No ECR build artifacts selected (helm-only); nothing to wait for."
+            exit 0
+          fi
+
+          echo "Waiting for post-merge builds to publish ${#TAGS[@]} ECR tag(s): ${TAGS[*]}"
+          # 3h budget (runtime builds alone get 120 min); 15-min fast-fail if
+          # post-merge never started for the target SHA.
+          start=$(date +%s)
+          deadline=$(( start + 10800 ))
+          start_deadline=$(( start + 900 ))
+          while :; do
+            missing=()
+            for TAG in "${TAGS[@]}"; do
+              if ! aws ecr describe-images --repository-name "${ECR_REPOSITORY}" \
+                     --image-ids imageTag="${TAG}" --region "${AWS_DEFAULT_REGION}" >/dev/null 2>&1; then
+                missing+=("${TAG}")
+              fi
+            done
+            if [ ${#missing[@]} -eq 0 ]; then
+              echo "All ${#TAGS[@]} required build images are in ECR; proceeding (not waiting for post-merge tests)."
+              break
+            fi
+            echo "still missing ${#missing[@]}/${#TAGS[@]}: ${missing[*]}"
+
+            # Fast-fail if post-merge finished (or never started) — but only on a
+            # successful API response, so a transient curl/JSON failure can't
+            # masquerade as "post-merge never ran".
+            API_OK=true
+            RUNS=$(curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/workflows/post-merge-ci.yml/runs?head_sha=${SHA}&per_page=1") || { API_OK=false; RUNS='{}'; }
+            # Failure flags must be set in the parent shell, not inside $( ).
+            if ! COUNT=$(echo "${RUNS}" | jq -r '.workflow_runs | length' 2>/dev/null); then
+              API_OK=false; COUNT=0
+            fi
+            if ! STATUS=$(echo "${RUNS}" | jq -r '.workflow_runs[0].status // "pending"' 2>/dev/null); then
+              API_OK=false; STATUS=pending
+            fi
+            if [ "${API_OK}" = "true" ]; then
+              if [ "${COUNT}" = "0" ] && [ "$(date +%s)" -ge "${start_deadline}" ]; then
+                echo "::error::post-merge CI never started for ${SHA}; is the branch tip built? required image(s) missing: ${missing[*]}"
+                exit 1
+              fi
+              if [ "${COUNT}" != "0" ] && [ "${STATUS}" = "completed" ]; then
+                echo "::error::post-merge CI completed but required image(s) still missing: ${missing[*]}"
+                exit 1
+              fi
+            else
+              echo "workflow-runs API probe failed (transient); skipping fast-fail checks this round"
+            fi
+
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "::error::timed out waiting for post-merge build images: ${missing[*]}"
+              exit 1
+            fi
+            sleep 30
+          done
+
+  # STAGE ARTIFACTS + TRIGGER GITLAB (release.yml in on-demand mode). release.yml's
+  # own authorize + approval gate covers the publish path for every caller, so the
+  # ops/approval gate is NOT duplicated here; this workflow's authorize job stays as
+  # a fast-fail so a non-devops dispatch is rejected before the ECR wait.
+  invoke-release:
+    name: Stage release
+    needs: [resolve-target, await-post-merge]
+    uses: ./.github/workflows/release.yml
+    with:
+      commit_sha: ${{ needs.resolve-target.outputs.bump_sha }}
+      on_demand: true
+      # TEMPORARY(1.5.0-rc3): revert to bare inputs.release_version before merge.
+      release_version: ${{ inputs.release_version || '1.5.0' }}
+      # Operator-chosen internal-staging rc (immutable registries can't be overwritten).
+      rc_number: ${{ needs.resolve-target.outputs.rc_number }}
+      # Normalized subsets from resolve-target.
+      containers: ${{ needs.resolve-target.outputs.containers }}
+      wheels: ${{ needs.resolve-target.outputs.wheels }}
+      crates: ${{ needs.resolve-target.outputs.crates }}
+      helm: ${{ needs.resolve-target.outputs.helm }}
+      skip_gitlab_pipeline: ${{ inputs.skip_gitlab_pipeline || false }}
+    secrets: inherit
