@@ -35,6 +35,7 @@ pub struct SglangSidecarEngine {
     disaggregation_mode: DisaggregationMode,
     bootstrap_host: Option<String>,
     bootstrap_port: Option<u16>,
+    kv_event_hosts: Vec<String>,
     state: OnceCell<StartedState>,
     cancel: CancellationToken,
 }
@@ -135,6 +136,7 @@ impl SglangSidecarEngine {
                 disaggregation_mode,
                 bootstrap_host,
                 bootstrap_port,
+                kv_event_hosts: args.kv_event_hosts,
                 state: OnceCell::new(),
                 cancel: CancellationToken::new(),
             },
@@ -220,7 +222,8 @@ impl LLMEngine for SglangSidecarEngine {
                 .runtime_data
                 .insert("sglang_generate".into(), true.into());
         }
-        let kv_event_sources = discover_kv_event_sources(&discovery, &config, &self.endpoint)?;
+        let kv_event_sources =
+            discover_kv_event_sources(&discovery, &config, &self.endpoint, &self.kv_event_hosts)?;
         let connection_count = pool.len();
         let kv_event_source_count = kv_event_sources.len();
         self.state
@@ -277,7 +280,7 @@ impl LLMEngine for SglangSidecarEngine {
             self.bootstrap_host.as_deref(),
             self.bootstrap_port,
         )?;
-        let prefill_handoff = if self.disaggregation_mode.is_prefill() {
+        let mut prefill_handoff = if self.disaggregation_mode.is_prefill() {
             grpc_request
                 .disaggregated_params
                 .as_ref()
@@ -293,7 +296,6 @@ impl LLMEngine for SglangSidecarEngine {
                 yield Ok(LLMEngineOutput::cancelled().with_usage(usage(prompt_tokens, 0)));
                 return;
             }
-
             tracing::debug!(request_id = %ctx.id(), "sending request to SGLang gRPC");
             let opened = tokio::select! {
                 biased;
@@ -312,6 +314,21 @@ impl LLMEngine for SglangSidecarEngine {
                     return;
                 }
             };
+            if is_prefill {
+                let Some(handoff) = prefill_handoff.take() else {
+                    yield Err(client::protocol_error(
+                        "SGLang gRPC prefill request is missing disaggregated params",
+                    ));
+                    return;
+                };
+                // Publish the handoff only after SGLang accepts the prefill RPC.
+                // Decode can then rendezvous while this stream is drained without
+                // racing a bootstrap room that the backend has not seen yet.
+                yield Ok(LLMEngineOutput {
+                    disaggregated_params: Some(handoff),
+                    ..Default::default()
+                });
+            }
 
             let mut generated = 0_u32;
             let mut observed_prompt_tokens = prompt_tokens;
@@ -364,7 +381,7 @@ impl LLMEngine for SglangSidecarEngine {
 
                         if is_prefill {
                             if response.finished {
-                                let mut terminal = match terminal_from_meta(
+                                let terminal = match terminal_from_meta(
                                     &response.meta_info,
                                     observed_prompt_tokens,
                                     0,
@@ -375,7 +392,6 @@ impl LLMEngine for SglangSidecarEngine {
                                         break;
                                     }
                                 };
-                                terminal.disaggregated_params = prefill_handoff.clone();
                                 yield Ok(terminal);
                                 break;
                             }
@@ -617,6 +633,7 @@ fn discover_kv_event_sources(
     discovery: &Discovery,
     engine_config: &EngineConfig,
     grpc_endpoint: &GrpcEndpoint,
+    kv_event_hosts: &[String],
 ) -> Result<Vec<DiscoveredKvEventSource>, DynamoError> {
     let Some(descriptor) = discovery.server_info.get("kv_events") else {
         return Ok(Vec::new());
@@ -712,15 +729,25 @@ fn discover_kv_event_sources(
     let nnodes = client::json_u32(&discovery.server_info, "nnodes")
         .unwrap_or(1)
         .max(1);
-    if nnodes > 1 && dp_size > 1 {
+    if nnodes > 1 && dp_size > 1 && kv_event_hosts.is_empty() {
         return Err(client::protocol_error(format!(
-            "SGLang KV events for multi-node DP are unsupported because GetServerInfo does not map DP ranks to publisher hosts (nnodes={nnodes}, dp_size={dp_size})"
+            "SGLang KV events for multi-node DP require --kv-event-hosts because GetServerInfo does not map DP ranks to publisher hosts (nnodes={nnodes}, dp_size={dp_size})"
+        )));
+    }
+    if !kv_event_hosts.is_empty() && kv_event_hosts.len() != reported_dp_size as usize {
+        return Err(client::protocol_error(format!(
+            "--kv-event-hosts supplied {} hosts but SGLang reports {reported_dp_size} DP ranks",
+            kv_event_hosts.len()
         )));
     }
 
-    let connect_host = kv_event_connect_host(endpoint_host, grpc_endpoint)?;
+    let default_connect_host = kv_event_connect_host(endpoint_host, grpc_endpoint)?;
     let mut sources = Vec::with_capacity(dp_size as usize);
     for dp_rank in dp_start..dp_end {
+        let connect_host = match kv_event_hosts.get(dp_rank as usize) {
+            Some(host) => kv_event_connect_host(host, grpc_endpoint)?,
+            None => default_connect_host.clone(),
+        };
         let port = u32::from(base_port)
             .checked_add(dp_rank)
             .filter(|port| *port <= u32::from(u16::MAX))
@@ -890,6 +917,28 @@ fn build_engine_config(
         });
     let max_num_batched_tokens =
         client::json_u64(&discovery.server_info, "max_prefill_tokens").or(max_total_tokens);
+    let enable_eagle = discovery
+        .server_info
+        .get("enable_eagle")
+        .and_then(Value::as_bool)
+        .or_else(|| {
+            discovery
+                .server_info
+                .get("is_eagle")
+                .and_then(Value::as_bool)
+        })
+        .unwrap_or_else(|| {
+            discovery
+                .server_info
+                .get("speculative_algorithm")
+                .and_then(Value::as_str)
+                .is_some_and(|algorithm| {
+                    matches!(
+                        algorithm.to_ascii_uppercase().as_str(),
+                        "EAGLE" | "EAGLE3" | "FROZEN_KV_MTP" | "NEXTN"
+                    )
+                })
+        });
 
     // Native gRPC is exposed by the rank-zero frontend for the complete
     // SGLang endpoint, so one sidecar registers every pure- or attention-DP rank.
@@ -927,6 +976,7 @@ fn build_engine_config(
             total_kv_blocks,
             max_num_seqs,
             max_num_batched_tokens,
+            enable_eagle,
             data_parallel_size,
             data_parallel_start_rank,
             bootstrap_host: mode.is_prefill().then_some(bootstrap_host).flatten(),
@@ -1087,6 +1137,7 @@ mod tests {
                 "page_size": 64,
                 "dcp_size": 8,
                 "max_total_num_tokens": 1024,
+                "speculative_algorithm": "EAGLE",
             })),
             DisaggregationMode::Decode,
             None,
@@ -1097,6 +1148,7 @@ mod tests {
 
         assert_eq!(registration.kv_cache_block_size, Some(512));
         assert_eq!(registration.total_kv_blocks, Some(16));
+        assert!(registration.enable_eagle);
     }
 
     #[test]
@@ -1176,7 +1228,7 @@ mod tests {
             build_engine_config(&discovery, DisaggregationMode::Aggregated, None, None).unwrap();
         let endpoint = GrpcEndpoint::parse("http://worker.example:30001", "test").unwrap();
 
-        let sources = discover_kv_event_sources(&discovery, &config, &endpoint).unwrap();
+        let sources = discover_kv_event_sources(&discovery, &config, &endpoint, &[]).unwrap();
 
         assert_eq!(
             sources,
@@ -1193,5 +1245,43 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn maps_multi_node_dp_kv_event_sources_to_rank_hosts() {
+        let discovery = discovery(json!({
+            "page_size": 64,
+            "dp_size": 8,
+            "enable_dp_attention": true,
+            "nnodes": 2,
+            "kv_events": {
+                "publisher": "zmq",
+                "endpoint_host": "*",
+                "endpoint_port_base": 5557,
+                "topic": "kv-events",
+                "block_size": 64,
+                "dp_size": 8
+            }
+        }));
+        let config = build_engine_config(
+            &discovery,
+            DisaggregationMode::Prefill,
+            Some("node0".into()),
+            Some(7200),
+        )
+        .unwrap();
+        let endpoint = GrpcEndpoint::parse("http://node0:50051", "test").unwrap();
+        let hosts = [
+            "node0", "node0", "node0", "node0", "node1", "node1", "node1", "node1",
+        ]
+        .map(str::to_string);
+
+        let sources = discover_kv_event_sources(&discovery, &config, &endpoint, &hosts).unwrap();
+
+        assert_eq!(sources[3].endpoint, "tcp://node0:5560");
+        assert_eq!(sources[3].dp_rank, 3);
+        assert_eq!(sources[4].endpoint, "tcp://node1:5561");
+        assert_eq!(sources[4].dp_rank, 4);
+        assert_eq!(sources.len(), 8);
     }
 }
