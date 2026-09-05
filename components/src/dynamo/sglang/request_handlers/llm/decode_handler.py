@@ -400,12 +400,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     @staticmethod
     def _extract_logprobs(
         meta_info: Dict[str, Any],
-        num_output_tokens_in_chunk: Optional[int] = None,
+        *,
         return_tokens_as_token_ids: bool = False,
     ) -> tuple:
         return _shared_logprobs.extract_from_sglang_meta(
             meta_info,
-            num_output_tokens_in_chunk=num_output_tokens_in_chunk,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
@@ -751,7 +750,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     # Extract logprobs for new tokens if available
                     log_probs, top_logprobs = self._extract_logprobs(
                         meta_info,
-                        num_output_tokens_in_chunk=len(output_ids),
                         return_tokens_as_token_ids=return_tokens_as_token_ids,
                     )
                     if log_probs is not None:
@@ -829,10 +827,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             OpenAI-formatted chat completion chunk dicts.
         """
         request = request or {}
-        # SGLang text chunks are cumulative per choice. Keep independent text
-        # offsets so interleaved n>1 choices do not compute deltas from each
-        # other's previous text.
-        text_counts_per_choice: dict[int, int] = {}
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future: asyncio.Future[str] = asyncio.Future()
@@ -855,7 +849,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # Same defaulting as token mode: non-n chunks are choice 0.
                 index = res.get("index") or 0
 
-                text = res.get("text", "")
+                # Dynamo forces incremental_streaming_output=True, so SGLang
+                # has already produced the client-facing disjoint text delta.
+                # Its default detokenizer also buffers and trims stop markers.
+                delta = res.get("text", "")
 
                 finish_reason = meta_info["finish_reason"]
                 if finish_reason:
@@ -872,9 +869,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     finish_reason_type = normalize_finish_reason(finish_reason["type"])
                 else:
                     finish_reason_type = None
-                next_count = len(text)
-                count = text_counts_per_choice.get(index, 0)
-                delta = text[count:]
                 if res.get("output_ids") and not first_output_seen:
                     first_output_seen = True
                     context.notify_first_token()
@@ -923,4 +917,3 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     response["nvext"] = response_nvext
                 if not context.is_stopped():
                     yield response
-                text_counts_per_choice[index] = next_count

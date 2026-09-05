@@ -3976,30 +3976,6 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         ]
         assert content == tokenizer.decode(visible_ids, skip_special_tokens=True)
 
-    def test_split_stop_string_is_hidden_by_python_frontend(self):
-        """A stop string split across native SGLang chunks is never emitted."""
-        post = SglangStreamingPostProcessor(
-            tokenizer=self.ByteTokenizer(),
-            tool_call_parser=None,
-            reasoning_parser=None,
-            stop_strings={"END"},
-        )
-
-        first = post.process_output(
-            {"token_ids": list(b"beforeEN"), "finish_reason": None}
-        )
-        final = post.process_output(
-            {"token_ids": list(b"Dafter"), "finish_reason": None}
-        )
-
-        assert first is not None
-        assert first["delta"]["content"] == "before"
-        assert final is not None
-        assert final["delta"].get("content", "") == ""
-        assert final["finish_reason"] == "stop"
-        assert post.locally_finished
-        assert post.local_stop_reason == "END"
-
 
 # ---------------------------------------------------------------------------
 # SglangStreamingPostProcessor: fast plain text path

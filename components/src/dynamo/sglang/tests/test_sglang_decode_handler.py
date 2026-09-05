@@ -1046,7 +1046,6 @@ def test_extract_logprobs_formats_top_tokens_as_token_ids():
             "output_token_logprobs": [(-0.1, 101, "a")],
             "output_top_logprobs": [[(-0.1, 101, "a"), (-0.2, 102, "b")]],
         },
-        1,
         return_tokens_as_token_ids=True,
     )
 
@@ -1234,6 +1233,15 @@ async def test_process_token_stream_accepts_incremental_logprob_arrays():
                             "id": "request-1",
                             "finish_reason": None,
                             "output_token_logprobs": [(-0.1, 101, "")],
+                            "output_top_logprobs": [
+                                [
+                                    (-0.1, 101, "a"),
+                                    (-0.2, 201, "b"),
+                                    (-0.3, 202, "c"),
+                                    (-0.4, 203, "d"),
+                                    (-0.5, 204, "e"),
+                                ]
+                            ],
                         },
                         "engine_data": {"native_chunk": 1},
                     },
@@ -1245,6 +1253,15 @@ async def test_process_token_stream_accepts_incremental_logprob_arrays():
                             "id": "request-1",
                             "finish_reason": None,
                             "output_token_logprobs": [(-0.3, 102, "")],
+                            "output_top_logprobs": [
+                                [
+                                    (-0.3, 102, "c"),
+                                    (-0.4, 301, "d"),
+                                    (-0.5, 302, "e"),
+                                    (-0.6, 303, "f"),
+                                    (-0.7, 304, "g"),
+                                ]
+                            ],
                         },
                         "engine_data": {"native_chunk": 2},
                     },
@@ -1256,6 +1273,9 @@ async def test_process_token_stream_accepts_incremental_logprob_arrays():
 
     assert [chunk["token_ids"] for chunk in chunks] == [[101], [102]]
     assert [chunk["log_probs"] for chunk in chunks] == [[-0.1], [-0.3]]
+    assert [
+        [len(position) for position in chunk["top_logprobs"]] for chunk in chunks
+    ] == [[5], [5]]
     assert all("text" not in chunk for chunk in chunks)
     assert all("tokens" not in chunk for chunk in chunks)
     assert [chunk["engine_data"]["native_chunk"] for chunk in chunks] == [1, 2]
@@ -1428,7 +1448,7 @@ async def test_process_token_stream_upload_failure_blocks_final_chunk(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_process_text_stream_tracks_delta_per_choice_index():
+async def test_process_text_stream_forwards_incremental_text_per_choice():
     handler = _new_decode_handler()
 
     chunks = await _collect(
@@ -1447,12 +1467,12 @@ async def test_process_text_stream_tracks_delta_per_choice_index():
                     },
                     {
                         "index": 0,
-                        "text": "Hello",
+                        "text": "llo",
                         "meta_info": {"id": "request-1", "finish_reason": None},
                     },
                     {
                         "index": 1,
-                        "text": "Good",
+                        "text": "od",
                         "meta_info": {"id": "request-1", "finish_reason": None},
                     },
                 ]
@@ -1469,6 +1489,50 @@ async def test_process_text_stream_tracks_delta_per_choice_index():
         "llo",
         "od",
     ]
+
+
+@pytest.mark.asyncio
+async def test_process_text_stream_forwards_sglang_trimmed_stop_response():
+    """SGLang trims display text but retains matched token IDs upstream."""
+    handler = _new_decode_handler()
+
+    chunks = await _collect(
+        handler._process_text_stream(
+            _stream(
+                [
+                    {
+                        "index": 0,
+                        "text": " delta",
+                        "output_ids": [9477],
+                        "meta_info": {"id": "request-1", "finish_reason": None},
+                    },
+                    {
+                        "index": 0,
+                        # Vanilla SGLang's default no_stop_trim=False response:
+                        # the text is already trimmed while output_ids still
+                        # include the three-token matched stop string.
+                        "text": " epsilon",
+                        "output_ids": [31204, 1147, 1915, 38997, 18526],
+                        "meta_info": {
+                            "id": "request-1",
+                            "finish_reason": {
+                                "type": "stop",
+                                "matched": " zeta eta theta",
+                            },
+                        },
+                    },
+                ]
+            ),
+            _Context(),
+            request={"stop": [" zeta eta theta"]},
+        )
+    )
+
+    assert [chunk["choices"][0]["delta"]["content"] for chunk in chunks] == [
+        " delta",
+        " epsilon",
+    ]
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
 
 
 @pytest.mark.asyncio
