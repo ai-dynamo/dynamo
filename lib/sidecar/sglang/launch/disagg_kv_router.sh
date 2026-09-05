@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
             echo
             echo "Environment overrides:"
             echo "  MODEL                              Model to serve (default: Qwen/Qwen3-0.6B)"
-            echo "  SGLANG_PYTHON                      Python with SGLang installed (default: python3)"
+            echo "  SGLANG_PYTHON                      Python with SGLang and Dynamo installed (default: python3)"
             echo "  DYN_HTTP_PORT                      Dynamo frontend port (default: 8000)"
             echo "  DYN_SYSTEM_PORT1                   First prefill sidecar port (default: 8081)"
             echo "  DYN_SYSTEM_PORT2                   Second prefill sidecar port (default: 8082)"
@@ -117,9 +117,11 @@ print_launch_banner "Launching SGLang Native-gRPC Sidecars with Disaggregated KV
 python3 -m dynamo.frontend --router-mode kv &
 
 # Each prefill engine hosts its own KV-transfer bootstrap server, so these ports must be unique.
+# dynamo.sglang.launch_server passes every flag through to sglang.launch_server
+# after fixing that server's batch_size ordering defect on SGLang 0.5.17/0.5.18.
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL1_GPU" \
-"$SGLANG_PYTHON" -m sglang.launch_server \
+"$SGLANG_PYTHON" -m dynamo.sglang.launch_server \
     --model-path "$MODEL" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_PREFILL1_HTTP_PORT" \
@@ -137,7 +139,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL1_GPU" \
 
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL2_GPU" \
-"$SGLANG_PYTHON" -m sglang.launch_server \
+"$SGLANG_PYTHON" -m dynamo.sglang.launch_server \
     --model-path "$MODEL" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_PREFILL2_HTTP_PORT" \
@@ -155,7 +157,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL2_GPU" \
 
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$SGLANG_DECODE1_GPU" \
-"$SGLANG_PYTHON" -m sglang.launch_server \
+"$SGLANG_PYTHON" -m dynamo.sglang.launch_server \
     --model-path "$MODEL" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_DECODE1_HTTP_PORT" \
@@ -172,7 +174,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_DECODE1_GPU" \
 
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$SGLANG_DECODE2_GPU" \
-"$SGLANG_PYTHON" -m sglang.launch_server \
+"$SGLANG_PYTHON" -m dynamo.sglang.launch_server \
     --model-path "$MODEL" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_DECODE2_HTTP_PORT" \

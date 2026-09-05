@@ -54,6 +54,12 @@ python3 -m sglang.launch_server \
     --sidecar dynamo.sglang.sidecar
 ```
 
+> [!NOTE]
+> On SGLang **v0.5.17** and **v0.5.18**, start the engine with
+> `python3 -m dynamo.sglang.launch_server` instead. It forwards every flag to
+> `sglang.launch_server` unchanged, after fixing a defect in those releases that
+> fails every streaming request over the native gRPC server.
+
 The entry point configures Dynamo logging when `main()` runs, then calls the
 private `dynamo._core.backend._run_sglang_sidecar(argv)` binding. The binding
 prepends the executable name expected by clap, releases the GIL, and runs the
@@ -78,6 +84,18 @@ command.
 > server (`--grpc-port`) landed there. The KV-routing examples require
 > **v0.5.18+** because the sidecar discovers their structured KV-event
 > descriptor through `GetServerInfo`. They use `lmsysorg/sglang:v0.5.18`.
+
+> [!WARNING]
+> Stock SGLang **v0.5.17** and **v0.5.18** have a defect in the native gRPC
+> server: it reads the request's batch size before SGLang normalizes the
+> request, so every streaming request fails with `'GenerateReqInput' object has
+> no attribute 'batch_size'` and the sidecar returns HTTP 500. The scripts under
+> `launch/` are unaffected — they start the engine with
+> `python3 -m dynamo.sglang.launch_server`, which installs a compatibility
+> override and then delegates to `sglang.launch_server` with every flag
+> unchanged. These manifests cannot do the same: their engine container is a
+> stock `lmsysorg/sglang` image with no Dynamo Python in it. Until the fix is
+> released upstream, run them against an engine image that carries it.
 
 ### Prerequisites
 

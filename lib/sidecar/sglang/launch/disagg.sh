@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
             echo
             echo "Environment overrides:"
             echo "  MODEL                                   Model to serve (default: Qwen/Qwen3-0.6B)"
-            echo "  SGLANG_PYTHON                           Python with SGLang installed (default: python3)"
+            echo "  SGLANG_PYTHON                           Python with SGLang and Dynamo installed (default: python3)"
             echo "  SGLANG_PREFILL_GPU                      Prefill GPU assignment (default: 0)"
             echo "  SGLANG_DECODE_GPU                       Decode GPU assignment (default: 1)"
             echo "  DYN_HTTP_PORT                           Dynamo frontend port (default: 8000)"
@@ -83,9 +83,11 @@ print_launch_banner "Launching SGLang Native-gRPC Sidecar (Disaggregated, 2 GPUs
 
 python3 -m dynamo.frontend &
 
+# dynamo.sglang.launch_server passes every flag through to sglang.launch_server
+# after fixing that server's batch_size ordering defect on SGLang 0.5.17/0.5.18.
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL_GPU" \
-"$SGLANG_PYTHON" -m sglang.launch_server \
+"$SGLANG_PYTHON" -m dynamo.sglang.launch_server \
     --model-path "$MODEL" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_PREFILL_HTTP_PORT" \
@@ -101,7 +103,7 @@ CUDA_VISIBLE_DEVICES="$SGLANG_PREFILL_GPU" \
 
 # shellcheck disable=SC2086 # GPU_MEM_ARGS intentionally expands into multiple flags.
 CUDA_VISIBLE_DEVICES="$SGLANG_DECODE_GPU" \
-"$SGLANG_PYTHON" -m sglang.launch_server \
+"$SGLANG_PYTHON" -m dynamo.sglang.launch_server \
     --model-path "$MODEL" \
     --host "$SGLANG_HOST" \
     --port "$SGLANG_DECODE_HTTP_PORT" \
