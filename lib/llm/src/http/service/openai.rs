@@ -4369,13 +4369,12 @@ async fn images(
     let response = NvImagesResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to fold images stream for {}: {:?}", request_id, e);
             // Route the stream error through from_anyhow so typed errors keep
             // their semantics: an InvalidArgument raised by the worker (e.g.
             // request validation) surfaces as HTTP 400 with its message,
-            // while internal errors remain sanitized 500s. Previously every
-            // stream error collapsed into a generic 500 and the worker's
-            // message was only visible in server logs.
+            // while internal errors remain sanitized 500s (and are logged by
+            // the sanitization path). No pre-classification logging here:
+            // expected 400s would show up at error level.
             let err_response =
                 ErrorMessage::from_anyhow(anyhow::Error::new(e), "Failed to generate images");
             inflight.mark_error(extract_error_type_from_response(&err_response));

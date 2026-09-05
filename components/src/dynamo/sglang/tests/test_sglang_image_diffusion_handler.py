@@ -119,6 +119,11 @@ class TestImageDiffusionWorkerHandler:
         assert width == 512
         assert height == 768
 
+    def test_parse_size_auto_uses_default(self, handler):
+        """The OpenAI size enum includes "auto": the frontend forwards it, and
+        it must behave like an omitted size (backend default), not a 400."""
+        assert handler._parse_size("auto") == (1024, 1024)
+
     @pytest.mark.parametrize("bad_size", ["1024", "axb", "1024x768x3", "x", ""])
     def test_parse_size_invalid_raises_invalid_argument(self, handler, bad_size):
         """Malformed size strings must raise InvalidArgument (HTTP 400),

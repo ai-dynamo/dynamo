@@ -99,61 +99,53 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         if trace_header:
             logger.debug(f"Image diffusion request with trace: {trace_header}")
 
-        try:
-            req = CreateImageRequest(**request)
+        # Exceptions propagate to the runtime, which converts them into error
+        # events on the response stream (Annotated::from_err); the frontend
+        # folds those into a non-200 HTTP response. Expected validation
+        # failures (InvalidArgument) become 400s without traceback noise.
+        req = CreateImageRequest(**request)
 
-            nvext = req.nvext or ImageNvExt()
+        nvext = req.nvext or ImageNvExt()
 
-            # Apply SGLang-specific defaults for unset values
-            raw_steps = nvext.num_inference_steps or DEFAULT_NUM_INFERENCE_STEPS
-            if raw_steps > MAX_NUM_INFERENCE_STEPS:
-                logger.warning(
-                    f"num_inference_steps={raw_steps} exceeds max "
-                    f"{MAX_NUM_INFERENCE_STEPS}, clamping"
-                )
-            num_inference_steps = min(raw_steps, MAX_NUM_INFERENCE_STEPS)
-            guidance_scale = nvext.guidance_scale or DEFAULT_GUIDANCE_SCALE
-
-            width, height = self._parse_size(req.size)
-
-            images = await self._generate_images(
-                prompt=req.prompt,
-                negative_prompt=nvext.negative_prompt,
-                width=width,
-                height=height,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                seed=nvext.seed,
-                input_reference=req.input_reference,
+        # Apply SGLang-specific defaults for unset values
+        raw_steps = nvext.num_inference_steps or DEFAULT_NUM_INFERENCE_STEPS
+        if raw_steps > MAX_NUM_INFERENCE_STEPS:
+            logger.warning(
+                f"num_inference_steps={raw_steps} exceeds max "
+                f"{MAX_NUM_INFERENCE_STEPS}, clamping"
             )
+        num_inference_steps = min(raw_steps, MAX_NUM_INFERENCE_STEPS)
+        guidance_scale = nvext.guidance_scale or DEFAULT_GUIDANCE_SCALE
 
-            context_id = context.id()
-            assert context_id is not None
-            user_id = req.user or context_id
-            image_data = []
-            for img in images:
-                # uploading or encoding the image
-                if req.response_format == "url":
-                    url = await self._upload_to_fs(img, user_id, context_id)
-                    image_data.append(ImageData(url=url))
-                else:
-                    b64 = self._encode_base64(img)
-                    image_data.append(ImageData(b64_json=b64))
+        width, height = self._parse_size(req.size)
 
-            response = ImagesResponse(created=int(time.time()), data=image_data)
+        images = await self._generate_images(
+            prompt=req.prompt,
+            negative_prompt=nvext.negative_prompt,
+            width=width,
+            height=height,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            seed=nvext.seed,
+            input_reference=req.input_reference,
+        )
 
-            yield response.model_dump()
+        context_id = context.id()
+        assert context_id is not None
+        user_id = req.user or context_id
+        image_data = []
+        for img in images:
+            # uploading or encoding the image
+            if req.response_format == "url":
+                url = await self._upload_to_fs(img, user_id, context_id)
+                image_data.append(ImageData(url=url))
+            else:
+                b64 = self._encode_base64(img)
+                image_data.append(ImageData(b64_json=b64))
 
-        except Exception as e:
-            # Let the exception propagate: the runtime converts a raised
-            # exception into an error event on the response stream
-            # (Annotated::from_err), which the frontend folds into a non-200
-            # HTTP error. Yielding a {"data": [], "error": ...} dict instead
-            # produced an HTTP 200 with empty data and no error, because the
-            # OpenAI ImagesResponse schema has no `error` field and the
-            # message was silently dropped during deserialization.
-            logger.error(f"Error in diffusion generation: {e}", exc_info=True)
-            raise
+        response = ImagesResponse(created=int(time.time()), data=image_data)
+
+        yield response.model_dump()
 
     async def _generate_images(
         self,
@@ -228,7 +220,9 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
     def _parse_size(self, size_str: Optional[str]) -> tuple[int, int]:
         """Parse '1024x1024' -> (1024, 1024)"""
-        if size_str is None:
+        # The OpenAI size enum includes "auto": the model picks; use the
+        # backend default, same as an omitted size.
+        if size_str is None or size_str == "auto":
             return 1024, 1024
 
         try:
