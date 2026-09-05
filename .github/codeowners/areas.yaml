@@ -338,6 +338,7 @@ areas:
   - container/run.sh
   - container/templates/
   - container/use-sccache.sh
+  - harness/
   - deny.toml
   - dev/docker-compose.yml
   - dev/nats-server.conf

@@ -256,6 +256,7 @@
 # === ops  (@ai-dynamo/dynamo-ops-codeowners) ===
 /.cargo/                                                                                                @ai-dynamo/dynamo-ops-codeowners
 /.github/                                                                                               @ai-dynamo/dynamo-ops-codeowners
+/harness/                                                                                               @ai-dynamo/dynamo-ops-codeowners
 /scripts/                                                                                               @ai-dynamo/dynamo-ops-codeowners
 /deny.toml                                                                                              @ai-dynamo/dynamo-ops-codeowners
 /.gitignore                                                                                             @ai-dynamo/dynamo-ops-codeowners
