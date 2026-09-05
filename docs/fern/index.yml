@@ -200,6 +200,8 @@ navigation:
             path: pages/kubernetes/fault-tolerance/request-rejection.md
           - page: Graceful Shutdown
             path: pages/kubernetes/fault-tolerance/graceful-shutdown.md
+          - page: GMS with Device Plugin and DRA
+            path: pages/kubernetes/fault-tolerance/gms-dra-coexistence.md
 
       - section: Auto Deployment
         icon: wand-magic-sparkles
