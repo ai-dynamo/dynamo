@@ -836,7 +836,7 @@ MINIMUM KV TOKENS RESULT (TensorRT-LLM)
 
 1. **Copy the `@pytest.mark.*` lines** into your test function or `pytestmark` list.
 
-2. **VRAM markers** — `profiled_vram_gib(N)` records the actual nvidia-smi peak (for filtering/scheduling), `requested_vllm_kv_cache_bytes(N)` or `requested_sglang_kv_tokens(N)` controls the engine's KV cache allocation for deterministic parallel execution. Use `--max-vram-gib=N` to deselect tests whose profiled VRAM exceeds N (see [Filtering by VRAM](#filtering-by-vram)). The WARNING lines in the profiler output tell you which GPU tiers would be too small (e.g., "Will OOM on T4 (16 GiB)").
+2. **VRAM markers** — `profiled_vram_gib(N)` records the actual nvidia-smi peak (for filtering/scheduling), `requested_vllm_kv_cache_bytes(N)` or `requested_sglang_kv_tokens(N)` controls the engine's KV cache allocation for deterministic parallel execution. Use `--max-vram-gib=N` to deselect tests whose profiled VRAM exceeds N (see [VRAM Markers and Filtering](#vram-markers-and-filtering)). The WARNING lines in the profiler output tell you which GPU tiers would be too small (e.g., "Will OOM on T4 (16 GiB)").
 
 3. **Lifecycle markers** — the profiler recommends `pre_merge` only for tests under 20 seconds. For slower tests, it warns you to consider `post_merge` or `nightly` but does not choose for you — use your judgment based on how critical the test is for catching regressions early.
 

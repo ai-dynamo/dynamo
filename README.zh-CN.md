@@ -143,7 +143,7 @@ uv pip install --prerelease=allow "ai-dynamo[sglang]"   # 或 [vllm]
 
 ### 选项 C：Kubernetes（推荐）
 
-对于生产级多节点集群，安装 [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/start-here/installation-guide)，并使用单个 manifest 部署：
+对于生产级多节点集群，安装 [Dynamo Platform](https://docs.nvidia.com/dynamo/latest/kubernetes/installation/install-dynamo)，并使用单个 manifest 部署：
 
 ```yaml
 # 零配置部署：指定模型 + SLA，剩余工作由 Dynamo 处理
@@ -227,7 +227,7 @@ Dynamo 提供完整的基准测试工具：
 cargo run -p dynamo-llm --bin generate-frontend-openapi
 ```
 
-该命令会写入 `docs/reference/api/openapi.json`。
+该命令会写入 `docs/frontends/openapi.json`。
 
 ## 服务发现与消息传递
 

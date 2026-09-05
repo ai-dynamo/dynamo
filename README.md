@@ -171,7 +171,7 @@ Then start the frontend and a worker as shown above. See the [full installation 
 
 ### Option C: Kubernetes (recommended)
 
-For production multi-node clusters, install the [Dynamo Platform](https://docs.nvidia.com/dynamo/kubernetes-deployment/start-here/installation-guide) and deploy with a single manifest:
+For production multi-node clusters, install the [Dynamo Platform](https://docs.nvidia.com/dynamo/latest/kubernetes/installation/install-dynamo) and deploy with a single manifest:
 
 ```yaml
 # Zero-config deploy: specify model + SLA, Dynamo handles the rest
@@ -255,7 +255,7 @@ The OpenAI-compatible frontend exposes an OpenAPI 3 spec at `/openapi.json`. To 
 cargo run -p dynamo-llm --bin generate-frontend-openapi
 ```
 
-This writes to `docs/reference/api/openapi.json`.
+This writes to `docs/frontends/openapi.json`.
 
 ## Service Discovery and Messaging
 
