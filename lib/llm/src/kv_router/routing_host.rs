@@ -412,15 +412,7 @@ where
         if let Some(cache_history) = &cache_history {
             let history = cache_history.lock();
             let stats = history.stats();
-            request_metrics.set_cache_loss_history(
-                stats.retained_records,
-                stats.retained_unique_hashes,
-                stats.represented_tokens,
-                stats.estimated_retained_bytes,
-                stats.capacity_bytes,
-                stats.capacity_blocks,
-                stats.oldest_chunk_age_seconds,
-            );
+            request_metrics.set_cache_loss_history(stats);
         }
 
         RoutingHost {

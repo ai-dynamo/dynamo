@@ -637,14 +637,13 @@ where
         worker: WorkerWithDpRank,
         attempt: AdmissionAttempt,
         request: &PreprocessedRequest,
-        scheduler_tracked: bool,
         cache_loss_tracking: Option<CacheLossTracking>,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
             KvRequestCleanup::new(chooser, context_id, worker, attempt),
             request,
-            scheduler_tracked.then_some(cache_loss_tracking).flatten(),
+            cache_loss_tracking,
         )
     }
 
@@ -945,15 +944,9 @@ where
             let mut history = cache_history.lock();
             history_request.record_prompt(&mut history, prompt_hashes);
             let stats = history.stats();
-            self.observability.request_metrics().set_cache_loss_history(
-                stats.retained_records,
-                stats.retained_unique_hashes,
-                stats.represented_tokens,
-                stats.estimated_retained_bytes,
-                stats.capacity_bytes,
-                stats.capacity_blocks,
-                stats.oldest_chunk_age_seconds,
-            );
+            self.observability
+                .request_metrics()
+                .set_cache_loss_history(stats);
             self.cache_history_verified = true;
         }
         self.cache_loss_recorded = true;
@@ -985,15 +978,9 @@ where
         let mut history = cache_history.lock();
         history_request.finalize(&mut history, prompt_hashes, output_hashes);
         let stats = history.stats();
-        self.observability.request_metrics().set_cache_loss_history(
-            stats.retained_records,
-            stats.retained_unique_hashes,
-            stats.represented_tokens,
-            stats.estimated_retained_bytes,
-            stats.capacity_bytes,
-            stats.capacity_blocks,
-            stats.oldest_chunk_age_seconds,
-        );
+        self.observability
+            .request_metrics()
+            .set_cache_loss_history(stats);
     }
 }
 
@@ -1170,6 +1157,15 @@ mod prefill_start_tests {
     }
 
     fn test_metrics() -> Arc<RouterRequestMetrics> {
+        fn counter(name: &str) -> prometheus::IntCounter {
+            prometheus::IntCounter::new(name, name).unwrap()
+        }
+        fn counter_vec(name: &str, label: &str) -> prometheus::IntCounterVec {
+            prometheus::IntCounterVec::new(prometheus::Opts::new(name, name), &[label]).unwrap()
+        }
+        fn gauge(name: &str) -> prometheus::IntGauge {
+            prometheus::IntGauge::new(name, name).unwrap()
+        }
         fn hist(name: &str) -> prometheus::Histogram {
             prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
         }
@@ -1193,6 +1189,20 @@ mod prefill_start_tests {
             )
             .unwrap(),
             overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
+            cache_loss_observation_input_tokens_total: counter(
+                "cache_loss_observation_input_tokens_total",
+            ),
+            cache_loss_funnel_tokens_total: counter_vec("cache_loss_funnel_tokens_total", "stage"),
+            cache_loss_observations_total: counter_vec("cache_loss_observations_total", "result"),
+            cache_loss_history_block_records: gauge("cache_loss_history_block_records"),
+            cache_loss_history_unique_hashes: gauge("cache_loss_history_unique_hashes"),
+            cache_loss_history_represented_tokens: gauge("cache_loss_history_represented_tokens"),
+            cache_loss_history_estimated_bytes: gauge("cache_loss_history_estimated_bytes"),
+            cache_loss_history_capacity_bytes: gauge("cache_loss_history_capacity_bytes"),
+            cache_loss_history_capacity_blocks: gauge("cache_loss_history_capacity_blocks"),
+            cache_loss_history_oldest_chunk_age_seconds: gauge(
+                "cache_loss_history_oldest_chunk_age_seconds",
+            ),
         })
     }
 

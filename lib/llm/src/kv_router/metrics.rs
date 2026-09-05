@@ -66,6 +66,8 @@ use crate::http::service::metrics::generate_log_buckets;
 use crate::protocols::common::timing::WORKER_TYPE_PREFILL;
 use dynamo_kv_router::indexer::ApproximateLruStats;
 
+use super::minimal_cache_loss::CacheHistoryStats;
+
 pub(crate) const ROUTER_WORKER_ID_LABEL: &str = "router_worker_id";
 const TARGET_NAMESPACE_LABEL: &str = "target_namespace";
 const TARGET_COMPONENT_LABEL: &str = "target_component";
@@ -1138,30 +1140,21 @@ impl RouterRequestMetrics {
             .inc();
     }
 
-    pub fn set_cache_loss_history(
-        &self,
-        retained_records: usize,
-        retained_unique_hashes: usize,
-        represented_tokens: u64,
-        estimated_retained_bytes: usize,
-        capacity_bytes: usize,
-        capacity_blocks: usize,
-        oldest_chunk_age_seconds: u64,
-    ) {
+    pub fn set_cache_loss_history(&self, stats: CacheHistoryStats) {
         self.cache_loss_history_block_records
-            .set(retained_records.min(i64::MAX as usize) as i64);
+            .set(stats.retained_records.min(i64::MAX as usize) as i64);
         self.cache_loss_history_unique_hashes
-            .set(retained_unique_hashes.min(i64::MAX as usize) as i64);
+            .set(stats.retained_unique_hashes.min(i64::MAX as usize) as i64);
         self.cache_loss_history_represented_tokens
-            .set(represented_tokens.min(i64::MAX as u64) as i64);
+            .set(stats.represented_tokens.min(i64::MAX as u64) as i64);
         self.cache_loss_history_estimated_bytes
-            .set(estimated_retained_bytes.min(i64::MAX as usize) as i64);
+            .set(stats.estimated_retained_bytes.min(i64::MAX as usize) as i64);
         self.cache_loss_history_capacity_bytes
-            .set(capacity_bytes.min(i64::MAX as usize) as i64);
+            .set(stats.capacity_bytes.min(i64::MAX as usize) as i64);
         self.cache_loss_history_capacity_blocks
-            .set(capacity_blocks.min(i64::MAX as usize) as i64);
+            .set(stats.capacity_blocks.min(i64::MAX as usize) as i64);
         self.cache_loss_history_oldest_chunk_age_seconds
-            .set(oldest_chunk_age_seconds.min(i64::MAX as u64) as i64);
+            .set(stats.oldest_chunk_age_seconds.min(i64::MAX as u64) as i64);
     }
 }
 

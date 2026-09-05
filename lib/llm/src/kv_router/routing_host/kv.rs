@@ -297,7 +297,7 @@ where
         let block_size = chooser.block_size() as usize;
         let selected_worker = selection.worker;
         let cache_loss_tracking = (!is_query_only)
-            .then(|| self.cache_history.as_ref())
+            .then_some(self.cache_history.as_ref())
             .flatten()
             .map(|cache_history| {
                 let cache_history_request = CacheHistoryRequest::new(
@@ -340,7 +340,6 @@ where
                 selected_worker,
                 selection.attempt,
                 request,
-                !is_query_only,
                 cache_loss_tracking,
             ),
         };
