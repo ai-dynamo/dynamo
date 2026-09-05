@@ -33,7 +33,7 @@ def _create_ext_modules():
     # Common compile arguments
     extra_compile_args = ["-std=c++17", "-O3", "-fPIC"]
 
-    # _allocator_ext: CUDAPluggableAllocator shim using only Python C API
+    # _allocator_ext: Device-agnostic pluggable allocator shim (Python C API only)
     # No CUDA or PyTorch dependency - just provides my_malloc/my_free that call Python callbacks
     return [
         Extension(
