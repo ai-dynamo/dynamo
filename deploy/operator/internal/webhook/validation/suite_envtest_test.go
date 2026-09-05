@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -481,6 +482,17 @@ func expectedAdmissionErrors(t *testing.T, test admissionTestCase) []string {
 	return test.wantWebhookErrors
 }
 
+// goStructFieldType matches the leading Go type name encoding/json reports in
+// a nested UnmarshalTypeError, such as "PodCliqueSet" in "Go struct field
+// PodCliqueSet.spec.template.topologyConstraint.pack". That leading type is
+// the outermost struct passed to json.Unmarshal, not the struct that
+// declares the erroring field: it stays constant across every nesting depth,
+// so it carries no information a field-path assertion does not already
+// carry. Go 1.27 also changed which unqualified type name lands there for a
+// pointer-typed nested field, so pinning it ties this assertion to a Go
+// toolchain minor version the module does not otherwise require.
+var goStructFieldType = regexp.MustCompile(`Go struct field \S+?\.`)
+
 func assertAdmissionErrors(t *testing.T, err error, want []string, notWant string) {
 	t.Helper()
 	if len(want) == 0 {
@@ -513,6 +525,7 @@ func assertAdmissionErrors(t *testing.T, err error, want []string, notWant strin
 		}
 		message := strings.Replace(cause.Message, `Invalid value: "object": `, "Invalid value: ", 1)
 		message = strings.Replace(message, `Invalid value: "array": `, "Invalid value: ", 1)
+		message = goStructFieldType.ReplaceAllString(message, "Go struct field .")
 		got = append(got, fmt.Sprintf("%s: %s", cause.Field, message))
 	}
 	if !slices.Equal(got, want) {
