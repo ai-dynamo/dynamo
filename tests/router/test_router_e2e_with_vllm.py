@@ -705,7 +705,9 @@ def test_router_decisions_vllm_dp(
     )
 
 
-# The parallel lane reserves one GPU per test; this case requires GPUs 0 and 1.
+# This case needs two GPUs. The parallel lane can reserve a two-GPU gang, but
+# only for tests that declare profiled_vram_gib; this one does not, so it still
+# runs in the sequential stage.
 @pytest.mark.gpu_2
 @pytest.mark.nightly
 @pytest.mark.timeout(600)

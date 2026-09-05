@@ -549,9 +549,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                # No profiled_vram_gib: multi-GPU scheduling is not supported
-                # in the VRAM-parallel stage yet, so this runs sequentially
-                # if the skip is removed.
+                # No profiled_vram_gib yet: the VRAM-parallel stage schedules
+                # multi-GPU tests, but only profiled ones, so this runs
+                # sequentially until someone profiles it.
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-1.5 (placeholder-template `<image>` path).
@@ -606,8 +606,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 marks=[pytest.mark.nightly],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                # No profiled_vram_gib: multi-GPU scheduling is not supported
-                # in the VRAM-parallel stage yet, so this runs sequentially.
+                # No profiled_vram_gib yet: the VRAM-parallel stage schedules
+                # multi-GPU tests, but only profiled ones, so this runs
+                # sequentially until someone profiles it.
                 requested_vllm_kv_cache_bytes=4_308_848_000,
                 tests=[
                     MmCase(
@@ -674,9 +675,9 @@ VLLM_MULTIMODAL_PROFILES: list[MultimodalModelProfile] = [
                 ],
                 timeout_s=600,
                 gpu_marker="gpu_2",
-                # No profiled_vram_gib: multi-GPU scheduling is not supported
-                # in the VRAM-parallel stage yet, so this runs sequentially
-                # if the skip is removed.
+                # No profiled_vram_gib yet: the VRAM-parallel stage schedules
+                # multi-GPU tests, but only profiled ones, so this runs
+                # sequentially until someone profiles it.
                 requested_vllm_kv_cache_bytes=4_318_854_000,
                 # cached_tokens-asserting payload proves MM-aware routing
                 # engaged for LLaVA-NeXT (anyres multi-crop processor).
