@@ -1,7 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU-only tests for the SGLang ServerArgs override ladder used by setup_gms."""
+"""CPU-only tests for the SGLang ServerArgs override ladder used by setup_gms.
+
+Do not rename this module to ``test_sglang_*``. The installed ``ai-dynamo``
+wheel registers ``dynamo.sglang.tests.conftest`` as a pytest plugin, and its
+``pytest_ignore_collect`` drops every file whose name starts with that prefix,
+repository-wide, whenever SGLang is not importable. Four of the five tests below
+are hermetic and must still run on an image without SGLang.
+"""
 
 from types import SimpleNamespace
 
