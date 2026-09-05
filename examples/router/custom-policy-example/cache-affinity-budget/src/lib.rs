@@ -194,6 +194,31 @@ mod tests {
     }
 
     #[test]
+    fn configured_active_request_weight_contributes_to_load_budget() {
+        let config = KvRouterConfig {
+            decode_active_request_weight: 32.0,
+            ..Default::default()
+        };
+        let policy = create_policy(&config, "test", 64.0);
+        let workers = HashMap::from([(0, TestWorker), (1, TestWorker)]);
+        let warm = WorkerWithDpRank::from_worker_id(0);
+        let mut request = request(0);
+        request.worker_loads.get_mut(&warm).unwrap().active_requests = 3;
+        assert_eq!(
+            policy
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    16,
+                ))
+                .unwrap()
+                .worker,
+            WorkerWithDpRank::from_worker_id(1)
+        );
+    }
+
+    #[test]
     fn validates_cost_delta() {
         assert!(validate_cost_delta(0.0).is_ok());
         assert!(validate_cost_delta(64.0).is_ok());
