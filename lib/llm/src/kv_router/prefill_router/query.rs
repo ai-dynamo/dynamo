@@ -344,6 +344,7 @@ mod tests {
             discovery_backend: DiscoveryBackend::KvStore(kv::Selector::File(root.to_path_buf())),
             nats_config: None,
             request_plane: RequestPlaneMode::Tcp,
+            response_plane: None,
             event_transport_kind: EventTransportKind::Zmq,
         }
     }

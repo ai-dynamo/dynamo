@@ -51,6 +51,7 @@ def _runtime_config(**overrides):
         "namespace": "checkpoint-ns",
         "discovery_backend": "kubernetes",
         "request_plane": "nats",
+        "response_plane": "tcp",
         "event_plane": None,
     }
     values.update(overrides)
@@ -134,10 +135,13 @@ async def test_snapshot_runtime_proxy_materializes_runtime_after_restore(monkeyp
             assert await self.pause_controller.pause(self.engine) is True
             return True
 
-    def fake_create_runtime(discovery_backend, request_plane, event_plane):
+    def fake_create_runtime(
+        discovery_backend, request_plane, event_plane, response_plane="tcp"
+    ):
         assert discovery_backend == "kubernetes"
         assert request_plane == "nats"
         assert event_plane is None
+        assert response_plane == "tcp"
         assert "resume" not in lifecycle_calls
         return created_runtime, object()
 

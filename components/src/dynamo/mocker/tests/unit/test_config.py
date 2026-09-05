@@ -688,3 +688,15 @@ def test_mock_engine_args_from_json_ignores_legacy_has_perf_model_field():
     assert engine_args.max_num_seqs is None
     assert engine_args.max_num_batched_tokens is None
     assert engine_args.worker_type == "decode"
+
+
+def test_response_plane_defaults_to_tcp_and_accepts_quic(monkeypatch):
+    monkeypatch.delenv("DYN_RESPONSE_PLANE", raising=False)
+
+    assert parse_args([]).response_plane == "tcp"
+    assert parse_args(["--response-plane", "quic"]).response_plane == "quic"
+    monkeypatch.setenv("DYN_RESPONSE_PLANE", "quic")
+    assert parse_args([]).response_plane == "quic"
+
+    with pytest.raises(SystemExit):
+        parse_args(["--response-plane", "invalid"])

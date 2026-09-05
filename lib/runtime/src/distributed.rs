@@ -6,6 +6,7 @@ use crate::component::{
 };
 use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
+use crate::pipeline::network::ResponsePlaneMode;
 use crate::pipeline::network::manager::NetworkManager;
 use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
@@ -99,8 +100,11 @@ pub struct DistributedRuntime {
     nats_client: Option<transports::nats::Client>,
     network_manager: Arc<NetworkManager>,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    quic_response_server:
+        Arc<OnceCell<Arc<crate::pipeline::network::quic_response::QuicResponseServer>>>,
     system_status_server: Arc<OnceLock<Arc<system_status_server::SystemStatusServerInfo>>>,
     request_plane: RequestPlaneMode,
+    response_plane: ResponsePlaneMode,
 
     // Service discovery client
     discovery_client: Arc<dyn discovery::Discovery>,
@@ -166,8 +170,12 @@ impl std::fmt::Debug for DistributedRuntime {
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let (discovery_backend, nats_config, request_plane, event_transport_kind) =
+        let (discovery_backend, nats_config, request_plane, response_plane, event_transport_kind) =
             config.dissolve();
+        let response_plane = match response_plane {
+            Some(mode) => mode,
+            None => ResponsePlaneMode::configured()?,
+        };
 
         let nats_client = match nats_config {
             Some(nc) => Some(nc.connect().await?),
@@ -253,6 +261,7 @@ impl DistributedRuntime {
             network_manager: Arc::new(network_manager),
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            quic_response_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
             endpoint_registrations,
@@ -263,11 +272,18 @@ impl DistributedRuntime {
             metrics_registry: crate::MetricsRegistry::new(),
             system_health,
             request_plane,
+            response_plane,
             local_endpoint_registry: crate::local_endpoint_registry::LocalEndpointRegistry::new(),
             engine_routes: crate::engine_routes::EngineRouteRegistry::new(),
             metadata_artifacts: crate::metadata_registry::MetadataArtifactRegistry::new(),
             event_transport_kind,
         };
+
+        if response_plane == ResponsePlaneMode::Quic {
+            crate::metrics::quic_response::ensure_registered(
+                distributed_runtime.get_metrics_registry(),
+            );
+        }
 
         // Initialize the uptime gauge in SystemHealth
         distributed_runtime
@@ -446,11 +462,11 @@ impl DistributedRuntime {
                     .map_or(String::new(), |h| format!(" on host {h}"));
                 if port == 0 {
                     tracing::info!(
-                        "TCP response stream server using OS-assigned port{host_suffix}"
+                        "TCP request callback server using OS-assigned port{host_suffix}"
                     );
                 } else {
                     tracing::info!(
-                        "TCP response stream server using fixed port {port}{host_suffix}"
+                        "TCP request callback server using fixed port {port}{host_suffix}"
                     );
                 }
 
@@ -463,6 +479,51 @@ impl DistributedRuntime {
             })
             .await?
             .clone())
+    }
+
+    pub async fn quic_response_server(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::quic_response::QuicResponseServer>> {
+        anyhow::ensure!(
+            self.response_plane == ResponsePlaneMode::Quic,
+            "QUIC response server requested while response plane is {}",
+            self.response_plane.name()
+        );
+        Ok(self
+            .quic_response_server
+            .get_or_try_init(async {
+                let tcp_server = self.tcp_server().await?;
+                let tcp_address = tcp_server.local_address()?;
+                // Keep the selected interface, but let the UDP stack choose a
+                // free port. A TCP ephemeral port can already be in use by an
+                // unrelated UDP socket because the two protocols allocate
+                // ports independently.
+                let address = std::net::SocketAddr::new(tcp_address.ip(), 0);
+                crate::pipeline::network::quic_response::QuicResponseServer::new(
+                    address,
+                    address,
+                    self.runtime.child_token(),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await?
+            .clone())
+    }
+
+    pub fn quic_response_client_pool(
+        &self,
+    ) -> Result<Arc<crate::pipeline::network::quic_response::QuicResponseClientPool>> {
+        anyhow::ensure!(
+            self.response_plane == ResponsePlaneMode::Quic,
+            "QUIC response client pool requested while response plane is {}",
+            self.response_plane.name()
+        );
+        crate::pipeline::network::quic_response::process_client_pool_from_env()
+            .map_err(anyhow::Error::from)
+    }
+
+    pub fn response_plane(&self) -> ResponsePlaneMode {
+        self.response_plane
     }
 
     /// Get the network manager
@@ -724,6 +785,9 @@ pub struct DistributedConfig {
     pub discovery_backend: DiscoveryBackend,
     pub nats_config: Option<nats::ClientOptions>,
     pub request_plane: RequestPlaneMode,
+    /// Explicit response transport. `None` reads `DYN_RESPONSE_PLANE` for
+    /// standalone Rust entry points.
+    pub response_plane: Option<ResponsePlaneMode>,
     /// Resolved event transport kind — computed once at config time from
     /// `DYN_EVENT_PLANE` and the discovery backend, then stored on the runtime
     /// so callers always get the same answer regardless of which other services
@@ -784,6 +848,7 @@ impl DistributedConfig {
                 None
             },
             request_plane,
+            response_plane: None,
             event_transport_kind,
         }
     }
@@ -811,6 +876,7 @@ impl DistributedConfig {
                 None
             },
             request_plane,
+            response_plane: None,
             event_transport_kind,
         }
     }
@@ -824,6 +890,7 @@ impl DistributedConfig {
             // This won't be used in process local, so we likely need a "none" option to
             // communicate that and avoid opening the ports.
             request_plane: RequestPlaneMode::Tcp,
+            response_plane: None,
             event_transport_kind: crate::discovery::EventTransportKind::Zmq,
         }
     }
@@ -899,6 +966,7 @@ pub mod distributed_test_utils {
             ),
             nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
+            response_plane: None,
             event_transport_kind: crate::discovery::EventTransportKind::Nats,
         };
         super::DistributedRuntime::new(rt, config).await.unwrap()
@@ -922,6 +990,7 @@ pub mod distributed_test_utils {
             ),
             nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
+            response_plane: None,
             event_transport_kind: crate::discovery::EventTransportKind::Nats,
         };
         super::DistributedRuntime::new(rt, config).await.unwrap()
