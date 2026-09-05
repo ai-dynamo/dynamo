@@ -570,6 +570,7 @@ fn raw_block_stored(
         kv_cache_spec_kind: None,
         kv_cache_spec_sliding_window: None,
         locality: None,
+        session_id: None,
     }
 }
 

@@ -597,6 +597,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                 // This state agent creates CacheOwner events only from KVCR ownership.
                 ResidencyDomain::CacheOwner => EventDedupPolicy::SetLike,
             };
+            let session_id = placement_event.session_id;
             let mut event = placement_event.event;
             if event.dp_rank != self.slot_dp_rank {
                 self.fail_source(
@@ -655,7 +656,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
             };
             self.next_outbound_id = next_outbound_id;
 
-            let router_event = match domain {
+            let mut router_event = match domain {
                 ResidencyDomain::Worker => RouterEvent::with_residency_domain(
                     event_worker_id,
                     event,
@@ -670,6 +671,7 @@ impl<P: RouterEventBatchSink + 'static> Coordinator<P> {
                     self.identity.cache_owner_id,
                 ),
             };
+            router_event.session_id = session_id;
             // NOTE: Stored/Removed intentionally use the legacy lossy contract: queue
             // admission and one best-effort publish, with no completion acknowledgement.
             // Cleared is stronger and completes every affected tier before publication.
@@ -1931,6 +1933,7 @@ mod tests {
             kv_cache_spec_sliding_window: None,
             locality: None,
             ownership: ownership.map(str::to_owned),
+            session_id: None,
         }
     }
 

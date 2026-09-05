@@ -9,8 +9,8 @@ use serde::Serialize;
 
 use crate::protocols::{
     BlockExtraInfo, BlockHashOptions, BlockMmObjectInfo, ExternalSequenceBlockHash,
-    KvCacheEventData, PlacementEvent, PlacementOwner, StorageTier, WorkerWithDpRank,
-    compute_block_hash_for_seq,
+    KvCacheEventData, PlacementEvent, PlacementOwner, StorageTier, UNATTRIBUTED_SESSION_ID,
+    WorkerWithDpRank, compute_block_hash_for_seq,
 };
 
 use super::filter::KvCacheSpecKind;
@@ -96,6 +96,8 @@ struct MapBlockStoredFixture {
     locality: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ownership: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'static str>,
 }
 
 impl Default for MapBlockStoredFixture {
@@ -112,6 +114,7 @@ impl Default for MapBlockStoredFixture {
             extra_keys: None,
             locality: None,
             ownership: None,
+            session_id: None,
         }
     }
 }
@@ -150,6 +153,52 @@ fn decodes_ownership_on_named_map_events() {
     let event: RawKvEvent = from_slice(&encoded).unwrap();
     assert_eq!(event.ownership(), Ok(KvEventOwnership::Kvcr));
     assert_eq!(event.locality(), Some(Locality::Local));
+}
+
+#[test]
+fn block_stored_session_id_reaches_canonical_router_event() {
+    let encoded = to_vec_named(&MapBlockStoredFixture {
+        session_id: Some("session-1"),
+        ..Default::default()
+    })
+    .unwrap();
+    let raw: RawKvEvent = from_slice(&encoded).unwrap();
+    let placement = convert_event(
+        raw,
+        42,
+        2,
+        WorkerWithDpRank::new(7, 0),
+        &Arc::new(AtomicU32::new(0)),
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(placement.session_id.as_deref(), Some("session-1"));
+    let event = placement.into_router_event().unwrap();
+    assert_eq!(event.session_id.as_deref(), Some("session-1"));
+    assert_eq!(event.session_id_or_unattributed(), "session-1");
+}
+
+#[test]
+fn missing_block_stored_session_id_uses_unattributed_fallback() {
+    let encoded = to_vec_named(&MapBlockStoredFixture::default()).unwrap();
+    let raw: RawKvEvent = from_slice(&encoded).unwrap();
+    let event = convert_event(
+        raw,
+        42,
+        2,
+        WorkerWithDpRank::new(7, 0),
+        &Arc::new(AtomicU32::new(0)),
+        None,
+        None,
+    )
+    .unwrap()
+    .into_router_event()
+    .unwrap();
+
+    assert_eq!(event.session_id, None);
+    assert_eq!(event.session_id_or_unattributed(), UNATTRIBUTED_SESSION_ID);
 }
 
 #[test]
@@ -736,6 +785,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
     let child = RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(2)],
@@ -752,6 +802,7 @@ fn test_normalizer_propagates_cache_namespace_from_parent() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
 
     assert!(normalizer.preprocess(parent, worker).is_some());
@@ -797,6 +848,7 @@ fn test_normalizer_shares_cache_namespace_across_blocks() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
 
     assert!(normalizer.preprocess(event, worker).is_some());
@@ -830,6 +882,7 @@ fn test_normalizer_rejects_ambiguous_parent_cache_namespace() {
             kv_cache_spec_sliding_window: None,
             locality: None,
             ownership: None,
+            session_id: None,
         };
 
     let parent_a = stored(Some("tenant-a"), vec![BlockHashValue::Unsigned(1)], None);
@@ -869,6 +922,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
     let child = RawKvEvent::BlockStored {
         block_hashes: vec![BlockHashValue::Unsigned(2)],
@@ -885,6 +939,7 @@ fn test_normalizer_treats_empty_namespace_as_absent() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
 
     assert!(normalizer.preprocess(parent, worker).is_some());
@@ -932,6 +987,7 @@ fn test_convert_event_bigram_emits_eagle_windows() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
     let warning_count = Arc::new(AtomicU32::new(0));
     let placement_event = convert_event(
@@ -1008,6 +1064,7 @@ fn cpu_block_stored(fixture: CpuBlockStoredFixture<'_>) -> RawKvEvent {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     }
 }
 
@@ -1193,6 +1250,7 @@ fn raw_placement_event(
             kv_cache_spec_sliding_window: None,
             locality,
             ownership: None,
+            session_id: None,
         },
         TestEventKind::BlockRemoved => RawKvEvent::BlockRemoved {
             block_hashes: vec![BlockHashValue::Unsigned(1)],
@@ -1385,6 +1443,7 @@ fn test_storage_placeholder_store_is_indexed_as_disk_noop() {
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     };
     let warning_count = Arc::new(AtomicU32::new(0));
     let placement = convert_event(
@@ -1431,6 +1490,7 @@ fn namespaced_block_stored(
         kv_cache_spec_sliding_window: None,
         locality: None,
         ownership: None,
+        session_id: None,
     }
 }
 
