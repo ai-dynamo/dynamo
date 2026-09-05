@@ -1692,7 +1692,7 @@ impl RequestPlaneClient for TcpRequestClient {
                 tracing::warn!("TCP request timeout to {}", addr);
                 Err(anyhow::anyhow!(
                     crate::error::DynamoError::builder()
-                        .error_type(crate::error::ErrorType::CannotConnect)
+                        .error_type(crate::error::ErrorType::ConnectionTimeout)
                         .message(format!("TCP request to {addr} timed out"))
                         .build()
                 ))

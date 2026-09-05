@@ -63,6 +63,12 @@ pub fn request_was_cancelled(err: &(dyn std::error::Error + 'static)) -> bool {
     dynamo_runtime::error::match_error_chain(err, CANCELLATION, NON_CANCELLATION)
 }
 
+pub fn request_was_timed_out(err: &(dyn std::error::Error + 'static)) -> bool {
+    const TIMEOUT: &[DynamoErrorType] = &[DynamoErrorType::ResponseTimeout];
+    const NON_TIMEOUT: &[DynamoErrorType] = &[];
+    dynamo_runtime::error::match_error_chain(err, TIMEOUT, NON_TIMEOUT)
+}
+
 pub use prometheus::Registry;
 
 use super::RouteDoc;

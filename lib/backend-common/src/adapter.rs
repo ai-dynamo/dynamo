@@ -500,6 +500,13 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // `stream_span.record(...)` from the closure mutates the same span
         // we just dropped — `Span` is a cheap handle, clones share storage.
 
+        let mapped = async_stream::stream! {
+            let mut inner = Box::pin(mapped);
+            while let Some(item) = inner.next().await {
+                yield item;
+            }
+        };
+
         Ok(ResponseStream::new(Box::pin(mapped), ctx))
     }
 }

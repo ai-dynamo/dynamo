@@ -35,6 +35,7 @@ use dynamo_runtime::config::{
     env_is_falsey, environment_names::llm as env_llm, is_truthy, parse_bool_opt,
 };
 use dynamo_runtime::error::{DynamoError, ErrorType};
+use dynamo_runtime::telemetry::{LIFECYCLE_TRACE_CONTEXT_KEY, LifecycleStage, LifecycleTrace};
 use either::Either;
 use futures::Stream;
 use futures::stream::{self, StreamExt};
@@ -52,7 +53,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex, OnceLock},
 };
-use tracing;
+use tracing::{self, Instrument};
 
 #[cfg(all(feature = "mm-routing", feature = "media-ffmpeg"))]
 use crate::local_model::runtime_config::VLLM_QWEN_VIDEO_PROCESSOR_CONTRACT_RUNTIME_KEY;
@@ -6912,6 +6913,13 @@ impl
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         // unpack the request
         let (mut request, context) = request.into_parts();
+        let lifecycle = context
+            .get_optional::<LifecycleTrace>(LIFECYCLE_TRACE_CONTEXT_KEY)
+            .ok()
+            .flatten()
+            .map(|trace| trace.as_ref().clone())
+            .unwrap_or_else(|| LifecycleTrace::from_request_id(context.id().to_string()));
+        let preprocessing = lifecycle.start(LifecycleStage::RequestPreprocessing);
 
         // Preserve original inbound streaming flag before any internal overrides
         let request_id = context.id().to_string();
@@ -6979,6 +6987,7 @@ impl
                     .flatten()
                     .map(|name| name.as_ref().clone()),
             )
+            .instrument(preprocessing.clone())
             .await?;
         attach_agent_context_from_context(&mut common_request, &context);
 
@@ -7032,6 +7041,7 @@ impl
             .flat_map(|(k, v)| Annotated::from_annotation(k, &v))
             .collect();
         let annotations_stream = stream::iter(annotations);
+        drop(preprocessing);
 
         // forward the common completion request to the next operator
         let response_stream = next.generate(common_request).await?;

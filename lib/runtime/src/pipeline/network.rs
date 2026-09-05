@@ -34,6 +34,7 @@ use super::{
 use crate::metrics::MetricsHierarchy;
 use crate::metrics::prometheus_names::work_handler;
 use crate::protocols::maybe_error::MaybeError;
+use crate::telemetry::LifecycleOperationRole;
 use ingress::push_handler::WorkHandlerMetrics;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
@@ -488,14 +489,16 @@ pub struct Egress<Req: PipelineIO, Resp: PipelineIO> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SEND_BUFFER_COUNT, IngressResponseEncoder, NetworkStreamWrapper,
+        DEFAULT_SEND_BUFFER_COUNT, Ingress, IngressResponseEncoder, ManyOut, NetworkStreamWrapper,
         RequestControlMessage, RequestPlanePayloadCodec, RequestType, ResponseType,
-        SerdeIngressPayloadAdapter, StreamOptions,
+        SerdeIngressPayloadAdapter, SingleIn, StreamOptions,
     };
     use crate::engine::AsyncEngineContextProvider;
     use crate::pipeline::Context;
     use crate::protocols::annotated::Annotated;
+    use crate::telemetry::LifecycleOperationRole;
     use serde::{Deserialize, Serialize};
+    use std::sync::{Arc, OnceLock};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
     struct TestPayload {
@@ -554,6 +557,29 @@ mod tests {
             .expect("stream options should build");
 
         assert_eq!(options.send_buffer_count, 128);
+    }
+
+    #[test]
+    fn ingress_observes_lifecycle_role_set_after_binding() {
+        let ingress = Ingress::<SingleIn<String>, ManyOut<String>>::new();
+        let endpoint_role = Arc::new(OnceLock::new());
+
+        ingress
+            .lifecycle_operation_role
+            .set(endpoint_role.clone())
+            .expect("new ingress lifecycle role source must be empty");
+        assert_eq!(
+            ingress.lifecycle_operation_role(),
+            LifecycleOperationRole::Worker
+        );
+
+        endpoint_role
+            .set(LifecycleOperationRole::Prefill)
+            .expect("new endpoint lifecycle role cell must be empty");
+        assert_eq!(
+            ingress.lifecycle_operation_role(),
+            LifecycleOperationRole::Prefill
+        );
     }
 
     #[test]
@@ -844,6 +870,7 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO, Adapter = SerdeIngressPayl
     /// Endpoint-specific notifier for health check timer resets
     endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
     payload_adapter: Arc<Adapter>,
+    lifecycle_operation_role: OnceLock<Arc<OnceLock<LifecycleOperationRole>>>,
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
@@ -866,6 +893,14 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     pub fn for_engine(engine: ServiceEngine<Req, Resp>) -> Result<Arc<Self>> {
         Self::for_engine_with_adapter(engine, SerdeIngressPayloadAdapter)
     }
+
+    /// Build a worker ingress with the role fixed by its startup configuration.
+    pub fn for_engine_with_lifecycle_role(
+        engine: ServiceEngine<Req, Resp>,
+        role: LifecycleOperationRole,
+    ) -> Result<Arc<Self>> {
+        Self::for_engine_with_adapter_and_lifecycle_role(engine, SerdeIngressPayloadAdapter, role)
+    }
 }
 
 impl<Req, Resp, Adapter> Ingress<Req, Resp, Adapter>
@@ -880,7 +915,23 @@ where
             metrics: OnceLock::new(),
             endpoint_health_check_notifier: OnceLock::new(),
             payload_adapter: Arc::new(payload_adapter),
+            lifecycle_operation_role: OnceLock::new(),
         })
+    }
+
+    fn new_with_adapter_and_lifecycle_role(
+        payload_adapter: Adapter,
+        lifecycle_operation_role: LifecycleOperationRole,
+    ) -> Arc<Self> {
+        let ingress = Self::new_with_adapter(payload_adapter);
+        let role = Arc::new(OnceLock::new());
+        role.set(lifecycle_operation_role)
+            .expect("new lifecycle role cell must be empty");
+        ingress
+            .lifecycle_operation_role
+            .set(role)
+            .expect("new ingress lifecycle role source must be empty");
+        ingress
     }
 
     pub fn attach(&self, segment: Arc<SegmentSource<Req, Resp>>) -> Result<()> {
@@ -894,6 +945,9 @@ where
         endpoint: &crate::component::Endpoint,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()> {
+        let _ = self
+            .lifecycle_operation_role
+            .set(endpoint.lifecycle_operation_role());
         let metrics = WorkHandlerMetrics::from_endpoint(endpoint, metrics_labels)
             .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
 
@@ -920,11 +974,23 @@ where
     ) -> Result<Arc<Self>> {
         let frontend = SegmentSource::<Req, Resp>::new();
         let backend = ServiceBackend::from_engine(engine);
+        let pipeline = frontend.link(backend)?.link_terminal(frontend)?;
+        let ingress = Ingress::new_with_adapter(payload_adapter);
+        ingress.attach(pipeline)?;
+        Ok(ingress)
+    }
 
-        // create the pipeline
+    pub fn for_engine_with_adapter_and_lifecycle_role(
+        engine: ServiceEngine<Req, Resp>,
+        payload_adapter: Adapter,
+        role: LifecycleOperationRole,
+    ) -> Result<Arc<Self>> {
+        let frontend = SegmentSource::<Req, Resp>::new();
+        let backend = ServiceBackend::from_engine(engine);
+
         let pipeline = frontend.link(backend)?.link_terminal(frontend)?;
 
-        let ingress = Ingress::new_with_adapter(payload_adapter);
+        let ingress = Ingress::new_with_adapter_and_lifecycle_role(payload_adapter, role);
         ingress.attach(pipeline)?;
 
         Ok(ingress)
@@ -933,6 +999,14 @@ where
     /// Helper method to access metrics if available
     fn metrics(&self) -> Option<&Arc<WorkHandlerMetrics>> {
         self.metrics.get()
+    }
+
+    fn lifecycle_operation_role(&self) -> LifecycleOperationRole {
+        self.lifecycle_operation_role
+            .get()
+            .and_then(|role| role.get())
+            .copied()
+            .unwrap_or(LifecycleOperationRole::Worker)
     }
 }
 

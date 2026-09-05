@@ -95,6 +95,10 @@ impl StreamErrorSignal {
         self.0.error_type.get()
     }
 
+    pub(super) fn error_type(&self) -> Option<ErrorType> {
+        self.get().cloned()
+    }
+
     pub(super) fn mark_terminal_event_emitted(&self) {
         self.0.terminal_event_emitted.store(true, Ordering::Release);
     }
@@ -406,6 +410,28 @@ pub fn monitor_for_disconnects_with_activity(
     )
 }
 
+pub(super) fn monitor_for_disconnects_with_activity_and_error_signal(
+    stream: impl Stream<Item = Result<Event, axum::Error>>,
+    context: Arc<dyn AsyncEngineContext>,
+    inflight_guard: InflightGuard,
+    stream_handle: ConnectionHandle,
+    activity_rx: mpsc::UnboundedReceiver<()>,
+    error_signal: StreamErrorSignal,
+) -> impl Stream<Item = Result<Event, axum::Error>> {
+    monitor_for_disconnects_with_timeout_error_and_keep_alive(
+        stream,
+        context,
+        inflight_guard,
+        stream_handle,
+        backend_stream_timeout(),
+        openai_stream_error,
+        StreamMonitorOptions {
+            activity_rx: Some(activity_rx),
+            error_signal: Some(error_signal),
+        },
+    )
+}
+
 #[cfg(test)]
 fn monitor_for_disconnects_with_timeout(
     stream: impl Stream<Item = Result<Event, axum::Error>>,
@@ -446,7 +472,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
     // "cancelled" instead of "internal". The happy path overrides this via mark_ok().
     inflight_guard.mark_error(ErrorType::Cancelled);
     let mut stream_handle = SignaledConnectionHandle::new(stream_handle, error_signal.clone());
-    let mut inflight_guard = SignaledInflightGuard::new(inflight_guard, error_signal);
+    let mut inflight_guard = SignaledInflightGuard::new(inflight_guard, error_signal.clone());
 
     async_stream::try_stream! {
         tokio::pin!(stream);
@@ -473,6 +499,9 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                         }
                         Some(Err(err)) => {
                             let (error_type, error_body) = error_formatter(&err);
+                            if let Some(error_signal) = &error_signal {
+                                error_signal.set(error_type.clone());
+                            }
                             inflight_guard.mark_error(error_type);
                             // We're terminating the stream intentionally here with a
                             // structured error + [DONE]; disarm so the stream handle
@@ -541,6 +570,9 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                     }
                 } => {
                     inflight_guard.mark_error(ErrorType::ResponseTimeout);
+                    if let Some(error_signal) = &error_signal {
+                        error_signal.set(ErrorType::ResponseTimeout);
+                    }
                     stream_handle.disarm();
                     tracing::warn!(
                         request_id = %inflight_guard.request_id(),

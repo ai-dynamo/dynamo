@@ -78,6 +78,18 @@ pub mod logging {
     }
 }
 
+/// Request-lifecycle tracing environment variables.
+pub mod lifecycle_tracing {
+    /// Enable the native request-lifecycle OpenTelemetry span convention.
+    ///
+    /// This is independent from `DYN_LOG`: lifecycle spans are exported through
+    /// the OpenTelemetry tracing layer only.
+    pub const DYN_LIFECYCLE_TRACE_ENABLED: &str = "DYN_LIFECYCLE_TRACE_ENABLED";
+
+    /// Lifecycle detail mode. Defaults to `core`.
+    pub const DYN_LIFECYCLE_TRACE_MODE: &str = "DYN_LIFECYCLE_TRACE_MODE";
+}
+
 /// Runtime configuration environment variables
 ///
 /// These control the Tokio runtime, system health/metrics server, and worker behavior
