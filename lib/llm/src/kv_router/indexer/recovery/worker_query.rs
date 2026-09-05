@@ -1375,6 +1375,7 @@ mod tests {
                 lower_tier: LowerTierIndexers::new(1, 4),
                 approx: None,
                 primary_records_routing_decisions: false,
+                session_prefix_index: None,
             },
         )
     }
