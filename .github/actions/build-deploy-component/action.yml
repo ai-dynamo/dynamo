@@ -142,14 +142,14 @@ runs:
         echo "run_compliance=${RUN_COMPLIANCE}" >> $GITHUB_OUTPUT
 
     - name: Initialize Dynamo Builder
-      uses: ./.github/actions/init-dynamo-builder
+      uses: $/.github/actions/init-dynamo-builder
       with:
         builder_name: ${{ inputs.builder_name }}
         flavor: general
         arch: ${{ steps.settings.outputs.build_platforms }}
 
     - name: Docker Login
-      uses: ./.github/actions/docker-login
+      uses: $/.github/actions/docker-login
       with:
         aws_default_region: ${{ inputs.aws_default_region }}
         aws_account_id: ${{ inputs.aws_account_id }}
