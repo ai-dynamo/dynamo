@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Disaggregated TRT-LLM deployment: prefill/decode split with UCX KV transfer.
-# Tested with Dynamo v1.0.0 (TRT-LLM PyTorch backend).
+# Tested with Dynamo v1.0.0 (TRT-LLM PyTorch backend); re-validated on
+# Dynamo v1.3.0 with 4x B200 (requires max_tokens_in_buffer, set below).
 #
 # Uses TP=2 per worker (prefill: 2 GPUs, decode: 2 GPUs) for a total of 4 GPUs.
 # KV cache (attention + Mamba SSM state) is transferred between workers via UCX.
@@ -47,6 +48,17 @@ data:
       # UCX is required for hybrid Mamba+Attention models.
       # NIXL/MOONCAKE do not support Mamba SSM state transfer.
       backend: UCX
+      # Cap the transceiver transfer buffer. Without this, it is sized from the
+      # engine's derived max_seq_len (~3 MiB/token/rank for this model; ~195 GB),
+      # and executor creation fails with "insufficient GPU memory" on any GPU.
+      # Sizing: GPU memory cost ~= value x 3 MiB x 2 (send+recv) per rank, and the
+      # value must EXCEED your longest expected input (shorter buffers risk a
+      # transfer deadlock under load; see docs/backends/trtllm/trtllm-known-issues.md).
+      # 16384 (~105 GB/rank) is validated on 4x B200 (180 GB). It does NOT fit
+      # H100/H200 after weights; on those, a value low enough to fit is below
+      # max_num_tokens (8192) and therefore deadlock-prone. See PR discussion:
+      # this profile's H100/H200 hardware claim needs owner review.
+      max_tokens_in_buffer: 16384
     cuda_graph_config:
       enable_padding: true
       max_batch_size: 16
@@ -79,6 +91,17 @@ data:
       # UCX is required for hybrid Mamba+Attention models.
       # NIXL/MOONCAKE do not support Mamba SSM state transfer.
       backend: UCX
+      # Cap the transceiver transfer buffer. Without this, it is sized from the
+      # engine's derived max_seq_len (~3 MiB/token/rank for this model; ~195 GB),
+      # and executor creation fails with "insufficient GPU memory" on any GPU.
+      # Sizing: GPU memory cost ~= value x 3 MiB x 2 (send+recv) per rank, and the
+      # value must EXCEED your longest expected input (shorter buffers risk a
+      # transfer deadlock under load; see docs/backends/trtllm/trtllm-known-issues.md).
+      # 16384 (~105 GB/rank) is validated on 4x B200 (180 GB). It does NOT fit
+      # H100/H200 after weights; on those, a value low enough to fit is below
+      # max_num_tokens (8192) and therefore deadlock-prone. See PR discussion:
+      # this profile's H100/H200 hardware claim needs owner review.
+      max_tokens_in_buffer: 16384
     cuda_graph_config:
       enable_padding: true
       max_batch_size: 16
