@@ -815,6 +815,7 @@ class VllmProcessor:
                     uses_dynamo_json_tool_call_fallback=(
                         pre.uses_dynamo_json_tool_call_fallback
                     ),
+                    guided_output_is_content=pre.guided_output_is_content,
                 )
 
             # StreamingPostProcessor keeps delta/tool/reasoning parser state, so

@@ -7,8 +7,10 @@ Tests for the tool-stripping behaviour of _prepare_request when
 tool_choice='none' and the exclude_tools_when_tool_choice_none flag.
 """
 
+import asyncio
 import importlib.util
 import json
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -220,6 +222,61 @@ class TestDynamoJsonToolCallFallback:
             "content": '[{"name":"get_weather","parameters":',
         }
 
+    def _preprocess_forced_choice(self, tokenizer, tool_parser_class):
+        class Renderer:
+            async def render_messages_async(self, messages, chat_params):
+                return messages, {"prompt": "tool prompt", "prompt_token_ids": [1]}
+
+        return asyncio.run(
+            prepost_module.preprocess_chat_request(
+                TOOL_REQUEST
+                | {
+                    "tool_choice": {
+                        "type": "function",
+                        "function": {"name": "get_weather"},
+                    }
+                },
+                tokenizer=tokenizer,
+                renderer=Renderer(),
+                tool_parser_class=tool_parser_class,
+            )
+        )
+
+    def test_bare_json_parser_without_grammar_uses_json_fallback(self, tokenizer):
+        # Emulates vLLM's GLM declarative adapter: forced-choice grammar is
+        # declined, and the model emits Dynamo's bare-JSON tool-call shape.
+        class Glm47MoeParserToolAdapter:
+            supports_required_and_named = False
+
+            def __init__(self, tokenizer, tools):
+                pass
+
+            def adjust_request(self, request):
+                return request
+
+        result = self._preprocess_forced_choice(tokenizer, Glm47MoeParserToolAdapter)
+
+        assert result.guided_decoding is None
+        assert result.uses_dynamo_json_tool_call_fallback is True
+
+    def test_native_markup_parser_must_not_use_json_fallback(self, tokenizer):
+        # Emulates Mistral/Gemma4Engine/PoolsideV1-style parsers: forced-choice
+        # grammar also declined, but output is native markup for the parser's
+        # own streaming extractor -- the JSON fallback would hide it as content.
+        class NativeMarkupParser:
+            supports_required_and_named = False
+
+            def __init__(self, tokenizer, tools):
+                pass
+
+            def adjust_request(self, request):
+                return request
+
+        result = self._preprocess_forced_choice(tokenizer, NativeMarkupParser)
+
+        assert result.guided_decoding is None
+        assert result.uses_dynamo_json_tool_call_fallback is False
+
     def test_multiple_fallback_tool_calls_respect_parallel_setting(self, tokenizer):
         post = self._post_processor(
             tokenizer,
@@ -394,6 +451,111 @@ class TestDynamoJsonToolCallFallback:
             assert choice["delta"]["tool_calls"][0]["function"]["arguments"] == (
                 f'{{"city":"{city}"}}'
             )
+
+
+def test_guided_bare_json_bypasses_reasoning_by_shape(tokenizer):
+    class TrapReasoningParser:
+        """Force-reasoning parser: without a bypass it swallows the payload."""
+
+        engine_based_streaming = False
+
+        def __init__(self, tokenizer, *, chat_template_kwargs=None, model_config=None):
+            self.parse_calls = 0
+
+        def is_reasoning_end(self, prompt_token_ids):
+            return False
+
+        def adjust_initial_state_from_prompt(self, prompt_token_ids):
+            pass
+
+        def extract_reasoning_streaming(self, *args, **kwargs):
+            self.parse_calls += 1
+            return prepost_module.DeltaMessage(reasoning="trapped")
+
+        def is_reasoning_end_streaming(self, current_token_ids, delta_token_ids):
+            return False
+
+    post = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=SimpleNamespace(include_reasoning=True),
+        sampling_params=SamplingParams(),
+        prompt_token_ids=[],
+        tool_parser=None,
+        reasoning_parser_class=TrapReasoningParser,
+        chat_template_kwargs={},
+        stream_response=True,
+        guided_output_is_content=True,
+    )
+
+    # The parser is still constructed so that thinking-first streams parse
+    # normally; only bare-JSON payloads bypass it.
+    assert post.reasoning_parser is not None
+    assert post.reasoning_parser.parse_calls == 0
+
+    choice = post.process_output(
+        SimpleNamespace(
+            index=0,
+            text='{"status":"ok"}',
+            token_ids=[],
+            finish_reason="stop",
+            logprobs=None,
+        )
+    )
+
+    assert choice["delta"] == {
+        "role": "assistant",
+        "content": '{"status":"ok"}',
+    }
+    assert post.reasoning_parser is None  # bypassed permanently for the stream
+
+
+def test_guided_thinking_first_output_keeps_reasoning_parser(tokenizer):
+    class SimpleThinkParser:
+        engine_based_streaming = False
+
+        def __init__(self, tokenizer, *, chat_template_kwargs=None, model_config=None):
+            self.parse_calls = 0
+
+        def is_reasoning_end(self, prompt_token_ids):
+            return False
+
+        def adjust_initial_state_from_prompt(self, prompt_token_ids):
+            pass
+
+        def extract_reasoning_streaming(self, *args, **kwargs):
+            self.parse_calls += 1
+            text = args[2]
+            return prepost_module.DeltaMessage(reasoning=text)
+
+        def is_reasoning_end_streaming(self, current_token_ids, delta_token_ids):
+            return False
+
+    post = StreamingPostProcessor(
+        tokenizer=tokenizer,
+        request_for_sampling=SimpleNamespace(include_reasoning=True),
+        sampling_params=SamplingParams(),
+        prompt_token_ids=[],
+        tool_parser=None,
+        reasoning_parser_class=SimpleThinkParser,
+        chat_template_kwargs={},
+        stream_response=True,
+        guided_output_is_content=True,
+    )
+
+    choice = post.process_output(
+        SimpleNamespace(
+            index=0,
+            text="thinking still",
+            token_ids=[],
+            finish_reason=None,
+            logprobs=None,
+        )
+    )
+
+    assert post.reasoning_parser is not None  # not bypassed
+    assert post.reasoning_parser.parse_calls == 1
+    assert choice["delta"].get("reasoning_content") == "thinking still"
+    assert choice["delta"].get("content") is None
 
 
 @pytest.fixture(scope="module")
@@ -1779,6 +1941,21 @@ class _FakePassthroughToolParser(_FakeGrammarToolParser):
         return request
 
 
+class _FakePreAdjustStructuralTagParser(_FakeStructuralTagParser):
+    supports_required_and_named = False
+
+    def __init__(self, tokenizer, tools):
+        del tokenizer, tools
+        super().__init__()
+        self.adjusted = False
+
+    def adjust_request(self, request):
+        assert request.structured_outputs is not None
+        assert request.structured_outputs.structural_tag is not None
+        self.adjusted = True
+        return request
+
+
 class _FakeResponseFormatConsumingToolParser(_FakeAdjustRequestGrammarToolParser):
     def adjust_request(self, request):
         request.response_format = None
@@ -2340,6 +2517,36 @@ class TestToolCallGuidedDecoding:
         )
 
         assert result.guided_decoding == {"grammar": 'root ::= "<tool_call>"'}
+        assert result.uses_dynamo_json_tool_call_fallback is False
+
+    @pytest.mark.asyncio
+    async def test_structural_tag_is_attached_before_parser_adjust_request(
+        self, tokenizer
+    ):
+        result = await prepost_module.preprocess_chat_request(
+            {
+                **TOOL_REQUEST,
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+            },
+            tokenizer=tokenizer,
+            renderer=SimpleNamespace(
+                render_messages_async=AsyncMock(
+                    return_value=(None, {"prompt_token_ids": [1]})
+                )
+            ),
+            tool_parser_class=_FakePreAdjustStructuralTagParser,
+            structural_tag_mode="on",
+            structural_tag_scope="auto",
+            structural_tag_schema="strict",
+        )
+
+        assert result.tool_parser.adjusted is True
+        assert result.guided_decoding == {
+            "structural_tag": {"format": {"strict": [True]}}
+        }
         assert result.uses_dynamo_json_tool_call_fallback is False
 
     @pytest.mark.parametrize(
@@ -3418,3 +3625,198 @@ class TestReasoningTokenAccounting:
         usage = {"completion_tokens_details": {"reasoning_tokens": backend}}
         annotated = self._annotator(post).annotate(usage)
         assert annotated["completion_tokens_details"]["reasoning_tokens"] == 2
+
+
+class _ReproKimiTokenizer:
+    """Kimi-K3-style: XTML control tokens are genuine special tokens."""
+
+    all_special_tokens = ["<|open|>", "<|sep|>", "<|close|>"]
+
+    def decode(self, token_id):
+        return f"tok-{token_id}"
+
+
+class _ReproReasoningParser:
+    engine_based_streaming = False
+    _close = "</think>"
+
+    def __init__(self, *args, **kwargs):
+        self._ended = False
+
+    def is_reasoning_end(self, prompt_token_ids):
+        return False
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids):
+        pass
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text,
+        current_text,
+        delta_text,
+        previous_token_ids,
+        current_token_ids,
+        delta_token_ids,
+    ):
+        if self._close not in current_text:
+            return prepost_module.DeltaMessage(reasoning=current_text)
+        reasoning, content = current_text.split(self._close, 1)
+        self._ended = True
+        return prepost_module.DeltaMessage(
+            reasoning=reasoning or None, content=content or None
+        )
+
+    def is_reasoning_end_streaming(self, current_token_ids, delta_token_ids):
+        return self._ended
+
+
+class _ReproWrappedResponseToolParser:
+    engine_based_streaming = False
+    tool_call_start_token = "<|open|>tools<|sep|>"
+    _response_open = "<|open|>response<|sep|>"
+    _message_close = "<|close|>message<|sep|>"
+    _response_open_re = re.compile(r"<\|open\|>\s*response\s*<\|sep\|>")
+    _response_close_re = re.compile(r"<\|close\|>\s*response\s*<\|sep\|>")
+
+    def __init__(self):
+        self._sent = 0
+
+    def extract_tool_calls_streaming(
+        self,
+        previous_text,
+        current_text,
+        delta_text,
+        previous_token_ids,
+        current_token_ids,
+        delta_token_ids,
+        request,
+    ):
+        match = self._response_open_re.search(current_text)
+        if match is None:
+            if any(
+                current_text.endswith(self._response_open[:length])
+                for length in range(1, len(self._response_open))
+            ):
+                return None
+            body = current_text
+        else:
+            body = current_text[match.end() :]
+        body = self._response_close_re.sub("", body)
+        if len(body) <= self._sent:
+            return None
+        content = body[self._sent :]
+        self._sent = len(body)
+        return prepost_module.DeltaMessage(content=content)
+
+
+class _ReproWrappedResponseReasoningParser(_ReproReasoningParser):
+    """Kimi-style: the reasoning parser declares its channel wrapper markers."""
+
+    _response_open = "<|open|>response<|sep|>"
+    _message_close = "<|close|>message<|sep|>"
+
+
+def _repro_postprocessor(with_tool_parser: bool) -> StreamingPostProcessor:
+    return StreamingPostProcessor(
+        tokenizer=_ReproKimiTokenizer(),
+        request_for_sampling=SimpleNamespace(
+            include_reasoning=True,
+            tool_choice="auto",
+            tools=None,
+            top_logprobs=None,
+        ),
+        sampling_params=SamplingParams(),
+        prompt_token_ids=[],
+        tool_parser=_ReproWrappedResponseToolParser() if with_tool_parser else None,
+        reasoning_parser_class=(
+            _ReproReasoningParser
+            if with_tool_parser
+            else _ReproWrappedResponseReasoningParser
+        ),
+        chat_template_kwargs={},
+        stream_response=True,
+    )
+
+
+def _repro_chunk(text: str, finish_reason: str | None = None):
+    return SimpleNamespace(
+        index=0,
+        text=text,
+        token_ids=[],
+        finish_reason=finish_reason,
+        logprobs=None,
+    )
+
+
+@pytest.mark.parametrize("with_tool_parser", [False, True])
+def test_response_wrapper_same_chunk_as_reasoning_end_does_not_leak(
+    with_tool_parser,
+):
+    post = _repro_postprocessor(with_tool_parser)
+    choice = post.process_output(
+        _repro_chunk("analysis</think><|open|>response<|sep|>Hello", "stop")
+    )
+    delta = choice["delta"]
+    assert delta.get("content") == "Hello", delta
+    assert delta.get("reasoning_content") == "analysis"
+
+
+@pytest.mark.parametrize("with_tool_parser", [False, True])
+def test_response_wrapper_split_across_transition_does_not_leak(with_tool_parser):
+    post = _repro_postprocessor(with_tool_parser)
+    first = post.process_output(_repro_chunk("analysis</think><|open|>"))
+    second = post.process_output(_repro_chunk(" response <|sep|>Hello", "stop"))
+    for choice in (first, second):
+        content = choice["delta"].get("content") or ""
+        assert "<|open|>" not in content
+        assert "<|sep|>" not in content
+        assert "response" not in content
+    assert second["delta"].get("content") == "Hello"
+
+
+@pytest.mark.parametrize("with_tool_parser", [False, True])
+def test_stop_trimmed_marker_suffix_does_not_leak(with_tool_parser):
+    """A stop trimmed <|close|> must not leak the orphan `message<|sep|>`."""
+    post = _repro_postprocessor(with_tool_parser)
+    post.process_output(_repro_chunk("analysis</think><|open|>response<|sep|>Hello"))
+    final = post.process_output(_repro_chunk("message<|sep|>", "stop"))
+    content = final["delta"].get("content") or ""
+    assert "message" not in content
+    assert "<|sep|>" not in content
+    assert final["finish_reason"] == "stop"
+
+
+@pytest.mark.parametrize("with_tool_parser", [False, True])
+def test_marker_split_inside_channel_word_is_held(with_tool_parser):
+    """A delta can split inside the composite marker's channel word."""
+    post = _repro_postprocessor(with_tool_parser)
+
+    first = post.process_output(_repro_chunk("analysis</think><|open|>res"))
+    second = post.process_output(_repro_chunk("ponse<|sep|>Hello"))
+    final = post.process_output(_repro_chunk(" world", "stop"))
+
+    first_content = first["delta"].get("content") or ""
+    assert not first_content or first_content.isascii()  # nothing yet or held
+    assert "res" not in first_content  # partial marker prefix is withheld
+    contents = (second["delta"].get("content") or "") + (
+        final["delta"].get("content") or ""
+    )
+    assert contents == "Hello world"
+    for choice in (first, second, final):
+        c = choice["delta"].get("content") or ""
+        assert "<|open|>" not in c and "<|sep|>" not in c
+
+
+@pytest.mark.parametrize("with_tool_parser", [False, True])
+def test_holdback_flushes_ordinary_text(with_tool_parser):
+    """A trailing ordinary word must surface once it fails to complete."""
+    post = _repro_postprocessor(with_tool_parser)
+
+    post.process_output(_repro_chunk("analysis</think><|open|>response<|sep|>"))
+    first = post.process_output(_repro_chunk("the message"))
+    second = post.process_output(_repro_chunk(" arrived", "stop"))
+
+    contents = (first["delta"].get("content") or "") + (
+        second["delta"].get("content") or ""
+    )
+    assert contents == "the message arrived"

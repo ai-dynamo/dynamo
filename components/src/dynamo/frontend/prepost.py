@@ -26,7 +26,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams, merge_kwargs
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.utils import get_json_schema_from_tools
@@ -67,6 +67,7 @@ class PreprocessResult:
     prompt_token_ids: list[int]
     guided_decoding: dict[str, Any] | None = None
     uses_dynamo_json_tool_call_fallback: bool = False
+    guided_output_is_content: bool = False
 
 
 _ASYNC_TOKENIZER_POOL: dict[int, Callable[..., Awaitable[Any]]] = {}
@@ -434,6 +435,9 @@ def _prepare_request(
     enable_auto_tool_choice: bool = False,
     default_chat_template_kwargs: dict[str, Any] | None = None,
     default_thinking_mode: str | None = None,
+    structural_tag_mode: str = "off",
+    structural_tag_scope: str = "auto",
+    structural_tag_schema: str = "auto",
     validated_request: ChatCompletionRequest | None = None,
     guidance_snapshots: dict[str, Any] | None = None,
 ) -> tuple[ChatCompletionRequest, ToolParser | None, dict[str, Any], Any, ChatParams]:
@@ -464,10 +468,32 @@ def _prepare_request(
     # client did not supply an explicit `tools` list, so we activate the parser
     # whenever the tool_parser_class is available.
     has_tools = bool(request_for_sampling.tools)
-    if tool_parser_class and (has_tools or enable_auto_tool_choice):
-        if request_for_sampling.tool_choice != "none":
-            tool_parser = tool_parser_class(tokenizer, request_for_sampling.tools)
-            request_for_sampling = tool_parser.adjust_request(request_for_sampling)
+    if (
+        tool_parser_class
+        and (has_tools or enable_auto_tool_choice)
+        and request_for_sampling.tool_choice != "none"
+    ):
+        tool_parser = tool_parser_class(tokenizer, request_for_sampling.tools)
+        # Kimi K3's raw parser rejects a named tool choice unless its XTML
+        # structural tag is already attached. Standard vLLM satisfies that
+        # contract in DelegatingParser before invoking adjust_request().
+        # Dynamo owns the equivalent orchestration here, so mirror that
+        # ordering instead of waiting until guided decoding is assembled
+        # below. Other parsers are unchanged when they return no tag.
+        pre_adjust_guidance = build_tool_call_guided_decoding(
+            request_for_sampling,
+            tool_parser,
+            structural_tag_mode=structural_tag_mode,
+            structural_tag_scope=structural_tag_scope,
+            structural_tag_schema=structural_tag_schema,
+        )
+        if pre_adjust_guidance is not None and set(pre_adjust_guidance) == {
+            "structural_tag"
+        }:
+            request_for_sampling.structured_outputs = StructuredOutputsParams(
+                structural_tag=json.dumps(pre_adjust_guidance["structural_tag"])
+            )
+        request_for_sampling = tool_parser.adjust_request(request_for_sampling)
 
     # Strip tools from the template when tool_choice=none so the model doesn't
     # see them and generate raw XML tool calls in its response.
@@ -586,6 +612,45 @@ def _prepare_request(
     )
 
 
+# The forced-choice fallback first decided by #12876 assumed the parser either
+# installs a grammar or the request dies without tool decoding. Parsers that
+# decline forced-choice grammars still differ in what their models emit: GLM's
+# declarative engine adapters are trained to produce Dynamo's bare-JSON shape,
+# while native-syntax parsers (Mistral, Gemma4Engine, PoolsideV1, ...) emit
+# markup meant for their own extract_tool_calls_streaming. Only the former may
+# use the buffer-and-decode fallback; extending it to the latter hides native
+# tool markup as assistant content. Extend the list when a parser is verified
+# to emit bare JSON for forced choices; never derive it from
+# supports_required_and_named alone, which native-syntax parsers also clear.
+_BARE_JSON_FORCED_CHOICE_PARSER_NAMES = frozenset(
+    {
+        "Glm47MoeModelToolParser",
+        "Glm47MoeParserToolAdapter",
+    }
+)
+
+
+def _parser_cannot_force_choice_but_emits_bare_json(
+    tool_parser: ToolParser | None,
+    guided_decoding: dict[str, Any] | None,
+    parser_guided_decoding: dict[str, Any] | None,
+) -> bool:
+    if tool_parser is None:
+        return False
+    if getattr(tool_parser, "supports_required_and_named", True):
+        return False
+    if type(tool_parser).__name__ not in _BARE_JSON_FORCED_CHOICE_PARSER_NAMES:
+        return False
+    if parser_guided_decoding is not None:
+        # The parser adjusted the request itself; its guidance owns the stream.
+        return False
+    if isinstance(guided_decoding, dict) and "structural_tag" in guided_decoding:
+        # A structural tag is a native forced-choice grammar: its output must
+        # go through the parser's native-syntax decoder, not the JSON fallback.
+        return False
+    return True
+
+
 async def preprocess_chat_request(
     request: dict[str, Any] | ChatCompletionRequest,
     *,
@@ -632,6 +697,9 @@ async def preprocess_chat_request(
         enable_auto_tool_choice=enable_auto_tool_choice,
         default_chat_template_kwargs=default_chat_template_kwargs,
         default_thinking_mode=default_thinking_mode,
+        structural_tag_mode=structural_tag_mode,
+        structural_tag_scope=structural_tag_scope,
+        structural_tag_schema=structural_tag_schema,
         validated_request=validated_request,
         guidance_snapshots=guidance_snapshots,
     )
@@ -724,12 +792,16 @@ async def preprocess_chat_request(
     # adjust_request() leaves structured_outputs unchanged.  In either case the
     # model emits Dynamo's bare JSON wire format, which must bypass the parser's
     # native-syntax decoder during postprocessing.
-    uses_dynamo_json_tool_call_fallback = (
-        is_forced_tool_choice
-        and parser_guided_decoding is None
-        and guided_decoding is tool_guided_decoding
-        and isinstance(tool_guided_decoding, dict)
-        and ("json" in tool_guided_decoding or "regex" in tool_guided_decoding)
+    uses_dynamo_json_tool_call_fallback = is_forced_tool_choice and (
+        (
+            parser_guided_decoding is None
+            and guided_decoding is tool_guided_decoding
+            and isinstance(tool_guided_decoding, dict)
+            and ("json" in tool_guided_decoding or "regex" in tool_guided_decoding)
+        )
+        or _parser_cannot_force_choice_but_emits_bare_json(
+            tool_parser, guided_decoding, parser_guided_decoding
+        )
     )
 
     _, engine_prompt = await renderer.render_messages_async(messages, chat_params)
@@ -752,6 +824,9 @@ async def preprocess_chat_request(
         prompt_token_ids=tokens,
         guided_decoding=guided_decoding,
         uses_dynamo_json_tool_call_fallback=uses_dynamo_json_tool_call_fallback,
+        guided_output_is_content=(
+            assistant_guided_decoding is not None and not is_forced_tool_choice
+        ),
     )
 
 
@@ -771,6 +846,78 @@ def _compile_marker_strip_re(strippable: tuple[str, ...]) -> "re.Pattern[str] | 
     return re.compile("|".join(re.escape(m) for m in ordered))
 
 
+# Parser attributes that carry complete control markers. Only string values are
+# honoured; the attribute names are a convention followed by wrapped-channel
+# parsers such as Kimi K3's, and absent attributes simply contribute nothing.
+_PARSER_MARKER_ATTRIBUTES = (
+    "response_open",
+    "response_close",
+    "tools_open",
+    "tools_close",
+    "_response_open",
+    "_response_close",
+    "_message_close",
+    "_think_open",
+    "_think_close",
+)
+
+
+def _parser_control_markers(
+    tool_parser: ToolParser | None,
+    reasoning_parser: Any,
+) -> tuple[str, ...]:
+    """Composite control markers declared by the active parsers.
+
+    `_marker_strip_re` only knows tokenizer-level special tokens, which strips
+    complete markers like `<|open|>` but cannot remove the channel words that
+    live *between* a parser's control tokens (Kimi K3's
+    `<|open|>response<|sep|>` sheds its tokens but leaks `response`), nor the
+    stop-trimmed derivative the engine can emit when its stop consumes only
+    the leading control token (`<|close|>message<|sep|>` -> `message<|sep|>`).
+    Return the parsers' complete markers plus such orphaned variants.
+    """
+    markers: list[str] = []
+    for parser in (tool_parser, reasoning_parser):
+        if parser is None:
+            continue
+        for attribute in _PARSER_MARKER_ATTRIBUTES:
+            marker = getattr(parser, attribute, None)
+            if isinstance(marker, str) and marker and marker not in markers:
+                markers.append(marker)
+    for marker in list(markers):
+        # Engines may trim only the marker's leading control token at a stop
+        # boundary, leaving the rest behind.  The remainder is considered an
+        # orphan only when it still ends in a registered control token, so
+        # ordinary channel words alone (`message`) never match this pattern.
+        leading_control = re.match(r"<\|[^>]+\|>", marker)
+        if leading_control is not None:
+            orphaned = marker[leading_control.end() :]
+            if re.search(r"<\|[^>]+\|>", orphaned) and orphaned not in markers:
+                markers.append(orphaned)
+    return tuple(markers)
+
+
+def _whitespace_tolerant_marker_pattern(marker: str) -> str:
+    pieces = re.split(r"(<\|[^>]+\|>)", marker)
+    inner = r"\s*".join(re.escape(piece) for piece in pieces if piece)
+    # A wrapper can be stream-split after its leading control token, so the
+    # remainder may arrive with formatting whitespace in front of the channel
+    # word (` response <|sep|>Hello`).
+    return r"\s*" + inner
+
+
+def _compile_parser_marker_re(markers: tuple[str, ...]) -> "re.Pattern[str] | None":
+    if not markers:
+        return None
+    # Longest-first so a complete marker wins over its orphaned variant.
+    patterns = sorted(
+        (_whitespace_tolerant_marker_pattern(m) for m in markers),
+        key=len,
+        reverse=True,
+    )
+    return re.compile("|".join(patterns))
+
+
 class StreamingPostProcessor:
     def __init__(
         self,
@@ -786,6 +933,7 @@ class StreamingPostProcessor:
         response_reasoning_ended: bool | None = None,
         stream_response: bool = True,
         uses_dynamo_json_tool_call_fallback: bool = False,
+        guided_output_is_content: bool = False,
     ) -> None:
         self.tokenizer = tokenizer
         self.request_for_sampling = request_for_sampling
@@ -813,6 +961,16 @@ class StreamingPostProcessor:
             and response_reasoning_ended is not True
             else None
         )
+        # Guided output is structured content, not reasoning. A reasoning parser
+        # whose turn starts in reasoning mode would swallow a bare-JSON guided
+        # payload into reasoning_content entirely, so such streams bypass the
+        # parser -- but only once the stream's first payload text proves the
+        # bare-shape (guided JSON with no reasoning opener), mirroring the Rust
+        # preprocessor's bypass_reasoning_for_bare_guided_json. Otherwise the
+        # parser stays active so deferred grammar output still flows through
+        # the reasoning channel.
+        self._guided_output_is_content = guided_output_is_content
+        self._guided_shape_checked = False
         if self.reasoning_parser is not None:
             if response_reasoning_ended is None:
                 self.reasoning_is_done = self.reasoning_parser.is_reasoning_end(
@@ -872,6 +1030,15 @@ class StreamingPostProcessor:
             self._marker_strip_re = _compile_marker_strip_re(
                 tuple(m for m in self._control_markers if m not in owned)
             )
+        self._parser_marker_variants = frozenset(
+            _parser_control_markers(self.tool_parser, self.reasoning_parser)
+        )
+        self._parser_marker_re = _compile_parser_marker_re(
+            tuple(sorted(self._parser_marker_variants))
+        )
+        # Chars withheld while they can still complete into a marker, per
+        # choice index. See _apply_marker_holdback.
+        self._marker_pending: dict[int, str] = {}
 
         self.previous_text = ""
         self.previous_token_ids: list[int] = []
@@ -1098,6 +1265,44 @@ class StreamingPostProcessor:
             return text
         return self._marker_strip_re.sub("", text)
 
+    def _strip_parser_control_markers(self, text: str | None) -> str | None:
+        if not text or self._parser_marker_re is None:
+            return text
+        return self._parser_marker_re.sub("", text)
+
+    def _apply_marker_holdback(
+        self, index: int, text: str | None, finish_reason: str | None
+    ) -> str | None:
+        """Buffer marker prefixes that may still complete in a later delta.
+
+        vLLM deltas are token-aligned in practice, but nothing guarantees it:
+        a delta can split inside a composite marker's channel word (Kimi K3's
+        `response` in `res` + `ponse<|sep|>`), in which case neither the full
+        nor the orphan pattern matches until both halves arrived. Hold only
+        the longest trailing segment that is a strict prefix of a configured
+        marker variant; everything else is emitted immediately. On the
+        finishing delta -- or once the candidate extends past the longest
+        marker -- the held text is flushed verbatim, so ordinary content is
+        never dropped.
+        """
+        if not self._parser_marker_variants:
+            return text
+        pending = self._marker_pending.pop(index, "")
+        body = (pending + (text or "")) or None
+        if body is None:
+            return None
+        body = self._strip_parser_control_markers(body)
+        if not body or finish_reason:
+            return body
+        max_len = max(len(m) for m in self._parser_marker_variants)
+        limit = min(len(body), max_len - 1)
+        for k in range(limit, 0, -1):
+            segment = body[-k:]
+            if any(v.startswith(segment) for v in self._parser_marker_variants):
+                self._marker_pending[index] = segment
+                return body[:-k] or None
+        return body
+
     @staticmethod
     def _compose_delta_message(
         reasoning: str | None, content: str | None
@@ -1233,7 +1438,17 @@ class StreamingPostProcessor:
         # enforced once at the funnel rather than at each producer -- stripping at
         # the producers as well only re-scans text that is about to be scanned.
         if isinstance(delta.get("content"), str):
-            stripped = self._strip_control_markers(delta["content"])
+            # Composite markers must go first: they match across control-token
+            # boundaries, which `_strip_control_markers` would erase. Holdback
+            # also runs before the literal strip so a marker completed across
+            # deltas is still recognizable.
+            stripped = self._strip_control_markers(
+                self._apply_marker_holdback(
+                    output.index,
+                    self._strip_parser_control_markers(delta["content"]),
+                    output.finish_reason,
+                )
+            )
             if stripped:
                 delta["content"] = stripped
             else:
@@ -1260,7 +1475,11 @@ class StreamingPostProcessor:
 
         saved_reasoning = None
         content = current_text
-        if self.reasoning_parser:
+        bare_guided_json = (
+            self._guided_output_is_content
+            and current_text.lstrip().startswith(("{", "["))
+        )
+        if self.reasoning_parser and not bare_guided_json:
             saved_reasoning, content = self.reasoning_parser.extract_reasoning(
                 current_text,
                 request=self.request_for_sampling,
@@ -1322,6 +1541,19 @@ class StreamingPostProcessor:
         current_token_ids = self.previous_token_ids + delta_token_ids
 
         delta_message: DeltaMessage | None = DeltaMessage(content=delta_text)
+
+        if (
+            self.reasoning_parser is not None
+            and not self.reasoning_is_done
+            and not self._guided_shape_checked
+            and self._guided_output_is_content
+        ):
+            self._guided_shape_checked = True
+            if current_text.lstrip().startswith(("{", "[")):
+                # Bare structured payload with no reasoning opener: keep it as
+                # content instead of letting the parser trap it as reasoning.
+                self.reasoning_is_done = True
+                self.reasoning_parser = None
 
         # ------------------------------------------------------------------
         # Drain the tool-text buffer (populated when </think> and <tool_call>
