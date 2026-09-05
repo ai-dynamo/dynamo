@@ -286,12 +286,6 @@ pub mod kvbm {
         /// Number of blocks to store in object storage
         pub const DYN_KVBM_OBJECT_NUM_BLOCKS: &str = "DYN_KVBM_OBJECT_NUM_BLOCKS";
     }
-    /// Transfer configuration
-    pub mod transfer {
-        /// Maximum number of blocks per transfer batch
-        pub const DYN_KVBM_TRANSFER_BATCH_SIZE: &str = "DYN_KVBM_TRANSFER_BATCH_SIZE";
-    }
-
     /// KVBM leader (distributed mode) configuration
     pub mod leader {
         /// Timeout in seconds for KVBM leader and worker initialization
