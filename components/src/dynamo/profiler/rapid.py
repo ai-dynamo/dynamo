@@ -86,6 +86,29 @@ def _winning_backend(best_config_df: pd.DataFrame | None) -> str | None:
     return str(best_config_df.iloc[0]["backend"])
 
 
+def _generated_backend(
+    best_config_df: pd.DataFrame | None,
+    chosen_exp: str,
+    task_configs: dict[str, Task],
+) -> str | None:
+    """The backend the generated deployment runs.
+
+    ``_generate_dgd_from_pick`` takes both the runtime image and the command
+    line from the resolved task config, so that task's backend is the one the
+    deployment actually runs. Reading it through the same lookup covers the
+    merged rows that carry ``_task_key`` but no ``backend`` column, where the
+    row label alone resolves nothing. Falls back to the row label when no task
+    resolves, which is also the case in which nothing is generated.
+    """
+    if best_config_df is None or best_config_df.empty:
+        return None
+    row_backend = _winning_backend(best_config_df)
+    tc = _resolve_task_config(
+        best_config_df.iloc[0], chosen_exp, task_configs, row_backend
+    )
+    return tc.primary_backend_name if tc is not None else row_backend
+
+
 def _resolve_task_config(
     row: pd.Series,
     chosen_exp: str,
@@ -437,15 +460,15 @@ def _run_default_sim(
         chosen, {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
     )
 
-    # When backend="auto" AIC expands to per-backend task configs; the winning
-    # row carries the concrete backend name so downstream consumers (e.g.
-    # run_interpolation) can use it without re-encountering "auto". Resolved
-    # before generation so both are read from the same row.
+    # When backend="auto" AIC expands to per-backend task configs; downstream
+    # consumers (e.g. run_interpolation) need the concrete backend name so they
+    # do not re-encounter "auto". Read through the same task-config lookup the
+    # generator uses, so the reported backend is the generated deployment's.
     resolved_backend = backend
     if backend == "auto":
-        row_backend = _winning_backend(best_config_df)
-        if row_backend is not None:
-            resolved_backend = row_backend
+        generated = _generated_backend(best_config_df, chosen, task_configs)
+        if generated is not None:
+            resolved_backend = generated
 
     dgd_config = _generate_dgd_from_pick(
         dgdr, best_config_df, chosen, task_configs, picking_mode

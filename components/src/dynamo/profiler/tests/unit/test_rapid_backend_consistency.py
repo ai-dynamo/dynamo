@@ -9,9 +9,6 @@ selects which command and argument generator `generate_backend_artifacts`
 runs. Both must name the backend that the winning configuration row reports,
 otherwise the deployment pulls one runtime image and runs another runtime's
 command line.
-
-These tests patch AIC's two generator entry points and assert on what AIC
-would have been handed, in the style of `test_rapid_planner_replicas.py`.
 """
 
 import logging
@@ -30,7 +27,7 @@ pytestmark = [
 try:
     from aiconfigurator.sdk.task_v2 import Task
 
-    from dynamo.profiler.rapid import _generate_dgd_from_pick
+    from dynamo.profiler.rapid import _generate_dgd_from_pick, _generated_backend
     from dynamo.profiler.utils.dgdr_v1beta1_types import (
         DynamoGraphDeploymentRequestSpec,
         HardwareSpec,
@@ -66,7 +63,7 @@ def _make_dgdr(
 
 def _make_task(backend: str, serving_mode: str = "agg") -> Task:
     """A real AIC Task for one backend, matching `_make_dgdr()`."""
-    shared = dict(total_gpus=8, isl=4000, osl=1000, ttft=2000.0, tpot=50.0)
+    shared = {"total_gpus": 8, "isl": 4000, "osl": 1000, "ttft": 2000.0, "tpot": 50.0}
     if serving_mode == "agg":
         return Task(
             serving_mode="agg",
@@ -222,11 +219,15 @@ class TestMergedAutoBackendPath:
         `backend` column to rebuild that key from."""
         dgdr = _make_dgdr()
         task_configs = {"agg_sglang": _make_task("sglang")}
+        row = _make_row(_task_key="agg_sglang")
 
-        seen = _drive(dgdr, _make_row(_task_key="agg_sglang"), "agg", task_configs)
+        seen = _drive(dgdr, row, "agg", task_configs)
 
         assert seen["k8s_image"] == f"{_REGISTRY}/sglang-runtime:1.2.3"
         assert seen["generator_backend"] == "sglang"
+        # The row carries no `backend` column, so the label alone reports
+        # nothing and the run would otherwise still be described as "auto".
+        assert _generated_backend(row, "agg", task_configs) == "sglang"
 
 
 class TestConcreteBackendPath:

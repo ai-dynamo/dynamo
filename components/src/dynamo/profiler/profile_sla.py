@@ -51,6 +51,7 @@ from dynamo.profiler.utils.dgdr_validate import (
     validate_dgdr_dynamo_features,
 )
 from dynamo.profiler.utils.profile_common import (
+    DEFAULT_BACKEND,
     ProfilerOperationalConfig,
     determine_picking_mode,
     get_profiling_job_tolerations,
@@ -68,14 +69,28 @@ logger = logging.getLogger(__name__)
 _CONCRETE_BACKENDS = ["trtllm", "sglang", "vllm"]
 
 
+def _supported_concrete_backend(model: str, system: str) -> str | None:
+    """A concrete backend AIC reports as supporting this model/system, or None.
+
+    ``DEFAULT_BACKEND`` is offered first so the ordinary case keeps the backend
+    it has always run; the others are only reached when the default cannot
+    serve the model on this hardware.
+    """
+    ordered = [DEFAULT_BACKEND] + [
+        b for b in _CONCRETE_BACKENDS if b != DEFAULT_BACKEND
+    ]
+    for candidate in ordered:
+        if check_model_hardware_support(model, system, candidate):
+            return candidate
+    return None
+
+
 def _check_auto_backend_support(model: str, system: str) -> bool:
     """
     Return True if *any* concrete backend is AIC-supported for this model/system.
     TODO: move this function to AIC and handle partially supported model x backend x hardware
     """
-    return any(
-        check_model_hardware_support(model, system, b) for b in _CONCRETE_BACKENDS
-    )
+    return _supported_concrete_backend(model, system) is not None
 
 
 def _check_dgdr_aic_support(
@@ -176,8 +191,14 @@ async def _execute_strategy(
             )
         else:
             # THOROUGH measures one backend rather than searching across them, and
-            # derives a container image, so "auto" has to be concrete here.
-            backend = resolve_auto_backend(backend, "the measured (THOROUGH) search")
+            # derives a container image, so "auto" has to be concrete here. Prefer
+            # a backend AIC reports as supporting this model on this hardware,
+            # rather than deploying the default one against a model it cannot run.
+            backend = resolve_auto_backend(
+                backend,
+                "the measured (THOROUGH) search",
+                supported=_supported_concrete_backend(resolve_model_path(dgdr), system),
+            )
             pick_result = await run_thorough(
                 dgdr,
                 ops,
@@ -193,6 +214,11 @@ async def _execute_strategy(
                 request_latency,
                 deployment_clients,
             )
+            # THOROUGH reports no backend of its own, so publish the one it was
+            # measured with. The caller reads the deployment's backend out of
+            # this result, and would otherwise carry "auto" into the image and
+            # the command line.
+            pick_result.setdefault("resolved_backend", backend)
 
         ops.current_phase = ProfilingPhase.SelectingConfig
         write_profiler_status(

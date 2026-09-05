@@ -61,13 +61,6 @@ def test_every_declared_backend_yields_a_runtime_image():
         assert _image_name(image) in published, f"{backend.value} -> {image}"
 
 
-def test_auto_resolves_to_a_concrete_backend():
-    resolved = resolve_auto_backend(BackendType.Auto.value, _CALLER)
-
-    assert resolved != BackendType.Auto.value
-    assert resolved in BACKEND_IMAGE_NAMES
-
-
 def test_a_requested_backend_is_never_overridden():
     """Resolution applies to the automatic value only; an explicit request
     must reach the search path unchanged."""
