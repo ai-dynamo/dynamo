@@ -1901,13 +1901,24 @@ async fn create_kv_router_from_endpoint(
     // requires the model name. Wait for a model card only for those cases. Stock
     // routers retain the non-blocking discovery snapshot used for Eagle semantics.
     // The blocking path is bounded by `DYN_ROUTER_MODEL_CARD_WAIT_SECS` (default 600s).
+    // `DYN_ROUTER_WAIT_FOR_MODEL_CARD=1` opts a stock router into the same wait.
+    // `is_eagle` is frozen from this one lookup, so a router that starts before
+    // its workers would otherwise hash non-Eagle for its whole lifetime.
     let needs_model_name = kv_router_config
         .as_ref()
         .map(|cfg| cfg.use_remote_indexer || cfg.serve_indexer)
         .unwrap_or(false);
     let needs_policy_role = worker_selection_policy_factory.is_some();
+    let wait_for_card = std::env::var("DYN_ROUTER_WAIT_FOR_MODEL_CARD")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
     let (model_name, policy_model_name, enable_eagle, worker_role, policy_worker_role, load_source) = {
-        let maybe_card = if needs_model_name || needs_policy_role {
+        let maybe_card = if needs_model_name || needs_policy_role || wait_for_card {
             let wait_secs: u64 = std::env::var("DYN_ROUTER_MODEL_CARD_WAIT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1945,6 +1956,15 @@ async fn create_kv_router_from_endpoint(
 
         match maybe_card {
             Some(card) => {
+                tracing::info!(
+                    namespace = %endpoint_id.namespace,
+                    component = %endpoint_id.component,
+                    endpoint = %endpoint_id.name,
+                    model = %card.display_name,
+                    enable_eagle = card.runtime_config.enable_eagle,
+                    kv_cache_block_size = ?card.kv_cache_block_size,
+                    "Resolved worker model card for KV routing"
+                );
                 let model_name = needs_model_name.then(|| card.display_name.clone());
                 let (worker_role, policy_worker_role) = advertised_and_policy_worker_roles(&card);
                 if needs_policy_role && policy_worker_role.is_none() {
@@ -1973,7 +1993,8 @@ async fn create_kv_router_from_endpoint(
                     namespace = %endpoint_id.namespace,
                     component = %endpoint_id.component,
                     endpoint = %endpoint_id.name,
-                    "No model card found in discovery; defaulting to non-Eagle routing semantics"
+                    "No model card found in discovery; defaulting to non-Eagle routing semantics \
+                     (set DYN_ROUTER_WAIT_FOR_MODEL_CARD=1 to wait for the card instead)"
                 );
                 (
                     None,
