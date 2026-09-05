@@ -10,7 +10,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from dynamo.vllm.realtime import RealtimeHandler, RealtimeTranscriptionHandler
+from dynamo.vllm.realtime import (
+    RealtimeHandler,
+    RealtimeTextHandler,
+    RealtimeTranscriptionHandler,
+)
 
 pytestmark = [
     pytest.mark.unit,
@@ -139,6 +143,444 @@ def test_rejects_unsupported_session_type():
     assert result[0]["error"]["code"] == "unsupported_session"
     assert result[0]["error"]["event_id"] == "event_1"
     assert transcription.events == []
+
+
+TEXT_MODEL = "test/realtime-llm"
+
+
+def _text_session(**updates) -> dict:
+    session = {
+        "type": "realtime",
+        "model": TEXT_MODEL,
+        "instructions": "Answer clearly.",
+        "max_output_tokens": 32,
+        "output_modalities": ["text"],
+    }
+    session.update(updates)
+    return session
+
+
+def _text_item(text: str, *, item_id: str = "user_1") -> dict:
+    return {
+        "type": "conversation.item.create",
+        "item": {
+            "id": item_id,
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": text}],
+        },
+    }
+
+
+def test_text_session_streams_canonical_response_and_preserves_usage():
+    calls = []
+
+    async def chat_completion(messages, max_output_tokens):
+        calls.append((messages, max_output_tokens))
+
+        async def frames():
+            yield 'data: {"choices":[{"delta":{"role":"assistant"}}]}\n\n'
+            yield 'data: {"choices":[{"delta":{"content":"hello "}}]}\n\n'
+            yield 'data: {"choices":[{"delta":{"content":"world"},"finish_reason":"stop"}]}\n\n'
+            yield (
+                'data: {"choices":[],"usage":{"prompt_tokens":5,'
+                '"completion_tokens":2,"total_tokens":7}}\n\n'
+            )
+            yield "data: [DONE]\n\n"
+
+        return frames()
+
+    handler = RealtimeTextHandler(
+        model_name=TEXT_MODEL,
+        chat_completion_factory=chat_completion,
+    )
+    result = asyncio.run(
+        _drive(
+            handler,
+            [
+                {"type": "session.update", "session": _text_session()},
+                _text_item("Hello"),
+                {"type": "response.create"},
+            ],
+        )
+    )
+
+    assert calls == [
+        (
+            [
+                {"role": "system", "content": "Answer clearly."},
+                {"role": "user", "content": "Hello"},
+            ],
+            32,
+        )
+    ]
+    assert [event["type"] for event in result] == [
+        "session.updated",
+        "conversation.item.added",
+        "conversation.item.done",
+        "response.created",
+        "response.output_item.added",
+        "conversation.item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+        "response.output_text.delta",
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "conversation.item.done",
+        "response.done",
+    ]
+    assert (
+        "".join(
+            event["delta"]
+            for event in result
+            if event["type"] == "response.output_text.delta"
+        )
+        == "hello world"
+    )
+    response = result[-1]["response"]
+    assert response["status"] == "completed"
+    assert response["output"][0]["content"] == [
+        {"type": "output_text", "text": "hello world"}
+    ]
+    assert response["usage"] == {
+        "input_tokens": 5,
+        "output_tokens": 2,
+        "total_tokens": 7,
+    }
+
+
+def test_text_buffer_prefills_cumulative_input_before_generation():
+    updates_seen = []
+    prefill_messages = []
+    prefill_done = asyncio.Event()
+
+    async def prefill(messages, updates):
+        prefill_messages.extend(messages)
+        async for update in updates:
+            updates_seen.append(update)
+        prefill_done.set()
+
+    async def chat_completion(messages, max_output_tokens):
+        assert prefill_done.is_set()
+        assert messages[-1] == {"role": "user", "content": "Hello world"}
+        assert max_output_tokens == 32
+
+        async def frames():
+            yield 'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":"stop"}]}\n\n'
+            yield "data: [DONE]\n\n"
+
+        return frames()
+
+    handler = RealtimeTextHandler(
+        model_name=TEXT_MODEL,
+        chat_completion_factory=chat_completion,
+        text_prefill_factory=prefill,
+    )
+    result = asyncio.run(
+        _drive(
+            handler,
+            [
+                {"type": "session.update", "session": _text_session()},
+                {"type": "input_text_buffer.append", "text": "Hello"},
+                {"type": "input_text_buffer.append", "text": " world"},
+                {"type": "input_text_buffer.commit"},
+                {"type": "response.create"},
+            ],
+        )
+    )
+
+    assert prefill_messages == [{"role": "system", "content": "Answer clearly."}]
+    assert updates_seen == [
+        ("Hello", False),
+        (" world", False),
+        ("", True),
+    ]
+    user_items = [
+        event["item"]
+        for event in result
+        if event["type"] == "conversation.item.done" and event["item"]["role"] == "user"
+    ]
+    assert len(user_items) == 1
+    assert user_items[0]["content"] == [{"type": "input_text", "text": "Hello world"}]
+
+
+def test_text_buffer_clear_discards_input_and_allows_replay():
+    prefill_texts = []
+
+    async def prefill(messages, updates):
+        del messages
+        async for text, _ in updates:
+            prefill_texts.append(text)
+
+    async def chat_completion(messages, max_output_tokens):
+        del max_output_tokens
+        assert messages[-1] == {"role": "user", "content": "correct"}
+
+        async def frames():
+            yield 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+
+        return frames()
+
+    result = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=chat_completion,
+                text_prefill_factory=prefill,
+            ),
+            [
+                {"type": "session.update", "session": _text_session()},
+                {"type": "input_text_buffer.append", "text": "incorrect"},
+                {"type": "input_text_buffer.clear"},
+                {"type": "input_text_buffer.append", "text": "correct"},
+                {"type": "input_text_buffer.commit"},
+                {"type": "response.create"},
+            ],
+        )
+    )
+
+    user_items = [
+        event["item"]
+        for event in result
+        if event["type"] == "conversation.item.done" and event["item"]["role"] == "user"
+    ]
+    assert len(user_items) == 1
+    assert user_items[0]["content"][0]["text"] == "correct"
+    assert "correct" in prefill_texts
+
+
+def test_text_prefill_failure_does_not_fail_final_generation():
+    async def failed_prefill(messages, updates):
+        del messages
+        async for _ in updates:
+            pass
+        raise RuntimeError("prefill failed")
+
+    async def chat_completion(messages, max_output_tokens):
+        del messages, max_output_tokens
+
+        async def frames():
+            yield 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+
+        return frames()
+
+    result = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=chat_completion,
+                text_prefill_factory=failed_prefill,
+            ),
+            [
+                {"type": "session.update", "session": _text_session()},
+                {"type": "input_text_buffer.append", "text": "Hello"},
+                {"type": "input_text_buffer.commit"},
+                {"type": "response.create"},
+            ],
+        )
+    )
+
+    done = next(event for event in result if event["type"] == "response.done")
+    assert done["response"]["status"] == "completed"
+
+
+def test_text_buffer_must_be_committed_before_response():
+    async def unused_chat_completion(messages, max_output_tokens):
+        raise AssertionError((messages, max_output_tokens))
+
+    async def prefill(messages, updates):
+        del messages
+        async for _ in updates:
+            pass
+
+    result = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=unused_chat_completion,
+                text_prefill_factory=prefill,
+            ),
+            [
+                {"type": "session.update", "session": _text_session()},
+                {"type": "input_text_buffer.append", "text": "Hello"},
+                {"type": "response.create"},
+            ],
+        )
+    )
+
+    error = next(event for event in result if event["type"] == "error")
+    assert error["error"]["code"] == "input_not_committed"
+
+
+@pytest.mark.parametrize(
+    "event,message",
+    [
+        ({"type": "input_text_buffer.append", "text": ""}, "non-empty"),
+        ({"type": "input_text_buffer.append", "text": 123}, "non-empty"),
+        ({"type": "input_text_buffer.commit"}, "buffer is empty"),
+    ],
+)
+def test_invalid_text_buffer_events_are_recoverable(event, message):
+    async def unused_chat_completion(messages, max_output_tokens):
+        raise AssertionError((messages, max_output_tokens))
+
+    async def unused_prefill(messages, updates):
+        raise AssertionError((messages, updates))
+
+    result = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=unused_chat_completion,
+                text_prefill_factory=unused_prefill,
+            ),
+            [{"type": "session.update", "session": _text_session()}, event],
+        )
+    )
+
+    errors = [item for item in result if item["type"] == "error"]
+    assert len(errors) == 1
+    assert message in errors[0]["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    "session_update, item, code",
+    [
+        ({"output_modalities": ["audio"]}, _text_item("Hello"), "invalid_session"),
+        (
+            {},
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_audio", "audio": "..."}],
+                },
+            },
+            "invalid_item",
+        ),
+    ],
+)
+def test_text_session_rejects_unsupported_modalities(session_update, item, code):
+    async def unused_chat_completion(messages, max_output_tokens):
+        raise AssertionError((messages, max_output_tokens))
+
+    result = asyncio.run(
+        _drive(
+            RealtimeTextHandler(
+                model_name=TEXT_MODEL,
+                chat_completion_factory=unused_chat_completion,
+            ),
+            [
+                {
+                    "type": "session.update",
+                    "session": _text_session(**session_update),
+                },
+                item,
+            ],
+        )
+    )
+
+    errors = [event for event in result if event["type"] == "error"]
+    assert len(errors) == 1
+    assert errors[0]["error"]["code"] == code
+
+
+def test_response_cancel_aborts_generation():
+    async def scenario():
+        started = asyncio.Event()
+
+        async def chat_completion(messages, max_output_tokens):
+            del messages, max_output_tokens
+
+            async def frames():
+                started.set()
+                await asyncio.Event().wait()
+                yield "data: [DONE]\n\n"
+
+            return frames()
+
+        handler = RealtimeTextHandler(
+            model_name=TEXT_MODEL,
+            chat_completion_factory=chat_completion,
+        )
+
+        async def request_stream():
+            yield {"type": "session.update", "session": _text_session()}
+            yield _text_item("Wait")
+            yield {"type": "response.create"}
+            await started.wait()
+            yield {"type": "response.cancel"}
+
+        return [event async for event in handler.generate(request_stream(), _Context())]
+
+    result = asyncio.run(asyncio.wait_for(scenario(), timeout=1))
+
+    done = [event for event in result if event["type"] == "response.done"]
+    assert len(done) == 1
+    assert done[0]["response"]["status"] == "cancelled"
+    assert done[0]["response"]["status_details"] == {
+        "type": "cancelled",
+        "reason": "client_cancelled",
+    }
+
+
+def test_text_session_starts_next_turn_immediately_after_response_done():
+    async def scenario():
+        calls = []
+
+        async def chat_completion(messages, max_output_tokens):
+            del max_output_tokens
+            calls.append(messages)
+
+            async def frames():
+                reply = f"reply {len(calls)}"
+                yield f'data: {{"choices":[{{"delta":{{"content":"{reply}"}},"finish_reason":"stop"}}]}}\n\n'
+                yield "data: [DONE]\n\n"
+
+            return frames()
+
+        requests = asyncio.Queue()
+
+        async def request_stream():
+            while (event := await requests.get()) is not None:
+                yield event
+
+        responses = RealtimeTextHandler(
+            model_name=TEXT_MODEL,
+            chat_completion_factory=chat_completion,
+        ).generate(request_stream(), _Context())
+        await requests.put({"type": "session.update", "session": _text_session()})
+        await requests.put(_text_item("First", item_id="user_1"))
+        await requests.put({"type": "response.create"})
+
+        first = []
+        while not first or first[-1]["type"] != "response.done":
+            first.append(await anext(responses))
+
+        await requests.put(_text_item("Second", item_id="user_2"))
+        await requests.put({"type": "response.create"})
+        await requests.put(None)
+        remaining = [event async for event in responses]
+
+        return calls, first + remaining
+
+    calls, events = asyncio.run(asyncio.wait_for(scenario(), timeout=1))
+
+    assert len([event for event in events if event["type"] == "response.done"]) == 2
+    assert calls == [
+        [
+            {"role": "system", "content": "Answer clearly."},
+            {"role": "user", "content": "First"},
+        ],
+        [
+            {"role": "system", "content": "Answer clearly."},
+            {"role": "user", "content": "First"},
+            {"role": "assistant", "content": "reply 1"},
+            {"role": "user", "content": "Second"},
+        ],
+    ]
 
 
 def test_transcription_session_streams_canonical_events_and_resamples_audio():

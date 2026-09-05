@@ -435,6 +435,58 @@ async fn realtime_websocket_binary_frame_during_selection_emits_error() {
 }
 
 #[tokio::test]
+async fn realtime_websocket_forwards_text_buffer_extension() {
+    let (port, token, handle) = spawn_test_service(true, true).await;
+
+    let url = format!("ws://127.0.0.1:{port}/v1/realtime");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("ws connect");
+
+    expect_text_event(&mut ws, "session.created").await;
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "session.update",
+            "session": { "type": "realtime", "model": ECHO_MODEL }
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send session.update");
+    expect_text_event(&mut ws, "session.updated").await;
+
+    ws.send(Message::Text(
+        serde_json::json!({
+            "type": "input_text_buffer.append",
+            "text": "hello"
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .expect("send text append");
+
+    let event = expect_text_event(&mut ws, "error").await;
+    assert_eq!(
+        event
+            .pointer("/error/code")
+            .and_then(|value| value.as_str()),
+        Some("echo_engine_unsupported")
+    );
+    assert!(
+        event
+            .pointer("/error/message")
+            .and_then(|value| value.as_str())
+            .is_some_and(|message| message.contains("input_text_buffer.append"))
+    );
+
+    let _ = ws.close(None).await;
+    token.cancel();
+    let _ = handle.await;
+}
+
+#[tokio::test]
 async fn realtime_websocket_unknown_model_emits_error() {
     let (port, token, handle) = spawn_test_service(true, false).await;
 

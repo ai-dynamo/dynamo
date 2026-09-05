@@ -51,7 +51,7 @@ from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKE
 from .multimodal_handlers import EncodeWorkerHandler
 from .pooling_handlers import ClassifyWorkerHandler
 from .publisher import StatLoggerFactory
-from .realtime import RealtimeHandler, RealtimeTranscriptionHandler
+from .realtime import RealtimeHandler, RealtimeTextHandler, RealtimeTranscriptionHandler
 from .state_agent import StateAgentLifecycle, state_agent_settings
 
 logger = logging.getLogger(__name__)
@@ -817,15 +817,26 @@ class WorkerFactory:
         factory.init_publish()
 
         model_name = config.served_model_name or config.model
-        handler = RealtimeHandler(
-            {
-                "transcription": RealtimeTranscriptionHandler.from_engine(
-                    engine_client=engine_client,
-                    model_name=model_name,
-                    model_path=config.model,
-                )
-            }
-        )
+        supported_tasks = await engine_client.get_supported_tasks()
+        handlers = {}
+        if "generate" in supported_tasks:
+            handlers["realtime"] = RealtimeTextHandler.from_engine(
+                engine_client=engine_client,
+                model_name=model_name,
+                model_path=config.model,
+                chat_template_path=config.custom_jinja_template,
+            )
+        if "realtime" in supported_tasks:
+            handlers["transcription"] = RealtimeTranscriptionHandler.from_engine(
+                engine_client=engine_client,
+                model_name=model_name,
+                model_path=config.model,
+            )
+        if not handlers:
+            raise ValueError(
+                f"Model {model_name!r} does not support realtime text or transcription"
+            )
+        handler = RealtimeHandler(handlers)
         self.setup_metrics_collection(config, generate_endpoint, logger)
 
         await self.register_vllm_model(

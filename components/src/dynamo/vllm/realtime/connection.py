@@ -90,13 +90,18 @@ class RealtimeConnection(Generic[TurnT]):
     def cancel_active_turn(self) -> TurnT | None:
         """Detach, cancel, and close the active uncommitted turn."""
         turn = self.finish_active_turn()
-        if turn is not None and turn.task is not None:
+        if turn is not None:
+            self.cancel_turn(turn)
+        return turn
+
+    def cancel_turn(self, turn: TurnT) -> None:
+        """Cancel a specific queued turn and discard its pending output."""
+        if turn.task is not None:
             turn.task.cancel()
             # A task cancelled before its coroutine starts cannot run its finally
-            # block, so close the output explicitly. Drop partial uncommitted output.
+            # block, so close the output explicitly.
             drain_queue(turn.events)
             turn.events.put_nowait(None)
-        return turn
 
     async def _drive_turn(self, turn: TurnT) -> None:
         try:
