@@ -306,6 +306,7 @@ With `--benchmark-mode` set and no points file, passing a legacy flag together w
 ## Validation rules
 
 - `--embedding-worker` is only valid with `--disaggregation-mode=agg` (or the default aggregated mode) and cannot be combined with `--enable-multimodal` or `--benchmark-mode`.
+- `--benchmark-mode` cannot be combined with `--data-parallel-size` greater than `1` unless the model is a mixture-of-experts (MoE) model. The attention-DP self-benchmark needs the data-parallel ranks to run as one coordinated group, which vLLM does only for MoE models; the worker rejects this combination at startup, before it loads the model.
 
 ## Related pages
 

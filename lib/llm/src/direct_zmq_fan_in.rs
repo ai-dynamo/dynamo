@@ -5,17 +5,22 @@ use std::{collections::HashMap, time::Duration};
 
 use anyhow::Result;
 use dynamo_runtime::{
-    component::Endpoint,
+    component::{Component, Endpoint},
     discovery::{
         DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
         EventChannelInstanceId, EventChannelQuery, EventScope, EventTransport,
     },
+    protocols::EndpointId,
     traits::DistributedRuntimeProvider,
     transports::event_plane::{ValidatedEnvelope, ValidatedZmqSource, ValidatedZmqSourceError},
 };
 use futures::StreamExt;
-use tokio::task::JoinHandle;
+use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+
+use crate::direct_zmq_sub_pool::{
+    DirectZmqSubConnection, DirectZmqSubItem, DirectZmqSubPool, endpoints_per_sub_from_env,
+};
 
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
@@ -31,6 +36,8 @@ pub(crate) enum ContinuityMode {
 pub(crate) enum FanInEvent {
     SourceStarted,
     SourceStopped,
+    Disconnected,
+    DiscoveryReset,
     Reconnect,
     Replacement,
     EnvelopeDecodeError,
@@ -119,20 +126,60 @@ where
     H: Fn(ValidatedEnvelope) -> Result<()> + Clone + Send + Sync + 'static,
     O: Fn(FanInObservation) + Clone + Send + Sync + 'static,
 {
-    let query =
-        DiscoveryQuery::EventChannels(EventChannelQuery::endpoint_topic(endpoint.id(), topic));
+    start_direct_zmq_fan_in_for_endpoint_id(
+        endpoint.component().clone(),
+        endpoint.id(),
+        topic,
+        rcvhwm,
+        excluded_publisher_id,
+        continuity_mode,
+        cancellation_token,
+        handler,
+        observer,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_direct_zmq_fan_in_for_endpoint_id<H, O>(
+    component: Component,
+    endpoint_id: EndpointId,
+    topic: &'static str,
+    rcvhwm: i32,
+    excluded_publisher_id: Option<u64>,
+    continuity_mode: ContinuityMode,
+    cancellation_token: CancellationToken,
+    handler: H,
+    observer: O,
+) -> Result<JoinHandle<()>>
+where
+    H: Fn(ValidatedEnvelope) -> Result<()> + Clone + Send + Sync + 'static,
+    O: Fn(FanInObservation) + Clone + Send + Sync + 'static,
+{
+    let endpoints_per_sub = endpoints_per_sub_from_env()?;
+    let query = DiscoveryQuery::EventChannels(EventChannelQuery::endpoint_topic(
+        endpoint_id.clone(),
+        topic,
+    ));
     let watch_cancel = cancellation_token.child_token();
-    let initial_watch = endpoint
+    let initial_watch = component
         .drt()
         .discovery()
         .list_and_watch(query.clone(), Some(watch_cancel.clone()))
         .await?;
+    let group_pool = DirectZmqSubPool::new(
+        topic,
+        endpoints_per_sub,
+        rcvhwm,
+        cancellation_token.child_token(),
+    )?;
 
     Ok(tokio::spawn(run_supervisor(
-        endpoint,
+        component,
+        endpoint_id,
         topic,
         query,
-        rcvhwm,
+        group_pool,
         excluded_publisher_id,
         continuity_mode,
         cancellation_token,
@@ -144,10 +191,11 @@ where
 
 #[allow(clippy::too_many_arguments)]
 async fn run_supervisor<H, O>(
-    endpoint: Endpoint,
+    component: Component,
+    endpoint_id: EndpointId,
     topic: &'static str,
     query: DiscoveryQuery,
-    rcvhwm: i32,
+    group_pool: DirectZmqSubPool,
     excluded_publisher_id: Option<u64>,
     continuity_mode: ContinuityMode,
     cancellation_token: CancellationToken,
@@ -162,9 +210,9 @@ async fn run_supervisor<H, O>(
     O: Fn(FanInObservation) + Clone + Send + Sync + 'static,
 {
     let expected_scope = EventScope::Endpoint {
-        endpoint: endpoint.id(),
+        endpoint: endpoint_id,
     };
-    let discovery = endpoint.drt().discovery();
+    let discovery = component.drt().discovery();
     let mut resume_cursors = HashMap::<u64, u64>::new();
     let mut next_generation = 1_u64;
     let mut retry_delay = INITIAL_BACKOFF;
@@ -253,8 +301,7 @@ async fn run_supervisor<H, O>(
                             endpoint,
                             generation,
                             high_watermark,
-                            topic,
-                            rcvhwm,
+                            group_pool.clone(),
                             continuity_mode,
                             handler.clone(),
                             observer.clone(),
@@ -285,6 +332,16 @@ async fn run_supervisor<H, O>(
         }
 
         watch_cancel.cancel();
+        if restart_watch {
+            for source in sources.values() {
+                observe(
+                    &observer,
+                    source.publisher_id,
+                    source.generation,
+                    FanInEvent::DiscoveryReset,
+                );
+            }
+        }
         for (publisher_id, high_watermark) in stop_sources(sources, &observer).await {
             resume_cursors.insert(publisher_id, high_watermark);
         }
@@ -296,6 +353,7 @@ async fn run_supervisor<H, O>(
         }
         retry_delay = (retry_delay * 2).min(MAX_BACKOFF);
     }
+    group_pool.shutdown().await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -304,8 +362,7 @@ fn spawn_source<H, O>(
     endpoint: String,
     generation: u64,
     high_watermark: Option<u64>,
-    topic: &'static str,
-    rcvhwm: i32,
+    group_pool: DirectZmqSubPool,
     continuity_mode: ContinuityMode,
     handler: H,
     observer: O,
@@ -329,8 +386,7 @@ where
             task_endpoint,
             generation,
             high_watermark,
-            topic,
-            rcvhwm,
+            group_pool,
             continuity_mode,
             handler,
             observer,
@@ -353,8 +409,7 @@ async fn run_source<H, O>(
     endpoint: String,
     generation: u64,
     high_watermark: Option<u64>,
-    topic: &'static str,
-    rcvhwm: i32,
+    group_pool: DirectZmqSubPool,
     continuity_mode: ContinuityMode,
     handler: H,
     observer: O,
@@ -369,14 +424,14 @@ where
     let mut connected_once = false;
 
     loop {
-        let source = tokio::select! {
+        let connection = tokio::select! {
             _ = cancel.cancelled() => break,
-            source = ValidatedZmqSource::connect(&endpoint, topic, publisher_id, rcvhwm) => source,
+            connection = group_pool.connect(publisher_id, &endpoint, generation) => connection,
         };
-        let mut source = match source {
-            Ok(source) => source,
+        let mut connection = match connection {
+            Ok(connection) => connection,
             Err(error) => {
-                tracing::warn!(%error, publisher_id, generation, %endpoint, topic, "failed to connect direct-ZMQ source");
+                tracing::warn!(%error, publisher_id, generation, %endpoint, "failed to connect direct-ZMQ source");
                 observe(&observer, publisher_id, generation, FanInEvent::Reconnect);
                 if !sleep_or_cancel(retry_delay, &cancel).await {
                     break;
@@ -391,17 +446,43 @@ where
         connected_once = true;
         retry_delay = INITIAL_BACKOFF;
 
-        if !consume_connection(
-            publisher_id,
-            generation,
-            &mut source,
-            &mut cursor,
-            &handler,
-            &observer,
-            &cancel,
-        )
-        .await
-        {
+        let keep_running = match &mut connection {
+            DirectZmqSubConnection::Dedicated(source) => {
+                consume_dedicated_connection(
+                    publisher_id,
+                    generation,
+                    source,
+                    &mut cursor,
+                    &handler,
+                    &observer,
+                    &cancel,
+                )
+                .await
+            }
+            DirectZmqSubConnection::Grouped(registration) => {
+                consume_grouped_connection(
+                    publisher_id,
+                    generation,
+                    &mut registration.receiver,
+                    &registration.disconnected,
+                    &mut cursor,
+                    &handler,
+                    &observer,
+                    &cancel,
+                )
+                .await
+            }
+        };
+        if keep_running {
+            observe(
+                &observer,
+                publisher_id,
+                generation,
+                FanInEvent::Disconnected,
+            );
+        }
+        connection.close().await;
+        if !keep_running {
             break;
         }
         if !sleep_or_cancel(retry_delay, &cancel).await {
@@ -413,7 +494,73 @@ where
     cursor.high_watermark
 }
 
-async fn consume_connection<H, O>(
+#[allow(clippy::too_many_arguments)]
+async fn consume_grouped_connection<H, O>(
+    publisher_id: u64,
+    generation: u64,
+    receiver: &mut mpsc::Receiver<DirectZmqSubItem>,
+    disconnected: &CancellationToken,
+    cursor: &mut SequenceCursor,
+    handler: &H,
+    observer: &O,
+    cancel: &CancellationToken,
+) -> bool
+where
+    H: Fn(ValidatedEnvelope) -> Result<()> + Send + Sync,
+    O: Fn(FanInObservation) + Send + Sync,
+{
+    loop {
+        let item = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return false,
+            _ = disconnected.cancelled() => return true,
+            item = receiver.recv() => item,
+        };
+        let Some(item) = item else {
+            return true;
+        };
+
+        let envelope = match item {
+            DirectZmqSubItem::Envelope(envelope) => envelope,
+            DirectZmqSubItem::EnvelopeDecodeError => {
+                observe(
+                    observer,
+                    publisher_id,
+                    generation,
+                    FanInEvent::EnvelopeDecodeError,
+                );
+                continue;
+            }
+            DirectZmqSubItem::IdentityMismatch => {
+                observe(
+                    observer,
+                    publisher_id,
+                    generation,
+                    FanInEvent::IdentityMismatch,
+                );
+                continue;
+            }
+        };
+
+        match cursor.observe(envelope.sequence) {
+            None | Some(Continuity::InOrder) => {}
+            Some(Continuity::Gap(missing)) => observe(
+                observer,
+                publisher_id,
+                generation,
+                FanInEvent::SequenceGap { missing },
+            ),
+            Some(Continuity::OutOfOrder) => {
+                observe(observer, publisher_id, generation, FanInEvent::OutOfOrder)
+            }
+        }
+        if let Err(error) = handler(envelope) {
+            tracing::warn!(%error, publisher_id, generation, "direct-ZMQ source handler rejected an envelope");
+        }
+    }
+}
+
+async fn consume_dedicated_connection<H, O>(
     publisher_id: u64,
     generation: u64,
     source: &mut ValidatedZmqSource,
@@ -567,7 +714,7 @@ mod tests {
         collections::{HashMap, HashSet},
         sync::{
             Arc, Condvar, Mutex,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
@@ -613,6 +760,58 @@ mod tests {
             SequenceCursor::new(ContinuityMode::Disabled, None).observe(9),
             None
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ready_source_messages_are_not_double_charged_against_coop_budget() {
+        const MESSAGE_COUNT: usize = 1_025;
+
+        let (sender, mut receiver) = mpsc::channel(MESSAGE_COUNT);
+        for sequence in 0..MESSAGE_COUNT as u64 {
+            sender
+                .try_send(DirectZmqSubItem::Envelope(ValidatedEnvelope {
+                    publisher_id: 1,
+                    sequence,
+                    published_at: 0,
+                    payload: Default::default(),
+                }))
+                .unwrap();
+        }
+        drop(sender);
+
+        let seen = Arc::new(AtomicUsize::new(0));
+        let (first_seen_tx, mut first_seen_rx) = mpsc::unbounded_channel();
+        let probe_seen = seen.clone();
+        let probe = tokio::spawn(async move {
+            first_seen_rx.recv().await.unwrap();
+            probe_seen.load(Ordering::SeqCst)
+        });
+        let consumer_seen = seen.clone();
+        let handler = move |envelope: ValidatedEnvelope| {
+            let previous = consumer_seen.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(envelope.sequence, previous as u64);
+            if previous == 0 {
+                first_seen_tx.send(()).unwrap();
+            }
+            Ok(())
+        };
+        let mut cursor = SequenceCursor::new(ContinuityMode::Disabled, None);
+
+        assert!(
+            consume_grouped_connection(
+                1,
+                1,
+                &mut receiver,
+                &CancellationToken::new(),
+                &mut cursor,
+                &handler,
+                &|_| {},
+                &CancellationToken::new(),
+            )
+            .await
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), MESSAGE_COUNT);
+        assert!(probe.await.unwrap() > 64);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

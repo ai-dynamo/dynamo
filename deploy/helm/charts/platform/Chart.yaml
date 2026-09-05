@@ -37,7 +37,7 @@ dependencies:
     repository: "https://charts.bitnami.com/bitnami"
     condition: global.etcd.install
   - name: kai-scheduler
-    version: v0.13.4
+    version: v0.17.0
     repository: oci://ghcr.io/kai-scheduler/kai-scheduler
     condition: global.kai-scheduler.install
   - name: grove-charts

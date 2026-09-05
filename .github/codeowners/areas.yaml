@@ -344,9 +344,11 @@ areas:
   - dev/sanity_check.py
   - dynamo.code-workspace
   - hatch_build.py
+  - lib/bindings/kvbm/pyproject.toml
   - pyproject.toml
   - rust-toolchain.toml
   - scripts/
+  - tests/wheels/
 - label: docs
   github_team: '@ai-dynamo/dynamo-docs-codeowners'
   path_globs:
@@ -1108,6 +1110,30 @@ shared:
   owners:
   - gms
   - operator
+- glob: tests/serve/test_vllm.py
+  owners:
+  - runtime
+  - backend-vllm
+- glob: tests/serve/test_vllm_omni.py
+  owners:
+  - runtime
+  - backend-vllm
+- glob: tests/serve/test_sglang.py
+  owners:
+  - runtime
+  - backend-sglang
+- glob: tests/serve/test_sglang_mm_hashes_protocol.py
+  owners:
+  - runtime
+  - backend-sglang
+- glob: tests/serve/test_trtllm.py
+  owners:
+  - runtime
+  - backend-trtllm
+- glob: tests/serve/test_trtllm_mm_hashes_protocol.py
+  owners:
+  - runtime
+  - backend-trtllm
 - glob: deploy/operator/internal/gms/
   owners:
   - gms
@@ -1258,6 +1284,10 @@ shared:
   owners:
   - fault-tolerance
   - ops
+- glob: tests/fault_tolerance/hardware/fault_injection_service/**/requirements.txt
+  owners:
+  - fault-tolerance
+  - ops
 - glob: components/src/dynamo/common/backend/multimodal.py
   owners:
   - runtime
@@ -1360,10 +1390,35 @@ shared:
   owners:
   - runtime
   - backend-trtllm
+- glob: tests/serve/test_sample_diffusion.py
+  owners:
+  - runtime
+  - diffusion
 - glob: tests/serve/multimodal_profiles/
   owners:
   - runtime
   - multimodal
+# The xpu profile is declared in the xpu area, which emits in the earlier
+# override tier. Shared rules emit after overrides, so the directory glob above
+# would otherwise take this file back; the longer glob wins by last-match.
+- glob: tests/serve/multimodal_profiles/vllm_xpu.py
+  owners:
+  - runtime
+  - multimodal
+  - xpu
+  - backend-vllm
+- glob: tests/test_kustomize_matrix.py
+  owners:
+  - runtime
+  - ops
+- glob: tests/test_generate_kustomize_openapi.py
+  owners:
+  - runtime
+  - ops
+- glob: tests/dependencies/test_kvbm_imports.py
+  owners:
+  - runtime
+  - kv-memory
 - glob: .github/workflows/pr-xpu.yaml
   owners:
   - xpu
@@ -1386,12 +1441,6 @@ shared:
 - glob: tests/serve/test_vllm_xpu.py
   owners:
   - runtime
-  - xpu
-  - backend-vllm
-- glob: tests/serve/multimodal_profiles/vllm_xpu.py
-  owners:
-  - runtime
-  - multimodal
   - xpu
   - backend-vllm
 - glob: dev/observability/*xpu*
@@ -1452,6 +1501,15 @@ shared:
   - backend-vllm
   - xpu
 classify:
+  # File-type defaults sit above the area tier but below explicit path overrides
+  # and shared rules, which emit later and win by last-match. A pyproject.toml or
+  # Dockerfile added under a path carrying its own override or shared declaration
+  # keeps that path's owner instead. Every pyproject.toml in the tree resolves to
+  # ops today; check a new one with who_owns.py rather than assuming this caught it.
   filetype_rules:
   - pattern: '*Dockerfile*'
+    coowner: ops
+  - pattern: pyproject.toml
+    coowner: ops
+  - pattern: requirements.txt
     coowner: ops
