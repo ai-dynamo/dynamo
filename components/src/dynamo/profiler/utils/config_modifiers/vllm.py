@@ -18,6 +18,7 @@ from dynamo.profiler.utils.config import (
     get_component_name_by_type,
     get_main_container,
     get_worker_component_from_config,
+    remove_all_argument_occurrences,
     remove_valued_arguments,
     set_argument_value,
     set_unique_argument_value,
@@ -109,22 +110,6 @@ def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[s
             DEFAULT_VLLM_KV_TRANSFER_CONFIG,
         )
     return finalized
-
-
-def _remove_disaggregation_mode_args(args: list[str]) -> list[str]:
-    filtered_args: list[str] = []
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if arg == "--disaggregation-mode":
-            index += 2
-            continue
-        if arg.startswith("--disaggregation-mode="):
-            index += 1
-            continue
-        filtered_args.append(arg)
-        index += 1
-    return filtered_args
 
 
 class VllmV1ConfigModifier(BaseConfigModifier):
@@ -222,7 +207,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             args = break_arguments(args)
 
             # Remove role selection when converting the prefill worker to aggregated.
-            args = remove_valued_arguments(args, "--disaggregation-mode")
+            args = remove_all_argument_occurrences(args, "--disaggregation-mode")
             # AIC may still emit this removed vLLM role flag.
             if "--is-prefill-worker" in args:
                 args.remove("--is-prefill-worker")
@@ -263,7 +248,7 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             args = break_arguments(args)
 
             # The decode candidate is standalone after its prefill peer is removed.
-            args = _remove_disaggregation_mode_args(args)
+            args = remove_all_argument_occurrences(args, "--disaggregation-mode")
 
             # enable prefix caching
             if "--enable-prefix-caching" not in args:
