@@ -260,6 +260,25 @@ def test_convert_vllm_prefill_to_aggregated_drops_equals_spelled_role() -> None:
     ("target", "source_type"),
     [(EngineType.PREFILL, "prefill"), (EngineType.DECODE, "decode")],
 )
+def test_convert_trtllm_drops_equals_spelled_disaggregation_args(
+    target: EngineType, source_type: str
+) -> None:
+    """TensorRT-LLM candidates must not inherit disaggregation wiring either."""
+    modifier = CONFIG_MODIFIERS["trtllm"]
+    config = modifier.load_default_config("disagg")
+    source_args = _main_container(_component_by_type(config, source_type))["args"]
+    _use_equals_spelling(source_args, "--disaggregation-mode")
+
+    converted = modifier.convert_config(config, target=target)
+    converted_args = _main_container(_worker_components(converted)[0])["args"]
+
+    assert not any("--disaggregation" in arg for arg in converted_args)
+
+
+@pytest.mark.parametrize(
+    ("target", "source_type"),
+    [(EngineType.PREFILL, "prefill"), (EngineType.DECODE, "decode")],
+)
 def test_convert_sglang_drops_equals_spelled_disaggregation_args(
     target: EngineType, source_type: str
 ) -> None:
