@@ -44,10 +44,176 @@ runs:
     - name: ECR Login
       shell: bash
       if: ${{ inputs.aws_default_region != '' && inputs.ecr_registry != '' }}
+      env:
+        # Passed through env, never interpolated into the script body: a
+        # ${{ ... }} expansion inside `run:` is substituted before bash parses
+        # the script, so the value is materialized into the runner's temp
+        # script file and cannot be safely quoted.
+        AWS_DEFAULT_REGION: ${{ inputs.aws_default_region }}
+        ECR_REGISTRY: ${{ inputs.ecr_registry }}
+        LOGIN_CLIENT: skopeo
       run: |
         set -euo pipefail
-        aws ecr get-login-password --region ${{ inputs.aws_default_region }} | skopeo login --username AWS --password-stdin "${{ inputs.ecr_registry }}"
 
+        # ---- preflight (cheap, fails loud, never burns the retry budget) -------------
+        # A typo'd region emits the byte-identical "Could not connect to the endpoint
+        # URL" that a real DNS outage does, so it is unclassifiable after the fact.
+        [ -n "${AWS_DEFAULT_REGION:-}" ] || { echo "::error::ECR login: aws_default_region input is empty."; exit 1; }
+        [ -n "${ECR_REGISTRY:-}" ]      || { echo "::error::ECR login: ecr_registry input is empty.";      exit 1; }
+        [ -n "${LOGIN_CLIENT:-}" ]      || { echo "::error::ECR login: LOGIN_CLIENT is not set.";          exit 1; }
+        ATTEMPT_TIMEOUT=60    # per-attempt wall-clock bound on the aws call
+        if ! [[ "$AWS_DEFAULT_REGION" =~ ^[a-z]{2}(-gov|-iso[a-z]?)?-[a-z]+-[0-9]+$ ]]; then
+          echo "::error::ECR login: region '$AWS_DEFAULT_REGION' is not a well-formed AWS region."
+          exit 1
+        fi
+        command -v aws           >/dev/null || { echo "::error::ECR login: 'aws' is not on PATH.";            exit 1; }
+        command -v "$LOGIN_CLIENT" >/dev/null || { echo "::error::ECR login: '$LOGIN_CLIENT' is not on PATH."; exit 1; }
+        echo "aws: $(aws --version 2>&1)"   # the runner image is not in this repo; record the version
+
+        # A blackholed STS endpoint hangs `aws` indefinitely (measured: still running
+        # after 8s, killed by timeout with rc=124 and EMPTY stderr). coreutils `timeout`
+        # is present on the Debian/Ubuntu runner; degrade loudly rather than hard-fail.
+        TIMEOUT_PREFIX=()
+        if   command -v timeout  >/dev/null; then TIMEOUT_PREFIX=(timeout  "$ATTEMPT_TIMEOUT")
+        elif command -v gtimeout >/dev/null; then TIMEOUT_PREFIX=(gtimeout "$ATTEMPT_TIMEOUT")
+        else echo "::warning::ECR login: no 'timeout' on PATH; a hung STS call will not be bounded."
+        fi
+
+        # ---- password file ----------------------------------------------------------
+        # mktemp, never a fixed path: a fixed /tmp/ecr_pw is a symlink-follow write
+        # primitive on 1777 /tmp and leaked another job's token in 200/200 concurrent
+        # trials. umask 077 + mktemp gives 0600 regardless of the ambient umask.
+        umask 077
+        PW_FILE=""
+        cleanup() { [ -n "$PW_FILE" ] && rm -f "$PW_FILE"; return 0; }
+        trap cleanup EXIT INT TERM          # installed BEFORE mktemp: no leak window.
+        PW_FILE="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/ecrpw.XXXXXXXX")"
+
+        # ---- retry policy -----------------------------------------------------------
+        MAX_ATTEMPTS=5        # 1-(1-0.226)^5 = 72% login success at the measured rate
+        BASE_DELAY=3          # full-jitter cap for the first backoff
+        MAX_DELAY=45          # cap; keeps worst-case sleep at 3+6+12+24 = 45s
+        TOTAL_BUDGET=300      # hard wall-clock ceiling for the whole step
+        DEADLINE=$(( $(date +%s) + TOTAL_BUDGET ))
+        EMPTY_PW='aws exited 0 but produced an empty authorization token'
+
+        # ---- retryability: ALLOW-list, fail closed ----------------------------------
+        # Scored 40/40 on the induced-error catalog where the deny-list scored 28/40.
+        # Matches the EXTRACTED error code, not a glob over the whole message, so a
+        # message body containing "AccessDenied" cannot flip a transient 5xx.
+        is_retryable() {
+          local rc="$1" err="$2" code   # `local`: bash functions share scope, so an
+                                        # unlocal rc= here would clobber the caller's.
+          # `timeout` produces rc 124 with EMPTY stderr, so text matching cannot see it.
+          if [ "$rc" -eq 124 ]; then return 0; fi
+          if [ "$err" = "$EMPTY_PW" ]; then return 0; fi
+          code="$(printf '%s' "$err" | sed -n 's/.*An error occurred (\([^)]*\)).*/\1/p')"
+          if [ -n "$code" ]; then
+            case "$code" in
+              # Bare numerics appear whenever the HTTP error body is unparseable.
+              Throttling|ThrottlingException|TooManyRequestsException|RequestLimitExceeded|SlowDown| \
+              ServiceUnavailable|ServiceUnavailableException|InternalError|InternalFailure| \
+              InternalServerError|ServerException|RequestTimeout|RequestTimeoutException| \
+              BandwidthLimitExceeded|PriorRequestNotComplete|LimitExceededException|IDPCommunicationError| \
+              429|500|502|503|504|509) return 0 ;;
+              *) return 1 ;;   # AccessDenied, InvalidIdentityToken, UnrecognizedClientException,
+            esac                # ExpiredTokenException, NoCredentials, ValidationError, ...
+          fi
+          # rc 255 errors carry NO error code at all; these are the transport failures.
+          case "$err" in
+            *'Could not connect to the endpoint URL'*|*'Connect timeout on endpoint URL'*| \
+            *'Read timeout on endpoint URL'*|*'Connection was closed before we received a valid response'*| \
+            *'Connection reset'*) return 0 ;;
+            *) return 1 ;;
+          esac
+        }
+
+        # ---- fetch loop -------------------------------------------------------------
+        attempt=1
+        while : ; do
+          # `2>&1 >file` (this order) sends stdout to the file and stderr to the
+          # capture. Never pipe into the client: pipefail returns the RIGHTMOST
+          # non-zero status, so the client's rc=1 destroys aws's 253/254/255, and an
+          # empty stdin makes skopeo print "inappropriate ioctl for device" (docker:
+          # "password is empty") -- messages that name neither AWS nor STS.
+          # The explicit `|| rc=$?` is required: `$?` inside `if ! cmd` is 0.
+          # TOTAL_BUDGET is a HARD ceiling, so the per-attempt timeout is clamped to the
+          # budget that is actually left. Without this the last attempt can overrun the
+          # deadline by a full ATTEMPT_TIMEOUT (measured: 328s against a 300s budget).
+          remaining=$(( DEADLINE - $(date +%s) ))
+          if [ "$remaining" -le 0 ]; then
+            echo "::error::ECR login exhausted its ${TOTAL_BUDGET}s budget after $(( attempt - 1 )) attempts."
+            exit 1
+          fi
+          this_timeout="$ATTEMPT_TIMEOUT"
+          if [ "$remaining" -lt "$this_timeout" ]; then this_timeout="$remaining"; fi
+          if [ "${#TIMEOUT_PREFIX[@]}" -gt 0 ]; then TIMEOUT_PREFIX[1]="$this_timeout"; fi
+
+          rc=0
+          err="$("${TIMEOUT_PREFIX[@]}" aws ecr get-login-password \
+                   --region "$AWS_DEFAULT_REGION" 2>&1 >"$PW_FILE")" || rc=$?
+          if [ "$rc" -eq 0 ] && [ -s "$PW_FILE" ]; then
+            break
+          fi
+          # aws CLI v2 writes a LEADING BLANK LINE before "aws: [ERROR]:", so a naive
+          # head -1 yields "" and every log line reads "failed ()". `|| true` is
+          # mandatory: grep -v exits 1 on empty input and set -e would kill the step.
+          err="$(printf '%s\n' "$err" | grep -v '^[[:space:]]*$' | head -1 || true)"
+          if [ "$rc" -eq 0 ]; then err="$EMPTY_PW"; fi
+          if [ -z "$err" ]; then err="aws exited $rc with no diagnostic output"; fi
+          : > "$PW_FILE"   # drop any partial write before the next attempt
+
+          if ! is_retryable "$rc" "$err"; then
+            echo "::error::ECR login failed permanently (aws rc=$rc): $err"
+            exit 1
+          fi
+          if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+            echo "::error::ECR login failed after $MAX_ATTEMPTS attempts (aws rc=$rc): $err"
+            exit 1
+          fi
+          # Full jitter over an exponentially growing cap. NOT delay=$((delay*2+RANDOM%5)):
+          # that compounds its own jitter (2x spread over 6 rounds) and wraps negative,
+          # after which `sleep` fails and set -e aborts the step.
+          cap=$(( BASE_DELAY << (attempt - 1) ))
+          if [ "$cap" -gt "$MAX_DELAY" ]; then cap="$MAX_DELAY"; fi
+          delay=$(( 1 + RANDOM % cap ))
+          if [ $(( $(date +%s) + delay )) -ge "$DEADLINE" ]; then
+            echo "::error::ECR login exhausted its ${TOTAL_BUDGET}s budget after $attempt attempts (aws rc=$rc): $err"
+            exit 1
+          fi
+          echo "::warning::ECR login attempt $attempt/$MAX_ATTEMPTS failed (aws rc=$rc): $err; retrying in ${delay}s"
+          sleep "$delay"
+          attempt=$(( attempt + 1 ))   # never a bare `(( attempt++ ))`: it returns the
+        done                           # OLD value, so at 0 it exits 1 and set -e kills the step.
+
+        # ---- hand the token to the client -------------------------------------------
+        # `< "$PW_FILE"` keeps the token out of argv, out of the environment, out of any
+        # shell variable, and out of a `set -x` trace. No ::add-mask:: is needed or
+        # wanted: the token is never printed, and `echo "::add-mask::$PW"` is itself
+        # traced in cleartext under set -x before the mask exists.
+        if ! "$LOGIN_CLIENT" login --username AWS --password-stdin "$ECR_REGISTRY" < "$PW_FILE"; then
+          echo "::error::ECR login: '$LOGIN_CLIENT' rejected a token that aws returned successfully on attempt $attempt."
+          exit 1
+        fi
+        echo "ECR login succeeded on attempt $attempt/$MAX_ATTEMPTS."
+
+        # ---- credential-cache diagnostic (non-fatal, IRSA only) ---------------------
+        # AWS CLI v2 caches sts:AssumeRoleWithWebIdentity results under
+        # ~/.aws/cli/cache with a key that is stable across processes, so every
+        # `aws` call in a job should collapse to ONE STS call. That silently
+        # degrades to a fresh STS call per process when HOME is unset or not
+        # writable (ARC runner pods run as uid 1001), multiplying this repo's STS
+        # load with no log line anywhere. Report it; never fail the step over it.
+        # The cache files hold live credentials: count them, never print them.
+        if [ -n "${AWS_WEB_IDENTITY_TOKEN_FILE:-}" ] && [ -n "${AWS_ROLE_ARN:-}" ]; then
+          if [ -z "${HOME:-}" ]; then
+            echo "::warning::ECR login: HOME is unset, so the AWS CLI credential cache is disabled and every 'aws' process re-assumes the role via STS."
+          elif [ -d "$HOME/.aws/cli/cache" ]; then
+            echo "ECR login: AWS credential cache is live ($(find "$HOME/.aws/cli/cache" -type f 2>/dev/null | wc -l | tr -d ' ') entries under \$HOME/.aws/cli/cache)."
+          else
+            echo "::warning::ECR login: no credential cache at \$HOME/.aws/cli/cache after a successful login; every 'aws' process will re-assume the role via STS. Check that HOME ($HOME) is writable by uid $(id -u)."
+          fi
+        fi
     - name: ACR Login
       shell: bash
       if: ${{ inputs.azure_acr_hostname != '' && inputs.azure_acr_user != '' && inputs.azure_acr_password != '' }}
