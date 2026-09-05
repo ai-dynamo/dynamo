@@ -13,9 +13,7 @@ import dataclasses
 import importlib
 import importlib.machinery
 import importlib.util
-import pathlib
 import sys
-import tempfile
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -85,13 +83,14 @@ def test_mistral_multimodal_without_cv2_fails_before_the_engine_starts(monkeypat
 
     msg = str(excinfo.value)
     assert "cv2" in msg
-    # Upstream's own suggestion is the wrong one for these images.
     assert VALIDATED_SPECS["opencv-python-headless"] in msg
     assert "install_media_decoders vllm" in msg
     assert "mistral-common[opencv]" not in msg
 
 
-def test_a_broken_cv2_install_fails_the_same_way_as_a_missing_one(monkeypatch):
+def test_a_broken_cv2_install_fails_the_same_way_as_a_missing_one(
+    monkeypatch, tmp_path
+):
     """A discoverable ``cv2`` that cannot import is still no decoder.
 
     ``opencv-python`` whose native libraries are absent installs a perfectly
@@ -101,11 +100,10 @@ def test_a_broken_cv2_install_fails_the_same_way_as_a_missing_one(monkeypatch):
     """
     vllm_main = _load_vllm_main()
     monkeypatch.delitem(sys.modules, "cv2", raising=False)
-    directory = tempfile.mkdtemp()
-    pathlib.Path(directory, "cv2.py").write_text(
+    (tmp_path / "cv2.py").write_text(
         'raise ImportError("libGL.so.1: cannot open shared object file")\n'
     )
-    monkeypatch.syspath_prepend(directory)
+    monkeypatch.syspath_prepend(str(tmp_path))
     assert importlib.util.find_spec("cv2") is not None
 
     with pytest.raises(MissingMediaDecoderError) as excinfo:

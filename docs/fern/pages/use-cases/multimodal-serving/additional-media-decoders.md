@@ -46,11 +46,15 @@ Cannot process image input: this model tokenizes images through mistral_common
 (--tokenizer-mode mistral), which resizes them with OpenCV ('cv2'). ...
 ```
 
-Install the same validated spec as the vLLM rows above, with either command:
+Install the same validated spec as the vLLM rows above:
 
 ```bash
 pip install --no-deps 'opencv-python-headless>=4.13.0.92,<5'
-# or
+```
+
+The installer covers this too, but it takes a backend rather than a modality, so it installs every decoder in the vLLM row set — `av` for audio input alongside OpenCV. Reach for it when the deployment wants that whole set anyway; use the direct command above to add image input and nothing else:
+
+```bash
 python -m dynamo.common.utils.install_media_decoders vllm
 ```
 
