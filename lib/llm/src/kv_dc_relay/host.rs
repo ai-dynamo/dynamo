@@ -25,7 +25,6 @@ use std::sync::atomic::Ordering;
 
 use dynamo_kv_router::identity::PoolId;
 use dynamo_kv_router::indexer::cuckoo::{CkfConfig, CkfFailureAction};
-use dynamo_kv_router::protocols::ActiveLoad;
 use dynamo_kv_router::protocols::{DpRank, KvCacheEventError, WorkerId};
 use dynamo_runtime::component::Component;
 use dynamo_runtime::component::{Client, Instance};
@@ -60,15 +59,14 @@ use super::topology::{TopologyPublisher, TopologySnapshot};
 use crate::discovery::{
     KvSourceMembershipCoordinator, KvSourceMembershipView, KvSourceMembershipWatch,
 };
-use crate::kv_router::KV_METRICS_SUBJECT;
 #[cfg(feature = "ckf-diagnostics")]
 use crate::kv_router::indexer::WorkerQueryHealthSnapshot;
 use crate::kv_router::indexer::{
     DEFAULT_RECOVERY_ATTEMPT_TIMEOUT, RecoverySupervisor, TargetFaultDisposition,
     start_target_subscriber,
 };
+use crate::kv_router::metrics_subscriber::KvMetricsSubscriber;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
-use dynamo_runtime::transports::event_plane::EventSubscriber;
 
 pub const DEFAULT_EXPECTED_UNIQUE_BLOCKS: usize = 1_048_576;
 const DEFAULT_RECOVERY_FETCH_CONCURRENCY: usize = 16;
@@ -2078,10 +2076,9 @@ async fn run_load_collector(
 ) {
     let mut retry = LoadRetryBackoff::default();
     loop {
-        let subscriber =
-            EventSubscriber::for_endpoint_id(component.drt(), &endpoint, KV_METRICS_SUBJECT).await;
+        let subscriber = KvMetricsSubscriber::for_endpoint_id(&component, &endpoint).await;
         let mut subscriber = match subscriber {
-            Ok(subscriber) => subscriber.typed::<ActiveLoad>(),
+            Ok(subscriber) => subscriber,
             Err(error) => {
                 let failure = retry.failed();
                 if failure.first {
@@ -2102,7 +2099,7 @@ async fn run_load_collector(
                 event = subscriber.next() => event,
             };
             match event {
-                Some(Ok((_envelope, load))) => {
+                Some(Ok(load)) => {
                     retry.succeeded();
                     if !pools.observe_load(pool_id, layout_generation, load) {
                         tracing::debug!(%endpoint, %pool_id, layout_generation, "Ignoring ActiveLoad outside the pool generation's expected ranks");

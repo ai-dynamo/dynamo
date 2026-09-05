@@ -131,6 +131,19 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>json</Badge> <Badge intent="note" minimal>msgpack</Badge></span>
 </ParamField>
 
+<ParamField path="DYN_TCP_RESPONSE_STREAM_HOST" type="string" default="auto-detected local address">
+  IPv4 or IPv6 address, or exact network interface name, used to bind and advertise the TCP response
+  stream server. If an interface name occurs more than once in the operating system's interface
+  list, Dynamo uses the last address. Dynamo trims whitespace and treats an empty value as unset.
+  Unspecified addresses such as `0.0.0.0` and `::` are invalid.
+</ParamField>
+
+<ParamField path="DYN_TCP_RESPONSE_STREAM_PORT" type="integer" default="0">
+  Port used by the TCP response stream server. Dynamo trims surrounding whitespace. When the value
+  is unset, empty, or `0`, the operating system assigns a free port. Values must be between `0` and
+  `65535`.
+</ParamField>
+
 <ParamField path="--event-plane" type="string" default="zmq">
   Event publishing transport. ZMQ is the default for every discovery backend; select `nats`
   explicitly to use NATS Core. See [Event Plane](../../developer-guide/knowledge-base/concepts/system-architecture/architecture.md#event-plane) for design details.
@@ -138,6 +151,17 @@ Unless a field is marked environment-only, it has both a CLI flag and an environ
   <span className="enum-values"><span className="enum-label">Allowed values:</span> <Badge intent="note" minimal>nats</Badge> <Badge intent="note" minimal>zmq</Badge></span>
 
   Environment variable: `DYN_EVENT_PLANE`
+</ParamField>
+
+<ParamField path="DYN_EVENT_PLANE_HOST" type="string" default="auto-detected local address">
+  IPv4 or IPv6 address, or exact network interface name, advertised by direct ZMQ event publishers.
+  If an interface name occurs more than once in the operating system's interface list, Dynamo uses
+  the last address. Dynamo trims whitespace and treats an empty value as unset. Unspecified addresses
+  such as `0.0.0.0` and `::` are invalid.
+
+  This variable changes the discovery address, not the listener address. Direct ZMQ continues to bind
+  an IPv4 wildcard, so an IPv6 value does not enable IPv6 listening. This variable does not affect
+  NATS or ZMQ broker mode.
 </ParamField>
 
 <ParamField path="--connector" type="string" default="null">
