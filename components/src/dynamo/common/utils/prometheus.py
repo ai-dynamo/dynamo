@@ -190,7 +190,92 @@ def register_engine_metrics_callback(
         )
         return result
 
+    def get_typed() -> list:
+        """Callback returning engine metrics as a typed structure."""
+        return get_prometheus_typed(
+            registry,
+            metric_prefix_filters=metric_prefix_filters,
+            exclude_prefixes=exclude_prefixes,
+            inject_custom_labels=final_inject_labels or None,
+        )
+
+    # Two independent surfaces: /metrics renders the engine's own exposition
+    # text, OTLP exports the same metrics handed over as a structure. Both are
+    # registered here so an engine cannot end up on only one of them.
     endpoint.metrics.register_prometheus_expfmt_callback(get_expfmt)
+    endpoint.metrics.register_prometheus_typed_callback(get_typed)
+
+
+def get_prometheus_typed(
+    registry: "CollectorRegistry",
+    metric_prefix_filters: Optional[list[str]] = None,
+    exclude_prefixes: Optional[list[str]] = None,
+    inject_custom_labels: Optional[dict[str, str]] = None,
+) -> list:
+    """Collect a registry as a typed structure rather than exposition text.
+
+    Returns ``[(name, help, type, [(sample_name, [(label, value)], value)])]``,
+    which pyo3 extracts natively. Nothing is serialized to a string on either
+    side, so the family name, type and help arrive authoritative instead of
+    being re-derived from ``# TYPE`` lines by a parser.
+
+    ``generate_latest`` flattens this same structure; :func:`get_prometheus_expfmt`
+    remains for ``/metrics``, where the engine's own rendering is what consumers
+    already scrape.
+    """
+    if inject_custom_labels:
+        # Injected at collection time, exactly as the text path does, so
+        # dynamo_namespace / dynamo_component / worker_id reach the typed form
+        # too. Dropping this would silently unlabel every engine metric.
+        from prometheus_client import CollectorRegistry as _Registry
+
+        from dynamo.common.utils.label_injecting_collector import (
+            LabelInjectingCollector,
+        )
+
+        wrapped = _Registry()
+        wrapped.register(LabelInjectingCollector(registry, inject_custom_labels))
+        registry = wrapped
+
+    # Compile only when a filter was actually requested: an empty prefix tuple
+    # compiles to a pattern that matches everything, which would exclude every
+    # family rather than none.
+    include = (
+        _compile_include_pattern(tuple(metric_prefix_filters))
+        if metric_prefix_filters
+        else None
+    )
+    exclude = (
+        _compile_exclude_pattern(tuple(exclude_prefixes)) if exclude_prefixes else None
+    )
+
+    out = []
+    for metric in registry.collect():
+        if include and not include.match(metric.name):
+            continue
+        if exclude and exclude.match(metric.name):
+            continue
+        out.append(
+            (
+                metric.name,
+                metric.documentation,
+                metric.type,
+                # The sample timestamp is carried, not dropped: standard
+                # prometheus_client metrics leave it None, but a custom
+                # collector or a federated source can set it, and defaulting to
+                # the collection instant would silently relabel a stale sample.
+                [
+                    (
+                        s.name,
+                        list(s.labels.items()),
+                        float(s.value),
+                        s.timestamp if s.timestamp is None else float(s.timestamp),
+                    )
+                    for s in metric.samples
+                ],
+            )
+        )
+    return out
 
 
 @lru_cache(maxsize=64)
@@ -532,37 +617,55 @@ def register_embedding_cache_metrics(
     lock = threading.Lock()
     prev_state = {"hits": 0, "misses": 0, "evictions": 0}
 
+    def _refresh_locked() -> None:
+        """Fold the cache's monotonic stats into the registry. Caller holds `lock`.
+
+        Safe to call from either callback: increments are deltas against
+        ``prev_state``, which advances on every call, so whichever surface
+        collects next sees only what has accumulated since.
+        """
+        stats = cache.stats
+
+        # Delta-based counter increments from monotonic source values
+        delta_hits = stats["hits"] - prev_state["hits"]
+        delta_misses = stats["misses"] - prev_state["misses"]
+        delta_evictions = stats["evictions"] - prev_state["evictions"]
+
+        if delta_hits > 0:
+            hits_counter.labels(**label_values).inc(delta_hits)
+        if delta_misses > 0:
+            misses_counter.labels(**label_values).inc(delta_misses)
+        if delta_evictions > 0:
+            evictions_counter.labels(**label_values).inc(delta_evictions)
+
+        prev_state["hits"] = stats["hits"]
+        prev_state["misses"] = stats["misses"]
+        prev_state["evictions"] = stats["evictions"]
+
+        # Set gauge snapshots
+        utilization_gauge.labels(**label_values).set(stats["utilization"])
+        current_bytes_gauge.labels(**label_values).set(stats["current_bytes"])
+        entries_gauge.labels(**label_values).set(stats["entries"])
+
     def _collect_embedding_cache_metrics() -> str:
         """Callback invoked on each /metrics scrape."""
         with lock:
-            stats = cache.stats
-
-            # Delta-based counter increments from monotonic source values
-            delta_hits = stats["hits"] - prev_state["hits"]
-            delta_misses = stats["misses"] - prev_state["misses"]
-            delta_evictions = stats["evictions"] - prev_state["evictions"]
-
-            if delta_hits > 0:
-                hits_counter.labels(**label_values).inc(delta_hits)
-            if delta_misses > 0:
-                misses_counter.labels(**label_values).inc(delta_misses)
-            if delta_evictions > 0:
-                evictions_counter.labels(**label_values).inc(delta_evictions)
-
-            prev_state["hits"] = stats["hits"]
-            prev_state["misses"] = stats["misses"]
-            prev_state["evictions"] = stats["evictions"]
-
-            # Set gauge snapshots
-            utilization_gauge.labels(**label_values).set(stats["utilization"])
-            current_bytes_gauge.labels(**label_values).set(stats["current_bytes"])
-            entries_gauge.labels(**label_values).set(stats["entries"])
-
+            _refresh_locked()
             return generate_latest(registry).decode("utf-8")
 
+    def _collect_embedding_cache_typed() -> list:
+        """Same metrics, handed over typed for the OTLP export."""
+        with lock:
+            _refresh_locked()
+            return get_prometheus_typed(registry)
+
+    # Registered on both surfaces: /metrics renders the exposition text, OTLP
+    # exports the same registry typed. Registering only one would leave these
+    # metrics visible on a Prometheus dashboard and absent from the collector.
     endpoint.metrics.register_prometheus_expfmt_callback(
         _collect_embedding_cache_metrics
     )
+    endpoint.metrics.register_prometheus_typed_callback(_collect_embedding_cache_typed)
     logging.info(
         "Registered embedding cache metrics (model=%s, component=%s)",
         model_name,

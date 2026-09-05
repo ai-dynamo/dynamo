@@ -7,6 +7,8 @@
 //! with automatic label injection and hierarchical naming support.
 
 pub mod frontend_perf;
+pub mod otlp_export;
+pub mod prom_typed;
 pub mod prometheus_names;
 pub mod request_plane;
 pub mod tokio_perf;
@@ -20,6 +22,7 @@ use std::sync::Arc;
 
 use crate::component::ComponentBuilder;
 use anyhow;
+use anyhow::Context as _;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::any::Any;
@@ -710,6 +713,11 @@ pub type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + 
 pub type PrometheusExpositionFormatCallback =
     Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync + 'static>;
 
+/// Returns already-built families, so engine metrics reach the structured
+/// path without being rendered to text and parsed back.
+pub type PrometheusTypedCallback =
+    Arc<dyn Fn() -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> + Send + Sync + 'static>;
+
 /// Structure to hold Prometheus registries and associated callbacks for a given hierarchy.
 ///
 /// All fields are Arc-wrapped, so cloning shares state. This ensures metrics registered
@@ -739,10 +747,15 @@ pub struct MetricsRegistry {
     /// Wrapped in Arc to preserve callbacks across clones (prevents callback loss when MetricsRegistry is cloned).
     pub prometheus_update_callbacks: Arc<std::sync::RwLock<Vec<PrometheusUpdateCallback>>>,
 
-    /// Callbacks that return Prometheus exposition text appended to metrics output.
-    /// Wrapped in Arc to preserve callbacks across clones (e.g., vLLM callbacks registered at Endpoint remain accessible at DRT).
+    /// Callbacks returning engine exposition text; these feed `/metrics` only.
+    #[allow(clippy::type_complexity)]
     pub prometheus_expfmt_callbacks:
         Arc<std::sync::RwLock<Vec<PrometheusExpositionFormatCallback>>>,
+
+    /// Callbacks returning engine metric families; these feed OTLP only.
+    /// Wrapped in Arc to preserve callbacks across clones (e.g. vLLM callbacks
+    /// registered at Endpoint remain reachable at DRT).
+    pub prometheus_typed_callbacks: Arc<std::sync::RwLock<Vec<PrometheusTypedCallback>>>,
 }
 
 impl std::fmt::Debug for MetricsRegistry {
@@ -763,6 +776,13 @@ impl std::fmt::Debug for MetricsRegistry {
                     self.prometheus_expfmt_callbacks.read().unwrap().len()
                 ),
             )
+            .field(
+                "prometheus_typed_callbacks",
+                &format!(
+                    "<RwLock<Vec<Callback>>> with {} callbacks",
+                    self.prometheus_typed_callbacks.read().unwrap().len()
+                ),
+            )
             .finish()
     }
 }
@@ -775,6 +795,7 @@ impl MetricsRegistry {
             child_registries: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_update_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
             prometheus_expfmt_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
+            prometheus_typed_callbacks: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
     }
 
@@ -831,84 +852,18 @@ impl MetricsRegistry {
 
     /// Combine metrics across this registry and all registered children into one Prometheus exposition output.
     ///
+    /// Engine metrics are appended as the text the engine produced. This is the
+    /// scrape path and is deliberately independent of the typed path that feeds
+    /// OTLP: `/metrics` output stays byte-for-byte what the engine emitted.
+    ///
     /// - Families are merged by name; HELP and TYPE must match.
     /// - Multiple series for the same name are allowed if labels differ.
     /// - Exact duplicate series (same name + identical label pairs) are warned and dropped.
     pub fn prometheus_expfmt_combined(&self) -> anyhow::Result<String> {
         let registries = self.registries_for_combined_scrape();
+        run_update_callbacks(&registries);
 
-        // Run per-registry update callbacks first.
-        for registry in &registries {
-            for result in registry.execute_update_callbacks() {
-                if let Err(e) = result {
-                    tracing::error!("Error executing metrics callback: {e}");
-                }
-            }
-        }
-
-        // Merge metric families.
-        let mut by_name: HashMap<String, prometheus::proto::MetricFamily> = HashMap::new();
-        let mut seen_series: HashSet<String> = HashSet::new();
-
-        for (registry_idx, registry) in registries.iter().enumerate() {
-            let families = registry.get_prometheus_registry().gather();
-            for mut family in families {
-                let name = family.name().to_string();
-
-                let entry = by_name.entry(name.clone()).or_insert_with(|| {
-                    let mut out = prometheus::proto::MetricFamily::new();
-                    out.set_name(name.clone());
-                    out.set_help(family.help().to_string());
-                    out.set_field_type(family.get_field_type());
-                    out
-                });
-
-                if entry.help() != family.help()
-                    || entry.get_field_type() != family.get_field_type()
-                {
-                    return Err(anyhow::anyhow!(
-                        "Metric family '{}' has inconsistent help/type across registries (idx={})",
-                        name,
-                        registry_idx
-                    ));
-                }
-
-                let mut metrics = family.take_metric();
-                for metric in metrics.drain(..) {
-                    let mut labels: Vec<(String, String)> = metric
-                        .get_label()
-                        .iter()
-                        .map(|lp| (lp.name().to_string(), lp.value().to_string()))
-                        .collect();
-                    labels.sort_by(|(ka, va), (kb, vb)| (ka, va).cmp(&(kb, vb)));
-
-                    let key = format!(
-                        "{}|{}",
-                        name,
-                        labels
-                            .iter()
-                            .map(|(k, v)| format!("{}={}", k, v))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    );
-
-                    if !seen_series.insert(key) {
-                        tracing::warn!(
-                            metric_name = %name,
-                            labels = ?labels,
-                            registry_idx,
-                            "Duplicate Prometheus series while merging registries; dropping later sample"
-                        );
-                        continue;
-                    }
-
-                    entry.mut_metric().push(metric);
-                }
-            }
-        }
-
-        let mut merged: Vec<prometheus::proto::MetricFamily> = by_name.into_values().collect();
-        merged.sort_by(|a, b| a.name().cmp(b.name()));
+        let merged = FamilyMerger::from_gathered(&registries)?.into_sorted();
 
         let encoder = prometheus::TextEncoder::new();
         let mut buffer = Vec::new();
@@ -917,7 +872,7 @@ impl MetricsRegistry {
 
         // Append expfmt callbacks deterministically in registry order.
         let mut expfmt = String::new();
-        for registry in registries {
+        for registry in &registries {
             let text = registry.execute_expfmt_callbacks();
             if !text.is_empty() {
                 if !expfmt.is_empty() && !expfmt.ends_with('\n') {
@@ -937,6 +892,33 @@ impl MetricsRegistry {
         Ok(result)
     }
 
+    /// Every metric family: Dynamo's own from `gather()`, plus engine families
+    /// delivered typed. This is the OTLP export path.
+    ///
+    /// Engine metrics cross the binding as a structure rather than as
+    /// exposition text, so their name, type and help arrive authoritative
+    /// instead of being re-derived by a parser.
+    ///
+    /// Each call re-executes the typed callbacks, which cross into Python and
+    /// take the GIL, so callers should collect on a deliberate cadence.
+    pub fn metric_families_combined(&self) -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> {
+        let registries = self.registries_for_combined_scrape();
+        run_update_callbacks(&registries);
+
+        let mut merger = FamilyMerger::from_gathered(&registries)?;
+
+        for registry in &registries {
+            for family in registry.execute_typed_callbacks() {
+                let name = family.name().to_string();
+                if let Err(error) = merger.add_family(family) {
+                    tracing::warn!(metric_name = %name, %error, "skipping typed metric family");
+                }
+            }
+        }
+
+        Ok(merger.into_sorted())
+    }
+
     /// Add a callback function that receives a reference to any MetricsHierarchy
     pub fn add_update_callback(&self, callback: PrometheusUpdateCallback) {
         self.prometheus_update_callbacks
@@ -945,7 +927,10 @@ impl MetricsRegistry {
             .push(callback);
     }
 
-    /// Add an exposition text callback that returns Prometheus text
+    /// Add an exposition text callback that returns Prometheus text.
+    ///
+    /// This feeds `/metrics` only. Engines that also want to be exported over
+    /// OTLP must register a typed callback via [`Self::add_typed_callback`].
     pub fn add_expfmt_callback(&self, callback: PrometheusExpositionFormatCallback) {
         self.prometheus_expfmt_callbacks
             .write()
@@ -953,19 +938,18 @@ impl MetricsRegistry {
             .push(callback);
     }
 
-    /// Execute all update callbacks and return their results
-    pub fn execute_update_callbacks(&self) -> Vec<anyhow::Result<()>> {
-        self.prometheus_update_callbacks
+    /// Execute all exposition text callbacks and return their concatenated text
+    pub fn execute_expfmt_callbacks(&self) -> String {
+        // Snapshot under the lock, then invoke without it held; see
+        // `execute_typed_callbacks` for why holding it across the calls
+        // deadlocks against registration from Python.
+        let callbacks: Vec<PrometheusExpositionFormatCallback> = self
+            .prometheus_expfmt_callbacks
             .read()
             .unwrap()
             .iter()
-            .map(|callback| callback())
-            .collect()
-    }
-
-    /// Execute all exposition text callbacks and return their concatenated text
-    pub fn execute_expfmt_callbacks(&self) -> String {
-        let callbacks = self.prometheus_expfmt_callbacks.read().unwrap();
+            .cloned()
+            .collect();
         let mut result = String::new();
         for callback in callbacks.iter() {
             match callback() {
@@ -983,6 +967,54 @@ impl MetricsRegistry {
             }
         }
         result
+    }
+
+    /// Register a callback that returns typed families directly.
+    ///
+    /// This is how engine metrics reach OTLP.
+    pub fn add_typed_callback(&self, callback: PrometheusTypedCallback) {
+        self.prometheus_typed_callbacks
+            .write()
+            .unwrap()
+            .push(callback);
+    }
+
+    /// Collect from every typed callback, logging and skipping failures so one
+    /// broken engine cannot empty the whole collection.
+    pub fn execute_typed_callbacks(&self) -> Vec<prometheus::proto::MetricFamily> {
+        // Snapshot under the lock, then invoke without it held. The callbacks
+        // take the Python GIL, and registration arrives from Python holding the
+        // GIL and blocking on `write()` -- holding the read lock across the
+        // calls would deadlock those two against each other.
+        let callbacks: Vec<PrometheusTypedCallback> = self
+            .prometheus_typed_callbacks
+            .read()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+
+        callbacks
+            .iter()
+            .filter_map(|callback| match callback() {
+                Ok(families) => Some(families),
+                Err(error) => {
+                    tracing::warn!(%error, "typed metrics callback failed");
+                    None
+                }
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Execute all update callbacks and return their results
+    pub fn execute_update_callbacks(&self) -> Vec<anyhow::Result<()>> {
+        self.prometheus_update_callbacks
+            .read()
+            .unwrap()
+            .iter()
+            .map(|callback| callback())
+            .collect()
     }
 
     /// Add a Prometheus metric collector to this registry
@@ -1017,6 +1049,108 @@ impl MetricsRegistry {
             .gather()
             .iter()
             .any(|mf| mf.name() == metric_name)
+    }
+}
+
+/// Run every registry's update callbacks, logging rather than propagating
+/// failures so one broken callback cannot poison the whole collection.
+fn run_update_callbacks(registries: &[MetricsRegistry]) {
+    for registry in registries {
+        for result in registry.execute_update_callbacks() {
+            if let Err(error) = result {
+                tracing::error!(%error, "metrics update callback failed");
+            }
+        }
+    }
+}
+
+fn merge_gathered_families(
+    registries: &[MetricsRegistry],
+) -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> {
+    Ok(FamilyMerger::from_gathered(registries)?.into_sorted())
+}
+
+/// Merges metric families from several sources under one set of rules.
+///
+/// Extracted so the text path (`prometheus_expfmt_combined`) and the structured
+/// path (`metric_families_combined`) cannot drift: a series accepted by one must
+/// be accepted by the other, or `/metrics` and OTLP would disagree.
+struct FamilyMerger {
+    by_name: HashMap<String, prometheus::proto::MetricFamily>,
+    seen_series: HashSet<String>,
+}
+
+impl FamilyMerger {
+    fn from_gathered(registries: &[MetricsRegistry]) -> anyhow::Result<Self> {
+        let mut merger = Self {
+            by_name: HashMap::new(),
+            seen_series: HashSet::new(),
+        };
+        for (idx, registry) in registries.iter().enumerate() {
+            for family in registry.get_prometheus_registry().gather() {
+                merger
+                    .add_family(family)
+                    .with_context(|| format!("gathering from registry {idx}"))?;
+            }
+        }
+        Ok(merger)
+    }
+
+    fn add_family(&mut self, mut family: prometheus::proto::MetricFamily) -> anyhow::Result<()> {
+        let name = family.name().to_string();
+
+        let entry = self.by_name.entry(name.clone()).or_insert_with(|| {
+            let mut out = prometheus::proto::MetricFamily::new();
+            out.set_name(name.clone());
+            out.set_help(family.help().to_string());
+            out.set_field_type(family.get_field_type());
+            out
+        });
+
+        if entry.help() != family.help() || entry.get_field_type() != family.get_field_type() {
+            return Err(anyhow::anyhow!(
+                "Metric family '{}' has inconsistent help/type across sources",
+                name
+            ));
+        }
+
+        for metric in family.take_metric() {
+            let mut labels: Vec<(String, String)> = metric
+                .get_label()
+                .iter()
+                .map(|lp| (lp.name().to_string(), lp.value().to_string()))
+                .collect();
+            labels.sort_by(|(ka, va), (kb, vb)| (ka, va).cmp(&(kb, vb)));
+
+            let key = format!(
+                "{}|{}",
+                name,
+                labels
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+
+            if !self.seen_series.insert(key) {
+                tracing::warn!(
+                    metric_name = %name,
+                    labels = ?labels,
+                    "Duplicate Prometheus series while merging; dropping later sample"
+                );
+                continue;
+            }
+
+            entry.mut_metric().push(metric);
+        }
+
+        Ok(())
+    }
+
+    fn into_sorted(self) -> Vec<prometheus::proto::MetricFamily> {
+        let mut merged: Vec<prometheus::proto::MetricFamily> = self.by_name.into_values().collect();
+        merged.sort_by(|a, b| a.name().cmp(b.name()));
+        merged
     }
 }
 
@@ -1393,33 +1527,51 @@ mod test_metricsregistry_prefixes {
     }
 
     #[tokio::test]
-    async fn test_expfmt_callback_only_registered_on_endpoint_is_included_once() {
-        // Sanity test: if an expfmt callback is registered only on the endpoint registry,
-        // scraping from the root (DRT) should still include it exactly once via the
-        // child-registry traversal.
+    async fn test_typed_callback_only_registered_on_endpoint_is_collected_once() {
+        // The registry tree is traversed once, so a callback registered on the
+        // endpoint must not be collected again via its parents. Count
+        // invocations rather than emitted series: the merger drops duplicate
+        // series, so a double traversal would be invisible in the output.
         let drt = create_test_drt_async().await;
-        let namespace = drt.namespace("ns_expfmt_ep_only").unwrap();
-        let component = namespace.component("comp_expfmt_ep_only").unwrap();
-        let endpoint = component.endpoint("ep_expfmt_ep_only");
+        let namespace = drt.namespace("ns_typed_ep_only").unwrap();
+        let component = namespace.component("comp_typed_ep_only").unwrap();
+        let endpoint = component.endpoint("ep_typed_ep_only");
 
-        let metric_line = "dynamo_component_active_decode_blocks{dp_rank=\"0\"} 0\n";
-        let callback: PrometheusExpositionFormatCallback =
-            Arc::new(move || Ok(metric_line.to_string()));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let callback: PrometheusTypedCallback = Arc::new(move || {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut family = prometheus::proto::MetricFamily::new();
+            family.set_name("dynamo_component_active_decode_blocks".to_string());
+            family.set_field_type(prometheus::proto::MetricType::GAUGE);
+            let mut metric = prometheus::proto::Metric::new();
+            let mut label = prometheus::proto::LabelPair::new();
+            label.set_name("dp_rank".to_string());
+            label.set_value("0".to_string());
+            metric.set_label(vec![label]);
+            metric.set_gauge(prometheus::proto::Gauge::new());
+            family.mut_metric().push(metric);
+            Ok(vec![family])
+        });
 
-        endpoint
+        endpoint.get_metrics_registry().add_typed_callback(callback);
+
+        // Typed callbacks feed the OTLP collection, not the exposition path.
+        let families = drt
             .get_metrics_registry()
-            .add_expfmt_callback(callback);
-
-        let output = drt.metrics().prometheus_expfmt().unwrap();
-        let occurrences = output
-            .lines()
-            .filter(|line| line == &metric_line.trim_end_matches('\n'))
-            .count();
+            .metric_families_combined()
+            .unwrap();
 
         assert_eq!(
-            occurrences, 1,
-            "endpoint-registered exposition callback should appear once, got {} occurrences\n\n{}",
-            occurrences, output
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "endpoint-registered typed callback should be collected once"
+        );
+        assert!(
+            families
+                .iter()
+                .any(|f| f.name() == "dynamo_component_active_decode_blocks"),
+            "typed family missing from the combined collection"
         );
     }
 
@@ -1871,5 +2023,149 @@ dynamo_component_dup_metric{dynamo_component="comp_dup",dynamo_endpoint="ep_same
         );
 
         println!("✓ Duplicate series detection and deduplication works!");
+    }
+}
+
+#[cfg(test)]
+mod test_metric_families_combined {
+    use super::*;
+    use std::sync::Arc as StdArc;
+
+    fn gauge_family(name: &str, help: &str, value: f64) -> prometheus::proto::MetricFamily {
+        let mut family = prometheus::proto::MetricFamily::new();
+        family.set_name(name.to_string());
+        family.set_help(help.to_string());
+        family.set_field_type(prometheus::proto::MetricType::GAUGE);
+        let mut metric = prometheus::proto::Metric::new();
+        let mut gauge = prometheus::proto::Gauge::new();
+        gauge.set_value(value);
+        metric.set_gauge(gauge);
+        family.mut_metric().push(metric);
+        family
+    }
+
+    fn registry() -> MetricsRegistry {
+        let registry = MetricsRegistry::new();
+        let counter = prometheus::IntCounter::new("dynamo_native_total", "Native counter").unwrap();
+        counter.inc_by(7);
+        registry
+            .get_prometheus_registry()
+            .register(Box::new(counter))
+            .unwrap();
+        registry.add_typed_callback(StdArc::new(|| {
+            Ok(vec![gauge_family(
+                "vllm:num_requests_running",
+                "Running requests",
+                4.0,
+            )])
+        }));
+        registry
+    }
+
+    fn names(fs: &[prometheus::proto::MetricFamily]) -> Vec<&str> {
+        fs.iter().map(|f| f.name()).collect()
+    }
+
+    #[test]
+    fn typed_and_native_families_share_one_collection() {
+        let families = registry().metric_families_combined().expect("combined");
+        assert!(names(&families).contains(&"vllm:num_requests_running"));
+        assert!(names(&families).contains(&"dynamo_native_total"));
+    }
+
+    /// The two surfaces are fed independently: typed callbacks reach OTLP,
+    /// exposition-text callbacks reach `/metrics`. A registry that registers
+    /// only one appears on only that surface -- which is why the Python
+    /// helpers always register both.
+    #[test]
+    fn typed_callbacks_feed_otlp_and_not_the_scrape() {
+        let registry = registry();
+
+        let text = registry.prometheus_expfmt_combined().expect("text");
+        assert!(
+            text.contains("dynamo_native_total"),
+            "native metrics must still render on /metrics"
+        );
+        assert!(
+            !text.contains("vllm:num_requests_running"),
+            "typed callbacks feed OTLP only; /metrics is fed by expfmt callbacks"
+        );
+
+        registry.add_expfmt_callback(StdArc::new(|| {
+            Ok("# HELP vllm:num_requests_running Running requests\n\
+                # TYPE vllm:num_requests_running gauge\n\
+                vllm:num_requests_running 4\n"
+                .to_string())
+        }));
+        let text = registry.prometheus_expfmt_combined().expect("text");
+        assert!(
+            text.contains("vllm:num_requests_running"),
+            "engine exposition text must be appended verbatim"
+        );
+    }
+
+    /// Collection must not hold the callback lock while invoking callbacks.
+    ///
+    /// Registration arrives from Python holding the GIL and blocks on
+    /// `write()`; a collection that held the read lock while calling into
+    /// Python would deadlock the two against each other. Registering from
+    /// inside a callback reproduces that ordering deterministically, without
+    /// depending on a thread interleaving.
+    ///
+    /// Run on a worker thread with a deadline so a regression fails the test
+    /// rather than hanging the suite forever.
+    #[test]
+    fn collection_does_not_hold_the_callback_lock() {
+        for (name, collect) in [
+            (
+                "typed",
+                Box::new(|r: &MetricsRegistry| {
+                    r.execute_typed_callbacks();
+                }) as Box<dyn Fn(&MetricsRegistry) + Send>,
+            ),
+            (
+                "expfmt",
+                Box::new(|r: &MetricsRegistry| {
+                    r.execute_expfmt_callbacks();
+                }),
+            ),
+        ] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let registry = MetricsRegistry::new();
+                let reentrant = registry.clone();
+                registry.add_typed_callback(StdArc::new(move || {
+                    reentrant.add_typed_callback(StdArc::new(|| Ok(Vec::new())));
+                    Ok(Vec::new())
+                }));
+                let reentrant = registry.clone();
+                registry.add_expfmt_callback(StdArc::new(move || {
+                    reentrant.add_expfmt_callback(StdArc::new(|| Ok(String::new())));
+                    Ok(String::new())
+                }));
+                collect(&registry);
+                let _ = tx.send(());
+            });
+
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
+                "{name} collection deadlocked: the callback lock was held while a \
+                 callback registered another"
+            );
+        }
+    }
+
+    /// A failing engine callback is skipped, never fatal: one broken engine
+    /// must not empty the collection for every other.
+    #[test]
+    fn failing_typed_callback_is_skipped() {
+        let registry = MetricsRegistry::new();
+        registry.add_typed_callback(StdArc::new(|| anyhow::bail!("engine exploded")));
+        assert!(
+            registry
+                .metric_families_combined()
+                .expect("collection survives")
+                .is_empty()
+        );
     }
 }

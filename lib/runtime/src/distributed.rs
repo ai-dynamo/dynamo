@@ -287,6 +287,44 @@ impl DistributedRuntime {
                 }));
         }
 
+        // Opt-in OTLP metrics export. Deliberately not tied to the system
+        // status server: that server is disabled by default
+        // (DYN_SYSTEM_PORT=-1), and gating export on it would make
+        // OTEL_METRICS_EXPORTER=otlp a silent no-op in the default
+        // configuration. Traces and logs are set up in logging::init() for the
+        // same reason -- an OTEL_* variable should mean the same thing for
+        // every signal. Metrics cannot join them there because the exporter
+        // needs the registry, which only exists once the runtime does.
+        match crate::metrics::otlp_export::ExportConfig::from_env() {
+            Ok(Some(export_config)) => {
+                tracing::info!(
+                    endpoint = %export_config.endpoint,
+                    interval_ms = export_config.interval.as_millis(),
+                    "exporting metrics over OTLP"
+                );
+                // Hold a graceful-shutdown guard for the task's life so the
+                // final export is not abandoned mid-RPC. `child_token()`
+                // derives from the endpoint shutdown token, which Phase 1
+                // cancels *before* the Phase 2 wait, so the exporter is told to
+                // stop and then waited for -- it cannot deadlock the wait on a
+                // token that only fires in Phase 3.
+                let shutdown_guard = distributed_runtime
+                    .runtime
+                    .graceful_shutdown_tracker()
+                    .register_task();
+                let registry = distributed_runtime.metrics_registry.clone();
+                let cancel = distributed_runtime.runtime.child_token();
+                tokio::spawn(async move {
+                    crate::metrics::otlp_export::run(registry, export_config, cancel).await;
+                    drop(shutdown_guard);
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(%error, "OTLP metrics export is misconfigured; not exporting");
+            }
+        }
+
         // Handle system status server initialization
         if let Some(cancel_token) = cancel_token {
             // System server is enabled - start both the state and HTTP server
