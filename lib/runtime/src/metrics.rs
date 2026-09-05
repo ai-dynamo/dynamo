@@ -7,6 +7,8 @@
 //! with automatic label injection and hierarchical naming support.
 
 pub mod frontend_perf;
+pub mod otlp_export;
+pub mod prom_text;
 pub mod prometheus_names;
 pub mod request_plane;
 pub mod tokio_perf;
@@ -20,6 +22,7 @@ use std::sync::Arc;
 
 use crate::component::ComponentBuilder;
 use anyhow;
+use anyhow::Context as _;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::any::Any;
@@ -836,97 +839,16 @@ impl MetricsRegistry {
     /// - Exact duplicate series (same name + identical label pairs) are warned and dropped.
     pub fn prometheus_expfmt_combined(&self) -> anyhow::Result<String> {
         let registries = self.registries_for_combined_scrape();
+        run_update_callbacks(&registries);
 
-        // Run per-registry update callbacks first.
-        for registry in &registries {
-            for result in registry.execute_update_callbacks() {
-                if let Err(e) = result {
-                    tracing::error!("Error executing metrics callback: {e}");
-                }
-            }
-        }
-
-        // Merge metric families.
-        let mut by_name: HashMap<String, prometheus::proto::MetricFamily> = HashMap::new();
-        let mut seen_series: HashSet<String> = HashSet::new();
-
-        for (registry_idx, registry) in registries.iter().enumerate() {
-            let families = registry.get_prometheus_registry().gather();
-            for mut family in families {
-                let name = family.name().to_string();
-
-                let entry = by_name.entry(name.clone()).or_insert_with(|| {
-                    let mut out = prometheus::proto::MetricFamily::new();
-                    out.set_name(name.clone());
-                    out.set_help(family.help().to_string());
-                    out.set_field_type(family.get_field_type());
-                    out
-                });
-
-                if entry.help() != family.help()
-                    || entry.get_field_type() != family.get_field_type()
-                {
-                    return Err(anyhow::anyhow!(
-                        "Metric family '{}' has inconsistent help/type across registries (idx={})",
-                        name,
-                        registry_idx
-                    ));
-                }
-
-                let mut metrics = family.take_metric();
-                for metric in metrics.drain(..) {
-                    let mut labels: Vec<(String, String)> = metric
-                        .get_label()
-                        .iter()
-                        .map(|lp| (lp.name().to_string(), lp.value().to_string()))
-                        .collect();
-                    labels.sort_by(|(ka, va), (kb, vb)| (ka, va).cmp(&(kb, vb)));
-
-                    let key = format!(
-                        "{}|{}",
-                        name,
-                        labels
-                            .iter()
-                            .map(|(k, v)| format!("{}={}", k, v))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    );
-
-                    if !seen_series.insert(key) {
-                        tracing::warn!(
-                            metric_name = %name,
-                            labels = ?labels,
-                            registry_idx,
-                            "Duplicate Prometheus series while merging registries; dropping later sample"
-                        );
-                        continue;
-                    }
-
-                    entry.mut_metric().push(metric);
-                }
-            }
-        }
-
-        let mut merged: Vec<prometheus::proto::MetricFamily> = by_name.into_values().collect();
-        merged.sort_by(|a, b| a.name().cmp(b.name()));
+        let merged = merge_gathered_families(&registries)?;
 
         let encoder = prometheus::TextEncoder::new();
         let mut buffer = Vec::new();
         encoder.encode(&merged, &mut buffer)?;
         let mut result = String::from_utf8(buffer)?;
 
-        // Append expfmt callbacks deterministically in registry order.
-        let mut expfmt = String::new();
-        for registry in registries {
-            let text = registry.execute_expfmt_callbacks();
-            if !text.is_empty() {
-                if !expfmt.is_empty() && !expfmt.ends_with('\n') {
-                    expfmt.push('\n');
-                }
-                expfmt.push_str(&text);
-            }
-        }
-
+        let expfmt = collect_expfmt_text(&registries);
         if !expfmt.is_empty() {
             if !result.ends_with('\n') {
                 result.push('\n');
@@ -935,6 +857,32 @@ impl MetricsRegistry {
         }
 
         Ok(result)
+    }
+
+    /// The same content as [`Self::prometheus_expfmt_combined`], kept structured.
+    ///
+    /// `/metrics` is the union of two sources: typed families from `gather()`,
+    /// and raw exposition text from expfmt callbacks (engine metrics, produced
+    /// by Python). A consumer that only calls `gather()` silently omits every
+    /// engine metric, so this parses the callback text back into families and
+    /// merges both through the same dedup rules the text path uses.
+    ///
+    /// Each call re-executes the expfmt callbacks, which cross into Python and
+    /// take the GIL, so callers should collect on a deliberate cadence.
+    pub fn metric_families_combined(&self) -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> {
+        let registries = self.registries_for_combined_scrape();
+        run_update_callbacks(&registries);
+
+        let mut merger = FamilyMerger::from_gathered(&registries)?;
+
+        let expfmt = collect_expfmt_text(&registries);
+        if !expfmt.is_empty() {
+            for family in crate::metrics::prom_text::parse_exposition(&expfmt)? {
+                merger.add_family(family)?;
+            }
+        }
+
+        Ok(merger.into_sorted())
     }
 
     /// Add a callback function that receives a reference to any MetricsHierarchy
@@ -1017,6 +965,123 @@ impl MetricsRegistry {
             .gather()
             .iter()
             .any(|mf| mf.name() == metric_name)
+    }
+}
+
+/// Run every registry's update callbacks, logging rather than propagating
+/// failures so one broken callback cannot poison the whole collection.
+fn run_update_callbacks(registries: &[MetricsRegistry]) {
+    for registry in registries {
+        for result in registry.execute_update_callbacks() {
+            if let Err(error) = result {
+                tracing::error!(%error, "metrics update callback failed");
+            }
+        }
+    }
+}
+
+/// Concatenate expfmt callback output deterministically in registry order.
+fn collect_expfmt_text(registries: &[MetricsRegistry]) -> String {
+    let mut expfmt = String::new();
+    for registry in registries {
+        let text = registry.execute_expfmt_callbacks();
+        if !text.is_empty() {
+            if !expfmt.is_empty() && !expfmt.ends_with('\n') {
+                expfmt.push('\n');
+            }
+            expfmt.push_str(&text);
+        }
+    }
+    expfmt
+}
+
+fn merge_gathered_families(
+    registries: &[MetricsRegistry],
+) -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> {
+    Ok(FamilyMerger::from_gathered(registries)?.into_sorted())
+}
+
+/// Merges metric families from several sources under one set of rules.
+///
+/// Extracted so the text path (`prometheus_expfmt_combined`) and the structured
+/// path (`metric_families_combined`) cannot drift: a series accepted by one must
+/// be accepted by the other, or `/metrics` and OTLP would disagree.
+struct FamilyMerger {
+    by_name: HashMap<String, prometheus::proto::MetricFamily>,
+    seen_series: HashSet<String>,
+}
+
+impl FamilyMerger {
+    fn from_gathered(registries: &[MetricsRegistry]) -> anyhow::Result<Self> {
+        let mut merger = Self {
+            by_name: HashMap::new(),
+            seen_series: HashSet::new(),
+        };
+        for (idx, registry) in registries.iter().enumerate() {
+            for family in registry.get_prometheus_registry().gather() {
+                merger
+                    .add_family(family)
+                    .with_context(|| format!("gathering from registry {idx}"))?;
+            }
+        }
+        Ok(merger)
+    }
+
+    fn add_family(&mut self, mut family: prometheus::proto::MetricFamily) -> anyhow::Result<()> {
+        let name = family.name().to_string();
+
+        let entry = self.by_name.entry(name.clone()).or_insert_with(|| {
+            let mut out = prometheus::proto::MetricFamily::new();
+            out.set_name(name.clone());
+            out.set_help(family.help().to_string());
+            out.set_field_type(family.get_field_type());
+            out
+        });
+
+        if entry.help() != family.help() || entry.get_field_type() != family.get_field_type() {
+            return Err(anyhow::anyhow!(
+                "Metric family '{}' has inconsistent help/type across sources",
+                name
+            ));
+        }
+
+        for metric in family.take_metric() {
+            let mut labels: Vec<(String, String)> = metric
+                .get_label()
+                .iter()
+                .map(|lp| (lp.name().to_string(), lp.value().to_string()))
+                .collect();
+            labels.sort_by(|(ka, va), (kb, vb)| (ka, va).cmp(&(kb, vb)));
+
+            let key = format!(
+                "{}|{}",
+                name,
+                labels
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+
+            if !self.seen_series.insert(key) {
+                tracing::warn!(
+                    metric_name = %name,
+                    labels = ?labels,
+                    "Duplicate Prometheus series while merging; dropping later sample"
+                );
+                continue;
+            }
+
+            entry.mut_metric().push(metric);
+        }
+
+        Ok(())
+    }
+
+    fn into_sorted(self) -> Vec<prometheus::proto::MetricFamily> {
+        let mut merged: Vec<prometheus::proto::MetricFamily> = self.by_name.into_values().collect();
+        merged.sort_by(|a, b| a.name().cmp(b.name()));
+        merged
     }
 }
 
@@ -1871,5 +1936,80 @@ dynamo_component_dup_metric{dynamo_component="comp_dup",dynamo_endpoint="ep_same
         );
 
         println!("✓ Duplicate series detection and deduplication works!");
+    }
+}
+
+#[cfg(test)]
+mod test_metric_families_combined {
+    use super::*;
+    use std::sync::Arc as StdArc;
+
+    const ENGINE_TEXT: &str = r#"# HELP vllm_num_requests_running Running requests
+# TYPE vllm_num_requests_running gauge
+vllm_num_requests_running{model="llama"} 4
+"#;
+
+    fn registry() -> MetricsRegistry {
+        let registry = MetricsRegistry::new();
+        let counter = prometheus::IntCounter::new("dynamo_native_total", "Native counter").unwrap();
+        counter.inc_by(7);
+        registry
+            .get_prometheus_registry()
+            .register(Box::new(counter))
+            .unwrap();
+        registry.add_expfmt_callback(StdArc::new(|| Ok(ENGINE_TEXT.to_string())));
+        registry
+    }
+
+    fn names(fs: &[prometheus::proto::MetricFamily]) -> Vec<&str> {
+        fs.iter().map(|f| f.name()).collect()
+    }
+
+    /// `gather()` cannot see expfmt-callback metrics. Without this the OTLP
+    /// export ships with zero engine metrics.
+    #[test]
+    fn engine_metrics_are_included() {
+        let families = registry().metric_families_combined().expect("combined");
+        assert!(names(&families).contains(&"vllm_num_requests_running"));
+        assert!(names(&families).contains(&"dynamo_native_total"));
+    }
+
+    /// `/metrics` and the structured path must not disagree on the surface,
+    /// and HELP must survive for both sources.
+    #[test]
+    fn structured_path_matches_text_path() {
+        let registry = registry();
+        let text = registry.prometheus_expfmt_combined().expect("text");
+        let families = registry.metric_families_combined().expect("combined");
+
+        // Exact output: the merge refactor must not change a byte of /metrics.
+        assert_eq!(
+            text,
+            "# HELP dynamo_native_total Native counter\n\
+             # TYPE dynamo_native_total counter\n\
+             dynamo_native_total 7\n\
+             # HELP vllm_num_requests_running Running requests\n\
+             # TYPE vllm_num_requests_running gauge\n\
+             vllm_num_requests_running{model=\"llama\"} 4\n"
+        );
+
+        for name in names(&families) {
+            assert!(text.contains(name), "{name} missing from /metrics");
+        }
+
+        let help = |n: &str| {
+            families
+                .iter()
+                .find(|f| f.name() == n)
+                .map(|f| f.help().to_string())
+        };
+        assert_eq!(
+            help("dynamo_native_total").as_deref(),
+            Some("Native counter")
+        );
+        assert_eq!(
+            help("vllm_num_requests_running").as_deref(),
+            Some("Running requests")
+        );
     }
 }

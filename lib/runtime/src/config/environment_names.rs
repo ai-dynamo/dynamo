@@ -75,6 +75,19 @@ pub mod logging {
 
         /// Service name for OTLP traces and logs
         pub const OTEL_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
+
+        /// Set to "otlp" to export metrics over OTLP. Any other value disables it.
+        /// Prometheus scraping is unaffected either way.
+        pub const OTEL_METRICS_EXPORTER: &str = "OTEL_METRICS_EXPORTER";
+
+        /// OTLP exporter endpoint URL for metrics. Falls back to OTEL_EXPORTER_OTLP_ENDPOINT.
+        pub const OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT";
+
+        /// OTLP exporter transport protocol for metrics. Defaults to OTEL_EXPORTER_OTLP_PROTOCOL.
+        pub const OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL";
+
+        /// Metric export interval in milliseconds. Spec default is 60000.
+        pub const OTEL_METRIC_EXPORT_INTERVAL: &str = "OTEL_METRIC_EXPORT_INTERVAL";
     }
 }
 
