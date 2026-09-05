@@ -158,6 +158,32 @@ runs:
         fi
 
         mkdir -p "${DYN_TEST_OUTPUT_PATH}"
+        for diagnostic_file in \
+          "${{ github.workspace }}/.vcluster-port-forward.log" \
+          "${{ github.workspace }}/.vcluster-port-forward-watchdog.log"; do
+          if [ -f "${diagnostic_file}" ]; then
+            cp "${diagnostic_file}" "${DYN_TEST_OUTPUT_PATH}/"
+          fi
+        done
+
+        {
+          echo "captured_at=$(date -u +%FT%TZ)"
+          curl -skS --connect-timeout 1 --max-time 2 \
+            -o /dev/null -w 'healthz_http_code=%{http_code}\n' \
+            https://127.0.0.1:8443/healthz || echo "healthz_unreachable=true"
+          for pid_file in \
+            "${{ github.workspace }}/.vcluster-port-forward.pid" \
+            "${{ github.workspace }}/.vcluster-port-forward-watchdog.pid"; do
+            if [ -f "${pid_file}" ]; then
+              pid="$(cat "${pid_file}")"
+              echo "$(basename "${pid_file}")=${pid}"
+              ps -p "${pid}" -o pid=,ppid=,stat=,etime=,command= || true
+            else
+              echo "$(basename "${pid_file}")=missing"
+            fi
+          done
+        } > "${DYN_TEST_OUTPUT_PATH}/vcluster-port-forward-status.log" 2>&1
+
         kubectl cluster-info dump \
           --namespaces="${namespaces}" \
           --output-directory="${DYN_TEST_OUTPUT_PATH}/cluster-info" || true

@@ -14,12 +14,18 @@ import os
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Any
+from functools import partial
+from typing import Any, Awaitable, Callable, ParamSpec, TypeVar
 
 import aiohttp
 import yaml
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
+
+from tests.deploy.vcluster_utils import (
+    VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS,
+    retry_vcluster_api_async,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +45,8 @@ _MAX_DGDR_NAME_LENGTH = (
 )
 _MAX_LABEL_VALUE_LENGTH = 63
 _NAME_DIGEST_LENGTH = 6
+_RetryParams = ParamSpec("_RetryParams")
+_RetryResult = TypeVar("_RetryResult")
 PHASE_ORDER = {
     "Pending": 0,
     "Profiling": 1,
@@ -293,6 +301,37 @@ class ManagedDGDR:
         assert self.batch is not None, "call init() first"
         assert self.apiextensions is not None, "call init() first"
 
+    async def _retry_vcluster_api(
+        self,
+        operation: str,
+        request: Callable[_RetryParams, Awaitable[_RetryResult]],
+        /,
+        *args: _RetryParams.args,
+        **kwargs: _RetryParams.kwargs,
+    ) -> _RetryResult:
+        """Retry a vCluster API operation while its port-forward recovers."""
+        return await retry_vcluster_api_async(
+            operation,
+            partial(request, *args, **kwargs),
+            (aiohttp.ClientConnectionError,),
+            logger,
+        )
+
+    async def _delete_if_exists(
+        self,
+        operation: str,
+        request: Callable[_RetryParams, Awaitable[Any]],
+        /,
+        *args: _RetryParams.args,
+        **kwargs: _RetryParams.kwargs,
+    ) -> None:
+        """Retry deletion and treat an already absent resource as success."""
+        try:
+            await self._retry_vcluster_api(operation, request, *args, **kwargs)
+        except exceptions.ApiException as error:
+            if error.status != 404:
+                raise
+
     async def create(self, manifest: dict[str, Any]) -> dict[str, Any]:
         self._require_clients()
         name = manifest["metadata"]["name"]
@@ -377,35 +416,15 @@ class ManagedDGDR:
     async def _wait_for_phase(
         self, name: str, target: str, at_least: bool, timeout: int | None
     ) -> dict[str, Any]:
-        poll_interval_seconds = 5
-        vcluster_connection_retry_limit = 3
         timeout = timeout or self.config.profiling_timeout
         deadline = time.monotonic() + timeout
         last_phase: str | None = None
-        vcluster_connection_failures = 0
         while time.monotonic() < deadline:
-            # Give the vCluster watchdog a bounded window to restore its tunnel.
-            try:
-                result = await self.get(name)
-            except aiohttp.ClientConnectorError as error:
-                vcluster_connection_failures += 1
-                if vcluster_connection_failures > vcluster_connection_retry_limit:
-                    raise
-                logger.warning(
-                    "vCluster API connection failed while waiting for DGDR %s/%s; "
-                    "the port-forward watchdog may restore the tunnel, retrying in "
-                    "%ss (%s/%s): %s",
-                    self.config.namespace,
-                    name,
-                    poll_interval_seconds,
-                    vcluster_connection_failures,
-                    vcluster_connection_retry_limit,
-                    error,
-                )
-                await asyncio.sleep(poll_interval_seconds)
-                continue
-
-            vcluster_connection_failures = 0
+            result = await self._retry_vcluster_api(
+                f"reading DGDR {self.config.namespace}/{name} while waiting for {target}",
+                self.get,
+                name,
+            )
             phase = result.get("status", {}).get("phase") if result else None
             if phase != last_phase:
                 logger.info("DGDR %s/%s phase: %s", self.config.namespace, name, phase)
@@ -425,7 +444,7 @@ class ManagedDGDR:
                 )
             ):
                 return result
-            await asyncio.sleep(poll_interval_seconds)
+            await asyncio.sleep(VCLUSTER_CONNECTION_RETRY_DELAY_SECONDS)
         raise TimeoutError(
             f"Timed out after {timeout}s waiting for DGDR "
             f"{self.config.namespace}/{name} to reach {target}; last phase={last_phase}"
@@ -433,9 +452,13 @@ class ManagedDGDR:
 
     async def get_output_dgd(self, name: str) -> dict[str, Any]:
         self._require_clients()
-        assert self.core is not None
-        configmap = await self.core.read_namespaced_config_map(
-            f"dgdr-output-{name}", self.config.namespace
+        core = self.core
+        assert core is not None
+        configmap = await self._retry_vcluster_api(
+            f"reading output ConfigMap for DGDR {self.config.namespace}/{name}",
+            core.read_namespaced_config_map,
+            f"dgdr-output-{name}",
+            self.config.namespace,
         )
         data = configmap.data or {}
         content = data.get("final_config.yaml")
@@ -542,8 +565,13 @@ class ManagedDGDR:
 
     async def _cleanup_name(self, name: str, failed: bool) -> None:
         self._require_clients()
-        assert self.custom is not None
-        current = await self.get(name)
+        custom = self.custom
+        assert custom is not None
+        current = await self._retry_vcluster_api(
+            f"reading DGDR {self.config.namespace}/{name} during cleanup",
+            self.get,
+            name,
+        )
         dgd_name = current.get("status", {}).get("dgdName") if current else None
         job_name = (
             current.get("status", {}).get("profilingJobName") if current else None
@@ -552,31 +580,27 @@ class ManagedDGDR:
             await self._log_diagnostics(current)
 
         # Stop reconciliation before deleting children that are not owned by the DGDR.
-        try:
-            await self.custom.delete_namespaced_custom_object(
-                group=DGDR_GROUP,
-                version=DGDR_VERSION,
-                namespace=self.config.namespace,
-                plural=DGDR_PLURAL,
-                name=name,
-            )
-        except exceptions.ApiException as error:
-            if error.status != 404:
-                raise
+        await self._delete_if_exists(
+            f"deleting DGDR {self.config.namespace}/{name}",
+            custom.delete_namespaced_custom_object,
+            group=DGDR_GROUP,
+            version=DGDR_VERSION,
+            namespace=self.config.namespace,
+            plural=DGDR_PLURAL,
+            name=name,
+        )
         await self._wait_until_dgdr_absent(name)
 
         if dgd_name:
-            try:
-                await self.custom.delete_namespaced_custom_object(
-                    group=DGDR_GROUP,
-                    version=DGD_VERSION,
-                    namespace=self.config.namespace,
-                    plural=DGD_PLURAL,
-                    name=dgd_name,
-                )
-            except exceptions.ApiException as error:
-                if error.status != 404:
-                    raise
+            await self._delete_if_exists(
+                f"deleting DGD {self.config.namespace}/{dgd_name}",
+                custom.delete_namespaced_custom_object,
+                group=DGDR_GROUP,
+                version=DGD_VERSION,
+                namespace=self.config.namespace,
+                plural=DGD_PLURAL,
+                name=dgd_name,
+            )
             await self._wait_until_dgd_absent(dgd_name)
 
         if job_name:
@@ -586,19 +610,32 @@ class ManagedDGDR:
     async def _wait_until_dgdr_absent(self, name: str) -> None:
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
-            if await self.get(name) is None:
+            current = await self._retry_vcluster_api(
+                f"waiting for DGDR {self.config.namespace}/{name} deletion",
+                self.get,
+                name,
+            )
+            if current is None:
                 return
             await asyncio.sleep(5)
         raise TimeoutError(f"DGDR {self.config.namespace}/{name} did not terminate")
 
     async def _wait_until_dgd_absent(self, name: str) -> None:
         self._require_clients()
-        assert self.core is not None
+        core = self.core
+        assert core is not None
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
-            dgd = await self.get_dgd(name)
-            pods = await self.core.list_namespaced_pod(
-                self.config.namespace, label_selector=f"{DGD_LABEL}={name}"
+            dgd = await self._retry_vcluster_api(
+                f"waiting for DGD {self.config.namespace}/{name} deletion",
+                self.get_dgd,
+                name,
+            )
+            pods = await self._retry_vcluster_api(
+                f"listing pods for DGD {self.config.namespace}/{name} during cleanup",
+                core.list_namespaced_pod,
+                self.config.namespace,
+                label_selector=f"{DGD_LABEL}={name}",
             )
             if dgd is None and not pods.items:
                 return
@@ -607,29 +644,38 @@ class ManagedDGDR:
 
     async def _delete_profiling_job(self, name: str) -> None:
         self._require_clients()
-        assert self.batch is not None
-        assert self.core is not None
-        try:
-            await self.batch.delete_namespaced_job(
-                name,
-                self.config.namespace,
-                propagation_policy="Foreground",
-            )
-        except exceptions.ApiException as error:
-            if error.status != 404:
-                raise
+        batch = self.batch
+        core = self.core
+        assert batch is not None
+        assert core is not None
+        await self._delete_if_exists(
+            f"deleting profiling job {self.config.namespace}/{name}",
+            batch.delete_namespaced_job,
+            name,
+            self.config.namespace,
+            propagation_policy="Foreground",
+        )
 
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
             try:
-                await self.batch.read_namespaced_job(name, self.config.namespace)
+                await self._retry_vcluster_api(
+                    "waiting for profiling job "
+                    f"{self.config.namespace}/{name} deletion",
+                    batch.read_namespaced_job,
+                    name,
+                    self.config.namespace,
+                )
                 job_exists = True
             except exceptions.ApiException as error:
                 if error.status != 404:
                     raise
                 job_exists = False
-            pods = await self.core.list_namespaced_pod(
-                self.config.namespace, label_selector=f"job-name={name}"
+            pods = await self._retry_vcluster_api(
+                f"listing pods for profiling job {self.config.namespace}/{name}",
+                core.list_namespaced_pod,
+                self.config.namespace,
+                label_selector=f"job-name={name}",
             )
             if not job_exists and not pods.items:
                 return
@@ -640,14 +686,14 @@ class ManagedDGDR:
 
     async def _delete_output_configmap(self, name: str) -> None:
         self._require_clients()
-        assert self.core is not None
-        try:
-            await self.core.delete_namespaced_config_map(
-                f"dgdr-output-{name}", self.config.namespace
-            )
-        except exceptions.ApiException as error:
-            if error.status != 404:
-                raise
+        core = self.core
+        assert core is not None
+        await self._delete_if_exists(
+            f"deleting output ConfigMap for DGDR {self.config.namespace}/{name}",
+            core.delete_namespaced_config_map,
+            f"dgdr-output-{name}",
+            self.config.namespace,
+        )
 
     async def _log_diagnostics(self, dgdr: dict[str, Any]) -> None:
         self._require_clients()
