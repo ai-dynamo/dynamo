@@ -41,7 +41,6 @@ _CALLER = "this test"
 
 
 def _image_name(image_ref: str) -> str:
-    """The repository name of an image reference, without registry or tag."""
     return image_ref.rsplit("/", 1)[-1].split(":")[0]
 
 
