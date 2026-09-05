@@ -126,6 +126,24 @@ pub mod runtime {
         pub const DYN_SYSTEM_LIVE_PATH: &str = "DYN_SYSTEM_LIVE_PATH";
     }
 
+    /// `/engine/*` worker control-route policy (system-status server)
+    pub mod engine_routes {
+        /// Disable all `/engine/*` control routes. Truthy values (`1`/`true`/`on`/`yes`,
+        /// case-insensitive, per `dynamo-truthy`) enable the master switch; any other value
+        /// is treated as unset.
+        pub const DYN_DISABLE_ENGINE_ROUTES: &str = "DYN_DISABLE_ENGINE_ROUTES";
+
+        /// Comma-separated allowlist of `/engine/*` route names (full route string, e.g.
+        /// `control/start_profile,update/model_taints`). Only listed routes are served.
+        /// Present-but-empty (`""`) is a deliberate opt-in that serves no routes (fail
+        /// closed); leave the variable unset for the default (all routes served).
+        pub const DYN_ENGINE_ROUTES_ALLOW: &str = "DYN_ENGINE_ROUTES_ALLOW";
+
+        /// Comma-separated denylist of `/engine/*` route names (full route string). Listed
+        /// routes are disabled; all others are served.
+        pub const DYN_ENGINE_ROUTES_DENY: &str = "DYN_ENGINE_ROUTES_DENY";
+    }
+
     /// Compute configuration
     pub mod compute {
         /// Prefix for compute-related environment variables
