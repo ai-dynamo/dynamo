@@ -74,6 +74,8 @@ spec:
           args:
             - --model
             - /model-cache/deepseek-r1
+            - --disaggregation-mode
+            - decode
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --all2all-backend
