@@ -100,7 +100,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// GPUs/devices, and any runtime-specific resources.
 	Resources *Resources `json:"resources,omitempty"`
 	// Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
-	// with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+	// with HPA, KEDA, or Planner for autoscaling instead. See
+	// https://docs.nvidia.com/dynamo/dev/reference/kubernetes-api/full-api-reference#dynamographdeploymentscalingadapter
 	// for migration guidance. This field will be removed in a future API version.
 	Autoscaling *Autoscaling `json:"autoscaling,omitempty"`
 	// Envs defines additional environment variables to inject into the component containers.

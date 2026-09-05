@@ -41,7 +41,8 @@ Package v1alpha1 contains API Schema definitions for the nvidia.com v1alpha1 API
 
 <Accordion id="autoscaling" title="Autoscaling">
 Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter
-with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md
+with HPA, KEDA, or Planner for autoscaling instead. See
+https://docs.nvidia.com/dynamo/dev/reference/kubernetes-api/full-api-reference#dynamographdeploymentscalingadapter
 for migration guidance. This field will be removed in a future API version.
 
 
@@ -368,7 +369,7 @@ See [Resources](#resources).
 </ParamField>
 
 <ParamField path="autoscaling" type="Autoscaling">
-Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md for migration guidance. This field will be removed in a future API version.
+Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See https://docs.nvidia.com/dynamo/dev/reference/kubernetes-api/full-api-reference#dynamographdeploymentscalingadapter for migration guidance. This field will be removed in a future API version.
 See [Autoscaling](#autoscaling).
 </ParamField>
 
@@ -529,7 +530,7 @@ See [Resources](#resources).
 </ParamField>
 
 <ParamField path="autoscaling" type="Autoscaling">
-Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See docs/kubernetes/autoscaling.md for migration guidance. This field will be removed in a future API version.
+Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter with HPA, KEDA, or Planner for autoscaling instead. See https://docs.nvidia.com/dynamo/dev/reference/kubernetes-api/full-api-reference#dynamographdeploymentscalingadapter for migration guidance. This field will be removed in a future API version.
 See [Autoscaling](#autoscaling).
 </ParamField>
 
@@ -5079,7 +5080,6 @@ For users who want to understand the implementation details or contribute to the
 - **Checkpoint / Restore**:
   - [`internal/checkpoint/podspec.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/podspec.go) - Checkpoint env var injection and volume setup
   - [`internal/checkpoint/resolve.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resolve.go) - Checkpoint resolution logic
-  - [`internal/checkpoint/resource.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/checkpoint/resource.go) - Checkpoint resource management
 - **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/consts/consts.go) - Defines annotation keys and other constants
 
 ### Notes
