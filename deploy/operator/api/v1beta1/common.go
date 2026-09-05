@@ -234,6 +234,8 @@ type GroveSpec struct {
 	// deployment. `false` or omitted means automatic selection (multi-node
 	// and inter-pod GMS components use a scaling group, other single-node
 	// components a standalone PodClique), not "force PodClique".
+	// The pointer preserves field presence on the wire: `nil` and `false` are
+	// semantically identical, and consumers must dereference with `false`.
 	// Immutable after creation.
 	// +optional
 	ForceScalingGroup *bool `json:"forceScalingGroup,omitempty"`

@@ -25,6 +25,7 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/runtimeversion"
+	"k8s.io/utils/ptr"
 )
 
 const dgdWorkerHashPlaceholderValue = "worker-hash-placeholder"
@@ -98,6 +99,13 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	// Hash the resolved version separately so equivalent image-derived and
 	// explicit versions produce the same worker hash.
 	spec.RuntimeVersionOverride = ""
+
+	// forceScalingGroup false and omitted select the same rendering, so an
+	// explicit false must not create a new worker generation.
+	if spec.Experimental != nil && spec.Experimental.Grove != nil &&
+		!ptr.Deref(spec.Experimental.Grove.ForceScalingGroup, false) {
+		spec.Experimental.Grove.ForceScalingGroup = nil
+	}
 
 	return *spec
 }
