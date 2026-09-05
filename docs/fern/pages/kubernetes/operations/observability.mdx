@@ -8,7 +8,8 @@ subtitle: View Dynamo metrics, configure structured logs and distributed traces,
 Dynamo provides four core signals for running deployments:
 
 - **Metrics** expose request, latency, routing, worker, cache, and operator measurements. Metrics are
-  enabled by default, and the operator creates the resources required for Prometheus discovery.
+  enabled by default; the platform chart creates the monitors, and the operator labels managed pods
+  for Prometheus discovery.
 - **Logs** record component events on standard output. Enable structured JSONL output when you need
   reliable filtering and request correlation.
 - **Distributed traces** follow requests from the frontend through participating Dynamo components.
@@ -33,9 +34,9 @@ For exact metric names, labels, variables, schemas, and endpoint responses, use 
 
 ## View Metrics and Dashboards
 
-Application metrics are enabled by default. The operator creates a `PodMonitor` and labels managed
-pods for discovery, so a normal DynamoGraphDeployment (DGD) requires no metrics configuration.
-Operator metrics use a separate `ServiceMonitor` created by the Helm chart.
+Application metrics are enabled by default. The platform chart creates `PodMonitor` resources, and
+the operator labels managed pods for discovery, so a normal DynamoGraphDeployment (DGD) requires no
+metrics configuration. Operator metrics use a separate `ServiceMonitor` created by the Helm chart.
 
 <Steps toc={true}>
 <Step title="Verify Prometheus discovery" id="verify-prometheus-discovery">
@@ -130,20 +131,41 @@ NIXL transfer metrics are optional and are populated during disaggregated servin
 embedding transfers.
 
 <Steps toc={true}>
+<Step title="Enable NIXL scraping in the platform chart" id="enable-nixl-scraping">
+
+The worker `PodMonitor` does not include the NIXL endpoint by default. Upgrade the Dynamo platform
+release with the same chart version and values used for installation, adding the NIXL telemetry
+setting:
+
+```bash
+helm upgrade dynamo-platform dynamo-platform-$RELEASE_VERSION.tgz \
+  --namespace $NAMESPACE \
+  --reuse-values \
+  --set "dynamo-operator.dynamo.metrics.podMonitors.nixlTelemetry=true"
+```
+
+If the chart does not already create `PodMonitor` resources, also set
+`dynamo-operator.dynamo.metrics.podMonitors.enabled=true`. See
+[PodMonitors created by the Dynamo chart](../installation/observability.md#podmonitors-created-by-the-dynamo-chart)
+for the creation modes.
+
+</Step>
 <Step title="Enable telemetry on the worker" id="enable-nixl-telemetry">
 
-Add `NIXL_TELEMETRY_ENABLE` to each worker that should expose transfer metrics:
+Merge `NIXL_TELEMETRY_ENABLE` into the `main` container of each existing worker component that
+should expose transfer metrics. Keep the component's existing image and other fields:
 
 ```yaml
 spec:
-  services:
-    VllmDecodeWorker:
-      componentType: worker
-      extraPodSpec:
-        mainContainer:
-          env:
-            - name: NIXL_TELEMETRY_ENABLE
-              value: "y"
+  components:
+    - name: VllmDecodeWorker
+      podTemplate:
+        spec:
+          containers:
+          - name: main
+            env:
+              - name: NIXL_TELEMETRY_ENABLE
+                value: "y"
 ```
 
 NIXL exposes these metrics on its telemetry port, which defaults to `19090`. See
@@ -170,15 +192,12 @@ backend needs structured fields for filtering and trace correlation.
 <Steps toc={true}>
 <Step title="Enable JSONL logging" id="enable-jsonl-logging">
 
-Set the logging variables at graph level to apply them to every component:
+Merge the logging variables into the DGD's graph-level `spec.env` list to apply them to every
+component:
 
 ```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeployment
-metadata:
-  name: vllm-agg-logging
 spec:
-  envs:
+  env:
     - name: DYN_LOGGING_CONSOLE_FORMAT
       value: "jsonl"
     - name: DYN_LOG
@@ -192,18 +211,20 @@ complete configuration.
 </Step>
 <Step title="Override a component log level" id="override-component-log-level">
 
-Add a component-level value when one component needs more detail than the rest of the graph:
+When one component needs more detail than the rest of the graph, merge a component-level value into
+its existing `main` container:
 
 ```yaml
 spec:
-  services:
-    Frontend:
-      componentType: frontend
-      extraPodSpec:
-        mainContainer:
-          env:
-            - name: DYN_LOG
-              value: "info,dynamo_runtime::system_status_server:trace"
+  components:
+    - name: Frontend
+      podTemplate:
+        spec:
+          containers:
+          - name: main
+            env:
+              - name: DYN_LOG
+                value: "info,dynamo_runtime::system_status_server:trace"
 ```
 
 The component value overrides the graph-level value for that container.
@@ -245,11 +266,11 @@ The collector is responsible for routing traces and logs to the configured stora
 </Step>
 <Step title="Enable OTLP export" id="enable-otlp-export">
 
-Add the OpenTelemetry settings to the DGD:
+Merge the OpenTelemetry settings into the existing graph-level `spec.env` list:
 
 ```yaml
 spec:
-  envs:
+  env:
     - name: OTEL_EXPORT_ENABLED
       value: "true"
     - name: OTEL_EXPORTER_OTLP_ENDPOINT
@@ -291,28 +312,32 @@ example below expects an existing PVC named `fpm-traces`.
 </Step>
 <Step title="Enable FPM tracing" id="enable-fpm-tracing">
 
-Mount the PVC on each worker that should write a trace and set the output prefix inside the mount:
+For each worker that should write a trace, merge the PVC volume, mount, and output settings into the
+existing component. Keep the component's existing image and other fields:
 
 ```yaml
 spec:
-  pvcs:
-    - create: false
-      name: fpm-traces
-  services:
-    VllmWorker:
-      volumeMounts:
-        - name: fpm-traces
-          mountPoint: /var/log/dynamo
-      extraPodSpec:
-        mainContainer:
-          env:
-            - name: DYN_FPM_TRACE
-              value: "1"
-            - name: DYN_FPM_OUTPUT_PATH
-              value: /var/log/dynamo/fpm
+  components:
+    - name: VllmWorker
+      podTemplate:
+        spec:
+          containers:
+          - name: main
+            env:
+              - name: DYN_FPM_TRACE
+                value: "1"
+              - name: DYN_FPM_OUTPUT_PATH
+                value: /var/log/dynamo/fpm
+            volumeMounts:
+              - name: fpm-traces
+                mountPath: /var/log/dynamo
+          volumes:
+            - name: fpm-traces
+              persistentVolumeClaim:
+                claimName: fpm-traces
 ```
 
-Replace `VllmWorker` with every worker service that should write scheduler telemetry.
+Replace `VllmWorker` with every worker component that should write scheduler telemetry.
 
 </Step>
 <Step title="Collect the trace files" id="collect-fpm-trace-files">
@@ -382,18 +407,14 @@ If startup is delayed by downloading model weights, prefer
 </Step>
 <Step title="Override the probes" id="override-health-probes">
 
-Set standard Kubernetes probes on the `main` container in the component's `podTemplate`. This example
-extends the startup window and allows several consecutive liveness failures:
+Merge standard Kubernetes probes into the `main` container in the existing component's
+`podTemplate`. Keep the component's image and other fields. This fragment extends the startup window
+and allows several consecutive liveness failures:
 
 ```yaml
-apiVersion: nvidia.com/v1beta1
-kind: DynamoGraphDeployment
-metadata:
-  name: my-deployment
 spec:
   components:
   - name: VllmWorker
-    type: worker
     podTemplate:
       spec:
         containers:
