@@ -8,7 +8,6 @@
 
 use crate::SystemHealth;
 use crate::metrics::work_handler_pool::{
-    ENGINE_REQUEST_GAUGE, REJECTION_REQUEST_TOTAL, REQUEST_QUEUE_GAUGE,
     WORK_HANDLER_ENQUEUE_REJECTED_TOTAL, WORK_HANDLER_PERMIT_WAIT_SECONDS,
     WORK_HANDLER_POOL_ACTIVE_TASKS, WORK_HANDLER_POOL_CAPACITY, WORK_HANDLER_QUEUE_CAPACITY,
     WORK_HANDLER_QUEUE_DEPTH,
@@ -56,51 +55,6 @@ fn get_work_queue_size() -> usize {
         .unwrap_or(DEFAULT_WORK_QUEUE_SIZE)
 }
 
-/// Default small overflow queue when the engine-request limit is set but the
-/// queue limit is left unset. Keeps the hard cap close to N.
-const DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT: usize = 16;
-
-/// Resolved worker-pool / overflow-queue sizing for the TCP ingress.
-///
-/// `read_loop` front-acquires a worker-pool permit and dispatches directly when
-/// a worker is free, falls back to the bounded overflow queue, and returns 503
-/// ("Server overloaded") when both are full. The knobs set the *sizes*:
-///
-/// * `DYN_ENGINE_REQUEST_LIMIT` set → pool = engine limit (N), queue = Q
-///   (default 16). Hard cap N+Q.
-/// * unset → large defaults (10000 / 40000), so rejection only triggers under
-///   extreme saturation.
-struct SizingConfig {
-    pool_size: usize,
-    queue_size: usize,
-}
-
-fn resolve_sizing() -> SizingConfig {
-    match std::env::var("DYN_ENGINE_REQUEST_LIMIT")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-    {
-        Some(engine_limit) => {
-            let queue_limit = std::env::var("DYN_DYNAMO_REQUEST_QUEUE_LIMIT")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(DEFAULT_DYNAMO_REQUEST_QUEUE_LIMIT);
-            // The single dispatcher holds one request between `recv()` and
-            // acquiring an engine permit, so size the channel to limit-1:
-            // channel + the dispatcher-held request cap "queued, not in engine"
-            // at exactly `limit`.
-            SizingConfig {
-                pool_size: engine_limit.max(1),
-                queue_size: queue_limit.saturating_sub(1).max(1),
-            }
-        }
-        None => SizingConfig {
-            pool_size: get_worker_pool_size(),
-            queue_size: get_work_queue_size(),
-        },
-    }
-}
-
 /// RAII guard for `WORK_HANDLER_POOL_ACTIVE_TASKS`. `new()` increments and
 /// `Drop` decrements, so a single owner expresses the "task is active" interval.
 /// Constructed in the dispatcher *before* `tokio::spawn` and moved into the
@@ -112,8 +66,6 @@ struct ActiveTaskGuard;
 impl ActiveTaskGuard {
     fn new() -> Self {
         WORK_HANDLER_POOL_ACTIVE_TASKS.inc();
-        // `dynamo_engine_request`: requests currently in the engine.
-        ENGINE_REQUEST_GAUGE.inc();
         Self
     }
 }
@@ -121,7 +73,6 @@ impl ActiveTaskGuard {
 impl Drop for ActiveTaskGuard {
     fn drop(&mut self) {
         WORK_HANDLER_POOL_ACTIVE_TASKS.dec();
-        ENGINE_REQUEST_GAUGE.dec();
     }
 }
 
@@ -148,8 +99,9 @@ pub struct SharedTcpServer {
     cancellation_token: CancellationToken,
     /// Channel for sending work to the worker pool
     work_tx: tokio::sync::mpsc::Sender<WorkItem>,
-    /// Worker-pool semaphore bounding concurrent in-engine requests. Shared with
+    /// Worker-pool semaphore bounding concurrent TCP worker tasks. Shared with
     /// `read_loop` so it can front-acquire a permit and dispatch directly.
+    /// Unrelated to the backend admission gate's concurrency limit.
     engine_sem: Arc<Semaphore>,
     /// Overflow-queue capacity; `read_loop` compares against it to tell whether
     /// the queue is empty for the FIFO direct-dispatch rule.
@@ -174,10 +126,11 @@ impl SharedTcpServer {
         bind_addr: SocketAddr,
         cancellation_token: CancellationToken,
     ) -> anyhow::Result<Arc<Self>> {
-        let SizingConfig {
-            pool_size: worker_pool_size,
-            queue_size: work_queue_size,
-        } = resolve_sizing();
+        // TCP request-plane sizing only. Backend admission (the engine
+        // concurrency limit and its overflow queue) is owned by
+        // `crate::admission_gate`, which every transport shares.
+        let worker_pool_size = get_worker_pool_size();
+        let work_queue_size = get_work_queue_size();
 
         tracing::info!(
             "Initializing TCP server with dispatcher (concurrency={}, queue={})",
@@ -284,7 +237,6 @@ impl SharedTcpServer {
                         // gauge strictly reflects channel occupancy. Permit-acquire wait is
                         // tracked separately by WORK_HANDLER_PERMIT_WAIT_SECONDS.
                         WORK_HANDLER_QUEUE_DEPTH.dec();
-                        REQUEST_QUEUE_GAUGE.dec();
 
                         // Acquire permit before spawning (bounds concurrency). Time the wait so
                         // pool starvation (permit exhaustion) shows up as rising p99 in
@@ -718,11 +670,10 @@ impl SharedTcpServer {
                 continue;
             }
 
-            // All engine slots busy (or items already queued): try the overflow queue.
+            // All pool permits busy (or items already queued): try the work queue.
             match work_tx.try_reserve() {
                 Ok(slot) => {
                     WORK_HANDLER_QUEUE_DEPTH.inc();
-                    REQUEST_QUEUE_GAUGE.inc();
                     slot.send(work_item);
                     // Queued: the dispatcher owns inflight, so don't touch it here.
                     if !send_response(TcpResponseMessage::empty()) {
@@ -730,12 +681,13 @@ impl SharedTcpServer {
                     }
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    // Engine and queue both full → shed; keep the connection open.
-                    REJECTION_REQUEST_TOTAL.inc();
+                    // TCP worker pool and work queue both full → shed; keep the
+                    // connection open.
+                    WORK_HANDLER_ENQUEUE_REJECTED_TOTAL.inc();
                     tracing::warn!(
                         endpoint = handler.endpoint_name.as_str(),
                         instance_id = handler.instance_id,
-                        "Worker at capacity (engine + queue full), rejecting request"
+                        "TCP worker pool and work queue full, rejecting request"
                     );
                     send_response(TcpResponseMessage::new(Bytes::from_static(
                         b"Server overloaded: worker at capacity",
