@@ -17,12 +17,13 @@ use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequ
 use opentelemetry_proto::tonic::collector::metrics::v1::metrics_service_client::MetricsServiceClient;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
 use opentelemetry_proto::tonic::metrics::v1::{
-    AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint,
-    ResourceMetrics, ScopeMetrics, Sum, Summary, SummaryDataPoint, metric, number_data_point,
-    summary_data_point::ValueAtQuantile,
+    AggregationTemporality, DataPointFlags, Gauge, Histogram, HistogramDataPoint, Metric,
+    NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum, Summary, SummaryDataPoint, metric,
+    number_data_point, summary_data_point::ValueAtQuantile,
 };
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use prometheus::proto::{MetricFamily, MetricType};
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio_util::sync::CancellationToken;
 
@@ -40,9 +41,28 @@ pub fn to_resource_metrics(
     let now = unix_nanos(SystemTime::now());
     let start = unix_nanos(start_time);
 
+    // `_created` is a Python-client artifact, not a metric: the spec says use
+    // it as the parent's start time and drop it. Keeping it would emit a
+    // spurious gauge per counter and histogram, and would throw away the only
+    // signal a backend has for telling a counter reset from a jump.
+    let created: HashMap<(String, Vec<(String, String)>), u64> = families
+        .iter()
+        .filter(|f| f.name().ends_with("_created"))
+        .flat_map(|f| {
+            let parent = f.name().trim_end_matches("_created").to_string();
+            f.get_metric().iter().map(move |m| {
+                (
+                    (parent.clone(), label_key(m)),
+                    (m.get_gauge().value() * 1_000_000_000.0) as u64,
+                )
+            })
+        })
+        .collect();
+
     let metrics = families
         .iter()
-        .filter_map(|family| to_metric(family, start, now))
+        .filter(|family| !family.name().ends_with("_created"))
+        .filter_map(|family| to_metric(family, start, now, &created))
         .collect();
 
     ResourceMetrics {
@@ -65,13 +85,35 @@ pub fn to_resource_metrics(
     }
 }
 
-fn to_metric(family: &MetricFamily, start: u64, now: u64) -> Option<Metric> {
+/// Label pairs in a stable order, so a `_created` series can be matched to the
+/// parent series it belongs to.
+fn label_key(metric: &prometheus::proto::Metric) -> Vec<(String, String)> {
+    let mut labels: Vec<(String, String)> = metric
+        .get_label()
+        .iter()
+        .map(|l| (l.name().to_string(), l.value().to_string()))
+        .collect();
+    labels.sort();
+    labels
+}
+
+type CreatedTimes = HashMap<(String, Vec<(String, String)>), u64>;
+
+fn to_metric(
+    family: &MetricFamily,
+    start: u64,
+    now: u64,
+    created: &CreatedTimes,
+) -> Option<Metric> {
     let data = match family.get_field_type() {
         MetricType::COUNTER => metric::Data::Sum(Sum {
             data_points: family
                 .get_metric()
                 .iter()
-                .map(|m| number_point(m, m.get_counter().value(), start, now))
+                .map(|m| {
+                    let start = start_for(family, m, start, created);
+                    number_point(m, m.get_counter().value(), start, now)
+                })
                 .collect(),
             // Prometheus is always cumulative; converting to delta would need
             // reset detection we have no basis for.
@@ -82,14 +124,16 @@ fn to_metric(family: &MetricFamily, start: u64, now: u64) -> Option<Metric> {
             data_points: family
                 .get_metric()
                 .iter()
-                .map(|m| number_point(m, m.get_gauge().value(), start, now))
+                // Spec: gauges carry no start time. A non-zero one makes
+                // backends treat the series as cumulative and hunt for resets.
+                .map(|m| number_point(m, m.get_gauge().value(), 0, now))
                 .collect(),
         }),
         MetricType::HISTOGRAM => metric::Data::Histogram(Histogram {
             data_points: family
                 .get_metric()
                 .iter()
-                .map(|m| histogram_point(m, start, now))
+                .map(|m| histogram_point(m, start_for(family, m, start, created), now))
                 .collect(),
             aggregation_temporality: AggregationTemporality::Cumulative as i32,
         }),
@@ -97,7 +141,7 @@ fn to_metric(family: &MetricFamily, start: u64, now: u64) -> Option<Metric> {
             data_points: family
                 .get_metric()
                 .iter()
-                .map(|m| summary_point(m, start, now))
+                .map(|m| summary_point(m, start_for(family, m, start, created), now))
                 .collect(),
         }),
         // Native families reach here straight from `Registry::gather()`,
@@ -109,18 +153,55 @@ fn to_metric(family: &MetricFamily, start: u64, now: u64) -> Option<Metric> {
             data_points: family
                 .get_metric()
                 .iter()
-                .map(|m| number_point(m, m.untyped.value(), start, now))
+                .map(|m| number_point(m, m.untyped.value(), 0, now))
                 .collect(),
         }),
     };
 
+    // "The OTLP metric name MUST be the Prometheus name with `_total`
+    // removed." Applied here rather than in the typed builder so it covers
+    // both inputs: engine families arrive already bare, but Dynamo's own
+    // counters are registered under their rendered `_total` name.
+    let name = match family.get_field_type() {
+        MetricType::COUNTER => family.name().trim_end_matches("_total").to_string(),
+        _ => family.name().to_string(),
+    };
+
     Some(Metric {
-        name: family.name().to_string(),
+        name,
         description: family.help().to_string(),
         unit: String::new(),
         metadata: Vec::new(),
         data: Some(data),
     })
+}
+
+/// When a sample carried its own timestamp, that is when it was observed;
+/// otherwise fall back to the export instant.
+///
+/// Standard `prometheus_client` and `prometheus` metrics leave this unset, but
+/// custom collectors and federated sources set it, and reporting a stale sample
+/// at the export instant misleads anything reading `time_unix_nano` -- SLO
+/// monitors especially.
+fn observed_at(metric: &prometheus::proto::Metric, now: u64) -> u64 {
+    match metric.timestamp_ms() {
+        0 => now,
+        ms => (ms as u64).saturating_mul(1_000_000),
+    }
+}
+
+/// The series' own `_created` time when the client reported one, else the
+/// process start time.
+fn start_for(
+    family: &MetricFamily,
+    metric: &prometheus::proto::Metric,
+    fallback: u64,
+    created: &CreatedTimes,
+) -> u64 {
+    created
+        .get(&(family.name().to_string(), label_key(metric)))
+        .copied()
+        .unwrap_or(fallback)
 }
 
 fn number_point(
@@ -129,13 +210,24 @@ fn number_point(
     start: u64,
     now: u64,
 ) -> NumberDataPoint {
+    // A NaN is not a value a backend can store, and several reject the payload
+    // outright. The spec's representation is the no-recorded-value flag with
+    // the value left unset. Prometheus distinguishes a stale marker from an
+    // ordinary NaN by bit pattern, but only an f64 survives to here, and both
+    // mean "nothing was recorded" to a consumer.
+    let (flags, value) = if value.is_nan() {
+        (DataPointFlags::NoRecordedValueMask as u32, None)
+    } else {
+        (0, Some(number_data_point::Value::AsDouble(value)))
+    };
+
     NumberDataPoint {
         attributes: attributes(metric),
         start_time_unix_nano: start,
-        time_unix_nano: now,
+        time_unix_nano: observed_at(metric, now),
         exemplars: Vec::new(),
-        flags: 0,
-        value: Some(number_data_point::Value::AsDouble(value)),
+        flags,
+        value,
     }
 }
 
@@ -144,6 +236,12 @@ fn histogram_point(metric: &prometheus::proto::Metric, start: u64, now: u64) -> 
 
     // Prometheus buckets are cumulative and include a final `+Inf`; OTLP wants
     // per-bucket counts and omits the implicit overflow bound.
+    // TODO: preserve exemplars. `prometheus::proto::Bucket` carries an
+    // `exemplar` field which is dropped here. Mapping it means decoding
+    // `trace_id` / `span_id` label values into the raw bytes OTLP wants, and no
+    // engine Dynamo runs emits them today, so it is deliberately absent rather
+    // than overlooked -- without exemplars a backend cannot jump from a
+    // histogram bucket to the trace that produced it.
     let mut bounds = Vec::new();
     let mut counts = Vec::new();
     let mut previous = 0u64;
@@ -163,9 +261,9 @@ fn histogram_point(metric: &prometheus::proto::Metric, start: u64, now: u64) -> 
     HistogramDataPoint {
         attributes: attributes(metric),
         start_time_unix_nano: start,
-        time_unix_nano: now,
+        time_unix_nano: observed_at(metric, now),
         count: h.sample_count(),
-        sum: Some(h.sample_sum()),
+        sum: (!h.sample_sum().is_nan()).then(|| h.sample_sum()),
         bucket_counts: counts,
         explicit_bounds: bounds,
         exemplars: Vec::new(),
@@ -180,9 +278,15 @@ fn summary_point(metric: &prometheus::proto::Metric, start: u64, now: u64) -> Su
     SummaryDataPoint {
         attributes: attributes(metric),
         start_time_unix_nano: start,
-        time_unix_nano: now,
+        time_unix_nano: observed_at(metric, now),
         count: s.sample_count(),
-        sum: s.sample_sum(),
+        // A summary's sum is not optional in the proto, so an unrecorded one
+        // becomes 0 with the flag set rather than a NaN on the wire.
+        sum: if s.sample_sum().is_nan() {
+            0.0
+        } else {
+            s.sample_sum()
+        },
         quantile_values: s
             .get_quantile()
             .iter()
@@ -219,6 +323,26 @@ pub struct ExportConfig {
     pub endpoint: String,
     pub interval: Duration,
     pub service_name: String,
+    /// Sent as gRPC metadata on every export; how authenticated collectors are
+    /// reached. Empty unless configured.
+    pub headers: Vec<(String, String)>,
+    /// Resource attributes applied to every export, beyond `service.name`.
+    pub resource_attributes: Vec<(String, String)>,
+}
+
+/// Parse the `key=value,key=value` form the OTLP exporter spec uses for both
+/// headers and resource attributes.
+///
+/// Values are taken verbatim: splitting on the *first* `=` keeps base64
+/// padding in a bearer token intact. Percent-decoding, which the spec allows,
+/// is deliberately not applied -- no configuration here has needed it, and
+/// silently decoding a token containing a literal `%` would corrupt it.
+pub(crate) fn parse_key_value_list(raw: &str) -> Vec<(String, String)> {
+    raw.split(',')
+        .filter_map(|pair| pair.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .filter(|(k, _)| !k.is_empty())
+        .collect()
 }
 
 impl ExportConfig {
@@ -272,7 +396,20 @@ impl ExportConfig {
         }
         let protocol = crate::logging::OtlpProtocol::Grpc;
 
+        // Signal-specific headers replace the generic set rather than merging,
+        // per the OTLP exporter spec.
+        let headers = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_HEADERS)
+            .or_else(|_| std::env::var(env_otlp::OTEL_EXPORTER_OTLP_HEADERS))
+            .map(|raw| parse_key_value_list(&raw))
+            .unwrap_or_default();
+
+        let resource_attributes = std::env::var(env_otlp::OTEL_RESOURCE_ATTRIBUTES)
+            .map(|raw| parse_key_value_list(&raw))
+            .unwrap_or_default();
+
         Ok(Some(Self {
+            headers,
+            resource_attributes,
             endpoint: crate::logging::resolve_otlp_endpoint(
                 protocol,
                 std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_ENDPOINT).ok(),
@@ -295,6 +432,32 @@ fn export_interval() -> Duration {
     Duration::from_millis(millis)
 }
 
+/// Resource attributes for every export.
+///
+/// `OTEL_SERVICE_NAME` wins over a `service.name` in `OTEL_RESOURCE_ATTRIBUTES`
+/// per the resource spec, so the configured one is dropped rather than sent
+/// twice.
+fn attributes_for(config: &ExportConfig) -> Vec<KeyValue> {
+    let mut attrs: Vec<KeyValue> = config
+        .resource_attributes
+        .iter()
+        .filter(|(key, _)| key != "service.name")
+        .map(|(key, value)| KeyValue {
+            key: key.clone(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(value.clone())),
+            }),
+        })
+        .collect();
+    attrs.push(KeyValue {
+        key: "service.name".to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(config.service_name.clone())),
+        }),
+    });
+    attrs
+}
+
 /// Collect and export until `cancel` fires.
 ///
 /// Export failures are logged and retried on the next tick: metrics are
@@ -305,12 +468,7 @@ fn export_interval() -> Duration {
 /// collector that accepts the connection but never answers would otherwise
 /// hold this task past shutdown.
 pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: CancellationToken) {
-    let attrs = vec![KeyValue {
-        key: "service.name".to_string(),
-        value: Some(AnyValue {
-            value: Some(any_value::Value::StringValue(config.service_name)),
-        }),
-    }];
+    let attrs = attributes_for(&config);
     // Fixed for the process lifetime; a moving start time reads as a counter
     // reset on every export.
     let start_time = SystemTime::now();
@@ -383,16 +541,51 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
         let request = ExportMetricsServiceRequest {
             resource_metrics: vec![to_resource_metrics(&families, &attrs, start_time)],
         };
+        let mut request = tonic::Request::new(request);
+        for (key, value) in &config.headers {
+            match (
+                tonic::metadata::MetadataKey::from_bytes(key.as_bytes()),
+                tonic::metadata::MetadataValue::try_from(value),
+            ) {
+                (Ok(key), Ok(value)) => {
+                    request.metadata_mut().insert(key, value);
+                }
+                _ => {
+                    // Logged once per export rather than dropped silently: a
+                    // malformed auth header means every request is rejected.
+                    tracing::warn!(header = %key, "skipping unusable OTLP header");
+                }
+            }
+        }
+
         if let Some(connected) = client.as_mut() {
             let exported = tokio::select! {
                 _ = cancel.cancelled() => break,
                 result = connected.export(request) => result,
             };
-            if let Err(error) = exported {
-                tracing::warn!(%error, endpoint = %config.endpoint, "OTLP metrics export failed");
-                // Drop the channel so the next tick reconnects; a broken
-                // transport will not recover on its own.
-                client = None;
+            match exported {
+                Ok(response) => {
+                    // A successful status can still report dropped series --
+                    // cardinality limits are the usual cause. Reporting the
+                    // export as clean would hide data loss the collector has
+                    // already told us about.
+                    if let Some(partial) = response.into_inner().partial_success
+                        && partial.rejected_data_points > 0
+                    {
+                        tracing::warn!(
+                            rejected_data_points = partial.rejected_data_points,
+                            error_message = %partial.error_message,
+                            endpoint = %config.endpoint,
+                            "OTLP collector rejected part of the export"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, endpoint = %config.endpoint, "OTLP metrics export failed");
+                    // Drop the channel so the next tick reconnects; a broken
+                    // transport will not recover on its own.
+                    client = None;
+                }
             }
         }
     }
@@ -440,6 +633,10 @@ mod tests {
 
     /// Counters must be monotonic cumulative sums, and HELP must reach
     /// `description` -- the fidelity a scraping sidecar cannot preserve.
+    ///
+    /// The name is the bare family name: the compatibility spec requires the
+    /// `_total` suffix be removed on the way to OTLP, so this deliberately
+    /// differs from what `/metrics` renders.
     #[test]
     fn counter_maps_to_monotonic_cumulative_sum_with_help() {
         let metrics = export(
@@ -447,7 +644,10 @@ mod tests {
                  {"name":"d_requests_total","labels":{"model":"a"},"value":"17"}]}]"#,
         );
 
-        assert_eq!(metrics[0].name, "d_requests_total");
+        assert_eq!(
+            metrics[0].name, "d_requests",
+            "spec: the OTLP name is the Prometheus name with _total removed"
+        );
         assert_eq!(metrics[0].description, "Total requests");
 
         let Some(metric::Data::Sum(sum)) = &metrics[0].data else {
@@ -564,8 +764,8 @@ mod tests {
 
         let by_name = |n: &str| metrics.iter().find(|m| m.name == n).cloned();
 
-        let Some(metric::Data::Sum(sum)) = by_name("dynamo_requests_total").expect("counter").data
-        else {
+        // Registered as `dynamo_requests_total`; exported bare, per spec.
+        let Some(metric::Data::Sum(sum)) = by_name("dynamo_requests").expect("counter").data else {
             panic!("counter should map to a Sum");
         };
         assert!(sum.is_monotonic);
@@ -671,6 +871,86 @@ mod tests {
         .await;
     }
 
+    /// Authenticated collectors are reached with headers, and deployments are
+    /// told apart by resource attributes. Neither is supplied by the SDK here:
+    /// traces and logs get them from `opentelemetry-otlp`, which this exporter
+    /// bypasses because the SDK's metric data model is read-only.
+    #[test]
+    fn headers_and_resource_attributes_are_read_from_the_environment() {
+        temp_env::with_vars(
+            [
+                (env_otlp::OTEL_METRICS_EXPORTER, Some("otlp")),
+                (env_otlp::OTEL_EXPORTER_OTLP_ENDPOINT, Some("http://c:4317")),
+                (env_otlp::OTEL_METRIC_EXPORT_INTERVAL, None),
+                // A bearer token: base64 padding means the value itself
+                // contains `=`, so only the first one separates key from value.
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_HEADERS,
+                    Some("authorization=Bearer abc==,x-key=v"),
+                ),
+                (
+                    env_otlp::OTEL_RESOURCE_ATTRIBUTES,
+                    Some("deployment.environment=prod,service.name=ignored"),
+                ),
+            ],
+            || {
+                let config = ExportConfig::from_env().expect("enabled").expect("some");
+                assert_eq!(
+                    config.headers,
+                    vec![
+                        ("authorization".to_string(), "Bearer abc==".to_string()),
+                        ("x-key".to_string(), "v".to_string()),
+                    ]
+                );
+                assert_eq!(
+                    config.resource_attributes,
+                    vec![
+                        ("deployment.environment".to_string(), "prod".to_string()),
+                        ("service.name".to_string(), "ignored".to_string()),
+                    ]
+                );
+
+                // service.name from OTEL_SERVICE_NAME wins, and is not emitted
+                // twice alongside the one in OTEL_RESOURCE_ATTRIBUTES.
+                let rm = to_resource_metrics(&[], &attributes_for(&config), UNIX_EPOCH);
+                let keys: Vec<&str> = rm
+                    .resource
+                    .as_ref()
+                    .expect("resource")
+                    .attributes
+                    .iter()
+                    .map(|kv| kv.key.as_str())
+                    .collect();
+                assert_eq!(keys, vec!["deployment.environment", "service.name"]);
+            },
+        );
+    }
+
+    /// The signal-specific variable replaces the generic set rather than
+    /// merging with it, per the OTLP exporter spec.
+    #[test]
+    fn metrics_headers_replace_the_generic_ones() {
+        temp_env::with_vars(
+            [
+                (env_otlp::OTEL_METRICS_EXPORTER, Some("otlp")),
+                (env_otlp::OTEL_EXPORTER_OTLP_ENDPOINT, Some("http://c:4317")),
+                (env_otlp::OTEL_METRIC_EXPORT_INTERVAL, None),
+                (env_otlp::OTEL_EXPORTER_OTLP_HEADERS, Some("generic=1")),
+                (
+                    env_otlp::OTEL_EXPORTER_OTLP_METRICS_HEADERS,
+                    Some("specific=2"),
+                ),
+            ],
+            || {
+                let config = ExportConfig::from_env().expect("enabled").expect("some");
+                assert_eq!(
+                    config.headers,
+                    vec![("specific".to_string(), "2".to_string())]
+                );
+            },
+        );
+    }
+
     /// The exporter must not depend on the system status server, which is
     /// disabled by default (`DYN_SYSTEM_PORT=-1`). Gating export on it made
     /// the documented `OTEL_METRICS_EXPORTER=otlp` opt-in a silent no-op in
@@ -710,6 +990,132 @@ mod tests {
         assert!(
             connected,
             "exporter never dialled the collector with the system status server disabled"
+        );
+    }
+
+    /// A NaN is reported as no-recorded-value with the value unset, not as a
+    /// raw NaN on the wire. Engines produce them routinely -- any ratio with a
+    /// zero denominator -- and several backends reject the payload.
+    #[test]
+    fn nan_becomes_no_recorded_value() {
+        let metrics = export(
+            r#"[{"name":"d_ratio","help":"Ratio","type":"gauge","samples":[
+                 {"name":"d_ratio","labels":{},"value":"NaN"}]},
+                {"name":"d_latency","help":"Latency","type":"histogram","samples":[
+                 {"name":"d_latency_bucket","labels":{"le":"1"},"value":"0"},
+                 {"name":"d_latency_sum","labels":{},"value":"NaN"},
+                 {"name":"d_latency_count","labels":{},"value":"0"}]}]"#,
+        );
+
+        let Some(metric::Data::Gauge(g)) = &metrics
+            .iter()
+            .find(|m| m.name == "d_ratio")
+            .expect("gauge")
+            .data
+        else {
+            panic!("expected gauge");
+        };
+        assert_eq!(
+            g.data_points[0].flags,
+            DataPointFlags::NoRecordedValueMask as u32
+        );
+        assert!(
+            g.data_points[0].value.is_none(),
+            "the value must be unset, not a NaN"
+        );
+
+        let Some(metric::Data::Histogram(h)) = &metrics
+            .iter()
+            .find(|m| m.name == "d_latency")
+            .expect("histogram")
+            .data
+        else {
+            panic!("expected histogram");
+        };
+        assert!(
+            h.data_points[0].sum.is_none(),
+            "an unrecorded histogram sum must be unset rather than NaN"
+        );
+    }
+
+    /// The compatibility spec treats `_created` as the parent's start time, not
+    /// as a metric: it must not appear in the export, and the counter it
+    /// belongs to must carry it as `start_time_unix_nano`. Emitting it as a
+    /// gauge produced one spurious metric per counter and threw away the only
+    /// signal a backend has for distinguishing a counter reset from a jump.
+    ///
+    /// Gauges must carry no start time at all -- a non-zero one makes backends
+    /// treat the series as cumulative.
+    #[test]
+    fn created_becomes_the_start_time_and_gauges_carry_none() {
+        let metrics = export(
+            r#"[{"name":"d_requests","help":"Requests","type":"counter","samples":[
+                 {"name":"d_requests_total","labels":{"model":"a"},"value":"17"},
+                 {"name":"d_requests_created","labels":{"model":"a"},"value":"1700000000"}]},
+                {"name":"d_queue","help":"Queue","type":"gauge","samples":[
+                 {"name":"d_queue","labels":{},"value":"3"}]}]"#,
+        );
+
+        assert!(
+            !metrics.iter().any(|m| m.name.ends_with("_created")),
+            "_created must not be exported as a metric: {:?}",
+            metrics.iter().map(|m| &m.name).collect::<Vec<_>>()
+        );
+
+        let counter = metrics
+            .iter()
+            .find(|m| m.name == "d_requests")
+            .expect("counter");
+        let Some(metric::Data::Sum(sum)) = &counter.data else {
+            panic!("expected sum");
+        };
+        assert_eq!(
+            sum.data_points[0].start_time_unix_nano, 1_700_000_000_000_000_000,
+            "the counter must start at its _created time"
+        );
+
+        let gauge = metrics.iter().find(|m| m.name == "d_queue").expect("gauge");
+        let Some(metric::Data::Gauge(g)) = &gauge.data else {
+            panic!("expected gauge");
+        };
+        assert_eq!(
+            g.data_points[0].start_time_unix_nano, 0,
+            "spec: gauges carry no start time"
+        );
+    }
+
+    /// A sample that carries its own timestamp is reported as observed then,
+    /// not at the export instant. Standard client metrics leave it unset, but a
+    /// custom collector or federated source sets it, and relabelling a stale
+    /// sample to "now" misleads anything reading `time_unix_nano`.
+    #[test]
+    fn sample_timestamps_survive_instead_of_the_export_instant() {
+        // Carried all the way from the Python-side tuple, through the typed
+        // builder, into the datapoint.
+        let metrics = export(
+            r#"[{"name":"engine_queue","help":"Queue","type":"gauge","samples":[
+                 {"name":"engine_queue","labels":{},"value":"4","timestamp":1700000000.0}]},
+                {"name":"engine_fresh","help":"Fresh","type":"gauge","samples":[
+                 {"name":"engine_fresh","labels":{},"value":"1"}]}]"#,
+        );
+
+        let point = |name: &str| {
+            let m = metrics.iter().find(|m| m.name == name).expect("metric");
+            let Some(metric::Data::Gauge(g)) = &m.data else {
+                panic!("expected gauge");
+            };
+            g.data_points[0].time_unix_nano
+        };
+
+        assert_eq!(
+            point("engine_queue"),
+            1_700_000_000_000_000_000,
+            "a carried timestamp must be reported as the observation time"
+        );
+        assert_ne!(
+            point("engine_fresh"),
+            0,
+            "a sample without one still gets the export instant"
         );
     }
 

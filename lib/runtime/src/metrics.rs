@@ -940,7 +940,16 @@ impl MetricsRegistry {
 
     /// Execute all exposition text callbacks and return their concatenated text
     pub fn execute_expfmt_callbacks(&self) -> String {
-        let callbacks = self.prometheus_expfmt_callbacks.read().unwrap();
+        // Snapshot under the lock, then invoke without it held; see
+        // `execute_typed_callbacks` for why holding it across the calls
+        // deadlocks against registration from Python.
+        let callbacks: Vec<PrometheusExpositionFormatCallback> = self
+            .prometheus_expfmt_callbacks
+            .read()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
         let mut result = String::new();
         for callback in callbacks.iter() {
             match callback() {
@@ -973,9 +982,19 @@ impl MetricsRegistry {
     /// Collect from every typed callback, logging and skipping failures so one
     /// broken engine cannot empty the whole collection.
     pub fn execute_typed_callbacks(&self) -> Vec<prometheus::proto::MetricFamily> {
-        self.prometheus_typed_callbacks
+        // Snapshot under the lock, then invoke without it held. The callbacks
+        // take the Python GIL, and registration arrives from Python holding the
+        // GIL and blocking on `write()` -- holding the read lock across the
+        // calls would deadlock those two against each other.
+        let callbacks: Vec<PrometheusTypedCallback> = self
+            .prometheus_typed_callbacks
             .read()
             .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+
+        callbacks
             .iter()
             .filter_map(|callback| match callback() {
                 Ok(families) => Some(families),
@@ -2083,6 +2102,57 @@ mod test_metric_families_combined {
             text.contains("vllm:num_requests_running"),
             "engine exposition text must be appended verbatim"
         );
+    }
+
+    /// Collection must not hold the callback lock while invoking callbacks.
+    ///
+    /// Registration arrives from Python holding the GIL and blocks on
+    /// `write()`; a collection that held the read lock while calling into
+    /// Python would deadlock the two against each other. Registering from
+    /// inside a callback reproduces that ordering deterministically, without
+    /// depending on a thread interleaving.
+    ///
+    /// Run on a worker thread with a deadline so a regression fails the test
+    /// rather than hanging the suite forever.
+    #[test]
+    fn collection_does_not_hold_the_callback_lock() {
+        for (name, collect) in [
+            (
+                "typed",
+                Box::new(|r: &MetricsRegistry| {
+                    r.execute_typed_callbacks();
+                }) as Box<dyn Fn(&MetricsRegistry) + Send>,
+            ),
+            (
+                "expfmt",
+                Box::new(|r: &MetricsRegistry| {
+                    r.execute_expfmt_callbacks();
+                }),
+            ),
+        ] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let registry = MetricsRegistry::new();
+                let reentrant = registry.clone();
+                registry.add_typed_callback(StdArc::new(move || {
+                    reentrant.add_typed_callback(StdArc::new(|| Ok(Vec::new())));
+                    Ok(Vec::new())
+                }));
+                let reentrant = registry.clone();
+                registry.add_expfmt_callback(StdArc::new(move || {
+                    reentrant.add_expfmt_callback(StdArc::new(|| Ok(String::new())));
+                    Ok(String::new())
+                }));
+                collect(&registry);
+                let _ = tx.send(());
+            });
+
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok(),
+                "{name} collection deadlocked: the callback lock was held while a \
+                 callback registered another"
+            );
+        }
     }
 
     /// A failing engine callback is skipped, never fatal: one broken engine

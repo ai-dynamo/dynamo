@@ -49,6 +49,11 @@ pub struct TypedSample {
     /// real path -- a native f64 across PyO3 -- never has.
     #[cfg_attr(test, serde(deserialize_with = "de_f64"))]
     pub value: f64,
+    /// Seconds since the epoch, when the source recorded one. Standard
+    /// `prometheus_client` metrics leave this unset; custom collectors and
+    /// federated sources can populate it.
+    #[cfg_attr(test, serde(default))]
+    pub timestamp: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -108,11 +113,12 @@ fn promote_created(help: &str, samples: Vec<TypedSample>) -> Vec<MetricFamily> {
 }
 
 fn build_one(family: TypedFamily) -> Option<MetricFamily> {
-    // Some families are reported under a bare name but rendered with a suffix:
-    // counters as `foo_total`, info as `foo_info`. Carry that suffix so the
-    // exported identity matches the one `/metrics` shows.
+    // The OTLP name is the Prometheus *family* name, which `collect()` already
+    // reports bare -- so a counter exports as `foo`, not `foo_total`, as the
+    // compatibility spec requires. Info is the exception: its `_info` suffix is
+    // part of the name rather than a rendering artifact.
     let (metric_type, rendered_suffix) = match family.kind.as_str() {
-        "counter" => (MetricType::COUNTER, Some("_total")),
+        "counter" => (MetricType::COUNTER, None),
         "gauge" => (MetricType::GAUGE, None),
         "histogram" => (MetricType::HISTOGRAM, None),
         "summary" => (MetricType::SUMMARY, None),
@@ -161,6 +167,9 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
                 points: Vec<(f64, f64)>,
                 sum: f64,
                 count: u64,
+                /// A histogram is one proto `Metric` built from several
+                /// samples, so keep the first timestamp any of them carried.
+                timestamp: Option<f64>,
             }
             let mut series: Vec<Series> = Vec::new();
             for sample in samples {
@@ -178,10 +187,14 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
                             points: Vec::new(),
                             sum: 0.0,
                             count: 0,
+                            timestamp: None,
                         });
                         series.last_mut()?
                     }
                 };
+                if entry.timestamp.is_none() {
+                    entry.timestamp = sample.timestamp;
+                }
                 match sample.labels.get(point_label) {
                     Some(point) => {
                         let bound = parse_bound(point);
@@ -202,6 +215,7 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
                 mut points,
                 sum,
                 count,
+                timestamp,
             } in series
             {
                 points.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -240,6 +254,9 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
                     s.set_sample_count(count);
                     metric.set_summary(s);
                 }
+                if let Some(seconds) = timestamp {
+                    metric.set_timestamp_ms((seconds * 1_000.0) as i64);
+                }
                 out.mut_metric().push(metric);
             }
         }
@@ -255,6 +272,9 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
                     let mut g = Gauge::new();
                     g.set_value(sample.value);
                     metric.set_gauge(g);
+                }
+                if let Some(seconds) = sample.timestamp {
+                    metric.set_timestamp_ms((seconds * 1_000.0) as i64);
                 }
                 out.mut_metric().push(metric);
             }

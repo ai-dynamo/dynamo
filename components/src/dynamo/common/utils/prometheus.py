@@ -260,8 +260,17 @@ def get_prometheus_typed(
                 metric.name,
                 metric.documentation,
                 metric.type,
+                # The sample timestamp is carried, not dropped: standard
+                # prometheus_client metrics leave it None, but a custom
+                # collector or a federated source can set it, and defaulting to
+                # the collection instant would silently relabel a stale sample.
                 [
-                    (s.name, list(s.labels.items()), float(s.value))
+                    (
+                        s.name,
+                        list(s.labels.items()),
+                        float(s.value),
+                        s.timestamp if s.timestamp is None else float(s.timestamp),
+                    )
                     for s in metric.samples
                 ],
             )

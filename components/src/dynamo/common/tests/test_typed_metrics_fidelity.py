@@ -125,7 +125,7 @@ def test_registered_callback_carries_auto_labels_into_typed_samples():
         "lora_adapter": "my-lora",
     }
     for _name, _help_text, _type, samples in families:
-        for sample_name, sample_labels, _value in samples:
+        for sample_name, sample_labels, _value, _timestamp in samples:
             got = dict(sample_labels)
             for key, value in expected.items():
                 assert (

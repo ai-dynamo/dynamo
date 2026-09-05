@@ -86,6 +86,24 @@ pub mod logging {
         /// OTLP exporter transport protocol for metrics. Defaults to OTEL_EXPORTER_OTLP_PROTOCOL.
         pub const OTEL_EXPORTER_OTLP_METRICS_PROTOCOL: &str = "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL";
 
+        /// Headers sent with every OTLP request, as `key=value` pairs separated
+        /// by commas. Used for authenticated collectors (bearer token, API key).
+        pub const OTEL_EXPORTER_OTLP_HEADERS: &str = "OTEL_EXPORTER_OTLP_HEADERS";
+
+        /// Headers for metrics specifically. Replaces OTEL_EXPORTER_OTLP_HEADERS
+        /// when set, rather than merging with it, per the OTLP exporter spec.
+        pub const OTEL_EXPORTER_OTLP_METRICS_HEADERS: &str = "OTEL_EXPORTER_OTLP_METRICS_HEADERS";
+
+        /// Headers for traces specifically. Replaces OTEL_EXPORTER_OTLP_HEADERS when set.
+        pub const OTEL_EXPORTER_OTLP_TRACES_HEADERS: &str = "OTEL_EXPORTER_OTLP_TRACES_HEADERS";
+
+        /// Headers for logs specifically. Replaces OTEL_EXPORTER_OTLP_HEADERS when set.
+        pub const OTEL_EXPORTER_OTLP_LOGS_HEADERS: &str = "OTEL_EXPORTER_OTLP_LOGS_HEADERS";
+
+        /// Resource attributes applied to every exported signal, as `key=value`
+        /// pairs separated by commas.
+        pub const OTEL_RESOURCE_ATTRIBUTES: &str = "OTEL_RESOURCE_ATTRIBUTES";
+
         /// Metric export interval in milliseconds. Spec default is 60000.
         pub const OTEL_METRIC_EXPORT_INTERVAL: &str = "OTEL_METRIC_EXPORT_INTERVAL";
     }

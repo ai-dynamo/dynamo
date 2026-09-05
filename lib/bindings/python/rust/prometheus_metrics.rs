@@ -41,7 +41,7 @@ type PyTypedFamilies = Vec<(
     String,
     String,
     String,
-    Vec<(String, Vec<(String, String)>, f64)>,
+    Vec<(String, Vec<(String, String)>, f64, Option<f64>)>,
 )>;
 
 /// Wrap a Python callable returning typed families into the Rust callback shape.
@@ -72,11 +72,12 @@ fn wrap_py_typed_callback(
                         kind,
                         samples: samples
                             .into_iter()
-                            .map(|(name, labels, value)| {
+                            .map(|(name, labels, value, timestamp)| {
                                 crate::rs::metrics::prom_typed::TypedSample {
                                     name,
                                     labels: labels.into_iter().collect(),
                                     value,
+                                    timestamp,
                                 }
                             })
                             .collect(),

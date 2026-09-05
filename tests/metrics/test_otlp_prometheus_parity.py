@@ -120,18 +120,40 @@ def _running_receiver(port: int):
         server.stop(grace=None)
 
 
-def _prometheus_families(text: str) -> set[str]:
-    """Family names as declared by ``# TYPE``.
+def _prometheus_families(text: str) -> dict[str, str]:
+    """Family name -> type, as declared by ``# TYPE``.
 
     Compares families, not sample lines: a histogram renders as ``_bucket`` /
     ``_sum`` / ``_count`` on the scrape but is one metric in OTLP, so sample
     names would report drift that is only a representation difference.
     """
-    return {
-        line.split()[2]
-        for line in text.splitlines()
-        if line.startswith("# TYPE ") and len(line.split()) >= 4
-    }
+    out = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if line.startswith("# TYPE ") and len(parts) >= 4:
+            out[parts[2]] = parts[3]
+    return out
+
+
+def _expected_otlp_name(name: str, kind: str) -> str | None:
+    """The OTLP name the compatibility spec requires for a Prometheus family.
+
+    The two surfaces are deliberately *not* identical. Asserting identity would
+    pin whatever we happen to emit -- it is how a wrong `_total` suffix went
+    unnoticed, because both surfaces agreed on the same wrong name.
+
+    Returns ``None`` for families the spec says must not be exported at all.
+    """
+    if name.endswith("_created"):
+        # An artifact of the Python client: it becomes the parent's
+        # start_time_unix_nano and is not a metric of its own.
+        return None
+    if kind == "counter":
+        # "The OTLP metric name MUST be the Prometheus name with _total
+        # removed." The scrape renders `foo_total`; `# TYPE` already names the
+        # family bare, so this is normally a no-op and guards the rendered form.
+        return name[: -len("_total")] if name.endswith("_total") else name
+    return name
 
 
 class _Worker(ManagedProcess):
@@ -188,10 +210,45 @@ def test_otlp_and_prometheus_expose_the_same_metrics(request, runtime_services):
                     f"http://localhost:{system_port}/metrics", timeout=10
                 )
                 scrape.raise_for_status()
-                prometheus = _prometheus_families(scrape.text)
+                declared = _prometheus_families(scrape.text)
                 exported = receiver.names() - OTLP_ONLY
 
-                assert prometheus, "no families on /metrics; the scrape path is broken"
+                assert declared, "no families on /metrics; the scrape path is broken"
+
+                # The scrape must keep Prometheus conventions even though OTLP
+                # transforms them. Only the export changes shape; if a spec
+                # transformation ever leaks into /metrics, dashboards and
+                # recording rules built on it break silently.
+                rendered_counters = [
+                    n
+                    for n, k in declared.items()
+                    if k == "counter" and n.endswith("_total")
+                ]
+                assert rendered_counters, (
+                    "/metrics no longer renders counters with _total; an OTLP-side "
+                    "transformation has leaked into the scrape path"
+                )
+                assert any(n.endswith("_created") for n in declared), (
+                    "/metrics no longer renders _created; it is dropped from OTLP "
+                    "by design, but the scrape must still carry it"
+                )
+
+                # Each scraped family maps to the name the spec requires, or to
+                # nothing when the spec says it must not be exported.
+                prometheus = {
+                    expected
+                    for name, kind in declared.items()
+                    if (expected := _expected_otlp_name(name, kind)) is not None
+                }
+                must_not_export = {
+                    name for name in declared if name.endswith("_created")
+                }
+
+                wrongly_exported = must_not_export & receiver.names()
+                assert not wrongly_exported, (
+                    "_created is a client artifact, not a metric; the spec says "
+                    f"it becomes the parent's start time: {sorted(wrongly_exported)}"
+                )
 
                 missing_from_otlp = prometheus - exported
                 missing_from_prometheus = exported - prometheus
