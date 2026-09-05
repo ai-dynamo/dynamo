@@ -850,6 +850,11 @@ class VllmProcessor:
         mm_routing_info: dict[str, Any] | None = None,
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        """Stream choices until completion, releasing locally stopped requests.
+
+        After a local stop, usage counts only tokens consumed by active choices;
+        backend totals may include later tokens generated for a stopped choice.
+        """
         sp = vllm_preproc.sampling_params
         output_request_ids: dict[int, str]
         registered_request_ids: list[str]
@@ -1049,12 +1054,16 @@ class VllmProcessor:
                         "object": "chat.completion.chunk",
                     }
                     usage = engine_response.get("completion_usage")
-                    if locally_finished and not usage:
-                        usage = {
-                            "prompt_tokens": input_tokens,
-                            "completion_tokens": cumulative_output_tokens,
-                            "total_tokens": input_tokens + cumulative_output_tokens,
-                        }
+                    if has_local_stop and (usage or locally_finished):
+                        usage = dict(usage or {})
+                        prompt_tokens = usage.get("prompt_tokens")
+                        if prompt_tokens is None:
+                            prompt_tokens = input_tokens
+                        usage.update(
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=cumulative_output_tokens,
+                            total_tokens=prompt_tokens + cumulative_output_tokens,
+                        )
                     if usage:
                         dynamo_out["usage"] = reasoning_usage.annotate(usage)
                     envelope["data"] = dynamo_out

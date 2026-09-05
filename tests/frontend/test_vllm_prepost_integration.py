@@ -322,6 +322,7 @@ def test_vllm_chat_processor_forwards_max_thinking_tokens(
 def test_vllm_chat_processor_local_stop_preserves_stream_terminal(
     start_services: tuple[int, Path],
 ) -> None:
+    """A frontend string stop must retain terminal usage across HTTP requests."""
     frontend_port, capture_path = start_services
     payload = {
         "model": TEST_MODEL,

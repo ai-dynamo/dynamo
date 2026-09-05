@@ -1137,6 +1137,7 @@ class _FakePostProcessor:
 
 @pytest.fixture
 def real_vllm_processor_module():
+    """Defer real vLLM imports until execution so marker collection stays light."""
     import dynamo.frontend.vllm_processor as module
 
     return module
@@ -1144,6 +1145,7 @@ def real_vllm_processor_module():
 
 @pytest.fixture
 def vllm_processor_module(monkeypatch, real_vllm_processor_module):
+    """Replace engine-facing types while retaining real frontend orchestration."""
     module = real_vllm_processor_module
 
     class FakeEngineCoreOutput:
@@ -1467,13 +1469,19 @@ async def _run_generate(processor, preproc, *, mm_routing_info=None, context=Non
 class TestRoutedEnginePath:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "n,other_request",
-        [(1, False), (2, False), (1, True)],
-        ids=["single-choice", "parallel-choices", "concurrent-request"],
+        "n,other_request,backend_usage",
+        [(1, False, False), (2, False, False), (1, True, False), (2, False, True)],
+        ids=[
+            "single-choice",
+            "parallel-choices",
+            "concurrent-request",
+            "backend-usage",
+        ],
     )
     async def test_local_stop_releases_only_the_completed_request(
-        self, tokenizer, n, other_request, real_vllm_processor_module
+        self, tokenizer, n, other_request, backend_usage, real_vllm_processor_module
     ):
+        """Stopped choices must not inflate usage, even when the worker sends it."""
         module = real_vllm_processor_module
 
         sampling_params = SamplingParams(
@@ -1510,6 +1518,13 @@ class TestRoutedEnginePath:
                 }
             )
             expected_tokens += len(other_tokens)
+            if backend_usage:
+                items[-1]["completion_usage"] = {
+                    "prompt_tokens": 1,
+                    "completion_tokens": expected_tokens + 2,
+                    "total_tokens": expected_tokens + 3,
+                    "prompt_tokens_details": {"cached_tokens": 0},
+                }
         expected_chunks = len(items)
         items.append({"token_ids": [42], "index": 0})
         routed_engine = _FakeRoutedEngine(items)
@@ -1562,6 +1577,9 @@ class TestRoutedEnginePath:
             if choice["finish_reason"]
         } == ({0: "stop", 1: "length"} if n > 1 else {0: "stop"})
         assert data[-1]["usage"]["completion_tokens"] == expected_tokens
+        assert data[-1]["usage"]["total_tokens"] == expected_tokens + 1
+        if backend_usage:
+            assert data[-1]["usage"]["prompt_tokens_details"] == {"cached_tokens": 0}
         metrics = [json.loads(chunk["comment"][0]) for chunk in chunks]
         assert metrics[-1]["output_tokens"] == expected_tokens
         assert sum(metric["chunk_tokens"] for metric in metrics) == expected_tokens
