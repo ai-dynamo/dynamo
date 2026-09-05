@@ -4314,4 +4314,181 @@ mod tests {
             "embedding_latency_seconds histogram must be registered with the registry"
         );
     }
+
+    /// #11349 regression: non-streaming chat must preserve per-chunk metrics
+    /// through folding and the backend-error preflight, including a zero-token
+    /// payload-usage tail.
+    #[tokio::test]
+    async fn test_non_streaming_fold_preserves_chunk_metrics() {
+        use crate::http::service::openai::check_for_backend_error;
+        use crate::preprocessor::LLMMetricAnnotation;
+        use crate::protocols::openai::ParsingOptions;
+        use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
+        use crate::protocols::openai::chat_completions::{
+            NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse,
+        };
+        use crate::request_trace::payload_stream::fold_aggregate_with_future;
+        use crate::types::Annotated;
+        use futures::StreamExt;
+
+        fn chat_chunk(
+            content: Option<&str>,
+            finish: Option<dynamo_protocols::types::FinishReason>,
+            llm_metrics: Option<LLMMetricAnnotation>,
+        ) -> Annotated<NvCreateChatCompletionStreamResponse> {
+            #[allow(deprecated)]
+            let delta = dynamo_protocols::types::ChatCompletionStreamResponseDelta {
+                role: Some(dynamo_protocols::types::Role::Assistant),
+                content: content.map(|c| {
+                    dynamo_protocols::types::ChatCompletionMessageContent::Text(c.to_string())
+                }),
+                tool_calls: None,
+                function_call: None,
+                refusal: None,
+                reasoning_content: None,
+            };
+            let choice = dynamo_protocols::types::ChatChoiceStream {
+                index: 0,
+                delta,
+                finish_reason: finish,
+                logprobs: None,
+            };
+            let response = NvCreateChatCompletionStreamResponse {
+                inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
+                    id: "test-id".to_string(),
+                    choices: vec![choice],
+                    created: 1234567890,
+                    model: "test-model".to_string(),
+                    system_fingerprint: None,
+                    object: "chat.completion.chunk".to_string(),
+                    usage: None,
+                    service_tier: None,
+                },
+                nvext: None,
+                llm_metrics,
+            };
+            Annotated {
+                data: Some(response),
+                id: None,
+                event: None,
+                comment: None,
+                error: None,
+            }
+        }
+
+        fn chunk_metrics(chunk_tokens: usize, output_tokens: usize) -> LLMMetricAnnotation {
+            LLMMetricAnnotation {
+                input_tokens: 7,
+                output_tokens,
+                chunk_tokens,
+                ..Default::default()
+            }
+        }
+
+        // Production shape: positive-count content chunks, a finish chunk, then
+        // a zero-token usage tail carrying the final cumulative metrics.
+        let tail_annotation = chunk_metrics(0, 3).to_annotation::<()>().unwrap();
+        let mut tail = chat_chunk(None, None, None);
+        {
+            let data = tail.data.as_mut().unwrap();
+            data.inner.choices = vec![];
+            data.inner.usage = Some(dynamo_protocols::types::CompletionUsage {
+                prompt_tokens: 7,
+                completion_tokens: 3,
+                total_tokens: 10,
+                ..Default::default()
+            });
+        }
+        tail.event = tail_annotation.event;
+        tail.comment = tail_annotation.comment;
+
+        let chunks = vec![
+            chat_chunk(Some("Hello "), None, Some(chunk_metrics(1, 1))),
+            chat_chunk(Some("world"), None, Some(chunk_metrics(2, 3))),
+            chat_chunk(
+                None,
+                Some(dynamo_protocols::types::FinishReason::Stop),
+                None,
+            ),
+            tail,
+        ];
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+        let mut collector = metrics.clone().create_response_collector("test-model");
+        let mut http_queue_guard = None;
+
+        // Match the production non-streaming chat path exactly:
+        // fold -> observe metrics -> backend-error preflight -> aggregate.
+        // The preflight buffers leading annotation frames, so the observer must
+        // sit ahead of it for TTFT/ITL to reflect arrival time.
+        let (folded, payload_future) = fold_aggregate_with_future(futures::stream::iter(chunks));
+        let observed = folded.inspect(move |response| {
+            process_chat_response_and_observe_metrics(
+                response,
+                &mut collector,
+                &mut http_queue_guard,
+            );
+        });
+        let checked = check_for_backend_error(observed, None)
+            .await
+            .expect("production-shaped stream must pass the backend-error preflight");
+        let response = NvCreateChatCompletionResponse::from_annotated_stream(
+            checked,
+            ParsingOptions::default(),
+        )
+        .await
+        .expect("non-streaming fold must produce a response");
+        // Consuming the stream drops the collector, flushing ITL and final OSL.
+
+        assert_eq!(
+            response.inner.choices[0].message.content.as_ref().unwrap(),
+            &dynamo_protocols::types::ChatCompletionMessageContent::Text("Hello world".to_string())
+        );
+        assert_eq!(response.inner.usage.as_ref().unwrap().completion_tokens, 3);
+
+        let record = payload_future
+            .await
+            .expect("payload capture must produce a response record");
+        assert_eq!(record.inner.usage.as_ref().unwrap().completion_tokens, 3);
+
+        let families = registry.gather();
+        let find = |name: &str| {
+            families
+                .iter()
+                .find(|mf| mf.name() == name)
+                .unwrap_or_else(|| panic!("{name} should be registered"))
+        };
+
+        // Positive chunks contribute 1 + 2 output tokens; the zero-token tail
+        // must not increment the counter again.
+        let output_tokens = find("dynamo_frontend_output_tokens_total");
+        assert_eq!(
+            output_tokens.get_metric()[0].get_counter().value() as u64,
+            3
+        );
+
+        // ISL and TTFT are emitted once from the first positive chunk.
+        let isl = find("dynamo_frontend_input_sequence_tokens");
+        assert_eq!(isl.get_metric()[0].get_histogram().get_sample_count(), 1);
+        assert_eq!(
+            isl.get_metric()[0].get_histogram().get_sample_sum() as u64,
+            7
+        );
+        let ttft = find("dynamo_frontend_time_to_first_token_seconds");
+        assert_eq!(ttft.get_metric()[0].get_histogram().get_sample_count(), 1);
+
+        // The second chunk contributes two ITL observations.
+        let itl = find("dynamo_frontend_inter_token_latency_seconds");
+        assert_eq!(itl.get_metric()[0].get_histogram().get_sample_count(), 2);
+
+        // The zero-token tail still supplies the final cumulative OSL.
+        let osl = find("dynamo_frontend_output_sequence_tokens");
+        assert_eq!(osl.get_metric()[0].get_histogram().get_sample_count(), 1);
+        assert_eq!(
+            osl.get_metric()[0].get_histogram().get_sample_sum() as u64,
+            3
+        );
+    }
 }
