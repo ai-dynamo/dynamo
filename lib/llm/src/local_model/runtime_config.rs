@@ -21,6 +21,7 @@ use dynamo_kv_router::{
 use dynamo_runtime::{config::is_truthy, protocols::EndpointId};
 
 use crate::protocols::openai::chat_completions::tool_parser_v2::unified_family_names;
+use dynamo_parsers::reasoning::get_available_reasoning_parsers;
 use dynamo_parsers::tool_calling::parsers::get_available_tool_parsers;
 
 /// Re-export from parsers crate so that `ModelRuntimeConfig` can use it
@@ -590,6 +591,24 @@ fn validate_model_runtime_config(config: &ModelRuntimeConfig) -> Result<(), Vali
                 "unsupported_tool_call_parser",
                 format!(
                     "tool_call_parser '{parser}' is not supported; available parsers: {}",
+                    supported.join(", ")
+                ),
+            ));
+        }
+    }
+
+    // Empty is rejected, not skipped: downstream tests `reasoning_parser.is_none()`,
+    // so Some("") resolves to Basic.
+    if let Some(parser) = config.reasoning_parser.as_deref() {
+        let mut supported = get_available_reasoning_parsers();
+        supported.extend_from_slice(unified_family_names());
+        supported.sort_unstable();
+        supported.dedup();
+        if !supported.contains(&parser) {
+            return Err(validation_error(
+                "unsupported_reasoning_parser",
+                format!(
+                    "reasoning_parser '{parser}' is not supported; available parsers: {}",
                     supported.join(", ")
                 ),
             ));
@@ -1334,6 +1353,31 @@ mod tests {
         ] {
             assert!(config.validate_config().is_err());
         }
+    }
+
+    #[test]
+    fn test_validate_config_checks_reasoning_parser() {
+        let validate = |parser: &str| {
+            ModelRuntimeConfig {
+                reasoning_parser: Some(parser.to_string()),
+                ..Default::default()
+            }
+            .validate_config()
+        };
+
+        // muse has no v1 reasoning entry, but vLLM ships `--reasoning-parser muse_glimmer`.
+        for parser in get_available_reasoning_parsers()
+            .into_iter()
+            .chain(unified_family_names().iter().copied())
+        {
+            assert!(validate(parser).is_ok(), "{parser} must be supported");
+            // Downstream policy checks match the canonical name, so casing is exact.
+            assert!(validate(&parser.to_uppercase()).is_err(), "{parser} casing");
+        }
+        assert!(validate("").is_err());
+
+        let error = validate("not_registered").unwrap_err();
+        assert!(error.contains("not_registered"));
     }
 
     #[test]
