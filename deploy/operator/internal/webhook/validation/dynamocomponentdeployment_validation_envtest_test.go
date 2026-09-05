@@ -499,7 +499,7 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "v1beta1 checkpoint with inter-pod GMS and failover reports both errors",
+			name: "v1beta1 checkpoint with inter-pod GMS and failover keeps ordinary incompatibility",
 			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
 				enableBetaInterPodGMS(&dcd.Spec.DynamoComponentDeploymentSharedSpec)
 				dcd.Spec.Experimental.Checkpoint = &nvidiacomv1beta1.ComponentCheckpointConfig{Enabled: true}
@@ -510,7 +510,6 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			}),
 			wantWebhookErrs: []string{
 				"spec.experimental.checkpoint: Forbidden: Snapshot with gpuMemoryService.mode=InterPod is unsupported",
-				"spec.experimental.checkpoint: Forbidden: Snapshot with active/passive failover is temporarily unsupported",
 			},
 		},
 		{
