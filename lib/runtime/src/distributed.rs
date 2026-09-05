@@ -40,6 +40,48 @@ use tokio_util::sync::CancellationToken;
 type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 
+fn parse_tcp_response_stream_port(value: Option<&str>) -> Result<u16, PipelineError> {
+    let Some(port) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(0);
+    };
+
+    port.parse::<u16>().map_err(|_| {
+        PipelineError::Generic(format!(
+            "invalid {}: '{}' is not a valid port number",
+            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+            port
+        ))
+    })
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::parse_tcp_response_stream_port;
+    use crate::pipeline::PipelineError;
+
+    #[test]
+    fn response_stream_port_trims_and_treats_empty_as_unset() {
+        for value in [None, Some(""), Some(" \t ")] {
+            assert_eq!(parse_tcp_response_stream_port(value).unwrap(), 0);
+        }
+        assert_eq!(
+            parse_tcp_response_stream_port(Some(" 8080 ")).unwrap(),
+            8080
+        );
+    }
+
+    #[test]
+    fn response_stream_port_rejects_invalid_values() {
+        let error = parse_tcp_response_stream_port(Some(" 65536 ")).unwrap_err();
+        assert!(matches!(
+            error,
+            PipelineError::Generic(message)
+                if message
+                    == "invalid DYN_TCP_RESPONSE_STREAM_PORT: '65536' is not a valid port number"
+        ));
+    }
+}
+
 /// Distributed [Runtime] providing cluster-wide communication, transport, and discovery resources.
 ///
 /// `DistributedRuntime` is not a process singleton. Calling [`DistributedRuntime::new`] more than
@@ -391,21 +433,15 @@ impl DistributedRuntime {
         Ok(self
             .tcp_server
             .get_or_try_init(async move {
-                let port = match std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT) {
-                    Ok(p) => p.parse::<u16>().map_err(|_| {
-                        PipelineError::Generic(format!(
-                            "invalid {}: '{}' is not a valid port number",
-                            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
-                            p
-                        ))
-                    })?,
-                    Err(_) => 0,
-                };
-                let interface = std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST)
-                    .ok()
-                    .filter(|h| !h.is_empty());
+                let port_value =
+                    std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT).ok();
+                let port = parse_tcp_response_stream_port(port_value.as_deref())?;
+                let host = crate::utils::ip_resolver::host_override_from_env(
+                    tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+                )
+                .map_err(|error| PipelineError::Generic(error.to_string()))?;
 
-                let host_suffix = interface
+                let host_suffix = host
                     .as_ref()
                     .map_or(String::new(), |h| format!(" on host {h}"));
                 if port == 0 {
@@ -418,7 +454,10 @@ impl DistributedRuntime {
                     );
                 }
 
-                let options = tcp::server::ServerOptions { port, interface };
+                let options = tcp::server::ServerOptions {
+                    port,
+                    interface: host,
+                };
                 let server = tcp::server::TcpStreamServer::new(options).await?;
                 Ok::<_, PipelineError>(server)
             })

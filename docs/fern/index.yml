@@ -300,6 +300,13 @@ navigation:
 
   - tab: developer-guide
     layout:
+      - section: Security
+        icon: shield-halved
+        collapsed: true
+        contents:
+          - page: Secure Deployment Guidelines
+            path: pages/developer-guide/security/secure-deployment-guidelines.md
+
       # ==================== Knowledge Base ====================
       - section: Knowledge Base
         icon: book-open
