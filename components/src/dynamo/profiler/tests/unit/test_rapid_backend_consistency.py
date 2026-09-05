@@ -225,8 +225,6 @@ class TestMergedAutoBackendPath:
 
         assert seen["k8s_image"] == f"{_REGISTRY}/sglang-runtime:1.2.3"
         assert seen["generator_backend"] == "sglang"
-        # The row carries no `backend` column, so the label alone reports
-        # nothing and the run would otherwise still be described as "auto".
         assert _generated_backend(row, "agg", task_configs) == "sglang"
 
 

@@ -8,12 +8,6 @@ its `backend:` field to. `derive_backend_image` maps a concrete backend to its
 published runtime image name and raises for anything else, so the automatic
 value has to be resolved to a concrete backend before an image is derived.
 Every search path must therefore be able to resolve it.
-
-This module imports only `dynamo.profiler.utils.profile_common` and the DGDR
-types, so it does not depend on the AIC simulation package that
-`dynamo.profiler.rapid` pulls in. It covers the backend enumeration rather
-than image substitution mechanics, which `test_planner_image_selection.py`
-already covers.
 """
 
 import pytest

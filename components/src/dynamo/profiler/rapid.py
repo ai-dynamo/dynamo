@@ -91,14 +91,8 @@ def _generated_backend(
     chosen_exp: str,
     task_configs: dict[str, Task],
 ) -> str | None:
-    """The backend the generated deployment runs.
-
-    ``_generate_dgd_from_pick`` takes both the runtime image and the command
-    line from the resolved task config, so that task's backend is the one the
-    deployment actually runs. Reading it through the same lookup covers the
-    merged rows that carry ``_task_key`` but no ``backend`` column, where the
-    row label alone resolves nothing. Falls back to the row label when no task
-    resolves, which is also the case in which nothing is generated.
+    """The backend the generated deployment runs, read through the same task
+    lookup ``_generate_dgd_from_pick`` derives its image and command line from.
     """
     if best_config_df is None or best_config_df.empty:
         return None
