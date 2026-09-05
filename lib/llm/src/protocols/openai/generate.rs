@@ -92,6 +92,13 @@ impl GenerateRequest {
             return Err("sampling_params.max_tokens must be greater than 0.".to_string());
         }
 
+        if let Some(logprobs) = self.sampling_params.logprobs()
+            && logprobs < 0
+            && logprobs != -1
+        {
+            return Err("sampling_params.logprobs must be non-negative or -1.".to_string());
+        }
+
         if let Some(prompt_logprobs) = self.sampling_params.prompt_logprobs() {
             if prompt_logprobs < 0 && prompt_logprobs != -1 {
                 return Err(
@@ -172,6 +179,7 @@ pub struct SamplingParams {
     /// typed view opaque avoids duplicating version-specific vLLM validation.
     structured_outputs: Option<Value>,
     skip_reading_prefix_cache: Option<bool>,
+    skip_special_tokens: Option<bool>,
     vllm_xargs: Option<HashMap<String, Value>>,
 }
 
@@ -194,6 +202,10 @@ impl SamplingParams {
 
     pub fn prompt_logprobs(&self) -> Option<i32> {
         self.prompt_logprobs
+    }
+
+    pub fn skip_special_tokens(&self) -> Option<bool> {
+        self.skip_special_tokens
     }
 
     pub fn as_value(&self) -> &Value {
@@ -254,6 +266,7 @@ impl<'de> Deserialize<'de> for SamplingParams {
             logprob_token_ids: field!(logprob_token_ids),
             structured_outputs: field!(structured_outputs),
             skip_reading_prefix_cache: field!(skip_reading_prefix_cache),
+            skip_special_tokens: field!(skip_special_tokens),
             vllm_xargs: field!(vllm_xargs),
             raw,
         })
@@ -296,6 +309,8 @@ pub struct GenerateResponseChoice {
     pub finish_reason: Option<String>,
 
     pub routed_experts: Option<String>,
+
+    pub sampling_mask: Option<Vec<Vec<u32>>>,
 }
 
 /// Token-in/token-out generation response.
@@ -324,6 +339,7 @@ struct GenerateChoiceAcc {
     logprobs: Option<Vec<Value>>,
     finish_reason: Option<String>,
     routed_experts: Option<String>,
+    sampling_mask: Option<Vec<Vec<u32>>>,
 }
 
 impl GenerateChoiceAcc {
@@ -378,6 +394,7 @@ impl GenerateChoiceAcc {
             logprobs,
             finish_reason,
             routed_experts,
+            sampling_mask,
         } = self;
         let logprobs = if options.include_logprobs {
             let content = logprobs.ok_or_else(|| {
@@ -395,6 +412,14 @@ impl GenerateChoiceAcc {
         } else {
             None
         };
+        if let Some(sampling_mask) = sampling_mask.as_ref() {
+            anyhow::ensure!(
+                sampling_mask.len() == token_ids.len(),
+                "generate choice {index} returned {} sampling-mask rows for {} tokens",
+                sampling_mask.len(),
+                token_ids.len()
+            );
+        }
 
         Ok(GenerateResponseChoice {
             index,
@@ -402,6 +427,7 @@ impl GenerateChoiceAcc {
             logprobs,
             finish_reason,
             routed_experts,
+            sampling_mask,
         })
     }
 }
@@ -544,6 +570,7 @@ impl GenerateAggregator {
             logprobs: None,
             finish_reason: None,
             routed_experts: None,
+            sampling_mask: None,
         });
         if let Some(engine_data) = output.engine_data.as_ref() {
             if let Some(routed_experts) = engine_data.get("routed_experts") {
@@ -552,6 +579,17 @@ impl GenerateAggregator {
                         anyhow::anyhow!("invalid generate routed_experts payload: {error}")
                     })?,
                 );
+            }
+            if let Some(sampling_mask) = engine_data.get("sampling_mask") {
+                let rows: Vec<Vec<u32>> =
+                    serde_json::from_value(sampling_mask.clone()).map_err(|error| {
+                        anyhow::anyhow!("invalid generate sampling_mask payload: {error}")
+                    })?;
+                anyhow::ensure!(
+                    rows.iter().all(|row| !row.is_empty()),
+                    "invalid generate sampling_mask payload: rows must not be empty"
+                );
+                choice.sampling_mask.get_or_insert_default().extend(rows);
             }
             if let Some(kv_transfer_params) = engine_data.get("kv_transfer_params") {
                 self.kv_transfer_params = Some(kv_transfer_params.clone());
@@ -833,6 +871,7 @@ mod tests {
                 logprobs: None,
                 finish_reason: None,
                 routed_experts: None,
+                sampling_mask: None,
             }],
             prompt_logprobs: None,
             kv_transfer_params: None,
@@ -849,6 +888,7 @@ mod tests {
         assert_eq!(value["choices"][0]["logprobs"], Value::Null);
         assert_eq!(value["choices"][0]["finish_reason"], Value::Null);
         assert_eq!(value["choices"][0]["routed_experts"], Value::Null);
+        assert_eq!(value["choices"][0]["sampling_mask"], Value::Null);
 
         let round: GenerateResponse =
             serde_json::from_value(value).expect("round-trip deserialize");
@@ -990,6 +1030,7 @@ mod tests {
                     },
                 ]]),
                 engine_data: Some(json!({
+                    "sampling_mask": [[7, 100]],
                     "prompt_logprobs": [
                         null,
                         {
@@ -1019,6 +1060,7 @@ mod tests {
                 finish_reason: Some(crate::protocols::common::FinishReason::Length),
                 engine_data: Some(json!({
                     "routed_experts": "encoded-experts",
+                    "sampling_mask": [[8, 101]],
                     "kv_transfer_params": {"connector": "x"}
                 })),
                 ..Default::default()
@@ -1043,6 +1085,14 @@ mod tests {
         assert_eq!(
             response.choices[0].routed_experts.as_deref(),
             Some("encoded-experts")
+        );
+        assert_eq!(
+            response.choices[0].sampling_mask,
+            Some(vec![vec![7, 100], vec![8, 101]])
+        );
+        assert_eq!(
+            serde_json::to_value(&response).expect("serialize generate response")["choices"][0]["sampling_mask"],
+            json!([[7, 100], [8, 101]])
         );
         let logprobs = response.choices[0]
             .logprobs
@@ -1088,14 +1138,20 @@ mod tests {
                 token_ids: vec![201],
                 index: Some(1),
                 finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-                engine_data: Some(json!({"routed_experts": "experts-1"})),
+                engine_data: Some(json!({
+                    "routed_experts": "experts-1",
+                    "sampling_mask": [[201, 202]]
+                })),
                 ..Default::default()
             }),
             Annotated::from_data(LLMEngineOutput {
                 token_ids: vec![100],
                 index: Some(0),
                 finish_reason: Some(crate::protocols::common::FinishReason::Stop),
-                engine_data: Some(json!({"routed_experts": "experts-0"})),
+                engine_data: Some(json!({
+                    "routed_experts": "experts-0",
+                    "sampling_mask": [[100, 101]]
+                })),
                 ..Default::default()
             }),
         ]);
@@ -1109,10 +1165,18 @@ mod tests {
             response.choices[0].routed_experts.as_deref(),
             Some("experts-0")
         );
+        assert_eq!(
+            response.choices[0].sampling_mask,
+            Some(vec![vec![100, 101]])
+        );
         assert_eq!(response.choices[1].index, 1);
         assert_eq!(
             response.choices[1].routed_experts.as_deref(),
             Some("experts-1")
+        );
+        assert_eq!(
+            response.choices[1].sampling_mask,
+            Some(vec![vec![201, 202]])
         );
     }
 
@@ -1135,6 +1199,29 @@ mod tests {
                 .to_string()
                 .contains("invalid generate routed_experts payload")
         );
+    }
+
+    #[tokio::test]
+    async fn generate_response_rejects_malformed_sampling_masks() {
+        for sampling_mask in [json!([[]]), json!([[100], [101]]), json!({"bad": "shape"})] {
+            let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+                token_ids: vec![100],
+                index: Some(0),
+                finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+                engine_data: Some(json!({"sampling_mask": sampling_mask})),
+                ..Default::default()
+            })]);
+
+            let error = GenerateResponse::from_annotated_stream(stream, "req-mask".to_string())
+                .await
+                .expect_err("malformed sampling mask must fail");
+
+            assert!(
+                error.to_string().contains("sampling_mask")
+                    || error.to_string().contains("sampling-mask rows"),
+                "unexpected error: {error}"
+            );
+        }
     }
 
     #[tokio::test]

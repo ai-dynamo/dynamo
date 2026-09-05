@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use dynamo_backend_common::engine::RoutingHints;
 use dynamo_backend_common::{
     DisaggregationMode, FinishReason, GenerateContext, LLMEngine, MultimodalData, OutputOptions,
@@ -16,6 +17,7 @@ use dynamo_backend_common::{
 };
 use dynamo_sidecar_common::{GrpcEndpoint, GrpcTransportConfig};
 use futures::{Stream, StreamExt};
+use prost::Message;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, oneshot};
@@ -546,6 +548,8 @@ fn sequence_response(
                 kv_transfer_params,
                 ec_transfer_params: None,
             }),
+            routed_experts: None,
+            sampling_mask: Vec::new(),
         }),
     }
 }
@@ -579,6 +583,8 @@ fn encode_response(ec_transfer_params: Option<prost_types::Struct>) -> pb::Gener
                 kv_transfer_params: None,
                 ec_transfer_params,
             }),
+            routed_experts: None,
+            sampling_mask: Vec::new(),
         }),
     }
 }
@@ -596,6 +602,7 @@ fn encode_response_enforces_terminal_contract() {
         .expect("finish info")
         .finish_reason = pb::finish_info::FinishReason::Length as i32;
     let error = ResponseState::new(&request, DisaggregationMode::Encode)
+        .expect("valid response state")
         .convert(length)
         .expect_err("Length must not become a successful encoder handoff");
     assert!(error.to_string().contains("invalid finish reason"));
@@ -611,6 +618,7 @@ fn encode_response_enforces_terminal_contract() {
         .expect("finish info")
         .num_output_tokens = 1;
     let error = ResponseState::new(&request, DisaggregationMode::Encode)
+        .expect("valid response state")
         .convert(token_producing)
         .expect_err("Encode must remain tokenless");
     assert!(error.to_string().contains("produced output tokens"));
@@ -623,6 +631,7 @@ fn encode_response_enforces_terminal_contract() {
         .expect("finish info")
         .finish_reason = pb::finish_info::FinishReason::Aborted as i32;
     let terminal = ResponseState::new(&request, DisaggregationMode::Encode)
+        .expect("valid response state")
         .convert(cancelled)
         .expect("cancelled response")
         .expect("cancelled terminal");
@@ -633,7 +642,8 @@ fn encode_response_enforces_terminal_contract() {
 #[test]
 fn prompt_logprobs_are_retained_for_the_terminal_chunk() {
     let request = request();
-    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let mut state =
+        ResponseState::new(&request, DisaggregationMode::Aggregated).expect("valid response state");
     let mut first_response = sequence_response(false, true, None);
     first_response.prompt_info = Some(pb::PromptInfo {
         num_prompt_tokens: 3,
@@ -670,7 +680,8 @@ fn prompt_logprobs_are_retained_for_the_terminal_chunk() {
 #[test]
 fn negative_infinity_logprobs_are_normalized() {
     let request = request();
-    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let mut state =
+        ResponseState::new(&request, DisaggregationMode::Aggregated).expect("valid response state");
     let mut response = sequence_response(true, true, None);
     response.prompt_info = Some(pb::PromptInfo {
         num_prompt_tokens: 3,
@@ -712,7 +723,8 @@ fn negative_infinity_logprobs_are_normalized() {
 fn zero_output_logprobs_omits_top_logprobs() {
     let mut request = request();
     request.output_options.logprobs = Some(0);
-    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated);
+    let mut state =
+        ResponseState::new(&request, DisaggregationMode::Aggregated).expect("valid response state");
     let mapped = state
         .convert(sequence_response(true, true, None))
         .expect("convert response")
@@ -720,6 +732,121 @@ fn zero_output_logprobs_omits_top_logprobs() {
 
     assert_eq!(mapped.log_probs.as_deref(), Some(&[-0.25][..]));
     assert!(mapped.top_logprobs.is_none());
+}
+
+#[test]
+fn full_vocabulary_logprobs_map_to_all_candidates() {
+    let mut request = request();
+    request.output_options.logprobs = None;
+    request.output_options.logprobs_all = true;
+    request.output_options.prompt_logprobs = None;
+    request.output_options.prompt_logprobs_all = true;
+
+    let wire = build_generate_request(
+        request.clone(),
+        "all-logprobs".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("build all-candidate request");
+    let response = wire.response.expect("response options");
+    assert!(response.output_logprobs);
+    assert!(response.prompt_logprobs);
+    assert!(matches!(
+        response.output_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::All(true))
+    ));
+    assert!(matches!(
+        response.prompt_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::All(true))
+    ));
+
+    let mut state =
+        ResponseState::new(&request, DisaggregationMode::Aggregated).expect("valid response state");
+    let mapped = state
+        .convert(sequence_response(true, true, None))
+        .expect("convert response")
+        .expect("terminal output");
+    assert!(mapped.top_logprobs.is_some());
+}
+
+#[test]
+fn legacy_generate_envelope_supplies_missing_canonical_logprobs() {
+    let mut request = request();
+    request.output_options.logprobs = None;
+    request.output_options.prompt_logprobs = None;
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "legacy-logprobs",
+            "sampling_params": {"logprobs": 2, "prompt_logprobs": -1},
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated)
+        .expect("legacy response state");
+    let mapped = state
+        .convert(sequence_response(true, true, None))
+        .expect("convert response")
+        .expect("terminal output");
+    assert!(mapped.top_logprobs.is_some());
+
+    let wire = build_generate_request(
+        request,
+        "legacy-logprobs".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("build legacy request");
+    let response = wire.response.expect("response options");
+    assert!(matches!(
+        response.output_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::TopN(2))
+    ));
+    assert!(matches!(
+        response.prompt_candidates.and_then(|value| value.select),
+        Some(pb::candidate_tokens::Select::All(true))
+    ));
+}
+
+#[test]
+fn legacy_and_canonical_logprob_conflicts_are_rejected() {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "conflicting-logprobs",
+            "sampling_params": {"logprobs": 2},
+            "stream": false,
+            "priority": 0
+        }
+    }));
+
+    let error = build_generate_request(
+        request,
+        "conflicting-logprobs".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("raw and canonical selections must agree");
+    assert!(error.to_string().contains("conflicts"));
+}
+
+#[test]
+fn conflicting_logprob_selections_are_rejected() {
+    for prompt in [false, true] {
+        let mut request = request();
+        if prompt {
+            request.output_options.prompt_logprobs_all = true;
+        } else {
+            request.output_options.logprobs_all = true;
+        }
+
+        let error = build_generate_request(
+            request,
+            "conflicting-logprobs".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("conflicting candidate selections must fail");
+        assert!(error.to_string().contains("mutually exclusive"));
+    }
 }
 
 #[test]
@@ -745,6 +872,169 @@ fn oversized_logprob_counts_are_rejected() {
     )
     .expect_err("oversized prompt logprobs must fail");
     assert!(prompt_error.to_string().contains("must fit in i32"));
+}
+
+#[test]
+fn terminal_routed_experts_are_forwarded_with_prompt_logprobs() {
+    let request = request();
+    let mut state =
+        ResponseState::new(&request, DisaggregationMode::Aggregated).expect("valid response state");
+    let mut response = sequence_response(true, true, None);
+    response.prompt_info = Some(pb::PromptInfo {
+        num_prompt_tokens: 3,
+        token_ids: vec![11, 22, 33],
+        logprobs: vec![0.0, -0.2, -0.3],
+        ranks: vec![0, 1, 2],
+        candidate_tokens: vec![pb::CandidateTokenInfo::default(); 3],
+    });
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::OpaqueData {
+        data: b"\x93NUMPY\x01\x00native".to_vec(),
+    });
+    response.outputs.as_mut().unwrap().sampling_mask = vec![pb::TokenIds {
+        ids: vec![7, 42, 99],
+    }];
+
+    let output = state
+        .convert(response)
+        .expect("opaque routed data")
+        .expect("terminal output");
+    let engine_data = output.engine_data.expect("terminal engine data");
+    assert_eq!(engine_data["routed_experts"], json!("k05VTVBZAQBuYXRpdmU="));
+    assert_eq!(engine_data["sampling_mask"], json!([[7, 42, 99]]));
+    assert!(engine_data["prompt_logprobs"].is_array());
+}
+
+#[test]
+fn sampling_mask_uses_additive_sequence_output_tag() {
+    let output = pb::SequenceOutput {
+        sampling_mask: vec![pb::TokenIds { ids: vec![7, 42] }],
+        ..Default::default()
+    };
+    let wire = output.encode_to_vec();
+
+    assert!(
+        wire.contains(&82),
+        "field 10 must use its length-delimited tag"
+    );
+    assert_eq!(
+        pb::SequenceOutput::decode(wire.as_slice())
+            .expect("decode sequence output")
+            .sampling_mask,
+        output.sampling_mask
+    );
+}
+
+#[test]
+fn missing_sampling_mask_remains_compatible() {
+    let output = pb::SequenceOutput::decode([].as_slice()).expect("decode legacy empty output");
+
+    assert!(output.sampling_mask.is_empty());
+}
+
+#[test]
+fn large_terminal_routed_experts_are_not_truncated() {
+    let request = request();
+    let mut state =
+        ResponseState::new(&request, DisaggregationMode::Aggregated).expect("valid response state");
+    let payload = (0..(6 * 1024 * 1024 + 17))
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let mut response = sequence_response(true, true, None);
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::OpaqueData {
+        data: payload.clone(),
+    });
+
+    let output = state
+        .convert(response)
+        .expect("large opaque routed data")
+        .expect("terminal output");
+    let encoded = output.engine_data.as_ref().unwrap()["routed_experts"]
+        .as_str()
+        .expect("base64 routed data");
+    assert_eq!(BASE64_STANDARD.decode(encoded).unwrap(), payload);
+}
+
+#[test]
+fn nonterminal_routed_experts_are_rejected() {
+    let request = request();
+    let mut state =
+        ResponseState::new(&request, DisaggregationMode::Aggregated).expect("valid response state");
+    let mut response = sequence_response(false, true, None);
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::OpaqueData { data: vec![1] });
+
+    let error = state
+        .convert(response)
+        .expect_err("opaque routed data must be terminal");
+    assert!(error.to_string().contains("nonterminal"));
+}
+
+#[test]
+fn nonterminal_sampling_mask_is_rejected() {
+    let request = request();
+    let mut state =
+        ResponseState::new(&request, DisaggregationMode::Aggregated).expect("valid response state");
+    let mut response = sequence_response(false, true, None);
+    response.outputs.as_mut().unwrap().sampling_mask = vec![pb::TokenIds { ids: vec![42] }];
+
+    let error = state
+        .convert(response)
+        .expect_err("sampling masks must be terminal");
+    assert!(error.to_string().contains("nonterminal"));
+}
+
+#[test]
+fn malformed_terminal_sampling_masks_are_rejected() {
+    for rows in [
+        vec![pb::TokenIds { ids: Vec::new() }],
+        vec![
+            pb::TokenIds { ids: vec![42] },
+            pb::TokenIds { ids: vec![43] },
+        ],
+    ] {
+        let request = request();
+        let mut state = ResponseState::new(&request, DisaggregationMode::Aggregated)
+            .expect("valid response state");
+        let mut response = sequence_response(true, true, None);
+        response.outputs.as_mut().unwrap().sampling_mask = rows;
+
+        assert!(
+            state
+                .convert(response)
+                .expect_err("malformed sampling mask must fail")
+                .to_string()
+                .contains("sampling mask")
+        );
+    }
+}
+
+#[test]
+fn encoder_routed_experts_are_rejected() {
+    let request = epd_image_request();
+    let mut response = encode_response(Some(
+        json_to_struct(encoder_handoff()).expect("encoder handoff"),
+    ));
+    response.outputs.as_mut().unwrap().routed_experts = Some(pb::OpaqueData { data: vec![1] });
+
+    let error = ResponseState::new(&request, DisaggregationMode::Encode)
+        .expect("valid response state")
+        .convert(response)
+        .expect_err("encoder output cannot carry routed experts");
+    assert!(error.to_string().contains("encoder response"));
+}
+
+#[test]
+fn encoder_sampling_mask_is_rejected() {
+    let request = epd_image_request();
+    let mut response = encode_response(Some(
+        json_to_struct(encoder_handoff()).expect("encoder handoff"),
+    ));
+    response.outputs.as_mut().unwrap().sampling_mask = vec![pb::TokenIds { ids: vec![42] }];
+
+    let error = ResponseState::new(&request, DisaggregationMode::Encode)
+        .expect("valid response state")
+        .convert(response)
+        .expect_err("encoder output cannot carry a sampling mask");
+    assert!(error.to_string().contains("encoder response"));
 }
 
 struct FakeServer {
@@ -995,6 +1285,20 @@ fn engine_config_normalizes_total_kv_blocks_per_dp_rank() {
     let registration = model.engine_config().llm.expect("LLM registration");
 
     assert_eq!(registration.total_kv_blocks, Some(2048));
+}
+
+#[test]
+fn engine_config_advertises_vllm_generate_capability() {
+    let model =
+        DiscoveredModel::from_proto(model_info(), server_info()).expect("valid discovery metadata");
+
+    assert_eq!(
+        model
+            .engine_config()
+            .runtime_data
+            .get("vllm_inference_v1_generate"),
+        Some(&json!(true))
+    );
 }
 
 #[test]
@@ -2088,6 +2392,280 @@ async fn decode_cancellation_maps_premature_eof_to_cancelled() {
         .expect("cancelled terminal")
         .expect("cancelled output");
     assert_eq!(terminal.finish_reason, Some(FinishReason::Cancelled));
+}
+
+const VALID_MM_KWARGS_BASE64: &str =
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgOlZmllbGSSp2JhdGNoZWSBq2tlZXBfb25fY3B1wg==";
+const ALTERNATE_VALID_MM_KWARGS_BASE64: &str =
+    "gaxwaXhlbF92YWx1ZXOCpGRhdGGTpXVpbnQ4kQPHAwMBAgSlZmllbGSSp2JhdGNoZWSBq2tlZXBfb25fY3B1wg==";
+
+fn request_with_preprocessed_features(features: serde_json::Value) -> PreprocessedRequest {
+    let mut request = request();
+    request.extra_args = Some(json!({
+        "vllm_tito": {
+            "request_id": "request-1",
+            "sampling_params": {},
+            "stream": false,
+            "priority": 0,
+            "features": features
+        }
+    }));
+    request
+}
+
+fn image_features(kwargs: serde_json::Value) -> serde_json::Value {
+    json!({
+        "mm_hashes": {"image": ["image-hash-a"]},
+        "mm_placeholders": {"image": [{"offset": 1, "length": 2}]},
+        "kwargs_data": {"image": [kwargs]}
+    })
+}
+
+#[test]
+fn preprocessed_multimodal_features_are_forwarded_to_vllm_grpc() {
+    let mut request =
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+    request.extra_args.as_mut().unwrap()["vllm_tito"]["sampling_params"]["routed_experts_prompt_start"] =
+        json!(2);
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("preprocessed features should be forwarded");
+
+    let feature = match wire.media[0].source.as_ref() {
+        Some(pb::media_item::Source::Features(feature)) => feature,
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert!(feature.identifier.starts_with("grpc-mm:"));
+    assert_ne!(feature.identifier, "image-hash-a");
+    assert_eq!(feature.mm_hash.as_deref(), Some("image-hash-a"));
+    assert_eq!((feature.offset, feature.length), (1, 2));
+    assert_eq!(feature.kwargs.as_ref().map(Vec::len), Some(64));
+    assert_eq!(
+        wire.response
+            .expect("response options")
+            .routed_experts_prompt_start,
+        Some(2)
+    );
+}
+
+#[test]
+fn routed_expert_prompt_start_rejects_invalid_values() {
+    for value in [
+        json!(-1),
+        json!(1.5),
+        json!("2"),
+        json!(u64::from(u32::MAX) + 1),
+    ] {
+        let mut request =
+            request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+        request.extra_args.as_mut().unwrap()["vllm_tito"]["sampling_params"]["routed_experts_prompt_start"] =
+            value;
+
+        let error = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("invalid routed expert prompt start must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("routed_experts_prompt_start must be an unsigned 32-bit integer")
+        );
+    }
+}
+
+#[test]
+fn routed_expert_prompt_start_must_be_inside_request_tokens() {
+    for start in [3, 4] {
+        let mut request =
+            request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+        request.extra_args.as_mut().unwrap()["vllm_tito"]["sampling_params"]["routed_experts_prompt_start"] =
+            json!(start);
+
+        let error = build_generate_request(
+            request,
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("routed expert prompt start must index the request tokens");
+        assert!(
+            error
+                .to_string()
+                .contains("must be less than the request token count 3")
+        );
+    }
+}
+
+#[test]
+fn preprocessed_multimodal_identifier_is_bound_to_inline_content() {
+    let first = build_generate_request(
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64))),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("first feature should be forwarded");
+    let second = build_generate_request(
+        request_with_preprocessed_features(image_features(json!(ALTERNATE_VALID_MM_KWARGS_BASE64))),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("second feature should be forwarded");
+
+    let identifier = |request: &pb::GenerateRequest| match request.media[0].source.as_ref() {
+        Some(pb::media_item::Source::Features(feature)) => feature.identifier.clone(),
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert_ne!(identifier(&first), identifier(&second));
+}
+
+#[test]
+fn preprocessed_multimodal_features_require_inline_kwargs() {
+    for kwargs in [
+        serde_json::Value::Null,
+        serde_json::Value::String(String::new()),
+    ] {
+        let error = build_generate_request(
+            request_with_preprocessed_features(image_features(kwargs)),
+            "request-1".to_string(),
+            DisaggregationMode::Aggregated,
+        )
+        .expect_err("empty feature kwargs must be rejected");
+        assert!(error.to_string().contains("features"));
+    }
+}
+
+#[test]
+fn preprocessed_multimodal_features_enforce_hash_and_count_limits() {
+    let mut oversized_hash = image_features(json!(VALID_MM_KWARGS_BASE64));
+    oversized_hash["mm_hashes"]["image"][0] = json!("h".repeat(257));
+    let hash_error = build_generate_request(
+        request_with_preprocessed_features(oversized_hash),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("producer hashes must be bounded");
+    assert!(hash_error.to_string().contains("between 1 and 256 bytes"));
+
+    let too_many = json!({
+        "mm_hashes": {"image": vec!["image-hash"; 65]},
+        "mm_placeholders": {"image": (0..65).map(|offset| json!({"offset": offset, "length": 1})).collect::<Vec<_>>()},
+        "kwargs_data": {"image": vec![VALID_MM_KWARGS_BASE64; 65]}
+    });
+    let count_error = build_generate_request(
+        request_with_preprocessed_features(too_many),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("feature count must be bounded");
+    assert!(count_error.to_string().contains("at most 64"));
+}
+
+#[test]
+fn preprocessed_multimodal_features_cannot_mix_with_raw_media() {
+    let mut request =
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+    request.multi_modal_data = Some(std::collections::HashMap::from([(
+        "image_url".to_string(),
+        vec![MultimodalData::RawUrl(
+            "data:image/png;base64,iVBORw0KGgo=".to_string(),
+        )],
+    )]));
+
+    let error = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect_err("raw media and preprocessed features must not be mixed");
+    assert!(error.to_string().contains("cannot be mixed"));
+}
+
+#[test]
+fn preprocessed_multimodal_features_consume_frontend_routing_hashes() {
+    let mut request =
+        request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64)));
+    request.extra_args.as_mut().expect("object extra args")["dynamo_mm_routing_hashes"] =
+        json!(["image-hash-a"]);
+
+    let wire = build_generate_request(
+        request,
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("frontend routing metadata should be consumed");
+
+    let feature = match wire.media[0].source.as_ref() {
+        Some(pb::media_item::Source::Features(feature)) => feature,
+        other => panic!("expected preprocessed features, got {other:?}"),
+    };
+    assert_eq!(feature.mm_hash.as_deref(), Some("image-hash-a"));
+}
+
+#[test]
+fn preprocessed_multimodal_features_allow_overlapping_audio_video_spans() {
+    let features = json!({
+        "mm_hashes": {
+            "video": ["video-hash-a"],
+            "audio": ["audio-hash-a"]
+        },
+        "mm_placeholders": {
+            "video": [{"offset": 1, "length": 2}],
+            "audio": [{"offset": 1, "length": 2}]
+        },
+        "kwargs_data": {
+            "video": [VALID_MM_KWARGS_BASE64],
+            "audio": [VALID_MM_KWARGS_BASE64]
+        }
+    });
+
+    let wire = build_generate_request(
+        request_with_preprocessed_features(features),
+        "request-1".to_string(),
+        DisaggregationMode::Aggregated,
+    )
+    .expect("overlapping audio and video features are valid");
+
+    assert_eq!(wire.media.len(), 2);
+    assert_eq!(wire.media[0].modality, pb::Modality::Video as i32);
+    assert_eq!(wire.media[1].modality, pb::Modality::Audio as i32);
+    assert!(wire.media.iter().all(|item| {
+        matches!(
+            item.source.as_ref(),
+            Some(pb::media_item::Source::Features(feature))
+                if (feature.offset, feature.length) == (1, 2)
+        )
+    }));
+}
+
+#[tokio::test]
+async fn preprocessed_multimodal_features_require_model_support() {
+    let engine = engine(
+        "http://127.0.0.1:9",
+        DisaggregationMode::Aggregated,
+        1,
+        model_info(),
+    );
+    let context = dynamo_backend_common::testing::mock_context();
+    let result = engine
+        .generate(
+            request_with_preprocessed_features(image_features(json!(VALID_MM_KWARGS_BASE64))),
+            GenerateContext::new(context, None),
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("a text-only model must reject preprocessed media before RPC submission"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("does not advertise multimodal support")
+    );
 }
 
 #[tokio::test]

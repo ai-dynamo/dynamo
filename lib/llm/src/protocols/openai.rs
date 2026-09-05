@@ -256,7 +256,9 @@ impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
 
         Ok(common::OutputOptions {
             logprobs,
+            logprobs_all: false,
             prompt_logprobs,
+            prompt_logprobs_all: false,
             skip_special_tokens,
             formatted_prompt,
             return_tokens_as_token_ids,
