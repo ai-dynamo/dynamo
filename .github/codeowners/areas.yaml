@@ -533,6 +533,12 @@ areas:
   - tests/router/test_router_e2e_with_vllm_xpu.py
   - tests/serve/multimodal_profiles/vllm_xpu.py
   - tests/serve/test_vllm_xpu.py
+# Deliberate ownership hand-offs. Each entry records a grant a change removes
+# on purpose, naming the outgoing '@org/team' handle rather than an area label.
+# The gate blocks a removal that is not recorded here, and blocks an entry that
+# matches no removal, so this list stays empty between hand-offs.
+ownership_transfers: []
+
 required_owners:
 - glob: components/src/dynamo/planner/connectors/clients/kubernetes_api.py
   owners:

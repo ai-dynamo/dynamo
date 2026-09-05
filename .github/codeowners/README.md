@@ -95,6 +95,47 @@ contract could never be retired. The edit is itself a policy change: it is
 judged full-tree and reviewed by this directory's owners, so lifting a
 guarantee is always a visible, owned decision.
 
+### Hand ownership to another team
+
+The strict gate blocks any edit that drops a team from paths that are still
+tracked, whether the edit deletes a glob, deletes a `shared` line, or repoints
+an area's `github_team` while every glob stays put. All three read the same
+way to the files: a team stops owning code it owned before.
+
+A hand-off is legitimate, so it is expressible -- it just cannot be silent.
+Record it in the same file, where it shows up in the same diff and gets the
+same review as the change it covers:
+
+```yaml
+ownership_transfers:
+  - glob: lib/kv-router/
+    removing: ['@ai-dynamo/dynamo-runtime-codeowners']
+    reason: router team took the subtree over in DIS-1234
+```
+
+Reassigning an area's team drops the outgoing team from every glob that area
+reached, so acknowledge it once with `glob: '*'` rather than one entry per
+path:
+
+```yaml
+ownership_transfers:
+  - glob: '*'
+    removing: ['@ai-dynamo/dynamo-frontend-codeowners']
+    reason: team renamed on GitHub
+```
+
+`removing` names the outgoing owner handle, which is the exact string the
+failure message prints -- copy it from there. Area labels are rejected. A
+label is a pointer: repoint its `github_team` and an approval written against
+the label silently follows to whichever team the label names next, so the
+approval for handing team A's code to team B would go on to approve handing
+team B's code to team C.
+
+An acknowledgement is live for exactly one change, the one whose diff carries
+it. An entry landed ahead of its removal fails as inert; one already on the
+base branch is spent and approves nothing further. Prune spent entries -- they
+warn until you do.
+
 ## External contributors
 
 An external individual who has earned ownership of an area is granted it by
