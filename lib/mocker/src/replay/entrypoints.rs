@@ -17,7 +17,7 @@ use super::{
     ReplayWorkerArtifacts, SlaThresholds, TraceSimulationReport,
 };
 use crate::common::protocols::{DirectRequest, MockEngineArgs};
-use crate::loadgen::{AgenticTrace, Trace, TraceFileFormat};
+use crate::loadgen::{AgenticReplayConfig, AgenticTrace, Trace, TraceFileFormat};
 use crate::scheduler::RouterEventVisibility;
 
 /// Replay artifact KV-event timestamp visibility override.
@@ -62,6 +62,7 @@ fn load_trace_from_file(
         TraceFileFormat::Dynamo => {
             bail!("Dynamo request traces must be loaded through the multi-file replay path")
         }
+        _ => bail!("trace format is not supported by this replay entrypoint"),
     }
 }
 
@@ -70,7 +71,7 @@ fn load_agentic_trace_from_file(
     trace_block_size: usize,
     arrival_speedup_ratio: f64,
 ) -> Result<AgenticTrace> {
-    AgenticTrace::from_agentic_mooncake(trace_path, trace_block_size)?
+    crate::loadgen::load_agentic_mooncake(trace_path, trace_block_size)?
         .normalize_starts()
         .speed_up_timing(arrival_speedup_ratio)
 }
@@ -1334,7 +1335,27 @@ pub fn simulate_concurrency_file_disagg_with_router_mode_and_format_and_scaling_
     let config = config.normalized()?;
     validate_offline_disagg_concurrency_args(&config, max_in_flight, router_mode)?;
     if trace_format == TraceFileFormat::AgenticMooncake {
-        bail!("agentic_mooncake trace format is not supported for disaggregated replay");
+        anyhow::ensure!(
+            scaling_policy.is_none(),
+            "scaling_policy replay only supports standard Mooncake traces"
+        );
+        let trace = load_agentic_trace_from_file(trace_path, trace_block_size, 1.0)?;
+        let replay_config = AgenticReplayConfig {
+            lanes: max_in_flight,
+            profile_duration_ms: max_sim_time_ms
+                .unwrap_or_else(|| AgenticReplayConfig::default().profile_duration_ms),
+            ..AgenticReplayConfig::default()
+        };
+        return crate::replay::offline::simulate_agentic_replay_disagg(
+            config,
+            router_config,
+            prefill_load_estimator,
+            trace,
+            replay_config,
+            router_mode,
+            record_per_request,
+            sla,
+        );
     }
     if trace_accumulates_session_deltas(trace_format) {
         bail!("mooncake-delta trace format is not supported for disaggregated replay");
@@ -2517,9 +2538,9 @@ mod tests {
 
         let trace = load_agentic_trace_from_file(file.path(), 4, 2.0).unwrap();
 
-        assert_eq!(trace.turns[0].first_ready_timestamp_ms, Some(0.0));
-        assert_eq!(trace.turns[1].first_ready_timestamp_ms, Some(15.0));
-        assert_eq!(trace.turns[1].delay_after_dependencies_ms, 8.0);
+        assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
+        assert_eq!(trace.nodes()[1].not_before_ms(), 0.0);
+        assert_eq!(trace.nodes()[1].dependencies()[0].delay_ms, 8.0);
 
         let report = simulate_trace_live_file_with_router_mode_and_format_and_options(
             replay_test_args(),

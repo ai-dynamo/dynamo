@@ -312,6 +312,7 @@ impl PendingRequest {
     fn scheduling_request(
         &self,
         worker_loads: FxHashMap<WorkerWithDpRank, WorkerLoadProjection>,
+        pinned_worker: Option<WorkerWithDpRank>,
     ) -> SchedulingRequest {
         SchedulingRequest {
             mode: ScheduleMode::Tracked {
@@ -334,7 +335,7 @@ impl PendingRequest {
                 .clone()
                 .map(|session_id| SessionContext::new(session_id, None, None, None, None)),
             expected_output_tokens: self.expected_output_tokens,
-            pinned_worker: None,
+            pinned_worker,
             allowed_worker_ids: None,
             routing_constraints: RoutingConstraints::default(),
             shared_cache_hits: None,
@@ -358,6 +359,7 @@ pub(crate) struct OfflineReplayRouter {
     prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
     decay_time_epoch: Instant,
     tracking_hash: TrackingHashContext,
+    session_affinity: Option<FxHashMap<String, WorkerWithDpRank>>,
 }
 
 pub(in crate::replay) struct KvRouterPlacement {
@@ -371,20 +373,17 @@ impl KvRouterPlacement {
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         topology: Vec<WorkerTopology>,
         selector_seed: Option<u64>,
+        session_affinity: bool,
     ) -> Result<Self> {
         let num_workers = topology.len();
-        let mut router = match selector_seed {
-            Some(seed) => OfflineReplayRouter::new_with_selector_seed(
-                args,
-                router_config,
-                prefill_load_estimator,
-                num_workers,
-                Some(seed),
-            )?,
-            None => {
-                OfflineReplayRouter::new(args, router_config, prefill_load_estimator, num_workers)?
-            }
-        };
+        let mut router = OfflineReplayRouter::new_with_options(
+            args,
+            router_config,
+            prefill_load_estimator,
+            num_workers,
+            selector_seed,
+            session_affinity,
+        )?;
         for worker in topology {
             router.register_worker_topology(worker)?;
         }
@@ -550,27 +549,30 @@ impl<Request: PlacementRequestView> PlacementPolicy<Request> for KvRouterPlaceme
 }
 
 impl OfflineReplayRouter {
+    #[cfg(test)]
     pub(crate) fn new(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
     ) -> Result<Self> {
-        Self::new_with_selector_seed(
+        Self::new_with_options(
             args,
             router_config,
             prefill_load_estimator,
             num_workers,
             None,
+            false,
         )
     }
 
-    pub(crate) fn new_with_selector_seed(
+    fn new_with_options(
         args: &MockEngineArgs,
         router_config: Option<KvRouterConfig>,
         prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
         num_workers: usize,
         selector_seed: Option<u64>,
+        session_affinity: bool,
     ) -> Result<Self> {
         let config = replay_router_config(args, router_config);
         let tracking_hash = TrackingHashContext::from_config(&config)?;
@@ -604,6 +606,7 @@ impl OfflineReplayRouter {
             // time derived from this epoch, not wall-clock progression.
             decay_time_epoch: Instant::now(),
             tracking_hash,
+            session_affinity: session_affinity.then(FxHashMap::default),
         };
         router.register_default_topology(num_workers)?;
         Ok(router)
@@ -914,6 +917,9 @@ impl OfflineReplayRouter {
     pub(crate) fn remove_worker(&mut self, worker_id: usize) -> Result<()> {
         let wid = worker_id as WorkerId;
         self.workers_with_configs.remove(&wid);
+        if let Some(bindings) = &mut self.session_affinity {
+            bindings.retain(|_, worker| worker.worker_id != wid);
+        }
         Ok(())
     }
 
@@ -1089,7 +1095,12 @@ impl OfflineReplayRouter {
         let worker_loads = self
             .slots
             .project_worker_loads(request.token_seq.as_deref(), decay_now);
-        let scheduling_request = request.scheduling_request(worker_loads);
+        let pinned_worker = request.session_id.as_ref().and_then(|session_id| {
+            self.session_affinity
+                .as_ref()
+                .and_then(|bindings| bindings.get(session_id).copied())
+        });
+        let scheduling_request = request.scheduling_request(worker_loads, pinned_worker);
         let best_available_overlap_blocks = u32::try_from(
             SchedulingContext::new(&scheduling_request, &self.workers_with_configs)
                 .best_cached_tokens()
@@ -1141,6 +1152,15 @@ impl OfflineReplayRouter {
                 decay_now,
             )
             .map_err(anyhow::Error::from)?;
+
+        if let (Some(bindings), Some(session_id)) =
+            (&mut self.session_affinity, request.session_id.as_ref())
+        {
+            let bound = bindings
+                .entry(session_id.clone())
+                .or_insert(selection.worker);
+            debug_assert_eq!(*bound, selection.worker);
+        }
 
         Ok(AdmitOutcome {
             worker_idx,
@@ -1427,7 +1447,7 @@ mod tests {
                 Some("session-a".to_string()),
             )
             .unwrap();
-        let scheduling_request = pending.scheduling_request(FxHashMap::default());
+        let scheduling_request = pending.scheduling_request(FxHashMap::default(), None);
 
         assert_eq!(
             scheduling_request
@@ -1572,6 +1592,45 @@ mod tests {
 
         assert_eq!(targets, vec![0, 1]);
         assert_eq!(router.pending_count(), 0);
+    }
+
+    #[test]
+    fn agentic_session_affinity_pins_attention_dp_rank() {
+        let mut args = replay_args();
+        args.dp_size = 2;
+        let mut router = OfflineReplayRouter::new_with_options(
+            &args,
+            Some(router_config()),
+            None,
+            1,
+            Some(42),
+            true,
+        )
+        .unwrap();
+
+        let first = router
+            .on_request_arrival_for_session(
+                &request(1, 7),
+                None,
+                Some("session-a".to_string()),
+                0.0,
+            )
+            .unwrap();
+        let second = router
+            .on_request_arrival_for_session(
+                &request(2, 8),
+                None,
+                Some("session-a".to_string()),
+                1.0,
+            )
+            .unwrap();
+
+        assert_eq!(first.admissions.len(), 1);
+        assert_eq!(second.admissions.len(), 1);
+        assert_eq!(
+            first.admissions[0].worker_idx,
+            second.admissions[0].worker_idx
+        );
     }
 
     #[test]

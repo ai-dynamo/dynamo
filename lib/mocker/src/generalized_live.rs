@@ -401,7 +401,7 @@ impl GroupedLiveActor {
         self.clock_origin.elapsed().as_secs_f64() * 1_000.0
     }
 
-    async fn publish(&self, event: GroupedLiveEvent) -> Result<()> {
+    async fn publish(&mut self, event: GroupedLiveEvent) -> Result<()> {
         tokio::select! {
             biased;
             result = self.event_tx.send(event) => {

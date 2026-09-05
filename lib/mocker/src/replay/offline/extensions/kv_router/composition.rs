@@ -95,6 +95,7 @@ pub(in crate::replay) struct KvReplayComposition {
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
     scaling_enabled: bool,
     determinism: ReplayDeterminism,
+    session_affinity: bool,
 }
 
 impl KvReplayComposition {
@@ -116,6 +117,7 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            session_affinity: false,
         }
     }
 
@@ -141,7 +143,13 @@ impl KvReplayComposition {
             scaling_policy,
             scaling_enabled,
             determinism: ReplayDeterminism::Random,
+            session_affinity: false,
         }
+    }
+
+    pub(in crate::replay) fn with_session_affinity(mut self, enabled: bool) -> Self {
+        self.session_affinity = enabled;
+        self
     }
 }
 
@@ -177,6 +185,7 @@ impl ReplayComposition for KvReplayComposition {
             self.prefill_load_estimator.take(),
             topology,
             self.determinism.selector_seed(),
+            self.session_affinity,
         )
     }
 
@@ -220,6 +229,7 @@ impl ReplayComposition for KvReplayComposition {
             self.prefill_load_estimator.take(),
             prefill_topology,
             self.determinism.selector_seed(),
+            self.session_affinity,
         )
         .context("constructing prefill KV Router placement")?;
         let decode = KvRouterPlacement::new_with_selector_seed(
@@ -228,6 +238,7 @@ impl ReplayComposition for KvReplayComposition {
             None,
             decode_topology,
             self.determinism.selector_seed(),
+            self.session_affinity,
         )
         .context("constructing decode KV Router placement")?;
         Ok((prefill, decode))

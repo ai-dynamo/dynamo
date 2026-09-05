@@ -23,7 +23,7 @@ use super::normalize_trace_requests;
 use crate::common::handoff::NormalizedHandoffConformance;
 use crate::common::protocols::{DirectRequest, EngineType, MockEngineArgs, SglangArgs, WorkerType};
 use crate::engine_adapter::{aggregated_replay_setup, disaggregated_replay_setup};
-use crate::loadgen::{AgenticTrace, Trace, WorkloadDriver};
+use crate::loadgen::{AgenticReplayConfig, AgenticTrace, Trace, WorkloadDriver};
 use crate::replay::{
     OfflineDisaggReplayConfig, ReplayPrefillLoadEstimator, ReplayRouterMode, ReplayWorkerArtifacts,
     SlaThresholds, TraceSimulationReport,
@@ -183,6 +183,7 @@ fn run_disaggregated(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    session_affinity: bool,
 ) -> Result<TraceSimulationReport> {
     let capture_options = ReplayCaptureOptions {
         capture_per_request: record_per_request,
@@ -202,6 +203,7 @@ fn run_disaggregated(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        session_affinity,
     )
 }
 
@@ -217,6 +219,7 @@ fn run_disaggregated_with_capture_options(
     max_sim_time_ms: Option<f64>,
     sla: SlaThresholds,
     scaling_policy: Option<Box<dyn ReplayScalingPolicy>>,
+    session_affinity: bool,
 ) -> Result<TraceSimulationReport> {
     let config = config.normalized()?;
     let (engine, factory) = disaggregated_replay_setup(&config.prefill_args, &config.decode_args)?;
@@ -255,7 +258,8 @@ fn run_disaggregated_with_capture_options(
                 router_config,
                 prefill_load_estimator,
                 scaling_policy,
-            ),
+            )
+            .with_session_affinity(session_affinity),
         )?
         .with_capture_options(capture_options)
         .with_runtime_input(input)
@@ -619,6 +623,35 @@ pub(crate) fn simulate_agentic_trace_workload(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn simulate_agentic_replay_disagg(
+    config: OfflineDisaggReplayConfig,
+    router_config: Option<ReplayKvRouterConfig>,
+    prefill_load_estimator: Option<ReplayPrefillLoadEstimator>,
+    trace: AgenticTrace,
+    replay_config: AgenticReplayConfig,
+    router_mode: ReplayRouterMode,
+    record_per_request: bool,
+    sla: SlaThresholds,
+) -> Result<TraceSimulationReport> {
+    let config = config.normalized()?;
+    let driver =
+        WorkloadDriver::new_agentic_replay(trace, config.prefill_args.block_size, replay_config)?;
+    run_disaggregated(
+        config,
+        router_config,
+        prefill_load_estimator,
+        ReplayRuntimeInput::Workload(driver),
+        None,
+        router_mode,
+        record_per_request,
+        None,
+        sla,
+        None,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn simulate_trace_disagg_with_scaling_policy(
     config: OfflineDisaggReplayConfig,
     router_config: Option<ReplayKvRouterConfig>,
@@ -643,6 +676,7 @@ pub(crate) fn simulate_trace_disagg_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        false,
     )
 }
 
@@ -670,6 +704,7 @@ pub(crate) fn simulate_concurrency_disagg_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        false,
     )
 }
 
@@ -703,6 +738,7 @@ pub(crate) fn simulate_trace_workload_disagg_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        false,
     )
 }
 
@@ -735,6 +771,7 @@ pub(crate) fn simulate_trace_workload_disagg_with_capture_options(
         max_sim_time_ms,
         sla,
         None,
+        false,
     )
 }
 
@@ -770,5 +807,6 @@ pub(crate) fn simulate_concurrency_workload_disagg_with_scaling_policy(
         max_sim_time_ms,
         sla,
         scaling_policy,
+        false,
     )
 }
