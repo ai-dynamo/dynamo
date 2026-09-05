@@ -569,6 +569,13 @@ fn preprocessed_from_generate_with_tracker(
     let max_tokens = sampling.max_tokens();
     let min_tokens = sampling.min_tokens();
     let ignore_eos = sampling.ignore_eos();
+    let (logprobs, logprobs_all) =
+        canonical_logprobs(sampling.logprobs(), "sampling_params.logprobs")?;
+    let (prompt_logprobs, prompt_logprobs_all) = canonical_logprobs(
+        sampling.prompt_logprobs(),
+        "sampling_params.prompt_logprobs",
+    )?;
+    let skip_special_tokens = sampling.skip_special_tokens();
     let routing_priority = dynamo_routing_priority(request.priority);
     // With vLLM's default `enable_tower_connector_lora=false`, MM identifiers
     // are adapter-invariant and `lora_name` separately salts LM KV hashes. When
@@ -622,7 +629,14 @@ fn preprocessed_from_generate_with_tracker(
             n: Some(1),
             ..Default::default()
         })
-        .output_options(Default::default())
+        .output_options(crate::protocols::common::OutputOptions {
+            logprobs,
+            logprobs_all,
+            prompt_logprobs,
+            prompt_logprobs_all,
+            skip_special_tokens,
+            ..Default::default()
+        })
         .mm_routing_info(mm_routing_info)
         .routing(Some(crate::protocols::common::preprocessor::RoutingHints {
             dp_rank: data_parallel_rank,
@@ -641,6 +655,15 @@ fn preprocessed_from_generate_with_tracker(
         .tracker(Some(tracker))
         .build()
         .map_err(|error| anyhow::anyhow!("failed to build PreprocessedRequest: {error}"))
+}
+
+fn canonical_logprobs(value: Option<i32>, field: &str) -> anyhow::Result<(Option<u32>, bool)> {
+    match value {
+        None => Ok((None, false)),
+        Some(value) if value >= 0 => Ok((Some(value as u32), false)),
+        Some(-1) => Ok((None, true)),
+        Some(value) => anyhow::bail!("{field} must be non-negative or -1; got {value}"),
+    }
 }
 
 /// Metrics adapter for the raw engine stream used by `/inference/v1/generate`.
@@ -1498,6 +1521,7 @@ mod tests {
         let invalid = [
             r#"{"token_ids":[1],"sampling_params":{},"stream_options":{"include_usage":true}}"#,
             r#"{"token_ids":[1],"sampling_params":{"max_tokens":0}}"#,
+            r#"{"token_ids":[1],"sampling_params":{"logprobs":-2}}"#,
             r#"{"token_ids":[1],"sampling_params":{"prompt_logprobs":-2}}"#,
             r#"{"token_ids":[1],"sampling_params":{"min_tokens":3,"max_tokens":2}}"#,
         ];
@@ -1783,6 +1807,78 @@ mod tests {
         assert_eq!(expected_token_ids, serde_json::json!([1, 2]));
         assert_eq!(envelope, &expected_envelope);
         assert!(envelope.get("token_ids").is_none());
+    }
+
+    #[test]
+    fn skip_special_tokens_reaches_canonical_output_options() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {"skip_special_tokens": false},
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+
+        assert_eq!(preprocessed.output_options.skip_special_tokens, Some(false));
+    }
+
+    #[test]
+    fn logprobs_reach_canonical_output_options() {
+        let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+            "token_ids": [1, 2],
+            "sampling_params": {"logprobs": 1, "prompt_logprobs": 2},
+            "model": "test-model"
+        }))
+        .expect("deserialize request");
+
+        let preprocessed = preprocessed_from_generate(
+            request,
+            "test-model",
+            None,
+            "resolved-request",
+            routing_metadata(16, false, None),
+        )
+        .expect("build request");
+
+        assert_eq!(preprocessed.output_options.logprobs, Some(1));
+        assert_eq!(preprocessed.output_options.prompt_logprobs, Some(2));
+    }
+
+    #[test]
+    fn full_vocabulary_logprobs_reach_canonical_output_options() {
+        for field in ["logprobs", "prompt_logprobs"] {
+            let request: GenerateRequest = serde_json::from_value(serde_json::json!({
+                "token_ids": [1, 2],
+                "sampling_params": {field: -1},
+                "model": "test-model"
+            }))
+            .expect("deserialize request");
+
+            let preprocessed = preprocessed_from_generate(
+                request,
+                "test-model",
+                None,
+                "resolved-request",
+                routing_metadata(16, false, None),
+            )
+            .expect("build request");
+
+            if field == "logprobs" {
+                assert!(preprocessed.output_options.logprobs_all);
+                assert_eq!(preprocessed.output_options.logprobs, None);
+            } else {
+                assert!(preprocessed.output_options.prompt_logprobs_all);
+                assert_eq!(preprocessed.output_options.prompt_logprobs, None);
+            }
+        }
     }
 
     #[test]

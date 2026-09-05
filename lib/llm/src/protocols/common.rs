@@ -644,8 +644,16 @@ pub struct OutputOptions {
     /// `logprobs+1` elements in the response
     pub logprobs: Option<u32>,
 
+    /// Return log probabilities for the full output vocabulary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub logprobs_all: bool,
+
     /// Number of log probabilities to return per prompt token.
     pub prompt_logprobs: Option<u32>,
+
+    /// Return log probabilities for the full prompt vocabulary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prompt_logprobs_all: bool,
 
     /// Whether to skip special tokens in the output.
     pub skip_special_tokens: Option<bool>,

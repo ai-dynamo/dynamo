@@ -92,6 +92,13 @@ impl GenerateRequest {
             return Err("sampling_params.max_tokens must be greater than 0.".to_string());
         }
 
+        if let Some(logprobs) = self.sampling_params.logprobs()
+            && logprobs < 0
+            && logprobs != -1
+        {
+            return Err("sampling_params.logprobs must be non-negative or -1.".to_string());
+        }
+
         if let Some(prompt_logprobs) = self.sampling_params.prompt_logprobs() {
             if prompt_logprobs < 0 && prompt_logprobs != -1 {
                 return Err(
@@ -172,6 +179,7 @@ pub struct SamplingParams {
     /// typed view opaque avoids duplicating version-specific vLLM validation.
     structured_outputs: Option<Value>,
     skip_reading_prefix_cache: Option<bool>,
+    skip_special_tokens: Option<bool>,
     vllm_xargs: Option<HashMap<String, Value>>,
 }
 
@@ -194,6 +202,10 @@ impl SamplingParams {
 
     pub fn prompt_logprobs(&self) -> Option<i32> {
         self.prompt_logprobs
+    }
+
+    pub fn skip_special_tokens(&self) -> Option<bool> {
+        self.skip_special_tokens
     }
 
     pub fn as_value(&self) -> &Value {
@@ -254,6 +266,7 @@ impl<'de> Deserialize<'de> for SamplingParams {
             logprob_token_ids: field!(logprob_token_ids),
             structured_outputs: field!(structured_outputs),
             skip_reading_prefix_cache: field!(skip_reading_prefix_cache),
+            skip_special_tokens: field!(skip_special_tokens),
             vllm_xargs: field!(vllm_xargs),
             raw,
         })
