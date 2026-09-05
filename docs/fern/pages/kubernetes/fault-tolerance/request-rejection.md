@@ -114,10 +114,13 @@ decision immediately. This endpoint does not enable `--router-mode kv` or
 
 </Step>
 
-<Step title="Add a worker-side hard cap">
+<Step title="Tune the worker-side hard cap">
 
-Optional. A worker can independently cap concurrent engine work and queue only a small burst. Set
-`--engine-request-limit N` (or `DYN_ENGINE_REQUEST_LIMIT`) on the **worker** component:
+Optional. Every worker already caps concurrent work at
+`ceil(3/2 x max_num_seqs x data_parallel_size)`, taken from the first usable capacity reported by a
+base model card registered in that process, or at `10000` when no card reports a usable
+`max_num_seqs`. To pin an explicit value, set `--engine-request-limit N` (or
+`DYN_ENGINE_REQUEST_LIMIT`) on the **worker** component:
 
 ```yaml
 - name: VllmWorker
@@ -131,14 +134,30 @@ Optional. A worker can independently cap concurrent engine work and queue only a
             - "32"
 ```
 
-When all `N` engine slots and the overflow queue are full, the worker rejects the request and the
-Frontend returns HTTP 529 when migration is disabled or its retry attempts do not find capacity.
-With a positive `--migration-limit`, an unpinned request using in-process KV routing retries on another
-eligible worker first. Split or standalone routing uses global overload and fault state, so its
-retry is best-effort and can select the same worker again.
-`DYN_DYNAMO_REQUEST_QUEUE_LIMIT` controls the advanced overflow-queue size, defaults to `16`, must be
-at least `2`, and has an effect only when the engine limit is set. The effective cap is `N + Q`
-in-flight requests per worker.
+When all `N` engine slots and the overflow queue are full, the worker refuses the request before it
+reaches the engine and the request fails. `DYN_DYNAMO_REQUEST_QUEUE_LIMIT` controls the advanced
+overflow-queue size and defaults to `40000`. The effective cap is `N + Q` in-flight requests per
+worker process, counted across the TCP and NATS request planes together and across every endpoint the
+process serves.
+
+`DYN_DYNAMO_REQUEST_QUEUE_TIMEOUT_MS` bounds how long a request may wait in that overflow queue, in
+whole milliseconds, and defaults to `5000`. It is environment-only, with no command-line flag. A
+request still queued when its deadline passes leaves the queue immediately and is refused exactly as
+a full queue refuses one. Set it lower when a stale queued request is worth less than the queue place
+it holds, and higher when clients would rather wait. It does not limit how long an admitted request
+may run.
+
+Set `DYN_DYNAMO_REQUEST_QUEUE_ENABLE_CONTROLLED_DELAY` to `0` on the **worker** component to stop
+rejecting queued requests for age altogether. Nothing then leaves the queue for waiting too long: a
+request may wait longer than the delay and is still admitted in its FIFO turn, and the queue length
+limit is the only backpressure left.
+
+After the worker has rejected a queued request for age, the next slot it frees goes to the newest
+queued request rather than the oldest, and the slot after that goes to the oldest again — so a worker
+recovering from a backlog does not work through requests whose queue delay is nearly spent. Set
+`DYN_DYNAMO_REQUEST_QUEUE_ENABLE_ADAPTIVE_LIFO` to `0` on the **worker** component to serve the
+oldest queued request in every case. The queue delay, the deadlines and which requests are rejected
+are the same either way.
 
 See [Runtime Configuration](../../reference/components/runtime-configuration.mdx#operations) for the exact
 fields and [Worker-Side Request Admission](../../developer-guide/knowledge-base/concepts/fault-tolerance/request-rejection-architecture.md#worker-side-request-admission)
@@ -156,12 +175,25 @@ curl -s http://localhost:8000/metrics \
   | grep -E 'dynamo_frontend_worker_active_(decode_blocks|prefill_tokens)'
 ```
 
-Generate enough load to exceed the configured threshold, then confirm:
+Generate enough load to exceed the configured threshold, then confirm Frontend busy-threshold
+rejection:
 
 - The client receives HTTP 529.
 - `dynamo_frontend_model_rejection_total` increases for the affected `model` and `endpoint`.
-- Worker-side hard-cap tests increase `dynamo_rejection_request_total` when both the engine and queue
-  are full.
+
+The worker-side hard cap is verified differently: the refused request fails rather than returning a
+particular status, and `dynamo_backend_admission_rejection_total` increases with
+`reason="queue_full"` or `reason="request_expired"`. For `queue_full`, the worker logs `Worker at
+capacity (engine limit and queue both full), rejecting request` with the shed request's
+`request_id`. For `request_expired`, it logs `Request exceeded the backend admission queue delay,
+rejecting request` with the `request_id` and refuses the request with `Server overloaded: request
+rejected after exceeding the backend admission queue delay`. TCP request-plane saturation is
+reported separately through `dynamo_work_handler_enqueue_rejected_total`.
+
+`dynamo_backend_admission_request_queue_count` and `dynamo_backend_admission_engine_request_count`
+show live occupancy against their `_limit` counterparts, and
+`dynamo_backend_admission_dequeue_total{source="adaptive_lifo"}` increases when a freed slot goes to
+the newest queued request after a rejection.
 
 For all metric fields and labels, see
 [Cancellation and Rejection](../../reference/observability/metrics-catalog.mdx#cancellation-and-rejection).
