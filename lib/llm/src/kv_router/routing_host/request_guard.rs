@@ -27,7 +27,7 @@ use dynamo_kv_router::{
         BlockExtraInfo, BlockHashOptions, WorkerWithDpRank, compute_block_hash_for_seq,
         compute_next_seq_hash,
     },
-    scheduling::AdmissionAttempt,
+    scheduling::{AbortCause, AdmissionAttempt, RequestLifecycle},
     selector::WorkerSelector,
 };
 use dynamo_runtime::{
@@ -402,6 +402,9 @@ where
     worker: WorkerWithDpRank,
     approximate_lru: Option<ApproximateRequestLease>,
     lifecycle: Option<RequestAttemptLease>,
+    /// Classifier lifecycle for this attempt. Living here keeps it structurally
+    /// tied to KV routing: builtin and occupancy cleanups cannot hold one.
+    request_lifecycle: Option<Box<RequestLifecycle>>,
 }
 
 impl<Sel> KvRequestCleanup<Sel>
@@ -443,6 +446,7 @@ where
             worker,
             approximate_lru,
             lifecycle,
+            request_lifecycle: None,
         }
     }
 
@@ -521,6 +525,20 @@ where
         }
     }
 
+    fn request_lifecycle_mut(&mut self) -> Option<&mut RequestLifecycle> {
+        match self {
+            Self::Kv(cleanup) => cleanup.request_lifecycle.as_deref_mut(),
+            Self::Stateless { .. } | Self::Occupancy { .. } => None,
+        }
+    }
+
+    fn take_request_lifecycle(&mut self) -> Option<Box<RequestLifecycle>> {
+        match self {
+            Self::Kv(cleanup) => cleanup.request_lifecycle.take(),
+            Self::Stateless { .. } | Self::Occupancy { .. } => None,
+        }
+    }
+
     async fn finish(&mut self) {
         match self {
             Self::Kv(cleanup) => cleanup.finish().await,
@@ -595,19 +613,26 @@ where
         worker: WorkerWithDpRank,
         attempt: AdmissionAttempt,
         request: &PreprocessedRequest,
+        request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
             KvRequestCleanup::new(chooser, context_id, worker, attempt),
             request,
+            request_lifecycle,
         )
     }
 
     pub(super) fn new_kv_with_cleanup(
         request_metrics: Arc<RouterRequestMetrics>,
-        cleanup: KvRequestCleanup<Sel>,
+        mut cleanup: KvRequestCleanup<Sel>,
         request: &PreprocessedRequest,
+        mut request_lifecycle: Option<Box<RequestLifecycle>>,
     ) -> Self {
+        if let Some(lifecycle) = request_lifecycle.as_mut() {
+            lifecycle.observe_context_tokens(request.expanded_prompt_token_count());
+        }
+        cleanup.request_lifecycle = request_lifecycle;
         let chooser = &cleanup.chooser;
         let block_size = chooser.block_size() as usize;
         let isl_tokens = request.token_ids.len();
@@ -698,6 +723,12 @@ where
 
     pub(super) fn mark_dispatched(&mut self) {
         self.observability.mark_dispatched();
+        if let RequestCleanup::Kv(cleanup) = &mut self.cleanup {
+            let worker = cleanup.worker;
+            if let Some(lifecycle) = cleanup.request_lifecycle.as_mut() {
+                lifecycle.sent(worker);
+            }
+        }
     }
 
     pub(super) fn has_approximate_lru(&self) -> bool {
@@ -735,6 +766,18 @@ where
             && let Some(lifecycle) = self.cleanup.lifecycle()
         {
             lifecycle.touch();
+        }
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.responding();
+            lifecycle.observe_output_tokens(new_tokens);
+            if let Some(total_tokens) = item
+                .data
+                .as_ref()
+                .and_then(|data| data.completion_usage.as_ref())
+                .map(|usage| usage.total_tokens as usize)
+            {
+                lifecycle.observe_context_tokens(total_tokens);
+            }
         }
         if !self.prefill_marked {
             let has_tokens = item
@@ -809,6 +852,9 @@ where
     }
 
     pub(super) async fn finish(&mut self) {
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.complete();
+        }
         // Metrics must observe the completed request before cleanup releases its state.
         self.observability
             .record_metrics(self.record_itl_at_completion);
@@ -816,6 +862,26 @@ where
     }
 
     pub(super) async fn abort(&mut self) {
+        self.abort_with_error(None).await;
+    }
+
+    pub(super) async fn release_for_retry(&mut self) -> bool {
+        let Some(migration_state) = self.migration_state.as_ref() else {
+            return false;
+        };
+        let Some(mut lifecycle) = self.cleanup.take_request_lifecycle() else {
+            return false;
+        };
+        lifecycle.prepare_retry();
+        migration_state.store_request_lifecycle(lifecycle);
+        self.cleanup.finish().await;
+        true
+    }
+
+    pub(super) async fn abort_with_error(&mut self, error: Option<&AbortCause>) {
+        if let Some(lifecycle) = self.cleanup.request_lifecycle_mut() {
+            lifecycle.abort(error.map(crate::protocols::common::preprocessor::owned_abort_error));
+        }
         self.cleanup.finish().await;
     }
 }
