@@ -152,7 +152,7 @@ async def _register_model_with_runtime_config(
         )
         input_type = ModelInput.Text
         # Only override output_type for chat models, not for embeddings
-        if output_type != ModelType.Embedding:
+        if not output_type.supports_embedding():
             output_type = ModelType.Chat
 
     if runtime_config is not None and _supports_engine_generate(

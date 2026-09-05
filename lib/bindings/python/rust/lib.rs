@@ -1052,6 +1052,11 @@ impl ModelType {
         inner: llm_rs::model_type::ModelType::Pooling,
     };
 
+    #[classattr]
+    const Rerank: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Rerank,
+    };
+
     fn supports_chat(&self) -> bool {
         self.inner.supports_chat()
     }
@@ -1066,6 +1071,10 @@ impl ModelType {
 
     fn supports_pooling(&self) -> bool {
         self.inner.supports_pooling()
+    }
+
+    fn supports_rerank(&self) -> bool {
+        self.inner.supports_rerank()
     }
 
     fn __or__(&self, other: &Self) -> Self {

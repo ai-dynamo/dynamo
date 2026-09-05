@@ -88,7 +88,7 @@ async def init_embedding(
                 server_args,
                 dynamo_args,
                 input_type=ModelInput.Text,
-                output_type=ModelType.Embedding,
+                output_type=ModelType.Embedding | ModelType.Rerank,
                 readiness_gate=ready_event,
                 worker_type=WorkerType.Aggregated,
                 needs=[],

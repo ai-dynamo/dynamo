@@ -1648,8 +1648,8 @@ class ModelInput:
 class ModelType:
     """OpenAI-style surfaces supported by a model.
 
-    Values are Chat, Completions, Embedding, Classify, Pooling, TensorBased,
-    Images, Audios, Videos, Realtime, and Empty (no OpenAI surface).
+    Values are Chat, Completions, Embedding, Classify, Pooling, Rerank,
+    TensorBased, Images, Audios, Videos, Realtime, and Empty (no OpenAI surface).
     """
     # No OpenAI surface — used by prefill / encode workers whose role is
     # carried by WorkerType. Symmetric with the other ModelType.Foo members.
@@ -1671,6 +1671,8 @@ class ModelType:
     # Raw pooler output served on /v1/pooling (token embeddings, logits, rewards).
     # Usually combined with Classify or Embedding: ModelType.Classify | ModelType.Pooling.
     Pooling: ModelType
+    # Cross-encoder relevance scoring served on /v1/rerank.
+    Rerank: ModelType
 
     def __or__(self, other: ModelType) -> ModelType:
         ...
@@ -1689,6 +1691,10 @@ class ModelType:
 
     def supports_pooling(self) -> bool:
         """Return True if this model type supports /v1/pooling."""
+        ...
+
+    def supports_rerank(self) -> bool:
+        """Return True if this model type supports /v1/rerank."""
         ...
 
 class RouterMode:

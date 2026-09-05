@@ -20,6 +20,7 @@ from dynamo.sglang.request_handlers.embedding.metrics import (
     observe_embedding_input_tokens,
 )
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+from dynamo.sglang.request_handlers.rerank import RerankWorkerHandler
 
 
 def _encode_floats_to_base64(floats: List[float]) -> str:
@@ -44,6 +45,9 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         shutdown_event: Optional[asyncio.Event] = None,
     ):
         super().__init__(engine, config, publisher, None, shutdown_event)
+        self.rerank_handler = RerankWorkerHandler(
+            engine, enable_trace=self.enable_trace
+        )
         logging.info("Embedding worker handler initialized")
 
     def cleanup(self) -> None:
@@ -89,7 +93,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
 
     async def generate(
         self, request: dict, context: Context
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[Dict[str, Any] | List[Dict[str, Any]], None]:
         """
         Generate embeddings for the given input.
 
@@ -97,6 +101,11 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
             request: Embedding request dictionary.
             context: Context object for cancellation handling.
         """
+        if "query" in request or "documents" in request:
+            async for rerank_response in self.rerank_handler.generate(request, context):
+                yield rerank_response
+            return
+
         embedding_input = request.get("input")
         if isinstance(embedding_input, str):
             input_type = "str"

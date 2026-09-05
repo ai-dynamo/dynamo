@@ -381,6 +381,7 @@ struct StateFlags {
     cmpl_endpoints_enabled: AtomicBool,
     embeddings_endpoints_enabled: AtomicBool,
     classify_endpoints_enabled: AtomicBool,
+    rerank_endpoints_enabled: AtomicBool,
     pooling_endpoints_enabled: AtomicBool,
     images_endpoints_enabled: AtomicBool,
     videos_endpoints_enabled: AtomicBool,
@@ -399,6 +400,7 @@ impl StateFlags {
             EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Classify => self.classify_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Rerank => self.rerank_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Pooling => self.pooling_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Images => self.images_endpoints_enabled.load(Ordering::Relaxed),
             EndpointType::Videos => self.videos_endpoints_enabled.load(Ordering::Relaxed),
@@ -426,6 +428,9 @@ impl StateFlags {
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Classify => self
                 .classify_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Rerank => self
+                .rerank_endpoints_enabled
                 .store(enabled, Ordering::Relaxed),
             EndpointType::Pooling => self
                 .pooling_endpoints_enabled
@@ -476,6 +481,7 @@ impl State {
                 cmpl_endpoints_enabled: AtomicBool::new(false),
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 classify_endpoints_enabled: AtomicBool::new(false),
+                rerank_endpoints_enabled: AtomicBool::new(false),
                 pooling_endpoints_enabled: AtomicBool::new(false),
                 images_endpoints_enabled: AtomicBool::new(false),
                 videos_endpoints_enabled: AtomicBool::new(false),
@@ -1040,6 +1046,8 @@ static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
 static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
 /// Environment variable to set the classify endpoint path (default: `/v1/classify`)
 static HTTP_SVC_CLASSIFY_PATH_ENV: &str = "DYN_HTTP_SVC_CLASSIFY_PATH";
+/// Environment variable to set the rerank endpoint path (default: `/v1/rerank`)
+static HTTP_SVC_RERANK_PATH_ENV: &str = "DYN_HTTP_SVC_RERANK_PATH";
 /// Environment variable to set the pooling endpoint path (default: `/v1/pooling`)
 static HTTP_SVC_POOLING_PATH_ENV: &str = "DYN_HTTP_SVC_POOLING_PATH";
 /// Environment variable to set the responses endpoint path (default: `/v1/responses`)
@@ -1451,6 +1459,8 @@ impl HttpServiceConfigBuilder {
             super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
         let (classify_docs, classify_route) =
             super::openai::classify_router(state.clone(), var(HTTP_SVC_CLASSIFY_PATH_ENV).ok());
+        let (rerank_docs, rerank_route) =
+            super::openai::rerank_router(state.clone(), var(HTTP_SVC_RERANK_PATH_ENV).ok());
         let (pooling_docs, pooling_route) =
             super::openai::pooling_router(state.clone(), var(HTTP_SVC_POOLING_PATH_ENV).ok());
         let (images_docs, images_route) = super::openai::images_router(state.clone(), None);
@@ -1467,6 +1477,7 @@ impl HttpServiceConfigBuilder {
         endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
         endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
         endpoint_routes.insert(EndpointType::Classify, (classify_docs, classify_route));
+        endpoint_routes.insert(EndpointType::Rerank, (rerank_docs, rerank_route));
         endpoint_routes.insert(EndpointType::Pooling, (pooling_docs, pooling_route));
         endpoint_routes.insert(EndpointType::Images, (images_docs, images_route));
         endpoint_routes.insert(EndpointType::Videos, (videos_docs, videos_route));
