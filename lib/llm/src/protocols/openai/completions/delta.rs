@@ -232,8 +232,11 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         // `NvExtResponseFieldSelection` (see `nvext.rs`). Both chat and
         // completions delta generators go through the same helper so the gating
         // rules stay in one place.
-        let prompt_logprobs_payload =
-            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
+        let prompt_logprobs_payload = if self.state.options().response_fields.prompt_logprobs {
+            common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref())?
+        } else {
+            None
+        };
         if let Some(nvext_response) = self.state.options().response_fields.build_response_nvext(
             Some(self.state.tracker_ref()),
             finish_reason.is_some(),
@@ -498,6 +501,27 @@ mod tests {
             .expect("choice generation");
 
         assert!(response.nvext.is_none());
+    }
+
+    #[test]
+    fn test_malformed_prompt_logprobs_errors_only_when_requested() {
+        let mut invalid_output = final_backend_output();
+        invalid_output.engine_data = Some(serde_json::json!({"prompt_logprobs": "invalid"}));
+
+        create_test_request()
+            .response_generator("req-prompt-logprobs-unrequested".to_string())
+            .choice_from_postprocessor(invalid_output.clone())
+            .expect("unrequested prompt logprobs are ignored");
+
+        let error = create_test_request_with_extra_fields(vec!["prompt_logprobs".to_string()])
+            .response_generator("req-prompt-logprobs-invalid".to_string())
+            .choice_from_postprocessor(invalid_output)
+            .expect_err("requested malformed prompt logprobs must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid prompt_logprobs payload")
+        );
     }
 
     #[test]
