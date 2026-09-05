@@ -47,6 +47,201 @@ pub struct MetadataUpload {
     pub url: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+#[serde(transparent)]
+pub struct RedactedString(String);
+
+impl std::fmt::Debug for RedactedString {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+fn deserialize_non_empty_redacted_string<'de, D>(
+    deserializer: D,
+) -> Result<RedactedString, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() {
+        return Err(serde::de::Error::custom("value must not be empty"));
+    }
+    Ok(RedactedString(value))
+}
+
+fn deserialize_non_empty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(serde::de::Error::custom("value must not be empty"));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn deserialize_positive_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    if value == 0 {
+        return Err(serde::de::Error::custom("value must be positive"));
+    }
+    Ok(value)
+}
+
+fn deserialize_artifact_contents<'de, D>(
+    deserializer: D,
+) -> Result<Vec<GenerationArtifactKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<GenerationArtifactKind>::deserialize(deserializer)?;
+    let mut unique = HashSet::new();
+    if values.iter().any(|value| !unique.insert(*value)) {
+        return Err(serde::de::Error::custom(
+            "generation_artifact.contents must not contain duplicates",
+        ));
+    }
+    Ok(values)
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationArtifactKind {
+    MoeRoutes,
+    SelectedLogprobs,
+    TopkLogprobs,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationArtifactFormat {
+    GenerationArtifactV1,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationArtifactDeliveryMode {
+    ObjectStore,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PresignedHttpPutTarget {
+    #[serde(deserialize_with = "deserialize_non_empty_redacted_string")]
+    pub url: RedactedString,
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    pub expires_at: String,
+    #[serde(deserialize_with = "deserialize_positive_u64")]
+    pub max_bytes: u64,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub required_headers: HashMap<String, RedactedString>,
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    pub object_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedFsspecTarget {
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    pub profile: String,
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    pub object_key: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GenerationArtifactTarget {
+    PresignedHttpPut(PresignedHttpPutTarget),
+    ManagedFsspec(ManagedFsspecTarget),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationArtifactDelivery {
+    pub mode: GenerationArtifactDeliveryMode,
+    pub target: GenerationArtifactTarget,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationArtifactRequest {
+    pub format: GenerationArtifactFormat,
+    #[serde(deserialize_with = "deserialize_artifact_contents")]
+    pub contents: Vec<GenerationArtifactKind>,
+    pub delivery: GenerationArtifactDelivery,
+}
+
+const REDACTED_ARTIFACT_SECRET: &str = "[REDACTED]";
+
+impl NvExt {
+    pub(crate) fn redact_generation_artifact_secrets(&mut self) {
+        let Some(GenerationArtifactRequest {
+            delivery:
+                GenerationArtifactDelivery {
+                    target: GenerationArtifactTarget::PresignedHttpPut(target),
+                    ..
+                },
+            ..
+        }) = self.generation_artifact.as_mut()
+        else {
+            return;
+        };
+        target.url = RedactedString(REDACTED_ARTIFACT_SECRET.to_string());
+        for value in target.required_headers.values_mut() {
+            *value = RedactedString(REDACTED_ARTIFACT_SECRET.to_string());
+        }
+    }
+}
+
+pub(crate) fn redact_generation_artifact_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_generation_artifact_json(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(serde_json::Value::Object(artifact)) = object.get_mut("generation_artifact")
+            {
+                if let Some(serde_json::Value::Object(target)) = artifact
+                    .get_mut("delivery")
+                    .and_then(serde_json::Value::as_object_mut)
+                    .and_then(|delivery| delivery.get_mut("target"))
+                {
+                    if target.get("kind").and_then(serde_json::Value::as_str)
+                        == Some("presigned_http_put")
+                    {
+                        if target.contains_key("url") {
+                            target.insert(
+                                "url".to_string(),
+                                serde_json::Value::String(REDACTED_ARTIFACT_SECRET.to_string()),
+                            );
+                        }
+                        if let Some(headers) = target
+                            .get_mut("required_headers")
+                            .and_then(serde_json::Value::as_object_mut)
+                        {
+                            for value in headers.values_mut() {
+                                *value =
+                                    serde_json::Value::String(REDACTED_ARTIFACT_SECRET.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            for value in object.values_mut() {
+                redact_generation_artifact_json(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn deserialize_metadata_upload_url<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -218,6 +413,10 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     pub metadata_upload: Option<MetadataUpload>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub generation_artifact: Option<GenerationArtifactRequest>,
+
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefill_worker_id: Option<u64>,
@@ -282,6 +481,7 @@ impl NvExt {
             cache_salt: _,
             extra_fields,
             metadata_upload,
+            generation_artifact,
             prefill_worker_id,
             decode_worker_id,
             dp_rank,
@@ -300,6 +500,7 @@ impl NvExt {
             || max_thinking_tokens.is_some()
             || extra_fields.is_some()
             || metadata_upload.is_some()
+            || generation_artifact.is_some()
             || prefill_worker_id.is_some()
             || decode_worker_id.is_some()
             || dp_rank.is_some()
@@ -664,6 +865,9 @@ pub struct NvExtResponse {
     pub engine_data: Option<serde_json::Value>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_artifact: Option<serde_json::Value>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<serde_json::Value>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -721,6 +925,8 @@ pub struct NvExtResponseFieldSelection {
     pub token_ids: bool,
     pub routed_experts: bool,
     pub engine_data: bool,
+    pub generation_artifact: bool,
+    pub generation_artifact_contents: [bool; 3],
     pub stop_reason: bool,
     pub completion_token_ids: bool,
     pub prompt_token_ids: bool,
@@ -753,6 +959,17 @@ impl NvExtResponseFieldSelection {
             selection.worker_id = true;
             selection.token_ids = true;
         }
+        if let Some(artifact) = ext.generation_artifact.as_ref() {
+            selection.generation_artifact = true;
+            for kind in &artifact.contents {
+                let index = match kind {
+                    GenerationArtifactKind::MoeRoutes => 0,
+                    GenerationArtifactKind::SelectedLogprobs => 1,
+                    GenerationArtifactKind::TopkLogprobs => 2,
+                };
+                selection.generation_artifact_contents[index] = true;
+            }
+        }
         selection
     }
 
@@ -783,6 +1000,32 @@ impl NvExtResponseFieldSelection {
                 .as_ref()
                 .and_then(|data| data.get("routed_experts"))
                 .cloned()
+        } else {
+            None
+        };
+
+        let generation_artifact = if self.generation_artifact {
+            let receipt = engine_data_from_backend
+                .as_ref()
+                .and_then(|data| data.get("generation_artifact"))
+                .cloned();
+            if receipt.is_none() && finish_reason_present {
+                let kinds = ["moe_routes", "selected_logprobs", "topk_logprobs"];
+                let contents = kinds
+                    .into_iter()
+                    .zip(self.generation_artifact_contents)
+                    .filter_map(|(kind, selected)| selected.then_some(kind))
+                    .collect::<Vec<_>>();
+                Some(serde_json::json!({
+                    "format": "generation_artifact_v1",
+                    "contents": contents,
+                    "state": "failed",
+                    "error_code": "artifact_receipt_missing",
+                    "error": "generation worker did not return the requested artifact receipt"
+                }))
+            } else {
+                receipt
+            }
         } else {
             None
         };
@@ -830,6 +1073,7 @@ impl NvExtResponseFieldSelection {
             && routed_experts.is_none()
             && timing.is_none()
             && engine_data.is_none()
+            && generation_artifact.is_none()
             && stop_reason.is_none()
             && completion_token_ids.is_none()
             && prompt_token_ids.is_none()
@@ -844,6 +1088,7 @@ impl NvExtResponseFieldSelection {
             token_ids,
             routed_experts,
             engine_data,
+            generation_artifact,
             stop_reason,
             completion_token_ids,
             prompt_token_ids,
@@ -1027,9 +1272,11 @@ mod tests {
                     "target": {
                         "kind": "presigned_http_put",
                         "url": url,
+                        "expires_at": "2030-01-01T00:00:00Z",
                         "max_bytes": 67108864,
                         "required_headers": {
                             "content-type": "application/octet-stream",
+                            "if-none-match": "*",
                             "x-amz-checksum-sha256": "header-sentinel"
                         },
                         "object_id": "opaque-object"
@@ -1051,7 +1298,14 @@ mod tests {
 
         let selection = NvExtResponseFieldSelection::from_nvext(Some(&nvext));
         assert!(selection.generation_artifact);
+        assert_eq!(selection.generation_artifact_contents, [true, true, false]);
         assert!(!selection.engine_data);
+
+        let mut observable = serde_json::json!({"extra_args": {"nvext": serialized}});
+        redact_generation_artifact_json(&mut observable);
+        let observable = observable.to_string();
+        assert!(!observable.contains("sentinel"));
+        assert!(!observable.contains("header-sentinel"));
     }
 
     #[test]
@@ -1911,6 +2165,50 @@ mod tests {
             out.routed_experts,
             Some(serde_json::json!({"layer_0": [1, 3]}))
         );
+    }
+
+    #[test]
+    fn build_response_nvext_projects_generation_artifact_without_engine_data() {
+        let selection = NvExtResponseFieldSelection {
+            generation_artifact: true,
+            ..Default::default()
+        };
+        let receipt = serde_json::json!({
+            "format": "generation_artifact_v1",
+            "state": "ready",
+            "object_id": "opaque-object",
+            "actual_bytes": 42,
+            "sha256": "abcd"
+        });
+        let engine_data = serde_json::json!({
+            "generation_artifact": receipt,
+            "internal": "must-not-leak"
+        });
+
+        let out = selection
+            .build_response_nvext(None, true, Some(engine_data), None, None, None)
+            .expect("generation artifact receipt should be projected");
+
+        assert_eq!(out.generation_artifact, Some(receipt));
+        assert!(out.engine_data.is_none());
+    }
+
+    #[test]
+    fn build_response_nvext_fails_closed_when_artifact_receipt_is_missing() {
+        let selection = NvExtResponseFieldSelection {
+            generation_artifact: true,
+            generation_artifact_contents: [true, false, false],
+            ..Default::default()
+        };
+
+        let out = selection
+            .build_response_nvext(None, true, None, None, None, None)
+            .expect("missing terminal receipt must be explicit");
+        let artifact = out.generation_artifact.expect("failed artifact receipt");
+
+        assert_eq!(artifact["state"], "failed");
+        assert_eq!(artifact["error_code"], "artifact_receipt_missing");
+        assert_eq!(artifact["contents"], serde_json::json!(["moe_routes"]));
     }
 
     #[test]

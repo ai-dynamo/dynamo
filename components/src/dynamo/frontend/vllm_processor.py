@@ -741,6 +741,11 @@ class VllmProcessor:
             "annotations": [],
             "routing": request.get("routing"),
         }
+        generation_artifact = (request.get("nvext") or {}).get("generation_artifact")
+        if generation_artifact is not None:
+            dynamo_preproc["extra_args"] = {
+                "nvext": {"generation_artifact": generation_artifact}
+            }
         if guided_decoding is not None:
             dynamo_preproc["sampling_options"]["guided_decoding"] = guided_decoding
         if reasoning_metadata.engine_reasoning_ended is not None:

@@ -245,6 +245,34 @@ class TestLogprobTokenIds:
         sp = self._build({"logprobs": 5}, sampling_options={"logprob_token_ids": []})
         assert sp.logprobs == 5
 
+    def test_artifact_selected_logprobs_reject_explicit_token_ids(self):
+        request = {
+            "token_ids": [1, 2, 3],
+            "sampling_options": {"logprob_token_ids": [5000]},
+            "stop_conditions": {},
+            "output_options": {},
+            "extra_args": {
+                "nvext": {
+                    "generation_artifact": {
+                        "format": "generation_artifact_v1",
+                        "contents": ["selected_logprobs"],
+                        "delivery": {
+                            "mode": "object_store",
+                            "target": {
+                                "kind": "managed_fsspec",
+                                "profile": "training",
+                                "object_key": "run/request.dynexp",
+                            },
+                        },
+                    }
+                }
+            },
+        }
+        with pytest.raises(ValueError, match="cannot be combined"):
+            from dynamo.vllm.handlers import build_sampling_params
+
+            build_sampling_params(request, {})
+
 
 class TestFlattenLogprobs:
     def test_nested_lists_are_fully_flattened(self):

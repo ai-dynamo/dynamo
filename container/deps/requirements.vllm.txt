@@ -11,6 +11,7 @@
 
 --no-binary imageio-ffmpeg
 
+s3fs>=2026.4.0,<2027.0
 imageio-ffmpeg>=0.6.0  # binary skipped per --no-binary directive at top of file
 # The upstream vllm-openai image bundles pillow at an older patch release;
 # floor it so the --no-deps install moves it to the current patch line.

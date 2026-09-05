@@ -47,6 +47,11 @@ from vllm.sampling_params import (
 from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
+from dynamo.artifacts.capture import (
+    GenerationArtifactSession,
+    generation_artifact_contents,
+    generation_artifact_settings,
+)
 from dynamo.common.backend import logprobs as _shared_logprobs
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
@@ -838,12 +843,21 @@ def build_sampling_params(
     # in this case and let `num_logprobs` derive the width from the id list; mirror
     # that here, otherwise `SamplingParams.verify()` rejects the pair unless the
     # caller happens to set `top_logprobs == len(logprob_token_ids)`.
+    artifact_contents = generation_artifact_contents(request)
+    if "selected_logprobs" in artifact_contents and getattr(
+        sampling_params, "logprob_token_ids", None
+    ):
+        raise ValueError(
+            "generation artifact selected_logprobs cannot be combined with logprob_token_ids"
+        )
     if getattr(sampling_params, "logprob_token_ids", None):
         sampling_params.logprobs = None
     elif logprobs is not None:
         sampling_params.logprobs = logprobs
     if prompt_logprobs is not None:
         sampling_params.prompt_logprobs = prompt_logprobs
+    if "selected_logprobs" in artifact_contents and sampling_params.logprobs is None:
+        sampling_params.logprobs = 0
 
     # skip_special_tokens is intentionally NOT forwarded to vLLM here: this path
     # forces detokenize=False (below), so vLLM never detokenizes and ignores it.
@@ -886,12 +900,12 @@ def build_sampling_params(
                     if isinstance(existing_kv_transfer_params, dict)
                     else {}
                 )
-                passthrough_kv_transfer_params[
-                    _ROUTER_HINT_EXTRA_ARGS_KEY
-                ] = passthrough_router_hint
-                passthrough_extra_args[
-                    _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY
-                ] = passthrough_kv_transfer_params
+                passthrough_kv_transfer_params[_ROUTER_HINT_EXTRA_ARGS_KEY] = (
+                    passthrough_router_hint
+                )
+                passthrough_extra_args[_KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY] = (
+                    passthrough_kv_transfer_params
+                )
                 sampling_params.extra_args = passthrough_extra_args
 
     # Dynamo's internal token path consumes disjoint token deltas. This mirrors
@@ -3234,6 +3248,8 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         priority=0,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
+        generation_artifact_session=None,
+        include_routed_experts_response=True,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -3296,9 +3312,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 for output in res.outputs:
                     output_idx = getattr(output, "index", 0) or 0
                     token_ids = list(output.token_ids or [])
-                    total_output_tokens_by_index[
-                        output_idx
-                    ] = total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                    total_output_tokens_by_index[output_idx] = (
+                        total_output_tokens_by_index.get(output_idx, 0) + len(token_ids)
+                    )
                     finish_reason = getattr(output, "finish_reason", None)
                     stop_reason = getattr(output, "stop_reason", None)
                     if not token_ids and not finish_reason and not stop_reason:
@@ -3336,13 +3352,27 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     if top_logprobs is not None:
                         out["top_logprobs"] = top_logprobs
 
+                    if generation_artifact_session is not None:
+                        generation_artifact_session.record_chunk(
+                            choice_index=output_idx,
+                            prompt_token_ids=list(
+                                getattr(res, "prompt_token_ids", None) or []
+                            ),
+                            completion_token_ids=token_ids,
+                            selected_logprobs=log_probs,
+                            routed_experts=raw_routed_experts,
+                        )
+
                     if finish_reason:
-                        out["finish_reason"] = normalize_finish_reason(finish_reason)
-                        out[
-                            "completion_usage"
-                        ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res,
-                            completion_token_counts=total_output_tokens_by_index,
+                        normalized_finish_reason = normalize_finish_reason(
+                            finish_reason
+                        )
+                        out["finish_reason"] = normalized_finish_reason
+                        out["completion_usage"] = (
+                            BaseWorkerHandler._build_completion_usage(
+                                request_output=res,
+                                completion_token_counts=total_output_tokens_by_index,
+                            )
                         )
                         if prompt_logprobs_payload is not None:
                             _attach_prompt_logprobs_engine_data(
@@ -3360,12 +3390,45 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                         )
                         prompt_len = len(getattr(res, "prompt_token_ids", None) or [])
                         effective_start = min(raw_start, prompt_len)
-                        routed_experts = _serialize_routed_experts(
-                            raw_routed_experts_by_output.get(output_idx),
-                            start=effective_start,
-                        )
-                        if routed_experts is not None:
-                            _attach_routed_experts_engine_data(out, routed_experts)
+                        if include_routed_experts_response:
+                            routed_experts = _serialize_routed_experts(
+                                raw_routed_experts_by_output.get(output_idx),
+                                start=effective_start,
+                            )
+                            if routed_experts is not None:
+                                _attach_routed_experts_engine_data(out, routed_experts)
+                        if generation_artifact_session is not None and not (
+                            normalized_finish_reason == "cancelled"
+                            or normalized_finish_reason.startswith("error")
+                        ):
+                            try:
+                                receipt = (
+                                    await generation_artifact_session.finalize_choice(
+                                        choice_index=output_idx,
+                                        token_start=effective_start,
+                                    )
+                                )
+                            except Exception:  # noqa: BLE001 - emit a safe terminal receipt
+                                logger.warning(
+                                    "Generation artifact delivery failed for request %s",
+                                    request_id,
+                                )
+                                receipt = {
+                                    "format": "generation_artifact_v1",
+                                    "contents": sorted(
+                                        getattr(
+                                            generation_artifact_session,
+                                            "contents",
+                                            (),
+                                        )
+                                    ),
+                                    "state": "failed",
+                                    "error_code": "artifact_delivery_failed",
+                                    "error": "generation artifact delivery failed",
+                                }
+                            engine_data = out.setdefault("engine_data", {})
+                            if isinstance(engine_data, dict):
+                                engine_data["generation_artifact"] = receipt
                         # Log completion with LoRA info (debug level to avoid log spam)
                         self._log_with_lora_context(
                             "Completed token generation for request {request_id}{lora_info}: "
@@ -3425,6 +3488,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Use context ID for request tracking and correlation
         request_id = context.id()
         logger.debug(f"Decode Request ID: {request_id}")
+        if self.use_vllm_tokenizer and generation_artifact_settings(request):
+            raise InvalidArgument(
+                "generation artifacts require Dynamo frontend tokenization"
+            )
         routing = request.get("routing") or {}
         if self._first_token_source is not None:
             self._first_token_source.bind(context, routing.get("dp_rank"))
@@ -3655,6 +3722,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             self.model_max_len,
             enable_rl=self.config.enable_rl,
         )
+        generation_artifact_session = GenerationArtifactSession.from_backend_request(
+            request,
+            model_config=self.model_config,
+            enable_rl=self.config.enable_rl,
+            route_capture_enabled=bool(
+                getattr(self.engine_args, "enable_return_routed_experts", False)
+            ),
+            choice_count=int(getattr(sampling_params, "n", 1) or 1),
+        )
+        if generation_artifact_session is not None:
+            generation_artifact_session.validate_route_start(
+                int(getattr(sampling_params, "routed_experts_prompt_start", 0) or 0)
+            )
 
         if kv_params is not None:
             _update_kv_transfer_params(sampling_params, kv_params)
@@ -3707,6 +3787,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 # `NvExtResponseFieldSelection.engine_data` so this payload
                 # only reaches clients that asked for it.
                 want_engine_data = _nvext_extra_field_requested(request, "engine_data")
+                include_routed_experts_response = want_engine_data or (
+                    _nvext_extra_field_requested(request, "routed_experts")
+                )
                 # Prompt token IDs the engine actually saw. Either the
                 # pre-tokenized `nvext.token_data` (TITO) or whatever the
                 # preprocessor produced from messages (MITO). We echo them
@@ -3719,6 +3802,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
                 accumulated_token_ids: dict[int, list[int]] = {}
                 accumulated_log_probs: dict[int, list[float]] = {}
+                if generation_artifact_session is not None:
+                    await generation_artifact_session.admit(
+                        prompt_token_count=len(
+                            _prompt_token_ids_for_engine_data(request, prompt)
+                        ),
+                        max_tokens=int(
+                            getattr(sampling_params, "max_tokens", 0) or 0
+                        ),
+                    )
                 try:
                     async for tok in self.generate_tokens(
                         prompt,
@@ -3730,13 +3822,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        generation_artifact_session=generation_artifact_session,
+                        include_routed_experts_response=include_routed_experts_response,
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
                         if prefill_result is not None and "completion_usage" in tok:
-                            tok["completion_usage"][
-                                "prompt_tokens_details"
-                            ] = prefill_prompt_tokens_details
+                            tok["completion_usage"]["prompt_tokens_details"] = (
+                                prefill_prompt_tokens_details
+                            )
 
                         if want_engine_data:
                             _accumulate_engine_data(
@@ -3751,6 +3845,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     logger.warning("Initiating Dynamo Runtime shutdown.")
                     self.runtime.shutdown()
                     os._exit(1)
+                finally:
+                    if generation_artifact_session is not None:
+                        generation_artifact_session.release()
 
     async def _generate_text_mode(self, request, context, request_id):
         """Generate text using OpenAI-compatible format (text-in-text-out)."""
@@ -4071,9 +4168,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if embedding_params is not None:
             disaggregated_params["embedding_params"] = embedding_params
         if expanded_prompt_token_ids is not None:
-            disaggregated_params[
-                "expanded_prompt_token_ids"
-            ] = expanded_prompt_token_ids
+            disaggregated_params["expanded_prompt_token_ids"] = (
+                expanded_prompt_token_ids
+            )
 
         return disaggregated_params if disaggregated_params else None
 

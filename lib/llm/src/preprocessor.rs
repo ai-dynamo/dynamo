@@ -1746,6 +1746,12 @@ impl OpenAIPreprocessor {
                     serde_json::json!(metadata_upload),
                 );
             }
+            if let Some(ref generation_artifact) = nvext.generation_artifact {
+                nvext_passthrough.insert(
+                    "generation_artifact".to_string(),
+                    serde_json::json!(generation_artifact),
+                );
+            }
             if nvext.token_data.is_some() {
                 nvext_passthrough.insert("token_in".to_string(), serde_json::Value::Bool(true));
             }
@@ -6998,7 +7004,14 @@ impl
             tool_processing_route.uses_legacy_jail(),
         )?;
 
-        tracing::trace!(request = ?common_request, prompt_injected_reasoning, "Pre-processed request");
+        if tracing::enabled!(tracing::Level::TRACE) {
+            let mut observable_request = serde_json::to_value(&common_request)
+                .unwrap_or_else(|_| serde_json::Value::String("<unavailable>".to_string()));
+            crate::protocols::common::extensions::redact_generation_artifact_json(
+                &mut observable_request,
+            );
+            tracing::trace!(request = ?observable_request, prompt_injected_reasoning, "Pre-processed request");
+        }
         let trace_state = crate::request_trace::build_request_end_trace_state(
             &common_request,
             &tracker,

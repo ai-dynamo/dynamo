@@ -131,6 +131,11 @@ fn create_handle_with_config(
     let requested_streaming = req.inner.stream.unwrap_or(false);
     let model = req.inner.model.clone();
 
+    let mut request = req.clone();
+    if let Some(nvext) = request.nvext.as_mut() {
+        nvext.redact_generation_artifact_secrets();
+    }
+
     Some(RequestPayloadHandle {
         requested_streaming,
         request_id: request_id.to_string(),
@@ -139,7 +144,7 @@ fn create_handle_with_config(
         // overrides stream/usage) and stamp arrival time on the producing
         // thread, so the record reflects what the client sent and when.
         event_time: SystemTime::now(),
-        request: Arc::new(req.clone()),
+        request: Arc::new(request),
         http_request_headers,
     })
 }
@@ -175,6 +180,46 @@ mod tests {
             }]
         });
         serde_json::from_value(json).expect("Failed to create test response")
+    }
+
+    #[test]
+    fn request_payload_redacts_generation_artifact_capability() {
+        let request: NvCreateChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "test"}],
+            "nvext": {
+                "generation_artifact": {
+                    "format": "generation_artifact_v1",
+                    "contents": [],
+                    "delivery": {
+                        "mode": "object_store",
+                        "target": {
+                            "kind": "presigned_http_put",
+                            "url": "https://storage.example/object?signature=url-sentinel",
+                            "expires_at": "2030-01-01T00:00:00Z",
+                            "max_bytes": 1024,
+                            "required_headers": {
+                                "if-none-match": "*",
+                                "x-amz-checksum-sha256": "header-sentinel"
+                            },
+                            "object_id": "opaque"
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let handle = create_handle_with_config(&request, "request-1", true, true, None)
+            .expect("payload capture should be enabled");
+        let observable = serde_json::to_string(&handle.request).unwrap();
+        let original = serde_json::to_string(&request).unwrap();
+
+        assert!(!observable.contains("url-sentinel"));
+        assert!(!observable.contains("header-sentinel"));
+        assert!(observable.contains("[REDACTED]"));
+        assert!(original.contains("url-sentinel"));
+        assert!(original.contains("header-sentinel"));
     }
 
     #[test]

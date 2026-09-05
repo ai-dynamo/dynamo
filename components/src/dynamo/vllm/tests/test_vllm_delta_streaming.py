@@ -81,13 +81,17 @@ def _handler_with_responses(responses):
     handler._log_with_lora_context = _ignore_log
     # These delta-streaming tests exercise base-model requests only. Model the
     # no-LoRA branch without constructing the full legacy worker handler.
-    handler._generate_with_lora_admission_lock = (
-        lambda lora_request, create_generator: create_generator(lora_request)
+    handler._generate_with_lora_admission_lock = lambda lora_request, create_generator: (
+        create_generator(lora_request)
     )
     return handler
 
 
-async def _collect_handler_chunks(responses, generation_artifact_session=None):
+async def _collect_handler_chunks(
+    responses,
+    generation_artifact_session=None,
+    include_routed_experts_response=True,
+):
     handler = _handler_with_responses(responses)
     chunks = []
     async for chunk in BaseWorkerHandler.generate_tokens(
@@ -96,6 +100,7 @@ async def _collect_handler_chunks(responses, generation_artifact_session=None):
         sampling_params=SamplingParams(),
         request_id="req-1",
         generation_artifact_session=generation_artifact_session,
+        include_routed_experts_response=include_routed_experts_response,
     ):
         chunks.append(chunk)
     return chunks, handler
@@ -137,6 +142,13 @@ class _RecordingArtifactSession:
             "sha256": "a" * 64,
             "object_id": "opaque-1",
         }
+
+
+class _FailingArtifactSession(_RecordingArtifactSession):
+    contents = frozenset({"selected_logprobs"})
+
+    async def finalize_choice(self, *, choice_index, token_start):
+        raise RuntimeError("provider detail must not escape")
 
 
 def test_build_sampling_params_forces_delta_token_mode():
@@ -296,9 +308,7 @@ async def test_generation_artifact_receives_raw_routes_and_terminal_receipt() ->
     ]
     session = _RecordingArtifactSession()
     responses = [
-        _request_output(
-            [_output([7], logprobs=logprobs[:1])], prompt_token_ids=[101]
-        ),
+        _request_output([_output([7], logprobs=logprobs[:1])], prompt_token_ids=[101]),
         _request_output(
             [
                 _output(
@@ -323,6 +333,44 @@ async def test_generation_artifact_receives_raw_routes_and_terminal_receipt() ->
     ]
     assert session.finalizations == [{"choice_index": 0, "token_start": 0}]
     assert chunks[-1]["engine_data"]["generation_artifact"]["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_artifact_only_routes_skip_legacy_base64_projection() -> None:
+    routes = np.array([[[0]]], dtype=np.int32)
+    session = _RecordingArtifactSession()
+    responses = [
+        _request_output(
+            [_output([7], finish_reason="length", routed_experts=routes)],
+            prompt_token_ids=[101],
+        )
+    ]
+
+    chunks, _ = await _collect_handler_chunks(
+        responses, session, include_routed_experts_response=False
+    )
+
+    assert session.records[-1]["routed_experts"] is routes
+    assert "routed_experts" not in chunks[-1]["engine_data"]
+    assert chunks[-1]["engine_data"]["generation_artifact"]["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_artifact_delivery_failure_emits_sanitized_terminal_receipt() -> None:
+    responses = [
+        _request_output([_output([7], finish_reason="length")], prompt_token_ids=[101])
+    ]
+
+    chunks, _ = await _collect_handler_chunks(responses, _FailingArtifactSession())
+
+    receipt = chunks[-1]["engine_data"]["generation_artifact"]
+    assert receipt == {
+        "format": "generation_artifact_v1",
+        "contents": ["selected_logprobs"],
+        "state": "failed",
+        "error_code": "artifact_delivery_failed",
+        "error": "generation artifact delivery failed",
+    }
 
 
 def test_generation_artifact_selected_logprobs_forces_capture_only() -> None:
