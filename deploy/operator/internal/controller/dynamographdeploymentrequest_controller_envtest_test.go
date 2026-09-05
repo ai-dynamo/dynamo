@@ -1217,12 +1217,15 @@ spec:
 			Expect(outputCM.OwnerReferences[0].Name).Should(Equal(dgdrName))
 		})
 
-		It("Should adopt additional ConfigMaps when DGD already exists", func() {
+		It("Should adopt additional ConfigMaps when the existing DGD is this request's own deployment", func() {
 			ctx := context.Background()
 			dgdrName := "test-dgdr-existing-dgd-adopt"
 			namespace := envtestNamespace
 			dgdName := dgdrName + "-dgd"
 			additionalConfigMapName := "planner-config-existing-dgd"
+
+			t := GinkgoT()
+			t.Log("Given a DGDR whose generated spec describes the DGD that already exists")
 
 			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1238,7 +1241,12 @@ spec:
   components:
   - name: worker
     type: worker
-    replicas: 1`,
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: registry.example/runtime:1.1.0`,
 					},
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
@@ -1253,10 +1261,20 @@ spec:
 			dgdr.Status.DGDName = dgdName
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
+			t.Log("And the DGD carries this DGDR's tracking labels, as createDGD would have written them")
+
 			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      dgdName,
 					Namespace: namespace,
+					Labels: map[string]string{
+						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
+						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
+					},
+					Annotations: map[string]string{
+						AnnotationDGDRUID: string(dgdr.UID),
+					},
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
 					BackendFramework: "vllm",
@@ -1288,9 +1306,14 @@ spec:
 			Expect(k8sClient.Create(ctx, additionalCM)).Should(Succeed())
 			defer func() { _ = k8sClient.Delete(ctx, additionalCM) }()
 
+			t.Log("When the deploying phase runs against the interrupted create")
+
 			_, err := reconciler.handleDeployingPhase(ctx, dgdr)
 			Expect(err).NotTo(HaveOccurred())
 
+			t.Log("Then the request recovers: it adopts the DGD and reparents the additional ConfigMap")
+
+			Expect(dgdr.Status.Phase).ShouldNot(Equal(nvidiacomv1beta1.DGDRPhaseFailed))
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: additionalConfigMapName, Namespace: namespace}, additionalCM)).Should(Succeed())
 			Expect(additionalCM.OwnerReferences).Should(HaveLen(1))
 			Expect(additionalCM.OwnerReferences[0].Kind).Should(Equal("DynamoGraphDeployment"))
@@ -1371,6 +1394,394 @@ spec:
 			Expect(reconciler.adoptAdditionalResources(ctx, dgdr, dgd)).Should(Succeed())
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: additionalConfigMapName, Namespace: namespace}, additionalCM)).Should(Succeed())
 			Expect(additionalCM.ResourceVersion).Should(Equal(resourceVersion))
+		})
+
+		DescribeTable("Should refuse to adopt an existing DGD that is not this request's own deployment",
+			func(nameSuffix string, trackedByThisRequest bool, liveWorkerImage string) {
+				ctx := context.Background()
+				t := GinkgoT()
+				namespace := envtestNamespace
+				dgdrName := "test-dgdr-collision-" + nameSuffix
+				dgdName := dgdrName + "-dgd"
+				additionalConfigMapName := "planner-config-collision-" + nameSuffix
+
+				t.Log("Given a DGDR deploying a generated spec it has not yet confirmed")
+
+				dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      dgdrName,
+						Namespace: namespace,
+						Annotations: map[string]string{
+							"nvidia.com/generated-dgd-spec": `apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: ` + dgdName + `
+spec:
+  backendFramework: vllm
+  components:
+  - name: worker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: registry.example/runtime:1.1.0`,
+						},
+					},
+					Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+						Model:   "test-model",
+						Backend: "vllm",
+						Image:   "test-profiler:1.1.0",
+					},
+				}
+				Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+				defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+				dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeploying
+				dgdr.Status.DGDName = dgdName
+				Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
+
+				t.Log("And a DGD already occupying that name that fails one half of the identity contract")
+
+				labels := map[string]string{}
+				annotations := map[string]string{}
+				if trackedByThisRequest {
+					labels = map[string]string{
+						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
+						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
+					}
+					annotations[AnnotationDGDRUID] = string(dgdr.UID)
+				}
+
+				existingDGD := &nvidiacomv1beta1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        dgdName,
+						Namespace:   namespace,
+						Labels:      labels,
+						Annotations: annotations,
+					},
+					Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+						BackendFramework: "vllm",
+						Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+							ComponentName: "worker",
+							ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+							Replicas:      ptr.To[int32](1),
+							PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: consts.MainContainerName, Image: liveWorkerImage}},
+							}},
+						}},
+					},
+				}
+				Expect(k8sClient.Create(ctx, existingDGD)).Should(Succeed())
+				defer func() { _ = k8sClient.Delete(ctx, existingDGD) }()
+
+				additionalCM := &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      additionalConfigMapName,
+						Namespace: namespace,
+						Labels: map[string]string{
+							nvidiacomv1beta1.LabelDGDRName:      dgdrName,
+							nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+							nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
+						},
+					},
+					Data: map[string]string{"planner_config.json": "{}"},
+				}
+				Expect(k8sClient.Create(ctx, additionalCM)).Should(Succeed())
+				defer func() { _ = k8sClient.Delete(ctx, additionalCM) }()
+
+				t.Log("When the deploying phase observes the same-name DGD")
+
+				_, err := reconciler.handleDeployingPhase(ctx, dgdr)
+				Expect(err).NotTo(HaveOccurred())
+
+				t.Log("Then the request goes terminal with a name-collision condition instead of adopting")
+
+				Expect(dgdr.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseFailed))
+				condition := meta.FindStatusCondition(dgdr.Status.Conditions, nvidiacomv1beta1.ConditionTypeDeploymentReady)
+				Expect(condition).NotTo(BeNil())
+				Expect(condition.Status).Should(Equal(metav1.ConditionFalse))
+				Expect(condition.Reason).Should(Equal(ReasonDeploymentNameCollision))
+
+				t.Log("And the generated spec survives, so the intended deployment stays recoverable")
+
+				persistedDGDR := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, persistedDGDR)).Should(Succeed())
+				Expect(persistedDGDR.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseFailed))
+				Expect(persistedDGDR.Annotations["nvidia.com/generated-dgd-spec"]).ShouldNot(BeEmpty())
+
+				t.Log("And nothing this request owns is reparented onto the foreign deployment")
+
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: additionalConfigMapName, Namespace: namespace}, additionalCM)).Should(Succeed())
+				Expect(additionalCM.OwnerReferences).Should(BeEmpty())
+
+				t.Log("And the foreign deployment itself is left exactly as it was")
+
+				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: namespace}, existingDGD)).Should(Succeed())
+				Expect(existingDGD.Spec.Components[0].PodTemplate.Spec.Containers[0].Image).Should(Equal(liveWorkerImage))
+			},
+			Entry("when it does not carry this request's tracking labels", "foreign", false, "registry.example/runtime:1.1.0"),
+			Entry("when its spec differs from the spec this request generated", "spec-drift", true, "registry.example/other:9.9.9"),
+		)
+
+		It("Should refuse a recreated DGDR from adopting its prior DGD", func() {
+			ctx := context.Background()
+			t := GinkgoT()
+			namespace := envtestNamespace
+			dgdrName := "test-dgdr-recreated"
+			dgdName := dgdrName + "-dgd"
+			additionalConfigMapName := "planner-config-recreated"
+
+			t.Log("Given an original DGDR and DGD with matching labels and spec")
+
+			originalDGDR := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+					Annotations: map[string]string{
+						AnnotationGeneratedDGDSpec: `apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: ` + dgdName + `
+spec:
+  backendFramework: vllm
+  components:
+  - name: worker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: registry.example/runtime:1.1.0`,
+					},
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					Image:   "test-profiler:1.1.0",
+				},
+			}
+			Expect(k8sClient.Create(ctx, originalDGDR)).Should(Succeed())
+			originalDGDR.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeploying
+			originalDGDR.Status.DGDName = dgdName
+			Expect(k8sClient.Status().Update(ctx, originalDGDR)).Should(Succeed())
+
+			priorDGD := &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
+						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
+					},
+					Annotations: map[string]string{
+						AnnotationDGDRUID: string(originalDGDR.UID),
+					},
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "worker",
+						ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+						Replicas:      ptr.To[int32](1),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: consts.MainContainerName, Image: "registry.example/runtime:1.1.0"}},
+						}},
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, priorDGD)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, priorDGD) }()
+
+			additionalCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      additionalConfigMapName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
+						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
+					},
+				},
+				Data: map[string]string{"planner_config.json": "{}"},
+			}
+			Expect(k8sClient.Create(ctx, additionalCM)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, additionalCM) }()
+
+			t.Log("When the original DGDR is deleted and recreated with the same name and spec")
+
+			Expect(k8sClient.Delete(ctx, originalDGDR)).Should(Succeed())
+			Eventually(func() bool {
+				return apierrors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}))
+			}, timeout, interval).Should(BeTrue())
+
+			recreatedDGDR := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+					Annotations: map[string]string{
+						AnnotationGeneratedDGDSpec: originalDGDR.Annotations[AnnotationGeneratedDGDSpec],
+					},
+				},
+				Spec: originalDGDR.Spec,
+			}
+			Expect(k8sClient.Create(ctx, recreatedDGDR)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, recreatedDGDR) }()
+			Expect(recreatedDGDR.UID).ShouldNot(Equal(originalDGDR.UID))
+			recreatedDGDR.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeploying
+			recreatedDGDR.Status.DGDName = dgdName
+			Expect(k8sClient.Status().Update(ctx, recreatedDGDR)).Should(Succeed())
+
+			t.Log("Then the recreated DGDR rejects the DGD bound to the original request")
+
+			_, err := reconciler.handleDeployingPhase(ctx, recreatedDGDR)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(recreatedDGDR.Status.Phase).Should(Equal(nvidiacomv1beta1.DGDRPhaseFailed))
+			condition := meta.FindStatusCondition(recreatedDGDR.Status.Conditions, nvidiacomv1beta1.ConditionTypeDeploymentReady)
+			Expect(condition).NotTo(BeNil())
+			Expect(condition.Reason).Should(Equal(ReasonDeploymentNameCollision))
+
+			t.Log("And the stale DGD and ConfigMap are not adopted")
+
+			persistedDGDR := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, persistedDGDR)).Should(Succeed())
+			Expect(persistedDGDR.Annotations[AnnotationGeneratedDGDSpec]).ShouldNot(BeEmpty())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: additionalConfigMapName, Namespace: namespace}, additionalCM)).Should(Succeed())
+			Expect(additionalCM.OwnerReferences).Should(BeEmpty())
+		})
+
+		It("Should adopt an existing DGD whose live spec differs only by API-server structural defaults", func() {
+			ctx := context.Background()
+			t := GinkgoT()
+			namespace := envtestNamespace
+			dgdrName := "test-dgdr-structural-defaults"
+			dgdName := dgdrName + "-dgd"
+			additionalConfigMapName := "planner-config-structural-defaults"
+
+			t.Log("Given a generated spec that declares a container port and omits its protocol")
+
+			// A port protocol is the cheapest reachable instance of the whole class: the
+			// CRD's structural defaults apply on write, and the annotation bypasses them.
+			dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdrName,
+					Namespace: namespace,
+					Annotations: map[string]string{
+						AnnotationGeneratedDGDSpec: `apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: ` + dgdName + `
+spec:
+  backendFramework: vllm
+  components:
+  - name: worker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: registry.example/runtime:1.1.0
+          ports:
+          - name: http
+            containerPort: 8000`,
+					},
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
+					Model:   "test-model",
+					Backend: "vllm",
+					Image:   "test-profiler:1.1.0",
+				},
+			}
+			Expect(k8sClient.Create(ctx, dgdr)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
+			dgdr.Status.Phase = nvidiacomv1beta1.DGDRPhaseDeploying
+			dgdr.Status.DGDName = dgdName
+			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
+
+			t.Log("And this request's own DGD persisted from that spec, which the API server defaulted")
+
+			dgd := &nvidiacomv1beta1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      dgdName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
+						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
+					},
+					Annotations: map[string]string{
+						AnnotationDGDRUID: string(dgdr.UID),
+					},
+				},
+				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
+					BackendFramework: "vllm",
+					Components: []nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{{
+						ComponentName: "worker",
+						ComponentType: nvidiacomv1beta1.ComponentTypeWorker,
+						Replicas:      ptr.To[int32](1),
+						PodTemplate: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:  consts.MainContainerName,
+								Image: "registry.example/runtime:1.1.0",
+								Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: 8000}},
+							}},
+						}},
+					}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, dgd)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, dgd) }()
+
+			t.Log("Then the persisted object really does carry a default the generated spec never had")
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdName, Namespace: namespace}, dgd)).Should(Succeed())
+			Expect(dgd.Spec.Components[0].PodTemplate.Spec.Containers[0].Ports[0].Protocol).
+				Should(Equal(corev1.ProtocolTCP), "the CRD's structural default must actually be applied, or this spec proves nothing")
+
+			additionalCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      additionalConfigMapName,
+					Namespace: namespace,
+					Labels: map[string]string{
+						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
+						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
+					},
+				},
+				Data: map[string]string{"planner_config.json": "{}"},
+			}
+			Expect(k8sClient.Create(ctx, additionalCM)).Should(Succeed())
+			defer func() { _ = k8sClient.Delete(ctx, additionalCM) }()
+
+			t.Log("When the deploying phase observes the DGD this request created")
+
+			_, err := reconciler.handleDeployingPhase(ctx, dgdr)
+			Expect(err).NotTo(HaveOccurred())
+
+			t.Log("Then the request adopts its own deployment instead of colliding with it")
+
+			Expect(dgdr.Status.Phase).ShouldNot(Equal(nvidiacomv1beta1.DGDRPhaseFailed))
+			condition := meta.FindStatusCondition(dgdr.Status.Conditions, nvidiacomv1beta1.ConditionTypeDeploymentReady)
+			if condition != nil {
+				Expect(condition.Reason).ShouldNot(Equal(ReasonDeploymentNameCollision))
+			}
+
+			t.Log("And adoption really ran: the marker is cleared and the ConfigMap follows the DGD")
+
+			persistedDGDR := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, persistedDGDR)).Should(Succeed())
+			Expect(persistedDGDR.Annotations[AnnotationGeneratedDGDSpec]).Should(BeEmpty())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: additionalConfigMapName, Namespace: namespace}, additionalCM)).Should(Succeed())
+			Expect(additionalCM.OwnerReferences).Should(HaveLen(1))
+			Expect(additionalCM.OwnerReferences[0].Kind).Should(Equal("DynamoGraphDeployment"))
+			Expect(additionalCM.OwnerReferences[0].Name).Should(Equal(dgdName))
+			Expect(additionalCM.OwnerReferences[0].UID).Should(Equal(dgd.UID))
 		})
 	})
 
@@ -2731,12 +3142,21 @@ spec:
 					Name:      dgdrName,
 					Namespace: namespace,
 					Annotations: map[string]string{
-						AnnotationGeneratedDGDSpec: `apiVersion: nvidia.com/v1alpha1
+						AnnotationGeneratedDGDSpec: `apiVersion: nvidia.com/v1beta1
 kind: DynamoGraphDeployment
 metadata:
   name: test-dgd-deployed
 spec:
-  services: {}`,
+  backendFramework: vllm
+  components:
+  - name: worker
+    type: worker
+    replicas: 1
+    podTemplate:
+      spec:
+        containers:
+        - name: main
+          image: registry.example/runtime:1.1.0`,
 					},
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentRequestSpec{
@@ -2772,6 +3192,7 @@ spec:
 					Labels: map[string]string{
 						nvidiacomv1beta1.LabelDGDRName:      dgdrName,
 						nvidiacomv1beta1.LabelDGDRNamespace: namespace,
+						nvidiacomv1beta1.LabelManagedBy:     nvidiacomv1beta1.LabelValueDynamoOperator,
 					},
 				},
 				Spec: nvidiacomv1beta1.DynamoGraphDeploymentSpec{
