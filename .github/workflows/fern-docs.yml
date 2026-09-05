@@ -137,18 +137,28 @@ jobs:
           python-version: '3.13'
 
       - name: Generate API references
-        # The Python/Rust reference pages are publish-time artifacts:
-        # gitignored in the source tree and generated here against the exact
-        # ref being published, so source PRs never carry (or review) the
-        # regenerated MDX. Generation must precede the pages-dev sync below,
-        # which rsyncs whatever sits under docs/fern/pages/. The Kubernetes
-        # reference regenerates from a docs-owned source file and stays
-        # committed, so it keeps the freshness check.
+        id: api_refs
+        # Python/Rust references are publish-time artifacts: generated here
+        # against the ref being published, never committed. Generation must
+        # precede the pages-dev sync below, which rsyncs docs/fern/pages/.
+        #
+        # The Kubernetes reference stays committed, but this path REGENERATES
+        # it rather than gating on it. As `--check` the step failed, which
+        # skipped the sync and publish steps entirely, so a main left stale by
+        # merge skew silently froze the live site. Drift is still fatal, just
+        # after the site is current: the probe records it and the gate at the
+        # end of this job fails the run.
         run: |
+          set -euo pipefail
           python3 -m pip install 'griffe==2.1.0'
           python3 source-checkout/docs/fern/scripts/gen_python_api.py
           python3 source-checkout/docs/fern/scripts/gen_rust_api.py
-          python3 source-checkout/docs/fern/scripts/gen_kubernetes_api.py --check
+          if python3 source-checkout/docs/fern/scripts/gen_kubernetes_api.py --check >/dev/null 2>&1; then
+            echo "kubernetes_drift=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "kubernetes_drift=true" >> "$GITHUB_OUTPUT"
+          fi
+          python3 source-checkout/docs/fern/scripts/gen_kubernetes_api.py
 
       - name: Checkout docs-website branch
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
@@ -663,6 +673,15 @@ jobs:
       - name: Verify published pages carry their component CSS
         if: steps.ctx.outputs.is_main == 'true'
         run: python3 source-checkout/docs/fern/scripts/check_published_styles.py
+
+      - name: Fail if the committed Kubernetes API reference was stale
+        # Deliberately last. The site has already published the regenerated
+        # output, so docs are current; this only reports that the committed
+        # page differs from what reviewers approved.
+        if: steps.api_refs.outputs.kubernetes_drift == 'true'
+        run: |
+          echo "::error file=docs/fern/pages/reference/kubernetes-api/full-api-reference.mdx::Committed Kubernetes API reference does not match its source. The site published the regenerated output, so docs are current, but the committed page differs from the reviewed bytes. Fix with: python3 docs/fern/scripts/gen_kubernetes_api.py"
+          exit 1
 
   #############################################################################
   # VERSION RELEASE - Run on new version tags (vX.Y.Z)
