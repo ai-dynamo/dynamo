@@ -42,6 +42,10 @@ impl VllmEventBatch {
         &self.1
     }
 
+    fn into_events(self) -> Vec<RawKvEvent> {
+        self.1
+    }
+
     fn data_parallel_rank(&self) -> Option<i32> {
         self.2
     }
@@ -137,8 +141,8 @@ async fn run_listener_loop(
 
                 // Process events
                 let mut tracker_guard = tracker.write().await;
-                for event in batch.events() {
-                    process_event(&mut **tracker_guard, event.clone(), dp_rank, engine_source);
+                for event in batch.into_events() {
+                    process_event(&mut **tracker_guard, event, dp_rank, engine_source);
                 }
             }
         }
@@ -204,16 +208,12 @@ fn process_event(
                 return;
             }
 
-            // token_ids is already Vec<u32>; split directly into per-block chunks
-            let token_chunks: Vec<Vec<u32>> = token_ids
-                .chunks(block_size)
-                .map(|chunk| chunk.to_vec())
-                .collect();
+            let token_chunk_count = token_ids.chunks(block_size).len();
 
-            if token_chunks.len() != block_hashes.len() {
+            if token_chunk_count != block_hashes.len() {
                 tracing::warn!(
                     "Token chunks ({}) don't match block hashes ({}), skipping event",
-                    token_chunks.len(),
+                    token_chunk_count,
                     block_hashes.len()
                 );
                 return;
@@ -222,15 +222,16 @@ fn process_event(
             // For batches, chain the blocks: each block's parent is the previous block
             let mut current_parent = parent_block_hash.map(|h| h.into_u64().to_string());
 
-            for (i, block_hash) in block_hashes.into_iter().enumerate() {
-                let block_tokens = token_chunks[i].clone();
+            for (block_hash, block_tokens) in
+                block_hashes.into_iter().zip(token_ids.chunks(block_size))
+            {
                 let block_hash_u64 = block_hash.into_u64();
 
                 tracker.handle_store(StoreEventInput {
                     block_hash: block_hash_u64.to_string(),
                     source: engine_source,
-                    token_ids: block_tokens,
-                    parent_hash: current_parent.clone(),
+                    token_ids: block_tokens.to_vec(),
+                    parent_hash: current_parent.take(),
                     block_size,
                     lora_name: lora_name.clone(),
                     tier: Some(storage_tier),
@@ -353,5 +354,56 @@ mod tests {
                 ..
             }]
         ));
+    }
+
+    #[test]
+    fn block_stored_preserves_token_chunks_and_parent_chain() {
+        let mut tracker = PassthroughCacheStatusTracker::new();
+        let event = RawKvEvent::BlockStored {
+            block_hashes: vec![BlockHashValue::Unsigned(10), BlockHashValue::Unsigned(11)],
+            parent_block_hash: Some(BlockHashValue::Unsigned(9)),
+            token_ids: vec![1, 2, 3, 4],
+            block_size: 2,
+            medium: None,
+            lora_name: Some("adapter".to_string()),
+            cache_namespace: None,
+            block_mm_infos: None,
+            is_eagle: None,
+            group_idx: None,
+            kv_cache_spec_kind: None,
+            kv_cache_spec_sliding_window: None,
+            locality: None,
+        };
+
+        process_event(&mut tracker, event, Some(3), EventSource::Vllm);
+
+        let events = tracker.drain_events();
+        let expected = [
+            ("10", Some("9"), vec![1, 2]),
+            ("11", Some("10"), vec![3, 4]),
+        ];
+        assert_eq!(events.len(), expected.len());
+
+        for (event, (expected_hash, expected_parent, expected_tokens)) in
+            events.into_iter().zip(expected)
+        {
+            let ConsolidatedEvent::Store {
+                block_hash,
+                parent_hash,
+                token_ids,
+                block_size,
+                lora_name,
+                ..
+            } = event
+            else {
+                panic!("expected store event");
+            };
+
+            assert_eq!(block_hash, expected_hash);
+            assert_eq!(parent_hash.as_deref(), expected_parent);
+            assert_eq!(token_ids, expected_tokens);
+            assert_eq!(block_size, 2);
+            assert_eq!(lora_name.as_deref(), Some("adapter"));
+        }
     }
 }
