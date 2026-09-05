@@ -40,7 +40,9 @@ classifiers = [
 ]
 
 dependencies = [
-    "aisimulate==0.1.0.dev2; python_version >= '3.11' and python_version < '3.14'",
+    # TODO(AIC-1810): replace this review-only revision with the matching exact
+    # PyPI dev release after ai-dynamo/aisimulate#115 merges, before this PR is ready.
+    "aisimulate @ git+https://github.com/ai-dynamo/aisimulate.git@d5ec73296bd24d846fd932626b80b49e08e949ee#subdirectory=python/aisimulate ; python_version >= '3.11' and python_version < '3.14'",
     "aiperf==0.10.0",
     "matplotlib",
     "networkx",
