@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use tokio::sync::OnceCell;
 
@@ -14,18 +14,30 @@ use crate::{Endpoint, to_pyerr};
 pub struct KvDcRelay {
     endpoint: dynamo_runtime::component::Endpoint,
     dc_id: String,
-    namespace_filter: Option<String>,
-    endpoint_prefix: Option<String>,
-    publication_threshold: usize,
-    publication_delay_ms: u64,
-    recovery_attempt_timeout_ms: u64,
+    config: llm_rs::kv_dc_relay::KvDcRelayConfig,
     inner: Arc<OnceCell<Arc<llm_rs::kv_dc_relay::KvDcRelay>>>,
 }
 
 #[pymethods]
 impl KvDcRelay {
     #[new]
-    #[pyo3(signature = (endpoint, dc_id, namespace_filter=None, endpoint_prefix=None, publication_threshold=16, publication_delay_ms=1, recovery_attempt_timeout_ms=30_000))]
+    #[pyo3(signature = (
+        endpoint,
+        dc_id,
+        namespace_filter=None,
+        endpoint_prefix=None,
+        publication_threshold=16,
+        publication_delay_ms=1,
+        recovery_attempt_timeout_ms=30_000,
+        *,
+        namespaces=None,
+        endpoint_prefixes=None,
+        watch_all=None,
+        expected_unique_blocks=1_048_576,
+        bind=None,
+        tuning=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         endpoint: Endpoint,
         dc_id: String,
@@ -34,27 +46,155 @@ impl KvDcRelay {
         publication_threshold: usize,
         publication_delay_ms: u64,
         recovery_attempt_timeout_ms: u64,
-    ) -> Self {
-        Self {
-            endpoint: endpoint.inner,
-            dc_id,
-            namespace_filter,
-            endpoint_prefix,
+        namespaces: Option<Vec<String>>,
+        endpoint_prefixes: Option<Vec<String>>,
+        watch_all: Option<bool>,
+        expected_unique_blocks: usize,
+        bind: Option<String>,
+        tuning: Option<std::collections::HashMap<String, u64>>,
+    ) -> PyResult<Self> {
+        if namespace_filter.is_some() && namespaces.is_some() {
+            return Err(PyValueError::new_err(
+                "namespace_filter cannot be combined with namespaces",
+            ));
+        }
+        if endpoint_prefix.is_some() && endpoint_prefixes.is_some() {
+            return Err(PyValueError::new_err(
+                "endpoint_prefix cannot be combined with endpoint_prefixes",
+            ));
+        }
+
+        let namespaces = namespaces.unwrap_or_else(|| namespace_filter.into_iter().collect());
+        let endpoint_prefixes =
+            endpoint_prefixes.unwrap_or_else(|| endpoint_prefix.into_iter().collect());
+        let watch_all = watch_all.unwrap_or(namespaces.is_empty());
+        if watch_all && !namespaces.is_empty() {
+            return Err(PyValueError::new_err(
+                "watch_all cannot be combined with discovery namespaces",
+            ));
+        }
+        if !watch_all && namespaces.is_empty() {
+            return Err(PyValueError::new_err(
+                "at least one discovery namespace or watch_all=True is required",
+            ));
+        }
+
+        let mut producer = llm_rs::kv_dc_relay::KvDcRelayProducerConfig {
             publication_threshold,
             publication_delay_ms,
             recovery_attempt_timeout_ms,
-            inner: Arc::new(OnceCell::new()),
+            expected_unique_blocks,
+        };
+
+        let mut transport = match bind {
+            Some(bind) => {
+                let bind = bind.parse().map_err(|error| {
+                    PyValueError::new_err(format!("invalid KV DC Relay bind address: {error}"))
+                })?;
+                Some(llm_rs::kv_dc_relay::KvDcRelayTransportConfig::new(bind))
+            }
+            None => None,
+        };
+
+        for (key, &value) in tuning.iter().flatten() {
+            let to_usize = |value: u64| {
+                usize::try_from(value).map_err(|_| {
+                    PyValueError::new_err(format!("tuning value for {key} is out of range"))
+                })
+            };
+            let wan_config = transport.as_mut();
+            let require_wan = || {
+                wan_config.ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "tuning key {key} requires bind to enable the WAN server"
+                    ))
+                })
+            };
+            match key.as_str() {
+                "publication_threshold" => producer.publication_threshold = to_usize(value)?,
+                "publication_delay_ms" => producer.publication_delay_ms = value,
+                "recovery_attempt_timeout_ms" => producer.recovery_attempt_timeout_ms = value,
+                "max_message_bytes" => {
+                    require_wan()?.max_message_bytes = to_usize(value)?;
+                }
+                "keepalive_interval_ms" => {
+                    require_wan()?.keepalive_interval_ms = value;
+                }
+                "keepalive_timeout_ms" => {
+                    require_wan()?.keepalive_timeout_ms = value;
+                }
+                "pool_heartbeat_interval_ms" => {
+                    require_wan()?.pool_heartbeat_interval_ms = value;
+                }
+                "readiness_heartbeat_interval_ms" => {
+                    require_wan()?.readiness_heartbeat_interval_ms = value;
+                }
+                "snapshot_progress_timeout_ms" => {
+                    require_wan()?.snapshot_progress_timeout_ms = value;
+                }
+                "load_window_ms" => {
+                    require_wan()?.load_window_ms = value;
+                }
+                "load_fanout_capacity" => {
+                    require_wan()?.load_fanout_capacity = to_usize(value)?;
+                }
+                "publication_queue_capacity" => {
+                    require_wan()?.publication_queue_capacity = to_usize(value)?;
+                }
+                "publication_queue_bytes" => {
+                    require_wan()?.publication_queue_bytes = to_usize(value)?;
+                }
+                "publication_encoding_concurrency" => {
+                    require_wan()?.publication_encoding_concurrency = to_usize(value)?;
+                }
+                "max_catalog_subscribers" => {
+                    require_wan()?.max_catalog_subscribers = to_usize(value)?;
+                }
+                "max_pool_streams_total" => {
+                    require_wan()?.max_pool_streams_total = to_usize(value)?;
+                }
+                "max_subscribers_per_pool" => {
+                    require_wan()?.max_subscribers_per_pool = to_usize(value)?;
+                }
+                "max_initialized_pool_hubs" => {
+                    require_wan()?.max_initialized_pool_hubs = to_usize(value)?;
+                }
+                "max_readiness_subscribers" => {
+                    require_wan()?.max_readiness_subscribers = to_usize(value)?;
+                }
+                "max_load_subscribers" => {
+                    require_wan()?.max_load_subscribers = to_usize(value)?;
+                }
+                _ => {
+                    return Err(PyValueError::new_err(format!(
+                        "unknown tuning key {key}; producer keys: publication_threshold, \
+                         publication_delay_ms, recovery_attempt_timeout_ms; WAN transport keys \
+                         mirror the KvDcRelayTransportConfig field names"
+                    )));
+                }
+            }
         }
+
+        Ok(Self {
+            endpoint: endpoint.inner,
+            dc_id,
+            config: llm_rs::kv_dc_relay::KvDcRelayConfig {
+                discovery: llm_rs::kv_dc_relay::KvDcRelayDiscoveryConfig {
+                    namespaces,
+                    endpoint_prefixes,
+                    watch_all,
+                },
+                producer,
+                transport,
+            },
+            inner: Arc::new(OnceCell::new()),
+        })
     }
 
     fn start<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let endpoint = self.endpoint.clone();
         let dc_id = self.dc_id.clone();
-        let namespace_filter = self.namespace_filter.clone();
-        let endpoint_prefix = self.endpoint_prefix.clone();
-        let publication_threshold = self.publication_threshold;
-        let publication_delay_ms = self.publication_delay_ms;
-        let recovery_attempt_timeout_ms = self.recovery_attempt_timeout_ms;
+        let config = self.config.clone();
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner
@@ -62,22 +202,7 @@ impl KvDcRelay {
                     llm_rs::kv_dc_relay::KvDcRelay::start(
                         endpoint.component().clone(),
                         dc_id,
-                        llm_rs::kv_dc_relay::KvDcRelayConfig {
-                            discovery: llm_rs::kv_dc_relay::KvDcRelayDiscoveryConfig {
-                                // The historical namespace_filter=None default means
-                                // "watch every namespace" and must stay explicit now
-                                // that discovery validates watch_all XOR namespaces.
-                                watch_all: namespace_filter.is_none(),
-                                namespaces: namespace_filter.into_iter().collect(),
-                                endpoint_prefixes: endpoint_prefix.into_iter().collect(),
-                            },
-                            producer: llm_rs::kv_dc_relay::KvDcRelayProducerConfig {
-                                publication_threshold,
-                                publication_delay_ms,
-                                recovery_attempt_timeout_ms,
-                                ..Default::default()
-                            },
-                        },
+                        config,
                     )
                     .await
                     .map(Arc::new)

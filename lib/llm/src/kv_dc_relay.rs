@@ -9,9 +9,14 @@ mod host;
 mod identity;
 mod load;
 mod pool_registry;
+pub mod protocol;
 mod publication;
 mod resolution;
 mod topology;
+mod transport;
+mod transport_config;
+
+pub use transport_config::KvDcRelayTransportConfig;
 
 pub use discovery::KvDcRelayDiscoveryConfig;
 pub use host::{
