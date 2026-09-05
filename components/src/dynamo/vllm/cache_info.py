@@ -17,12 +17,23 @@ MAIN_ATTENTION_KV_CACHE_KINDS = {
 }
 
 
+def kv_event_block_size(vllm_config: VllmConfig, block_size: int) -> int:
+    """Widen a physical block size to the granularity vLLM emits KV events at.
+
+    Under DCP the cache manager multiplies ``KVCacheSpec.block_size`` by the DCP
+    world size; cache-group metadata still reports the unwidened value.
+    """
+    parallel_config = getattr(vllm_config, "parallel_config", None)
+    dcp_size = int(getattr(parallel_config, "decode_context_parallel_size", 1) or 1)
+    return block_size * dcp_size
+
+
 def get_configured_kv_event_block_size(vllm_config: VllmConfig) -> int:
     """Return the configured KV event block size, falling back to vLLM's cache block size."""
     additional_config = vllm_config.additional_config or {}
     return additional_config.get(
         DYNAMO_KV_EVENT_BLOCK_SIZE_KEY,
-        vllm_config.cache_config.block_size,
+        kv_event_block_size(vllm_config, vllm_config.cache_config.block_size),
     )
 
 
@@ -57,14 +68,24 @@ async def configure_kv_event_block_size(
             "vLLM cache_config.block_size: %s",
             e,
         )
-        kv_event_block_size = fallback_block_size
+        physical_block_size = fallback_block_size
     else:
-        kv_event_block_size = select_main_attention_block_size(
+        physical_block_size = select_main_attention_block_size(
             group_metadata,
             fallback_block_size,
         )
 
+    configured_block_size = kv_event_block_size(vllm_config, physical_block_size)
+    if configured_block_size != physical_block_size:
+        logger.info(
+            "Using DCP-aware vLLM KV event block size %d (physical_block_size=%d)",
+            configured_block_size,
+            physical_block_size,
+        )
+
     if vllm_config.additional_config is None:
         vllm_config.additional_config = {}
-    vllm_config.additional_config[DYNAMO_KV_EVENT_BLOCK_SIZE_KEY] = kv_event_block_size
-    return kv_event_block_size
+    vllm_config.additional_config[
+        DYNAMO_KV_EVENT_BLOCK_SIZE_KEY
+    ] = configured_block_size
+    return configured_block_size
