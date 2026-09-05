@@ -392,9 +392,12 @@ async def poll_for_worker_instances(
     instance_ids: list[int] = []
     start_time = asyncio.get_running_loop().time()
 
+    last_logged = None
     while len(instance_ids) < expected_num_workers:
         instance_ids = client.instance_ids()
-        logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
+        if len(instance_ids) != last_logged:
+            logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
+            last_logged = len(instance_ids)
 
         if len(instance_ids) >= expected_num_workers:
             break
@@ -404,7 +407,10 @@ async def poll_for_worker_instances(
                 f"Timeout waiting for workers. Found {len(instance_ids)} instance(s), expected {expected_num_workers}"
             )
 
-        await asyncio.sleep(1.0)
+        # Registration takes a few seconds; a coarse poll adds up to a full
+        # interval of dead time to every mocker launch. Log only on change so
+        # the finer poll does not flood the test log.
+        await asyncio.sleep(0.25)
 
     return instance_ids
 

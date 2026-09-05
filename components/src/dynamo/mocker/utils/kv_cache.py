@@ -2,9 +2,8 @@
 #  SPDX-License-Identifier: Apache-2.0
 
 import logging
+import os
 from typing import Any
-
-from transformers import AutoConfig
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +55,23 @@ def get_kv_cache_dtype_bytes(config: Any, kv_cache_dtype: str = "auto") -> int:
     return TORCH_DTYPE_BYTES.get(kv_cache_dtype, 2)
 
 
+def _load_config(model_path: str) -> Any:
+    """Load the Hugging Face config for ``model_path``.
+
+    ``transformers`` is imported here rather than at module import so the mocker
+    only pays for it when the KV-bytes estimate is actually needed. A local
+    directory is loaded with ``local_files_only=True`` so a cached model never
+    triggers a hub round trip; a bare hub ID still resolves through the hub.
+    """
+    from transformers import AutoConfig
+
+    return AutoConfig.from_pretrained(
+        model_path,
+        trust_remote_code=False,
+        local_files_only=os.path.isdir(model_path),
+    )
+
+
 def compute_kv_bytes_per_token(
     model_path: str, kv_cache_dtype: str = "auto"
 ) -> int | None:
@@ -74,7 +90,7 @@ def compute_kv_bytes_per_token(
         KV bytes per token, or None if model config cannot be parsed.
     """
     try:
-        config = AutoConfig.from_pretrained(model_path, trust_remote_code=False)
+        config = _load_config(model_path)
         if hasattr(config, "get_text_config"):
             config = config.get_text_config()
         num_layers = config.num_hidden_layers

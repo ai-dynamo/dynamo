@@ -42,22 +42,31 @@ async def graceful_shutdown(runtimes: list):
     logger.info("DistributedRuntime shutdown complete")
 
 
-async def prefetch_model(model_path: str) -> None:
-    """Pre-fetch model from HuggingFace to avoid rate limiting with many workers."""
+async def prefetch_model(model_path: str) -> str:
+    """Resolve ``model_path`` to a local directory, fetching config/tokenizer if needed.
+
+    ``fetch_model`` returns the cached snapshot directory without contacting the
+    hub when config.json and the tokenizer files are already present, and downloads
+    only those files otherwise. Resolving once here means neither the workers nor
+    the KV-bytes estimate below resolve a hub ID over the network. Returns the
+    original path on failure so callers degrade to their previous behavior.
+    """
 
     if Path(model_path).exists():
         logger.info(f"Using local model path: {model_path}")
-        return
+        return model_path
 
     logger.info(f"Pre-fetching model from HuggingFace: {model_path}")
     try:
         local_path = await fetch_model(model_path, ignore_weights=True)
         logger.info(f"Model cached at: {local_path}")
+        return str(local_path)
     except Exception as e:
         logger.warning(
             f"Failed to pre-fetch model: {e}. "
             "Workers will attempt individual downloads (may cause rate limiting)."
         )
+        return model_path
 
 
 async def worker():
@@ -72,9 +81,12 @@ async def worker():
     args.planner_profile_data = profile_data_result.npz_path
 
     try:
-        # Pre-fetch model once to avoid HuggingFace rate limiting when launching many workers
-        if args.num_workers > 1 and args.model_path:
-            await prefetch_model(args.model_path)
+        # Resolve the model to a local directory once, up front. Besides avoiding
+        # HuggingFace rate limiting with many workers, this keeps the KV-bytes
+        # estimate below from resolving a hub ID over the network on every start.
+        local_model_path = None
+        if args.model_path:
+            local_model_path = await prefetch_model(args.model_path)
 
         engine_args = load_mocker_engine_args(args)
         logger.info(
@@ -86,7 +98,7 @@ async def worker():
         # Auto-compute kv_bytes_per_token from model config if not explicitly set
         if args.kv_bytes_per_token is None and args.model_path:
             args.kv_bytes_per_token = compute_kv_bytes_per_token(
-                args.model_path, args.kv_cache_dtype
+                local_model_path or args.model_path, args.kv_cache_dtype
             )
         engine_args = apply_worker_engine_args_overrides(
             engine_args, kv_bytes_per_token=args.kv_bytes_per_token
