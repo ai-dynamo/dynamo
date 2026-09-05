@@ -73,6 +73,28 @@ func shellQuotePOSIX(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// findEnvVar returns the named environment variable entry, or nil when absent. The
+// entry, not its value, so a valueFrom variable is distinguishable from an absent one.
+func findEnvVar(env []corev1.EnvVar, name string) *corev1.EnvVar {
+	for i := range env {
+		if env[i].Name == name {
+			return &env[i]
+		}
+	}
+	return nil
+}
+
+// findContainerPort returns the named container port, or nil when the container
+// does not declare it.
+func findContainerPort(container *corev1.Container, name string) *corev1.ContainerPort {
+	for i := range container.Ports {
+		if container.Ports[i].Name == name {
+			return &container.Ports[i]
+		}
+	}
+	return nil
+}
+
 // containerHasArg reports whether the container already carries the given
 // flag/value pair in its Args (either as adjacent tokens "flag", "value" or
 // as a single token "flag=value" or "flag value" embedded inside a shell

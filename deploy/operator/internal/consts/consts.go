@@ -27,6 +27,10 @@ const (
 	DynamoNixlPort     = 19090
 	DynamoNixlPortName = "nixl"
 
+	// DynamoMaxNixlPorts bounds the per-pod NIXL exporter ports: rank i uses
+	// DynamoNixlPort+i. Keep in sync with MAX_COLOCATED_NIXL_EXPORTERS (nixl_telemetry.py).
+	DynamoMaxNixlPorts = 8
+
 	DynamoFPMBasePort = 20380
 
 	MpiRunSshPort = 2222
