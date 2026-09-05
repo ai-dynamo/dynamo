@@ -711,7 +711,7 @@ impl Node {
             state.edge[depth - 1].1
         };
 
-        if let Some(block_hashes) = input.router_hint_root_chain.as_deref_mut() {
+        if let Some(block_hashes) = input.kv_transfer_chain.as_deref_mut() {
             block_hashes.extend(
                 state
                     .edge

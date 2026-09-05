@@ -98,7 +98,7 @@ impl RadixTree {
         &self,
         sequence: Vec<LocalBlockHash>,
         early_exit: bool,
-        retain_router_hint_chain: bool,
+        retain_kv_transfer_chain: bool,
     ) -> MatchDetails {
         let mut details = MatchDetails::new();
         if sequence.is_empty() {
@@ -111,8 +111,8 @@ impl RadixTree {
         let mut seq_pos = 0usize;
         let mut first_node = true;
         let mut last_matched_hash = None;
-        let mut router_hint_root_chain =
-            retain_router_hint_chain.then(|| Vec::with_capacity(sequence.len()));
+        let mut kv_transfer_chain =
+            retain_kv_transfer_chain.then(|| Vec::with_capacity(sequence.len()));
 
         while seq_pos < sequence.len() {
             let Some(node) = next.take() else {
@@ -133,7 +133,7 @@ impl RadixTree {
                 break;
             }
 
-            if let Some(block_hashes) = router_hint_root_chain.as_mut() {
+            if let Some(block_hashes) = kv_transfer_chain.as_mut() {
                 block_hashes.extend(
                     node.state
                         .edge
@@ -215,8 +215,8 @@ impl RadixTree {
             }
         }
 
-        if let Some(block_hashes) = router_hint_root_chain {
-            details.retain_router_hint_root_candidates(block_hashes);
+        if let Some(block_hashes) = kv_transfer_chain {
+            details.retain_kv_transfer_candidates(block_hashes);
         }
 
         details
@@ -864,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn find_match_details_can_retain_router_hint_root_candidates() {
+    fn find_match_details_can_retain_kv_transfer_candidates() {
         let mut tree = RadixTree::new();
         tree.apply_event(make_store_event(7, &[11, 12])).unwrap();
         tree.apply_event(make_store_event(8, &[11, 12, 13]))
@@ -890,7 +890,7 @@ mod tests {
         .map(ExternalSequenceBlockHash)
         .collect::<Vec<_>>();
 
-        let candidates = details.router_hint_root_candidates.unwrap();
+        let candidates = details.kv_transfer_candidates.unwrap();
         assert_eq!(candidates.block_hashes, expected_hashes);
         assert_eq!(
             candidates.owner_prefix_blocks,
