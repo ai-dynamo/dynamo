@@ -660,7 +660,7 @@ export const ARTIFACTS: Artifact[] = [
     category: "container",
     group: "component",
     name: "dynamo-frontend",
-    description: "OpenAI-compatible API gateway with Endpoint Prediction Protocol (EPP)",
+    description: "OpenAI-compatible API gateway with Endpoint Picker Plugin (EPP)",
     meta: "AMD64/ARM64",
     href: `${NGC_C}/dynamo-frontend/tags`,
     tags: [{ label: "1.4.2", clipboard: "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.2" }],
@@ -722,7 +722,7 @@ export const ARTIFACTS: Artifact[] = [
   {
     category: "helm",
     name: "dynamo-platform",
-    description: "Platform services (etcd, NATS) and the Dynamo Operator for a Dynamo cluster",
+    description: "The Dynamo Operator, plus opt-in etcd and NATS subcharts for a Dynamo cluster",
     href: "https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-1.4.2.tgz",
     tags: [
       {
