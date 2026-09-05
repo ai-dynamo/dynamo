@@ -50,10 +50,8 @@ BACKEND_IMAGE_NAMES: dict[str, str] = {
 
 PLANNER_IMAGE_NAME = "dynamo-planner"
 
-# Backend used when a request asks for automatic backend selection but the code
-# path taken cannot search across backends. Every path that derives a container
-# image or renders a command line needs one concrete backend name, so "auto"
-# has to become a real backend somewhere; this is the single value it becomes.
+# Concrete backend for paths that cannot search across backends: every path that
+# derives an image or renders a command line needs one real backend name.
 DEFAULT_BACKEND = "vllm"
 
 

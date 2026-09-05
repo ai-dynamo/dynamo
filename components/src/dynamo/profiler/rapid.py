@@ -45,10 +45,8 @@ def _build_k8s_overrides(
 ) -> dict:
     """Extract K8s overrides (image, PVC) from a DGDR spec."""
     backend_image = derive_backend_image(dgdr.image, backend)
-    # derive_backend_image substitutes only the image-name component, keeping
-    # the registry, tag and digest. A difference therefore means the generated
-    # deployment pulls a sibling repository the request never named, which
-    # fails at pull time if that repository is absent from the registry.
+    # derive_backend_image keeps the registry, tag and digest, so a difference
+    # means a sibling repository that may be absent from the registry.
     if backend_image != dgdr.image:
         logger.warning(
             "Backend '%s' needs image '%s', so the generated deployment does "
@@ -150,9 +148,8 @@ def _generate_dgd_from_pick(
         )
         return None
 
-    # One backend for the whole generated deployment. The container image and
-    # the generated command line are both selected from this local, so they
-    # cannot name different backends.
+    # One backend for the whole generated deployment: the image and the
+    # command line are both selected from this local.
     backend = tc.primary_backend_name
     if row_backend is not None and row_backend != backend:
         logger.error(
@@ -410,10 +407,8 @@ def _run_default_sim(
                 "overriding to '%s' to support mocker/throughput-scaling.",
                 disagg_key,
             )
-            # Under backend="auto" each bucket is merged across backends, so the
-            # aggregated and disaggregated buckets can be won by different
-            # backends. The override then also changes the backend of the
-            # generated deployment away from the one the run summary reported.
+            # Each bucket is merged across backends under backend="auto", so the
+            # override can change the deployment's backend, not just its mode.
             summarized_backend = _winning_backend(best_configs.get(chosen))
             override_backend = _winning_backend(best_configs.get(disagg_key))
             if (
@@ -445,8 +440,7 @@ def _run_default_sim(
     # When backend="auto" AIC expands to per-backend task configs; the winning
     # row carries the concrete backend name so downstream consumers (e.g.
     # run_interpolation) can use it without re-encountering "auto". Resolved
-    # before generation so the generated deployment and the returned backend
-    # are read from the same row.
+    # before generation so both are read from the same row.
     resolved_backend = backend
     if backend == "auto":
         row_backend = _winning_backend(best_config_df)

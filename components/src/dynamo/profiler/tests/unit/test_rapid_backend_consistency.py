@@ -46,9 +46,8 @@ _REGISTRY = "nvcr.io/nvidia/ai-dynamo"
 _REQUEST_IMAGE = f"{_REGISTRY}/dynamo-planner:1.2.3"
 _RAPID_LOGGER = "dynamo.profiler.rapid"
 
-# A non-empty artifact so a generated deployment is distinguishable from a
-# refused one: _generate_dgd_from_pick returns None for both an empty artifact
-# and a refusal.
+# A non-empty artifact: _generate_dgd_from_pick returns None for both an empty
+# artifact and a refusal.
 _ARTIFACT_YAML = "kind: DynamoGraphDeployment\nmetadata:\n  name: generated\n"
 
 

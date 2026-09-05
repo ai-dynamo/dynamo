@@ -175,10 +175,8 @@ async def _execute_strategy(
                 request_latency,
             )
         else:
-            # THOROUGH measures one backend rather than searching across them,
-            # and derives a container image from the backend name, which has to
-            # be concrete. _check_auto_backend_support admits "auto" whenever
-            # any concrete backend is supported, so resolve it here.
+            # THOROUGH measures one backend rather than searching across them, and
+            # derives a container image, so "auto" has to be concrete here.
             backend = resolve_auto_backend(backend, "the measured (THOROUGH) search")
             pick_result = await run_thorough(
                 dgdr,
