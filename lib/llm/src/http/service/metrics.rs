@@ -2504,11 +2504,8 @@ mod tests {
         )));
         let worker_set = Arc::new(worker_set);
 
-        // The alias shares the primary's WorkerSet and is registered under its own
-        // name, which is what the discovery commit path does. `register_alias` runs
-        // before the alias name gains a WorkerSet: it refuses a name that is already
-        // a live primary, so the reverse order would record no alias at all and this
-        // test would pass without the readiness filter.
+        // `register_alias` refuses a name that is already a live primary, so it must
+        // run before the alias name gains its own WorkerSet.
         assert!(manager.add_worker_set_arc("test-model", "watched", worker_set.clone()));
         assert!(manager.register_alias("test-model-alias", "test-model"));
         assert!(manager.add_worker_set_arc("test-model-alias", "watched", worker_set));
