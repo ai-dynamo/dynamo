@@ -551,6 +551,11 @@ navigation:
                       - page: Multimodal
                         slug: tensorrt-llm-multimodal
                         path: pages/developer-guide/knowledge-base/modular-components/backends/tensorrt-llm/multimodal.md
+                  - section: Triton
+                    collapsed: true
+                    contents:
+                      - page: Overview
+                        path: pages/developer-guide/knowledge-base/modular-components/backends/triton/overview.md
                   - section: vLLM
                     collapsed: true
                     contents:

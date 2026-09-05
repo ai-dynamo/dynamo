@@ -110,6 +110,7 @@ docs = { requires-python = ">=3.11" }
 [project.entry-points.pytest11]
 vllm_tests = "dynamo.vllm.tests.conftest"
 trtllm_tests = "dynamo.trtllm.tests.conftest"
+triton_tests = "dynamo.triton.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
 
 [project.entry-points."aisimulate.sweep_config_providers"]
@@ -164,6 +165,9 @@ path = "hatch_build.py"
 packages = [
     "components/src/dynamo",
 ]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -
@@ -334,6 +338,8 @@ markers = [
     "vllm: marks tests as requiring vllm",
     "trtllm: marks tests as requiring trtllm",
     "sglang: marks tests as requiring sglang",
+    "triton: marks tests as requiring triton",
+    "triton_qa: marks the Triton QA test suite",
     "lmcache: marks tests as requiring lmcache",
     "framework_agnostic: marks tests that inspect the container image itself; they carry framework markers for CI selection but need no framework module installed",
     "multimodal: marks tests as multimodal (image/video) tests",
@@ -352,7 +358,7 @@ markers = [
     "k8s: marks tests as requiring Kubernetes",
     "fault_tolerance: marks tests as fault tolerance tests",
     "deploy: marks tests as deployment tests",
-    "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm)",
+    "framework_only: marks standard framework deployment tests (vllm, sglang, trtllm, triton)",
     "framework_with_gaie: marks tests for GAIE (Gateway API Inference Extension) deployment",
     "framework_with_efa: marks deployment tests that require an EFA-capable cluster and an -efa image",
     "snapshot_restore: marks standalone Snapshot checkpoint/restore deployment tests",
