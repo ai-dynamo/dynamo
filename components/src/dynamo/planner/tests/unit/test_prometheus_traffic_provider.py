@@ -6,7 +6,6 @@ import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from aiohttp.test_utils import TestClient, TestServer
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.control_api import _build_app
@@ -183,6 +182,10 @@ async def blocked_query(traffic_provider):
 async def test_control_api_responds_during_collection(
     traffic_provider, blocked_query, full
 ):
+    # The marker-report environment stubs aiohttp without test_utils. Import
+    # these helpers only when executing the HTTP test, as in test_control_api.
+    from aiohttp.test_utils import TestClient, TestServer
+
     provider, client = traffic_provider
     started, release = blocked_query
     controller = MagicMock()
