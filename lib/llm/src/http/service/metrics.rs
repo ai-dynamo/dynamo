@@ -412,6 +412,30 @@ fn validate_bucket_config(min: f64, max: f64, count: usize) -> bool {
 
 /// Parse histogram bucket configuration from environment variables
 /// Returns (min, max, count) with defaults if not specified
+/// Read one histogram bucket bound, reporting a value that cannot be used.
+///
+/// The combined-config check below already warns when the resulting min/max/count
+/// are inconsistent. A single unparseable value never reached it: it fell back to
+/// the default, the combination stayed valid, and the operator got default buckets
+/// with nothing said. Blank is treated as unset, matching the other env readers.
+fn bucket_bound_from_env<T: std::str::FromStr>(name: &str, default: T) -> T {
+    let Ok(raw) = std::env::var(name) else {
+        return default;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return default;
+    }
+    trimmed.parse::<T>().unwrap_or_else(|_| {
+        tracing::warn!(
+            env_var = name,
+            value = %raw,
+            "Invalid histogram bucket value; using the default"
+        );
+        default
+    })
+}
+
 fn parse_bucket_config(
     env_prefix: &str,
     default_min: f64,
@@ -428,18 +452,9 @@ fn parse_bucket_config(
         return (1.0, 10.0, 10);
     }
     let env_prefix = format!("{}{}", env_metrics::HISTOGRAM_PREFIX, env_prefix);
-    let mut min = std::env::var(format!("{env_prefix}_MIN"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_min);
-    let mut max = std::env::var(format!("{env_prefix}_MAX"))
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(default_max);
-    let mut count = std::env::var(format!("{env_prefix}_COUNT"))
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(default_count);
+    let mut min = bucket_bound_from_env(&format!("{env_prefix}_MIN"), default_min);
+    let mut max = bucket_bound_from_env(&format!("{env_prefix}_MAX"), default_max);
+    let mut count = bucket_bound_from_env(&format!("{env_prefix}_COUNT"), default_count);
 
     if !validate_bucket_config(min, max, count) {
         tracing::warn!(
@@ -830,7 +845,7 @@ impl Metrics {
 
         // Request duration buckets: configurable via DYN_METRICS_REQUEST_DURATION_{MIN,MAX,COUNT}
         let (req_dur_min, req_dur_max, req_dur_count) =
-            parse_bucket_config("DYN_METRICS_REQUEST_DURATION", 1.0, 512.0, 10);
+            parse_bucket_config("REQUEST_DURATION", 1.0, 512.0, 10);
         let request_duration_buckets =
             generate_log_buckets(req_dur_min, req_dur_max, req_dur_count);
 
@@ -846,7 +861,7 @@ impl Metrics {
 
         // Input sequence length buckets: configurable via DYN_METRICS_INPUT_SEQUENCE_{MIN,MAX,COUNT}
         let (isl_min, isl_max, isl_count) =
-            parse_bucket_config("DYN_METRICS_INPUT_SEQUENCE", 50.0, 128000.0, 12);
+            parse_bucket_config("INPUT_SEQUENCE", 50.0, 128000.0, 12);
         let input_sequence_buckets = generate_log_buckets(isl_min, isl_max, isl_count);
 
         let input_sequence_length = HistogramVec::new(
@@ -861,7 +876,7 @@ impl Metrics {
 
         // Output sequence length buckets: configurable via DYN_METRICS_OUTPUT_SEQUENCE_{MIN,MAX,COUNT}
         let (osl_min, osl_max, osl_count) =
-            parse_bucket_config("DYN_METRICS_OUTPUT_SEQUENCE", 50.0, 32000.0, 10);
+            parse_bucket_config("OUTPUT_SEQUENCE", 50.0, 32000.0, 10);
         let output_sequence_buckets = generate_log_buckets(osl_min, osl_max, osl_count);
 
         let output_sequence_length = HistogramVec::new(
@@ -884,8 +899,7 @@ impl Metrics {
         .unwrap();
 
         // Time to first token buckets: configurable via DYN_METRICS_TTFT_{MIN,MAX,COUNT}
-        let (ttft_min, ttft_max, ttft_count) =
-            parse_bucket_config("DYN_METRICS_TTFT", 0.001, 480.0, 18);
+        let (ttft_min, ttft_max, ttft_count) = parse_bucket_config("TTFT", 0.001, 480.0, 18);
         let time_to_first_token_buckets = generate_log_buckets(ttft_min, ttft_max, ttft_count);
 
         let time_to_first_token = HistogramVec::new(
@@ -899,7 +913,7 @@ impl Metrics {
         .unwrap();
 
         // Inter-token latency buckets: configurable via DYN_METRICS_ITL_{MIN,MAX,COUNT}
-        let (itl_min, itl_max, itl_count) = parse_bucket_config("DYN_METRICS_ITL", 0.001, 2.0, 13);
+        let (itl_min, itl_max, itl_count) = parse_bucket_config("ITL", 0.001, 2.0, 13);
         let inter_token_latency_buckets = generate_log_buckets(itl_min, itl_max, itl_count);
 
         let inter_token_latency = HistogramVec::new(
@@ -917,7 +931,7 @@ impl Metrics {
         // range), so 1ms..10s on a log scale gives p50/p99 resolution that
         // the 1..512s `request_duration` buckets cannot.
         let (emb_min, emb_max, emb_count) =
-            parse_bucket_config("DYN_METRICS_EMBEDDING_LATENCY", 0.001, 10.0, 14);
+            parse_bucket_config("EMBEDDING_LATENCY", 0.001, 10.0, 14);
         let embedding_latency_buckets = generate_log_buckets(emb_min, emb_max, emb_count);
 
         let embedding_latency = HistogramVec::new(
