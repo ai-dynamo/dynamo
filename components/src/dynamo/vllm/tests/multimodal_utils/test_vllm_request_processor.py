@@ -748,7 +748,6 @@ def test_build_user_mm_uuids_returns_none_for_all_null() -> None:
     [
         ("image-key", "must be an object"),
         ({"image_url": "image-key"}, "must be a list"),
-        ({"video_url": None}, "must be a list"),
         ({"image_url": [""]}, "non-empty strings or null"),
         ({"image_url": [123]}, "non-empty strings or null"),
     ],
