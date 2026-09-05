@@ -198,41 +198,6 @@ func GetRestartOrder(dgd *v1beta1.DynamoGraphDeployment) []string {
 	return order
 }
 
-// ServiceConfig represents the YAML configuration structure for a service
-type DynamoConfig struct {
-	Enabled       bool   `yaml:"enabled"`
-	Namespace     string `yaml:"namespace"`
-	Name          string `yaml:"name"`
-	ComponentType string `yaml:"component_type,omitempty"`
-}
-
-type Traffic struct {
-	Timeout int `yaml:"timeout"`
-}
-
-type Autoscaling struct {
-	MinReplicas int `yaml:"min_replicas"`
-	MaxReplicas int `yaml:"max_replicas"`
-}
-
-type Config struct {
-	Dynamo       *DynamoConfig   `yaml:"dynamo,omitempty"`
-	Resources    *Resources      `yaml:"resources,omitempty"`
-	Traffic      *Traffic        `yaml:"traffic,omitempty"`
-	Autoscaling  *Autoscaling    `yaml:"autoscaling,omitempty"`
-	HttpExposed  bool            `yaml:"http_exposed,omitempty"`
-	ApiEndpoints []string        `yaml:"api_endpoints,omitempty"`
-	Workers      *int32          `yaml:"workers,omitempty"`
-	TotalGpus    *int32          `yaml:"total_gpus,omitempty"`
-	ExtraPodSpec *corev1.PodSpec `yaml:"extraPodSpec,omitempty"`
-}
-
-type ServiceConfig struct {
-	Name         string              `yaml:"name"`
-	Dependencies []map[string]string `yaml:"dependencies,omitempty"`
-	Config       Config              `yaml:"config"`
-}
-
 type Resources struct {
 	CPU    *string           `yaml:"cpu,omitempty" json:"cpu,omitempty"`
 	Memory *string           `yaml:"memory,omitempty" json:"memory,omitempty"`
@@ -242,7 +207,7 @@ type Resources struct {
 
 type DynDeploymentConfig = map[string]*DynDeploymentServiceConfig
 
-// ServiceConfig represents the configuration for a specific service
+// DynDeploymentServiceConfig represents the configuration for a specific service.
 type DynDeploymentServiceConfig struct {
 	ServiceArgs *ServiceArgs `json:"ServiceArgs,omitempty"`
 }
@@ -251,13 +216,6 @@ type DynDeploymentServiceConfig struct {
 type ServiceArgs struct {
 	Workers   *int32     `json:"workers,omitempty"`
 	Resources *Resources `json:"resources,omitempty"`
-}
-
-func (s ServiceConfig) GetNamespace() *string {
-	if s.Config.Dynamo == nil || s.Config.Dynamo.Namespace == "" {
-		return nil
-	}
-	return &s.Config.Dynamo.Namespace
 }
 
 func ParseDynDeploymentConfig(jsonContent []byte) (DynDeploymentConfig, error) {
@@ -1433,45 +1391,6 @@ func PCSNameForDGD(dgdName string, components []v1beta1.DynamoComponentDeploymen
 	return dgdName[:pcsBudget-5] + "-" + suffix
 }
 
-func PCSNameForAlphaDGDServices(dgdName string, services map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec) string {
-	componentNames := make([]string, 0, len(services))
-	for componentName := range services {
-		componentNames = append(componentNames, componentName)
-	}
-	sort.Strings(componentNames)
-
-	components := make([]v1beta1.DynamoComponentDeploymentSharedSpec, 0, len(componentNames))
-	for _, componentName := range componentNames {
-		service := services[componentName]
-		component := v1beta1.DynamoComponentDeploymentSharedSpec{ComponentName: componentName}
-		if service != nil {
-			if service.Multinode != nil {
-				component.Multinode = &v1beta1.MultinodeSpec{}
-				v1alpha1.ConvertFromMultinodeSpec(service.Multinode, component.Multinode)
-			}
-			if service.Replicas != nil {
-				component.Replicas = ptr.To(*service.Replicas)
-			}
-			if service.GPUMemoryService != nil && service.GPUMemoryService.Enabled {
-				if component.Experimental == nil {
-					component.Experimental = &v1beta1.ExperimentalSpec{}
-				}
-				component.Experimental.GPUMemoryService = &v1beta1.GPUMemoryServiceSpec{}
-				v1alpha1.ConvertFromGPUMemoryServiceSpec(service.GPUMemoryService, component.Experimental.GPUMemoryService)
-			}
-			if service.Failover != nil && service.Failover.Enabled {
-				if component.Experimental == nil {
-					component.Experimental = &v1beta1.ExperimentalSpec{}
-				}
-				component.Experimental.Failover = &v1beta1.FailoverSpec{}
-				v1alpha1.ConvertFromFailoverSpec(service.Failover, component.Experimental.Failover)
-			}
-		}
-		components = append(components, component)
-	}
-	return PCSNameForDGD(dgdName, components)
-}
-
 // Define BackendFramework enum for sglang, vllm, trtllm
 
 type BackendFramework string
@@ -1482,18 +1401,6 @@ const (
 	BackendFrameworkTRTLLM BackendFramework = "trtllm"
 	BackendFrameworkNoop   BackendFramework = "noop"
 )
-
-// ParseBackendFramework converts a string to BackendFramework type.
-// Returns an error if the framework string is not recognized.
-func ParseBackendFramework(framework string) (BackendFramework, error) {
-	bf := BackendFramework(framework)
-	switch bf {
-	case BackendFrameworkVLLM, BackendFrameworkSGLang, BackendFrameworkTRTLLM, BackendFrameworkNoop:
-		return bf, nil
-	default:
-		return "", fmt.Errorf("unsupported backend framework: %s (valid values: vllm, sglang, trtllm)", framework)
-	}
-}
 
 // ContainerGPUCount lazily resolves the main container's scalar or DRA-backed
 // GPU count. The same resolver can be shared across all roles of a component.

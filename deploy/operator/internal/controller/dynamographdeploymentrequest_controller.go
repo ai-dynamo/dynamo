@@ -61,10 +61,6 @@ import (
 )
 
 const (
-	// Job naming
-	JobNamePrefixOnline = "profile-online-"
-	JobNamePrefixAIC    = "profile-aic-"
-
 	// Container names
 	ContainerNameProfiler             = "profiler"
 	ContainerNameOutputCopier         = "output-copier"
@@ -106,37 +102,25 @@ const (
 	DGDOverrideToolPath        = DGDOverrideToolMountPath + "/dgd-apply-overrides"
 	EnvDGDOverrideToolPath     = "DYNAMO_DGD_APPLY_OVERRIDES_BIN"
 
-	// Command line arguments
-	ArgModel   = "--model"
-	ArgBackend = "--backend"
-	ArgTTFT    = "--ttft"
-	ArgITL     = "--itl"
-	ArgConfig  = "--config"
-
 	// Messages
-	MessageValidationPassed          = "DGDR spec validation passed"
-	MessageInitialized               = "DGDR initialized successfully"
-	MessageDiscoveringHardware       = "Discovering GPU hardware and preparing profiling job"
-	MessageProfilingJobCreated       = "Profiling job created"
-	MessageAICProfilingJobCreated    = "AIC profiling job created"
-	MessageProfilingInProgress       = "Profiling is in progress"
-	MessageSpecGenerated             = "DynamoGraphDeployment spec generated successfully"
-	MessageSpecAvailable             = "Generated spec is available in annotation nvidia.com/generated-dgd-spec"
-	MessageDeploymentCreated         = "DynamoGraphDeployment %s created successfully"
-	MessageDeploymentReady           = "DynamoGraphDeployment %s is ready"
-	MessageDeploymentDegraded        = "DynamoGraphDeployment %s degraded from Ready to %s"
-	MessageDeploymentDeleted         = "DGD %s was deleted. DGDR will not recreate it. Delete this DGDR and create a new one to redeploy."
-	MessageInvalidState              = "Invalid state"
-	MessageSpecChangeRejected        = "Cannot modify spec in phase '%s'. DynamoGraphDeploymentRequest is immutable once profiling starts. Create a new resource with a different name instead."
-	MessageJobCreationFailed         = "JobCreationFailed"
-	MessageDeploymentCreationFailed  = "DeploymentCreationFailed"
-	MessageResultsRetrievalFailed    = "ResultsRetrievalFailed"
-	MessageGenerationFailed          = "GenerationFailed"
-	MessageAIConfiguratorCheckFailed = "AIConfiguratorCheckFailed"
-	MessageProfilingCheckFailed      = "ProfilingCheckFailed"
-	MessageConfigMapNotFound         = "ConfigMap %s not found in namespace %s"
-	MessageConfigMapKeyNotFound      = "key %s not found in ConfigMap %s"
-	MessageModelCachePVCNotFound     = "model cache PVC %s not found in namespace %s"
+	MessageValidationPassed         = "DGDR spec validation passed"
+	MessageInitialized              = "DGDR initialized successfully"
+	MessageDiscoveringHardware      = "Discovering GPU hardware and preparing profiling job"
+	MessageProfilingJobCreated      = "Profiling job created"
+	MessageProfilingInProgress      = "Profiling is in progress"
+	MessageSpecGenerated            = "DynamoGraphDeployment spec generated successfully"
+	MessageSpecAvailable            = "Generated spec is available in annotation nvidia.com/generated-dgd-spec"
+	MessageDeploymentCreated        = "DynamoGraphDeployment %s created successfully"
+	MessageDeploymentReady          = "DynamoGraphDeployment %s is ready"
+	MessageDeploymentDegraded       = "DynamoGraphDeployment %s degraded from Ready to %s"
+	MessageDeploymentDeleted        = "DGD %s was deleted. DGDR will not recreate it. Delete this DGDR and create a new one to redeploy."
+	MessageInvalidState             = "Invalid state"
+	MessageSpecChangeRejected       = "Cannot modify spec in phase '%s'. DynamoGraphDeploymentRequest is immutable once profiling starts. Create a new resource with a different name instead."
+	MessageJobCreationFailed        = "JobCreationFailed"
+	MessageDeploymentCreationFailed = "DeploymentCreationFailed"
+	MessageGenerationFailed         = "GenerationFailed"
+	MessageProfilingCheckFailed     = "ProfilingCheckFailed"
+	MessageModelCachePVCNotFound    = "model cache PVC %s not found in namespace %s"
 )
 
 var errProfilingOutputNotReady = errors.New("profiling output is not ready")
@@ -558,12 +542,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) handlePendingPhase(ctx context.
 		return ctrl.Result{}, nil
 	}
 
-	// Record event with appropriate message
-	if isOnlineProfiling(dgdr) {
-		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageProfilingJobCreated)
-	} else {
-		r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageAICProfilingJobCreated)
-	}
+	r.Recorder.Eventf(dgdr, nil, corev1.EventTypeNormal, nvidiacomv1beta1.EventReasonProfilingJobCreated, "Create", MessageProfilingJobCreated)
 
 	// Update to Profiling phase — use Initializing reason to indicate the profiler is loading.
 	dgdr.SetProfilingPhase(nvidiacomv1beta1.ProfilingPhaseInitializing)
@@ -1244,12 +1223,6 @@ func getProfilingJobName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) st
 // getOutputConfigMapName returns the ConfigMap name for profiling output
 func getOutputConfigMapName(dgdr *nvidiacomv1beta1.DynamoGraphDeploymentRequest) string {
 	return fmt.Sprintf("%s%s", ConfigMapOutputPrefix, dgdr.Name)
-}
-
-// isOnlineProfiling returns true. In v1beta1, the profiler decides online vs AIC
-// mode internally based on its config. The controller always uses the same label.
-func isOnlineProfiling(_ *nvidiacomv1beta1.DynamoGraphDeploymentRequest) bool {
-	return true
 }
 
 // validateSpec validates the DGDR spec
