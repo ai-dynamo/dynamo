@@ -9,7 +9,7 @@ spec:
     PrefillWorker:
       extraPodSpec:
         mainContainer:
-          image: &vllmEfaImage nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.1.1-efa-amd64
+          image: &vllmEfaImage nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.5.0-efa
     DecodeWorker:
       extraPodSpec:
         mainContainer:

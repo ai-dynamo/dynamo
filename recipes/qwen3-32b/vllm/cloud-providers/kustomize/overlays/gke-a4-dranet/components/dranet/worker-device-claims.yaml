@@ -1,0 +1,139 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Generated file. For repository contributors, do not edit this checked-in copy.
+# Regenerate this matrix's public overlays and template Components from the repository root:
+# Regenerate: scripts/kustomize-matrix.py unfold recipes/qwen3-32b/vllm/cloud-providers/.kustomize-matrix.yaml
+# Template source: recipes/kustomize/templates/gke-a4-dranet
+
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: q32b-1p1d-cloud-provider-decodeworker-a4-devices
+spec:
+  spec:
+    devices:
+      constraints:
+        - matchAttribute: resource.kubernetes.io/pcieRoot
+          requests:
+            - gpu-0
+            - rdma-0
+        - matchAttribute: resource.kubernetes.io/pcieRoot
+          requests:
+            - gpu-1
+            - rdma-1
+        - matchAttribute: resource.kubernetes.io/pcieRoot
+          requests:
+            - gpu-2
+            - rdma-2
+        - matchAttribute: resource.kubernetes.io/pcieRoot
+          requests:
+            - gpu-3
+            - rdma-3
+      requests:
+        - name: gpu-0
+          exactly:
+            deviceClassName: gpu.nvidia.com
+            allocationMode: ExactCount
+            count: 1
+        - name: rdma-0
+          exactly:
+            deviceClassName: mrdma.google.com
+            allocationMode: ExactCount
+            count: 1
+        - name: gpu-1
+          exactly:
+            deviceClassName: gpu.nvidia.com
+            allocationMode: ExactCount
+            count: 1
+        - name: rdma-1
+          exactly:
+            deviceClassName: mrdma.google.com
+            allocationMode: ExactCount
+            count: 1
+        - name: gpu-2
+          exactly:
+            deviceClassName: gpu.nvidia.com
+            allocationMode: ExactCount
+            count: 1
+        - name: rdma-2
+          exactly:
+            deviceClassName: mrdma.google.com
+            allocationMode: ExactCount
+            count: 1
+        - name: gpu-3
+          exactly:
+            deviceClassName: gpu.nvidia.com
+            allocationMode: ExactCount
+            count: 1
+        - name: rdma-3
+          exactly:
+            deviceClassName: mrdma.google.com
+            allocationMode: ExactCount
+            count: 1
+---
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: q32b-1p1d-cloud-provider-prefillworker-a4-devices
+spec:
+  spec:
+    devices:
+      constraints:
+        - matchAttribute: resource.kubernetes.io/pcieRoot
+          requests:
+            - gpu-0
+            - rdma-0
+        - matchAttribute: resource.kubernetes.io/pcieRoot
+          requests:
+            - gpu-1
+            - rdma-1
+        - matchAttribute: resource.kubernetes.io/pcieRoot
+          requests:
+            - gpu-2
+            - rdma-2
+        - matchAttribute: resource.kubernetes.io/pcieRoot
+          requests:
+            - gpu-3
+            - rdma-3
+      requests:
+        - name: gpu-0
+          exactly:
+            deviceClassName: gpu.nvidia.com
+            allocationMode: ExactCount
+            count: 1
+        - name: rdma-0
+          exactly:
+            deviceClassName: mrdma.google.com
+            allocationMode: ExactCount
+            count: 1
+        - name: gpu-1
+          exactly:
+            deviceClassName: gpu.nvidia.com
+            allocationMode: ExactCount
+            count: 1
+        - name: rdma-1
+          exactly:
+            deviceClassName: mrdma.google.com
+            allocationMode: ExactCount
+            count: 1
+        - name: gpu-2
+          exactly:
+            deviceClassName: gpu.nvidia.com
+            allocationMode: ExactCount
+            count: 1
+        - name: rdma-2
+          exactly:
+            deviceClassName: mrdma.google.com
+            allocationMode: ExactCount
+            count: 1
+        - name: gpu-3
+          exactly:
+            deviceClassName: gpu.nvidia.com
+            allocationMode: ExactCount
+            count: 1
+        - name: rdma-3
+          exactly:
+            deviceClassName: mrdma.google.com
+            allocationMode: ExactCount
+            count: 1
