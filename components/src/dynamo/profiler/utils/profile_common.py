@@ -50,6 +50,10 @@ BACKEND_IMAGE_NAMES: dict[str, str] = {
 
 PLANNER_IMAGE_NAME = "dynamo-planner"
 
+# Concrete backend for paths that cannot search across backends: every path that
+# derives an image or renders a command line needs one real backend name.
+DEFAULT_BACKEND = "vllm"
+
 
 def _replace_image_name(image_ref: str, new_name: str) -> str:
     """Replace the image name component in a Docker image reference.
@@ -109,6 +113,38 @@ def derive_backend_image(profiler_image: str, backend: str) -> str:
         )
 
     return _replace_image_name(profiler_image, backend_image_name)
+
+
+def resolve_auto_backend(
+    backend: str, search_path: str, supported: str | None = None
+) -> str:
+    """Resolve ``backend='auto'`` to a concrete backend for one search path.
+
+    Only the RAPID simulation search can pick a backend by searching across
+    them; every other path needs a concrete one to derive a container image and
+    render a command line from. Explicit backends pass through unchanged.
+
+    Args:
+        backend: The requested backend, possibly ``'auto'``.
+        search_path: Human-readable name of the calling path, named in the
+            warning so an operator can see which one did not search.
+        supported: A backend the caller has established can serve this model on
+            this hardware. Used in place of ``DEFAULT_BACKEND`` when supplied,
+            so a model the default cannot serve does not get it anyway.
+
+    Returns:
+        A concrete backend name.
+    """
+    if backend != "auto":
+        return backend
+    chosen = supported or DEFAULT_BACKEND
+    logger.warning(
+        "backend='auto' was requested but %s does not search across backends; "
+        "using '%s'. Request a concrete backend to control which one runs.",
+        search_path,
+        chosen,
+    )
+    return chosen
 
 
 # ---------------------------------------------------------------------------

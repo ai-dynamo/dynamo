@@ -29,6 +29,7 @@ from dynamo.profiler.utils.config import clamp_total_gpus_to_budget
 from dynamo.profiler.utils.dgdr_v1beta1_types import DynamoGraphDeploymentRequestSpec
 from dynamo.profiler.utils.model_cache_paths import model_cache_path_in_pvc
 from dynamo.profiler.utils.profile_common import (
+    DEFAULT_BACKEND,
     derive_backend_image,
     needs_mocker_aic_perf_model,
     needs_profile_data,
@@ -43,8 +44,20 @@ def _build_k8s_overrides(
     backend: str,
 ) -> dict:
     """Extract K8s overrides (image, PVC) from a DGDR spec."""
+    backend_image = derive_backend_image(dgdr.image, backend)
+    # derive_backend_image keeps the registry, tag and digest, so a difference
+    # means a sibling repository that may be absent from the registry.
+    if backend_image != dgdr.image:
+        logger.warning(
+            "Backend '%s' needs image '%s', so the generated deployment does "
+            "not use the requested image '%s'. Ensure the derived image exists "
+            "in the registry, or request a concrete backend.",
+            backend,
+            backend_image,
+            dgdr.image,
+        )
     overrides: dict = {
-        "k8s_image": derive_backend_image(dgdr.image, backend),
+        "k8s_image": backend_image,
     }
     if dgdr.modelCache:
         if dgdr.modelCache.pvcName:
@@ -59,6 +72,74 @@ def _build_k8s_overrides(
     return overrides
 
 
+def _winning_backend(best_config_df: pd.DataFrame | None) -> str | None:
+    """The concrete backend of a result bucket's rank-1 row.
+
+    AIC labels every row of a merged bucket with the backend of the task that
+    produced it. Returns ``None`` for an empty or unlabelled bucket, which is
+    what a single-backend search produces.
+    """
+    if best_config_df is None or best_config_df.empty:
+        return None
+    if "backend" not in best_config_df.columns:
+        return None
+    return str(best_config_df.iloc[0]["backend"])
+
+
+def _generated_backend(
+    best_config_df: pd.DataFrame | None,
+    chosen_exp: str,
+    task_configs: dict[str, Task],
+) -> str | None:
+    """The backend the generated deployment runs, read through the same task
+    lookup ``_generate_dgd_from_pick`` derives its image and command line from.
+    """
+    if best_config_df is None or best_config_df.empty:
+        return None
+    row_backend = _winning_backend(best_config_df)
+    tc = _resolve_task_config(
+        best_config_df.iloc[0], chosen_exp, task_configs, row_backend
+    )
+    return tc.primary_backend_name if tc is not None else row_backend
+
+
+def _resolve_task_config(
+    row: pd.Series,
+    chosen_exp: str,
+    task_configs: dict[str, Task],
+    row_backend: str | None,
+) -> Task | None:
+    """Find the task config that produced the winning row.
+
+    Under ``backend='auto'`` AIC runs one task per backend, keyed e.g.
+    ``agg_vllm``, then merges their results into the bare mode buckets ``agg``
+    and ``disagg``. ``chosen_exp`` is therefore a merged bucket name that is
+    absent from ``task_configs``, and the originating key has to be recovered.
+    Three sources are tried, most authoritative first:
+
+    1. ``_task_key``, which AIC publishes on every merged row.
+    2. ``chosen_exp`` itself, which is the key when one concrete backend was
+       requested and no merge happened.
+    3. ``f"{chosen_exp}_{row_backend}"``, reconstructing AIC's key scheme for
+       dependency versions that do not publish ``_task_key``.
+
+    Returns:
+        The task config, or ``None`` if no source resolves one.
+    """
+    if "_task_key" in row.index and pd.notna(row["_task_key"]):
+        tc = task_configs.get(str(row["_task_key"]))
+        if tc is not None:
+            return tc
+
+    tc = task_configs.get(chosen_exp)
+    if tc is not None:
+        return tc
+
+    if row_backend is not None:
+        return task_configs.get(f"{chosen_exp}_{row_backend}")
+    return None
+
+
 def _generate_dgd_from_pick(
     dgdr: DynamoGraphDeploymentRequestSpec,
     best_config_df: pd.DataFrame,
@@ -71,16 +152,31 @@ def _generate_dgd_from_pick(
         return None
 
     row = best_config_df.iloc[0]
+    row_backend = str(row["backend"]) if "backend" in row.index else None
 
-    tc = task_configs.get(chosen_exp)
-    # TODO: temporary workaround — when backend="auto", AIC's
-    # merge_experiment_results_by_mode collapses e.g. "agg_vllm" into "agg",
-    # but task_configs retains the original keys. Reconstruct the key from
-    # the winning row's backend column. Proper fix: AIC should return the
-    # original task config key alongside the merged chosen experiment name.
-    if tc is None and "backend" in row.index:
-        tc = task_configs.get(f"{chosen_exp}_{row['backend']}")
+    tc = _resolve_task_config(row, chosen_exp, task_configs, row_backend)
     if tc is None:
+        logger.error(
+            "No task config resolves the picked result: experiment='%s', "
+            "winning backend=%s, available keys=%s. No deployment generated.",
+            chosen_exp,
+            row_backend,
+            sorted(task_configs),
+        )
+        return None
+
+    # One backend for the whole generated deployment: the image and the
+    # command line are both selected from this local.
+    backend = tc.primary_backend_name
+    if row_backend is not None and row_backend != backend:
+        logger.error(
+            "Winning configuration reports backend '%s' but the resolved task "
+            "config '%s' is for backend '%s'. Refusing to generate a "
+            "deployment that would mix the two.",
+            row_backend,
+            chosen_exp,
+            backend,
+        )
         return None
 
     original_total_gpus = tc.total_gpus
@@ -110,7 +206,14 @@ def _generate_dgd_from_pick(
                 )
             tc.total_gpus = clamped_total_gpus
 
-        k8s_overrides = _build_k8s_overrides(dgdr, tc.primary_backend_name)
+        k8s_overrides = _build_k8s_overrides(dgdr, backend)
+        logger.info(
+            "Generating deployment for experiment='%s' with backend='%s' and "
+            "image='%s'.",
+            chosen_exp,
+            backend,
+            k8s_overrides["k8s_image"],
+        )
         cfg = task_config_to_generator_config(
             task_config=tc,
             result_df=row,
@@ -126,7 +229,7 @@ def _generate_dgd_from_pick(
 
     artifacts = generate_backend_artifacts(
         params=cfg,
-        backend=tc.primary_backend_name,
+        backend=backend,
         backend_version=tc.primary_backend_version,
         use_dynamo_generator=True,
     )
@@ -137,7 +240,7 @@ def _generate_dgd_from_pick(
 
 
 # Fallback backend when AIC simulation is unavailable and no concrete backend is specified.
-_DEFAULT_NAIVE_BACKEND = "vllm"
+_DEFAULT_NAIVE_BACKEND = DEFAULT_BACKEND
 
 # build_naive_generator_params seeds its own SlaConfig with these; kept only
 # to detect and report substitution, since the declared values are forwarded.
@@ -349,6 +452,23 @@ def _run_default_sim(
                 "overriding to '%s' to support mocker/throughput-scaling.",
                 disagg_key,
             )
+            # Each bucket is merged across backends under backend="auto", so the
+            # override can change the deployment's backend, not just its mode.
+            summarized_backend = _winning_backend(best_configs.get(chosen))
+            override_backend = _winning_backend(best_configs.get(disagg_key))
+            if (
+                summarized_backend is not None
+                and override_backend is not None
+                and summarized_backend != override_backend
+            ):
+                logger.warning(
+                    "The override also changes the backend: the summarized "
+                    "winner used '%s' but the generated deployment uses '%s', "
+                    "so it runs the '%s' runtime image and command line.",
+                    summarized_backend,
+                    override_backend,
+                    override_backend,
+                )
             chosen = disagg_key
         else:
             logger.warning(
@@ -362,20 +482,19 @@ def _run_default_sim(
         chosen, {"ttft": 0.0, "tpot": 0.0, "request_latency": 0.0}
     )
 
+    # When backend="auto" AIC expands to per-backend task configs; downstream
+    # consumers (e.g. run_interpolation) need the concrete backend name so they
+    # do not re-encounter "auto". Read through the same task-config lookup the
+    # generator uses, so the reported backend is the generated deployment's.
+    resolved_backend = backend
+    if backend == "auto":
+        generated = _generated_backend(best_config_df, chosen, task_configs)
+        if generated is not None:
+            resolved_backend = generated
+
     dgd_config = _generate_dgd_from_pick(
         dgdr, best_config_df, chosen, task_configs, picking_mode
     )
-
-    # When backend="auto" AIC expands to per-backend task configs; the winning
-    # row carries the concrete backend name so downstream consumers (e.g.
-    # run_interpolation) can use it without re-encountering "auto".
-    resolved_backend = backend
-    if (
-        backend == "auto"
-        and not best_config_df.empty
-        and "backend" in best_config_df.columns
-    ):
-        resolved_backend = best_config_df.iloc[0]["backend"]
 
     return {
         "best_config_df": best_config_df,
