@@ -24,6 +24,9 @@ try:
     from dynamo.profiler.utils.config_modifiers.protocol import (  # noqa: F401
         BaseConfigModifier,
     )
+    from dynamo.profiler.utils.config_modifiers.sglang import (
+        _normalize_prefill_dp_limits,
+    )
     from dynamo.profiler.utils.defaults import (
         DYNAMO_RUN_DEFAULT_PORT,
         EngineType,
@@ -207,6 +210,33 @@ def test_convert_aggregate_template_preserves_single_worker(
     assert workers[0]["type"] == "decode"
 
 
+def test_convert_vllm_disagg_decode_removes_disaggregation_role() -> None:
+    modifier = CONFIG_MODIFIERS["vllm"]
+    config = modifier.load_default_config("disagg")
+    decode_args = _main_container(_component_by_type(config, "decode"))["args"]
+    decode_args.extend(
+        [
+            "--disaggregation-mode=decode",
+            "--disaggregation-mode",
+            "decode",
+            "--kv-transfer-config",
+            '{"kv_connector":"NixlConnector","kv_role":"kv_both"}',
+        ]
+    )
+
+    converted = modifier.convert_config(config, target=EngineType.DECODE)
+    workers = _worker_components(converted)
+    converted_args = _main_container(workers[0])["args"]
+
+    assert len(workers) == 1
+    assert workers[0]["type"] == "decode"
+    assert "--disaggregation-mode" not in converted_args
+    assert not any(arg.startswith("--disaggregation-mode=") for arg in converted_args)
+    assert converted_args[converted_args.index("--kv-transfer-config") + 1] == (
+        '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+    )
+
+
 def test_build_dgd_config_vllm_disagg_restores_runtime_args() -> None:
     """AIC tuning args must not remove Dynamo's vLLM disaggregation contract."""
     modifier = CONFIG_MODIFIERS["vllm"]
@@ -356,8 +386,67 @@ def test_build_dgd_config_sglang_prefill_mrr_one_sets_dp_safe_cuda_graph_bs() ->
 
     prefill_args = _main_container(_component_by_type(dgd_config, "prefill"))["args"]
 
+    assert prefill_args.count("--max-running-requests") == 1
+    assert prefill_args[prefill_args.index("--max-running-requests") + 1] == "2"
     assert prefill_args.count("--cuda-graph-bs") == 1
     assert prefill_args[prefill_args.index("--cuda-graph-bs") + 1] == "2"
+
+
+@pytest.mark.parametrize(
+    "prefill_args",
+    [
+        ["--enable-dp-attention", "--max-running-requests=2"],
+        ["--dp-size=4", "--max-running-requests=2"],
+        ["--dp-size=2", "--enable-dp-attention", "--max-running-requests=2"],
+    ],
+)
+def test_sglang_prefill_dp_limits_leave_safe_args_unchanged(
+    prefill_args: list[str],
+) -> None:
+    assert _normalize_prefill_dp_limits(prefill_args) == prefill_args
+
+
+def test_sglang_prefill_dp_limits_normalize_shell_joined_args() -> None:
+    args = [
+        "--dp 2",
+        "--enable-dp-attention",
+        "--max-running-requests 1",
+    ]
+
+    normalized = _normalize_prefill_dp_limits(args)
+
+    assert "--max-running-requests 1" not in normalized
+    assert normalized.count("--max-running-requests") == 1
+    assert normalized[normalized.index("--max-running-requests") + 1] == "2"
+    assert normalized[normalized.index("--cuda-graph-bs") + 1] == "2"
+
+
+@pytest.mark.parametrize(
+    ("prefill_args", "error"),
+    [
+        (
+            ["--enable-dp-attention", "--dp-size=invalid"],
+            "data parallel size must be an integer",
+        ),
+        (
+            ["--enable-dp-attention", "--dp-size=0"],
+            "data parallel size must be greater than zero",
+        ),
+        (
+            ["--enable-dp-attention", "--max-running-requests=invalid"],
+            "--max-running-requests must be an integer",
+        ),
+        (
+            ["--enable-dp-attention", "--max-running-requests=0"],
+            "--max-running-requests must be greater than zero",
+        ),
+    ],
+)
+def test_sglang_prefill_dp_limits_reject_invalid_explicit_values(
+    prefill_args: list[str], error: str
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        _normalize_prefill_dp_limits(prefill_args)
 
 
 def test_build_dgd_config_sglang_prefill_keeps_existing_cuda_graph_bs() -> None:
@@ -401,6 +490,7 @@ def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
     _main_container(component)["args"] = [
         "--max-running-requests=512",
         "--dp=2",
+        "--enable-dp-attention",
     ]
 
     result = modifier.set_prefill_config(
@@ -410,7 +500,8 @@ def test_sglang_set_prefill_config_uses_effective_mrr_override() -> None:
     )
     args = _main_container(_component_by_type(result, "decode"))["args"]
 
-    assert args[args.index("--max-running-requests") + 1] == "1"
+    assert args.count("--max-running-requests") == 1
+    assert args[args.index("--max-running-requests") + 1] == "2"
     assert args.count("--cuda-graph-bs") == 1
     assert args[args.index("--cuda-graph-bs") + 1] == "2"
 

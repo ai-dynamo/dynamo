@@ -111,6 +111,22 @@ def _finalize_disagg_cli_args(args: list[str], role: SubComponentType) -> list[s
     return finalized
 
 
+def _remove_disaggregation_mode_args(args: list[str]) -> list[str]:
+    filtered_args: list[str] = []
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--disaggregation-mode":
+            index += 2
+            continue
+        if arg.startswith("--disaggregation-mode="):
+            index += 1
+            continue
+        filtered_args.append(arg)
+        index += 1
+    return filtered_args
+
+
 class VllmV1ConfigModifier(BaseConfigModifier):
     BACKEND = "vllm"
     # vllm uses a different arg for model path
@@ -243,6 +259,9 @@ class VllmV1ConfigModifier(BaseConfigModifier):
             )
             args = validate_and_get_worker_args(worker_service, backend="vllm")
             args = break_arguments(args)
+
+            # The decode candidate is standalone after its prefill peer is removed.
+            args = _remove_disaggregation_mode_args(args)
 
             # enable prefix caching
             if "--enable-prefix-caching" not in args:
