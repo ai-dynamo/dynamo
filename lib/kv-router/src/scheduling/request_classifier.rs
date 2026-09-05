@@ -22,7 +22,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::policy_queue::QueueSnapshot;
 use super::types::{KvSchedulerError, SessionContext};
-use crate::protocols::WorkerWithDpRank;
+use super::{RequestProgress, RequestProgressUpdater};
+use crate::protocols::{WorkerAffinityTarget, WorkerWithDpRank};
 
 static NEXT_CLASSIFICATION_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_LIFECYCLE_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -36,6 +37,7 @@ pub struct ClassifyRequest {
     ingress_at: Instant,
     input_tokens: usize,
     initial_cached_tokens: usize,
+    progress: RequestProgress,
     session_context: Option<SessionContext>,
 }
 
@@ -44,6 +46,16 @@ struct ClassificationOverrides {
     policy_class: Option<String>,
     due_at: Option<Instant>,
     scheduling_cost_tokens: Option<usize>,
+    /// Outer `None` leaves session affinity untouched; `Some(None)` clears it;
+    /// `Some(Some(target))` replaces it for this request.
+    worker_selection_target: Option<Option<WorkerAffinityTarget>>,
+}
+
+pub(crate) struct ClassificationQueueInputs {
+    pub(crate) policy_class: Option<String>,
+    pub(crate) due_at: Option<Instant>,
+    pub(crate) scheduling_cost_tokens: Option<usize>,
+    pub(crate) worker_selection_target: Option<Option<WorkerAffinityTarget>>,
 }
 
 impl ClassifyRequest {
@@ -57,6 +69,7 @@ impl ClassifyRequest {
         initial_cached_tokens: usize,
         ingress_at: Instant,
     ) -> Self {
+        let (progress, _) = RequestProgress::new(input_tokens);
         Self {
             classification_id: 0,
             request_id: None,
@@ -65,6 +78,7 @@ impl ClassifyRequest {
             ingress_at,
             input_tokens,
             initial_cached_tokens,
+            progress,
             session_context: None,
         }
     }
@@ -103,6 +117,12 @@ impl ClassifyRequest {
         self.input_tokens
     }
 
+    /// Return lock-free access to the latest logical context observed while
+    /// this request is live.
+    pub fn progress(&self) -> &RequestProgress {
+        &self.progress
+    }
+
     /// Return the original router ingress time on the monotonic clock.
     pub fn ingress_at(&self) -> Instant {
         self.ingress_at
@@ -126,6 +146,25 @@ impl ClassifyRequest {
         self.overrides.scheduling_cost_tokens = Some(scheduling_cost_tokens);
     }
 
+    /// Ask Place to prefer one worker and data-parallel rank for this request.
+    ///
+    /// The router keeps final selection authority: caller constraints and worker eligibility are
+    /// still enforced, and a custom worker-selection policy may fall back when the target is not
+    /// eligible. The target replaces any session-affinity target for this request only; a
+    /// pinned request (an explicit caller pin, a routing plan, or a disaggregation hint)
+    /// ignores it.
+    pub fn set_worker_selection_target(&mut self, worker: WorkerWithDpRank) {
+        self.overrides.worker_selection_target = Some(Some(worker.into()));
+    }
+
+    /// Remove the session-affinity target from this request before Place.
+    ///
+    /// Required caller routing constraints remain in force. This is primarily useful with soft
+    /// session affinity when a classifier deliberately repacks work across workers.
+    pub fn clear_worker_selection_target(&mut self) {
+        self.overrides.worker_selection_target = Some(None);
+    }
+
     pub fn session_context(&self) -> Option<&SessionContext> {
         self.session_context.as_ref()
     }
@@ -133,12 +172,13 @@ impl ClassifyRequest {
     /// Only the explicit overrides feed the queue: cache eligibility is
     /// recomputed from the current workers at enqueue, because worker state
     /// may have changed while the classification was pending.
-    pub(crate) fn into_queue_inputs(self) -> (Option<String>, Option<Instant>, Option<usize>) {
-        (
-            self.overrides.policy_class,
-            self.overrides.due_at,
-            self.overrides.scheduling_cost_tokens,
-        )
+    pub(crate) fn into_queue_inputs(self) -> ClassificationQueueInputs {
+        ClassificationQueueInputs {
+            policy_class: self.overrides.policy_class,
+            due_at: self.overrides.due_at,
+            scheduling_cost_tokens: self.overrides.scheduling_cost_tokens,
+            worker_selection_target: self.overrides.worker_selection_target,
+        }
     }
 }
 
@@ -240,7 +280,78 @@ pub trait RequestClassifier: Send + 'static {
 struct LiveRequest {
     generation: u64,
     overrides: Option<ClassificationOverrides>,
+    progress: RequestProgress,
+    progress_updater: RequestProgressUpdater,
 }
+
+/// One live worker rank visible to a request-classifier plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestClassifierWorker {
+    worker: WorkerWithDpRank,
+    total_kv_blocks: Option<u64>,
+}
+
+impl RequestClassifierWorker {
+    pub fn new(worker: WorkerWithDpRank, total_kv_blocks: Option<u64>) -> Self {
+        Self {
+            worker,
+            total_kv_blocks,
+        }
+    }
+
+    pub fn worker(&self) -> WorkerWithDpRank {
+        self.worker
+    }
+
+    /// Total KV blocks of [`RequestClassifierContext::block_size`] tokens on this rank, from the
+    /// worker's published runtime config. `None` when the worker did not publish a value.
+    pub fn total_kv_blocks(&self) -> Option<u64> {
+        self.total_kv_blocks
+    }
+}
+
+/// Cached host inputs supplied when constructing one classifier instance.
+#[derive(Clone)]
+pub struct RequestClassifierContext {
+    block_size: u32,
+    workers: Arc<dyn Fn() -> Vec<RequestClassifierWorker> + Send + Sync>,
+}
+
+impl RequestClassifierContext {
+    pub fn new(
+        block_size: u32,
+        workers: impl Fn() -> Vec<RequestClassifierWorker> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            block_size,
+            workers: Arc::new(workers),
+        }
+    }
+
+    /// Tokens per KV block for this router's hash domain.
+    pub fn block_size(&self) -> u32 {
+        self.block_size
+    }
+
+    /// Return a non-blocking snapshot from the host's existing discovery watcher.
+    /// Ranks appear as workers register and leave when they deregister.
+    pub fn workers(&self) -> Vec<RequestClassifierWorker> {
+        (self.workers)()
+    }
+}
+
+impl std::fmt::Debug for RequestClassifierContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RequestClassifierContext")
+            .field("block_size", &self.block_size)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Factory resolved once from the linked catalog and invoked for each routed model.
+pub type RequestClassifierFactory =
+    Arc<dyn Fn(RequestClassifierContext) -> Box<dyn RequestClassifier> + Send + Sync>;
 
 pub(crate) struct RequestClassifierRuntime {
     // Box: the install seam is object-safe and `Mutex::new` needs `Sized`;
@@ -322,14 +433,28 @@ impl RequestClassifierRuntime {
             return Err(KvSchedulerError::SubscriberShutdown);
         }
 
-        if let Some(overrides) = request.request_id().and_then(|request_id| {
-            self.live_requests
-                .lock()
-                .get(request_id)
-                .and_then(|live| live.overrides.clone())
-        }) {
-            request.overrides = overrides;
-            return Ok(request);
+        let input_tokens = request.input_tokens;
+        let live_request = request.request_id().and_then(|request_id| {
+            let mut live_requests = self.live_requests.lock();
+            let live_request = live_requests.get_mut(request_id)?;
+            live_request
+                .progress_updater
+                .update_context_tokens(input_tokens);
+            Some((
+                live_request.progress.clone(),
+                live_request.overrides.clone(),
+            ))
+        });
+        if let Some((progress, overrides)) = live_request {
+            request.progress = progress;
+            if let Some(overrides) = overrides {
+                // Cached overrides replay without re-consulting the plugin, so a retry can
+                // carry a worker-selection target whose worker has since deregistered.
+                // Availability filtering excludes dead workers, degrading to fallback
+                // selection rather than misrouting.
+                request.overrides = overrides;
+                return Ok(request);
+            }
         }
 
         let classification_id = NEXT_CLASSIFICATION_ID.fetch_add(1, Ordering::Relaxed);
@@ -391,24 +516,29 @@ impl RequestClassifierRuntime {
         if self.shutdown.is_cancelled() {
             return Err(KvSchedulerError::SubscriberShutdown);
         }
-        match self.live_requests.lock().entry(request_id.to_owned()) {
+        let progress_updater = match self.live_requests.lock().entry(request_id.to_owned()) {
             std::collections::hash_map::Entry::Occupied(_) => {
                 return Err(KvSchedulerError::DuplicateClassificationRequestId(
                     request_id.to_owned(),
                 ));
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
+                let (progress, progress_updater) = RequestProgress::new(0);
                 entry.insert(LiveRequest {
                     generation: NEXT_LIFECYCLE_GENERATION.fetch_add(1, Ordering::Relaxed),
                     overrides: None,
+                    progress,
+                    progress_updater: progress_updater.clone(),
                 });
+                progress_updater
             }
-        }
+        };
         Ok(RequestLifecycle {
             runtime: Arc::clone(self),
             request_id: request_id.to_owned(),
             worker: None,
             context_tokens: None,
+            progress_updater,
             phase: LifecyclePhase::Registered,
         })
     }
@@ -459,6 +589,7 @@ pub struct RequestLifecycle {
     request_id: String,
     worker: Option<WorkerWithDpRank>,
     context_tokens: Option<usize>,
+    progress_updater: RequestProgressUpdater,
     phase: LifecyclePhase,
 }
 
@@ -513,11 +644,12 @@ impl RequestLifecycle {
     /// Order matters: [`Self::observe_context_tokens`] floors the same total,
     /// so report a context before its outputs or the floor erases them.
     pub fn observe_output_tokens(&mut self, output_tokens: usize) {
-        self.context_tokens = Some(
-            self.context_tokens
-                .unwrap_or_default()
-                .saturating_add(output_tokens),
-        );
+        let context_tokens = self
+            .context_tokens
+            .unwrap_or_default()
+            .saturating_add(output_tokens);
+        self.context_tokens = Some(context_tokens);
+        self.progress_updater.update_context_tokens(context_tokens);
     }
 
     /// Raise the context total to at least `context_tokens` (an
@@ -527,6 +659,7 @@ impl RequestLifecycle {
             self.context_tokens
                 .map_or(context_tokens, |current| current.max(context_tokens)),
         );
+        self.progress_updater.update_context_tokens(context_tokens);
     }
 
     pub fn prepare_retry(&mut self) {
@@ -763,7 +896,11 @@ mod tests {
         assert_eq!(result.request_id(), Some("request-1"));
         assert_eq!(result.policy_class(), Some("latency"));
         assert_eq!(result.scheduling_cost_tokens(), 96);
-        assert_eq!(result.into_queue_inputs(), (None, None, None));
+        let inputs = result.into_queue_inputs();
+        assert_eq!(inputs.policy_class, None);
+        assert_eq!(inputs.due_at, None);
+        assert_eq!(inputs.scheduling_cost_tokens, None);
+        assert_eq!(inputs.worker_selection_target, None);
     }
 
     struct EventReleasedClassifier {
@@ -922,15 +1059,23 @@ mod tests {
             .classify_with(ClassifyRequest::new(10, 10).with_request_id("request-1"))
             .await
             .unwrap();
+        assert_eq!(first.progress().context_tokens(), 10);
+        lifecycle.observe_context_tokens(10);
+        lifecycle.observe_output_tokens(5);
+        assert_eq!(first.progress().context_tokens(), 15);
         let retry = runtime
-            .classify_with(ClassifyRequest::new(20, 20).with_request_id("request-1"))
+            .classify_with(ClassifyRequest::new(12, 12).with_request_id("request-1"))
             .await
             .unwrap();
 
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(first.input_tokens(), 10);
-        assert_eq!(retry.input_tokens(), 20);
+        assert_eq!(retry.input_tokens(), 12);
         assert_eq!(retry.scheduling_cost_tokens(), 7);
+        assert_eq!(retry.progress().context_tokens(), 15);
+        lifecycle.observe_context_tokens(20);
+        assert_eq!(first.progress().context_tokens(), 20);
+        assert_eq!(retry.progress().context_tokens(), 20);
         lifecycle.abort(None);
     }
 
@@ -950,7 +1095,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(calls.load(Ordering::Relaxed), 0);
-        assert_eq!(result.into_queue_inputs(), (None, None, None));
+        let inputs = result.into_queue_inputs();
+        assert_eq!(inputs.policy_class, None);
+        assert_eq!(inputs.due_at, None);
+        assert_eq!(inputs.scheduling_cost_tokens, None);
+        assert_eq!(inputs.worker_selection_target, None);
     }
 
     struct GatedClassifier {
