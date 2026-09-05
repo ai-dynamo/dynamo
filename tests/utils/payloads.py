@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, List, Optional, cast
 import requests
 
 from dynamo import prometheus_names  # type: ignore[attr-defined]
+from tests.serve.lora_utils import load_lora_adapter
 from tests.utils.constants import DefaultPort
 from tests.utils.prometheus import find_metric_samples, sum_metric_samples
 from tests.utils.router_nvext import RouterNvextExpectation, validate_router_nvext
@@ -739,10 +740,6 @@ class LoraTestChatPayload(ChatPayload):
     def _ensure_lora_loaded(self) -> None:
         """Ensure the LoRA adapter is loaded before making inference requests"""
         if not self._lora_loaded:
-            # Import the load_lora_adapter function
-            # Note: This import is done here to avoid circular dependencies
-            from tests.serve.lora_utils import load_lora_adapter
-
             load_lora_adapter(
                 system_port=self.system_ports[0],
                 lora_name=self.lora_name,
@@ -1281,6 +1278,75 @@ class EmbeddingPayload(BasePayload):
 
     def response_handler(self, response: Any) -> str:
         return EmbeddingPayload.extract_embeddings(response)
+
+
+class LoraEmbeddingPayload(EmbeddingPayload):
+    """Embedding payload that loads a LoRA adapter, then embeds through it.
+
+    Proves the adapter actually reached the pooling forward pass: the same text
+    is embedded against the base model and against the adapter, and the two
+    vectors must differ. Asserting only that the adapter-named request returns
+    200 would pass even when the worker silently pools with the base weights,
+    which is the regression this covers.
+    """
+
+    def __init__(
+        self,
+        body: dict,
+        lora_name: str,
+        s3_uri: str,
+        base_model: str,
+        system_port: int = DefaultPort.SYSTEM1.value,
+        repeat_count: int = 1,
+        expected_response: Optional[list] = None,
+        expected_log: Optional[list] = None,
+        timeout: int = 60,
+    ):
+        super().__init__(
+            body=body,
+            repeat_count=repeat_count,
+            expected_response=expected_response or [],
+            expected_log=expected_log or [],
+            timeout=timeout,
+        )
+        self.system_ports = [system_port]
+        self.lora_name = lora_name
+        self.s3_uri = s3_uri
+        self.base_model = base_model
+        self._lora_loaded = False
+
+    # Adapter load + /v1/models wait are identical to the chat flow.
+    _ensure_lora_loaded = LoraTestChatPayload._ensure_lora_loaded
+
+    def url(self) -> str:
+        self._ensure_lora_loaded()
+        return super().url()
+
+    def _embed(self, model: str) -> List[float]:
+        response = requests.post(
+            f"http://{self.host}:{self.port}{self.endpoint}",
+            json={**self.body, "model": model},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        raw = response.json()["data"][0]["embedding"]
+        assert isinstance(raw, list) and raw, f"empty embedding for {model!r}"
+        return [float(v) for v in raw]
+
+    def response_handler(self, response: Any) -> str:
+        summary = EmbeddingPayload.extract_embeddings(response)
+
+        adapter_vec = self._embed(self.lora_name)
+        base_vec = self._embed(self.base_model)
+        assert len(adapter_vec) == len(base_vec), (
+            f"adapter and base embeddings differ in dimension: "
+            f"{len(adapter_vec)} vs {len(base_vec)}"
+        )
+        assert adapter_vec != base_vec, (
+            f"embedding for adapter '{self.lora_name}' is identical to the base "
+            f"model '{self.base_model}': the adapter was not applied"
+        )
+        return summary
 
 
 @dataclass

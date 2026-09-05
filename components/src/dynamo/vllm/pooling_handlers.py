@@ -22,6 +22,7 @@ from vllm.config import ModelConfig
 from vllm.inputs import TextPrompt, TokensPrompt
 
 from dynamo._core import Context
+from dynamo.llm import ModelType
 
 from .args import Config
 from .handlers import EmbeddingWorkerHandler
@@ -52,16 +53,23 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         config: Config,
         model_config: ModelConfig | None = None,
         shutdown_event: Optional[asyncio.Event] = None,
+        generate_endpoint=None,
     ) -> None:
         super().__init__(
             runtime=runtime,
             engine=engine,
             config=config,
             shutdown_event=shutdown_event,
+            generate_endpoint=generate_endpoint,
+            model_config=model_config,
         )
-        self.model_config = model_config
         self._default_pooling_task: str | None = None
         logger.info("Classify worker handler initialized")
+
+    def _lora_model_type(self) -> ModelType:
+        """One worker registers both pooling-family types, so adapter cards
+        must carry the same pair as the base card."""
+        return ModelType.Classify | ModelType.Pooling
 
     def _id2label(self) -> dict[int, str]:
         """Return the model's Hugging Face label map with integer keys."""
@@ -150,6 +158,13 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
         tokenizer = getattr(self.engine_client.renderer, "tokenizer", None)
         engine_request_id = context.id()
         priority = request.get("priority", 0)
+        # Resolved once per request: every prompt in the batch names the same
+        # model. Raises for an unknown non-base name rather than quietly
+        # pooling with the base weights.
+        lora_request = self._resolve_lora_request(
+            request.get("model") or self.config.served_model_name or ""
+        )
+        self._track_lora_request_activation(lora_request)
 
         async def _encode_one(idx: int, prompt: Any) -> Any:
             request_id = f"{engine_request_id}-{idx}"
@@ -166,6 +181,10 @@ class ClassifyWorkerHandler(EmbeddingWorkerHandler):
                     "pooling_params": pooling_params,
                     "request_id": request_id,
                 }
+                # Omitting this silently pools with the base model for a
+                # request that named an adapter.
+                if lora_request is not None:
+                    encode_kwargs["lora_request"] = lora_request
                 if priority != 0:
                     encode_kwargs["priority"] = priority
                 # Token-ID prompts have already been passed through vLLM's

@@ -20,6 +20,7 @@ from dynamo.common.constants import (  # noqa: E402
 from dynamo.common.lora.manager import LoRAInfo  # noqa: E402
 from dynamo.llm import ModelType, WorkerType  # noqa: E402
 from dynamo.vllm import handlers as handlers_mod  # noqa: E402
+from dynamo.vllm import lora_handler as lora_mod  # noqa: E402
 from dynamo.vllm.cache_info import DYNAMO_KV_EVENT_BLOCK_SIZE_KEY  # noqa: E402
 
 pytestmark = [
@@ -81,8 +82,8 @@ async def test_prefill_load_records_and_publishes_without_eager_engine_add(
     )
     register = AsyncMock()
     monkeypatch.delenv("DYN_LORA_HOTSWAP_ENABLED", raising=False)
-    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
-    monkeypatch.setattr(handlers_mod, "lora_name_to_id", lambda _name: 123)
+    monkeypatch.setattr(lora_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(lora_mod, "lora_name_to_id", lambda _name: 123)
     monkeypatch.setattr(handlers_mod, "register_model", register)
 
     results = [
@@ -142,8 +143,8 @@ async def test_prefill_lora_registration_preserves_worker_dp_range(monkeypatch):
     )
     register = AsyncMock()
     monkeypatch.delenv("DYN_LORA_HOTSWAP_ENABLED", raising=False)
-    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
-    monkeypatch.setattr(handlers_mod, "lora_name_to_id", lambda _name: 123)
+    monkeypatch.setattr(lora_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(lora_mod, "lora_name_to_id", lambda _name: 123)
     monkeypatch.setattr(handlers_mod, "register_model", register)
 
     results = [
@@ -172,8 +173,8 @@ async def test_decode_load_still_eagerly_adds_to_engine(monkeypatch):
         )
     )
     monkeypatch.delenv("DYN_LORA_HOTSWAP_ENABLED", raising=False)
-    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
-    monkeypatch.setattr(handlers_mod, "lora_name_to_id", lambda _name: 123)
+    monkeypatch.setattr(lora_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(lora_mod, "lora_name_to_id", lambda _name: 123)
     monkeypatch.setattr(handlers_mod, "register_model", AsyncMock())
 
     results = [
@@ -197,8 +198,8 @@ async def test_prefill_publish_failure_rolls_back_metadata_only(monkeypatch):
     )
     register = AsyncMock(side_effect=RuntimeError("discovery is down"))
     monkeypatch.delenv("DYN_LORA_HOTSWAP_ENABLED", raising=False)
-    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
-    monkeypatch.setattr(handlers_mod, "lora_name_to_id", lambda _name: 123)
+    monkeypatch.setattr(lora_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(lora_mod, "lora_name_to_id", lambda _name: 123)
     monkeypatch.setattr(handlers_mod, "register_model", register)
 
     results = [
@@ -224,7 +225,7 @@ async def test_legacy_unload_unregisters_before_engine_removal(monkeypatch):
     order: list[str] = []
     unregister = AsyncMock(side_effect=lambda **_kwargs: order.append("unregister"))
     handler.engine_client.remove_lora.side_effect = lambda _id: order.append("remove")
-    monkeypatch.setattr(handlers_mod, "unregister_model", unregister)
+    monkeypatch.setattr(lora_mod, "unregister_model", unregister)
 
     results = [
         result async for result in handler.unload_lora({"lora_name": "adapterA"})
@@ -246,10 +247,10 @@ async def test_legacy_prefill_unload_skips_engine_removal_for_metadata_only_adap
         )
     )
     unregister = AsyncMock()
-    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
-    monkeypatch.setattr(handlers_mod, "lora_name_to_id", lambda _name: 123)
+    monkeypatch.setattr(lora_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(lora_mod, "lora_name_to_id", lambda _name: 123)
     monkeypatch.setattr(handlers_mod, "register_model", AsyncMock())
-    monkeypatch.setattr(handlers_mod, "unregister_model", unregister)
+    monkeypatch.setattr(lora_mod, "unregister_model", unregister)
 
     load_results = [
         result
@@ -275,7 +276,7 @@ async def test_legacy_prefill_unload_removes_request_activated_adapter(monkeypat
         "adapterA": LoRAInfo(id=123, path="/cache/adapter")
     }
     handler._track_lora_request_activation(handler._resolve_lora_request("adapterA"))
-    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
+    monkeypatch.setattr(lora_mod, "unregister_model", AsyncMock())
 
     results = [
         result async for result in handler.unload_lora({"lora_name": "adapterA"})
@@ -291,7 +292,7 @@ async def test_legacy_prefill_request_admission_serializes_with_unload(monkeypat
     handler._lora_state.loaded_loras = {
         "adapterA": LoRAInfo(id=123, path="/cache/adapter")
     }
-    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
+    monkeypatch.setattr(lora_mod, "unregister_model", AsyncMock())
 
     admission_started = asyncio.Event()
     allow_admission = asyncio.Event()
@@ -342,7 +343,7 @@ async def test_legacy_prefill_request_rejects_adapter_unloaded_before_admission(
     handler._lora_state.loaded_loras = {
         "adapterA": LoRAInfo(id=123, path="/cache/adapter")
     }
-    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
+    monkeypatch.setattr(lora_mod, "unregister_model", AsyncMock())
     stale_request = handler._resolve_lora_request("adapterA")
 
     results = [
@@ -400,8 +401,8 @@ async def test_load_lora_cancellation_releases_capacity_placeholder(monkeypatch)
         return {"status": "success", "local_path": "/cache/adapter"}
 
     manager = SimpleNamespace(download_lora=_blocked_download)
-    monkeypatch.setattr(handlers_mod, "get_lora_manager", lambda: manager)
-    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
+    monkeypatch.setattr(lora_mod, "get_lora_manager", lambda: manager)
+    monkeypatch.setattr(lora_mod, "unregister_model", AsyncMock())
 
     async def _run_load():
         return [
@@ -435,7 +436,7 @@ async def test_legacy_prefill_unload_treats_missing_request_adapter_as_idempoten
     }
     handler._engine_loaded_loras = {"adapterA"}
     handler.engine_client.remove_lora.side_effect = RuntimeError("adapter not found")
-    monkeypatch.setattr(handlers_mod, "unregister_model", AsyncMock())
+    monkeypatch.setattr(lora_mod, "unregister_model", AsyncMock())
 
     results = [
         result async for result in handler.unload_lora({"lora_name": "adapterA"})
@@ -451,7 +452,7 @@ async def test_legacy_unload_unregister_failure_preserves_engine_state(monkeypat
     original = LoRAInfo(id=123, path="/cache/adapter")
     handler._lora_state.loaded_loras = {"adapterA": original}
     monkeypatch.setattr(
-        handlers_mod,
+        lora_mod,
         "unregister_model",
         AsyncMock(side_effect=RuntimeError("discovery is down")),
     )

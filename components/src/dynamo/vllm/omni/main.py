@@ -11,6 +11,7 @@ import uvloop
 
 from dynamo import prometheus_names
 from dynamo.common.config_dump import dump_config
+from dynamo.common.lora.manager import get_lora_manager
 from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.rl import first_endpoint_response
 from dynamo.common.storage import get_fs
@@ -20,7 +21,6 @@ from dynamo.common.utils.runtime import create_runtime
 from dynamo.llm import ModelInput, ModelType, WorkerType, fetch_model, register_model
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.handlers import get_lora_manager
 from dynamo.vllm.health_check import VllmOmniHealthCheckPayload
 from dynamo.vllm.main import setup_metrics_collection
 from dynamo.vllm.omni.realtime_utils import init_omni_realtime

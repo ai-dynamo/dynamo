@@ -77,11 +77,11 @@ def _load_vllm_main() -> ModuleType:
     [
         (True, dynamo_llm.ModelType.Prefill, 3),
         (True, dynamo_llm.ModelType.Chat, 3),
-        (True, dynamo_llm.ModelType.Embedding, None),
+        (True, dynamo_llm.ModelType.Embedding, 3),
         (
             True,
             dynamo_llm.ModelType.Classify | dynamo_llm.ModelType.Pooling,
-            None,
+            3,
         ),
         (False, dynamo_llm.ModelType.Prefill, None),
     ],
