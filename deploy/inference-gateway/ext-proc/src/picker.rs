@@ -10,6 +10,8 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 
+use crate::lifecycle::EppRequestLifecycle;
+
 /// A model server pod endpoint available for serving requests.
 #[derive(Debug, Clone)]
 pub struct Endpoint {
@@ -132,6 +134,20 @@ pub trait EndpointPicker: Send + Sync + 'static {
         _usage: Option<ResponseUsage>,
     ) {
         self.on_request_complete(booking_id).await;
+    }
+
+    /// Begin a router classifier lifecycle for `request_id` (DEP #13891).
+    ///
+    /// The ext_proc server owns the returned driver for the life of the stream
+    /// and pumps it from the request/response phases. Pickers that embed no
+    /// router return [`EppRequestLifecycle::disabled`], which makes every
+    /// transition a no-op.
+    ///
+    /// TODO(router-lifecycle-visibility): only implementable once
+    /// `begin_request_lifecycle` is public on `ManagedKvRouter`. Until then the
+    /// default below keeps the classifier inert, matching today's behaviour.
+    fn begin_request_lifecycle(&self, _request_id: &str) -> EppRequestLifecycle {
+        EppRequestLifecycle::disabled()
     }
 }
 

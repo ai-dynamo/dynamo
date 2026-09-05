@@ -379,6 +379,13 @@ pub enum FindBestMatchAdvisoryOutcome {
     },
 }
 
+// TODO(epp-integration): `pub(super)` makes this enum unnameable outside
+// `dynamo-llm`. The Rust EPP (`deploy/inference-gateway/ext-proc`, crate
+// `dynamo-ext-proc`) embeds this router in full dynamo mode and needs to opt a
+// request into `track_lifecycle: true`, but cannot construct the variant to ask
+// for it. Either widen this to `pub`, or keep it private and expose a public
+// entry point that takes a plain `track_lifecycle: bool` (see the
+// `epp-integration` TODO on `find_best_match`).
 #[derive(Debug, Clone, Copy)]
 pub(super) enum FindBestMatchAdmission {
     WithAdmission { track_lifecycle: bool },
@@ -1447,6 +1454,12 @@ where
                 pinned_worker,
                 allowed_worker_ids,
                 routing_constraints,
+                // TODO(epp-integration): hardcoded `false` means no caller of
+                // this public entry point can ever reach
+                // `ScheduleMode::TrackedWithLifecycle`. The Rust EPP in full
+                // dynamo mode selects through here, so pluggable flow control
+                // is unreachable for it. This should become a parameter, or a
+                // sibling `..._tracked` entry point should be added.
                 FindBestMatchAdmission::WithAdmission {
                     track_lifecycle: false,
                 },
@@ -1791,6 +1804,35 @@ where
     /// Give these tokens, find the worker with the best match in its KV cache.
     /// Returns the best worker (with dp_rank) and approximate effective overlap in blocks.
     #[allow(clippy::too_many_arguments)]
+    // TODO(epp-integration): this is the entry point the Rust EPP uses in full
+    // dynamo mode (`epp::Router::route_decode` -> `ManagedKvRouter`), and it
+    // cannot participate in pluggable router flow control (DEP #13891).
+    //
+    // The EPP calls it with `context_id: None` and `update_states: false`,
+    // which resolves to `ScheduleMode::QueryOnly`. Two gates then close:
+    //
+    //   1. `ScheduleMode::tracked_request_id()` returns `None` for `QueryOnly`,
+    //      so the scheduler skips classification before it looks at anything
+    //      else.
+    //   2. Even with a tracked mode, classification additionally requires the
+    //      request id to have been registered with the classifier, which the
+    //      EPP cannot do (see the `epp-integration` TODO on the registration
+    //      entry point, once that lands from PR #14123).
+    //
+    // The EPP does have every signal the lifecycle needs — it observes the
+    // chosen worker, the first response chunk from Envoy, parsed `usage` at
+    // end of stream, and client disconnect. What it lacks is a public,
+    // cross-crate way to say "track this one". Needed here:
+    //
+    //   - a variant of this call accepting `context_id: Some(request_id)`,
+    //     `update_states: true`, and `track_lifecycle: true`; and
+    //   - a public registration call so `has_request(request_id)` becomes true.
+    //
+    // Caveat for whoever wires this: the EPP today books separately via
+    // `add_request` after selection returns. A tracked call books during
+    // selection, so the separate `add_request` must be removed at the same
+    // time or the request is booked twice. See `TODO(epp-atomic-admission)` in
+    // `deploy/inference-gateway/ext-proc/src/epp.rs`.
     pub async fn find_best_match(
         &self,
         context_id: Option<&str>,
