@@ -29,7 +29,6 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/checkpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 )
@@ -158,6 +157,7 @@ func (h *PodCheckpointRestoreMutator) buildPinnedPodSnapshotRestorePod(
 		Enabled:       true,
 		CheckpointRef: &snapshotName,
 	}
+	targetWorkerHash := pod.Labels[consts.KubeLabelDynamoWorkerHash]
 
 	// Admission bypasses the informer cache and repeats compatibility validation
 	// so a deleted and recreated PodSnapshot cannot satisfy old incarnation pins.
@@ -166,7 +166,7 @@ func (h *PodCheckpointRestoreMutator) buildPinnedPodSnapshotRestorePod(
 		h.apiReader,
 		podNamespace,
 		config,
-		expectedWorkerHashForPod(pod),
+		&targetWorkerHash,
 		checkpoint.ExplicitPodSnapshotUse(),
 	)
 	if err != nil {
@@ -234,12 +234,13 @@ func (h *PodCheckpointRestoreMutator) buildAutomaticSnapshotJobRestorePod(
 		Enabled:       true,
 		CheckpointRef: &snapshotName,
 	}
+	targetWorkerHash := pod.Labels[consts.KubeLabelDynamoWorkerHash]
 	info, err := checkpoint.ResolvePodSnapshotForService(
 		ctx,
 		h.apiReader,
 		podNamespace,
 		config,
-		expectedWorkerHashForPod(pod),
+		&targetWorkerHash,
 		checkpoint.ManagedPodSnapshotUse(ownerUID),
 	)
 	if apierrors.IsNotFound(err) {
@@ -267,14 +268,6 @@ func automaticCandidateUnavailable(
 		return nil, false, nil
 	}
 	return nil, false, fmt.Errorf("automatic restore candidate unavailable: %s", reason)
-}
-
-func expectedWorkerHashForPod(pod *corev1.Pod) *string {
-	if !dynamo.IsWorkerComponent(pod.Labels[consts.KubeLabelDynamoComponentType]) {
-		return nil
-	}
-	workerHash := pod.Labels[consts.KubeLabelDynamoWorkerHash]
-	return &workerHash
 }
 
 func (h *PodCheckpointRestoreMutator) shapeNativeRestorePod(
