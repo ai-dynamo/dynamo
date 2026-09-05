@@ -54,6 +54,25 @@ WORKER = os.path.join(os.path.dirname(__file__), "parity_worker.py")
 # collected, so it has no Prometheus counterpart.
 OTLP_ONLY = {"target_info"}
 
+# Suffixes the exporter moves into `Metric.unit`, mirroring the UCUM mapping in
+# `normalized_name_and_unit`. Kept in sync deliberately: this test is the thing
+# that would catch the two drifting apart.
+_UNIT_SUFFIXES = (
+    "_seconds",
+    "_milliseconds",
+    "_microseconds",
+    "_nanoseconds",
+    "_bytes",
+    "_ratio",
+    "_percent",
+    "_celsius",
+    "_meters",
+    "_volts",
+    "_amperes",
+    "_joules",
+    "_grams",
+)
+
 
 def _free_port() -> int:
     """A free port that fits in an i16.
@@ -152,7 +171,14 @@ def _expected_otlp_name(name: str, kind: str) -> str | None:
         # "The OTLP metric name MUST be the Prometheus name with _total
         # removed." The scrape renders `foo_total`; `# TYPE` already names the
         # family bare, so this is normally a no-op and guards the rendered form.
-        return name[: -len("_total")] if name.endswith("_total") else name
+        name = name[: -len("_total")] if name.endswith("_total") else name
+
+    # Prometheus encodes the unit in the name, OTLP carries it in a field, so
+    # the suffix is stripped. Both come off for a counter of bytes, in that
+    # order.
+    for suffix in _UNIT_SUFFIXES:
+        if name.endswith(suffix) and name != suffix:
+            return name[: -len(suffix)]
     return name
 
 

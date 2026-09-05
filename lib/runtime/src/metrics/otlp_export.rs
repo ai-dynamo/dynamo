@@ -99,6 +99,50 @@ fn label_key(metric: &prometheus::proto::Metric) -> Vec<(String, String)> {
 
 type CreatedTimes = HashMap<(String, Vec<(String, String)>), u64>;
 
+/// Prometheus encodes the unit in the name; OTLP carries it in a field.
+///
+/// One pass, because the two suffixes compose: a counter of bytes is
+/// `foo_bytes_total`, and the spec strips `_total` first and then the unit. The
+/// order matters and doing it in two places invites them to disagree.
+///
+/// Only suffixes whose unit is known are stripped -- `dynamo_request_queue`
+/// keeps its name because `queue` is not a unit. Applied here rather than in
+/// the typed builder so it covers both inputs: engine families and Dynamo's own
+/// metrics alike.
+fn normalized_name_and_unit(family: &MetricFamily) -> (String, &'static str) {
+    // UCUM codes, per the OpenTelemetry Prometheus compatibility spec.
+    const UNITS: &[(&str, &str)] = &[
+        ("_seconds", "s"),
+        ("_milliseconds", "ms"),
+        ("_microseconds", "us"),
+        ("_nanoseconds", "ns"),
+        ("_bytes", "By"),
+        ("_ratio", "1"),
+        ("_percent", "%"),
+        ("_celsius", "Cel"),
+        ("_meters", "m"),
+        ("_volts", "V"),
+        ("_amperes", "A"),
+        ("_joules", "J"),
+        ("_grams", "g"),
+    ];
+
+    let mut name = family.name();
+    if family.get_field_type() == MetricType::COUNTER {
+        name = name.strip_suffix("_total").unwrap_or(name);
+    }
+
+    for (suffix, unit) in UNITS {
+        if let Some(stripped) = name.strip_suffix(suffix)
+            && !stripped.is_empty()
+        {
+            return (stripped.to_string(), unit);
+        }
+    }
+
+    (name.to_string(), "")
+}
+
 fn to_metric(
     family: &MetricFamily,
     start: u64,
@@ -158,19 +202,12 @@ fn to_metric(
         }),
     };
 
-    // "The OTLP metric name MUST be the Prometheus name with `_total`
-    // removed." Applied here rather than in the typed builder so it covers
-    // both inputs: engine families arrive already bare, but Dynamo's own
-    // counters are registered under their rendered `_total` name.
-    let name = match family.get_field_type() {
-        MetricType::COUNTER => family.name().trim_end_matches("_total").to_string(),
-        _ => family.name().to_string(),
-    };
+    let (name, unit) = normalized_name_and_unit(family);
 
     Some(Metric {
         name,
         description: family.help().to_string(),
-        unit: String::new(),
+        unit: unit.to_string(),
         metadata: Vec::new(),
         data: Some(data),
     })
@@ -774,8 +811,7 @@ mod tests {
             Some(number_data_point::Value::AsDouble(7.0))
         );
 
-        let Some(metric::Data::Histogram(h)) =
-            by_name("dynamo_latency_seconds").expect("histogram").data
+        let Some(metric::Data::Histogram(h)) = by_name("dynamo_latency").expect("histogram").data
         else {
             panic!("histogram should map to a Histogram");
         };
@@ -993,14 +1029,37 @@ mod tests {
         );
     }
 
+    /// Prometheus encodes the unit in the name; OTLP carries it in a field.
+    /// Done in one pass with the `_total` strip, because a counter of bytes
+    /// carries both suffixes and the order they come off matters.
+    #[test]
+    fn unit_suffixes_move_into_the_unit_field() {
+        let metrics = export(
+            r#"[{"name":"d_latency_seconds","help":"Latency","type":"gauge","samples":[
+                 {"name":"d_latency_seconds","labels":{},"value":"0.5"}]},
+                {"name":"d_request_bytes","help":"Bytes","type":"counter","samples":[
+                 {"name":"d_request_bytes_total","labels":{},"value":"9"}]},
+                {"name":"d_queue","help":"Queue","type":"gauge","samples":[
+                 {"name":"d_queue","labels":{},"value":"2"}]}]"#,
+        );
+
+        let named = |n: &str| metrics.iter().find(|m| m.name == n).expect(n);
+
+        assert_eq!(named("d_latency").unit, "s");
+        // Both suffixes come off: `_total` first, then the unit.
+        assert_eq!(named("d_request").unit, "By");
+        // `queue` is not a unit, so the name is left alone.
+        assert_eq!(named("d_queue").unit, "");
+    }
+
     /// A NaN is reported as no-recorded-value with the value unset, not as a
     /// raw NaN on the wire. Engines produce them routinely -- any ratio with a
     /// zero denominator -- and several backends reject the payload.
     #[test]
     fn nan_becomes_no_recorded_value() {
         let metrics = export(
-            r#"[{"name":"d_ratio","help":"Ratio","type":"gauge","samples":[
-                 {"name":"d_ratio","labels":{},"value":"NaN"}]},
+            r#"[{"name":"d_level","help":"Level","type":"gauge","samples":[
+                 {"name":"d_level","labels":{},"value":"NaN"}]},
                 {"name":"d_latency","help":"Latency","type":"histogram","samples":[
                  {"name":"d_latency_bucket","labels":{"le":"1"},"value":"0"},
                  {"name":"d_latency_sum","labels":{},"value":"NaN"},
@@ -1009,7 +1068,7 @@ mod tests {
 
         let Some(metric::Data::Gauge(g)) = &metrics
             .iter()
-            .find(|m| m.name == "d_ratio")
+            .find(|m| m.name == "d_level")
             .expect("gauge")
             .data
         else {
