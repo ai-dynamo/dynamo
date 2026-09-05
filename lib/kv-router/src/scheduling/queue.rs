@@ -789,9 +789,6 @@ impl<
         &self,
         request_id: Option<&str>,
     ) -> Option<Box<RequestLifecycleLease>> {
-        if !self.queueing_enabled {
-            return None;
-        }
         let request_id = request_id?;
         Some(Box::new(RequestLifecycleLease {
             cleanup: Arc::clone(&self.cleanup),
@@ -2526,14 +2523,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_queueing_has_no_cancellation_lease() {
-        let (queue, _slots) = make_queue(1, 16, 64, None);
+    async fn disabled_queueing_lifecycle_lease_releases_an_admitted_booking_on_cancellation() {
+        let isl = 512;
+        let (queue, slots) = make_queue(1, 16, isl, None);
+        let request_id = "default-path-cancelled";
+        let (mut request, response_rx) = make_request(request_id, isl);
+        request.mode = ScheduleMode::TrackedWithLifecycle {
+            request_id: request_id.to_string(),
+        };
 
-        assert!(
-            queue
-                .new_request_lifecycle_lease(Some("default-path"))
-                .is_none()
-        );
+        let lease = queue
+            .new_request_lifecycle_lease(Some(request_id))
+            .expect("lifecycle-tracked request must receive a cancellation lease");
+        let lease = queue
+            .enqueue_with_block_hashes_and_lease(request, None, Some(lease))
+            .await
+            .expect("scheduler must return the admitted request lease");
+        response_rx
+            .await
+            .expect("scheduler response sender dropped")
+            .expect("request should be admitted before cancellation");
+
+        drop(lease);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while slots.any_worker_matches_active_tokens(Instant::now(), |_, tokens| tokens != 0) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancellation lease cleanup did not release the admitted booking");
+        slots.assert_completely_drained(decay_now());
     }
 
     #[tokio::test(flavor = "multi_thread")]

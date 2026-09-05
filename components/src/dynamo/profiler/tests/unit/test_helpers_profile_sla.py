@@ -1327,6 +1327,8 @@ class TestNaiveFallbackResolvedBackend:
                 total_gpus=8,
                 system="h200_sxm",
                 backend="auto",
+                isl=4000,
+                osl=1000,
             )
 
         # The resolved backend must be a concrete name, not 'auto'
@@ -1374,6 +1376,8 @@ class TestNaiveFallbackResolvedBackend:
                 total_gpus=8,
                 system="h200_sxm",
                 backend="vllm",
+                isl=4000,
+                osl=1000,
             )
 
         assert result.get("resolved_backend") == "vllm"
@@ -1407,6 +1411,8 @@ class TestNaiveFallbackResolvedBackend:
                 total_gpus=8,
                 system="h200_sxm",
                 backend="vllm",
+                isl=4000,
+                osl=1000,
             )
 
         assert result.get("chosen_exp") == "agg"
