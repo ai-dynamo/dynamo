@@ -5,6 +5,7 @@ import argparse
 import importlib
 import importlib.util
 import json
+import sys
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from types import SimpleNamespace
@@ -508,13 +509,43 @@ def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
         dtype="bfloat16",
     )
     config = SimpleNamespace(get_text_config=lambda: text_config)
-    monkeypatch.setattr(
-        kv_cache.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: config,
-    )
+    monkeypatch.setattr(kv_cache, "_load_config", lambda model_path: config)
 
     assert kv_cache.compute_kv_bytes_per_token("model") == 256
+
+
+def test_load_config_stays_offline_for_local_directories(monkeypatch, tmp_path):
+    """A cached snapshot directory must never trigger a hub round trip.
+
+    The mocker resolves hub IDs to the local cache before estimating KV bytes;
+    ``local_files_only`` is what turns that into a no-network load. A bare hub
+    ID keeps resolving through the hub as before.
+    """
+    from dynamo.mocker.utils import kv_cache
+
+    calls: list[tuple[str, dict]] = []
+
+    class FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_path, **kwargs):
+            calls.append((model_path, kwargs))
+            return SimpleNamespace()
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", SimpleNamespace(AutoConfig=FakeAutoConfig)
+    )
+
+    kv_cache._load_config(str(tmp_path))
+    kv_cache._load_config("org/model")
+
+    assert calls[0] == (
+        str(tmp_path),
+        {"trust_remote_code": False, "local_files_only": True},
+    )
+    assert calls[1] == (
+        "org/model",
+        {"trust_remote_code": False, "local_files_only": False},
+    )
 
 
 def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
