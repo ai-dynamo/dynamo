@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cache-first selection within a bounded active-load cost delta.
+//! Effective-cache-first selection within a bounded active-load cost delta.
 
 use dynamo_kv_router::{
     WorkerInputView, WorkerInputs, WorkerPicker, WorkerSelectionContext, WorkerSelectionPolicyError,
@@ -39,8 +39,8 @@ impl WorkerPicker for CacheAffinityBudgetPicker {
             })
             .max_by(|(_, (left, left_cache)), (_, (right, right_cache))| {
                 left_cache
-                    .device_overlap_blocks()
-                    .total_cmp(&right_cache.device_overlap_blocks())
+                    .effective_overlap_blocks()
+                    .total_cmp(&right_cache.effective_overlap_blocks())
                     .then_with(|| right.cost().total_cmp(&left.cost()))
                     .then_with(|| right.worker().cmp(&left.worker()))
             })

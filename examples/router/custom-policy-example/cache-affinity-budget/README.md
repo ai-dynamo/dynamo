@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Cache Affinity Within a Load Budget
 
-This policy separates a hard cache preference from its load-safety bound. It first finds the least modeled active-load cost, keeps workers within `max_load_cost_delta_blocks` of that floor, and selects the remaining worker with the most device-resident prefix overlap.
+This policy separates a hard cache preference from its load-safety bound. It first finds the least modeled active-load cost, keeps workers within `max_load_cost_delta_blocks` of that floor, and selects the remaining worker with the most effective prefix overlap. Effective overlap is the same tier-weighted value used by Dynamo's cache-loss funnel, including device and configured lower-tier cache credit.
 
 The active-load cost uses Dynamo's configured prefill-load scale and active-request weight:
 

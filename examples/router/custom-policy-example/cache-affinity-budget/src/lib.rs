@@ -97,11 +97,24 @@ mod tests {
     }
 
     fn request(warm_load_blocks: usize) -> SchedulingRequest {
+        request_with_overlap(80, 80.0, warm_load_blocks)
+    }
+
+    fn request_with_overlap(
+        warm_device_blocks: usize,
+        warm_effective_blocks: f64,
+        warm_load_blocks: usize,
+    ) -> SchedulingRequest {
         let warm = WorkerWithDpRank::from_worker_id(0);
         let cold = WorkerWithDpRank::from_worker_id(1);
         let mut overlap = OverlapSignals::default();
-        overlap.tier_overlap_blocks.device.insert(warm, 80);
-        overlap.effective_overlap_blocks.insert(warm, 80.0);
+        overlap
+            .tier_overlap_blocks
+            .device
+            .insert(warm, warm_device_blocks);
+        overlap
+            .effective_overlap_blocks
+            .insert(warm, warm_effective_blocks);
         let mut request = SchedulingRequest {
             mode: ScheduleMode::QueryOnly { request_id: None },
             token_seq: None,
@@ -159,6 +172,25 @@ mod tests {
     #[test]
     fn load_wins_when_cache_worker_exceeds_budget() {
         assert_eq!(select(39.0, 40), WorkerWithDpRank::from_worker_id(1));
+    }
+
+    #[test]
+    fn lower_tier_cache_counts_within_load_budget() {
+        let policy = create_policy(&KvRouterConfig::default(), "test", 40.0);
+        let workers = HashMap::from([(0, TestWorker), (1, TestWorker)]);
+        let request = request_with_overlap(0, 80.0, 40);
+        assert_eq!(
+            policy
+                .select_worker(WorkerSelectionInput::configured(
+                    &workers,
+                    &request,
+                    request.eligibility(),
+                    16,
+                ))
+                .unwrap()
+                .worker,
+            WorkerWithDpRank::from_worker_id(0)
+        );
     }
 
     #[test]
