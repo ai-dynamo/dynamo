@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use dynamo_parsers::tool_calling::try_tool_call_parse_aggregate_finalize;
 
+use super::tool_call_merge::merge_tool_call_chunk;
 use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
 use crate::protocols::{
     Annotated,
@@ -172,7 +173,8 @@ struct DeltaChoice {
     // keyed by `index` so chunks that carry only argument fragments can be
     // merged into the entry created by the initial (id + name) chunk.
     // BTreeMap preserves deterministic iteration order on the index dimension.
-    // See [`merge_tool_call_chunk`] for per-field merge semantics.
+    // See [`super::tool_call_merge::merge_tool_call_chunk`] for per-field merge
+    // semantics, shared with the streaming `tool_call_dispatch` side channel.
     // #8640: replaces the old `Option<Vec<ChatCompletionMessageToolCall>>`
     // which required id/name/arguments to all be set on the same chunk.
     tool_call_chunks: BTreeMap<u32, dynamo_protocols::types::ChatCompletionMessageToolCallChunk>,
@@ -203,53 +205,6 @@ impl Default for DeltaAggregator {
     /// Provides a default implementation for `DeltaAggregator` by calling [`DeltaAggregator::new`].
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Merge an incoming chunk into the per-index accumulator.
-///
-/// #8640: the prior implementation required `id`, `name`, and `arguments`
-/// all on the same chunk, and thus the argument-fragment deltas were dropped
-/// and the client saw `arguments: ""`.
-///
-/// The fix here merges by `index` across deltas: `id`, `type`, `function.name`
-/// first-wins; `function.arguments` concatenated across fragments. This matches
-/// the OpenAI streaming spec and vLLM/SGLang hermes emission:
-///
-/// * delta 1: `{index, id, type, function: { name }}`
-/// * delta 2..N: `{index, function: { arguments: "<fragment>" }}`
-fn merge_tool_call_chunk(
-    existing: &mut dynamo_protocols::types::ChatCompletionMessageToolCallChunk,
-    incoming: dynamo_protocols::types::ChatCompletionMessageToolCallChunk,
-) {
-    if existing.id.is_none()
-        && let Some(id) = incoming.id
-    {
-        existing.id = Some(id);
-    }
-    if existing.r#type.is_none()
-        && let Some(ty) = incoming.r#type
-    {
-        existing.r#type = Some(ty);
-    }
-    let Some(incoming_fn) = incoming.function else {
-        return;
-    };
-    match &mut existing.function {
-        None => existing.function = Some(incoming_fn),
-        Some(existing_fn) => {
-            if existing_fn.name.is_none()
-                && let Some(name) = incoming_fn.name
-            {
-                existing_fn.name = Some(name);
-            }
-            if let Some(args_fragment) = incoming_fn.arguments {
-                existing_fn
-                    .arguments
-                    .get_or_insert_with(String::new)
-                    .push_str(&args_fragment);
-            }
-        }
     }
 }
 
@@ -293,7 +248,8 @@ fn finalize_merged_tool_chunk(
         // Use the merged r#type if the stream carried one. Falls back to
         // `Function` — today the only variant in the OpenAI schema, but
         // threading the merged value keeps us forward-compat if variants
-        // are added later and avoids dead state in `merge_tool_call_chunk`.
+        // are added later and avoids dead state in
+        // `super::tool_call_merge::merge_tool_call_chunk`.
         r#type: chunk
             .r#type
             .unwrap_or(dynamo_protocols::types::FunctionType::Function),
@@ -411,7 +367,8 @@ impl DeltaAggregator {
                                             function: None,
                                         }
                                     });
-                                merge_tool_call_chunk(entry, chunk);
+                                // Only the streaming dispatch acts on identity conflicts.
+                                let _ = merge_tool_call_chunk(entry, chunk);
                             }
                         }
 

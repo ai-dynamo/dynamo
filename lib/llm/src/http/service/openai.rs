@@ -60,6 +60,9 @@ use crate::protocols::common::input_trigger::{
     classify_chat_request, classify_completion_request, classify_response_request,
 };
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
+use crate::protocols::openai::chat_completions::tool_call_merge::{
+    ToolCallMergeOutcome, merge_tool_call_chunk,
+};
 use crate::protocols::openai::{
     ParsingOptions,
     audios::{NvAudioSpeechResponse, NvCreateAudioSpeechRequest},
@@ -89,6 +92,7 @@ use dynamo_protocols::types::ChatCompletionMessageContent;
 use dynamo_protocols::types::ChatCompletionMessageToolCallChunk;
 use dynamo_protocols::types::ChatCompletionStreamResponseDelta;
 use dynamo_protocols::types::Choice;
+use dynamo_protocols::types::FinishReason;
 use dynamo_protocols::types::responses::{
     CountInputTokensRequest, CountInputTokensResponse, ErrorObject,
 };
@@ -2672,20 +2676,386 @@ fn is_empty_completion_stream_response(resp: &NvCreateCompletionResponse) -> boo
         })
 }
 
-/// Emits early `event: tool_call_dispatch` SSE events for any complete tool calls found in a
-/// streaming response chunk, when `DYN_ENABLE_STREAMING_TOOL_DISPATCH` is enabled.
+/// Outcome of feeding one argument fragment to [`JsonStructureScanner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanOutcome {
+    /// The accumulated argument string is not yet a self-delimiting root value.
+    Incomplete,
+    /// The root container closed and only whitespace followed it. This is a
+    /// *candidate* boundary; `serde_json` still has to confirm it.
+    RootClosed,
+    /// The accumulated argument string can never become valid JSON. Sticky.
+    Malformed,
+}
+
+/// Incremental, O(total argument bytes) structural scanner over a tool call's
+/// `function.arguments` fragments.
 ///
-/// Dynamo backends emit each tool call as a single complete chunk (id + name + arguments
-/// all present), so we can dispatch immediately upon seeing the chunk rather than waiting
-/// for `finish_reason="tool_calls"` to arrive. Each event payload includes `choice_index`
-/// for correct disambiguation when `n > 1`.
+/// Each fragment is scanned exactly once, and container-depth / in-string /
+/// pending-escape state is carried across fragment boundaries, so a quoted
+/// brace, an escaped quote, or a backslash split across two chunks cannot
+/// create a false boundary. Re-running `serde_json::from_str` over the whole
+/// accumulated buffer on every fragment would be quadratic in exactly the
+/// long-argument case that motivates this change, so structural scanning
+/// *proposes* a boundary and `serde_json` *confirms* it, once.
 ///
-/// Dedup is keyed by `(choice_index, tool_call_id)`, not by id alone: with `n > 1` the
-/// backend may reuse the same tool call id across choices, and keying on the id alone
-/// would silently drop every choice after the first.
+/// Only a top-level object or array is treated as self-delimiting. A top-level
+/// scalar is never an early-dispatch candidate: `1` may still legally receive
+/// a further `2`. Such a value waits for the terminal `finish_reason` pass.
+#[derive(Debug, Default)]
+struct JsonStructureScanner {
+    /// Open `{`/`[` containers not yet closed.
+    depth: u32,
+    in_string: bool,
+    pending_escape: bool,
+    /// The first non-whitespace byte has been seen.
+    root_started: bool,
+    /// The root value is a top-level scalar (or leading junk), so no early
+    /// dispatch is possible and scanning stops.
+    scalar_root: bool,
+    /// The root container opened and closed.
+    root_closed: bool,
+    /// Sticky: the accumulated string is structurally impossible.
+    malformed: bool,
+}
+
+impl JsonStructureScanner {
+    /// Consume one fragment in full and report the state of the accumulated
+    /// argument string. The *entire* fragment is consumed before a candidate
+    /// is declared, so `{}junk` cannot be reported complete at the first `}`.
+    fn consume(&mut self, fragment: &str) -> ScanOutcome {
+        for byte in fragment.bytes() {
+            if self.malformed {
+                break;
+            }
+            if self.scalar_root {
+                // Nothing a scalar root can do makes it an early candidate.
+                break;
+            }
+            if self.in_string {
+                if self.pending_escape {
+                    self.pending_escape = false;
+                } else if byte == b'\\' {
+                    self.pending_escape = true;
+                } else if byte == b'"' {
+                    self.in_string = false;
+                }
+                continue;
+            }
+            if byte.is_ascii_whitespace() {
+                continue;
+            }
+            if self.root_closed {
+                // Trailing junk after a closed root: `{}junk`, `{}{}`.
+                self.malformed = true;
+                break;
+            }
+            if !self.root_started {
+                self.root_started = true;
+                if byte == b'}' || byte == b']' {
+                    // A closing token with nothing open: `}{"x":1}` is a
+                    // permanent non-dispatch, not a depth-clamped completion.
+                    self.malformed = true;
+                    break;
+                }
+                if byte != b'{' && byte != b'[' {
+                    // Top-level scalar, or leading junk. Either way the
+                    // terminal pass — not the scanner — decides.
+                    self.scalar_root = true;
+                    break;
+                }
+            }
+            match byte {
+                b'"' => self.in_string = true,
+                b'{' | b'[' => self.depth += 1,
+                b'}' | b']' => {
+                    if self.depth == 0 {
+                        self.malformed = true;
+                        break;
+                    }
+                    self.depth -= 1;
+                    if self.depth == 0 {
+                        self.root_closed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if self.malformed {
+            ScanOutcome::Malformed
+        } else if self.root_closed && self.depth == 0 && !self.in_string {
+            ScanOutcome::RootClosed
+        } else {
+            ScanOutcome::Incomplete
+        }
+    }
+}
+
+/// Lifecycle of one `(choice.index, tool_call_chunk.index)` assembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssemblyState {
+    /// Still collecting fragments.
+    Accumulating,
+    /// Failed closed — a producer violation or unparseable arguments. Never
+    /// emits, and later fragments for the key are ignored.
+    Invalid,
+    /// Tombstone: the dispatch event was emitted. Exactly-once emission comes
+    /// from this, not from a separate set of already-dispatched ids.
+    Emitted,
+}
+
+/// Request-local assembly state for a single streamed tool call.
+#[derive(Debug)]
+struct ToolCallAssembly {
+    /// Merged identity plus the concatenated argument string, and the payload
+    /// the dispatch event borrows. Never fed back into the ordinary deltas.
+    accumulated: ChatCompletionMessageToolCallChunk,
+    scanner: JsonStructureScanner,
+    state: AssemblyState,
+    /// `serde_json` has already confirmed the accumulated arguments, so the
+    /// confirmation pass does not repeat while identity is still missing.
+    json_confirmed: bool,
+}
+
+/// Request-local assembly state for the whole stream, keyed by
+/// `(choice.index, tool_call_chunk.index)`.
+type ToolCallAssemblies = HashMap<(u32, u32), ToolCallAssembly>;
+
+/// True when `chunk` is a byte-identical replay of what has already been
+/// emitted for its key, rather than a continuation of it.
+fn is_exact_replay(entry: &ToolCallAssembly, chunk: &ChatCompletionMessageToolCallChunk) -> bool {
+    let accumulated_args = entry
+        .accumulated
+        .function
+        .as_ref()
+        .and_then(|f| f.arguments.as_deref());
+    let incoming_args = chunk.function.as_ref().and_then(|f| f.arguments.as_deref());
+    accumulated_args == incoming_args
+}
+
+fn emit_tool_call_dispatch(
+    choice_index: u32,
+    entry: &mut ToolCallAssembly,
+    out: &mut Vec<Result<Event, axum::Error>>,
+) {
+    let payload = ToolCallDispatchPayload {
+        choice_index,
+        tool_call: &entry.accumulated,
+    };
+    push_dispatch_event("tool_call_dispatch", &payload, out);
+    entry.state = AssemblyState::Emitted;
+}
+
+/// True once the accumulated call carries both an id and a function name.
+/// Assembly proceeds without them; emission does not.
+fn assembly_has_identity(entry: &ToolCallAssembly) -> bool {
+    entry.accumulated.id.is_some()
+        && entry
+            .accumulated
+            .function
+            .as_ref()
+            .is_some_and(|f| f.name.is_some())
+}
+
+/// Fold one incoming tool-call chunk into its assembly, emitting the dispatch
+/// event if this fragment completed the call.
+fn update_tool_call_assembly(
+    choice_index: u32,
+    chunk: &ChatCompletionMessageToolCallChunk,
+    assemblies: &mut ToolCallAssemblies,
+    out: &mut Vec<Result<Event, axum::Error>>,
+) {
+    let entry = assemblies
+        .entry((choice_index, chunk.index))
+        .or_insert_with(|| ToolCallAssembly {
+            // An entry is created for *every* chunk: arguments legally
+            // arrive before identity.
+            accumulated: ChatCompletionMessageToolCallChunk {
+                index: chunk.index,
+                id: None,
+                r#type: None,
+                function: None,
+            },
+            scanner: JsonStructureScanner::default(),
+            state: AssemblyState::Accumulating,
+            json_confirmed: false,
+        });
+
+    match entry.state {
+        AssemblyState::Invalid => return,
+        AssemblyState::Emitted => {
+            // An exact replay is the duplicate-backend-chunk case; an emitted
+            // SSE event cannot be retracted, so a differing continuation is dropped.
+            if !is_exact_replay(entry, chunk) {
+                tracing::warn!(
+                    choice_index,
+                    tool_call_index = chunk.index,
+                    "tool_call_dispatch: continuation after the call was already \
+                     dispatched; suppressing"
+                );
+            }
+            return;
+        }
+        AssemblyState::Accumulating => {}
+    }
+
+    // Scan only the arriving fragment's bytes, never the accumulated buffer.
+    // `merge_tool_call_chunk` is the aggregator's own first-wins policy.
+    let fragment = chunk
+        .function
+        .as_ref()
+        .and_then(|f| f.arguments.as_deref())
+        .unwrap_or("");
+
+    if let ToolCallMergeOutcome::IdentityConflict { field } =
+        merge_tool_call_chunk(&mut entry.accumulated, chunk.clone())
+    {
+        tracing::warn!(
+            choice_index,
+            tool_call_index = chunk.index,
+            field = field.as_str(),
+            "tool_call_dispatch: conflicting tool call identity; failing closed"
+        );
+        entry.state = AssemblyState::Invalid;
+        return;
+    }
+
+    match entry.scanner.consume(fragment) {
+        ScanOutcome::Malformed => {
+            tracing::warn!(
+                choice_index,
+                tool_call_index = chunk.index,
+                "tool_call_dispatch: tool call arguments are structurally invalid; \
+                 will not dispatch"
+            );
+            entry.state = AssemblyState::Invalid;
+        }
+        ScanOutcome::Incomplete => {}
+        ScanOutcome::RootClosed => {
+            // Structural scanning proposed the boundary; `serde_json` confirms
+            // it once, over the whole accumulated string.
+            if !entry.json_confirmed {
+                let accumulated_args = entry
+                    .accumulated
+                    .function
+                    .as_ref()
+                    .and_then(|f| f.arguments.as_deref())
+                    .unwrap_or("");
+                if serde_json::from_str::<serde::de::IgnoredAny>(accumulated_args).is_err() {
+                    tracing::warn!(
+                        choice_index,
+                        tool_call_index = chunk.index,
+                        "tool_call_dispatch: tool call arguments closed but did not \
+                         parse; will not dispatch"
+                    );
+                    entry.state = AssemblyState::Invalid;
+                    return;
+                }
+                entry.json_confirmed = true;
+            }
+            // Syntax only. This does not validate the arguments against the
+            // requested tool schema, and does not authorize execution.
+            if assembly_has_identity(entry) {
+                emit_tool_call_dispatch(choice_index, entry, out);
+            }
+        }
+    }
+}
+
+/// Terminal pass for one choice. `finish_reason` ends the *choice*, not each
+/// individual call, so this is the only point at which a call that never
+/// produced a self-delimiting root value can be resolved.
+fn finalize_choice_assemblies(
+    choice_index: u32,
+    finish_reason: FinishReason,
+    assemblies: &mut ToolCallAssemblies,
+    out: &mut Vec<Result<Event, axum::Error>>,
+) {
+    // Deterministic emission order for a choice that finishes with several
+    // calls still open; `HashMap` iteration order is not stable.
+    let mut keys: Vec<(u32, u32)> = assemblies
+        .keys()
+        .filter(|(ci, _)| *ci == choice_index)
+        .copied()
+        .collect();
+    keys.sort_unstable();
+
+    for key in keys {
+        let Some(entry) = assemblies.get_mut(&key) else {
+            continue;
+        };
+        if entry.state != AssemblyState::Accumulating {
+            continue;
+        }
+
+        // A tool-call turn arrives under either reason: the aggregator rewrites
+        // `Stop` to `ToolCalls` for exactly that case, and a parameterless call
+        // never reaches `RootClosed`, so it depends on this pass. `length`, a
+        // backend error, and a content filter stay fail-closed; the `usable`
+        // check below still rejects incomplete arguments.
+        if !matches!(finish_reason, FinishReason::ToolCalls | FinishReason::Stop) {
+            entry.state = AssemblyState::Invalid;
+            continue;
+        }
+
+        let accumulated_args = entry
+            .accumulated
+            .function
+            .as_ref()
+            .and_then(|f| f.arguments.as_deref());
+        let usable = match accumulated_args {
+            // Absent or empty arguments for a parameterless tool: only safe
+            // here, where the choice has stopped producing arguments.
+            None | Some("") => true,
+            Some(args) => {
+                entry.json_confirmed || serde_json::from_str::<serde::de::IgnoredAny>(args).is_ok()
+            }
+        };
+
+        if !usable {
+            tracing::warn!(
+                choice_index,
+                tool_call_index = key.1,
+                "tool_call_dispatch: choice finished with incomplete tool call \
+                 arguments; will not dispatch"
+            );
+            entry.state = AssemblyState::Invalid;
+            continue;
+        }
+
+        if assembly_has_identity(entry) {
+            // The accumulated argument string is emitted verbatim; model
+            // output is never rewritten.
+            emit_tool_call_dispatch(choice_index, entry, out);
+        } else {
+            entry.state = AssemblyState::Invalid;
+        }
+    }
+}
+
+/// Emits `event: tool_call_dispatch` SSE events for tool calls assembled out of
+/// the streamed deltas, when `DYN_ENABLE_STREAMING_TOOL_DISPATCH` is enabled.
+///
+/// Chat Completions has no per-tool-call `done` bit — `finish_reason` ends the
+/// choice, not each call — so JSON closure is a Dynamo early-dispatch
+/// convention rather than proof supplied by the OpenAI protocol. A call is
+/// dispatched as soon as its accumulated `function.arguments` form a
+/// self-delimiting root value that `serde_json` accepts and its id and name are
+/// known, and otherwise at the terminal `finish_reason: "tool_calls"` pass.
+///
+/// State is keyed by `(choice.index, tool_call_chunk.index)`, not by id: with
+/// `n > 1` the backend may reuse both the same id and the same inner index
+/// across choices, and keying on either alone would silently drop every choice
+/// after the first. Exactly-once emission comes from the per-key `Emitted`
+/// tombstone.
+///
+/// This function only *observes*. It never consumes, rewrites, duplicates, or
+/// re-aggregates the ordinary deltas, which continue through `EventConverter`
+/// untouched.
 fn streaming_tool_dispatch_events(
     response: &crate::types::Annotated<NvCreateChatCompletionStreamResponse>,
-    dispatched_ids: &mut HashSet<(u32, String)>,
+    assemblies: &mut ToolCallAssemblies,
     out: &mut Vec<Result<Event, axum::Error>>,
 ) {
     let Some(data) = &response.data else {
@@ -2693,29 +3063,13 @@ fn streaming_tool_dispatch_events(
     };
 
     for choice in &data.inner.choices {
-        let Some(tool_calls) = &choice.delta.tool_calls else {
-            continue;
-        };
-        for chunk in tool_calls {
-            // Only dispatch when the tool call is fully formed (id + name + arguments)
-            let has_name_and_args = chunk
-                .function
-                .as_ref()
-                .is_some_and(|f| f.name.is_some() && f.arguments.is_some());
-
-            if let (true, Some(id)) = (has_name_and_args, &chunk.id) {
-                // Skip already-dispatched tool calls (dedup guard, matches
-                // the stopped/done flags in Anthropic/Responses converters).
-                // Scoped per choice so repeated ids across choices still dispatch.
-                if !dispatched_ids.insert((choice.index, id.clone())) {
-                    continue;
-                }
-                let payload = ToolCallDispatchPayload {
-                    choice_index: choice.index,
-                    tool_call: chunk,
-                };
-                push_dispatch_event("tool_call_dispatch", &payload, out);
+        if let Some(tool_calls) = &choice.delta.tool_calls {
+            for chunk in tool_calls {
+                update_tool_call_assembly(choice.index, chunk, assemblies, out);
             }
+        }
+        if let Some(finish_reason) = choice.finish_reason {
+            finalize_choice_assemblies(choice.index, finish_reason, assemblies, out);
         }
     }
 }
@@ -2977,7 +3331,9 @@ async fn chat_completions(
         let reasoning_dispatch_enabled = state.streaming_reasoning_dispatch_enabled();
         let reasoning_field = state.reasoning_field();
         let mut reasoning_buffer: HashMap<u32, String> = HashMap::new();
-        let mut dispatched_tool_ids: HashSet<(u32, String)> = HashSet::new();
+        // Request-local tool-call assembly, keyed by
+        // `(choice.index, tool_call_chunk.index)`. Dies with the HTTP stream.
+        let mut tool_call_assemblies: ToolCallAssemblies = HashMap::new();
         let mut emitted_roles: HashSet<u32> = HashSet::new();
 
         // Optionally prepend extra SSE events before each regular chunk:
@@ -3030,7 +3386,7 @@ async fn chat_completions(
                 if tool_dispatch_enabled {
                     streaming_tool_dispatch_events(
                         &response,
-                        &mut dispatched_tool_ids,
+                        &mut tool_call_assemblies,
                         &mut events,
                     );
                 }
@@ -7837,10 +8193,72 @@ mod tests {
 
     fn collect_tool_dispatch_events(
         response: &Annotated<NvCreateChatCompletionStreamResponse>,
-        dispatched_ids: &mut HashSet<(u32, String)>,
+        assemblies: &mut ToolCallAssemblies,
     ) -> Vec<Result<Event, axum::Error>> {
         let mut events = Vec::new();
-        streaming_tool_dispatch_events(response, dispatched_ids, &mut events);
+        streaming_tool_dispatch_events(response, assemblies, &mut events);
+        events
+    }
+
+    /// Build a tool-call delta chunk at an explicit inner tool-call index.
+    fn tool_call_chunk(
+        tool_call_index: u32,
+        id: Option<&str>,
+        name: Option<&str>,
+        arguments: Option<&str>,
+    ) -> ChatCompletionMessageToolCallChunk {
+        ChatCompletionMessageToolCallChunk {
+            index: tool_call_index,
+            id: id.map(|s| s.to_string()),
+            r#type: Some(FunctionType::Function),
+            function: Some(FunctionCallStream {
+                name: name.map(|s| s.to_string()),
+                arguments: arguments.map(|s| s.to_string()),
+            }),
+        }
+    }
+
+    fn make_choice_with_tool_calls(
+        index: u32,
+        tool_calls: Vec<ChatCompletionMessageToolCallChunk>,
+        finish: Option<FinishReason>,
+    ) -> ChatChoiceStream {
+        #[allow(deprecated)]
+        ChatChoiceStream {
+            index,
+            delta: ChatCompletionStreamResponseDelta {
+                content: None,
+                function_call: None,
+                tool_calls: if tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(tool_calls)
+                },
+                role: None,
+                refusal: None,
+                reasoning_content: None,
+            },
+            finish_reason: finish,
+            logprobs: None,
+        }
+    }
+
+    fn make_finish_choice(index: u32, finish: FinishReason) -> ChatChoiceStream {
+        make_choice_with_tool_calls(index, vec![], Some(finish))
+    }
+
+    fn drive_to_tool_calls_finish(
+        choices: Vec<ChatChoiceStream>,
+        finish_choice_index: u32,
+    ) -> Vec<Result<Event, axum::Error>> {
+        let mut assemblies = ToolCallAssemblies::new();
+        let mut events =
+            collect_tool_dispatch_events(&make_stream_response(choices), &mut assemblies);
+        let terminator = make_stream_response(vec![make_finish_choice(
+            finish_choice_index,
+            FinishReason::ToolCalls,
+        )]);
+        events.extend(collect_tool_dispatch_events(&terminator, &mut assemblies));
         events
     }
 
@@ -7874,35 +8292,20 @@ mod tests {
         }
     }
 
+    /// `tool_call_index` is explicit so that two calls in one choice, and a
+    /// call filtered out by `parallel_tool_calls=false`, are both expressible.
     fn make_choice_with_tool_call(
         index: u32,
+        tool_call_index: u32,
         id: Option<&str>,
         name: Option<&str>,
         arguments: Option<&str>,
     ) -> ChatChoiceStream {
-        let tool_call = ChatCompletionMessageToolCallChunk {
-            index: 0,
-            id: id.map(|s| s.to_string()),
-            r#type: Some(FunctionType::Function),
-            function: Some(FunctionCallStream {
-                name: name.map(|s| s.to_string()),
-                arguments: arguments.map(|s| s.to_string()),
-            }),
-        };
-        #[allow(deprecated)]
-        ChatChoiceStream {
+        make_choice_with_tool_calls(
             index,
-            delta: ChatCompletionStreamResponseDelta {
-                content: None,
-                function_call: None,
-                tool_calls: Some(vec![tool_call]),
-                role: None,
-                refusal: None,
-                reasoning_content: None,
-            },
-            finish_reason: None,
-            logprobs: None,
-        }
+            vec![tool_call_chunk(tool_call_index, id, name, arguments)],
+            None,
+        )
     }
 
     // ── streaming_tool_dispatch_events tests ──
@@ -7911,12 +8314,13 @@ mod tests {
     fn test_tool_dispatch_emits_event_for_complete_tool_call() {
         let response = make_stream_response(vec![make_choice_with_tool_call(
             0,
+            0,
             Some("call_123"),
             Some("get_weather"),
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert_eq!(events.len(), 1);
 
         let event = events[0].as_ref().unwrap();
@@ -7935,12 +8339,13 @@ mod tests {
     fn test_tool_dispatch_skips_incomplete_tool_call_no_id() {
         let response = make_stream_response(vec![make_choice_with_tool_call(
             0,
+            0,
             None, // no id
             Some("get_weather"),
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert!(events.is_empty(), "should not dispatch without id");
     }
 
@@ -7948,12 +8353,13 @@ mod tests {
     fn test_tool_dispatch_skips_incomplete_tool_call_no_name() {
         let response = make_stream_response(vec![make_choice_with_tool_call(
             0,
+            0,
             Some("call_123"),
             None, // no name
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert!(events.is_empty(), "should not dispatch without name");
     }
 
@@ -7961,12 +8367,13 @@ mod tests {
     fn test_tool_dispatch_skips_incomplete_tool_call_no_arguments() {
         let response = make_stream_response(vec![make_choice_with_tool_call(
             0,
+            0,
             Some("call_123"),
             Some("get_weather"),
             None, // no arguments
         )]);
 
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert!(events.is_empty(), "should not dispatch without arguments");
     }
 
@@ -8006,7 +8413,7 @@ mod tests {
         };
 
         let response = make_stream_response(vec![choice]);
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert_eq!(events.len(), 2, "should dispatch both tool calls");
 
         // Verify each dispatched event has the correct tool call data
@@ -8028,14 +8435,14 @@ mod tests {
             comment: None,
             error: None,
         };
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert!(events.is_empty());
     }
 
     #[test]
     fn test_tool_dispatch_empty_choices() {
         let response = make_stream_response(vec![]);
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert!(events.is_empty());
     }
 
@@ -8077,7 +8484,7 @@ mod tests {
         };
 
         let response = make_stream_response(vec![choice]);
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert_eq!(
             events.len(),
             1,
@@ -8113,23 +8520,29 @@ mod tests {
         };
 
         let response = make_stream_response(vec![choice]);
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert!(events.is_empty(), "function: None should not dispatch");
     }
 
     #[test]
-    fn test_tool_dispatch_empty_arguments_still_dispatches() {
-        // arguments: Some("") is considered complete — intentional.
-        // Some backends emit empty-string arguments for parameterless tools.
-        let response = make_stream_response(vec![make_choice_with_tool_call(
+    fn test_tool_dispatch_empty_arguments_dispatch_at_terminal_pass() {
+        // `Some("")` is ambiguous mid-stream, so the parameterless-tool
+        // compatibility resolves at `finish_reason: "tool_calls"`.
+        let events = drive_to_tool_calls_finish(
+            vec![make_choice_with_tool_call(
+                0,
+                0,
+                Some("call_empty"),
+                Some("no_params_tool"),
+                Some(""),
+            )],
             0,
-            Some("call_empty"),
-            Some("no_params_tool"),
-            Some(""),
-        )]);
-
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
-        assert_eq!(events.len(), 1, "empty arguments should still dispatch");
+        );
+        assert_eq!(
+            events.len(),
+            1,
+            "empty arguments dispatch exactly once, at the terminal pass"
+        );
 
         let json = extract_sse_data_json(events[0].as_ref().unwrap());
         assert_eq!(json["tool_call"]["id"], "call_empty");
@@ -8143,19 +8556,21 @@ mod tests {
         // choices must each dispatch with their own choice_index.
         let choice_0 = make_choice_with_tool_call(
             0,
+            0,
             Some("call_1"),
             Some("get_weather"),
             Some(r#"{"city":"Paris"}"#),
         );
         let choice_1 = make_choice_with_tool_call(
             1,
+            0,
             Some("call_1"),
             Some("get_time"),
             Some(r#"{"tz":"UTC"}"#),
         );
 
         let response = make_stream_response(vec![choice_0, choice_1]);
-        let events = collect_tool_dispatch_events(&response, &mut HashSet::new());
+        let events = collect_tool_dispatch_events(&response, &mut ToolCallAssemblies::new());
         assert_eq!(events.len(), 2, "should dispatch from both choices");
 
         let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
@@ -8170,23 +8585,460 @@ mod tests {
     #[test]
     fn test_tool_dispatch_dedup_skips_already_dispatched_id() {
         // Simulate a backend that sends the same complete tool call in two consecutive chunks.
-        // The HashSet should prevent the second dispatch.
+        // The per-key `Emitted` tombstone prevents the second dispatch.
         let response = make_stream_response(vec![make_choice_with_tool_call(
+            0,
             0,
             Some("call_dup"),
             Some("get_weather"),
             Some(r#"{"city":"Paris"}"#),
         )]);
 
-        let mut dispatched = HashSet::new();
+        let mut assemblies = ToolCallAssemblies::new();
 
         // First call — should dispatch
-        let events = collect_tool_dispatch_events(&response, &mut dispatched);
+        let events = collect_tool_dispatch_events(&response, &mut assemblies);
         assert_eq!(events.len(), 1);
 
         // Second call with same response — should be deduped
-        let events = collect_tool_dispatch_events(&response, &mut dispatched);
+        let events = collect_tool_dispatch_events(&response, &mut assemblies);
         assert!(events.is_empty(), "duplicate id should not dispatch twice");
+    }
+
+    /// Read the assembled arguments for a key directly, so quoted-brace
+    /// payloads never go through `extract_sse_data_json`'s brace-only,
+    /// string-unaware scan.
+    fn assembled_arguments(assemblies: &ToolCallAssemblies, key: (u32, u32)) -> Option<String> {
+        assemblies
+            .get(&key)
+            .and_then(|e| e.accumulated.function.as_ref())
+            .and_then(|f| f.arguments.clone())
+    }
+
+    /// Feed a sequence of deltas for choice 0 / inner index 0, where each entry
+    /// is `(id, name, arguments)`, and return the events plus the final state.
+    fn feed_fragments(
+        fragments: &[(Option<&str>, Option<&str>, Option<&str>)],
+    ) -> (Vec<Result<Event, axum::Error>>, ToolCallAssemblies) {
+        let mut assemblies = ToolCallAssemblies::new();
+        let mut events = Vec::new();
+        for (id, name, args) in fragments {
+            let response =
+                make_stream_response(vec![make_choice_with_tool_call(0, 0, *id, *name, *args)]);
+            events.extend(collect_tool_dispatch_events(&response, &mut assemblies));
+        }
+        (events, assemblies)
+    }
+
+    #[test]
+    fn test_13972_identity_opener_then_argument_fragments() {
+        let (events, assemblies) = feed_fragments(&[
+            (Some("call_1"), Some("create_file"), None),
+            (None, None, Some(r#"{"path":"/a/very"#)),
+            (None, None, Some(r#"/long/file"}"#)),
+        ]);
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one dispatch, on the fragment that closes the JSON"
+        );
+
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["choice_index"], 0);
+        assert_eq!(json["tool_call"]["index"], 0);
+        assert_eq!(json["tool_call"]["id"], "call_1");
+        assert_eq!(json["tool_call"]["type"], "function");
+        assert_eq!(json["tool_call"]["function"]["name"], "create_file");
+        assert_eq!(
+            assembled_arguments(&assemblies, (0, 0)).as_deref(),
+            Some(r#"{"path":"/a/very/long/file"}"#)
+        );
+    }
+
+    #[test]
+    fn test_13972_truncated_prefix_never_dispatches() {
+        let (events, _) = feed_fragments(&[(
+            Some("call_1"),
+            Some("create_file"),
+            Some(r#"{"path":"/a/very"#),
+        )]);
+        assert!(
+            events.is_empty(),
+            "a truncated argument prefix must not dispatch"
+        );
+    }
+
+    #[test]
+    fn test_13972_empty_opener_then_fragments_does_not_dispatch_early() {
+        let (events, assemblies) = feed_fragments(&[
+            (Some("call_1"), Some("search"), Some("")),
+            (None, None, Some(r#"{"q":"#)),
+        ]);
+        assert!(
+            events.is_empty(),
+            "the empty opener must not dispatch, and the prefix is incomplete"
+        );
+        assert_eq!(
+            assembled_arguments(&assemblies, (0, 0)).as_deref(),
+            Some(r#"{"q":"#)
+        );
+    }
+
+    #[test]
+    fn test_13972_identity_after_arguments_still_assembles() {
+        let (events, _) = feed_fragments(&[
+            (None, None, Some(r#"{"a":1}"#)),
+            (Some("call_1"), None, None),
+            (None, Some("calculator"), None),
+        ]);
+        assert_eq!(
+            events.len(),
+            1,
+            "arguments may precede identity; dispatch waits for both"
+        );
+        let json = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json["tool_call"]["id"], "call_1");
+        assert_eq!(json["tool_call"]["function"]["name"], "calculator");
+        assert_eq!(json["tool_call"]["function"]["arguments"], r#"{"a":1}"#);
+    }
+
+    // A magnitude `f64` cannot hold is still valid JSON syntax. Confirmation
+    // is a syntax check, so such a call dispatches; deserializing into
+    // `serde_json::Value` would reject it as `number out of range` and drop a
+    // call the model legitimately made.
+    #[test]
+    fn test_13972_out_of_range_exponent_dispatches() {
+        let (early, _) = feed_fragments(&[(Some("call_1"), Some("f"), Some(r#"{"a":1e400}"#))]);
+        assert_eq!(
+            early.len(),
+            1,
+            "an out-of-range exponent is syntactically valid and must dispatch early"
+        );
+        let json = extract_sse_data_json(early[0].as_ref().unwrap());
+        assert_eq!(
+            json["tool_call"]["function"]["arguments"], r#"{"a":1e400}"#,
+            "the argument string is forwarded verbatim, not renormalized"
+        );
+
+        // The terminal pass confirms independently when the scanner never
+        // reached a candidate boundary, so it needs the same syntax-only rule.
+        let terminal = drive_to_tool_calls_finish(
+            vec![make_choice_with_tool_call(
+                0,
+                0,
+                Some("call_2"),
+                Some("f"),
+                Some("-1e400"),
+            )],
+            0,
+        );
+        assert_eq!(
+            terminal.len(),
+            1,
+            "a top-level out-of-range scalar resolves at the terminal pass"
+        );
+    }
+
+    #[test]
+    fn test_13972_conflicting_identity_fails_closed() {
+        let (events, _) = feed_fragments(&[
+            (Some("call_1"), Some("calculator"), Some(r#"{"a":"#)),
+            (Some("call_2"), None, None),
+            (None, None, Some("1}")),
+        ]);
+        assert!(
+            events.is_empty(),
+            "a conflicting id must fail closed, not dispatch on either identity"
+        );
+    }
+
+    // Quoted braces, escaped quotes, and a split backslash must not create a
+    // false boundary. Asserted on typed state.
+    #[test]
+    fn test_13972_quoted_and_escaped_braces_do_not_close_early() {
+        let (events, assemblies) = feed_fragments(&[
+            (Some("call_1"), Some("write"), Some(r#"{"body":"a } b \"#)),
+            (None, None, Some(r#""quoted\" }"#)),
+            (None, None, Some(r#""}"#)),
+        ]);
+        assert_eq!(events.len(), 1, "only the real closing brace completes");
+        assert_eq!(
+            assembled_arguments(&assemblies, (0, 0)).as_deref(),
+            Some(r#"{"body":"a } b \"quoted\" }"}"#)
+        );
+    }
+
+    #[test]
+    fn test_13972_nested_and_array_roots_complete() {
+        let (nested, _) = feed_fragments(&[
+            (Some("call_1"), Some("f"), Some(r#"{"a":{"b":[1,2]"#)),
+            (None, None, Some("}}")),
+        ]);
+        assert_eq!(nested.len(), 1, "nested mixed containers complete");
+
+        let (array, _) = feed_fragments(&[
+            (Some("call_2"), Some("g"), Some("[1, {\"a\": 2}")),
+            (None, None, Some("]")),
+        ]);
+        assert_eq!(array.len(), 1, "a top-level array is self-delimiting");
+    }
+
+    #[test]
+    fn test_13972_trailing_junk_never_dispatches() {
+        let (events, _) = feed_fragments(&[(Some("call_1"), Some("f"), Some("{}junk"))]);
+        assert!(
+            events.is_empty(),
+            "the whole fragment is consumed before a candidate is declared"
+        );
+    }
+
+    // `}{\"x\":1}` read as complete under #6845's depth-clamping scanner; it
+    // must be a permanent non-dispatch.
+    #[test]
+    fn test_13972_mismatched_containers_never_dispatch() {
+        let (early, _) = feed_fragments(&[(Some("call_1"), Some("f"), Some(r#"}{"x":1}"#))]);
+        assert!(early.is_empty(), "a leading close must not dispatch");
+
+        // Not even the terminal pass rescues it.
+        let terminal = drive_to_tool_calls_finish(
+            vec![make_choice_with_tool_call(
+                0,
+                0,
+                Some("call_1"),
+                Some("f"),
+                Some(r#"}{"x":1}"#),
+            )],
+            0,
+        );
+        assert!(
+            terminal.is_empty(),
+            "a structurally invalid call stays a non-dispatch through the terminal pass"
+        );
+    }
+
+    #[test]
+    fn test_13972_leading_junk_never_dispatches() {
+        let (events, _) = feed_fragments(&[(Some("call_1"), Some("f"), Some(r#"junk{"a":1}"#))]);
+        assert!(events.is_empty(), "leading junk must not dispatch");
+    }
+
+    #[test]
+    fn test_13972_canonical_empty_object_dispatches_early() {
+        let (events, _) = feed_fragments(&[(Some("call_1"), Some("no_params"), Some("{}"))]);
+        assert_eq!(
+            events.len(),
+            1,
+            "an empty JSON object is a complete root value"
+        );
+    }
+
+    #[test]
+    fn test_13972_interleaved_inner_indexes_complete_out_of_order() {
+        let mut assemblies = ToolCallAssemblies::new();
+        let mut events = Vec::new();
+
+        let opener = make_stream_response(vec![make_choice_with_tool_calls(
+            0,
+            vec![
+                tool_call_chunk(0, Some("call_0"), Some("slow"), Some(r#"{"a":"#)),
+                tool_call_chunk(1, Some("call_1"), Some("fast"), Some(r#"{"b":"#)),
+            ],
+            None,
+        )]);
+        events.extend(collect_tool_dispatch_events(&opener, &mut assemblies));
+        assert!(events.is_empty(), "neither call is complete yet");
+
+        let close_1 = make_stream_response(vec![make_choice_with_tool_calls(
+            0,
+            vec![tool_call_chunk(1, None, None, Some("2}"))],
+            None,
+        )]);
+        events.extend(collect_tool_dispatch_events(&close_1, &mut assemblies));
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            extract_sse_data_json(events[0].as_ref().unwrap())["tool_call"]["id"],
+            "call_1"
+        );
+
+        let close_0 = make_stream_response(vec![make_choice_with_tool_calls(
+            0,
+            vec![tool_call_chunk(0, None, None, Some("1}"))],
+            None,
+        )]);
+        events.extend(collect_tool_dispatch_events(&close_0, &mut assemblies));
+        assert_eq!(events.len(), 2);
+        let second = extract_sse_data_json(events[1].as_ref().unwrap());
+        assert_eq!(second["tool_call"]["id"], "call_0");
+        assert_eq!(second["tool_call"]["index"], 0);
+        assert_eq!(second["tool_call"]["function"]["arguments"], r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn test_13972_same_id_and_inner_index_across_choices_do_not_collide() {
+        let mut assemblies = ToolCallAssemblies::new();
+        let mut events = Vec::new();
+
+        let opener = make_stream_response(vec![
+            make_choice_with_tool_call(0, 0, Some("call_1"), Some("f"), Some(r#"{"choice":"#)),
+            make_choice_with_tool_call(1, 0, Some("call_1"), Some("f"), Some(r#"{"choice":"#)),
+        ]);
+        events.extend(collect_tool_dispatch_events(&opener, &mut assemblies));
+        assert!(events.is_empty());
+
+        let closer = make_stream_response(vec![
+            make_choice_with_tool_call(0, 0, None, None, Some("0}")),
+            make_choice_with_tool_call(1, 0, None, None, Some("1}")),
+        ]);
+        events.extend(collect_tool_dispatch_events(&closer, &mut assemblies));
+        assert_eq!(events.len(), 2, "each choice dispatches independently");
+
+        let json0 = extract_sse_data_json(events[0].as_ref().unwrap());
+        assert_eq!(json0["choice_index"], 0);
+        assert_eq!(
+            json0["tool_call"]["function"]["arguments"],
+            r#"{"choice":0}"#
+        );
+        let json1 = extract_sse_data_json(events[1].as_ref().unwrap());
+        assert_eq!(json1["choice_index"], 1);
+        assert_eq!(
+            json1["tool_call"]["function"]["arguments"],
+            r#"{"choice":1}"#
+        );
+    }
+
+    #[test]
+    fn test_13972_terminal_pass_outcomes() {
+        // Valid JSON that only closes on the terminating chunk is not lost.
+        let mut assemblies = ToolCallAssemblies::new();
+        let open = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            0,
+            Some("call_1"),
+            Some("f"),
+            Some(r#"{"a":"#),
+        )]);
+        assert!(collect_tool_dispatch_events(&open, &mut assemblies).is_empty());
+        let close = make_stream_response(vec![make_choice_with_tool_calls(
+            0,
+            vec![tool_call_chunk(0, None, None, Some("1}"))],
+            Some(FinishReason::ToolCalls),
+        )]);
+        assert_eq!(
+            collect_tool_dispatch_events(&close, &mut assemblies).len(),
+            1,
+            "closing on the terminal chunk dispatches exactly once"
+        );
+
+        // Absent arguments dispatch under the parameterless compatibility rule.
+        let absent = drive_to_tool_calls_finish(
+            vec![make_choice_with_tool_call(
+                0,
+                0,
+                Some("call_1"),
+                Some("no_params"),
+                None,
+            )],
+            0,
+        );
+        assert_eq!(absent.len(), 1, "absent arguments dispatch at the terminal");
+
+        // A producer may report a tool-call turn as `Stop`; a parameterless
+        // call never closes a JSON root, so it depends on the terminal pass.
+        let mut assemblies = ToolCallAssemblies::new();
+        let open = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            0,
+            Some("call_1"),
+            Some("no_params"),
+            None,
+        )]);
+        assert!(collect_tool_dispatch_events(&open, &mut assemblies).is_empty());
+        let stop = make_stream_response(vec![make_finish_choice(0, FinishReason::Stop)]);
+        assert_eq!(
+            collect_tool_dispatch_events(&stop, &mut assemblies).len(),
+            1,
+            "a parameterless call dispatches on a `Stop` finish"
+        );
+
+        // `Stop` stays fail-closed for arguments that never became valid JSON.
+        let mut assemblies = ToolCallAssemblies::new();
+        let open = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            0,
+            Some("call_1"),
+            Some("f"),
+            Some(r#"{"a":"#),
+        )]);
+        assert!(collect_tool_dispatch_events(&open, &mut assemblies).is_empty());
+        let stop = make_stream_response(vec![make_finish_choice(0, FinishReason::Stop)]);
+        assert!(
+            collect_tool_dispatch_events(&stop, &mut assemblies).is_empty(),
+            "truncated arguments must not dispatch on a `Stop` finish either"
+        );
+
+        let invalid = drive_to_tool_calls_finish(
+            vec![make_choice_with_tool_call(
+                0,
+                0,
+                Some("call_1"),
+                Some("f"),
+                Some(r#"{"a":"#),
+            )],
+            0,
+        );
+        assert!(
+            invalid.is_empty(),
+            "truncated arguments must not dispatch at the terminal pass"
+        );
+
+        // `finish_reason: "length"` clears without emitting.
+        let mut assemblies = ToolCallAssemblies::new();
+        let open = make_stream_response(vec![make_choice_with_tool_call(
+            0,
+            0,
+            Some("call_1"),
+            Some("f"),
+            Some(r#"{"a":"#),
+        )]);
+        assert!(collect_tool_dispatch_events(&open, &mut assemblies).is_empty());
+        let truncated = make_stream_response(vec![make_finish_choice(0, FinishReason::Length)]);
+        assert!(
+            collect_tool_dispatch_events(&truncated, &mut assemblies).is_empty(),
+            "a truncated stream must not dispatch"
+        );
+    }
+
+    // Ordering is a property of the handler loop rather than of assembly, so it
+    // is covered over real SSE frames in `tests/streaming_tool_dispatch_http.rs`.
+
+    fn scan_all(fragments: &[&str]) -> ScanOutcome {
+        let mut scanner = JsonStructureScanner::default();
+        let mut last = ScanOutcome::Incomplete;
+        for fragment in fragments {
+            last = scanner.consume(fragment);
+        }
+        last
+    }
+
+    #[test]
+    fn test_json_scanner_boundaries() {
+        assert_eq!(scan_all(&[r#"{"a":1}"#]), ScanOutcome::RootClosed);
+        assert_eq!(scan_all(&["[", "1,2", "]"]), ScanOutcome::RootClosed);
+        assert_eq!(scan_all(&[r#"{"a":"}"#, r#"" }"#]), ScanOutcome::RootClosed);
+        // Backslash split across fragments: the `"` that follows is escaped.
+        assert_eq!(
+            scan_all(&[r#"{"a":"x\"#, r#""y"}"#]),
+            ScanOutcome::RootClosed
+        );
+        assert_eq!(scan_all(&[r#"{"a":1"#]), ScanOutcome::Incomplete);
+        assert_eq!(scan_all(&["{}junk"]), ScanOutcome::Malformed);
+        assert_eq!(scan_all(&[r#"}{"x":1}"#]), ScanOutcome::Malformed);
+        assert_eq!(scan_all(&["{}", "{}"]), ScanOutcome::Malformed);
+        // Trailing whitespace after the root is allowed.
+        assert_eq!(scan_all(&["{}", "  \n"]), ScanOutcome::RootClosed);
+        // A top-level scalar is never an early candidate.
+        assert_eq!(scan_all(&["1"]), ScanOutcome::Incomplete);
+        assert_eq!(scan_all(&["1", "2"]), ScanOutcome::Incomplete);
     }
 
     // ── accumulate_reasoning_dispatch tests ──
