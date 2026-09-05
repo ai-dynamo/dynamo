@@ -77,7 +77,7 @@ class DeviceToFileWriter:
             self._fd = os.open(
                 file_path,
                 os.O_CREAT | os.O_TRUNC | os.O_WRONLY,
-                0o666,
+                0o644,
             )
         except Exception:
             close_pinned_copy_slots(
