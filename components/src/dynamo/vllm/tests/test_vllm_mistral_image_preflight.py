@@ -55,6 +55,23 @@ def _vllm_config(
     return SimpleNamespace(model_config=model_config)
 
 
+def _pin_modalities(monkeypatch, vllm_main, *modalities: str) -> None:
+    """Stand in for the multimodal registry's view of this model.
+
+    Every test here builds its config by hand, so the real registry has no
+    model to look up. Pinning the answer keeps each test about one variable.
+    """
+
+    def get_processing_info(model_config):
+        return SimpleNamespace(supported_mm_limits={m: None for m in modalities})
+
+    monkeypatch.setattr(
+        vllm_main,
+        "MULTIMODAL_REGISTRY",
+        SimpleNamespace(get_processing_info=get_processing_info),
+    )
+
+
 def _pin_cv2(monkeypatch, *, present: bool) -> None:
     """Pin what importing ``cv2`` does, in both directions.
 
@@ -75,6 +92,7 @@ def _pin_cv2(monkeypatch, *, present: bool) -> None:
 def test_mistral_multimodal_without_cv2_fails_before_the_engine_starts(monkeypatch):
     vllm_main = _load_vllm_main()
     _pin_cv2(monkeypatch, present=False)
+    _pin_modalities(monkeypatch, vllm_main, "image")
 
     with pytest.raises(MissingMediaDecoderError) as excinfo:
         vllm_main.check_mistral_image_decoder(
@@ -99,6 +117,7 @@ def test_a_broken_cv2_install_fails_the_same_way_as_a_missing_one(
     failure this check exists to replace, so the check imports instead.
     """
     vllm_main = _load_vllm_main()
+    _pin_modalities(monkeypatch, vllm_main, "image")
     monkeypatch.delitem(sys.modules, "cv2", raising=False)
     (tmp_path / "cv2.py").write_text(
         'raise ImportError("libGL.so.1: cannot open shared object file")\n'
@@ -122,10 +141,11 @@ def test_preflight_stays_silent_when_image_input_is_disabled(monkeypatch):
 
     vLLM leaves a zero-limit modality out of its multimodal profiling, so such
     a worker starts without OpenCV today. Requiring the install there would
-    break a working text- or audio-only deployment of a multimodal model.
+    break a deployment that runs.
     """
     vllm_main = _load_vllm_main()
     _pin_cv2(monkeypatch, present=False)
+    _pin_modalities(monkeypatch, vllm_main, "image")
 
     assert (
         vllm_main.check_mistral_image_decoder(
@@ -139,11 +159,59 @@ def test_preflight_still_fires_when_image_input_is_allowed(monkeypatch):
     """The other side of that limit check: a non-zero limit still needs cv2."""
     vllm_main = _load_vllm_main()
     _pin_cv2(monkeypatch, present=False)
+    _pin_modalities(monkeypatch, vllm_main, "image")
 
     with pytest.raises(MissingMediaDecoderError):
         vllm_main.check_mistral_image_decoder(
             _vllm_config(multimodal=True, tokenizer_mode="mistral", image_limit=1)
         )
+
+
+def test_preflight_stays_silent_for_an_audio_only_mistral_model(monkeypatch):
+    """A multimodal Mistral model that supports no images must still start.
+
+    The configured limit cannot answer this on its own. ``get_limit_per_prompt``
+    is defined for any modality name and returns 999 for one the deployment
+    never mentioned, so an audio-only model such as Voxtral reports 999 images
+    per prompt while supporting none. Only the registry's modality set knows.
+    """
+    vllm_main = _load_vllm_main()
+    _pin_cv2(monkeypatch, present=False)
+    _pin_modalities(monkeypatch, vllm_main, "audio")
+
+    assert (
+        vllm_main.check_mistral_image_decoder(
+            _vllm_config(multimodal=True, tokenizer_mode="mistral", image_limit=999)
+        )
+        is None
+    )
+
+
+def test_preflight_stays_silent_when_the_modalities_cannot_be_read(monkeypatch):
+    """The registry is the only source for that answer, so it must not be fatal.
+
+    A model with no registered multimodal processor makes vLLM raise here and
+    then serve text-only. Skipping costs that deployment the late upstream
+    error this check exists to replace; raising would stop a worker that runs.
+    """
+    vllm_main = _load_vllm_main()
+    _pin_cv2(monkeypatch, present=False)
+
+    def explode(model_config):
+        raise ValueError("Model class Whatever has no registered multimodal processor")
+
+    monkeypatch.setattr(
+        vllm_main,
+        "MULTIMODAL_REGISTRY",
+        SimpleNamespace(get_processing_info=explode),
+    )
+
+    assert (
+        vllm_main.check_mistral_image_decoder(
+            _vllm_config(multimodal=True, tokenizer_mode="mistral")
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(
@@ -161,6 +229,7 @@ def test_preflight_stays_silent_off_the_mistral_image_path(
 ):
     vllm_main = _load_vllm_main()
     _pin_cv2(monkeypatch, present=False)
+    _pin_modalities(monkeypatch, vllm_main, "image")
 
     assert (
         vllm_main.check_mistral_image_decoder(
@@ -175,6 +244,7 @@ def test_preflight_passes_once_the_decoder_is_installed(monkeypatch):
     start after running it."""
     vllm_main = _load_vllm_main()
     _pin_cv2(monkeypatch, present=True)
+    _pin_modalities(monkeypatch, vllm_main, "image")
 
     assert (
         vllm_main.check_mistral_image_decoder(
@@ -193,6 +263,7 @@ def test_preflight_tolerates_a_config_without_the_attributes(monkeypatch):
     """
     vllm_main = _load_vllm_main()
     _pin_cv2(monkeypatch, present=False)
+    _pin_modalities(monkeypatch, vllm_main, "image")
 
     assert (
         vllm_main.check_mistral_image_decoder(
@@ -218,6 +289,27 @@ def test_vllm_model_config_still_exposes_the_attributes_the_preflight_reads():
     assert "tokenizer_mode" in field_names
     assert "multimodal_config" in field_names
     assert callable(getattr(multimodal_config_cls, "get_limit_per_prompt", None))
+
+    registry = pytest.importorskip("vllm.multimodal").MULTIMODAL_REGISTRY
+    processing_info_cls = pytest.importorskip(
+        "vllm.multimodal.processing"
+    ).BaseProcessingInfo
+    assert callable(getattr(registry, "get_processing_info", None))
+    assert hasattr(processing_info_cls, "supported_mm_limits")
+
+
+def test_an_unspecified_modality_limit_is_not_zero():
+    """Why the modality set is consulted at all.
+
+    If an unconfigured modality reported a limit of 0, the limit check alone
+    would already exclude a model that takes no images. It reports 999
+    instead, so this pins the behaviour the registry lookup exists to cover.
+    """
+    multimodal_config_cls = pytest.importorskip(
+        "vllm.config.multimodal"
+    ).MultiModalConfig
+
+    assert multimodal_config_cls().get_limit_per_prompt("image") != 0
 
 
 @pytest.mark.skipif(
