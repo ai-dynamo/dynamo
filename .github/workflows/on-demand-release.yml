@@ -10,7 +10,7 @@
 name: Stage Release RC
 
 on:
-  # TEMPORARY(1.5.0-rc2): push stages release/1.5.0 rc2 (all artifacts) with no
+  # TEMPORARY(1.5.0-rc3): push stages release/1.5.0 rc3 (all artifacts) with no
   # dispatch inputs. REVERT before merge.
   push:
     branches:
@@ -81,10 +81,10 @@ jobs:
       - name: Validate and resolve target SHA
         id: target
         env:
-          # TEMPORARY(1.5.0-rc2): fallbacks cover inputless push events. REVERT to bare inputs.*.
+          # TEMPORARY(1.5.0-rc3): fallbacks cover inputless push events. REVERT to bare inputs.*.
           RELEASE_VERSION: ${{ inputs.release_version || '1.5.0' }}
           RELEASE_BRANCH: ${{ inputs.release_branch || 'release/1.5.0' }}
-          RC_ROUND: ${{ inputs.rc_round || '2' }}
+          RC_ROUND: ${{ inputs.rc_round || '3' }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -137,7 +137,7 @@ jobs:
       - name: Resolve artifact selection
         id: resolve
         env:
-          # TEMPORARY(1.5.0-rc2): revert to bare inputs.release_version before merge.
+          # TEMPORARY(1.5.0-rc3): revert to bare inputs.release_version before merge.
           RELEASE_VERSION: ${{ inputs.release_version || '1.5.0' }}
           CONTAINERS: ${{ inputs.containers }}
           WHEELS: ${{ inputs.wheels }}
@@ -364,7 +364,7 @@ jobs:
     with:
       commit_sha: ${{ needs.resolve-target.outputs.bump_sha }}
       on_demand: true
-      # TEMPORARY(1.5.0-rc2): revert to bare inputs.release_version before merge.
+      # TEMPORARY(1.5.0-rc3): revert to bare inputs.release_version before merge.
       release_version: ${{ inputs.release_version || '1.5.0' }}
       # Operator-chosen internal-staging rc (immutable registries can't be overwritten).
       rc_number: ${{ needs.resolve-target.outputs.rc_number }}

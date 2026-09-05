@@ -156,7 +156,7 @@ jobs:
   # GATE: Version Extraction
   # ============================================================================
 
-  # TEMPORARY(1.5.0-rc2): the ops-membership steps below carry `&& github.event_name
+  # TEMPORARY(1.5.0-rc3): the ops-membership steps below carry `&& github.event_name
   # != 'push'` for the push test loop. REVERT before merge.
   # OPS GATE — operator-driven runs (on-demand staging and direct rc dispatch)
   # require an active ai-dynamo/devops member. The nightly path (scheduled /
