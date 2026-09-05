@@ -176,14 +176,11 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
 {% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
-{# cuda installs into the system interpreter, so /usr/local/bin is the PATH entry
-   Dynamo already owns there (see the /usr/local/bin/python link above). xpu and cpu
-   run out of ${VIRTUAL_ENV} and prepend ${VIRTUAL_ENV}/bin to PATH. #}
+{# cuda installs into the system interpreter (/usr/local/bin); xpu and cpu run out
+   of ${VIRTUAL_ENV} and prepend ${VIRTUAL_ENV}/bin to PATH. #}
 {% set vllm_rs_link = "/usr/local/bin/vllm-rs" if device == "cuda" else "${VIRTUAL_ENV}/bin/vllm-rs" %}
-{# Only cuda makes a missing vllm-rs fatal; see the comment above the link step
-   below for why. Rendered as an inline expression rather than a block tag because
-   container/render.py leaves trim_blocks off, so a block tag on its own line
-   inside the RUN would emit a blank line and break the backslash continuation. #}
+{# Inline expression, not a block tag: render.py leaves trim_blocks off, so a tag
+   on its own line inside the RUN breaks the backslash continuation. #}
 {% set vllm_rs_required = "1" if device == "cuda" else "0" %}
 
 # The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
@@ -507,24 +504,8 @@ if actual != expected:
     raise RuntimeError(f"expected transformers {expected}, found {actual}")
 PY
 
-# Put `vllm-rs` on PATH. It is upstream vLLM's own Rust frontend and
-# managed-engine CLI, shipped as a plain data file inside the installed `vllm`
-# package rather than as a console script, so the base image already carries it
-# but nothing makes it resolvable by name -- and the sidecar launch scripts under
-# lib/sidecar/vllm/launch/ invoke `vllm-rs serve` bare. Linking the copy that is
-# already in the package is what keeps the pairing lib/sidecar/vllm/README.md
-# requires: the exposed binary is by construction from the same vLLM source
-# revision as the Python `vllm` package, which fetching or building a separate
-# artifact could not guarantee. Runs after every package layer in this stage so
-# it sees the final installed vllm. The existence check and the `--help` call
-# share this layer, so a base image that stops shipping the binary fails the
-# build here instead of producing an image whose launch scripts die at startup.
-# A missing binary is fatal on cuda only: cuda is the variant this repository
-# builds on every pull request, so it is the only base whose vllm-rs is proven
-# before merge, whereas xpu and cpu start from separately built upstream vLLM
-# distributions (see container/context.yaml) that no pre-merge job here builds
-# and whose contents have not been verified to carry it -- so on those the link
-# is opportunistic and its absence only warns.
+# `vllm-rs` ships inside the installed `vllm` package, not as a console script;
+# linking it keeps the binary at that package's vLLM revision. Fatal on cuda only.
 RUN set -eu; \
     pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
     if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
