@@ -33,7 +33,7 @@ from vllm.tool_parsers.utils import get_json_schema_from_tools
 from vllm.utils.async_utils import make_async
 
 from dynamo.common.utils.guided_json import admits_only_empty_object
-from dynamo.llm.exceptions import InvalidArgument
+from dynamo.llm.exceptions import HttpError, InvalidArgument
 
 from .thinking import apply_default_thinking_mode_to_template_kwargs
 from .utils import legacy_guided_decoding
@@ -102,6 +102,24 @@ def _is_forced_tool_choice(tool_choice: Any) -> bool:
     return tool_choice == "required" or _is_named_tool_choice(tool_choice)
 
 
+def _forced_tool_choice_without_tools_error(tool_choice: Any) -> HttpError:
+    """Mirror the Rust frontend's wording so clients see one behaviour.
+
+    ``validate_tool_choice`` in protocols/openai/validate.rs emits exactly these
+    two messages for the same request.
+    """
+    if _is_named_tool_choice(tool_choice):
+        name = (
+            tool_choice.function.name
+            if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam)
+            else tool_choice["function"]["name"]
+        )
+        return HttpError(
+            400, f'tool named "{name}" in tool_choice is not present in tools'
+        )
+    return HttpError(400, 'tool_choice is "required" but tools is empty')
+
+
 def _typed_tool_choice(tool_choice: Any) -> Any:
     """Normalize a raw named tool choice into the type vLLM's helpers expect.
 
@@ -164,13 +182,11 @@ def _should_build_tool_call_guidance(
     structural_tag_scope: str,
 ) -> bool:
     tool_choice = request.tool_choice or "auto"
-    # TODO: a forced tool_choice with no tools is unsatisfiable and should be a
-    # 400, not an unconstrained request. preprocessor/tool_choice.rs rejects it
-    # (ToolChoiceError::EmptyTools via get_json_schema_from_tools); here and in
-    # sglang_prepost.py it returns no constraint and the caller gets a plausible
-    # answer that can never contain the tool call they required. vLLM's own
-    # "when using tool_choice, tools must be set" validator does not run because
-    # the DYN_VLLM_SKIP_REQUEST_VALIDATION fast path uses model_construct.
+    # A forced tool_choice with no tools is rejected in preprocess_chat_request,
+    # so reaching here without tools means the choice was not forced and there is
+    # nothing to constrain.
+    # TODO: sglang_prepost.py still has no such rejection. #14179 is editing that
+    # file, so it is left for a follow-up.
     if not request.tools:
         return False
 
@@ -603,6 +619,17 @@ async def preprocess_chat_request(
     structural_tag_schema: str = "auto",
 ) -> PreprocessResult:
     validated_request = _validate_chat_completion_request(request)
+    # A forced tool_choice with no tools cannot be satisfied: the reply has to be
+    # a tool call and there is no tool to call. The Rust preprocessor rejects it
+    # (ToolChoiceError::EmptyTools); this path did not, because vLLM's own
+    # "when using tool_choice, tools must be set" validator is skipped on the
+    # DYN_VLLM_SKIP_REQUEST_VALIDATION fast path, which uses model_construct.
+    # Without this the caller gets a plausible answer that can never contain the
+    # tool call they required.
+    if not validated_request.tools and _is_forced_tool_choice(
+        validated_request.tool_choice
+    ):
+        raise _forced_tool_choice_without_tools_error(validated_request.tool_choice)
     assistant_guided_decoding = _build_assistant_guided_decoding(validated_request)
     client_structured_guidance = deepcopy(
         _guided_decoding_from_structured_outputs(
