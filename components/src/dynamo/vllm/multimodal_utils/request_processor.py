@@ -145,44 +145,61 @@ def _video_media_io_kwargs(request: dict) -> dict:
 def _build_user_mm_uuids(
     raw_uuids: Any,
     use_unified_vision_chunk: bool,
+    use_audio_in_video: bool = False,
+    explicit_audio_count: int | None = None,
+    video_count: int | None = None,
 ) -> Optional[dict[str, list[str | None]]]:
-    """Normalize vLLM image cache identities without changing opaque values."""
+    """Map Dynamo media keys to vLLM cache identities."""
+    if use_audio_in_video and (explicit_audio_count is None or video_count is None):
+        raise ValueError(
+            "explicit_audio_count and video_count are required when "
+            "use_audio_in_video is enabled"
+        )
     if raw_uuids is None:
         return None
     if not isinstance(raw_uuids, dict):
         raise ValueError("multi_modal_uuids must be an object")
 
+    mm_uuids: dict[str, list[str | None]] = {}
     for modality, values in raw_uuids.items():
-        if modality == IMAGE_URL_KEY:
-            continue
-        has_uuid = (
-            any(value is not None for value in values)
-            if isinstance(values, list)
-            else values is not None
-        )
-        if has_uuid:
-            raise ValueError(
-                "multimodal cache UUIDs must use the 'image_url' modality key"
-            )
+        if not isinstance(values, list):
+            raise ValueError(f"multi_modal_uuids[{modality!r}] must be a list")
+        for index, value in enumerate(values):
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(
+                    f"multi_modal_uuids[{modality!r}] entries must be non-empty "
+                    f"strings or null; got invalid entry at index {index}"
+                )
 
-    if IMAGE_URL_KEY not in raw_uuids:
-        return None
-    image_uuids = raw_uuids[IMAGE_URL_KEY]
-    if not isinstance(image_uuids, list):
-        raise ValueError("multi_modal_uuids['image_url'] must be a list")
-    for index, value in enumerate(image_uuids):
-        if value is not None and (not isinstance(value, str) or not value):
-            raise ValueError(
-                "multi_modal_uuids['image_url'] entries must be non-empty "
-                f"strings or null; got invalid entry at index {index}"
+        backend_modality = str(modality)
+        if backend_modality.endswith("_url"):
+            backend_modality = backend_modality.removesuffix("_url")
+        backend_modality = _normalize_forwarded_mm_modality(
+            backend_modality,
+            use_unified_vision_chunk,
+        )
+        mm_uuids.setdefault(backend_modality, []).extend(values)
+
+    if use_audio_in_video:
+        video_uuids = mm_uuids.get("video")
+        audio_uuids = mm_uuids.get("audio")
+        if video_uuids is not None or audio_uuids is not None:
+            video_uuids = (
+                video_uuids if video_uuids is not None else [None] * video_count
             )
-    if not any(value is not None for value in image_uuids):
-        return None
-    backend_modality = _normalize_forwarded_mm_modality(
-        "image",
-        use_unified_vision_chunk,
-    )
-    return {backend_modality: list(image_uuids)}
+            audio_uuids = (
+                audio_uuids
+                if audio_uuids is not None
+                else [None] * explicit_audio_count
+            )
+            mm_uuids["audio"] = audio_uuids + video_uuids
+
+    mm_uuids = {
+        modality: uuids
+        for modality, uuids in mm_uuids.items()
+        if any(uuid is not None for uuid in uuids)
+    }
+    return mm_uuids or None
 
 
 def _get_modality_extra_values(
@@ -772,9 +789,16 @@ class VllmMultimodalRequestProcessor:
     ) -> TokensPrompt:
         """Create a TokensPrompt with stable multimodal UUIDs."""
         extra_args = request.get("extra_args") or {}
+        raw_mm_data = request.get("multi_modal_data") or {}
         mm_uuids = _build_user_mm_uuids(
             request.get("multi_modal_uuids"),
             self.use_unified_vision_chunk,
+            use_audio_in_video=bool(
+                mm_processor_kwargs
+                and mm_processor_kwargs.get("use_audio_in_video", False)
+            ),
+            explicit_audio_count=len(raw_mm_data.get(AUDIO_URL_KEY, [])),
+            video_count=len(raw_mm_data.get(VIDEO_URL_KEY, [])),
         )
         if mm_uuids is None:
             mm_uuids = _build_forwarded_mm_uuids(
