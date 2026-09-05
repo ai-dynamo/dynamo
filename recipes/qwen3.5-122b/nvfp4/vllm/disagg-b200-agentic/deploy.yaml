@@ -141,8 +141,6 @@ spec:
                   value: DS
                 - name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
                   value: "1"
-                - name: DYN_VLLM_APPEND_PREFILL_OUTPUT_TOKENS
-                  value: "0"
                 # Force GPU-local RDMA (rc_mlx5 IB) and skip the cuda_ipc slow path.
                 - name: UCX_TLS
                   value: "^cuda_ipc"
@@ -289,8 +287,6 @@ spec:
                   value: DS
                 - name: VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE
                   value: "1"
-                - name: DYN_VLLM_APPEND_PREFILL_OUTPUT_TOKENS
-                  value: "0"
                 - name: UCX_TLS
                   value: "^cuda_ipc"
                 - name: UCX_RNDV_SCHEME
