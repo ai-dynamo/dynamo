@@ -834,7 +834,10 @@ fn detect_worker_rejection_response(res_bytes: &[u8]) -> Option<DynamoError> {
         // worker scope for migration instead of reporting pool exhaustion.
         ErrorType::WorkerOverloaded
     } else if res_bytes.starts_with(UNAVAILABLE_PREFIX) {
-        ErrorType::Unavailable
+        // Same scope: the addressed server is up but has no handler for this
+        // instance, or is closing its worker pool. Other instances may still
+        // serve the endpoint, so this stays migratable.
+        ErrorType::WorkerUnavailable
     } else {
         return None;
     };
@@ -857,6 +860,13 @@ mod rejection_detection_tests {
         let err = detect_worker_rejection_response(b"Server overloaded: worker at capacity")
             .expect("should detect overload");
         assert_eq!(err.error_type(), ErrorType::WorkerOverloaded);
+    }
+
+    #[test]
+    fn unavailable_payload_maps_to_worker_unavailable() {
+        let err = detect_worker_rejection_response(b"Server unavailable: unknown endpoint x")
+            .expect("should detect unavailable");
+        assert_eq!(err.error_type(), ErrorType::WorkerUnavailable);
     }
 
     #[test]

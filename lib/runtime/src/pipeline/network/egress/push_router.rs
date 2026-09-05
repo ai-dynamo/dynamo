@@ -50,6 +50,9 @@ fn is_inhibited(err: &(dyn std::error::Error + 'static)) -> bool {
         // request. Quarantine it, or a migration retry can reselect the same
         // worker before discovery removal catches up.
         ErrorType::Backend(BackendError::StreamIncomplete),
+        // The addressed server has no handler for this instance: discovery is
+        // stale or the worker is shutting down. Same reasoning as above.
+        ErrorType::WorkerUnavailable,
     ];
     match_error_chain(err, INHIBITED, &[])
 }
@@ -2498,6 +2501,15 @@ mod tests {
             !is_inhibited(&cancelled),
             "client cancellation is not a worker fault"
         );
+    }
+
+    #[test]
+    fn worker_unavailable_quarantines_the_worker() {
+        let err = DynamoError::builder()
+            .error_type(ErrorType::WorkerUnavailable)
+            .message("Server unavailable: unknown endpoint a/generate")
+            .build();
+        assert!(is_inhibited(&err));
     }
 
     #[test]

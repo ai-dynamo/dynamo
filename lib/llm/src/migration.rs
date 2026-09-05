@@ -79,6 +79,9 @@ fn is_migratable(err: &(dyn StdError + 'static)) -> bool {
         // One overloaded worker: another may have room. Pool-wide exhaustion is
         // ResourceExhausted below and stays non-migratable.
         ErrorType::WorkerOverloaded,
+        // One worker answered that it no longer serves this instance: another
+        // may. Pool-wide absence is Unavailable and is not a worker fault.
+        ErrorType::WorkerUnavailable,
     ];
     const NON_MIGRATABLE: &[ErrorType] = &[ErrorType::Cancelled, ErrorType::ResourceExhausted];
     error::match_error_chain(err, MIGRATABLE, NON_MIGRATABLE)
@@ -730,6 +733,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn worker_unavailable_is_migratable_but_pool_unavailable_is_not() {
+        assert!(is_migratable(&migratable_error(
+            ErrorType::WorkerUnavailable
+        )));
+        assert!(!is_migratable(&migratable_error(ErrorType::Unavailable)));
+    }
+
     // Guard: genuinely non-migratable errors stay non-migratable.
     #[test]
     fn cancelled_and_exhausted_are_not_migratable() {
@@ -762,7 +773,11 @@ mod tests {
             RequestPhase::Decode,
         ] {
             let permit = tracker.set_phase(phase).await;
-            for error_type in [ErrorType::Disconnected, ErrorType::WorkerOverloaded] {
+            for error_type in [
+                ErrorType::Disconnected,
+                ErrorType::WorkerOverloaded,
+                ErrorType::WorkerUnavailable,
+            ] {
                 let error = migratable_error(error_type);
                 assert!(
                     !is_migratable_for_request(&request, &error),

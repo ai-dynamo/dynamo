@@ -671,10 +671,10 @@ impl SharedTcpServer {
                 Some(h) => h,
                 None => {
                     tracing::warn!("No handler found for endpoint: {endpoint_path}");
-                    // Send error response
+                    // The client only treats this prefix as a rejection; any other reply is
+                    // read as a success ACK and it waits for a response stream that never opens.
                     let error_response = TcpResponseMessage::new(Bytes::from(format!(
-                        "Unknown endpoint: {}",
-                        endpoint_path
+                        "Server unavailable: unknown endpoint {endpoint_path}"
                     )));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
@@ -798,20 +798,11 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         .await
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
-        // With multiple workers per process, each registers with a unique key
-        // "{instance_id}/{endpoint_name}". Find and remove all matching entries.
-        let suffix = format!("/{endpoint_name}");
-        let keys_to_remove: Vec<String> = self
-            .handlers
-            .iter()
-            .filter(|entry| entry.key().ends_with(&suffix))
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in keys_to_remove {
-            self.unregister_endpoint(&key, endpoint_name).await;
-        }
+    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+        // Other instances in this process may serve the same endpoint name; remove only ours.
+        let endpoint_path = format!("{instance_id:x}/{endpoint_name}");
+        self.unregister_endpoint(&endpoint_path, endpoint_name)
+            .await;
         Ok(())
     }
 
@@ -837,6 +828,9 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
 mod tests {
     use super::*;
     use crate::pipeline::error::PipelineError;
+    use crate::pipeline::network::egress::tcp_client::TcpRequestClient;
+    use crate::pipeline::network::egress::unified_client::{Headers, RequestPlaneClient};
+    use crate::pipeline::network::ingress::unified_server::RequestPlaneServer;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -1047,6 +1041,79 @@ mod tests {
             .expect("Request should succeed");
 
         tracing::info!("Test passed: unregister_endpoint properly waited for inflight TCP request");
+    }
+
+    async fn send_ack(client: &TcpRequestClient, addr: SocketAddr, path: &str) -> Bytes {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            client.send_request(
+                format!("{addr}/{path}"),
+                Bytes::from_static(b"payload"),
+                Headers::new(),
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("no ACK within 5s for {path}"))
+        .expect("request-plane send should succeed")
+    }
+
+    #[tokio::test]
+    async fn unregister_endpoint_removes_only_the_callers_instance() {
+        crate::logging::init();
+
+        let cancellation_token = CancellationToken::new();
+        let server =
+            SharedTcpServer::new("127.0.0.1:0".parse().unwrap(), cancellation_token.clone())
+                .unwrap();
+        let addr = server.clone().bind_and_start().await.unwrap();
+
+        let system_health = Arc::new(Mutex::new(SystemHealth::new(
+            crate::HealthStatus::Ready,
+            vec![],
+            false,
+            "/health".to_string(),
+            "/live".to_string(),
+        )));
+        let removed = Arc::new(SlowMockHandler::new(Duration::ZERO));
+        let survivor = Arc::new(SlowMockHandler::new(Duration::ZERO));
+        for (instance_id, handler) in [(0xa_u64, removed), (0xb_u64, survivor.clone())] {
+            RequestPlaneServer::register_endpoint(
+                &*server,
+                "generate".to_string(),
+                handler as Arc<dyn PushWorkHandler>,
+                instance_id,
+                "test_namespace".to_string(),
+                "test_component".to_string(),
+                system_health.clone(),
+            )
+            .await
+            .unwrap();
+        }
+
+        RequestPlaneServer::unregister_endpoint(&*server, "generate", 0xa)
+            .await
+            .unwrap();
+
+        let client = TcpRequestClient::new().unwrap();
+
+        let ack = send_ack(&client, addr, "b/generate").await;
+        assert!(
+            ack.is_empty(),
+            "surviving instance should return the success ACK, got {:?}",
+            String::from_utf8_lossy(&ack)
+        );
+        tokio::time::timeout(Duration::from_secs(5), survivor.request_started.notified())
+            .await
+            .expect("surviving instance's handler should still receive requests");
+
+        let ack = send_ack(&client, addr, "a/generate").await;
+        assert!(
+            ack.starts_with(b"Server unavailable:"),
+            "removed instance should be rejected on the ACK, got {:?}",
+            String::from_utf8_lossy(&ack)
+        );
+
+        cancellation_token.cancel();
     }
 
     ///////////////////// TESTS FOR CONCURRENCY BOUNDING /////////////////////

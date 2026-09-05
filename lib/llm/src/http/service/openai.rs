@@ -6045,16 +6045,29 @@ mod tests {
     fn unavailable_error_response_from_anyhow() {
         use dynamo_runtime::error::{DynamoError, ErrorType};
 
-        let err: anyhow::Error = DynamoError::builder()
-            .error_type(ErrorType::Unavailable)
-            .message("No workers available for endpoint test/worker/generate")
-            .build()
-            .into();
-        let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        // The pool-scoped and worker-scoped flavors both reach the client as 503
+        // when migration cannot retry them.
+        for (error_type, message) in [
+            (
+                ErrorType::Unavailable,
+                "No workers available for endpoint test/worker/generate",
+            ),
+            (
+                ErrorType::WorkerUnavailable,
+                "Server unavailable: unknown endpoint a/generate",
+            ),
+        ] {
+            let err: anyhow::Error = DynamoError::builder()
+                .error_type(error_type)
+                .message(message)
+                .build()
+                .into();
+            let response = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
 
-        assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
-        assert_eq!(response.1.message, "Service temporarily unavailable");
+            assert_eq!(response.0, StatusCode::SERVICE_UNAVAILABLE, "{error_type}");
+            assert_eq!(response.1.code, StatusCode::SERVICE_UNAVAILABLE.as_u16());
+            assert_eq!(response.1.message, "Service temporarily unavailable");
+        }
     }
 
     #[test]
