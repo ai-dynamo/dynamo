@@ -1,0 +1,117 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Two aggregated workers behind a KV-aware router on Intel XPU.
+# XPUs: 2 (one worker per device, gated via ZE_AFFINITY_MASK / ONEAPI_DEVICE_SELECTOR)
+
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+source "$SCRIPT_DIR/../../../../common/gpu_utils.sh"   # build_sglang_gpu_mem_args
+source "$SCRIPT_DIR/../../../../common/launch_utils.sh" # print_launch_banner, wait_any_exit
+
+# Parse command line arguments
+ENABLE_OTEL=false
+APPROX_MODE=false
+EXTRA_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --enable-otel)
+            ENABLE_OTEL=true
+            shift
+            ;;
+        --approx)
+            APPROX_MODE=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "Options:"
+            echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  --approx             Enable approximate KV routing (no KV events)"
+            echo "  -h, --help           Show this help message"
+            echo ""
+            echo "Additional SGLang/Dynamo flags can be passed and will be forwarded"
+            echo "Note: System metrics are enabled by default on ports 8081 (worker-1), 8082 (worker-2)"
+            exit 0
+            ;;
+        *)
+            EXTRA_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# Enable tracing if requested
+TRACE_ARGS=()
+if [ "$ENABLE_OTEL" = true ]; then
+    export DYN_LOGGING_JSONL=true
+    export OTEL_EXPORT_ENABLED=1
+    export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
+    TRACE_ARGS+=(--enable-trace --otlp-traces-endpoint localhost:4317)
+fi
+
+MODEL="Qwen/Qwen3-0.6B"
+
+GPU_MEM_ARGS=$(build_sglang_gpu_mem_args)
+
+HTTP_PORT="${DYN_HTTP_PORT:-8000}"
+print_launch_banner "Launching Aggregated + KV Routing on XPU (2 devices)" "$MODEL" "$HTTP_PORT"
+
+# Common XPU args appended to each worker
+XPU_ARGS=(--device xpu --attention-backend intel_xpu)
+
+# run ingress
+FRONTEND_ARGS=(--router-mode kv)
+if [ "$APPROX_MODE" = true ]; then
+    FRONTEND_ARGS+=(--no-kv-events)
+fi
+OTEL_SERVICE_NAME=dynamo-frontend \
+python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
+
+# Build KV events args conditionally (only when not in approx mode)
+KV_EVENTS_ARGS_1=()
+KV_EVENTS_ARGS_2=()
+if [ "$APPROX_MODE" = false ]; then
+    KV_EVENTS_ARGS_1=(--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}')
+    KV_EVENTS_ARGS_2=(--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558"}')
+fi
+
+# Worker 1 -> XPU 0
+OTEL_SERVICE_NAME=dynamo-worker-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_WORKER1:-8081} \
+ZE_AFFINITY_MASK=0 \
+python3 -m dynamo.sglang \
+  --model-path "$MODEL" \
+  --served-model-name "$MODEL" \
+  --page-size 16 \
+  --tp 1 \
+  --trust-remote-code \
+  "${KV_EVENTS_ARGS_1[@]}" \
+  --enable-metrics \
+  --disable-piecewise-cuda-graph \
+  $GPU_MEM_ARGS \
+  "${XPU_ARGS[@]}" \
+  "${TRACE_ARGS[@]}" \
+  "${EXTRA_ARGS[@]}" &
+
+# Worker 2 -> XPU 1
+OTEL_SERVICE_NAME=dynamo-worker-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_WORKER2:-8082} \
+ZE_AFFINITY_MASK=1 \
+python3 -m dynamo.sglang \
+  --model-path "$MODEL" \
+  --served-model-name "$MODEL" \
+  --page-size 16 \
+  --tp 1 \
+  --trust-remote-code \
+  "${KV_EVENTS_ARGS_2[@]}" \
+  --enable-metrics \
+  --disable-piecewise-cuda-graph \
+  $GPU_MEM_ARGS \
+  "${XPU_ARGS[@]}" \
+  "${TRACE_ARGS[@]}" \
+  "${EXTRA_ARGS[@]}" &
+
+# Exit on first worker failure; kill 0 in the EXIT trap tears down the rest
+wait_any_exit
