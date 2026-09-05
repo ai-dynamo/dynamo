@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from dynamo.common.constants import DisaggregationMode
 from dynamo.common.metadata_upload import MetadataUploader
 from dynamo.llm import HttpError
 from dynamo.llm.exceptions import EngineShutdown
@@ -2157,3 +2158,200 @@ async def test_multimodal_stream_keeps_reading_after_one_choice_finishes():
 
 async def _collect(stream):
     return [item async for item in stream]
+
+
+@pytest.fixture
+def decode_cancellation_case(monkeypatch):
+    handler = _new_decode_handler()
+    del handler._cancellation_monitor  # Exercise the real shared monitor.
+    handler.shutdown_event = asyncio.Event()
+    handler.serving_mode = DisaggregationMode.DECODE
+    handler.enable_trace = False
+    handler._routed_experts_kwargs = {}
+    handler._enable_frontend_decoding = False
+    handler._mm_hashes_supported = False
+    handler._get_input_param = lambda request: {"input_ids": [1]}
+    handler._build_sampling_params = lambda request: {"max_new_tokens": 1}
+    handler._build_logprob_kwargs = lambda request: {}
+    handler._resolve_lora = lambda request: None
+    handler._priority_kwargs = lambda priority: {}
+    monkeypatch.setattr(
+        "dynamo.sglang.request_handlers.llm.decode_handler.require_reasoning_kwargs",
+        lambda *args: {},
+    )
+
+    started = asyncio.Event()
+    allow_registration = asyncio.Event()
+    registered = asyncio.Event()
+    aborted = asyncio.Event()
+    cancelled = asyncio.Event()
+    observed = asyncio.Event()
+    drained = asyncio.Event()
+    abort_calls = []
+    registry = {}
+
+    def cancellation_future():
+        observed.set()
+        return asyncio.create_task(cancelled.wait())
+
+    context = SimpleNamespace(
+        id=lambda: "dynamo-request",
+        trace_id="trace-request",
+        async_killed_or_stopped=cancellation_future,
+        is_stopped=cancelled.is_set,
+        notify_first_token=lambda: None,
+    )
+    case = SimpleNamespace(
+        handler=handler,
+        context=context,
+        started=started,
+        allow_registration=allow_registration,
+        registered=registered,
+        aborted=aborted,
+        cancelled=cancelled,
+        observed=observed,
+        drained=drained,
+        abort_calls=abort_calls,
+        registry=registry,
+        finish_without_cancel=False,
+        first_response=False,
+        fail_registration=False,
+        first_response_consumed=asyncio.Event(),
+        request={
+            "token_ids": [1],
+            # No network is used by this engine double.
+            "bootstrap_info": {
+                "bootstrap_host": "localhost",
+                "bootstrap_port": 0,
+                "bootstrap_room": 1,
+            },
+        },
+    )
+
+    async def stream(rid):
+        started.set()
+        try:
+            await allow_registration.wait()
+            if case.fail_registration:
+                raise ValueError("registration failed")
+            registry[rid] = object()
+            registered.set()
+            if case.finish_without_cancel:
+                return
+            if case.first_response:
+                yield {
+                    "output_ids": [],
+                    "meta_info": {"id": rid, "finish_reason": None},
+                }
+                case.first_response_consumed.set()
+            await aborted.wait()
+        finally:
+            registry.pop(rid, None)
+            drained.set()
+
+    def abort_request(*, rid, abort_all):
+        abort_calls.append((rid, abort_all))
+        # Match SGLang: an unknown ID does not stop generation.
+        if rid in registry:
+            aborted.set()
+
+    async def async_generate(**kwargs):
+        return stream(kwargs["rid"])
+
+    def generate_request(request, context):
+        return stream(request.rid)
+
+    handler.engine = SimpleNamespace(
+        async_generate=async_generate,
+        tokenizer_manager=SimpleNamespace(
+            rid_to_state=registry,
+            abort_request=abort_request,
+            generate_request=generate_request,
+        ),
+    )
+    return case
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize("disaggregated", [False, True])
+@pytest.mark.parametrize("output_mode", ["tokens", "text", "native"])
+@pytest.mark.parametrize("early", [False, True])
+@pytest.mark.parametrize("signal", ["cancel", "shutdown"])
+async def test_decode_cancels_before_first_response(
+    decode_cancellation_case, output_mode, early, signal, disaggregated
+):
+    case = decode_cancellation_case
+    expected_id = case.context.trace_id
+    if not disaggregated:
+        case.handler.serving_mode = DisaggregationMode.AGGREGATED
+    case.handler.use_sglang_tokenizer = output_mode == "text"
+    if output_mode == "native":
+        expected_id = "caller-supplied-id"
+        case.request["extra_args"] = {"sglang_tito": {"rid": expected_id}}
+
+    consumer = asyncio.create_task(
+        _collect(case.handler.generate(case.request, case.context))
+    )
+    try:
+        await asyncio.wait_for(case.started.wait(), timeout=1)
+        if not early:
+            case.allow_registration.set()
+            await asyncio.wait_for(case.registered.wait(), timeout=1)
+        if signal == "cancel":
+            case.cancelled.set()
+        else:
+            case.handler.shutdown_event.set()
+        if early:
+            await asyncio.wait_for(case.observed.wait(), timeout=1)
+            # Give the monitor time to process the signal while registration
+            # remains blocked; an abort at this point would be ignored.
+            await asyncio.sleep(0.01)
+            assert not case.abort_calls
+            case.allow_registration.set()
+
+        if signal == "shutdown":
+            with pytest.raises(EngineShutdown):
+                await asyncio.wait_for(consumer, timeout=1)
+        else:
+            assert await asyncio.wait_for(consumer, timeout=1) == []
+        assert case.abort_calls == [(expected_id, False)]
+        assert case.drained.is_set()
+        assert not case.registry
+    finally:
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(5)
+@pytest.mark.parametrize(
+    "outcome", ["complete", "registration_error", "cancel_after_response"]
+)
+async def test_decode_cancellation_preserves_stream_lifetime(
+    decode_cancellation_case, outcome
+):
+    case = decode_cancellation_case
+    case.finish_without_cancel = outcome == "complete"
+    case.fail_registration = outcome == "registration_error"
+    case.first_response = outcome == "cancel_after_response"
+    case.allow_registration.set()
+    consumer = asyncio.create_task(
+        _collect(case.handler.generate(case.request, case.context))
+    )
+    try:
+        if outcome == "registration_error":
+            with pytest.raises(ValueError, match="registration failed"):
+                await asyncio.wait_for(consumer, timeout=1)
+        else:
+            if case.first_response:
+                await asyncio.wait_for(case.first_response_consumed.wait(), timeout=1)
+                case.cancelled.set()
+            assert await asyncio.wait_for(consumer, timeout=1) == []
+        expected = [(case.context.trace_id, False)] if case.first_response else []
+        assert case.abort_calls == expected
+        assert case.drained.is_set()
+        assert not case.registry
+    finally:
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
