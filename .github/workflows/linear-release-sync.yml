@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Merged commits sync their referenced issues to the corresponding Linear
+# release, keeping the Release view a live feature list without a manual step.
+#
+# Main only for the rollout: the action keeps per-pipeline scan state, so
+# release/* branches join once the dry run confirms how that state behaves
+# across concurrently active branches (they may need their own pipeline and
+# access key per stream).
+
+name: Linear Release Sync
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  # The release currently in development on main. Update at each cycle open,
+  # when the prior release branch is cut and main rolls to the next line.
+  # The v prefix is part of the version: every Dynamo release in the Linear
+  # pipeline is v-prefixed, and the action matches an existing release by this
+  # exact string. A bare "1.6.0" creates a second, empty release next to the
+  # real one.
+  MAIN_RELEASE_VERSION: "v1.6.0"
+
+  # First-run scan base. With no base the action scans from the pipeline's
+  # latest release, which would sweep in every issue merged since August. This
+  # is the commit where the 1.5 branch was cut, so the first run sees exactly
+  # the commits that belong to this cycle. Update it at each cycle open.
+  RELEASE_SCAN_BASE: "330ce842416d0065e33dbb67109585fbba6f4930"
+
+concurrency:
+  group: linear-release-sync-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync issues to the Linear release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout with history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Sync release
+        uses: linear/linear-release-action@53ad0f863963e7f8e270fba18426bbb55ef55384  # v0.17.2
+        with:
+          access_key: ${{ secrets.LINEAR_ACCESS_KEY }}
+          command: sync
+          version: ${{ env.MAIN_RELEASE_VERSION }}
+          name: Dynamo ${{ env.MAIN_RELEASE_VERSION }}
+          base_ref: ${{ env.RELEASE_SCAN_BASE }}
+          # Deliberate rollout gate: the workflow does not sync until this is
+          # flipped. Dry run scans and logs what it would attach without
+          # creating or modifying anything in Linear. Flip to false in a
+          # follow-up PR once one observed run logs that it would update the
+          # existing "Dynamo v1.6.0" release rather than create one, and
+          # LINEAR_ACCESS_KEY is confirmed to be a pipeline access key.
+          dry_run: true
