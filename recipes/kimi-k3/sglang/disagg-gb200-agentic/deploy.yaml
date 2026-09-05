@@ -1,0 +1,304 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kimi-k3-sglang-gb200-disagg-agentic-sglang-config
+data:
+  prefill.yaml: |-
+    model-path: moonshotai/Kimi-K3
+    served-model-name: moonshotai/Kimi-K3
+    trust-remote-code: true
+    context-length: 1048576
+    max-running-requests: 64
+    mem-fraction-static: 0.88
+    chunked-prefill-size: 8192
+    max-prefill-tokens: 8192
+    page-size: 64
+    schedule-policy: fcfs
+    weight-loader-prefetch-checkpoints: true
+    enable-multimodal: true
+    mm-attention-backend: triton_attn
+    speculative-algorithm: DSPARK
+    speculative-draft-model-path: RadixArk/Kimi-K3-DSpark
+    speculative-dspark-block-size: 7
+    moe-runner-backend: deep_gemm
+    moe-a2a-backend: megamoe
+    mamba-full-memory-ratio: 0.9
+    enable-hierarchical-cache: true
+    hicache-size: 100
+    kv-cache-dtype: fp8_e4m3
+    enable-nccl-nvls: true
+    enable-metrics: true
+    tp-size: 16
+    dp-size: 1
+    ep-size: 16
+    pp-size: 1
+    dcp-size: 1
+    disaggregation-mode: prefill
+    disaggregation-transfer-backend: mooncake
+    disaggregation-bootstrap-port: 30001
+    host: 0.0.0.0
+    port: 30000
+
+  decode.yaml: |-
+    model-path: moonshotai/Kimi-K3
+    served-model-name: moonshotai/Kimi-K3
+    trust-remote-code: true
+    context-length: 1048576
+    max-running-requests: 96
+    mem-fraction-static: 0.88
+    chunked-prefill-size: 8192
+    max-prefill-tokens: 8192
+    page-size: 64
+    schedule-policy: fcfs
+    weight-loader-prefetch-checkpoints: true
+    enable-multimodal: true
+    mm-attention-backend: triton_attn
+    speculative-algorithm: DSPARK
+    speculative-draft-model-path: RadixArk/Kimi-K3-DSpark
+    speculative-dspark-block-size: 7
+    moe-runner-backend: deep_gemm
+    moe-a2a-backend: megamoe
+    mamba-full-memory-ratio: 0.9
+    kv-cache-dtype: fp8_e4m3
+    enable-nccl-nvls: true
+    enable-metrics: true
+    tp-size: 16
+    dp-size: 1
+    ep-size: 16
+    pp-size: 1
+    dcp-size: 16
+    disaggregation-mode: decode
+    disaggregation-transfer-backend: mooncake
+    disaggregation-bootstrap-port: 30001
+    host: 0.0.0.0
+    port: 30000
+---
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: kimi-k3-sglang-gb200-disagg-agentic-compute-domain
+spec:
+  numNodes: 0
+  channel:
+    allocationMode: Single
+    resourceClaimTemplate:
+      name: kimi-k3-sglang-gb200-disagg-agentic-compute-domain-channel
+---
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: kimi-k3-sglang-gb200-disagg-agentic
+spec:
+  backendFramework: sglang
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-267a3244b74ebfe7834bbb59de90a77d35f35d01-sglang-runtime@sha256:e3104f24a631d4134cf61f28fb405ea440ff447c923d2fd206b196b3bc8a6337
+              imagePullPolicy: IfNotPresent
+              command: [python3, -m, dynamo.frontend]
+              args:
+                - --http-port
+                - "8000"
+                - --router-min-initial-workers
+                - "1"
+                - --dyn-chat-processor
+                - dynamo
+                - --model-name
+                - moonshotai/Kimi-K3
+                - --trust-remote-code
+              env:
+                - name: DYN_ROUTER_MODE
+                  value: least-loaded
+              ports:
+                - name: http
+                  containerPort: 8000
+                  protocol: TCP
+              resources:
+                requests:
+                  cpu: "16"
+                  memory: 128Gi
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+
+    - name: PrefillWorker
+      type: prefill
+      replicas: 2
+      multinode:
+        nodeCount: 4
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: kimi-k3-sglang-gb200-disagg-agentic-compute-domain-channel
+          terminationGracePeriodSeconds: 60
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-267a3244b74ebfe7834bbb59de90a77d35f35d01-sglang-runtime@sha256:e3104f24a631d4134cf61f28fb405ea440ff447c923d2fd206b196b3bc8a6337
+              imagePullPolicy: IfNotPresent
+              command: [python3, -m, dynamo.sglang]
+              args:
+                - --config
+                - /etc/sglang/prefill.yaml
+                - --dyn-reasoning-parser
+                - kimi_k3
+                - --dyn-tool-call-parser
+                - kimi_k3
+                - --dyn-enable-structural-tag
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: SGLANG_MOONCAKE_CUSTOM_MEM_POOL
+                  value: NVLINK
+                - name: MC_FORCE_MNNVL
+                  value: "true"
+                - name: SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK
+                  value: "1024"
+                # For perf benchmarking only
+                # - name: SGLANG_SIMULATE_ACC_LEN
+                #   value: "4.05"
+                # - name: SGLANG_SIMULATE_ACC_METHOD
+                #   value: match-expected
+              ports:
+                - name: system
+                  containerPort: 9090
+                  protocol: TCP
+                - name: bootstrap
+                  containerPort: 30001
+                  protocol: TCP
+              resources:
+                claims:
+                  - name: compute-domain-channel
+                requests:
+                  cpu: "16"
+                  memory: 512Gi
+                  ephemeral-storage: 64Gi
+                  nvidia.com/gpu: "4"
+                limits:
+                  nvidia.com/gpu: "4"
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              volumeMounts:
+                - name: sglang-config
+                  mountPath: /etc/sglang
+                  readOnly: true
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: sglang-config
+              configMap:
+                name: kimi-k3-sglang-gb200-disagg-agentic-sglang-config
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache
+
+    - name: DecodeWorker
+      type: decode
+      replicas: 1
+      multinode:
+        nodeCount: 4
+      sharedMemorySize: 64Gi
+      podTemplate:
+        spec:
+          resourceClaims:
+            - name: compute-domain-channel
+              resourceClaimTemplateName: kimi-k3-sglang-gb200-disagg-agentic-compute-domain-channel
+          terminationGracePeriodSeconds: 60
+          containers:
+            - name: main
+              image: dynamoci.azurecr.io/ai-dynamo/dynamo:1.4.0-ci-267a3244b74ebfe7834bbb59de90a77d35f35d01-sglang-runtime@sha256:e3104f24a631d4134cf61f28fb405ea440ff447c923d2fd206b196b3bc8a6337
+              imagePullPolicy: IfNotPresent
+              command: [python3, -m, dynamo.sglang]
+              args:
+                - --config
+                - /etc/sglang/decode.yaml
+                - --dyn-reasoning-parser
+                - kimi_k3
+                - --dyn-tool-call-parser
+                - kimi_k3
+                - --dyn-enable-structural-tag
+                # The SGLang YAML parser rejects this StoreTrue flag because a
+                # deprecated alias shares its destination. Pass it via CLI.
+                - --enable-linear-replayssm-spec
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: HF_HOME
+                  value: /shared-model-cache
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+                - name: NCCL_MNNVL_ENABLE
+                  value: "1"
+                - name: NCCL_NVLS_ENABLE
+                  value: "1"
+                - name: NCCL_CUMEM_ENABLE
+                  value: "1"
+                - name: SGLANG_MOONCAKE_CUSTOM_MEM_POOL
+                  value: NVLINK
+                - name: MC_FORCE_MNNVL
+                  value: "true"
+                - name: SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK
+                  value: "1024"
+                # For perf benchmarking only
+                # - name: SGLANG_SIMULATE_ACC_LEN
+                #   value: "4.05"
+                # - name: SGLANG_SIMULATE_ACC_METHOD
+                #   value: match-expected
+              ports:
+                - name: system
+                  containerPort: 9090
+                  protocol: TCP
+                - name: bootstrap
+                  containerPort: 30001
+                  protocol: TCP
+              resources:
+                claims:
+                  - name: compute-domain-channel
+                requests:
+                  cpu: "16"
+                  memory: 512Gi
+                  ephemeral-storage: 64Gi
+                  nvidia.com/gpu: "4"
+                limits:
+                  nvidia.com/gpu: "4"
+              securityContext:
+                runAsUser: 0
+                runAsGroup: 0
+                capabilities:
+                  add: [IPC_LOCK, SYS_PTRACE, SYS_RESOURCE]
+              volumeMounts:
+                - name: sglang-config
+                  mountPath: /etc/sglang
+                  readOnly: true
+                - name: shared-model-cache
+                  mountPath: /shared-model-cache
+          volumes:
+            - name: sglang-config
+              configMap:
+                name: kimi-k3-sglang-gb200-disagg-agentic-sglang-config
+            - name: shared-model-cache
+              persistentVolumeClaim:
+                claimName: shared-model-cache

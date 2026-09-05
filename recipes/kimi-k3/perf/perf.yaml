@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kimi-k3-aiperf-config
+data:
+  perf.yaml: |
+    schemaVersion: "2.0"
+
+    benchmark:
+      model: ${TARGET_MODEL}
+
+      tokenizer:
+        name: ${TOKENIZER}
+        trust_remote_code: true
+
+      endpoint:
+        url: ${INFERENCE_URL}
+        type: chat
+        streaming: true
+        timeout: 7200
+        use_server_token_count: true
+        extra:
+          ignore_eos: true
+
+      dataset:
+        type: file
+        path: ${TRACE_FILE}
+        format: mooncake_trace
+        sampling: sequential
+
+        synthesis:
+          max_isl: ${MAX_ISL:1048576}
+          max_osl: ${CAP_OSL:12000}
+
+      warmup:
+        type: concurrency
+        concurrency: 16
+        requests: 16
+
+      profiling:
+        type: concurrency
+        concurrency: ${CONCURRENCY}
+        requests: ${REQUESTS}
+
+      runtime:
+        ui: none
+
+      artifacts:
+        dir: ${ARTIFACT_DIR}
+        summary: [json]
+        records: [jsonl]
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kimi-k3-sglang-gb300-agg-bench
+spec:
+  backoffLimit: 0
+
+  template:
+    spec:
+      restartPolicy: Never
+
+      # Co-locate the benchmark pod with the target DGD frontend.
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: nvidia.com/dynamo-component-type
+                    operator: In
+                    values:
+                      - frontend
+                  - key: nvidia.com/dynamo-graph-deployment-name
+                    operator: In
+                    values:
+                      - kimi-k3-sglang-gb300-agg-agentic
+              topologyKey: kubernetes.io/hostname
+
+      containers:
+        - name: aiperf
+          image: nvcr.io/nvidia/ai-dynamo/aiperf:0.12.0
+          imagePullPolicy: IfNotPresent
+
+          command: ["/bin/bash", "-lc"]
+          args:
+            - |
+              set -euo pipefail
+              MODELS_URL="${INFERENCE_URL%/v1/chat/completions}/v1/models"
+              MODEL_READY_DEADLINE=$((SECONDS + 3600))
+              echo "Waiting for $TARGET_MODEL at $MODELS_URL"
+              until wget -qO- -T 5 "$MODELS_URL" | grep -Fq "$TARGET_MODEL"; do
+                if ((SECONDS >= MODEL_READY_DEADLINE)); then
+                  echo "Timed out waiting for $TARGET_MODEL at $MODELS_URL" >&2
+                  exit 1
+                fi
+                sleep 5
+              done
+              export REQUESTS="$(wc -l < "$TRACE_FILE" | tr -d '[:space:]')"
+              exec aiperf profile --config /etc/aiperf/perf.yaml
+
+          env:
+            - name: TARGET_MODEL
+              value: moonshotai/Kimi-K3
+
+            - name: TOKENIZER
+              value: moonshotai/Kimi-K3
+
+            - name: INFERENCE_URL
+              value: http://kimi-k3-sglang-gb300-agg-agentic-frontend:8000/v1/chat/completions
+
+            - name: TRACE_FILE
+              value: /model-cache/traces/64k_400_90kv_agent_new_noschedule_short_15perc.jsonl
+
+            - name: CONCURRENCY
+              value: "64"
+
+            - name: MAX_ISL
+              value: "1048576"
+
+            - name: CAP_OSL
+              value: "12000"
+
+            - name: ARTIFACT_DIR
+              value: /model-cache/aiperf-artifacts
+
+          volumeMounts:
+            - name: aiperf-config
+              mountPath: /etc/aiperf
+              readOnly: true
+
+            # Read the trace and write artifacts on the shared PVC.
+            - name: shared-model-cache
+              mountPath: /model-cache
+
+      volumes:
+        - name: aiperf-config
+          configMap:
+            name: kimi-k3-aiperf-config
+
+        - name: shared-model-cache
+          persistentVolumeClaim:
+            claimName: shared-model-cache
