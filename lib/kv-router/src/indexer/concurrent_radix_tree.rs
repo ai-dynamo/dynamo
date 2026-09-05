@@ -567,22 +567,30 @@ impl SyncIndexer for ConcurrentRadixTree {
             match task {
                 WorkerTask::Event(event) => {
                     let kind = EventKind::of(&event.event.data);
+                    let stored_block_count = EventKind::stored_block_count(&event.event.data);
                     let result = self.apply_event(&mut lookup, event, counters.as_ref());
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
                     }
                     if let Some(ref c) = counters {
+                        if let Some(block_count) = stored_block_count {
+                            c.inc_stored_parent_not_found_blocks(block_count, &result);
+                        }
                         c.inc(kind, result);
                     }
                 }
                 WorkerTask::EventWithAck { event, resp } => {
                     let kind = EventKind::of(&event.event.data);
+                    let stored_block_count = EventKind::stored_block_count(&event.event.data);
                     let result = self.apply_event(&mut lookup, event, counters.as_ref());
                     let applied = result.is_ok();
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
                     }
                     if let Some(ref c) = counters {
+                        if let Some(block_count) = stored_block_count {
+                            c.inc_stored_parent_not_found_blocks(block_count, &result);
+                        }
                         c.inc(kind, result);
                     }
                     let _ = resp.send(applied);
@@ -600,12 +608,16 @@ impl SyncIndexer for ConcurrentRadixTree {
                     correlation_id,
                 } => {
                     let kind = EventKind::of(&event.event.data);
+                    let stored_block_count = EventKind::stored_block_count(&event.event.data);
                     let result = self.apply_event(&mut lookup, event, counters.as_ref());
                     observation.record(correlation_id, result.is_ok());
                     if result.is_err() {
                         tracing::warn!("Failed to apply event: {:?}", result.as_ref().err());
                     }
                     if let Some(ref c) = counters {
+                        if let Some(block_count) = stored_block_count {
+                            c.inc_stored_parent_not_found_blocks(block_count, &result);
+                        }
                         c.inc(kind, result);
                     }
                 }
