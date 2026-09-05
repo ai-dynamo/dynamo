@@ -850,6 +850,11 @@ class VllmProcessor:
         mm_routing_info: dict[str, Any] | None = None,
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        """Stream choices until completion, releasing locally stopped requests.
+
+        After a local stop, usage counts only tokens consumed by active choices;
+        backend totals may include later tokens generated for a stopped choice.
+        """
         sp = vllm_preproc.sampling_params
         output_request_ids: dict[int, str]
         registered_request_ids: list[str]
@@ -901,6 +906,7 @@ class VllmProcessor:
         # content-part counts here too (else frontend metrics report zero media).
         input_tokens = len(tokens)
         cumulative_output_tokens = 0
+        has_local_stop = False
         # Per-request reasoning-token usage (NVBug 6678449b); see
         # _ReasoningUsageAnnotator. Must be per-request, never module-level.
         # The counts live on the post-processors, which are per-request too.
@@ -950,11 +956,6 @@ class VllmProcessor:
                     )
                     break
 
-                # Count before any choice gate — tool/reasoning parsers may
-                # consume tokens without emitting a visible delta.
-                chunk_tokens = len(engine_response.get("token_ids") or [])
-                cumulative_output_tokens += chunk_tokens
-
                 output_idx = engine_response.get("index", 0) or 0
                 output_request_id = output_request_ids.get(output_idx)
                 if output_request_id is None:
@@ -970,6 +971,15 @@ class VllmProcessor:
                         }
                     )
                     break
+
+                # Count active choices before processing: tool/reasoning
+                # parsers may consume tokens without emitting a visible delta.
+                chunk_tokens = (
+                    len(engine_response.get("token_ids") or [])
+                    if output_request_id in self.output_processor.request_states
+                    else 0
+                )
+                cumulative_output_tokens += chunk_tokens
 
                 raw_finish_reason = engine_response.get("finish_reason")
                 finish_reason = map_finish_reason(raw_finish_reason)
@@ -997,7 +1007,13 @@ class VllmProcessor:
                 )
 
                 if vllm_out.reqs_to_abort:
-                    pass
+                    has_local_stop = True
+                # Choices share a routed stream; a local stop on one must not
+                # cancel siblings that are still generating.
+                locally_finished = has_local_stop and not any(
+                    child_id in self.output_processor.request_states
+                    for child_id in registered_request_ids
+                )
 
                 choices = []
                 postprocess_error = False
@@ -1037,7 +1053,18 @@ class VllmProcessor:
                         "model": request["model"],
                         "object": "chat.completion.chunk",
                     }
-                    if usage := engine_response.get("completion_usage"):
+                    usage = engine_response.get("completion_usage")
+                    if has_local_stop and (usage or locally_finished):
+                        usage = dict(usage or {})
+                        prompt_tokens = usage.get("prompt_tokens")
+                        if prompt_tokens is None:
+                            prompt_tokens = input_tokens
+                        usage.update(
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=cumulative_output_tokens,
+                            total_tokens=prompt_tokens + cumulative_output_tokens,
+                        )
+                    if usage:
                         dynamo_out["usage"] = reasoning_usage.annotate(usage)
                     envelope["data"] = dynamo_out
 
@@ -1057,6 +1084,8 @@ class VllmProcessor:
                 envelope["comment"] = [json.dumps(metrics)]
 
                 yield envelope
+                if locally_finished:
+                    break
             _nvtx.end_range(rng_stream)
         except VLLMClientError:
             # Preserve request-side 400/404/422 errors for generator(), which
