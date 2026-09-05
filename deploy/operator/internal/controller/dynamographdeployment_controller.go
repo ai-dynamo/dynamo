@@ -280,8 +280,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			builder.WithPredicates(dgdWorkerPodEventPredicate()),
 		).
 		Owns(&nvidiacomv1beta1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
-			// ignore creation cause we don't want to be called again after we create the deployment
-			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			CreateFunc:  func(ce event.CreateEvent) bool { return true },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
