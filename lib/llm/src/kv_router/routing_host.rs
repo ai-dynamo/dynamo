@@ -37,6 +37,7 @@ use crate::{
     preprocessor::PreprocessedRequest,
     protocols::common::{
         FinishReason,
+        extensions::SessionAffinityId,
         llm_backend::LLMEngineOutput,
         timing::{RequestPhase, RoutingData, WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL},
     },
@@ -54,7 +55,7 @@ mod occupancy;
 mod request_guard;
 
 use builtin::BuiltinWorkerSelector;
-use cancellation::cancel_on_stop;
+use cancellation::{CleanupBudget, DispatchCancellation, StagedKv, await_with_cleanup_policy};
 use kv_selection::{RoutingRequestParts, SelectionOptions, WorkerSelection};
 use occupancy::HostedOccupancy;
 pub(crate) use request_guard::prompt_private_blocks;
@@ -267,6 +268,9 @@ where
     selection: WorkerSelection,
     cleanup: KvRequestCleanup<Sel>,
     affinity: Option<AffinityAcquire>,
+    /// Carried forward from the [`RoutePreview`] this plan was admitted from, so
+    /// preview, admission and dispatch draw on one budget instead of three.
+    budget: CleanupBudget,
 }
 
 /// A KV route selected without scheduler admission.
@@ -274,6 +278,8 @@ pub(crate) struct RoutePreview {
     request_id: String,
     phase: RequestPhase,
     signals: RoutePlanSignals,
+    /// Starts here because the conditional route's first stage is the preview.
+    budget: CleanupBudget,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -288,6 +294,13 @@ pub(crate) struct RoutePlanSignals {
 impl RoutePreview {
     pub(crate) fn signals(&self) -> RoutePlanSignals {
         self.signals
+    }
+
+    /// Starts the budget's clock and reports what is left, so a test can follow
+    /// one budget across the real preview/plan/dispatch chain.
+    #[cfg(test)]
+    pub(crate) fn cleanup_budget_remaining(&self) -> std::time::Duration {
+        self.budget.remaining()
     }
 }
 
@@ -304,6 +317,11 @@ where
 {
     pub(crate) fn signals(&self) -> RoutePlanSignals {
         self.signals
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cleanup_budget_remaining(&self) -> std::time::Duration {
+        self.budget.remaining()
     }
 
     #[cfg(test)]
@@ -577,17 +595,58 @@ where
         (start..end).contains(&dp_rank)
     }
 
+    /// Take a session-affinity slot under the same cleanup policy as every other
+    /// routing stage.
+    ///
+    /// `acquire_with_context` cancels its own wait as soon as the context stops,
+    /// and it runs upstream of every other stage. A decode leg with staged KV
+    /// would therefore die here — before any of the wrapped stages could let it
+    /// through — whenever a concurrent request for the same session is still
+    /// `Initializing`. On that path we wait through the stop instead, drawing on
+    /// the request's shared budget so the wait is still bounded.
+    #[allow(clippy::too_many_arguments)]
+    async fn acquire_affinity_slot(
+        &self,
+        affinity: &AffinityCoordinator,
+        session_id: &SessionAffinityId,
+        requested_target: Option<AffinityTarget>,
+        context: &dyn AsyncEngineContext,
+        phase: RequestPhase,
+        staged_kv: StagedKv,
+        budget: &CleanupBudget,
+    ) -> Result<AffinityAcquire, Error> {
+        match DispatchCancellation::for_request(phase, staged_kv) {
+            DispatchCancellation::CancelWhenStopped => {
+                affinity
+                    .acquire_with_context(session_id, requested_target, context)
+                    .await
+            }
+            DispatchCancellation::DispatchWhenStopped => await_with_cleanup_policy(
+                context,
+                phase,
+                staged_kv,
+                "affinity.acquire",
+                budget,
+                affinity.acquire(session_id, requested_target),
+            )
+            .await
+            .and_then(|result| result),
+        }
+    }
+
     async fn select_with_session_affinity<T, Select, SelectionFuture>(
         &self,
         request: &SingleIn<PreprocessedRequest>,
         phase: RequestPhase,
         is_query_only: bool,
+        budget: &CleanupBudget,
         mut select: Select,
     ) -> Result<(T, Option<AffinityAcquire>), Error>
     where
         Select: FnMut(Option<AffinityTarget>) -> SelectionFuture,
         SelectionFuture: Future<Output = Result<T, Error>>,
     {
+        let staged_kv = StagedKv::for_request(request.content());
         let Some(affinity) = self.affinity.as_ref() else {
             return Ok((select(None).await?, None));
         };
@@ -601,8 +660,16 @@ where
         }
 
         let request_context = request.context();
-        let operation = affinity
-            .acquire_with_context(&session_id, explicit, request_context.as_ref())
+        let operation = self
+            .acquire_affinity_slot(
+                affinity,
+                &session_id,
+                explicit,
+                request_context.as_ref(),
+                phase,
+                staged_kv,
+                budget,
+            )
             .await?;
         let target = operation.target();
         match select(target).await {
@@ -614,8 +681,16 @@ where
                     && target.is_some_and(|target| !self.affinity_target_is_valid(target)) =>
             {
                 operation.invalidate();
-                let retry = affinity
-                    .acquire_with_context(&session_id, None, request_context.as_ref())
+                let retry = self
+                    .acquire_affinity_slot(
+                        affinity,
+                        &session_id,
+                        None,
+                        request_context.as_ref(),
+                        phase,
+                        staged_kv,
+                        budget,
+                    )
                     .await?;
                 let selection = select(retry.target()).await?;
                 Ok((selection, Some(retry)))
@@ -677,6 +752,8 @@ where
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        // One cleanup budget for this request's whole route through the host.
+        let budget = CleanupBudget::default();
         if !matches!(&self.policy, RoutingPolicy::Kv(_)) {
             let phase = request
                 .tracker
@@ -698,7 +775,7 @@ where
         let phase_label = phase.to_string();
         let route_guard = StageGuard::new(STAGE_ROUTE, &phase_label);
         let (mut selection, mut operation) = self
-            .select_with_affinity(&request, phase, is_query_only)
+            .select_with_affinity(&request, phase, is_query_only, &budget)
             .await?;
         if is_query_only {
             let routing_parts = RoutingRequestParts::new(&request);
@@ -745,13 +822,19 @@ where
             return Ok(ResponseStream::new(Box::pin(stream), stream_context));
         }
 
-        let guard = match self.track_selection(&request, &mut selection, false).await {
+        let guard = match self
+            .track_selection(&request, &mut selection, phase, false, &budget)
+            .await
+        {
             Ok(guard) => guard,
             Err(error) => return Err(error),
         };
         drop(route_guard);
         let selected_target = route_target(selection.worker);
-        let stream = match self.dispatch_selection(request, selection, guard).await {
+        let stream = match self
+            .dispatch_selection(request, selection, guard, &budget)
+            .await
+        {
             Ok(stream) => stream,
             Err(error) => {
                 if self.session_affinity_mode == SessionAffinityMode::Hard

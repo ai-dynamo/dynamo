@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Test Execution Times (Last Run: 2025-12-09):
+Test Execution Times (Last Run: 2026-08-28):
 - test_request_cancellation_vllm_aggregated: ~55s (gpu_1)
-- test_request_cancellation_vllm_decode_cancel: ~53s (gpu_2)
-- test_request_cancellation_vllm_prefill_cancel: ~53s (gpu_2)
-- Total: 161.65s (0:02:41)
+- test_request_cancellation_vllm_decode_cancel: ~130s (gpu_2)
+- test_request_cancellation_vllm_prefill_cancel: ~108s [nats] / ~123s [tcp] (gpu_2)
 """
 
 import json
@@ -497,7 +496,7 @@ def test_request_cancellation_vllm_prefill_cancel(
 
     Reference: PR ai-dynamo/dynamo#7489
 
-    Timing (Last Run: 2026-05-26): ~219s total (requires 2 GPUs)
+    Timing (Last Run: 2026-08-28): ~108s [nats] / ~123s [tcp] (requires 2 GPUs)
     - Engine initialization: ~23s (decode + prefill workers)
     - Testing graceful disconnect during prefill: ~83s
     - Teardown: ~2s

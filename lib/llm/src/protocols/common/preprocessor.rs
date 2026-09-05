@@ -256,6 +256,18 @@ pub struct PreprocessedRequest {
     #[serde(skip)]
     pub(crate) migration_state: Option<MigrationState>,
 
+    /// Set when remote prefill has staged KV blocks that only this request's
+    /// decode worker can release, so the decode leg must reach that worker even
+    /// after the client disconnects.
+    ///
+    /// Narrower than `RequestPhase::Decode`: the conditional-disaggregation
+    /// bypass reaches decode without running remote prefill and leaves this
+    /// unset. Frontend-only, like `migration_state` — the routing decision it
+    /// feeds is made in-process before the request is serialized to a worker.
+    #[builder(default)]
+    #[serde(skip)]
+    pub(crate) staged_kv_cleanup: bool,
+
     /// Type of prompt
     pub token_ids: Vec<TokenIdType>,
 
