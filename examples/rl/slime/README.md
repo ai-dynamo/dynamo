@@ -8,21 +8,19 @@ SPDX-License-Identifier: Apache-2.0
 **Experimental.** Run Slime against a fixed pair of SGLang engines managed by a
 DynamoGraphDeployment. Each worker Pod runs SGLang and the Dynamo sidecar in one
 runtime container. Slime connects through stable Kubernetes Services and
-consumes incremental streaming responses.
+uses the Dynamo frontend for incremental streaming responses.
 
 This example uses the external-engine and streaming support from
 [THUDM/slime#2272](https://github.com/THUDM/slime/pull/2272). Slime queries
 `/server_info` on each engine. It registers the fixed addresses with its own
 SGLang router. It calls the native SGLang control and weight-update endpoints.
-The same engines register with Dynamo and remain available through the Dynamo
-frontend.
+The included custom generator sends rollout requests to the Dynamo frontend.
 
 > [!IMPORTANT]
-> Slime rollout requests use the Slime router and the native engine Services in
-> this version of the example. They do not pass through the Dynamo frontend.
-> Dynamic registration between the Dynamo worker set and Slime is not yet
-> available. Keep the two worker components at one replica each, and restart
-> Slime after changing the worker set.
+> Slime still starts an SGLang router for external-engine bookkeeping. The
+> custom generator does not send rollout requests to that router. Keep the two
+> worker components at one replica each, and restart Slime after changing the
+> worker set.
 
 ## Prerequisites
 
@@ -69,12 +67,9 @@ administrator assigns to your workload.
 
 The manifest creates three Services:
 
-- `slime-sglang-rollout:8000` exposes the Dynamo frontend for independent
-  Dynamo requests and smoke tests.
-- `slime-sglang-engine-0:30000` exposes the first native SGLang engine to
-  Slime.
-- `slime-sglang-engine-1:30000` exposes the second native SGLang engine to
-  Slime.
+- `slime-sglang-rollout:8000` exposes the Dynamo frontend for rollout requests.
+- `slime-sglang-engine-0:30000` exposes the first native SGLang control API.
+- `slime-sglang-engine-1:30000` exposes the second native SGLang control API.
 
 The `engine-*` names do not conflict with the operator-owned worker Services.
 The operator uses those worker Services for Dynamo discovery on port 9090.
@@ -84,8 +79,8 @@ name stays stable after Kubernetes replaces its Pod. Slime does not recover an
 external engine automatically. After an engine restart or replacement, restart
 the Slime job.
 
-The native engine Services expose generation and administrative APIs. Restrict
-them to the training network.
+The native engine Services expose administrative APIs and weight-update APIs.
+Restrict them to the training network.
 
 ## Validate the Engines
 
@@ -110,6 +105,7 @@ trainer, weight-update, and resource arguments required by your workload.
 ```bash
 export SLIME_HOME=<path-to-slime>
 export DYNAMO_ENGINE_ADDRS="slime-sglang-engine-0:30000 slime-sglang-engine-1:30000"
+export DYNAMO_ROLLOUT_URL="http://slime-sglang-rollout:8000"
 examples/rl/slime/launch-slime.sh \
   --hf-checkpoint Qwen/Qwen3-0.6B \
   --prompt-data <prompt-data> \
@@ -128,9 +124,14 @@ The launcher passes these integration arguments:
 ```text
 --rollout-external-engine-addrs <worker-0> <worker-1>
 --rollout-function-path slime.rollout.sglang_rollout.generate_rollout
---custom-generate-function-path slime.rollout.sglang_streaming_rollout.generate_streaming
+--custom-generate-function-path dynamo_generate.generate_streaming
 --sglang-incremental-streaming-output
 ```
+
+`dynamo_generate.generate_streaming` copies the Slime arguments and replaces
+the generation address with `DYNAMO_ROLLOUT_URL`. It then calls the streaming
+generator from THUDM/slime#2272. Slime continues to call each fixed engine for
+control operations and weight updates.
 
 The `--sglang-incremental-streaming-output` flag must match the
 `--incremental-streaming-output` setting in `dynamo.yaml`. See the Slime
@@ -140,7 +141,7 @@ for NCCL, full-checkpoint disk, and delta disk weight-update options.
 ## Current Boundary
 
 This example demonstrates a fixed external fleet. It does not provide elastic
-discovery, dynamic router registration, or external-engine fault recovery.
+discovery, dynamic endpoint registration, or external-engine fault recovery.
 Before you use the example for training, validate one complete rollout, policy
 update, post-update rollout, and worker-failure path. Use the selected model and
 weight transport for this validation.

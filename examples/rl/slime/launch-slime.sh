@@ -20,6 +20,11 @@ set -euo pipefail
 
 : "${SLIME_HOME:?Set SLIME_HOME to the Slime checkout or installed source tree}"
 : "${DYNAMO_ENGINE_ADDRS:=slime-sglang-engine-0:30000 slime-sglang-engine-1:30000}"
+: "${DYNAMO_ROLLOUT_URL:=http://slime-sglang-rollout:8000}"
+
+EXAMPLE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export DYNAMO_ROLLOUT_URL
+export PYTHONPATH="${EXAMPLE_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
 read -r -a ENGINE_ADDRS <<<"${DYNAMO_ENGINE_ADDRS}"
 
@@ -27,6 +32,6 @@ exec python3 "${SLIME_HOME}/train.py" \
     --rollout-external-engine-addrs "${ENGINE_ADDRS[@]}" \
     --rollout-function-path slime.rollout.sglang_rollout.generate_rollout \
     --custom-generate-function-path \
-    slime.rollout.sglang_streaming_rollout.generate_streaming \
+    dynamo_generate.generate_streaming \
     --sglang-incremental-streaming-output \
     "$@"
