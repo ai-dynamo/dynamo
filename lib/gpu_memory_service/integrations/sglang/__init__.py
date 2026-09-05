@@ -4,16 +4,14 @@
 """GPU Memory Service integration for SGLang.
 
 Usage:
-    from gpu_memory_service.integrations.sglang import setup_gms
+    from gpu_memory_service.integrations.sglang import (
+        override_server_args,
+        setup_gms,
+    )
 
     if server_args.load_format == "gms":
         load_format = setup_gms(server_args)
         override_server_args(server_args, "dynamo.gms", load_format=load_format)
-
-``server_args`` is already resolved by the time a launcher reaches this call,
-and a resolved SGLang ``ServerArgs`` rejects attribute assignment. The caller
-must therefore apply ``load_format`` through SGLang's resolution API; Dynamo's
-SGLang worker does this with ``dynamo.sglang._compat.override_server_args``.
 """
 
 from __future__ import annotations
@@ -38,7 +36,7 @@ def is_gms_active() -> bool:
     return _gms_initialized
 
 
-def _override_server_args(server_args: Any, source: str, **fields: Any) -> None:
+def override_server_args(server_args: Any, source: str, **fields: Any) -> None:
     """Declare launcher-stage SGLang configuration fields.
 
     SGLang 0.5.18+ keeps ``ServerArgs`` raw and resolves the effective
@@ -105,7 +103,7 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
             "Cannot use --enable-draft-weights-cpu-backup with --load-format gms."
         )
 
-    _override_server_args(server_args, "dynamo.gms", enable_memory_saver=True)
+    override_server_args(server_args, "dynamo.gms", enable_memory_saver=True)
 
     # Resolve lock mode and RO reconnect timeout from model_loader_extra_config
     # before patches fire.

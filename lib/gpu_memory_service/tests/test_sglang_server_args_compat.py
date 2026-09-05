@@ -15,7 +15,7 @@ if not HAS_GMS:
         allow_module_level=True,
     )
 
-from gpu_memory_service.integrations.sglang import _override_server_args
+from gpu_memory_service.integrations.sglang import override_server_args
 
 pytestmark = [
     pytest.mark.pre_merge,
@@ -66,7 +66,7 @@ def test_resolved_server_args_gets_memory_saver_by_declaration(
 ):
     server_args = ResolvedServerArgs()
 
-    _override_server_args(server_args, "dynamo.gms", enable_memory_saver=True)
+    override_server_args(server_args, "dynamo.gms", enable_memory_saver=True)
 
     assert server_args.declarations == [("dynamo.gms", {"enable_memory_saver": True})]
     assert server_args.assignments == []
@@ -78,7 +78,7 @@ def test_legacy_xpu_server_args_gets_memory_saver_by_assignment(
     # SGLang 0.5.11 on the XPU pin has neither override API and stays mutable.
     server_args = SimpleNamespace(enable_memory_saver=False)
 
-    _override_server_args(server_args, "dynamo.gms", enable_memory_saver=True)
+    override_server_args(server_args, "dynamo.gms", enable_memory_saver=True)
 
     assert server_args.enable_memory_saver is True
 
@@ -86,30 +86,24 @@ def test_legacy_xpu_server_args_gets_memory_saver_by_assignment(
 def test_installed_sglang_accepts_memory_saver_after_resolution():
     server_args = _installed_sglang_server_args()
 
-    _override_server_args(server_args, "dynamo.gms", enable_memory_saver=True)
+    override_server_args(server_args, "dynamo.gms", enable_memory_saver=True)
 
-    try:
-        resolved = _resolved_view(server_args)
-    except Exception as exc:
-        pytest.skip(
-            f"installed SGLang could not resolve ServerArgs ({type(exc).__name__})"
-        )
-    assert resolved.enable_memory_saver is True
+    assert _resolved_view(server_args).enable_memory_saver is True
 
 
 def _installed_sglang_server_args():
-    """Build a ServerArgs from the installed SGLang, or skip the test."""
-    try:
-        from sglang.srt.server_args import ServerArgs
-    except Exception as exc:
-        pytest.skip(f"SGLang is not importable here ({type(exc).__name__})")
+    """Build a ServerArgs from the installed SGLang.
 
-    try:
-        return ServerArgs(model_path="Qwen/Qwen3-0.6B")
-    except Exception as exc:
-        pytest.skip(
-            f"installed SGLang could not build ServerArgs ({type(exc).__name__})"
-        )
+    SGLang is an optional dependency of ``gpu-memory-service``, so an image
+    without it skips. Anything else -- a ServerArgs that will not build, a
+    resolution that drops the declaration -- is the incompatibility this test
+    exists to catch and must fail rather than skip.
+    """
+    server_args_module = pytest.importorskip(
+        "sglang.srt.server_args",
+        reason="SGLang is not installed in this test image",
+    )
+    return server_args_module.ServerArgs(model_path="Qwen/Qwen3-0.6B")
 
 
 def _resolved_view(server_args):
