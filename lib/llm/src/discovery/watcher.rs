@@ -245,29 +245,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
 
 /// Returns true if no models in the manager support the given model type.
 fn is_model_type_list_empty(manager: &ModelManager, model_type: ModelType) -> bool {
-    if model_type == ModelType::Chat {
-        manager.list_chat_completions_models().is_empty()
-    } else if model_type == ModelType::Completions {
-        manager.list_completions_models().is_empty()
-    } else if model_type == ModelType::Embedding {
-        manager.list_embeddings_models().is_empty()
-    } else if model_type == ModelType::Images {
-        manager.list_images_models().is_empty()
-    } else if model_type == ModelType::Audios {
-        manager.list_audios_models().is_empty()
-    } else if model_type == ModelType::Videos {
-        manager.list_videos_models().is_empty()
-    } else if model_type == ModelType::TensorBased {
-        manager.list_tensor_models().is_empty()
-    } else if model_type == ModelType::Realtime {
-        manager.list_realtime_models().is_empty()
-    } else if model_type == ModelType::Classify {
-        manager.list_classify_models().is_empty()
-    } else if model_type == ModelType::Pooling {
-        manager.list_pooling_models().is_empty()
-    } else {
-        true
-    }
+    !manager.has_models_of_type(model_type)
 }
 
 fn removed_model_cards(
@@ -1822,6 +1800,26 @@ mod tests {
         assert!(is_model_type_list_empty(&mm, ModelType::Realtime));
         assert!(is_model_type_list_empty(&mm, ModelType::Classify));
         assert!(is_model_type_list_empty(&mm, ModelType::Pooling));
+    }
+
+    /// `ALL_MODEL_TYPES` is the second hand-maintained list of the same `ModelType` units
+    /// that `ModelManager::has_models_of_type` enumerates, and it is what
+    /// `removed_model_cards` iterates. A unit missing from it is never considered for a
+    /// retraction card, so that unit's endpoint is never retracted even when its last model
+    /// is gone. `ModelType` is a `bitflags!` type, so nothing else catches the omission.
+    #[test]
+    fn all_model_types_covers_every_endpoint_backed_unit() {
+        for unit in ModelType::all().units() {
+            // Units that serve no HTTP endpoint need no retraction card.
+            if unit.as_endpoint_types_with_anthropic(true).is_empty() {
+                continue;
+            }
+            assert!(
+                ALL_MODEL_TYPES.contains(&unit),
+                "{unit:?} maps onto an HTTP endpoint but is missing from ALL_MODEL_TYPES, so \
+                 removed_model_cards would never emit a retraction card for it"
+            );
+        }
     }
 
     #[test]
