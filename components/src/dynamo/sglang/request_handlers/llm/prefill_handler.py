@@ -11,6 +11,7 @@ import sglang as sgl
 from dynamo._core import Context
 from dynamo.health_check import HEALTH_CHECK_KEY
 from dynamo.sglang._compat import require_reasoning_kwargs
+from dynamo.sglang._disagg import validate_disagg_parallel_sampling
 from dynamo.sglang.args import Config
 from dynamo.sglang.engine_generate import (
     build_native_generate_request,
@@ -83,6 +84,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         Yields:
             Bootstrap info dict with host, port, and room for decode worker connection.
         """
+        validate_disagg_parallel_sampling(request)
         logging.debug(f"New Request ID: {context.id()}")
         trace_id = context.trace_id
 
