@@ -178,7 +178,7 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
 
         // Store task info for later cleanup
         self.handlers.insert(
-            endpoint_name.clone(),
+            endpoint_with_id,
             EndpointTask {
                 cancel_token: endpoint_cancel,
                 join_handle,
@@ -189,8 +189,9 @@ impl super::unified_server::RequestPlaneServer for NatsMultiplexedServer {
         Ok(())
     }
 
-    async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
-        if let Some((_, task)) = self.handlers.remove(endpoint_name) {
+    async fn unregister_endpoint(&self, endpoint_name: &str, instance_id: u64) -> Result<()> {
+        let endpoint_with_id = format!("{endpoint_name}-{instance_id:x}");
+        if let Some((_, task)) = self.handlers.remove(&endpoint_with_id) {
             tracing::info!(
                 endpoint_name = %endpoint_name,
                 "Unregistering NATS endpoint"
