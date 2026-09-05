@@ -425,9 +425,8 @@ def test_parse_args_splits_served_model_name_into_aliases(mock_vllm_cli):
 
 
 def test_parse_args_logs_multi_name_registration(mock_vllm_cli, caplog):
-    # In a disaggregated launch prefill and decode are separate processes with
-    # separate --served-model-name flags. This line is how an operator sees what
-    # each one parsed.
+    # Prefill and decode are separate processes with separate
+    # --served-model-name flags; this log is how an operator sees each one.
     mock_vllm_cli(
         "--model",
         "Qwen/Qwen3-0.6B",
