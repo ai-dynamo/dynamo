@@ -31,7 +31,10 @@ use std::{
     collections::{HashMap, HashSet},
     marker::PhantomData,
     pin::Pin,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::Poll,
     time::Instant,
 };
@@ -160,6 +163,8 @@ where
     /// `StreamingDispatch` (the request-plane `AddressedPushRouter` by default).
     /// A trait object so an alternate transport can swap it out.
     addressed: Arc<dyn StreamingDispatch<T, U>>,
+
+    watcher: Arc<WatcherSubscription>,
 
     /// When false, `generate_with_fault_detection` skips fault detection logic:
     /// it won't call `report_instance_down` on errors, and it uses the raw discovery
@@ -332,11 +337,6 @@ fn p2c_select_from(occupancy_state: &RoutingOccupancyState, instance_ids: &[u64]
         .worker_id
 }
 
-/// At most one `list_and_watch` per endpoint, across all `PushRouter`
-/// instances. Entry removed on watcher exit so a later router can re-arm.
-static ENDPOINT_WATCHER_ACTIVE: std::sync::OnceLock<dashmap::DashMap<EndpointId, ()>> =
-    std::sync::OnceLock::new();
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RuntimeEndpointId {
     connection_id: u64,
@@ -357,55 +357,401 @@ static ENDPOINT_CACHE_INDEXER_WATCHER_ACTIVE: std::sync::OnceLock<
     dashmap::DashMap<RuntimeEndpointId, ()>,
 > = std::sync::OnceLock::new();
 
-/// Watch discovery for instance removals and cancel pending response-stream
-/// registrations on the removed instance, unblocking queued requests with
-/// a migratable `Disconnected` error. Uses raw `list_and_watch` events
-/// (not a coalesced snapshot diff) so a rapid remove→re-add of the same
-/// identity is not silently swallowed. Keyed by full `EndpointInstanceId`.
-fn spawn_instance_removal_watcher<T, U>(
+#[async_trait]
+trait LifecycleSink: Send + Sync {
+    async fn on_instance_removed(&self, id: &EndpointInstanceId);
+    async fn on_instance_added(&self, id: &EndpointInstanceId);
+}
+
+struct DispatchSink<T, U> {
+    dispatch: Arc<dyn StreamingDispatch<T, U>>,
+}
+
+#[derive(Clone)]
+struct LiveInstance {
+    id: EndpointInstanceId,
+    // Distinguishes remove-then-add of the same identity when a slow sink sees
+    // only the newest coalesced snapshot.
+    generation: u64,
+}
+
+type LifecycleSnapshot = Arc<HashMap<u64, LiveInstance>>;
+
+const MAX_PENDING_LIFECYCLE_REMOVALS: usize = 4096;
+
+#[derive(Default)]
+struct PendingLifecycleUpdates {
+    latest: LifecycleSnapshot,
+    removals: HashMap<u64, EndpointInstanceId>,
+    dirty: bool,
+}
+
+struct SinkEntry {
+    sink: Arc<dyn LifecycleSink>,
+    delivery: Arc<tokio::sync::Mutex<()>>,
+    delivered: Arc<std::sync::Mutex<LifecycleSnapshot>>,
+    pending: Arc<std::sync::Mutex<PendingLifecycleUpdates>>,
+    changed: Arc<tokio::sync::Notify>,
+    worker: tokio::task::AbortHandle,
+}
+
+impl SinkEntry {
+    fn new(sink: Arc<dyn LifecycleSink>) -> Self {
+        let delivery = Arc::new(tokio::sync::Mutex::new(()));
+        let delivered = Arc::new(std::sync::Mutex::new(Arc::new(HashMap::new())));
+        let pending = Arc::new(std::sync::Mutex::new(PendingLifecycleUpdates::default()));
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let worker_delivery = delivery.clone();
+        let worker_delivered = delivered.clone();
+        let worker_pending = pending.clone();
+        let worker_changed = changed.clone();
+        let worker_sink = sink.clone();
+        let worker = tokio::spawn(async move {
+            loop {
+                worker_changed.notified().await;
+                let (desired, removed) = {
+                    let mut pending = worker_pending.lock().unwrap();
+                    if !pending.dirty {
+                        continue;
+                    }
+                    pending.dirty = false;
+                    let desired = pending.latest.clone();
+                    let removed = pending.removals.drain().map(|(_, id)| id).collect();
+                    (desired, removed)
+                };
+                let _delivery = worker_delivery.lock().await;
+                reconcile_lifecycle_snapshot(
+                    worker_sink.as_ref(),
+                    worker_delivered.as_ref(),
+                    removed,
+                    desired,
+                )
+                .await;
+            }
+        });
+
+        Self {
+            sink,
+            delivery,
+            delivered,
+            pending,
+            changed,
+            worker: worker.abort_handle(),
+        }
+    }
+
+    fn publish(&self, snapshot: LifecycleSnapshot, removed: &[EndpointInstanceId]) {
+        let mut pending = self.pending.lock().unwrap();
+        pending.latest = snapshot;
+        pending.dirty = true;
+        for id in removed {
+            if pending.removals.contains_key(&id.instance_id)
+                || pending.removals.len() < MAX_PENDING_LIFECYCLE_REMOVALS
+            {
+                pending.removals.insert(id.instance_id, id.clone());
+            } else {
+                tracing::error!(
+                    namespace = %id.namespace,
+                    component = %id.component,
+                    endpoint = %id.endpoint,
+                    instance_id = id.instance_id,
+                    capacity = MAX_PENDING_LIFECYCLE_REMOVALS,
+                    "Lifecycle sink removal coalescer reached its fixed capacity"
+                );
+            }
+        }
+        drop(pending);
+        self.changed.notify_one();
+    }
+
+    fn mark_delivered(&self, snapshot: LifecycleSnapshot) {
+        *self.delivered.lock().unwrap() = snapshot;
+    }
+}
+
+impl Drop for SinkEntry {
+    fn drop(&mut self) {
+        self.worker.abort();
+    }
+}
+
+async fn reconcile_lifecycle_snapshot(
+    sink: &dyn LifecycleSink,
+    delivered: &std::sync::Mutex<LifecycleSnapshot>,
+    explicit_removals: Vec<EndpointInstanceId>,
+    desired: LifecycleSnapshot,
+) {
+    let previous = delivered.lock().unwrap().clone();
+    let mut removed: HashMap<_, _> = explicit_removals
+        .into_iter()
+        .map(|id| (id.instance_id, id))
+        .collect();
+    for (instance_id, instance) in previous.iter() {
+        let generation_unchanged = desired
+            .get(instance_id)
+            .map(|current| current.generation == instance.generation)
+            .unwrap_or(false);
+        if !generation_unchanged {
+            removed.insert(*instance_id, instance.id.clone());
+        }
+    }
+    let mut removed: Vec<_> = removed.into_values().collect();
+    let mut added: Vec<_> = desired
+        .iter()
+        .filter(|(instance_id, instance)| {
+            previous
+                .get(instance_id)
+                .map(|current| current.generation != instance.generation)
+                .unwrap_or(true)
+        })
+        .map(|(_, instance)| instance.id.clone())
+        .collect();
+
+    removed.sort_unstable_by_key(|id| id.instance_id);
+    added.sort_unstable_by_key(|id| id.instance_id);
+
+    // A changed generation represents remove-then-add of one identity, so
+    // retire the prior generation before announcing the current one.
+    for id in removed {
+        sink.on_instance_removed(&id).await;
+    }
+    for id in added {
+        sink.on_instance_added(&id).await;
+    }
+
+    *delivered.lock().unwrap() = desired;
+}
+
+#[async_trait]
+impl<T, U> LifecycleSink for DispatchSink<T, U>
+where
+    T: Data + Serialize,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
+{
+    async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+        self.dispatch.on_instance_removed(id).await;
+    }
+
+    async fn on_instance_added(&self, id: &EndpointInstanceId) {
+        self.dispatch.on_instance_added(id).await;
+    }
+}
+
+#[derive(Default)]
+struct WatcherState {
+    sinks: HashMap<u64, Arc<SinkEntry>>,
+    live: HashMap<u64, LiveInstance>,
+    next_generation: u64,
+}
+
+struct EndpointWatcher {
+    cancel: tokio_util::sync::CancellationToken,
+    next_sink_id: AtomicU64,
+    state: std::sync::Mutex<WatcherState>,
+}
+
+impl EndpointWatcher {
+    fn new(cancel: tokio_util::sync::CancellationToken) -> Self {
+        Self {
+            cancel,
+            next_sink_id: AtomicU64::new(0),
+            state: std::sync::Mutex::new(WatcherState::default()),
+        }
+    }
+
+    fn add_sink(&self, sink: Arc<SinkEntry>) -> (u64, LifecycleSnapshot) {
+        let sink_id = self.next_sink_id.fetch_add(1, Ordering::Relaxed);
+        let mut state = self.state.lock().unwrap();
+        let snapshot = Arc::new(state.live.clone());
+        sink.publish(snapshot.clone(), &[]);
+        state.sinks.insert(sink_id, sink);
+        (sink_id, snapshot)
+    }
+
+    fn remove_sink(&self, sink_id: u64) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.sinks.remove(&sink_id);
+        state.sinks.is_empty()
+    }
+
+    fn publish_live_snapshot(&self, removed: &[EndpointInstanceId]) {
+        let (sinks, snapshot) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.sinks.values().cloned().collect::<Vec<_>>(),
+                Arc::new(state.live.clone()),
+            )
+        };
+        for sink in sinks {
+            // Publication only replaces the latest snapshot and coalesces
+            // removals in fixed-size memory; a slow hook cannot stall another
+            // sink or grow an unbounded event queue.
+            sink.publish(snapshot.clone(), removed);
+        }
+    }
+
+    fn record_added(&self, id: &EndpointInstanceId) {
+        let mut state = self.state.lock().unwrap();
+        if state
+            .live
+            .get(&id.instance_id)
+            .map(|instance| instance.id == *id)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        state.next_generation = state.next_generation.wrapping_add(1);
+        let generation = state.next_generation;
+        state.live.insert(
+            id.instance_id,
+            LiveInstance {
+                id: id.clone(),
+                generation,
+            },
+        );
+    }
+
+    fn record_removed(&self, id: &EndpointInstanceId) {
+        self.state.lock().unwrap().live.remove(&id.instance_id);
+    }
+
+    fn retain_live(&self, present: &HashSet<u64>) -> Vec<EndpointInstanceId> {
+        let mut state = self.state.lock().unwrap();
+        let stale: Vec<u64> = state
+            .live
+            .keys()
+            .filter(|id| !present.contains(*id))
+            .copied()
+            .collect();
+        stale
+            .into_iter()
+            .filter_map(|id| state.live.remove(&id).map(|instance| instance.id))
+            .collect()
+    }
+}
+
+static ENDPOINT_WATCHERS: std::sync::OnceLock<
+    dashmap::DashMap<RuntimeEndpointId, Arc<EndpointWatcher>>,
+> = std::sync::OnceLock::new();
+
+fn endpoint_watchers() -> &'static dashmap::DashMap<RuntimeEndpointId, Arc<EndpointWatcher>> {
+    ENDPOINT_WATCHERS.get_or_init(dashmap::DashMap::new)
+}
+
+struct WatcherSubscription {
+    key: RuntimeEndpointId,
+    watcher: Arc<EndpointWatcher>,
+    sink_id: u64,
+}
+
+impl Drop for WatcherSubscription {
+    fn drop(&mut self) {
+        use dashmap::mapref::entry::Entry;
+
+        // Registration and last-subscriber removal share the shard lock so a
+        // router cannot attach to a watcher while it is being cancelled.
+        match endpoint_watchers().entry(self.key.clone()) {
+            Entry::Occupied(entry) if Arc::ptr_eq(entry.get(), &self.watcher) => {
+                if self.watcher.remove_sink(self.sink_id) {
+                    entry.remove();
+                    self.watcher.cancel.cancel();
+                }
+            }
+            _ => {
+                if self.watcher.remove_sink(self.sink_id) {
+                    self.watcher.cancel.cancel();
+                }
+            }
+        }
+    }
+}
+
+async fn spawn_instance_removal_watcher<T, U>(
     endpoint: Endpoint,
     dispatch: Arc<dyn StreamingDispatch<T, U>>,
     cancel_token: tokio_util::sync::CancellationToken,
-) where
+) -> WatcherSubscription
+where
     T: Data + Serialize + 'static,
     U: Data + for<'de> Deserialize<'de> + MaybeError + 'static,
 {
+    use dashmap::mapref::entry::Entry;
+
+    let key = RuntimeEndpointId::for_endpoint(&endpoint);
+    let sink = Arc::new(SinkEntry::new(Arc::new(DispatchSink { dispatch })));
+    // The initial replay holds the same per-sink lock as the delivery worker.
+    // Events recorded after registration therefore cannot overtake the replay.
+    let replay_delivery = sink.delivery.clone().lock_owned().await;
+
+    let (watcher, sink_id, replay) = {
+        match endpoint_watchers().entry(key.clone()) {
+            Entry::Occupied(entry) => {
+                let watcher = entry.get().clone();
+                let (sink_id, replay) = watcher.add_sink(sink.clone());
+                tracing::debug!(
+                    connection_id = key.connection_id,
+                    ?key.endpoint_id,
+                    replayed = replay.len(),
+                    "Joining the running instance removal watcher for this runtime endpoint"
+                );
+                (watcher, sink_id, replay)
+            }
+            Entry::Vacant(entry) => {
+                let watcher = Arc::new(EndpointWatcher::new(cancel_token.child_token()));
+                let (sink_id, replay) = watcher.add_sink(sink.clone());
+                entry.insert(watcher.clone());
+                spawn_endpoint_watcher_task(endpoint, key.clone(), watcher.clone());
+                (watcher, sink_id, replay)
+            }
+        }
+    };
+
+    let subscription = WatcherSubscription {
+        key,
+        watcher,
+        sink_id,
+    };
+
+    for instance in replay.values() {
+        sink.sink.on_instance_added(&instance.id).await;
+    }
+    sink.mark_delivered(replay);
+    drop(replay_delivery);
+
+    subscription
+}
+
+fn spawn_endpoint_watcher_task(
+    endpoint: Endpoint,
+    key: RuntimeEndpointId,
+    watcher: Arc<EndpointWatcher>,
+) {
     use crate::discovery::{
         DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
     };
     use tokio_stream::StreamExt as _;
 
-    // One watcher per endpoint: if one is already running, skip.
-    let guard = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-    let endpoint_id = endpoint.id();
-    if guard.insert(endpoint_id.clone(), ()).is_some() {
-        tracing::debug!(
-            ?endpoint_id,
-            "Instance removal watcher already running for this endpoint, skipping"
-        );
-        return;
-    }
-
     let endpoint_name = endpoint.name().to_string();
 
     tokio::spawn(async move {
-        // Release on every exit path (including panic); a leaked entry
-        // silently disables removal cancellation until process restart.
-        struct GuardRelease(EndpointId);
+        struct GuardRelease(RuntimeEndpointId, Arc<EndpointWatcher>);
         impl Drop for GuardRelease {
             fn drop(&mut self) {
-                if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
-                    map.remove(&self.0);
+                if let Some(map) = ENDPOINT_WATCHERS.get() {
+                    map.remove_if(&self.0, |_, watcher| Arc::ptr_eq(watcher, &self.1));
                 }
             }
         }
-        let _release = GuardRelease(endpoint_id);
+        let _release = GuardRelease(key, watcher.clone());
+
+        let lifecycle = watcher.cancel.clone();
 
         let namespace = endpoint.component().namespace().name();
         let component = endpoint.component().name().to_string();
 
         // Reconnect on transient discovery failure; cancel-aware backoff.
         const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+        let mut resubscribing = false;
         'reconnect: loop {
             let query = DiscoveryQuery::Endpoint {
                 namespace: namespace.clone(),
@@ -413,7 +759,12 @@ fn spawn_instance_removal_watcher<T, U>(
                 endpoint: endpoint_name.clone(),
             };
 
-            let mut stream = match endpoint.drt().discovery().list_and_watch(query, None).await {
+            let mut stream = match endpoint
+                .drt()
+                .discovery()
+                .list_and_watch(query.clone(), Some(lifecycle.clone()))
+                .await
+            {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(
@@ -422,10 +773,44 @@ fn spawn_instance_removal_watcher<T, U>(
                     );
                     tokio::select! {
                         _ = tokio::time::sleep(RECONNECT_BACKOFF) => continue 'reconnect,
-                        _ = cancel_token.cancelled() => break 'reconnect,
+                        _ = lifecycle.cancelled() => break 'reconnect,
                     }
                 }
             };
+
+            // Establish the watch before re-listing so a removal cannot fall
+            // between the reconciliation snapshot and the replacement stream.
+            if resubscribing {
+                match endpoint.drt().discovery().list(query).await {
+                    Ok(instances) => {
+                        let present: HashSet<u64> = instances
+                            .iter()
+                            .filter_map(|instance| match instance {
+                                DiscoveryInstance::Endpoint(inst) => Some(inst.instance_id),
+                                _ => None,
+                            })
+                            .collect();
+                        let stale = watcher.retain_live(&present);
+                        for eid in &stale {
+                            tracing::debug!(
+                                endpoint = %endpoint_name,
+                                instance_id = eid.instance_id,
+                                "Instance disappeared while the discovery watch was down"
+                            );
+                        }
+                        if !stale.is_empty() {
+                            watcher.publish_live_snapshot(&stale);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            endpoint = %endpoint_name,
+                            "Could not re-list instances to reconcile the watcher: {e}"
+                        );
+                    }
+                }
+            }
+            resubscribing = true;
 
             loop {
                 tokio::select! {
@@ -433,12 +818,14 @@ fn spawn_instance_removal_watcher<T, U>(
                         match event {
                             Some(Ok(DiscoveryEvent::Removed(id))) => {
                                 if let DiscoveryInstanceId::Endpoint(eid) = &id {
-                                    dispatch.on_instance_removed(eid).await;
+                                    watcher.record_removed(eid);
+                                    watcher.publish_live_snapshot(std::slice::from_ref(eid));
                                 }
                             }
                             Some(Ok(DiscoveryEvent::Added(DiscoveryInstance::Endpoint(inst)))) => {
                                 let eid: EndpointInstanceId = inst.endpoint_instance_id();
-                                dispatch.on_instance_added(&eid).await;
+                                watcher.record_added(&eid);
+                                watcher.publish_live_snapshot(&[]);
                             }
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
@@ -456,7 +843,7 @@ fn spawn_instance_removal_watcher<T, U>(
                             }
                         }
                     }
-                    _ = cancel_token.cancelled() => {
+                    _ = lifecycle.cancelled() => {
                         break 'reconnect;
                     }
                 }
@@ -594,16 +981,18 @@ where
 
         // Type-erase to the seam so discovery-removal cleanup runs through it.
         let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
-        spawn_instance_removal_watcher(
+        let watcher = spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
             client.endpoint.drt().primary_token(),
-        );
+        )
+        .await;
         let (round_robin_picker, random_picker, picker) = route_pickers(router_mode);
 
         Ok(PushRouter {
             client,
             addressed,
+            watcher: Arc::new(watcher),
             router_mode,
             picker,
             round_robin_picker,
@@ -654,11 +1043,12 @@ where
 
         // Type-erase to the seam so discovery-removal cleanup runs through it.
         let addressed: Arc<dyn StreamingDispatch<T, U>> = addressed;
-        spawn_instance_removal_watcher(
+        let watcher = spawn_instance_removal_watcher(
             client.endpoint.clone(),
             addressed.clone(),
             client.endpoint.drt().primary_token(),
-        );
+        )
+        .await;
 
         // Drop stale cache-index entries when workers leave discovery.
         if let Some(indexer) = multimodal_cache_indexer.clone() {
@@ -673,6 +1063,7 @@ where
         let router = PushRouter {
             client,
             addressed,
+            watcher: Arc::new(watcher),
             router_mode,
             picker,
             round_robin_picker,
@@ -706,16 +1097,18 @@ where
             None
         };
 
-        spawn_instance_removal_watcher(
+        let watcher = spawn_instance_removal_watcher(
             client.endpoint.clone(),
             dispatch.clone(),
             client.endpoint.drt().primary_token(),
-        );
+        )
+        .await;
         let (round_robin_picker, random_picker, picker) = route_pickers(router_mode);
 
         Ok(PushRouter {
             client,
             addressed: dispatch,
+            watcher: Arc::new(watcher),
             router_mode,
             picker,
             round_robin_picker,
@@ -3377,83 +3770,69 @@ mod tests {
         rt.shutdown();
     }
 
-    /// The watcher dedup guard must be released even if the spawned task panics.
-    /// Without this, a panic anywhere in the watcher body would leave a stale
-    /// `ENDPOINT_WATCHER_ACTIVE` entry, silently disabling orphaned-pending-
-    /// request cancellation for that endpoint until process restart.
-    ///
-    /// We exercise the Drop-guard pattern directly against the same static
-    /// rather than driving `spawn_instance_removal_watcher` end-to-end (which
-    /// would require staging a panicking discovery stream). The test mirrors
-    /// the production code's GuardRelease shape; if the production code stops
-    /// using a Drop guard, the integration would regress and the existing
-    /// orphan-cancellation tests would fail.
     #[tokio::test]
-    async fn watcher_dedup_guard_released_on_panic() {
-        let endpoint_id = EndpointId {
-            namespace: "panic-test-ns".to_string(),
-            component: "panic-test-comp".to_string(),
-            name: "panic-test-endpoint".to_string(),
-        };
+    async fn watcher_subscriptions_share_and_release_the_registry_entry() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("watcher_registry_lifetime".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
 
-        // Mimic the production code's pre-spawn dedup insert.
-        let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-        map.insert(endpoint_id.clone(), ());
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+        let key = RuntimeEndpointId::for_endpoint(&endpoint);
 
-        let endpoint_id_clone = endpoint_id.clone();
-        let join = tokio::spawn(async move {
-            // Same shape as in spawn_instance_removal_watcher.
-            struct GuardRelease(EndpointId);
-            impl Drop for GuardRelease {
-                fn drop(&mut self) {
-                    if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
-                        map.remove(&self.0);
-                    }
-                }
-            }
-            let _release = GuardRelease(endpoint_id_clone);
-            panic!("simulated watcher-task panic");
-        });
-
-        let result = join.await;
-        assert!(result.is_err() && result.unwrap_err().is_panic());
-        assert!(
-            !map.contains_key(&endpoint_id),
-            "Drop guard must release the dedup entry even on panic"
-        );
-    }
-
-    /// Normal-exit path: the Drop guard releases the entry when the task
-    /// finishes without panicking. This is the everyday case (cancel_token
-    /// fires or discovery stream closes).
-    #[tokio::test]
-    async fn watcher_dedup_guard_released_on_normal_exit() {
-        let endpoint_id = EndpointId {
-            namespace: "normal-test-ns".to_string(),
-            component: "normal-test-comp".to_string(),
-            name: "normal-test-endpoint".to_string(),
-        };
-
-        let map = ENDPOINT_WATCHER_ACTIVE.get_or_init(dashmap::DashMap::new);
-        map.insert(endpoint_id.clone(), ());
-
-        let endpoint_id_clone = endpoint_id.clone();
-        tokio::spawn(async move {
-            struct GuardRelease(EndpointId);
-            impl Drop for GuardRelease {
-                fn drop(&mut self) {
-                    if let Some(map) = ENDPOINT_WATCHER_ACTIVE.get() {
-                        map.remove(&self.0);
-                    }
-                }
-            }
-            let _release = GuardRelease(endpoint_id_clone);
-            // task body returns normally
-        })
+        let dispatch_a = Arc::new(RecordingDispatch::default());
+        let router_a = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            client.clone(),
+            RouterMode::RoundRobin,
+            dispatch_a.clone(),
+        )
         .await
         .unwrap();
+        assert!(
+            poll_until(|| dispatch_a.added.lock().unwrap().contains(&instance_id)).await,
+            "the first router must receive the initial-snapshot add"
+        );
 
-        assert!(!map.contains_key(&endpoint_id));
+        let dispatch_b = Arc::new(RecordingDispatch::default());
+        let router_b = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            client.clone(),
+            RouterMode::RoundRobin,
+            dispatch_b.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            dispatch_b.added.lock().unwrap().contains(&instance_id),
+            "a router joining a running watcher must be replayed the live instances"
+        );
+
+        drop(router_a);
+        assert!(
+            endpoint_watchers().contains_key(&key),
+            "the watcher must survive while another router is still subscribed"
+        );
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        assert!(
+            poll_until(|| dispatch_b.removed.lock().unwrap().contains(&instance_id)).await,
+            "the surviving router must still receive on_instance_removed"
+        );
+
+        drop(router_b);
+        assert!(
+            !endpoint_watchers().contains_key(&key),
+            "dropping the last subscription must release the registry entry"
+        );
+
+        rt.shutdown();
     }
 
     #[tokio::test]
@@ -3682,6 +4061,69 @@ mod tests {
         rt.shutdown();
     }
 
+    #[tokio::test]
+    async fn dropped_router_releases_dispatch_and_later_router_is_notified() {
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::new(rt.clone(), DistributedConfig::process_local())
+            .await
+            .unwrap();
+        let endpoint = drt
+            .namespace("router_generation_lifecycle".to_string())
+            .unwrap()
+            .component("test_component".to_string())
+            .unwrap()
+            .endpoint("test_endpoint".to_string());
+        let client = endpoint.client().await.unwrap();
+
+        endpoint.register_endpoint_instance().await.unwrap();
+        let instance_id = client.wait_for_instances().await.unwrap()[0].id();
+
+        let dispatch_a = Arc::new(RecordingDispatch::default());
+        let router_a = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            client.clone(),
+            RouterMode::RoundRobin,
+            dispatch_a.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            poll_until(|| dispatch_a.added.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_added (initial snapshot) not delivered to router A's dispatch"
+        );
+
+        let weak_a = Arc::downgrade(&dispatch_a);
+        drop(dispatch_a);
+        drop(router_a);
+
+        assert!(
+            poll_until(|| weak_a.upgrade().is_none()).await,
+            "dropping router A must release its dispatch; something still owns it"
+        );
+
+        let dispatch_b = Arc::new(RecordingDispatch::default());
+        let _router_b = PushRouter::<u64, TestResponse>::from_client_with_dispatch(
+            client.clone(),
+            RouterMode::RoundRobin,
+            dispatch_b.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            poll_until(|| dispatch_b.added.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_added not delivered to the later router's dispatch"
+        );
+
+        endpoint.unregister_endpoint_instance().await.unwrap();
+        assert!(
+            poll_until(|| dispatch_b.removed.lock().unwrap().contains(&instance_id)).await,
+            "on_instance_removed not delivered to the later router's dispatch"
+        );
+
+        rt.shutdown();
+    }
+
     /// Poll a predicate until it holds or a short deadline elapses; discovery
     /// events reach the watcher's spawned task asynchronously.
     async fn poll_until(mut pred: impl FnMut() -> bool) -> bool {
@@ -3692,5 +4134,224 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         pred()
+    }
+
+    fn test_instance_id(instance_id: u64) -> EndpointInstanceId {
+        EndpointInstanceId {
+            namespace: "ns".to_string(),
+            component: "comp".to_string(),
+            endpoint: "ep".to_string(),
+            instance_id,
+        }
+    }
+
+    struct InertSink;
+
+    #[async_trait]
+    impl LifecycleSink for InertSink {
+        async fn on_instance_removed(&self, _id: &EndpointInstanceId) {}
+        async fn on_instance_added(&self, _id: &EndpointInstanceId) {}
+    }
+
+    fn inert_sink() -> Arc<SinkEntry> {
+        Arc::new(SinkEntry::new(Arc::new(InertSink)))
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum RecordedLifecycleEvent {
+        Removed(u64),
+        Added(u64),
+    }
+
+    struct RecordingLifecycleSink {
+        events: std::sync::Mutex<Vec<RecordedLifecycleEvent>>,
+        block_first_add: std::sync::atomic::AtomicBool,
+        first_add_started: tokio::sync::Notify,
+        release_first_add: tokio::sync::Notify,
+    }
+
+    impl RecordingLifecycleSink {
+        fn new(block_first_add: bool) -> Self {
+            Self {
+                events: std::sync::Mutex::new(Vec::new()),
+                block_first_add: std::sync::atomic::AtomicBool::new(block_first_add),
+                first_add_started: tokio::sync::Notify::new(),
+                release_first_add: tokio::sync::Notify::new(),
+            }
+        }
+
+        fn events(&self) -> Vec<RecordedLifecycleEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl LifecycleSink for RecordingLifecycleSink {
+        async fn on_instance_removed(&self, id: &EndpointInstanceId) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(RecordedLifecycleEvent::Removed(id.instance_id));
+        }
+
+        async fn on_instance_added(&self, id: &EndpointInstanceId) {
+            self.events
+                .lock()
+                .unwrap()
+                .push(RecordedLifecycleEvent::Added(id.instance_id));
+            if self
+                .block_first_add
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.first_add_started.notify_one();
+                self.release_first_add.notified().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn add_sink_excludes_instances_removed_before_registration() {
+        let watcher = EndpointWatcher::new(tokio_util::sync::CancellationToken::new());
+        watcher.record_added(&test_instance_id(1));
+        watcher.record_added(&test_instance_id(2));
+        watcher.record_removed(&test_instance_id(2));
+
+        let (_sink_id, replay) = watcher.add_sink(inert_sink());
+        assert_eq!(
+            replay
+                .values()
+                .map(|instance| instance.id.instance_id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    #[tokio::test]
+    async fn retain_live_drops_instances_missing_from_a_fresh_listing() {
+        let watcher = EndpointWatcher::new(tokio_util::sync::CancellationToken::new());
+        watcher.record_added(&test_instance_id(1));
+        watcher.record_added(&test_instance_id(2));
+        watcher.record_added(&test_instance_id(3));
+
+        let present = HashSet::from([1, 3]);
+        let dropped: Vec<u64> = watcher
+            .retain_live(&present)
+            .iter()
+            .map(|id| id.instance_id)
+            .collect();
+
+        assert_eq!(dropped, vec![2]);
+
+        let (_sink_id, replay) = watcher.add_sink(inert_sink());
+        let mut replayed: Vec<u64> = replay
+            .values()
+            .map(|instance| instance.id.instance_id)
+            .collect();
+        replayed.sort_unstable();
+        assert_eq!(replayed, vec![1, 3]);
+    }
+
+    #[tokio::test]
+    async fn slow_sink_does_not_block_others_and_observes_readded_instance() {
+        let watcher = EndpointWatcher::new(tokio_util::sync::CancellationToken::new());
+        let slow = Arc::new(RecordingLifecycleSink::new(true));
+        let fast = Arc::new(RecordingLifecycleSink::new(false));
+        let (_slow_id, _) = watcher.add_sink(Arc::new(SinkEntry::new(slow.clone())));
+        let (_fast_id, _) = watcher.add_sink(Arc::new(SinkEntry::new(fast.clone())));
+        let instance = test_instance_id(7);
+
+        watcher.record_added(&instance);
+        watcher.publish_live_snapshot(&[]);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            slow.first_add_started.notified(),
+        )
+        .await
+        .expect("slow sink did not enter its first add hook");
+        assert!(
+            poll_until(|| fast.events() == vec![RecordedLifecycleEvent::Added(7)]).await,
+            "the fast sink must receive the add while the slow sink is blocked"
+        );
+
+        watcher.record_removed(&instance);
+        watcher.publish_live_snapshot(std::slice::from_ref(&instance));
+        assert!(
+            poll_until(|| {
+                fast.events()
+                    == vec![
+                        RecordedLifecycleEvent::Added(7),
+                        RecordedLifecycleEvent::Removed(7),
+                    ]
+            })
+            .await,
+            "the fast sink must receive the removal while the slow sink is blocked"
+        );
+
+        watcher.record_added(&instance);
+        watcher.publish_live_snapshot(&[]);
+        assert!(
+            poll_until(|| {
+                fast.events()
+                    == vec![
+                        RecordedLifecycleEvent::Added(7),
+                        RecordedLifecycleEvent::Removed(7),
+                        RecordedLifecycleEvent::Added(7),
+                    ]
+            })
+            .await,
+            "the fast sink must receive the re-add while the slow sink is blocked"
+        );
+
+        slow.release_first_add.notify_one();
+        assert!(
+            poll_until(|| {
+                slow.events()
+                    == vec![
+                        RecordedLifecycleEvent::Added(7),
+                        RecordedLifecycleEvent::Removed(7),
+                        RecordedLifecycleEvent::Added(7),
+                    ]
+            })
+            .await,
+            "the slow sink must reconcile the overwritten snapshots as remove then add"
+        );
+
+        assert_eq!(slow.events(), fast.events());
+    }
+
+    #[tokio::test]
+    async fn slow_sink_observes_instance_removed_before_its_add_is_delivered() {
+        let watcher = EndpointWatcher::new(tokio_util::sync::CancellationToken::new());
+        let slow = Arc::new(RecordingLifecycleSink::new(true));
+        let (_sink_id, _) = watcher.add_sink(Arc::new(SinkEntry::new(slow.clone())));
+        let blocking_instance = test_instance_id(7);
+        let transient_instance = test_instance_id(8);
+
+        watcher.record_added(&blocking_instance);
+        watcher.publish_live_snapshot(&[]);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            slow.first_add_started.notified(),
+        )
+        .await
+        .expect("slow sink did not enter its first add hook");
+
+        watcher.record_added(&transient_instance);
+        watcher.publish_live_snapshot(&[]);
+        watcher.record_removed(&transient_instance);
+        watcher.publish_live_snapshot(std::slice::from_ref(&transient_instance));
+
+        slow.release_first_add.notify_one();
+        assert!(
+            poll_until(|| {
+                slow.events()
+                    == vec![
+                        RecordedLifecycleEvent::Added(7),
+                        RecordedLifecycleEvent::Removed(8),
+                    ]
+            })
+            .await,
+            "a removal must survive even when its add is coalesced before delivery"
+        );
     }
 }
