@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for ManagedProcess teardown behavior.
+"""Tests for ManagedProcess teardown and health-check failure reporting.
 
 Verifies that __exit__ / _terminate_process_group correctly kills process
 trees under various scenarios: simple children, deep trees, children that
 create their own process groups, and xdist-safe mode skipping stragglers.
+Also verifies that when the managed process dies during the health-check
+loop, the raised RuntimeError carries the process output that explains why.
 
 All test processes are lightweight shell/python one-liners that sleep;
 no GPU or network resources are needed.
@@ -353,3 +355,105 @@ class TestSigtermGracePeriod:
         assert os.path.exists(
             marker_file
         ), "Process was SIGKILLed before SIGTERM handler could run"
+
+
+# ---------------------------------------------------------------------------
+# Scenario 7: Process dies during the health-check loop
+# The timeout covers the ManagedProcess wait plus the teardown grace period.
+@pytest.mark.timeout(60)
+class TestHealthCheckFailureDiagnostics:
+    def test_error_carries_process_output_and_log_path(self, tmp_path):
+        """A process that prints a marker and exits 1 while the health check is
+        still waiting should surface that marker, and the log path, in the
+        raised RuntimeError.
+
+        Without this, the only evidence reaching the pytest short summary and
+        the JUnit XML is the exit code, so a CI failure cannot be diagnosed
+        without re-running the job.
+
+        display_output=True is deliberate: it routes the child's output through
+        the asynchronous sed|tee pipeline, which is the path where the final
+        lines can still be unflushed at the moment the child is observed dead.
+        """
+        marker = _unique_marker()
+        mp = ManagedProcess(
+            command=["bash", "-c", f"echo {marker}; exit 1"],
+            # A health check that can never pass, so the loop is still running
+            # when the process dies. A function avoids binding a port.
+            health_check_funcs=[lambda *_: False],
+            timeout=10,
+            display_output=True,
+            terminate_all_matching_process_names=False,
+            log_dir=str(tmp_path),
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            with mp:
+                pass
+
+        message = str(excinfo.value)
+
+        assert message.startswith(
+            "Main server process exited with code 1 while waiting for health check"
+        ), f"First line changed; CI greps depend on it verbatim: {message!r}"
+        assert marker in message, f"Process output missing from error: {message!r}"
+        assert mp.log_path is not None
+        assert mp.log_path in message, f"Log path missing from error: {message!r}"
+
+    def test_silent_process_reports_sentinel(self, tmp_path):
+        """A process that dies without producing any output must still raise,
+        with an explicit sentinel instead of an empty tail.
+
+        display_output=False leaves _tee_proc as None, so this also covers the
+        drain's tolerance of a missing pipeline stage."""
+        mp = ManagedProcess(
+            command=["bash", "-c", "exit 1"],
+            health_check_funcs=[lambda *_: False],
+            timeout=10,
+            display_output=False,
+            terminate_all_matching_process_names=False,
+            log_dir=str(tmp_path),
+        )
+
+        with pytest.raises(RuntimeError) as excinfo:
+            with mp:
+                pass
+
+        # Pinned as a literal rather than imported: this is the text a human
+        # reads in a CI report, so the test should notice if it changes.
+        assert "<no server logs captured>" in str(excinfo.value)
+
+    @pytest.mark.parametrize("bad_value", [0, -1])
+    def test_non_positive_tail_is_rejected(self, tmp_path, bad_value):
+        """`[-0:]` is the whole list, so a non-positive tail length would put
+        the entire log in the error message instead of a bounded tail. Reject
+        it rather than let the bound silently disappear."""
+        mp = ManagedProcess(
+            command=["bash", "-c", "exit 1"],
+            health_check_funcs=[lambda *_: False],
+            timeout=10,
+            display_output=False,
+            terminate_all_matching_process_names=False,
+            log_dir=str(tmp_path),
+        )
+
+        with pytest.raises(ValueError, match="log_tail_lines must be positive"):
+            mp._check_process_alive(log_tail_lines=bad_value)
+
+    def test_healthy_process_raises_nothing(self, tmp_path):
+        """Negative control: a live process whose health check passes must not
+        raise, so the test above cannot pass by making ManagedProcess raise
+        indiscriminately."""
+        marker = _unique_marker()
+        mp = ManagedProcess(
+            command=_bash_sleep_cmd(marker),
+            health_check_funcs=[lambda *_: True],
+            timeout=10,
+            display_output=True,
+            terminate_all_matching_process_names=False,
+            log_dir=str(tmp_path),
+        )
+
+        with mp:
+            assert mp.proc is not None
+            assert mp.proc.poll() is None, "Control process died unexpectedly"
