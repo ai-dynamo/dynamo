@@ -36,7 +36,11 @@ def resolve_planner_profile_data(
 ) -> PlannerProfileDataResult:
     if planner_profile_data is None:
         return SimpleNamespace(npz_path=None)
-    if planner_profile_data.suffix == ".npz":
+    # Only short-circuit a file that is actually there. The suffix alone used to
+    # be enough, which skipped the mocker resolver -- the one thing that checks
+    # the path exists -- so a mistyped .npz was accepted here and rejected by
+    # the same input under dynamo.mocker.
+    if planner_profile_data.suffix == ".npz" and planner_profile_data.is_file():
         return SimpleNamespace(npz_path=planner_profile_data)
     return _resolve_mocker_planner_profile_data(planner_profile_data)
 
