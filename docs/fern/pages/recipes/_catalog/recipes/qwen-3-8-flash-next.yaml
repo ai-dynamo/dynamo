@@ -1,0 +1,142 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+id: qwen-3-8-flash-next
+title: Qwen3.8-Flash-Next
+page: pages/recipes/model-recipes/qwen-3-8-flash-next.mdx
+provider: qwen
+model:
+  name: Qwen3.8-Flash-Next
+  hf_id: Inferact/Qwen3.8-Flash-Next-NVFP4
+  precision: NVFP4 weights
+status: experimental
+targets:
+  - id: vllm-agg-b200-agentic
+    recommended: true
+    hardware:
+      gpu: B200
+      count: 4
+    runtime:
+      framework: vllm
+    topology: aggregated
+    techniques:
+      - kv-aware-routing
+      - mtp-speculative-decode
+      - expert-parallel
+      - ngram-embedding-offload
+    workload:
+      type: agentic
+      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    deploy:
+      asset: recipes/qwen3.8-flash-next/vllm/agg-b200-agentic/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3.8-flash-next/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 457.4 output tok/s/GPU, 102.8 user tok/s P50, TTFT P50 329 ms, ITL P50 9.7 ms at concurrency 24 (15% agentic trace subset)
+  - id: vllm-agg-b200-agentic-8gpu
+    recommended: false
+    hardware:
+      gpu: B200
+      count: 8
+    runtime:
+      framework: vllm
+    topology: aggregated
+    techniques:
+      - kv-aware-routing
+      - mtp-speculative-decode
+      - expert-parallel
+      - ngram-embedding-offload
+    workload:
+      type: agentic
+      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    deploy:
+      asset: recipes/qwen3.8-flash-next/vllm/agg-b200-agentic-8gpu/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3.8-flash-next/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 309.3 output tok/s/GPU, 127.6 user tok/s P50, TTFT P50 339 ms, ITL P50 7.8 ms at concurrency 24 (15% agentic trace subset)
+  - id: vllm-agg-b200-agentic-12gpu
+    recommended: false
+    hardware:
+      gpu: B200
+      count: 12
+    runtime:
+      framework: vllm
+    topology: aggregated
+    techniques:
+      - kv-aware-routing
+      - mtp-speculative-decode
+      - expert-parallel
+      - ngram-embedding-offload
+    workload:
+      type: agentic
+      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    deploy:
+      asset: recipes/qwen3.8-flash-next/vllm/agg-b200-agentic-12gpu/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3.8-flash-next/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 238.1 output tok/s/GPU, 144.5 user tok/s P50, TTFT P50 325 ms, ITL P50 6.9 ms at concurrency 24 (15% agentic trace subset)
+  - id: vllm-disagg-b200-agentic
+    recommended: false
+    hardware:
+      gpu: B200
+      count: 8
+    runtime:
+      framework: vllm
+    topology: disaggregated
+    techniques:
+      - disaggregated-prefill-decode
+      - kv-aware-routing
+      - mtp-speculative-decode
+      - expert-parallel
+      - ngram-embedding-offload
+    workload:
+      type: agentic
+      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    deploy:
+      asset: recipes/qwen3.8-flash-next/vllm/disagg-b200-agentic/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3.8-flash-next/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 330.2 output tok/s/GPU, 132.8 user tok/s P50, TTFT P50 452 ms, ITL P50 7.5 ms at concurrency 24 (15% agentic trace subset)
+  - id: vllm-disagg-b200-agentic-2p1d
+    recommended: false
+    hardware:
+      gpu: B200
+      count: 12
+    runtime:
+      framework: vllm
+    topology: disaggregated
+    techniques:
+      - disaggregated-prefill-decode
+      - kv-aware-routing
+      - mtp-speculative-decode
+      - expert-parallel
+      - ngram-embedding-offload
+    workload:
+      type: agentic
+      traffic: 64K ISL / 400 OSL, 90% KV cache hit (shared system prompt)
+    deploy:
+      asset: recipes/qwen3.8-flash-next/vllm/disagg-b200-agentic-2p1d/deploy.yaml
+    benchmark:
+      tool: aiperf
+      asset: recipes/qwen3.8-flash-next/perf/perf.yaml
+    expected_performance:
+      available: true
+      summary: 227.9 output tok/s/GPU, 133.4 user tok/s P50, TTFT P50 407 ms, ITL P50 7.5 ms at concurrency 24 (15% agentic trace subset)
+related_benchmarks: []
+maintainer: null
+gaps:
+  - Uses upstream vllm/vllm-openai:qwen38-flash-next image (not a dynamo-built
+    image); ai-dynamo is pip-installed at pod startup
+  - Disaggregated recipe uses reduced prefill --max-num-seqs 32 (OOM avoidance
+    on 260K-token prompts with 4 GPUs); async scheduling is enabled

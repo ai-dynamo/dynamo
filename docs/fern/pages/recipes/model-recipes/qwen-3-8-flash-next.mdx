@@ -1,0 +1,138 @@
+---
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Qwen3.8-Flash-Next"
+subtitle: "Serve Qwen3.8-Flash-Next with Dynamo and vLLM on B200, aggregated or disaggregated."
+---
+
+import { RecipeStyles } from "@/components/RecipeStyles";
+
+<RecipeStyles />
+
+Each target below is a Dynamo + vLLM deployment of [Qwen3.8-Flash-Next](https://huggingface.co/Inferact/Qwen3.8-Flash-Next-NVFP4) — a multimodal, ultra-sparse Mixture-of-Experts model (125B total / 6B active) with GDN+QSA hybrid attention, a 51B N-gram embedding table offloaded to host RAM, and a 262K-token context (extensible to 1M with YaRN) — with NVFP4 weights, MTP3 speculative decoding, and KV-aware routing. Pick your serving topology; every command on this page updates to match.
+
+<div className="dynamo-target-picker">
+<p className="dynamo-target-picker-title">Choose your deployment target</p>
+<div className="dynamo-target-picker-row">
+<span className="dynamo-target-picker-dim">Topology</span>
+<input type="radio" id="recipe-variant-agg" name="recipe-variant" value="agg" defaultChecked />
+<label htmlFor="recipe-variant-agg">Aggregated</label>
+<input type="radio" id="recipe-variant-disagg" name="recipe-variant" value="disagg" />
+<label htmlFor="recipe-variant-disagg">Disaggregated</label>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="agg">
+<span><b>Checkpoint</b> Inferact/Qwen3.8-Flash-Next-NVFP4</span>
+<span><b>Precision</b> NVFP4 weights</span>
+<span><b>GPUs</b> 4x B200 (1 node), 1 replica</span>
+<span><b>Parallelism</b> TP4 + expert parallel</span>
+<span><b>Spec decode</b> MTP3</span>
+<span><b>Routing</b> event-driven KV-aware, prefix caching</span>
+</div>
+<div className="dynamo-target-picker-summary" data-variant="disagg">
+<span><b>Checkpoint</b> Inferact/Qwen3.8-Flash-Next-NVFP4</span>
+<span><b>Precision</b> NVFP4 weights</span>
+<span><b>GPUs</b> 4x B200 prefill + 4x B200 decode (1P1D, colocated)</span>
+<span><b>Parallelism</b> TP4 + EP, both roles</span>
+<span><b>Spec decode</b> MTP3</span>
+<span><b>KV transfer</b> NIXL over InfiniBand RDMA (rc_x + rc + cuda_copy + cuda_ipc)</span>
+<span><b>Routing</b> KV-aware</span>
+</div>
+</div>
+
+## Overview
+
+[Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next) is a multimodal, ultra-sparse Mixture-of-Experts model with 125B total parameters (including a 51B N-gram embedding table) and 6B active parameters per token. The architecture combines:
+
+- **GDN + QSA**: three of every four layers use Gated DeltaNet; the fourth uses Qwen Sparse Attention.
+- **Gated Residual**: four residual branches dynamically control cross-layer reads and writes.
+- **N-gram Embedding**: a 51B lookup memory offloaded to host RAM via `VLLM_PLE_CPU_OFFLOAD=1`.
+- **MTP**: built-in Multi-Token Prediction for speculative decoding (3 draft tokens).
+
+This recipe uses the [Inferact NVFP4 quantization](https://huggingface.co/Inferact/Qwen3.8-Flash-Next-NVFP4) (~130 GB VRAM minimum) and the upstream `vllm/vllm-openai:qwen38-flash-next` image with GDN/QSA kernels.
+
+## Prerequisites
+
+1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../kubernetes/getting-started/quickstart.mdx).
+2. **vLLM image**: `vllm/vllm-openai:qwen38-flash-next` — model-specific build with GDN/QSA kernels. `ai-dynamo` is pip-installed at pod startup.
+3. **Hugging Face access** to `Inferact/Qwen3.8-Flash-Next-NVFP4`.
+4. **Host memory**: ≥ 51 GB per worker for N-gram embedding offload.
+
+## Quick Start
+
+### 1. Create namespace and secret
+
+```bash
+export NAMESPACE=your-namespace
+kubectl create namespace ${NAMESPACE}
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN="your-token" \
+  -n ${NAMESPACE}
+```
+
+### 2. Create storage
+
+Edit `model-cache/model-cache.yaml` and set `storageClassName` to a ReadWriteMany storage class.
+
+```bash
+kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
+```
+
+### 3. Download the model
+
+```bash
+kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
+kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+```
+
+### 4. Deploy
+
+<div data-variant="agg">
+
+```bash
+# 4-GPU aggregated (1 worker × TP4)
+kubectl apply -f vllm/agg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+
+# 8-GPU aggregated (2 workers × TP4)
+kubectl apply -f vllm/agg-b200-agentic-8gpu/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+<div data-variant="disagg">
+
+```bash
+# 8-GPU disaggregated (1P1D, InfiniBand RDMA)
+kubectl apply -f vllm/disagg-b200-agentic/deploy.yaml -n ${NAMESPACE}
+```
+
+</div>
+
+### 5. Smoke test
+
+<div data-variant="agg">
+
+```bash
+kubectl port-forward svc/qwen38fn-agg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE} &
+```
+
+</div>
+
+<div data-variant="disagg">
+
+```bash
+kubectl port-forward svc/qwen38fn-disagg-b200-agentic-frontend 8000:8000 -n ${NAMESPACE} &
+```
+
+</div>
+
+```bash
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "Inferact/Qwen3.8-Flash-Next-NVFP4",
+    "messages": [{"role": "user", "content": "Explain how Gated DeltaNet and Qwen Sparse Attention complement each other."}],
+    "max_tokens": 256
+  }'
+```
+
+See the [recipe README](https://github.com/ai-dynamo/dynamo/blob/main/recipes/qwen3.8-flash-next/README.md) for full smoke tests including tool calling and image input.
