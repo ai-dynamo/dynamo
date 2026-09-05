@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import importlib
 import json
 import logging
 import os
@@ -17,8 +18,9 @@ import uvloop
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import HFValidationError
 from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed.kv_events import ZmqEventPublisher
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
@@ -26,6 +28,7 @@ from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from dynamo.common.config_dump import dump_config
 from dynamo.common.configuration.groups.router_args import build_router_config
 from dynamo.common.model_fetch import fetch_model
+from dynamo.common.multimodal.codec_errors import mistral_image_decoder_missing
 from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.snapshot.restore_context import (
     parse_snapshot_restore_runtime_config,
@@ -439,6 +442,78 @@ def _resolve_video_token_id(vllm_config: VllmConfig) -> Optional[int]:
     return None
 
 
+def _model_accepts_image_input(model_config: ModelConfig) -> bool:
+    """Whether this model will actually tokenize an image.
+
+    The configured limit alone does not answer this. ``get_limit_per_prompt``
+    is defined for any modality name, and an unspecified one defaults to 999,
+    so a non-zero image limit is reported for a model that supports no images
+    at all -- an audio-only Mistral model such as Voxtral among them. The
+    modality set comes from the multimodal registry instead, where omitting a
+    modality means the model does not support it.
+
+    The limit is still the first question, because ``--limit-mm-per-prompt
+    image=0`` takes a supported modality out of vLLM's multimodal profiling,
+    and such a worker runs today without OpenCV.
+    """
+    mm_config = getattr(model_config, "multimodal_config", None)
+    get_limit_per_prompt = getattr(mm_config, "get_limit_per_prompt", None)
+    if callable(get_limit_per_prompt) and get_limit_per_prompt("image") == 0:
+        return False
+    try:
+        info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
+        return "image" in info.supported_mm_limits
+    except Exception:
+        # Unanswerable, so assume no image input. Being wrong that way costs a
+        # deployment the late upstream error this check exists to replace.
+        # Being wrong the other way stops a worker that would have served.
+        logger.debug(
+            "Could not determine the supported modalities of %s; "
+            "skipping the image-decoder preflight.",
+            getattr(model_config, "model", "the model"),
+            exc_info=True,
+        )
+        return False
+
+
+def check_mistral_image_decoder(vllm_config: VllmConfig) -> None:
+    """Fail fast when a Mistral-tokenizer multimodal model has no OpenCV.
+
+    ``mistral_common`` resizes every still image with ``cv2`` before
+    normalization, and the runtime images deliberately ship no OpenCV. Without
+    this check the gap surfaces from inside vLLM's multimodal profiling run,
+    after the weights are already loaded, as an upstream ``ImportError``
+    recommending ``pip install mistral-common[opencv]`` -- which is not the
+    supported install for these images.
+
+    Only ``--tokenizer-mode mistral`` routes through ``mistral_common``. The
+    Hugging Face processor path imports no OpenCV, so it must not trip this.
+
+    "Multimodal" is not "takes images", and neither is a non-zero image limit:
+    see ``_model_accepts_image_input``. A worker that will never tokenize an
+    image starts without OpenCV today, and this check must not be what stops
+    it.
+
+    Every config attribute is read defensively: a guard that runs on every
+    startup must never be the thing that breaks startup if vLLM moves them.
+    A move is caught loudly instead, by the contract tests alongside this check.
+    """
+    model_config = vllm_config.model_config
+    if not getattr(model_config, "is_multimodal_model", False):
+        return
+    if getattr(model_config, "tokenizer_mode", None) != "mistral":
+        return
+    if not _model_accepts_image_input(model_config):
+        return
+    # Import rather than probe for the spec. An OpenCV whose native libraries
+    # are absent is perfectly discoverable and still raises on import, and that
+    # deployment needs the same fast failure as one with no cv2 at all.
+    try:
+        importlib.import_module("cv2")
+    except ImportError as exc:
+        raise mistral_image_decoder_missing("vllm", str(exc)) from exc
+
+
 def setup_kv_event_publisher(
     config: Config,
     generate_endpoint: Endpoint,
@@ -671,6 +746,9 @@ def setup_vllm_engine(
     # Taken from build_async_engine_client_from_engine_args()
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+    # Before AsyncLLM: the same gap found later, during vLLM's multimodal
+    # profiling run, costs a full model load first and reports the wrong remedy.
+    check_mistral_image_decoder(vllm_config)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
 

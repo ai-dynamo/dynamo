@@ -14,15 +14,21 @@ in-tree FFmpeg, and H.264/H.265 decode on the GPU through NVDEC
 
 This module covers what is left:
 
-* compressed audio (AAC and friends), which NVDEC does not decode at all, and
+* compressed audio (AAC and friends), which NVDEC does not decode at all,
 * H.264/H.265 on hosts where NVDEC is unavailable -- a GPU with no video decode
-  engine, or a container not granted the ``video`` driver capability.
+  engine, or a container not granted the ``video`` driver capability, and
+* still images on the Mistral tokenizer path. This one is not a codec gap:
+  ``mistral_common`` resizes every image with ``cv2``, so a model served with
+  ``--tokenizer-mode mistral`` needs OpenCV for plain JPEG/PNG input even
+  though no video is involved.
 
 Each backend decodes such input through a specific Python package whose wheel
 bundles its own FFmpeg, so the support can be added by a plain ``pip install``
 -- no image rebuild:
 
 * vLLM video input    -> OpenCV (``cv2``),    package ``opencv-python-headless``
+* vLLM image input    -> OpenCV (``cv2``),    package ``opencv-python-headless``
+  (``--tokenizer-mode mistral`` only)
 * vLLM audio input    -> PyAV (``av``),       package ``av``
 * SGLang video input  -> decord (``decord``), package ``decord2``
 * TRT-LLM video input -> OpenCV (``cv2``),    package ``opencv-python-headless``
