@@ -5,6 +5,7 @@
 
 import contextlib
 import dataclasses
+import logging
 import sys
 from types import SimpleNamespace
 
@@ -321,6 +322,50 @@ def test_stage_id_keeps_the_full_parser_alongside_omni_router(monkeypatch, tmp_p
 
     with _no_accelerator(), pytest.raises(RuntimeError, match="Failed to infer device"):
         parse_omni_args()
+
+
+def test_stage_router_accepts_underscore_option_names(monkeypatch, tmp_path):
+    # FlexibleArgumentParser accepts either spelling, but the rewrite lives in
+    # parse_args and the router path calls parse_known_args. Unnormalized, this
+    # name is merely warned about and the served name is lost.
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        _router_argv(tmp_path, "--omni-router", "--served_model_name", "public-alias"),
+    )
+
+    with _no_accelerator():
+        config = parse_omni_args()
+
+    assert config.served_model_name == "public-alias"
+    assert config.engine_args.served_model_name == ["public-alias"]
+
+
+def test_stage_router_engine_args_satisfy_metrics_setup(monkeypatch, tmp_path):
+    # init_omni_stage_router() hands this config to the shared
+    # setup_metrics_collection(), which reads fields directly off engine_args --
+    # so the router's reduced namespace has to carry them or the router dies
+    # right after the parse this change exists to make work.
+    from dynamo.vllm import main as vllm_main
+
+    monkeypatch.setattr(sys, "argv", _router_argv(tmp_path, "--omni-router"))
+
+    with _no_accelerator():
+        config = parse_omni_args()
+
+    registered: list[dict] = []
+    monkeypatch.setattr(
+        vllm_main,
+        "register_engine_metrics_callback",
+        lambda **kwargs: registered.append(kwargs),
+    )
+    monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+
+    vllm_main.setup_metrics_collection(
+        config, SimpleNamespace(), logging.getLogger(__name__)
+    )
+
+    assert registered, "router metrics registration must still happen"
 
 
 # --- vllm_omni API compatibility guards ---

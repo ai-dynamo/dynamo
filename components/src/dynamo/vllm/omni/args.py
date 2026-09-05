@@ -7,6 +7,7 @@ import argparse
 import dataclasses
 import logging
 import os
+import re
 import sys
 from types import SimpleNamespace
 from typing import Optional
@@ -501,6 +502,32 @@ def _wants_stage_router(argv: list[str]) -> bool:
     return bool(env_or_default("DYN_OMNI_ROUTER", False))
 
 
+# Everything from the leading "--" up to the first "." -- the option name, but
+# not the key of a dotted value such as --json-arg.key_1.
+_OPTION_NAME = re.compile(r"(?<=^--)[^.]*")
+
+
+def _normalize_engine_option_names(argv: list[str]) -> list[str]:
+    """Rewrite ``--served_model_name`` to ``--served-model-name``, as vLLM does.
+
+    ``FlexibleArgumentParser`` accepts either spelling, but only through
+    ``parse_args``, which rewrites underscores to dashes in the option name
+    before parsing. ``parse_known_args`` -- which the stage router calls so that
+    a stage worker's engine flags stay non-fatal -- does not. Without this, the
+    underscore spelling would bind on the stage-worker path and be reported as
+    unrecognized on the router path, silently dropping the requested value.
+    """
+    normalized = []
+    for token in argv:
+        if not token.startswith("--"):
+            normalized.append(token)
+            continue
+        name, sep, value = token.partition("=")
+        name = _OPTION_NAME.sub(lambda match: match.group(0).replace("_", "-"), name)
+        normalized.append(f"{name}{sep}{value}" if sep else name)
+    return normalized
+
+
 def _add_stage_router_engine_args(parser: argparse.ArgumentParser) -> None:
     """Register the only engine options the stage router itself reads.
 
@@ -561,7 +588,9 @@ def parse_omni_args() -> OmniConfig:
     if stage_router:
         # Launch scripts forward EXTRA_ARGS to every omni process, so stage-worker
         # engine flags reach the router; tolerate them, but keep a typo visible.
-        vllm_args, ignored = vllm_parser.parse_known_args(unknown)
+        vllm_args, ignored = vllm_parser.parse_known_args(
+            _normalize_engine_option_names(unknown)
+        )
         if ignored:
             logger.warning(
                 "Stage router ignoring unrecognized engine options: %s. "
@@ -609,6 +638,11 @@ def parse_omni_args() -> OmniConfig:
             served_model_name=vllm_args.served_model_name,
             trust_remote_code=vllm_args.trust_remote_code,
             revision=vllm_args.revision,
+            # init_omni_stage_router() -> setup_metrics_collection() reads this
+            # straight off engine_args; the engine default keeps the router's
+            # metrics registration identical to the full OmniEngineArgs it used
+            # to build.
+            disable_log_stats=OmniEngineArgs.disable_log_stats,
         )
     else:
         engine_args = OmniEngineArgs.from_cli_args(vllm_args)
