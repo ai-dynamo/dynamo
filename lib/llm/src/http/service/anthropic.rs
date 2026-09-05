@@ -24,6 +24,7 @@ use axum::{
     },
     routing::{get, post},
 };
+use dynamo_runtime::error::ErrorClass;
 use dynamo_runtime::pipeline::{AsyncEngineContextProvider, Context};
 use futures::StreamExt;
 use tracing::Instrument;
@@ -31,7 +32,8 @@ use tracing::Instrument;
 use super::{
     RouteDoc, apply_request_tool_call_parsing_options,
     disconnect::{
-        ConnectionHandle, create_connection_monitor, monitor_for_disconnects_with_activity,
+        ConnectionHandle, StreamErrorSignal, create_connection_monitor,
+        monitor_for_disconnects_with_activity_and_error_signal,
     },
     metrics::{
         CancellationLabels, Endpoint, ErrorType, InflightGuard,
@@ -61,7 +63,10 @@ use crate::request_template::{RequestTemplate, resolve_request_model};
 use crate::types::Annotated;
 
 // Re-use helpers from the openai module (sibling under service/)
-use super::error::{SanitizedError, invalid_argument};
+use super::error::{
+    ClientErrorAction, SanitizedError, find_canonical_error_in_chain, http_action_for_error,
+    invalid_argument,
+};
 use super::metadata::{attach_x_request_id, extract_metadata_from_http};
 use super::openai::{get_body_limit, get_or_create_request_id, warn_nvext_disabled};
 
@@ -127,6 +132,7 @@ async fn anthropic_error_middleware(request: Request<Body>, next: Next) -> Respo
             .unwrap_or_default();
         let error_message = String::from_utf8_lossy(&body_bytes).to_string();
         return anthropic_error(
+            ErrorClass::InvalidRequest,
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             &error_message,
@@ -278,6 +284,7 @@ async fn handler_anthropic_messages(
     if let Err(error) = validate_anthropic_messages(&request.messages) {
         inflight_guard.mark_error(error.metric_error_type());
         return Err(anthropic_error(
+            ErrorClass::InvalidRequest,
             error.status(),
             error.anthropic_error_type(),
             error.message(),
@@ -286,6 +293,7 @@ async fn handler_anthropic_messages(
     if let Err(error) = validate_anthropic_tools(request.tools.as_deref()) {
         inflight_guard.mark_error(error.metric_error_type());
         return Err(anthropic_error(
+            ErrorClass::InvalidRequest,
             error.status(),
             error.anthropic_error_type(),
             error.message(),
@@ -294,6 +302,7 @@ async fn handler_anthropic_messages(
     if request.max_tokens == 0 {
         inflight_guard.mark_error(ErrorType::Validation);
         return Err(anthropic_error(
+            ErrorClass::InvalidRequest,
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             "max_tokens: must be greater than 0",
@@ -302,6 +311,7 @@ async fn handler_anthropic_messages(
     if let Err(error) = gate_anthropic_nvext(&mut request, &headers, state.nvext_enabled()) {
         inflight_guard.mark_error(ErrorType::Validation);
         return Err(anthropic_error(
+            ErrorClass::InvalidRequest,
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             &error.to_string(),
@@ -317,6 +327,7 @@ async fn handler_anthropic_messages(
     let metadata = extract_metadata_from_http(&headers).map_err(|err| {
         inflight_guard.mark_error(ErrorType::Validation);
         anthropic_error(
+            ErrorClass::PayloadTooLarge,
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             "invalid_request_error",
             &err.to_string(),
@@ -423,6 +434,7 @@ async fn anthropic_messages(
             crate::discovery::ModelManagerError::ModelUnavailable(_) => {
                 inflight_guard.mark_error(ErrorType::Unavailable);
                 anthropic_error(
+                    ErrorClass::Unavailable,
                     StatusCode::SERVICE_UNAVAILABLE,
                     "overloaded_error",
                     &super::openai::model_not_ready_message(&model),
@@ -431,6 +443,7 @@ async fn anthropic_messages(
             _ => {
                 inflight_guard.mark_error(ErrorType::NotFound);
                 anthropic_error(
+                    ErrorClass::NotFound,
                     StatusCode::NOT_FOUND,
                     "not_found_error",
                     &format!("Model '{}' not found", model),
@@ -466,6 +479,7 @@ async fn anthropic_messages(
             "Failed to convert AnthropicCreateMessageRequest to UnifiedRequest",
         );
         anthropic_error(
+            ErrorClass::InvalidRequest,
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             &format!("Failed to convert request: {}", e),
@@ -482,6 +496,7 @@ async fn anthropic_messages(
         inflight_guard.mark_error(ErrorType::Validation);
         let error = invalid_argument(error.to_string());
         return Err(anthropic_error(
+            ErrorClass::InvalidRequest,
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             error.message(),
@@ -531,6 +546,7 @@ async fn anthropic_messages(
         .map_err(|e| {
             inflight_guard.mark_error(ErrorType::Validation);
             anthropic_error(
+                ErrorClass::InvalidRequest,
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 &format!("Invalid tool_choice: {}", e.message()),
@@ -560,6 +576,12 @@ async fn anthropic_messages(
     tracing::trace!("Issuing generate call for Anthropic messages");
 
     let engine_stream = engine.generate(request).await.map_err(|e| {
+        if let Some(error) = find_canonical_error_in_chain(e.as_ref())
+            && let Some(response) = anthropic_semantic_error(error)
+        {
+            inflight_guard.mark_error(super::openai::metric_error_type_for_class(error.class()));
+            return response;
+        }
         if super::metrics::request_was_rejected(e.as_ref()) {
             state
                 .metrics_clone()
@@ -577,13 +599,11 @@ async fn anthropic_messages(
                 format!("{e:#}"),
             );
         }
-        if let Some(dynamo_err) = find_invalid_argument_in_chain(e.as_ref()) {
+        if let Some(dynamo_err) = find_invalid_argument_in_chain(e.as_ref())
+            && let Some(response) = anthropic_semantic_error(dynamo_err)
+        {
             inflight_guard.mark_error(super::metrics::ErrorType::Validation);
-            return anthropic_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-                dynamo_err.message(),
-            );
+            return response;
         }
         // Check for cancelled request (client disconnected before response was sent)
         if super::metrics::request_was_cancelled(e.as_ref()) {
@@ -639,6 +659,8 @@ async fn anthropic_messages(
         let cancel_ctx = ctx.clone();
 
         let (activity_tx, activity_rx) = tokio::sync::mpsc::unbounded_channel();
+        let error_signal = StreamErrorSignal::default();
+        let producer_error_signal = error_signal.clone();
         let full_stream = async_stream::stream! {
             let mut events = Vec::with_capacity(4);
             converter.append_start_events(&mut events);
@@ -647,6 +669,7 @@ async fn anthropic_messages(
             }
 
             let mut saw_error = false;
+            let mut stream_error_body = None;
             let mut cancelled = false;
 
             // Keep a single cancellation future alive across chunks — recreating
@@ -670,9 +693,24 @@ async fn anthropic_messages(
                             &mut http_queue_guard,
                         );
 
+                        let semantic_error = !saw_error
+                            && super::openai::set_stream_semantic_error(
+                                &annotated_chunk,
+                                &producer_error_signal,
+                            );
+                        if semantic_error {
+                            saw_error = true;
+                            stream_error_body = annotated_chunk
+                                .error
+                                .as_ref()
+                                .map(anthropic_stream_error_body);
+                        }
                         let Some(stream_resp) = annotated_chunk.data else {
                             if annotated_chunk.event.as_deref() == Some("error") {
                                 saw_error = true;
+                                if !semantic_error {
+                                    producer_error_signal.set(ErrorType::Internal);
+                                }
                             }
                             continue;
                         };
@@ -694,7 +732,12 @@ async fn anthropic_messages(
             }
 
             if saw_error {
-                converter.append_error_events(&mut events);
+                if let Some(error) = stream_error_body {
+                    converter.append_error_events_with_body(&mut events, error);
+                } else {
+                    converter.append_error_events(&mut events);
+                }
+                producer_error_signal.mark_terminal_event_emitted();
             } else {
                 converter.append_end_events(&mut events);
             }
@@ -712,12 +755,13 @@ async fn anthropic_messages(
         };
 
         let keep_alive = state.sse_keep_alive_for_response(stream_can_defer_all_output);
-        let stream = monitor_for_disconnects_with_activity(
+        let stream = monitor_for_disconnects_with_activity_and_error_signal(
             full_stream,
             ctx,
             inflight_guard,
             stream_handle,
             activity_rx,
+            error_signal,
         );
 
         let mut sse_stream = Sse::new(stream);
@@ -749,6 +793,7 @@ async fn anthropic_messages(
                     None => {
                         tracing::error!(%status, "Anthropic backend error event");
                         anthropic_error(
+                            ErrorClass::InvalidRequest,
                             status,
                             "invalid_request_error",
                             status.canonical_reason().unwrap_or("Client error"),
@@ -800,6 +845,7 @@ async fn handler_count_tokens(
 ) -> Result<Response, Response> {
     if let Err(error) = validate_anthropic_messages(&request.messages) {
         return Err(anthropic_error(
+            ErrorClass::InvalidRequest,
             error.status(),
             error.anthropic_error_type(),
             error.message(),
@@ -1110,6 +1156,13 @@ fn anthropic_sanitized_error_with_details(
     details: impl std::fmt::Display,
 ) -> Response {
     let status = err.status();
+    let class = match err {
+        SanitizedError::Cancelled => ErrorClass::Cancelled,
+        SanitizedError::Overloaded => ErrorClass::CapacityExhausted,
+        SanitizedError::Unavailable => ErrorClass::Unavailable,
+        SanitizedError::Internal | SanitizedError::PreserveServerError(_) => ErrorClass::Internal,
+    };
+    super::openai::record_local_failure(class);
     if err.log_as_error() {
         tracing::error!(status = %status, "Anthropic {err}: {details}");
     } else {
@@ -1153,19 +1206,73 @@ fn find_invalid_argument_in_chain<'a>(
     None
 }
 
+fn anthropic_stream_error_body(error: &dynamo_runtime::error::DynamoError) -> AnthropicErrorBody {
+    let (status, message) = match http_action_for_error(error) {
+        ClientErrorAction::Respond {
+            status,
+            public_message,
+        } => (status, public_message),
+        ClientErrorAction::NoDelivery => (
+            StatusCode::from_u16(499).expect("499 is a valid extension status"),
+            "Request cancelled",
+        ),
+    };
+    AnthropicErrorBody {
+        error_type: anthropic_error_type_for_status(status, "api_error").to_string(),
+        message: message.to_string(),
+    }
+}
+
+fn anthropic_semantic_error(error: &dynamo_runtime::error::DynamoError) -> Option<Response> {
+    let ClientErrorAction::Respond {
+        status,
+        public_message,
+    } = http_action_for_error(error)
+    else {
+        return None;
+    };
+
+    super::metrics::record_failure(error);
+    if matches!(error.class(), dynamo_runtime::error::ErrorClass::Internal) {
+        tracing::error!(class = %error.class(), reason = %error.reason(), "Semantic request failure");
+    } else {
+        tracing::debug!(class = %error.class(), reason = %error.reason(), "Semantic request failure");
+    }
+    Some(anthropic_error_unrecorded(
+        status,
+        "api_error",
+        public_message,
+    ))
+}
+
 /// Build an Anthropic-formatted error response.
 /// Maps HTTP status codes to Anthropic error types following the Anthropic API spec.
-fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Response {
-    let mapped_type = match status.as_u16() {
+fn anthropic_error(
+    class: ErrorClass,
+    status: StatusCode,
+    error_type: &str,
+    message: &str,
+) -> Response {
+    super::openai::record_local_failure(class);
+    anthropic_error_unrecorded(status, error_type, message)
+}
+
+fn anthropic_error_type_for_status<'a>(status: StatusCode, fallback: &'a str) -> &'a str {
+    match status.as_u16() {
         400 => "invalid_request_error",
         401 => "authentication_error",
         403 => "permission_error",
         404 => "not_found_error",
         429 => "rate_limit_error",
+        499 => "request_cancelled",
         503 | 529 => "overloaded_error",
-        // Use the caller-provided type for other codes (e.g. 500 → "api_error")
-        _ => error_type,
-    };
+        _ if status.is_client_error() => "invalid_request_error",
+        _ => fallback,
+    }
+}
+
+fn anthropic_error_unrecorded(status: StatusCode, error_type: &str, message: &str) -> Response {
+    let mapped_type = anthropic_error_type_for_status(status, error_type);
 
     (
         status,
@@ -1184,6 +1291,7 @@ fn anthropic_error(status: StatusCode, error_type: &str, message: &str) -> Respo
 /// Anthropic clients expect the nested `{"type": "error", "error": {...}}`
 pub(crate) fn unmatched_route_response(method: &Method, uri: &Uri) -> Response {
     anthropic_error(
+        ErrorClass::NotFound,
         StatusCode::NOT_FOUND,
         "not_found_error",
         &format!("Route not found: {} {}", method, uri.path()),
@@ -1332,6 +1440,84 @@ mod tests {
                 .as_deref(),
             Some("tenant-body")
         );
+    }
+
+    #[tokio::test]
+    async fn anthropic_semantic_error_hides_private_diagnostic() {
+        use dynamo_runtime::error::{DynamoError, ErrorType};
+
+        let error = DynamoError::builder()
+            .error_type(ErrorType::InvalidArgument)
+            .diagnostic("PRIVATE_DIAGNOSTIC_SENTINEL")
+            .build();
+        let response = anthropic_semantic_error(&error).expect("invalid request response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Invalid request"));
+        assert!(!body.contains("PRIVATE_DIAGNOSTIC_SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn anthropic_semantic_client_statuses_use_invalid_request_type() {
+        for (class, reason, status) in [
+            (
+                dynamo_runtime::error::ErrorClass::Conflict,
+                "request.conflict",
+                StatusCode::CONFLICT,
+            ),
+            (
+                dynamo_runtime::error::ErrorClass::PayloadTooLarge,
+                "request.payload_too_large",
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                dynamo_runtime::error::ErrorClass::UnsupportedMedia,
+                "request.unsupported_media",
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ),
+        ] {
+            let error = dynamo_runtime::error::DynamoError::builder()
+                .class(class)
+                .reason(dynamo_runtime::error::ErrorReason::new(reason).unwrap())
+                .build();
+            let response = anthropic_semantic_error(&error).expect("client response");
+            assert_eq!(response.status(), status);
+            let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+                .await
+                .unwrap();
+            let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body.error.error_type, "invalid_request_error");
+        }
+    }
+
+    #[test]
+    fn anthropic_stream_error_uses_semantic_identity_without_diagnostic() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(ErrorClass::InvalidRequest)
+            .diagnostic("PRIVATE_STREAM_DIAGNOSTIC")
+            .build();
+
+        let body = anthropic_stream_error_body(&error);
+
+        assert_eq!(body.error_type, "invalid_request_error");
+        assert_eq!(body.message, "Invalid request");
+        assert!(!body.message.contains("PRIVATE_STREAM_DIAGNOSTIC"));
+    }
+
+    #[test]
+    fn anthropic_stream_cancellation_has_request_cancelled_body() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(ErrorClass::Cancelled)
+            .build();
+
+        let body = anthropic_stream_error_body(&error);
+
+        assert_eq!(body.error_type, "request_cancelled");
+        assert_eq!(body.message, "Request cancelled");
     }
 
     #[test]
