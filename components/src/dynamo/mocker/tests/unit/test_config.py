@@ -5,6 +5,7 @@ import argparse
 import importlib
 import importlib.util
 import json
+import sys
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from types import SimpleNamespace
@@ -496,8 +497,56 @@ def test_get_kv_cache_dtype_bytes_supports_int8():
     assert get_kv_cache_dtype_bytes(cfg, "auto") == 2  # model default dtype
 
 
-def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
-    """Use the language-model config when Transformers exposes a multimodal wrapper."""
+def test_compute_kv_bytes_reads_local_config_json_without_transformers(
+    monkeypatch, tmp_path
+):
+    """A local model directory must be sized from config.json alone.
+
+    Importing transformers and instantiating its config classes (which import
+    torch) cost ~12 s per mocker start; the local path must not touch them.
+    """
+    from dynamo.mocker.utils import kv_cache
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "num_hidden_layers": 2,
+                "num_key_value_heads": 4,
+                "num_attention_heads": 8,
+                "hidden_size": 64,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
+    monkeypatch.setitem(sys.modules, "transformers", None)  # import would fail
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_unwraps_multimodal_text_config_json(tmp_path):
+    from dynamo.mocker.utils import kv_cache
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "some_vlm",
+                "vision_config": {"hidden_size": 1},
+                "text_config": {
+                    "num_hidden_layers": 2,
+                    "num_key_value_heads": 4,
+                    "num_attention_heads": 8,
+                    "hidden_size": 64,
+                    "dtype": "bfloat16",
+                },
+            }
+        )
+    )
+
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
+
+
+def test_compute_kv_bytes_uses_transformers_text_config_for_hub_ids(monkeypatch):
+    """A bare hub ID still resolves through transformers, unwrapping wrappers."""
     from dynamo.mocker.utils import kv_cache
 
     text_config = SimpleNamespace(
@@ -508,13 +557,18 @@ def test_compute_kv_bytes_uses_transformers_text_config(monkeypatch):
         dtype="bfloat16",
     )
     config = SimpleNamespace(get_text_config=lambda: text_config)
-    monkeypatch.setattr(
-        kv_cache.AutoConfig,
-        "from_pretrained",
-        lambda *args, **kwargs: config,
+
+    class FakeAutoConfig:
+        @staticmethod
+        def from_pretrained(model_path, **kwargs):
+            assert model_path == "org/model"
+            return config
+
+    monkeypatch.setitem(
+        sys.modules, "transformers", SimpleNamespace(AutoConfig=FakeAutoConfig)
     )
 
-    assert kv_cache.compute_kv_bytes_per_token("model") == 256
+    assert kv_cache.compute_kv_bytes_per_token("org/model") == 256
 
 
 def test_build_mocker_engine_args_estimates_aic_blocks(monkeypatch):
