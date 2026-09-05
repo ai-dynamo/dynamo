@@ -148,6 +148,13 @@ pub struct LlmRegistration {
     /// owns a sub-range; the router enumerates
     /// `[start, start + data_parallel_size)`.
     pub data_parallel_start_rank: Option<u32>,
+    /// Whether the engine runs Eagle-style speculative decoding whose KV-cache
+    /// events are keyed by token *bigrams* (SGLang EAGLE/EAGLE3/FROZEN_KV_MTP).
+    /// Published as `ModelRuntimeConfig::enable_eagle`; the KV router reads it
+    /// to hash prompt blocks with the same `block_size + 1` token window the
+    /// engine's events use. Left `false`, a router can accept every one of the
+    /// engine's events and still never match a request against them.
+    pub enable_eagle: bool,
     /// Bootstrap host advertised to decode peers. Backends with an internal
     /// KV-transport handshake leave it `None`. When host+port are set, `Worker`
     /// publishes them for the frontend's `PrefillRouter` bootstrap path.

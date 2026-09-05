@@ -769,6 +769,32 @@ fn kv_event_connect_host(
     Ok(bare_host.to_string())
 }
 
+/// Whether SGLang keys its KV-cache events by token bigrams for this server.
+///
+/// Mirrors `SpeculativeAlgorithm.is_eagle()` in SGLang -- the same predicate
+/// `UnifiedTreeCore`/`RadixCache` use to switch the radix key to a bigram view
+/// (`key.maybe_to_bigram_view(self.is_eagle)`), and the same one the legacy
+/// Python worker (`components/src/dynamo/sglang/register.py`) derives
+/// `ModelRuntimeConfig::enable_eagle` from. Under a bigram key every
+/// `BlockStored.token_ids` is a list of `(t_i, t_i+1)` pairs; the sidecar's
+/// ZMQ decoder normalizes those and stamps `is_eagle = true` on the resulting
+/// block hashes. A router hashing prompts non-Eagle can then never match a
+/// single event, so this flag has to be advertised on the model card.
+/// `NEXTN` is included because SGLang normalizes it to `EAGLE` before
+/// `server_info` is populated on current builds but not on older ones.
+fn sglang_eagle_enabled(server_info: &Value) -> bool {
+    server_info
+        .get("speculative_algorithm")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|algorithm| {
+            matches!(
+                algorithm.to_ascii_uppercase().as_str(),
+                "EAGLE" | "EAGLE3" | "FROZEN_KV_MTP" | "NEXTN"
+            )
+        })
+}
+
 fn is_deepseek_v4_arch(model_info: &Value) -> bool {
     model_info
         .get("architectures")
@@ -905,6 +931,8 @@ fn build_engine_config(
         ));
     }
 
+    let enable_eagle = sglang_eagle_enabled(&discovery.server_info);
+
     let mut runtime_data = HashMap::new();
     runtime_data.insert(
         "grpc_service".to_string(),
@@ -932,6 +960,7 @@ fn build_engine_config(
             max_num_batched_tokens,
             data_parallel_size,
             data_parallel_start_rank,
+            enable_eagle,
             bootstrap_host: mode.is_prefill().then_some(bootstrap_host).flatten(),
             bootstrap_port: mode.is_prefill().then_some(bootstrap_port).flatten(),
         }),
@@ -946,7 +975,7 @@ mod tests {
     use super::{
         DisaggregationMode, DiscoveredKvEventSource, Discovery, build_engine_config,
         discover_kv_event_sources, hicache_native_offloading_capacity,
-        resolve_bootstrap_host_with_local,
+        resolve_bootstrap_host_with_local, sglang_eagle_enabled,
     };
 
     fn discovery(server_info: serde_json::Value) -> Discovery {
@@ -958,6 +987,53 @@ mod tests {
             model_info: json!({}),
             server_info,
         }
+    }
+
+    #[test]
+    fn eagle_enabled_tracks_sglang_is_eagle_predicate() {
+        for algorithm in ["EAGLE", "eagle", "EAGLE3", "FROZEN_KV_MTP", "NEXTN", " Eagle "] {
+            assert!(
+                sglang_eagle_enabled(&json!({"speculative_algorithm": algorithm})),
+                "{algorithm:?} keys the radix cache by bigrams and must advertise enable_eagle"
+            );
+        }
+        for server_info in [
+            json!({}),
+            json!({"speculative_algorithm": null}),
+            json!({"speculative_algorithm": "NONE"}),
+            json!({"speculative_algorithm": "NGRAM"}),
+            json!({"speculative_algorithm": "STANDALONE"}),
+            json!({"speculative_algorithm": 3}),
+        ] {
+            assert!(
+                !sglang_eagle_enabled(&server_info),
+                "{server_info} must not advertise enable_eagle"
+            );
+        }
+    }
+
+    #[test]
+    fn registration_advertises_enable_eagle_for_eagle_servers() {
+        // Regression: the native sidecar never set enable_eagle, so the router
+        // hashed prompts non-Eagle while the engine's bigram-keyed KV events
+        // were normalized with is_eagle=true -- zero overlap on every request.
+        let eagle = build_engine_config(
+            &discovery(json!({"speculative_algorithm": "EAGLE", "page_size": 256})),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(eagle.llm.unwrap().enable_eagle);
+
+        let plain = build_engine_config(
+            &discovery(json!({"page_size": 256})),
+            DisaggregationMode::Aggregated,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!plain.llm.unwrap().enable_eagle);
     }
 
     #[test]
