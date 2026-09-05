@@ -10,13 +10,15 @@ import logging
 import math
 import os
 import struct
+import sys
 import tempfile
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import (
     Any,
     AsyncIterator,
@@ -127,6 +129,105 @@ _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 # that endpoint, so an unbounded wait on a degraded GCS would pile up control
 # requests; a capacity read is advisory and stale-or-absent beats slow.
 _EP_CAPACITY_RAY_TIMEOUT_S = 5.0
+
+_SCALE_EP_TIMEOUT_ENV = "DYN_SCALE_EP_TIMEOUT_S"
+_SCALE_EP_TIMEOUT_DEFAULT_S = 600.0
+# Head start the cooperative deadline gets over the hard watchdog, so a scale
+# that *does* answer cancellation unwinds through vLLM's finally blocks instead
+# of being killed mid-teardown.
+_SCALE_EP_KILL_GRACE_S = 30.0
+
+
+def _read_scale_ep_timeout_s() -> float:
+    """Deadline for one elastic-EP scale, read once at import.
+
+    Read per request, a typo'd value would be a live foot-gun: a scale that
+    overruns its deadline restarts the worker, so ``DYN_SCALE_EP_TIMEOUT_S=0``
+    turns every *healthy* scale into a restart, and a reconciler retrying into
+    that is a crashloop. Reject non-positive and unparseable values instead.
+    """
+    raw = os.environ.get(_SCALE_EP_TIMEOUT_ENV)
+    if raw is None:
+        return _SCALE_EP_TIMEOUT_DEFAULT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        value = -1.0
+    if value <= 0:
+        logger.warning(
+            "%s=%r is not a positive number of seconds; falling back to %ss. A "
+            "non-positive deadline would restart the worker on every scale.",
+            _SCALE_EP_TIMEOUT_ENV,
+            raw,
+            _SCALE_EP_TIMEOUT_DEFAULT_S,
+        )
+        return _SCALE_EP_TIMEOUT_DEFAULT_S
+    return value
+
+
+_SCALE_EP_TIMEOUT_S: Final[float] = _read_scale_ep_timeout_s()
+
+
+class _RayNodeInfo:
+    """ray.nodes() dict shaped like a ray.util.state.list_nodes() row."""
+
+    __slots__ = ("node_id", "node_ip")
+
+    def __init__(self, d: dict) -> None:
+        self.node_ip: str = d["NodeManagerAddress"]
+        self.node_id: str = d["NodeID"]
+
+
+# Bookkeeping for the list_nodes patch below. The mutex guards only these two
+# variables and is never held across the scale itself.
+_RAY_LIST_NODES_MUTEX = threading.Lock()
+_ray_list_nodes_original: Optional[Callable[..., Any]] = None
+_ray_list_nodes_patch_depth = 0
+
+
+@contextmanager
+def _ray_list_nodes_via_gcs(ray_module: Any, state_module: Any) -> Iterator[None]:
+    """Point ``ray.util.state.list_nodes`` at the GCS API for one reconfigure.
+
+    TODO(upstream-vllm): remove once vLLM's add_dp_placement_groups
+    (vllm/v1/engine/utils.py) uses ray.nodes() instead of list_nodes().
+
+    list_nodes() reads the Ray dashboard HTTP API (127.0.0.1:8265/api/v0/nodes).
+    The dynamo image installs ray core only (not ray[default]), so the dashboard
+    starts in --minimal mode with its HTTP server disabled and vLLM's
+    add_dp_placement_groups fails with "Failed to connect to API server".
+    ray.nodes() reaches the GCS over gRPC directly and carries the same data.
+
+    This is a process-global mutation while ``_scale_ep_in_progress`` is per
+    handler instance, so two handlers in one process (decode + prefill) could
+    otherwise interleave save/restore and leave a patched list_nodes installed
+    for good. Keeping the true original plus a depth count means whoever leaves
+    last always restores the real function.
+    """
+    global _ray_list_nodes_original, _ray_list_nodes_patch_depth
+
+    def _list_nodes(**kwargs):
+        # vLLM's add_dp_placement_groups calls list_nodes() with no arguments.
+        # Anything else is a caller we did not mean to intercept: this stand-in
+        # honours no filters and carries only node_id/node_ip, so answering it
+        # would hand back silently-wrong data or raise AttributeError downstream.
+        if kwargs:
+            return _ray_list_nodes_original(**kwargs)  # type: ignore[misc]
+        return [_RayNodeInfo(n) for n in ray_module.nodes() if n.get("Alive", False)]
+
+    with _RAY_LIST_NODES_MUTEX:
+        if _ray_list_nodes_patch_depth == 0:
+            _ray_list_nodes_original = state_module.list_nodes
+        _ray_list_nodes_patch_depth += 1
+        state_module.list_nodes = _list_nodes
+    try:
+        yield
+    finally:
+        with _RAY_LIST_NODES_MUTEX:
+            _ray_list_nodes_patch_depth -= 1
+            if _ray_list_nodes_patch_depth == 0:
+                state_module.list_nodes = _ray_list_nodes_original
+                _ray_list_nodes_original = None
 
 
 def _discard_orphan_result(fut: "asyncio.Future[dict]") -> None:
@@ -1142,6 +1243,9 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
 
     _benchmark_results: Optional[dict] = None
     _scale_ep_in_progress: bool = False
+    # Latched when a scale is cancelled out from under vLLM, which keeps
+    # reconfiguring; see the CancelledError branch in scale_elastic_ep.
+    _scale_ep_cancelled: bool = False
     # get_ep_capacity single-flight state; see the comment at its call site.
     # run_in_executor hands back an asyncio Future, not a concurrent.futures one.
     _ep_capacity_inflight: Optional["asyncio.Future[dict]"] = None
@@ -1239,6 +1343,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # can mutate _coord_store at a time.
         self._scale_ep_lock = asyncio.Lock()
         self._scale_ep_in_progress = False
+        self._scale_ep_cancelled = False
         # Created on first Ray-backed get_ep_capacity call so workers that never
         # serve elastic EP do not carry an idle thread.
         self._ep_capacity_inflight = None
@@ -1320,6 +1425,24 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
     def _shutdown_on_engine_dead(self, e: EngineDeadError) -> NoReturn:
         logger.error(f"vLLM EngineDeadError: {e}")
         self._shutdown_worker()
+
+    def _fail_fast(self, shutdown: Callable[[], NoReturn], reason: str) -> NoReturn:
+        """Run a NoReturn shutdown so nothing can turn it back into a return.
+
+        ``_shutdown_worker`` is only NoReturn if ``runtime.shutdown()`` does not
+        raise -- plausible on the already-degraded worker that got us here. If it
+        does, the exception unwinds into the caller's broad ``except Exception``,
+        which turns a wedged engine into an ordinary error response while the
+        worker stays registered and keeps taking traffic. Exit either way.
+        """
+        logger.error("Fail-fast: %s", reason)
+        try:
+            shutdown()
+        except BaseException:
+            logger.exception("Shutdown path failed; exiting anyway")
+        # os._exit skips atexit and logging handler flushing.
+        logging.shutdown()
+        os._exit(1)
 
     def init_embedding_loader(
         self, config: Config, encode_worker_client: Optional[Client] = None
@@ -1536,6 +1659,14 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         # caller's TCPStore before its Ray actor connects, causing a 300 s
         # timeout on the worker node.
         async with self._scale_ep_lock:
+            if self._scale_ep_cancelled:
+                msg = (
+                    "A previous scale_elastic_ep was cancelled mid-flight and vLLM "
+                    "may still be reconfiguring; this worker must restart before it "
+                    "can scale again"
+                )
+                logger.warning("[ElasticEP] %s", msg)
+                return {"status": "error", "message": msg}
             if self._scale_ep_in_progress:
                 msg = (
                     "A scale_elastic_ep operation is already in progress; "
@@ -1545,74 +1676,116 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                 return {"status": "error", "message": msg}
             self._scale_ep_in_progress = True
 
+        # Hard deadline, armed before the ray import so it covers everything the
+        # in-progress flag is held across.
+        #
+        # asyncio.wait_for on its own is NOT a deadline: it cancels the inner
+        # coroutine and then *awaits* the cancellation, so an await that delays or
+        # ignores cancellation runs past the timeout -- and a step that blocks the
+        # event loop outright (a ray.get() or the TCPStore rendezvous inside
+        # vLLM's scale) stops the timer from ever firing. Either way the
+        # in-progress flag would stick and this endpoint would wedge forever,
+        # which is the failure the backstop exists to prevent. A timed-out scale
+        # is a wedged engine and the answer is os._exit(1) regardless, so let a
+        # watchdog thread do the exit; wait_for stays as the cooperative first
+        # attempt so a cancellable hang unwinds cleanly.
+        def _deadline_exceeded() -> None:
+            # Runs on the timer thread and MUST exit unconditionally. Do not touch
+            # logging here: the main thread may be wedged while holding a logging
+            # handler lock (e.g. blocked writing to a full stdout pipe), which would
+            # make logger.*/logging.shutdown() block on that lock and defeat the one
+            # exit that exists to bound exactly this hang. os.write to fd 2 takes no
+            # Python-level lock.
+            try:
+                os.write(
+                    2,
+                    f"[ElasticEP] scale to dp={new_dp_size} exceeded its "
+                    f"{_SCALE_EP_TIMEOUT_S}s deadline and did not answer "
+                    f"cancellation; the engine is wedged. Hard-exiting so the worker "
+                    f"restarts clean at its previous size. Tune with "
+                    f"{_SCALE_EP_TIMEOUT_ENV}.\n".encode(),
+                )
+            except Exception:
+                pass
+            os._exit(1)
+
+        watchdog = threading.Timer(
+            _SCALE_EP_TIMEOUT_S + _SCALE_EP_KILL_GRACE_S, _deadline_exceeded
+        )
+        watchdog.daemon = True
+        watchdog.start()
         try:
-            # TODO(upstream-vllm): remove this patch once vLLM fixes
-            # add_dp_placement_groups in vllm/v1/engine/utils.py to use ray.nodes()
-            # instead of ray.util.state.list_nodes().
-            #
-            # Patch ray.util.state.list_nodes to use the GCS API instead of the
-            # dashboard HTTP API (127.0.0.1:8265/api/v0/nodes). The dynamo image
-            # installs ray core only (not ray[default]), so the dashboard HTTP server
-            # starts in --minimal mode with the HTTP server disabled. vLLM's
-            # add_dp_placement_groups calls list_nodes() which requires that HTTP
-            # endpoint, causing scale_elastic_ep to fail with "Failed to connect to
-            # API server".
-            #
-            # ray.nodes() uses the GCS gRPC channel directly (no dashboard process
-            # needed) and returns the same information. Imported lazily so ray is not
-            # required at module load time (absent in non-elastic-EP deployments).
-            #
-            # Format mapping:
-            #   list_nodes() -> objects with .node_ip and .node_id
-            #   ray.nodes()  -> dicts with "NodeManagerAddress" and "NodeID"
+            # ray is imported lazily so it is not required at module load time
+            # (absent in non-elastic-EP deployments), and warmed off the event loop
+            # so the first scale on a worker does not block token generation while
+            # a heavy import runs. Importing ray.util.state pulls in ray itself, so
+            # one hop warms both; skip it entirely once cached.
+            if "ray.util.state" not in sys.modules:
+                try:
+                    await asyncio.to_thread(importlib.import_module, "ray.util.state")
+                except ImportError as e:
+                    # Same call as get_ep_capacity: a worker without ray is a
+                    # configuration problem, not a wedged engine. Do not restart it.
+                    logger.warning("[ElasticEP] ray is not importable: %s", e)
+                    return {
+                        "status": "error",
+                        "message": f"elastic EP scaling unavailable: {e}",
+                    }
             import ray
             import ray.util.state as _ray_util_state
 
-            class _NodeInfo:
-                __slots__ = ("node_id", "node_ip")
-
-                def __init__(self, d: dict) -> None:
-                    self.node_ip: str = d["NodeManagerAddress"]
-                    self.node_id: str = d["NodeID"]
-
             async def _scale_engine(size: int) -> None:
-                # add_dp_placement_groups calls ray.util.state.list_nodes();
-                # patch it to the GCS API for the duration of the reconfigure.
-                original_list_nodes = _ray_util_state.list_nodes
-                try:
-                    _ray_util_state.list_nodes = lambda **kw: [
-                        _NodeInfo(n) for n in ray.nodes() if n.get("Alive", False)
-                    ]
+                with _ray_list_nodes_via_gcs(ray, _ray_util_state):
                     await self.engine_client.scale_elastic_ep(size)
-                finally:
-                    _ray_util_state.list_nodes = original_list_nodes
 
             try:
-                await _scale_engine(new_dp_size)
+                await asyncio.wait_for(
+                    _scale_engine(new_dp_size), timeout=_SCALE_EP_TIMEOUT_S
+                )
             except EngineDeadError as dead_err:
                 # Engine died mid-grow. Restart it the same way every other engine
                 # path here does, so it comes back clean and re-registers.
-                logger.error(
-                    "[ElasticEP] Engine died during scale to dp=%s: %s",
-                    new_dp_size,
-                    dead_err,
+                self._fail_fast(
+                    functools.partial(self._shutdown_on_engine_dead, dead_err),
+                    f"[ElasticEP] engine died during scale to dp={new_dp_size}: "
+                    f"{dead_err}",
                 )
-                self._shutdown_on_engine_dead(dead_err)  # NoReturn: restarts worker
+            except asyncio.CancelledError:
+                # An externally-cancelled scale (graceful shutdown, or the caller
+                # going away) must not force a restart: that would be a spurious
+                # non-zero exit on shutdown and too aggressive on a disconnect.
+                #
+                # But vLLM's grow tasks are not cancelled along with us -- its
+                # asyncio.gather does not cancel the siblings of a failed task --
+                # so the engine keeps reconfiguring after this coroutine unwinds.
+                # Latch the endpoint closed rather than clearing the flag: letting
+                # the next scale in would race the orphaned one, which is exactly
+                # the TCPStore hazard the early-reject above exists to prevent.
+                logger.warning(
+                    "[ElasticEP] Scale to dp=%s was cancelled, but vLLM's grow is "
+                    "not cancelled with it. Refusing further scales on this worker "
+                    "until it restarts.",
+                    new_dp_size,
+                )
+                self._scale_ep_cancelled = True
+                raise
             except Exception as grow_err:
                 # Fail fast: vLLM does no rollback or cleanup on a failed scale (its
                 # _scale_up_elastic_ep has no except and its /scale_elastic_ep
-                # endpoint just returns 500), so a failed grow leaves the engine
-                # partial/wedged with no safe way to recover in process. Restart the
-                # worker so it comes back clean, rather than fake a recovery that
-                # nothing acts on.
-                logger.error(
-                    "[ElasticEP] Scaling to dp=%s failed: %s. vLLM does not roll "
-                    "back a failed scale; restarting the worker to recover a clean "
-                    "state.",
-                    new_dp_size,
-                    grow_err,
+                # endpoint just returns 500), so a failed (or timed-out, hence
+                # wedged) grow leaves the engine partial with no safe way to recover
+                # in process. Restart the worker so it comes back clean rather than
+                # fake a recovery that nothing acts on. (asyncio.wait_for raises
+                # TimeoutError, an Exception subclass, so a hang lands here too --
+                # and TimeoutError stringifies to "", hence the explicit type.)
+                self._fail_fast(
+                    self._shutdown_worker,
+                    f"[ElasticEP] scale to dp={new_dp_size} failed within its "
+                    f"{_SCALE_EP_TIMEOUT_S}s budget with "
+                    f"{type(grow_err).__name__}: {str(grow_err) or '<no detail>'}. vLLM "
+                    "does not roll back a failed scale; restarting the worker to "
+                    "recover a clean state.",
                 )
-                self._shutdown_worker()  # NoReturn: runtime.shutdown() + os._exit(1)
 
             logger.info(f"[ElasticEP] Scaling to dp={new_dp_size} complete")
             return {
@@ -1624,6 +1797,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
             logger.error(f"[ElasticEP] Scaling failed: {e}")
             return {"status": "error", "message": str(e)}
         finally:
+            watchdog.cancel()
             async with self._scale_ep_lock:
                 self._scale_ep_in_progress = False
 
