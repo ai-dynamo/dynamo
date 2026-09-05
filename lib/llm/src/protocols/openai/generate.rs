@@ -21,6 +21,7 @@ use serde_json::{Map, Value};
 
 use super::{convert_backend_top_logprobs, token_to_utf8_bytes};
 use crate::protocols::Annotated;
+use crate::protocols::common::extensions::{GenerationArtifactKind, NvExt};
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PromptLogprobs};
 
 /// Token-in/token-out generation request.
@@ -64,6 +65,9 @@ pub struct GenerateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_transfer_params: Option<Map<String, Value>>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<NvExt>,
+
     /// Future top-level fields, including Python-frontend-only fields such as
     /// `features`, are retained and forwarded to the worker.
     #[serde(flatten)]
@@ -72,9 +76,26 @@ pub struct GenerateRequest {
 
 impl GenerateRequest {
     pub(crate) fn response_options(&self) -> GenerateResponseOptions {
+        let mut generation_artifact_contents = [false; 3];
+        let generation_artifact = self
+            .nvext
+            .as_ref()
+            .and_then(|nvext| nvext.generation_artifact.as_ref());
+        if let Some(artifact) = generation_artifact {
+            for content in &artifact.contents {
+                let index = match content {
+                    GenerationArtifactKind::MoeRoutes => 0,
+                    GenerationArtifactKind::SelectedLogprobs => 1,
+                    GenerationArtifactKind::TopkLogprobs => 2,
+                };
+                generation_artifact_contents[index] = true;
+            }
+        }
         GenerateResponseOptions {
             include_logprobs: self.sampling_params.logprobs().is_some(),
             include_prompt_logprobs: self.sampling_params.prompt_logprobs().is_some(),
+            generation_artifact: generation_artifact.is_some(),
+            generation_artifact_contents,
         }
     }
 
@@ -308,12 +329,17 @@ pub struct GenerateResponse {
     pub prompt_logprobs: Option<serde_json::Value>,
 
     pub kv_transfer_params: Option<serde_json::Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_artifact: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct GenerateResponseOptions {
     include_logprobs: bool,
     include_prompt_logprobs: bool,
+    generation_artifact: bool,
+    generation_artifact_contents: [bool; 3],
 }
 
 /// Per-index accumulation state while folding a stream of
@@ -507,6 +533,7 @@ struct GenerateAggregator {
     prompt_logprobs: Option<PromptLogprobs>,
     kv_transfer_params: Option<Value>,
     kv_transfer_params_from_engine_data: bool,
+    generation_artifact: Option<Value>,
 }
 
 impl GenerateAggregator {
@@ -517,6 +544,7 @@ impl GenerateAggregator {
             prompt_logprobs: None,
             kv_transfer_params: None,
             kv_transfer_params_from_engine_data: false,
+            generation_artifact: None,
         }
     }
 
@@ -557,6 +585,9 @@ impl GenerateAggregator {
                 self.kv_transfer_params = Some(kv_transfer_params.clone());
                 self.kv_transfer_params_from_engine_data = true;
             }
+            if let Some(generation_artifact) = engine_data.get("generation_artifact") {
+                self.generation_artifact = Some(generation_artifact.clone());
+            }
         }
         choice.apply(&output, options)
     }
@@ -580,6 +611,7 @@ impl GenerateAggregator {
             prompt_logprobs,
             kv_transfer_params,
             kv_transfer_params_from_engine_data: _,
+            generation_artifact,
         } = aggregator;
 
         let mut choices: Vec<GenerateResponseChoice> = choices
@@ -597,11 +629,31 @@ impl GenerateAggregator {
             None
         };
 
+        let generation_artifact = if options.generation_artifact {
+            Some(generation_artifact.unwrap_or_else(|| {
+                let contents: Vec<&str> = ["moe_routes", "selected_logprobs", "topk_logprobs"]
+                    .into_iter()
+                    .zip(options.generation_artifact_contents)
+                    .filter_map(|(name, requested)| requested.then_some(name))
+                    .collect();
+                serde_json::json!({
+                    "format": "generation_artifact_v1",
+                    "contents": contents,
+                    "state": "failed",
+                    "error_code": "artifact_receipt_missing",
+                    "error": "generation artifact result was not returned by the backend"
+                })
+            }))
+        } else {
+            None
+        };
+
         Ok(GenerateResponse {
             request_id,
             choices,
             prompt_logprobs,
             kv_transfer_params,
+            generation_artifact,
         })
     }
 }
@@ -836,6 +888,7 @@ mod tests {
             }],
             prompt_logprobs: None,
             kv_transfer_params: None,
+            generation_artifact: None,
         };
 
         let value = serde_json::to_value(&resp).expect("serialize");
@@ -1032,6 +1085,7 @@ mod tests {
             GenerateResponseOptions {
                 include_logprobs: true,
                 include_prompt_logprobs: true,
+                ..Default::default()
             },
         )
         .await
@@ -1135,6 +1189,64 @@ mod tests {
                 .to_string()
                 .contains("invalid generate routed_experts payload")
         );
+    }
+
+    #[tokio::test]
+    async fn generate_response_projects_requested_generation_artifact() {
+        let receipt = json!({
+            "format": "generation_artifact_v1",
+            "contents": ["moe_routes"],
+            "state": "ready",
+            "actual_bytes": 42,
+            "sha256": "abcd",
+            "object_id": "opaque"
+        });
+        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![100],
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            engine_data: Some(json!({"generation_artifact": receipt})),
+            ..Default::default()
+        })]);
+
+        let response = GenerateResponse::from_annotated_stream_with_options(
+            stream,
+            "req-artifact".to_string(),
+            GenerateResponseOptions {
+                generation_artifact: true,
+                generation_artifact_contents: [true, false, false],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("aggregate artifact receipt");
+
+        assert_eq!(response.generation_artifact, Some(receipt));
+    }
+
+    #[tokio::test]
+    async fn generate_response_reports_missing_requested_generation_artifact() {
+        let stream = futures::stream::iter([Annotated::from_data(LLMEngineOutput {
+            token_ids: vec![100],
+            finish_reason: Some(crate::protocols::common::FinishReason::Stop),
+            ..Default::default()
+        })]);
+
+        let response = GenerateResponse::from_annotated_stream_with_options(
+            stream,
+            "req-artifact".to_string(),
+            GenerateResponseOptions {
+                generation_artifact: true,
+                generation_artifact_contents: [false, true, false],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("aggregate missing artifact receipt");
+
+        let receipt = response.generation_artifact.expect("failed receipt");
+        assert_eq!(receipt["state"], "failed");
+        assert_eq!(receipt["error_code"], "artifact_receipt_missing");
+        assert_eq!(receipt["contents"], json!(["selected_logprobs"]));
     }
 
     #[tokio::test]
@@ -1391,6 +1503,7 @@ mod tests {
             GenerateResponseOptions {
                 include_logprobs: true,
                 include_prompt_logprobs: true,
+                ..Default::default()
             },
         )
         .await
