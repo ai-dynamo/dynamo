@@ -194,6 +194,9 @@ on:
         description: 'Baseline SBOM stem baked into the rendered Dockerfile (for the compliance-audit job)'
         value: ${{ jobs.build.outputs.baseline_sbom_file }}
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     strategy:

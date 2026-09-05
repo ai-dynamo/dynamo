@@ -32,6 +32,9 @@ on:
       DOCKERHUB_ACCESS_TOKEN:
         required: false
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   ensure-vcluster:
     name: Ensure vCluster

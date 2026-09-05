@@ -8,6 +8,9 @@ permissions:
   issues: write
   checks: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   dco-comment:
     runs-on: ubuntu-latest

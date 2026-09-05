@@ -18,6 +18,9 @@ permissions:
   contents: write
   actions:  write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   upgrade:
     name: ${{ matrix.framework }}

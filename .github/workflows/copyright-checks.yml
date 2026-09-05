@@ -3,6 +3,9 @@ name: Copyright Checks
 on:
   pull_request
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   copyright-checks:
       runs-on: ubuntu-24.04

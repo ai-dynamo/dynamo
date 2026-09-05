@@ -3,6 +3,9 @@ name: CodeQL
 on:
   pull_request:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   codeql:
     name: Analyze Codebase

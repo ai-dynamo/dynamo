@@ -12,6 +12,9 @@ permissions:
   contents: read
   pull-requests: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   team-request:
     uses: $/.github/workflows/nvskills-team-request.yml

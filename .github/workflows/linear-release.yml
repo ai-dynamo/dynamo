@@ -30,6 +30,9 @@ on:
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   # First-time bootstrap: Linear's `complete` targets an *existing* release, so
   # seed it first. Run this workflow manually once with command=sync and the

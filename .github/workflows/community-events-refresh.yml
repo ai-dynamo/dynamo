@@ -59,6 +59,9 @@ concurrency:
   group: community-events-refresh
   cancel-in-progress: false
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   refresh:
     name: Refresh community events
