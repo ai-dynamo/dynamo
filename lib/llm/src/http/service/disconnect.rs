@@ -349,7 +349,7 @@ fn openai_stream_error(_error: &(dyn std::error::Error + 'static)) -> (ErrorType
         "error": {
             "message": error.to_string(),
             "type": error.openai_type_slug(),
-            "code": error.status().as_u16(),
+            "code": error.status().as_u16().to_string(),
         }
     })
     .to_string();
@@ -386,7 +386,7 @@ fn openai_semantic_stream_error(class: dynamo_runtime::error::ErrorClass) -> (Er
         "error": {
             "message": message,
             "type": error_type,
-            "code": status.as_u16(),
+            "code": status.as_u16().to_string(),
         }
     })
     .to_string();
@@ -594,6 +594,7 @@ fn monitor_for_disconnects_with_timeout_error_and_keep_alive(
                                     tracing::debug!(
                                         class = %error.class(),
                                         reason = %error.reason(),
+                                        diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str),
                                         "Semantic streaming failure"
                                     );
                                 } else {
@@ -946,7 +947,7 @@ mod tests {
         let body = collect_sse_body(monitored).await;
 
         assert!(body.contains("Invalid request"));
-        assert!(body.contains("\"code\":400"));
+        assert!(body.contains("\"code\":\"400\""));
         assert!(body.contains("invalid_request_error"));
         assert!(!body.contains("PRIVATE_STREAM_DIAGNOSTIC"));
         assert_eq!(
@@ -1329,9 +1330,10 @@ mod tests {
             Some(expected.openai_type_slug()),
             "[{case}] structured error `type` mismatch. Body:\n{text}"
         );
+        let expected_code = expected.status().as_u16().to_string();
         assert_eq!(
-            error.get("code").and_then(|v| v.as_i64()),
-            Some(i64::from(expected.status().as_u16())),
+            error.get("code").and_then(|v| v.as_str()),
+            Some(expected_code.as_str()),
             "[{case}] structured error `code` mismatch. Body:\n{text}"
         );
         assert!(

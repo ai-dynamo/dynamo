@@ -397,8 +397,10 @@ where
                 if let Some(err) = response.error.as_ref()
                     && is_migratable_for_request(&self.request, err)
                 {
-                    let migration_error = migratable_error_in_chain(err)
-                        .expect("migration eligibility requires a semantic cause");
+                    let Some(migration_error) = migratable_error_in_chain(err) else {
+                        tracing::warn!(error = %err, "Migration eligibility had no semantic error");
+                        continue;
+                    };
                     if self.retries_left == 0 {
                         let route_trace = self.active_route_trace.clone();
                         self.record_migration_exhausted(MigrationCause {
@@ -537,9 +539,11 @@ where
                     return Ok(());
                 }
                 Err(err) if is_migratable_for_request(&self.request, err.as_ref()) => {
-                    let reason = migratable_error_in_chain(err.as_ref())
-                        .expect("migration eligibility requires a semantic cause")
-                        .error_type();
+                    let Some(migration_error) = migratable_error_in_chain(err.as_ref()) else {
+                        tracing::warn!(error = %err, "Migration eligibility had no semantic error");
+                        return Err(err);
+                    };
+                    let reason = migration_error.error_type();
                     if migration_event.is_none() {
                         migration_event = Some(MigrationEvent::new(
                             frontend_service::migration_type::NEW_REQUEST,

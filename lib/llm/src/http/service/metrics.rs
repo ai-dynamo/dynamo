@@ -40,7 +40,11 @@ use dynamo_runtime::error::{DynamoError, ErrorType as DynamoErrorType};
 fn new_failure_counter() -> IntCounterVec {
     IntCounterVec::new(
         Opts::new(
-            "dynam_failures_total",
+            format!(
+                "{}_{}",
+                name_prefix::FRONTEND,
+                frontend_service::FAILURES_TOTAL
+            ),
             "Total number of terminal semantic request failures",
         ),
         &["class", "reason"],
@@ -48,6 +52,7 @@ fn new_failure_counter() -> IntCounterVec {
     .expect("the fixed failure metric name and labels are valid")
 }
 
+/// Process-wide because protocol error renderers can run without a request-scoped `Metrics`.
 pub(crate) static DYNAM_FAILURES_TOTAL: LazyLock<IntCounterVec> =
     LazyLock::new(new_failure_counter);
 
@@ -4010,8 +4015,8 @@ mod tests {
         let family = registry
             .gather()
             .into_iter()
-            .find(|family| family.name() == "dynam_failures_total")
-            .expect("dynam_failures_total metric");
+            .find(|family| family.name() == "dynamo_frontend_failures_total")
+            .expect("dynamo_frontend_failures_total metric");
         let metric = family
             .get_metric()
             .iter()

@@ -50,19 +50,15 @@ pub(crate) enum ClientErrorAction {
 
 /// Total class-to-HTTP policy. Backends never select these status codes.
 pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) -> ClientErrorAction {
-    use dynamo_runtime::error::{BackendError, ErrorClass};
+    use dynamo_runtime::error::ErrorClass;
 
     let response = |status, public_message| ClientErrorAction::Respond {
         status,
         public_message,
     };
 
-    match class {
-        ErrorClass::InvalidArgument
-        | ErrorClass::InvalidRequest
-        | ErrorClass::Backend(BackendError::InvalidArgument) => {
-            response(StatusCode::BAD_REQUEST, "Invalid request")
-        }
+    match class.normalized() {
+        ErrorClass::InvalidRequest => response(StatusCode::BAD_REQUEST, "Invalid request"),
         ErrorClass::Unauthenticated => {
             response(StatusCode::UNAUTHORIZED, "Authentication required")
         }
@@ -76,39 +72,25 @@ pub(crate) fn http_action_for_class(class: dynamo_runtime::error::ErrorClass) ->
             response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "Unsupported media type")
         }
         ErrorClass::RateLimited => response(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"),
-        ErrorClass::ResourceExhausted
-        | ErrorClass::WorkerOverloaded
-        | ErrorClass::CapacityExhausted => response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Service temporarily unavailable",
-        ),
-        ErrorClass::CannotConnect
-        | ErrorClass::Disconnected
-        | ErrorClass::Unavailable
-        | ErrorClass::Backend(BackendError::CannotConnect)
-        | ErrorClass::Backend(BackendError::Disconnected)
-        | ErrorClass::Backend(BackendError::EngineShutdown)
-        | ErrorClass::Backend(BackendError::StreamIncomplete) => response(
+        ErrorClass::CapacityExhausted => {
+            response(overload_status_code(), "Service temporarily unavailable")
+        }
+        ErrorClass::Unavailable => response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Service temporarily unavailable",
         ),
         ErrorClass::BackendProtocol => response(StatusCode::BAD_GATEWAY, "Bad gateway"),
-        ErrorClass::ConnectionTimeout
-        | ErrorClass::ResponseTimeout
-        | ErrorClass::DeadlineExceeded
-        | ErrorClass::Backend(BackendError::ConnectionTimeout)
-        | ErrorClass::Backend(BackendError::ResponseTimeout) => {
+        ErrorClass::DeadlineExceeded => {
             response(StatusCode::GATEWAY_TIMEOUT, "Request deadline exceeded")
         }
         ErrorClass::NotImplemented => {
             response(StatusCode::NOT_IMPLEMENTED, "Operation not implemented")
         }
-        ErrorClass::Cancelled | ErrorClass::Backend(BackendError::Cancelled) => {
-            ClientErrorAction::NoDelivery
-        }
-        ErrorClass::Unknown | ErrorClass::Internal | ErrorClass::Backend(BackendError::Unknown) => {
+        ErrorClass::Cancelled => ClientErrorAction::NoDelivery,
+        ErrorClass::Internal => {
             response(StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
         }
+        _ => unreachable!("normalized error class must be canonical"),
     }
 }
 
@@ -508,10 +490,7 @@ mod tests {
                 Some(StatusCode::UNSUPPORTED_MEDIA_TYPE),
             ),
             (ErrorClass::RateLimited, Some(StatusCode::TOO_MANY_REQUESTS)),
-            (
-                ErrorClass::CapacityExhausted,
-                Some(StatusCode::SERVICE_UNAVAILABLE),
-            ),
+            (ErrorClass::CapacityExhausted, Some(overload_status_code())),
             (ErrorClass::BackendProtocol, Some(StatusCode::BAD_GATEWAY)),
             (
                 ErrorClass::Unavailable,
@@ -549,10 +528,7 @@ mod tests {
 
         for (class, expected) in [
             (ErrorClass::InvalidArgument, StatusCode::BAD_REQUEST),
-            (
-                ErrorClass::WorkerOverloaded,
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
+            (ErrorClass::WorkerOverloaded, overload_status_code()),
             (ErrorClass::Unknown, StatusCode::INTERNAL_SERVER_ERROR),
         ] {
             assert!(matches!(

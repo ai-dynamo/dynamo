@@ -1234,9 +1234,9 @@ fn anthropic_semantic_error(error: &dynamo_runtime::error::DynamoError) -> Optio
 
     super::metrics::record_failure(error);
     if matches!(error.class(), dynamo_runtime::error::ErrorClass::Internal) {
-        tracing::error!(class = %error.class(), reason = %error.reason(), "Semantic request failure");
+        tracing::error!(class = %error.class(), reason = %error.reason(), diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str), "Semantic request failure");
     } else {
-        tracing::debug!(class = %error.class(), reason = %error.reason(), "Semantic request failure");
+        tracing::debug!(class = %error.class(), reason = %error.reason(), diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str), "Semantic request failure");
     }
     Some(anthropic_error_unrecorded(
         status,

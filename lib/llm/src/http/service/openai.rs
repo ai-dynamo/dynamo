@@ -261,42 +261,24 @@ fn sanitized_error_class(error: SanitizedError) -> ErrorClass {
 }
 
 pub(super) fn metric_error_type_for_class(class: dynamo_runtime::error::ErrorClass) -> ErrorType {
-    use dynamo_runtime::error::{BackendError, ErrorClass};
+    use dynamo_runtime::error::ErrorClass;
 
-    match class {
-        ErrorClass::InvalidArgument
-        | ErrorClass::InvalidRequest
+    match class.normalized() {
+        ErrorClass::InvalidRequest
         | ErrorClass::Unauthenticated
         | ErrorClass::PermissionDenied
         | ErrorClass::Conflict
         | ErrorClass::PayloadTooLarge
-        | ErrorClass::UnsupportedMedia
-        | ErrorClass::Backend(BackendError::InvalidArgument) => ErrorType::Validation,
+        | ErrorClass::UnsupportedMedia => ErrorType::Validation,
         ErrorClass::NotFound => ErrorType::NotFound,
-        ErrorClass::RateLimited
-        | ErrorClass::ResourceExhausted
-        | ErrorClass::WorkerOverloaded
-        | ErrorClass::CapacityExhausted => ErrorType::Overload,
-        ErrorClass::CannotConnect
-        | ErrorClass::Disconnected
-        | ErrorClass::Unavailable
-        | ErrorClass::Backend(BackendError::CannotConnect)
-        | ErrorClass::Backend(BackendError::Disconnected)
-        | ErrorClass::Backend(BackendError::EngineShutdown)
-        | ErrorClass::Backend(BackendError::StreamIncomplete) => ErrorType::Unavailable,
-        ErrorClass::Cancelled | ErrorClass::Backend(BackendError::Cancelled) => {
-            ErrorType::Cancelled
-        }
+        ErrorClass::RateLimited | ErrorClass::CapacityExhausted => ErrorType::Overload,
+        ErrorClass::Unavailable => ErrorType::Unavailable,
+        ErrorClass::Cancelled => ErrorType::Cancelled,
         ErrorClass::NotImplemented => ErrorType::NotImplemented,
-        ErrorClass::Unknown
-        | ErrorClass::BackendProtocol
-        | ErrorClass::ConnectionTimeout
-        | ErrorClass::ResponseTimeout
-        | ErrorClass::DeadlineExceeded
-        | ErrorClass::Internal
-        | ErrorClass::Backend(BackendError::Unknown)
-        | ErrorClass::Backend(BackendError::ConnectionTimeout)
-        | ErrorClass::Backend(BackendError::ResponseTimeout) => ErrorType::Internal,
+        ErrorClass::BackendProtocol | ErrorClass::DeadlineExceeded | ErrorClass::Internal => {
+            ErrorType::Internal
+        }
+        _ => unreachable!("normalized error class must be canonical"),
     }
 }
 
@@ -595,7 +577,7 @@ impl ErrorMessage {
     pub fn unsupported_content_error<T: Display>(msg: T) -> ErrorResponse {
         tracing::debug!("Unsupported Content error: {msg}");
         let code = StatusCode::BAD_REQUEST;
-        record_local_failure(ErrorClass::NotImplemented);
+        record_local_failure(ErrorClass::InvalidRequest);
         let error_type = bad_request_error_type();
         (
             code,
@@ -604,7 +586,7 @@ impl ErrorMessage {
                 error_type,
                 code: code.as_u16(),
                 details: None,
-                metric_error_type: Some(ErrorType::NotImplemented),
+                metric_error_type: Some(ErrorType::Validation),
             }),
         )
     }
@@ -653,12 +635,14 @@ impl ErrorMessage {
             tracing::error!(
                 class = %error.class(),
                 reason = %error.reason(),
+                diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str),
                 "Semantic request failure"
             );
         } else {
             tracing::debug!(
                 class = %error.class(),
                 reason = %error.reason(),
+                diagnostic = ?error.diagnostic().map(dynamo_runtime::error::Diagnostic::as_str),
                 "Semantic request failure"
             );
         }
@@ -667,10 +651,7 @@ impl ErrorMessage {
             status,
             Json(ErrorMessage {
                 message: public_message.to_string(),
-                error_type: status
-                    .canonical_reason()
-                    .unwrap_or("UnknownError")
-                    .to_string(),
+                error_type: map_error_code_to_error_type(status),
                 code: status.as_u16(),
                 details: error
                     .public_details()
@@ -698,6 +679,13 @@ impl ErrorMessage {
                     details: serde_json::to_value(rejection).ok().map(Box::new),
                     metric_error_type: None,
                 }),
+            );
+        }
+
+        if super::metrics::request_was_cancelled(err.as_ref()) {
+            return ErrorMessage::sanitized_with_details(
+                SanitizedError::Cancelled,
+                format!("{err:#}"),
             );
         }
 
@@ -730,14 +718,6 @@ impl ErrorMessage {
             && let Some(response) = Self::from_semantic_error(dynamo_err)
         {
             return response;
-        }
-
-        // Check for Cancelled anywhere in the error chain → HTTP 499 (Client Closed Request)
-        if super::metrics::request_was_cancelled(err.as_ref()) {
-            return ErrorMessage::sanitized_with_details(
-                SanitizedError::Cancelled,
-                format!("{err:#}"),
-            );
         }
 
         if let Some(error) = canonical_error
@@ -808,7 +788,30 @@ impl ErrorMessage {
                 .unwrap_or("Client error")
                 .to_string();
         }
-        Self::from_http_error(ErrorClass::Internal, err)
+        Self::from_http_error(backend_http_error_class(status), err)
+    }
+}
+
+fn backend_http_error_class(status: StatusCode) -> ErrorClass {
+    if status == overload_status_code() {
+        return ErrorClass::CapacityExhausted;
+    }
+
+    match status {
+        status if status.as_u16() == 499 => ErrorClass::Cancelled,
+        StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => ErrorClass::InvalidRequest,
+        StatusCode::UNAUTHORIZED => ErrorClass::Unauthenticated,
+        StatusCode::FORBIDDEN => ErrorClass::PermissionDenied,
+        StatusCode::NOT_FOUND => ErrorClass::NotFound,
+        StatusCode::CONFLICT => ErrorClass::Conflict,
+        StatusCode::PAYLOAD_TOO_LARGE => ErrorClass::PayloadTooLarge,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE => ErrorClass::UnsupportedMedia,
+        StatusCode::TOO_MANY_REQUESTS => ErrorClass::RateLimited,
+        StatusCode::SERVICE_UNAVAILABLE => ErrorClass::Unavailable,
+        StatusCode::GATEWAY_TIMEOUT => ErrorClass::DeadlineExceeded,
+        StatusCode::NOT_IMPLEMENTED => ErrorClass::NotImplemented,
+        status if status.is_client_error() => ErrorClass::InvalidRequest,
+        _ => ErrorClass::Internal,
     }
 }
 
@@ -2751,7 +2754,8 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
     } = backend_error;
     let mut render_record_failure = record_failure;
     if let Some(error) = &semantic {
-        let is_canonical = error.error_type() == error.class();
+        let is_classified = error.reason().as_str() != "runtime.unclassified";
+        let is_canonical = is_classified && error.error_type() == error.class();
         if (is_canonical
             || matches!(
                 error.class(),
@@ -2769,7 +2773,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
                 false,
             );
         }
-        if record_failure {
+        if record_failure && is_classified {
             super::metrics::record_failure(error);
             render_record_failure = false;
         }
@@ -2787,7 +2791,7 @@ fn backend_error_response(backend_error: BackendErrorInfo, record_failure: bool)
         }
         BackendStatusAction::ForwardClientError => {
             if render_record_failure {
-                record_local_failure(ErrorClass::Internal);
+                record_local_failure(backend_http_error_class(status));
             }
             (
                 status,
@@ -6017,6 +6021,45 @@ mod tests {
     }
 
     #[test]
+    fn unclassified_backend_error_uses_its_trusted_http_status() {
+        let backend_payload = std::io::Error::other("backend payload");
+        let response = backend_error_response(
+            BackendErrorInfo {
+                message: "unsupported image format".to_string(),
+                status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                semantic: Some(dynamo_runtime::error::DynamoError::from(
+                    &backend_payload as &(dyn std::error::Error + 'static),
+                )),
+                sanitized: None,
+            },
+            true,
+        );
+
+        assert_eq!(response.0, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(response.1.message, "Unsupported Media Type");
+    }
+
+    #[test]
+    fn classified_internal_error_ignores_backend_http_status() {
+        let response = backend_error_response(
+            BackendErrorInfo {
+                message: "backend unavailable".to_string(),
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                semantic: Some(
+                    dynamo_runtime::error::DynamoError::builder()
+                        .class(dynamo_runtime::error::ErrorClass::Internal)
+                        .build(),
+                ),
+                sanitized: None,
+            },
+            true,
+        );
+
+        assert_eq!(response.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.1.message, "Internal server error");
+    }
+
+    #[test]
     fn test_from_http_error_sanitizes_499_message() {
         // Backend may construct HttpError { code: 499, message: "..." }; that
         // message can carry context IDs / queue paths and must not leak.
@@ -6477,6 +6520,39 @@ mod tests {
     }
 
     #[test]
+    fn frontend_invalid_argument_does_not_expose_diagnostic_details() {
+        const DIAGNOSTIC: &str = "request.messages must not be empty at /srv/frontend.rs:42";
+        let response =
+            ErrorMessage::from_anyhow(invalid_argument(DIAGNOSTIC).into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert_eq!(response.1.message, "Invalid request");
+        assert!(response.1.details.is_none());
+        let body = serde_json::to_string(&response.1.0).expect("error response serializes");
+        assert!(!body.contains(DIAGNOSTIC));
+    }
+
+    #[test]
+    fn backend_http_status_derives_the_recorded_semantic_class() {
+        assert_eq!(
+            backend_http_error_class(StatusCode::BAD_REQUEST),
+            ErrorClass::InvalidRequest
+        );
+        assert_eq!(
+            backend_http_error_class(StatusCode::TOO_MANY_REQUESTS),
+            ErrorClass::RateLimited
+        );
+        assert_eq!(
+            backend_http_error_class(overload_status_code()),
+            ErrorClass::CapacityExhausted
+        );
+        assert_eq!(
+            backend_http_error_class(StatusCode::SERVICE_UNAVAILABLE),
+            ErrorClass::Unavailable
+        );
+    }
+
+    #[test]
     fn test_backend_invalid_argument_surfaces_as_400() {
         // `Backend(InvalidArgument)` is what `py_err_to_dynamo` produces
         // for Python `ValueError` / `TypeError` raised inside an engine's
@@ -6495,6 +6571,17 @@ mod tests {
         assert_eq!(response.1.code, StatusCode::BAD_REQUEST.as_u16());
         assert_eq!(response.1.message, "Invalid request");
     }
+    #[test]
+    fn canonical_capacity_uses_the_configured_overload_status() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(ErrorClass::CapacityExhausted)
+            .build();
+        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
+
+        assert_eq!(response.0, overload_status_code());
+        assert_eq!(response.1.code, overload_status_code().as_u16());
+    }
+
     #[test]
     fn canonical_errors_use_shared_status_and_hide_diagnostics() {
         use dynamo_runtime::error::{DynamoError, ErrorClass};
@@ -6520,7 +6607,7 @@ mod tests {
             ),
             (
                 ErrorClass::CapacityExhausted,
-                StatusCode::SERVICE_UNAVAILABLE,
+                overload_status_code(),
                 "Service temporarily unavailable",
                 ErrorType::Overload,
             ),
@@ -6558,7 +6645,11 @@ mod tests {
             assert_eq!(response.1.message, expected_message, "{class}");
             assert_eq!(
                 response.1.error_type,
-                expected_status.canonical_reason().unwrap(),
+                if class == ErrorClass::CapacityExhausted {
+                    "Overloaded"
+                } else {
+                    expected_status.canonical_reason().unwrap()
+                },
                 "{class}"
             );
             assert_eq!(
@@ -8091,7 +8182,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_content_responses_conversion_errors_are_not_implemented() {
+    fn unsupported_content_responses_conversion_errors_are_validation_errors() {
         let response = responses_conversion_error_response(
             ResponsesConversionError::UnsupportedContent("feature not available".to_string())
                 .into(),
@@ -8101,7 +8192,7 @@ mod tests {
         assert_eq!(response.1.error_type, "Bad Request");
         assert_eq!(
             extract_error_type_from_response(&response),
-            ErrorType::NotImplemented
+            ErrorType::Validation
         );
     }
 

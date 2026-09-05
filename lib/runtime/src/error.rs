@@ -37,8 +37,6 @@ use std::sync::{Arc, LazyLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ErrorClass {
-    /// Uncategorized or unknown error.
-    Unknown,
     /// The request contains invalid input (e.g., prompt exceeds context length).
     InvalidArgument,
     /// Failed to establish a connection to a remote worker.
@@ -88,6 +86,9 @@ pub enum ErrorClass {
     NotImplemented,
     /// An internal defect or unclassified failure occurred.
     Internal,
+    /// Uncategorized or unknown error.
+    #[serde(other)]
+    Unknown,
 }
 
 impl fmt::Display for ErrorClass {
@@ -568,7 +569,10 @@ impl<'de> Deserialize<'de> for DynamoError {
         }
 
         let representation = Representation::deserialize(deserializer)?;
-        let raw_class = representation.class;
+        let raw_class = match representation.class {
+            ErrorClass::Unknown => ErrorClass::Internal,
+            class => class,
+        };
         let reason = match representation.reason {
             Some(reason) => ErrorReason::new(reason).ok(),
             None => Some(ErrorReason::for_class(raw_class)),
@@ -688,10 +692,25 @@ impl<'a> From<&'a (dyn std::error::Error + 'static)> for DynamoError {
         }
 
         let diagnostic = Diagnostic::new(err.to_string());
-        let diagnostic = match err.source() {
-            Some(source) => diagnostic.with_source(DynamoError::from(source)),
-            None => diagnostic,
+        let Some(source) = err.source() else {
+            return Self {
+                class: ErrorClass::Internal,
+                reason: ErrorReason::from_static("runtime.unclassified"),
+                diagnostic: Some(diagnostic),
+                public: None,
+            };
         };
+
+        let source = DynamoError::from(source);
+        let diagnostic = diagnostic.with_source(source.clone());
+        if source.has_valid_identity() && source.class() != ErrorClass::Internal {
+            return Self {
+                class: source.error_type(),
+                reason: source.reason().clone(),
+                diagnostic: Some(diagnostic),
+                public: source.public_details().cloned(),
+            };
+        }
 
         Self {
             class: ErrorClass::Internal,
@@ -1118,6 +1137,65 @@ mod tests {
             Some("bad request")
         );
         assert!(err.public_details().is_none());
+    }
+
+    #[test]
+    fn backend_class_roundtrips_as_its_canonical_class() {
+        let error = DynamoError::builder()
+            .error_type(ErrorClass::Backend(BackendError::InvalidArgument))
+            .build();
+
+        let serialized = serde_json::to_string(&error).unwrap();
+        assert!(serialized.contains("\"class\":\"InvalidRequest\""));
+
+        let decoded: DynamoError = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(decoded.error_type(), ErrorClass::InvalidRequest);
+        assert_eq!(decoded.class(), ErrorClass::InvalidRequest);
+        assert_eq!(decoded.reason().as_str(), "backend.invalid_argument");
+    }
+
+    #[test]
+    fn unknown_class_fails_closed_during_deserialization() {
+        let json = r#"{"class":"FutureErrorClass","reason":"runtime.internal"}"#;
+        let error: DynamoError = serde_json::from_str(json).unwrap();
+
+        assert_eq!(error.error_type(), ErrorClass::Internal);
+        assert_eq!(error.class(), ErrorClass::Internal);
+        assert_eq!(error.reason().as_str(), "runtime.internal");
+    }
+
+    #[test]
+    fn wrapping_preserves_the_semantic_head_across_the_wire() {
+        #[derive(Debug)]
+        struct Wrapper(DynamoError);
+
+        impl fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("transport wrapper")
+            }
+        }
+
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let wrapped = Wrapper(
+            DynamoError::builder()
+                .class(ErrorClass::Unavailable)
+                .reason(ErrorReason::new("transport.disconnected").unwrap())
+                .build(),
+        );
+        let error = DynamoError::from(&wrapped as &(dyn std::error::Error + 'static));
+
+        assert_eq!(error.class(), ErrorClass::Unavailable);
+        assert_eq!(error.reason().as_str(), "transport.disconnected");
+        let value = serde_json::to_value(&error).unwrap();
+        assert!(value.get("caused_by").is_none());
+        let decoded: DynamoError = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.class(), ErrorClass::Unavailable);
+        assert_eq!(decoded.reason().as_str(), "transport.disconnected");
     }
 
     #[test]
