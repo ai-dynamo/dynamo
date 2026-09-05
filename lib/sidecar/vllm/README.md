@@ -24,16 +24,18 @@ It is a standalone Rust executable and is also compiled into
 
 - Aggregated generation
 - NIXL prefill/decode generation
+- Encoder/prefill/decode generation in E+PD and E+P+D topologies
 - Token and text requests through Dynamo preprocessing
 - Sampling, stop conditions, structured output, logprobs, cache options, and priority
 - Opaque `kv_transfer_params` handoff
 - Data-parallel rank routing and KV-event source discovery
 - Capability-gated RL pause/resume, sleep/wake, weight-transfer, and weight-version controls through native gRPC
 - Image, video, and audio URL and data-URI inputs; cache UUIDs remain image-only
+- Opaque encoder-cache handoff through vLLM `ec_transfer_params`
 
 Audio and video gRPC inputs are not available in vLLM `0.28.0`. They require a later vLLM release.
 
-The protocol does not support LoRA, encode workers, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, audio/video cache UUIDs, or EPD. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
+The protocol does not support LoRA, beam search, `n > 1`, or Dynamo tool-call and reasoning parsers. The sidecar does not support `input_audio`, `file://` media, `use_audio_in_video` or other `mm_processor_kwargs`, preprocessed multimodal features, decoded RDMA media, UUID-only media, or audio/video cache UUIDs. Encoder disaggregation is image-only in this release. Direct vLLM gRPC callers can send raw media bytes, but Dynamo's current `MultimodalData` representation cannot. Parser defaults returned by Control are intentionally not advertised to the Dynamo frontend because the current inference protocol does not preserve all parser-related request semantics.
 
 In prefill/decode deployments, both engines independently prepare the original media. Reusing only the prefill-expanded prompt IDs is insufficient because KV transfer does not carry model-specific multimodal position metadata.
 
@@ -106,7 +108,32 @@ The sidecar discovers `model_id`, the served name, context length, KV capacity, 
 
 The sidecar currently supports one vLLM frontend hosting the complete data-parallel group starting at rank 0. Control reports the global size; Dynamo forwards the selected rank as `x-data-parallel-rank` gRPC metadata on each generation request. Partial and hybrid rank ownership are unsupported because the protocol does not report the locally hosted rank count, and a nonzero starting rank is rejected. When KV routing is enabled, Control must return one unique ZMQ event source for every rank in the group.
 
-Aggregated serving is the default. Set the existing `--disaggregation-mode` to `prefill` or `decode` only for non-aggregated deployments; the current Control API does not report engine role.
+Aggregated serving is the default. The sidecar role is configured explicitly because the current Control API does not report it:
+
+- Encoder: `--disaggregation-mode encode`
+- E+PD downstream: aggregated mode plus `--route-to-encoder`
+- E+P+D prefill: `--disaggregation-mode prefill --route-to-encoder`
+- E+P+D decode: `--disaggregation-mode decode`
+
+### Encoder disaggregation
+
+Encoder disaggregation uses Dynamo's Encode worker discovery and routing contract. All media items in one request are sent together to one Encode worker; per-item fan-out is not supported. Text-only requests bypass Encode workers. If the encoder hop fails, the downstream request retains its original media and vLLM encodes it inline.
+
+The encoder vLLM instance must use an EC producer connector and the aggregated or prefill instance must use the matching EC consumer connector. The sidecar treats the connector metadata as an opaque JSON object and carries it over the existing gRPC `KVCacheParameters.ec_transfer_params` and `FinishInfo.ec_transfer_params` fields. In E+P+D, decode's vLLM gRPC frontend uses that metadata with the original media description to reconstruct model-specific positions such as Qwen-VL mRoPE, then removes the EC parameters before EngineCore consumes the prefill KV handoff. Decode therefore uses NIXL without an EC connector and does not load the encoder embedding again. This path requires vLLM Rust frontend support for metadata-only remote-prefill decode from [vLLM #54814](https://github.com/vllm-project/vllm/pull/54814) or a later release containing it.
+
+The local examples use `Qwen/Qwen2.5-VL-3B-Instruct` with vLLM's `ECExampleConnector` and a shared directory. The directory must be accessible at the same path from the producer and consumer. Each script creates and removes an isolated temporary directory unless `EC_SHARED_STORAGE_PATH` names a caller-managed directory:
+
+In the filenames, `e_pd` means one Encode worker plus one aggregated Prefill/Decode worker, while `epd` means separate Encode, Prefill, and Decode workers.
+
+```bash
+# Encoder + aggregated prefill/decode (2 GPUs)
+lib/sidecar/vllm/launch/disagg_multimodal_e_pd.sh
+
+# Encoder + NIXL prefill + decode (3 GPUs)
+lib/sidecar/vllm/launch/disagg_multimodal_epd.sh
+```
+
+The examples run one `vllm-rs` process and one Dynamo sidecar for each role. The encoder uses `--mm-encoder-only`, eager execution, and disabled prefix caching. The sidecar rejects media UUIDs that contain path separators, NUL bytes, or dot path components before forwarding them as connector keys. `ECExampleConnector` is a validation connector; production deployments should select an EC connector whose transport and storage semantics fit the deployment.
 
 The sidecar opens eight gRPC connections by default. This avoided
 connection-level throttling in high-concurrency sidecar tests. Override the

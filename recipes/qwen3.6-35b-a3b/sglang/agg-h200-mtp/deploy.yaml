@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1beta1
+kind: DynamoGraphDeployment
+metadata:
+  name: qwen36-35b-a3b-sglang-h200-agg-agentic
+  labels:
+    app.kubernetes.io/name: qwen36-35b-a3b-sglang-h200-agg-agentic
+    app.kubernetes.io/part-of: dynamo
+spec:
+  backendFramework: sglang
+  components:
+    - name: Frontend
+      type: frontend
+      replicas: 1
+      podTemplate:
+        spec:
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+              imagePullPolicy: Always
+              command: ["python3"]
+              args:
+                - -m
+                - dynamo.frontend
+                - --http-host
+                - 0.0.0.0
+                - --http-port
+                - "8000"
+    - name: agg
+      type: worker
+      replicas: 1
+      podTemplate:
+        spec:
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-H200
+          containers:
+            - name: main
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:1.4.0
+              imagePullPolicy: Always
+              command:
+                - python3
+                - -m
+                - dynamo.sglang
+              args:
+                - --model-path
+                - Qwen/Qwen3.6-35B-A3B-FP8
+                - --served-model-name
+                - Qwen/Qwen3.6-35B-A3B-FP8
+                - --trust-remote-code
+                - --tp-size
+                - "1"
+                - --attention-backend
+                - flashinfer
+                - --reasoning-parser
+                - qwen3
+                - --tool-call-parser
+                - qwen3_coder
+                - --speculative-algorithm
+                - EAGLE
+                - --speculative-num-steps
+                - "3"
+                - --speculative-eagle-topk
+                - "1"
+                - --speculative-num-draft-tokens
+                - "4"
+                - --host
+                - 0.0.0.0
+                - --port
+                - "30000"
+              env:
+                - name: HF_HUB_OFFLINE
+                  value: "1"
+                - name: HF_HOME
+                  value: /model-cache
+                - name: DYN_FORWARDPASS_METRIC_PORT
+                  value: ""
+                # Uncomment these variables for benchmarking with simulated
+                # MTP acceptance. Leave them commented for normal serving.
+                # real-draft-token is required on this model: with the default fixed
+                # fake token id, SGLang emits id 100, which is not a valid token in the
+                # Qwen tokenizer, so the frontend drops the response and ITL reports 0.
+                # - name: SGLANG_SIMULATE_ACC_LEN
+                #   value: "3.3153"
+                # - name: SGLANG_SIMULATE_ACC_METHOD
+                #   value: match-expected
+                # - name: SGLANG_SIMULATE_ACC_TOKEN_MODE
+                #   value: real-draft-token
+              resources:
+                requests:
+                  nvidia.com/gpu: "1"
+                limits:
+                  nvidia.com/gpu: "1"
+              volumeMounts:
+                - name: model-cache
+                  mountPath: /model-cache
+                  readOnly: true
+          volumes:
+            - name: model-cache
+              persistentVolumeClaim:
+                claimName: model-cache
