@@ -102,6 +102,14 @@ pub struct PeerReplicationConfig {
         message = "DYN_EPP_REPLICA_SYNC_PORT must be greater than zero"
     ))]
     pub sync_port: u16,
+    /// Optional HTTP port used to serve and fetch peer KV-index snapshots.
+    /// When unset, replica synchronization remains enabled but startup recovery
+    /// is skipped for compatibility with deployments predating the dump endpoint.
+    #[validate(range(
+        min = 1,
+        message = "DYN_EPP_SELECTION_HTTP_PORT must be greater than zero when set"
+    ))]
+    pub selection_http_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Validate)]
@@ -178,6 +186,7 @@ impl EppStandaloneConfig {
         let pod_ip = trimmed(get("POD_IP"));
         let sync_port = opt_parse::<u16>(get, "DYN_EPP_REPLICA_SYNC_PORT")?
             .unwrap_or(DEFAULT_REPLICA_SYNC_PORT);
+        let selection_http_port = opt_parse::<u16>(get, "DYN_EPP_SELECTION_HTTP_PORT")?;
         let peer_replication = peer_service
             .map(|service_name| -> anyhow::Result<_> {
                 let pod_ip = pod_ip.ok_or_else(|| {
@@ -190,6 +199,7 @@ impl EppStandaloneConfig {
                     service_name,
                     pod_ip,
                     sync_port,
+                    selection_http_port,
                 })
             })
             .transpose()?;
@@ -425,7 +435,7 @@ mod tests {
     #[test]
     fn peer_replication_config() {
         type ExtraEnv = &'static [(&'static str, &'static str)];
-        type Expected = Result<(u16, usize), &'static str>;
+        type Expected = Result<(u16, Option<u16>, usize), &'static str>;
         type Case = (&'static str, ExtraEnv, Expected);
 
         let required = [
@@ -436,7 +446,7 @@ mod tests {
             ("DYN_EPP_TOKENIZER_PROTOCOL", "vllm-render"),
             ("DYN_KV_CACHE_BLOCK_SIZE", "16"),
         ];
-        let cases: [Case; 6] = [
+        let cases: [Case; 8] = [
             (
                 "default port",
                 &[
@@ -444,7 +454,7 @@ mod tests {
                     ("POD_IP", "10.0.0.10"),
                     ("DYN_EPP_SELECTION_INDEXER_THREADS", "8"),
                 ],
-                Ok((DEFAULT_REPLICA_SYNC_PORT, 8)),
+                Ok((DEFAULT_REPLICA_SYNC_PORT, None, 8)),
             ),
             (
                 "overridden port",
@@ -453,7 +463,20 @@ mod tests {
                     ("POD_IP", "10.0.0.10"),
                     ("DYN_EPP_REPLICA_SYNC_PORT", "9192"),
                 ],
-                Ok((9192, DEFAULT_SELECTOR_THREADS)),
+                Ok((9192, None, DEFAULT_SELECTOR_THREADS)),
+            ),
+            (
+                "selection recovery port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_SELECTION_HTTP_PORT", "9093"),
+                ],
+                Ok((
+                    DEFAULT_REPLICA_SYNC_PORT,
+                    Some(9093),
+                    DEFAULT_SELECTOR_THREADS,
+                )),
             ),
             (
                 "missing pod ip",
@@ -483,13 +506,22 @@ mod tests {
                 ],
                 Err("DYN_EPP_REPLICA_SYNC_PORT"),
             ),
+            (
+                "zero selection recovery port",
+                &[
+                    ("DYN_EPP_PEER_SERVICE", "dynamo-epp"),
+                    ("POD_IP", "10.0.0.10"),
+                    ("DYN_EPP_SELECTION_HTTP_PORT", "0"),
+                ],
+                Err("DYN_EPP_SELECTION_HTTP_PORT"),
+            ),
         ];
 
         for (name, extra, expected) in cases {
             let mut env = required.to_vec();
             env.extend_from_slice(extra);
             match expected {
-                Ok((port, selector_threads)) => {
+                Ok((port, selection_http_port, selector_threads)) => {
                     let cfg = parse_cfg(&env).unwrap_or_else(|error| panic!("{name}: {error}"));
                     let replication = cfg
                         .peer_replication
@@ -498,6 +530,10 @@ mod tests {
                     assert_eq!(replication.service_name, "dynamo-epp", "{name}");
                     assert_eq!(replication.pod_ip, "10.0.0.10", "{name}");
                     assert_eq!(replication.sync_port, port, "{name}");
+                    assert_eq!(
+                        replication.selection_http_port, selection_http_port,
+                        "{name}"
+                    );
                     assert_eq!(cfg.selector_threads, selector_threads, "{name}");
                 }
                 Err(expected_error) => {

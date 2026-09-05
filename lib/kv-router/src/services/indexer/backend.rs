@@ -185,6 +185,34 @@ impl Indexer {
         }
     }
 
+    /// Wait until every mutation accepted before this call is visible to queries.
+    ///
+    /// Ordinary live ingestion stays enqueue-only for throughput. Recovery and
+    /// listener catch-up use this cold-path barrier before publishing readiness.
+    pub async fn flush_pending(&self) -> Result<(), KvRouterError> {
+        let lower_tier = match self {
+            Indexer::Single {
+                primary,
+                lower_tier,
+            } => {
+                primary.flush_and_wait().await?;
+                lower_tier
+            }
+            Indexer::Concurrent {
+                primary,
+                lower_tier,
+            } => {
+                primary.flush_and_wait().await?;
+                lower_tier
+            }
+        };
+
+        for indexer in lower_tier.all() {
+            indexer.flush_and_wait().await?;
+        }
+        Ok(())
+    }
+
     /// Device match details + per-tier hits, suitable for building the
     /// Mooncake-RFC-shape per-instance breakdown.
     pub async fn find_tiered_matches(
@@ -398,6 +426,61 @@ mod tests {
             Some(1),
             "host-pinned should report 1 additional matched block beyond device"
         );
+    }
+
+    #[tokio::test]
+    async fn flush_pending_waits_for_primary_and_lower_tier_mutations() {
+        for num_threads in [1, 2] {
+            let indexer = create_indexer(4, num_threads);
+            let worker = WorkerWithDpRank::new(17, 0);
+
+            indexer
+                .apply_event_routed(store_event(
+                    worker.worker_id,
+                    worker.dp_rank,
+                    1,
+                    &[],
+                    &[21, 22],
+                    StorageTier::Device,
+                ))
+                .await
+                .unwrap();
+            indexer
+                .apply_event_routed(store_event(
+                    worker.worker_id,
+                    worker.dp_rank,
+                    2,
+                    &[21, 22],
+                    &[23],
+                    StorageTier::HostPinned,
+                ))
+                .await
+                .unwrap();
+
+            indexer.flush_pending().await.unwrap();
+
+            let details = indexer
+                .find_tiered_matches(vec![
+                    LocalBlockHash(21),
+                    LocalBlockHash(22),
+                    LocalBlockHash(23),
+                ])
+                .await
+                .unwrap();
+            assert_eq!(
+                details.device.overlap_scores.scores.get(&worker),
+                Some(&2),
+                "device mutations must be visible after flush with {num_threads} thread(s)"
+            );
+            assert_eq!(
+                details
+                    .lower_tier
+                    .get(&StorageTier::HostPinned)
+                    .and_then(|tier| tier.hits.get(&worker)),
+                Some(&1),
+                "lower-tier mutations must be visible after flush with {num_threads} thread(s)"
+            );
+        }
     }
 
     /// Dump every tier's events from a populated indexer, replay through a

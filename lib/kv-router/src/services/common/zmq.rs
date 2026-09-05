@@ -152,6 +152,35 @@ impl ZmqSocket {
         poll_fn(|cx| self.poll_recv_multipart(cx)).await
     }
 
+    /// Receive one complete multipart message without waiting for input.
+    ///
+    /// libzmq queues a multipart message frame-by-frame. If the queue is empty,
+    /// return `None`; if it becomes empty in the middle of a message, surface an
+    /// error instead of silently dropping the partial message.
+    pub(crate) fn try_recv_multipart(&mut self) -> Result<Option<MultipartMessage>> {
+        let mut frames = Vec::new();
+        loop {
+            let mut msg = zmq::Message::new();
+            match self.socket().recv(&mut msg, zmq::DONTWAIT) {
+                Ok(_) => {
+                    let more = msg.get_more();
+                    frames.push(msg.to_vec());
+                    if !more {
+                        return Ok(Some(frames));
+                    }
+                }
+                Err(zmq::Error::EAGAIN) if frames.is_empty() => return Ok(None),
+                Err(zmq::Error::EAGAIN) => {
+                    return Err(anyhow!(
+                        "multipart receive interrupted after {} frames",
+                        frames.len()
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
     pub(crate) async fn send_multipart(&mut self, frames: MultipartMessage) -> Result<()> {
         let mut buffer = frames
             .into_iter()
@@ -247,6 +276,12 @@ pub(crate) fn create_bound_pub_socket(endpoint: &str) -> Result<ZmqSocket> {
 pub(crate) async fn recv_multipart(socket: &SharedSocket) -> Result<MultipartMessage> {
     let mut socket = socket.lock().await;
     socket.recv_multipart().await
+}
+
+#[cfg(feature = "standalone-indexer")]
+pub(crate) async fn try_recv_multipart(socket: &SharedSocket) -> Result<Option<MultipartMessage>> {
+    let mut socket = socket.lock().await;
+    socket.try_recv_multipart()
 }
 
 #[cfg(feature = "standalone-indexer")]
