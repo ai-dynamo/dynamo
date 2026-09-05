@@ -277,7 +277,7 @@ impl
                         return Some((output, state));
                     };
 
-                    let result = match decoder.process_token_ids(&data.token_ids) {
+                    let mut result = match decoder.process_token_ids(&data.token_ids) {
                         Ok(result) => result,
                         Err(e) => {
                             tracing::error!("Failed to process token_ids for choice {choice_idx}: {e}");
@@ -294,6 +294,19 @@ impl
                             return Some((output, state));
                         }
                     };
+
+                    // The engine can report its own completion (e.g. it hit `max_tokens`)
+                    // without our decoder ever detecting a local stop condition. Any text
+                    // still withheld as a partial hidden-stop-sequence match can never
+                    // complete at that point, so flush it now rather than silently dropping
+                    // it -- this is the last chance before the decoder for this choice is
+                    // discarded.
+                    if result.stop_trigger.is_none()
+                        && data.finish_reason.is_some()
+                        && let Some(flushed) = decoder.flush_jailed()
+                    {
+                        result.text.get_or_insert_with(String::new).push_str(&flushed);
+                    }
 
                     // NOTE: the `finish_reason` is computed from the generated `token_ids` alone.
                     // The `data` field can have a `finish_reason` set, coming from the underlying
@@ -647,27 +660,27 @@ impl Decoder {
         if self.jail_max_bytes > 0
             && let Some(token) = &token
         {
-            let pre_append = self.jail.len();
+            // bytes at the tail of `jail` withheld by a previous step because they could
+            // still grow into a complete hidden stop sequence; everything before this point
+            // has already been released to the caller.
+            let release_start = self.jail.len() - self.jailed_bytes;
             self.jail.push_str(token);
 
             // Check hidden stop sequences first (excluded from output)
             for seq in &self.hidden_stop_sequences {
                 if let Some(offset) = galil_seiferas::gs_find(self.jail.as_bytes(), seq.as_bytes())
                 {
-                    // return only new bytes after pre_append .. offset (excluding stop sequence)
+                    // return only new bytes after release_start .. offset (excluding stop sequence)
                     // example: seq = "ox", token = "boxes", return "b"
-                    // note: this changes when we start jailing tokens for partial matches
-                    // on the suffix of the jail with prefixes of the stop sequences
                     //
-                    // we might have returned a partial match, if so, then offset < pre_append
-                    // in that case, we return the empty string
-                    let partial_token = if offset >= pre_append {
-                        self.jail[pre_append..offset].to_string()
-                    } else {
-                        "".to_string()
-                    };
+                    // we might have returned a partial match, if so, then offset < release_start
+                    // in that case, we return no text
+                    let partial_token = (offset >= release_start)
+                        .then(|| self.jail[release_start..offset].to_string())
+                        .filter(|s| !s.is_empty());
+                    self.jailed_bytes = 0;
                     return Ok(StepResult::with_stop_trigger(
-                        Some(partial_token),
+                        partial_token,
                         StopTrigger::HiddenStopSequenceDetected(seq.to_string()),
                     ));
                 }
@@ -678,25 +691,69 @@ impl Decoder {
                 if let Some(offset) = galil_seiferas::gs_find(self.jail.as_bytes(), seq.as_bytes())
                 {
                     // For visible stop sequences, include the stop string in the output
-                    // Return all text from pre_append up to and including the stop sequence
+                    // Return all text from release_start up to and including the stop sequence
                     let stop_end = offset + seq.len();
-                    let token_with_stop = if stop_end > pre_append {
-                        self.jail[pre_append..stop_end].to_string()
-                    } else {
-                        // Stop sequence was entirely in previously returned text
-                        "".to_string()
-                    };
+                    let token_with_stop = (stop_end > release_start)
+                        .then(|| self.jail[release_start..stop_end].to_string())
+                        .filter(|s| !s.is_empty());
+                    self.jailed_bytes = 0;
                     return Ok(StepResult::with_stop_trigger(
-                        Some(token_with_stop),
+                        token_with_stop,
                         StopTrigger::VisibleStopSequenceDetected(seq.to_string()),
                     ));
                 }
             }
 
+            // No complete match. Withhold the longest tail of `jail` that is still a viable
+            // prefix of some hidden stop sequence -- a later token could complete it into a
+            // full match. Everything else since the last release is now safe to hand back:
+            // it cannot be part of a hidden stop sequence, complete or partial.
+            self.jailed_bytes =
+                Self::longest_hidden_prefix_suffix(&self.jail, &self.hidden_stop_sequences);
+            let release_end = self.jail.len() - self.jailed_bytes;
+            let released = (release_end > release_start)
+                .then(|| self.jail[release_start..release_end].to_string());
+
             Self::maybe_drain_to_max_bytes(&mut self.jail, self.jail_max_bytes);
+            return Ok(StepResult::ok(released));
         }
 
         Ok(StepResult::ok(token))
+    }
+
+    /// Releases any text still withheld as a partial hidden-stop-sequence match. Call this
+    /// once it is known no further tokens are coming (e.g. the engine reports completion
+    /// without `Decoder` having detected a local stop condition) so a stop sequence that
+    /// never completed is not silently dropped from the output.
+    pub fn flush_jailed(&mut self) -> Option<String> {
+        let flushed = self.jailed_string();
+        self.jailed_bytes = 0;
+        flushed
+    }
+
+    /// Returns the length, in bytes, of the longest suffix of `jail` that is also a strict
+    /// prefix of some hidden stop sequence -- text that might still grow into a complete
+    /// hidden stop sequence and so must not be released to the caller yet. Only considers
+    /// byte offsets that land on a `jail` char boundary, so the result is always safe to
+    /// slice with.
+    fn longest_hidden_prefix_suffix(jail: &str, hidden_stop_sequences: &[String]) -> usize {
+        let jail_bytes = jail.as_bytes();
+        let mut best = 0;
+        for seq in hidden_stop_sequences {
+            let seq_bytes = seq.as_bytes();
+            // A full-length match would already have been caught as a complete stop;
+            // only strictly shorter prefixes are candidates here.
+            let max_k = seq_bytes.len().saturating_sub(1).min(jail_bytes.len());
+            for k in (best + 1..=max_k).rev() {
+                if jail.is_char_boundary(jail_bytes.len() - k)
+                    && jail_bytes[jail_bytes.len() - k..] == seq_bytes[..k]
+                {
+                    best = k;
+                    break;
+                }
+            }
+        }
+        best
     }
 
     pub fn process_token_ids(&mut self, token_ids: &[TokenIdType]) -> Result<SeqResult> {
