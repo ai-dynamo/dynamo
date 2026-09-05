@@ -121,6 +121,14 @@ These fields are shared between a standalone DCD and each entry of a DGD `spec.c
   </ParamField>
 </Indent>
 
+<Warning>
+  Cached artifacts (for example vLLM's `torch.compile`/CUDA graph cache) are specific to the
+  backend, torch, and CUDA versions that produced them. After upgrading to a new Dynamo release —
+  or any change to the underlying backend image — clear the PVC's contents before redeploying.
+  Stale entries from an older build have caused worker crashes at startup (for example an NVML
+  assertion failure during CUDA graph capture) that disappear once the cache is emptied.
+</Warning>
+
 <ParamField path="topologyConstraint" type="TopologyConstraint">
   Component-level topology placement. See the [SpecTopologyConstraint API](full-api-reference.mdx#spectopologyconstraint).
 </ParamField>
