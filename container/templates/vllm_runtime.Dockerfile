@@ -176,6 +176,12 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /o
 
 {% set pip_target = "--system" if device == "cuda" else "--python /opt/venv/bin/python" %}
 {% set python_executable = "python3" if device == "cuda" else "/opt/venv/bin/python" %}
+{# cuda installs into the system interpreter (/usr/local/bin); xpu and cpu run out
+   of ${VIRTUAL_ENV} and prepend ${VIRTUAL_ENV}/bin to PATH. #}
+{% set vllm_rs_link = "/usr/local/bin/vllm-rs" if device == "cuda" else "${VIRTUAL_ENV}/bin/vllm-rs" %}
+{# Inline expression, not a block tag: render.py leaves trim_blocks off, so a tag
+   on its own line inside the RUN breaks the backslash continuation. #}
+{% set vllm_rs_required = "1" if device == "cuda" else "0" %}
 
 # The vLLM 0.28.0 release images resolve the unbounded `transformers>=5.5.3`
 # requirement to 5.15.1, but vLLM-Omni 0.28.0rc1 caps Transformers below 5.15.
@@ -497,6 +503,20 @@ expected = sys.argv[1]
 if actual != expected:
     raise RuntimeError(f"expected transformers {expected}, found {actual}")
 PY
+
+# `vllm-rs` ships inside the installed `vllm` package, not as a console script;
+# linking it keeps the binary at that package's vLLM revision. Fatal on cuda only.
+RUN set -eu; \
+    pkg="$({{ python_executable }} -c 'import os, vllm; print(os.path.dirname(vllm.__file__))')"; \
+    if [ -f "${pkg}/vllm-rs" ] && [ -x "${pkg}/vllm-rs" ]; then \
+        ln -sf "${pkg}/vllm-rs" {{ vllm_rs_link }}; \
+        vllm-rs --help >/dev/null; \
+    elif [ "{{ vllm_rs_required }}" = "1" ]; then \
+        echo "ERROR: installed vllm package (${pkg}) ships no executable vllm-rs" >&2; \
+        exit 1; \
+    else \
+        echo "WARNING: installed vllm package (${pkg}) ships no executable vllm-rs; not linking it onto PATH" >&2; \
+    fi
 
 USER dynamo
 
