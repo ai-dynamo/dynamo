@@ -3,11 +3,14 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use parking_lot::Mutex;
+
 use crate::{
     kv_router::{
         KvRouter,
         indexer::ApproximateRequestLease,
         metrics::RouterRequestMetrics,
+        minimal_cache_loss::{CacheHistory, CacheHistoryRequest, RouteObservation},
         prefill_router::BYPASS_REMOTE_PREFILL_ANNOTATION,
         request_lease::RequestAttemptLease,
         scheduler::{DefaultWorkerSelector, SchedulerBookingDescriptor},
@@ -72,6 +75,39 @@ struct MaterializedOutputBlocks {
     blocks: Vec<ApproximateLruBlock>,
     start_position: usize,
     private_blocks: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct CacheLossWorkerOutcome {
+    complete: bool,
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    gpu_hit_tokens: u64,
+    #[serde(default)]
+    cpu_hit_tokens: u64,
+    #[serde(default)]
+    cpu_lookup_tokens: u64,
+}
+
+pub(super) struct CacheLossTracking {
+    route: RouteObservation,
+    history: Arc<Mutex<CacheHistory>>,
+    request: CacheHistoryRequest,
+}
+
+impl CacheLossTracking {
+    pub(super) fn new(
+        route: RouteObservation,
+        history: Arc<Mutex<CacheHistory>>,
+        request: CacheHistoryRequest,
+    ) -> Self {
+        Self {
+            route,
+            history,
+            request,
+        }
+    }
 }
 
 pub(crate) fn prompt_private_blocks(
@@ -581,6 +617,12 @@ where
     record_itl_at_completion: bool,
     prefill_marked: bool,
     migration_state: Option<MigrationState>,
+    cache_loss: Option<RouteObservation>,
+    cache_loss_recorded: bool,
+    cache_history: Option<Arc<Mutex<CacheHistory>>>,
+    cache_history_request: Option<CacheHistoryRequest>,
+    cache_history_verified: bool,
+    cache_history_finalized: bool,
     _lora_load: Option<LoraLoadGuard>,
 }
 
@@ -595,11 +637,13 @@ where
         worker: WorkerWithDpRank,
         attempt: AdmissionAttempt,
         request: &PreprocessedRequest,
+        cache_loss_tracking: Option<CacheLossTracking>,
     ) -> Self {
         Self::new_kv_with_cleanup(
             request_metrics,
             KvRequestCleanup::new(chooser, context_id, worker, attempt),
             request,
+            cache_loss_tracking,
         )
     }
 
@@ -607,6 +651,7 @@ where
         request_metrics: Arc<RouterRequestMetrics>,
         cleanup: KvRequestCleanup<Sel>,
         request: &PreprocessedRequest,
+        cache_loss_tracking: Option<CacheLossTracking>,
     ) -> Self {
         let chooser = &cleanup.chooser;
         let block_size = chooser.block_size() as usize;
@@ -618,10 +663,18 @@ where
         let attempt_id = cleanup
             .lifecycle()
             .map(|lifecycle| lifecycle.booking().attempt_id);
+        let cache_loss = cache_loss_tracking.as_ref().map(|tracking| tracking.route);
+        let cache_history = cache_loss_tracking
+            .as_ref()
+            .map(|tracking| Arc::clone(&tracking.history));
+        let cache_history_request = cache_loss_tracking.map(|tracking| tracking.request);
         let track_output_blocks =
             attempt_id.is_some() && chooser.kv_router_config().router_track_output_blocks;
         if attempt_id.is_some() {
             request_metrics.requests_started_total().inc();
+            if let Some(cache_loss) = cache_loss {
+                request_metrics.observe_cache_loss_input(cache_loss.prompt_tokens);
+            }
         }
         let approximate_lru = cleanup.approximate_lru.clone();
         let output_hashes = approximate_lru
@@ -641,6 +694,12 @@ where
             record_itl_at_completion: false,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
+            cache_loss,
+            cache_loss_recorded: false,
+            cache_history,
+            cache_history_request,
+            cache_history_verified: false,
+            cache_history_finalized: false,
             _lora_load: None,
         }
     }
@@ -670,6 +729,12 @@ where
             record_itl_at_completion: true,
             prefill_marked: false,
             migration_state: request.migration_state.clone(),
+            cache_loss: None,
+            cache_loss_recorded: false,
+            cache_history: None,
+            cache_history_request: None,
+            cache_history_verified: false,
+            cache_history_finalized: false,
             _lora_load: lora_load,
         }
     }
@@ -760,6 +825,11 @@ where
             }
         }
 
+        if let (Some(data), Some(history)) =
+            (item.data.as_ref(), self.cache_history_request.as_mut())
+        {
+            history.observe_output(data.index.unwrap_or(0), &data.token_ids);
+        }
         if self
             .cleanup
             .lifecycle()
@@ -785,6 +855,7 @@ where
             );
         }
         self.observability.observe_tokens(new_tokens);
+        self.observe_cache_loss_worker_outcome(item);
         let cumulative_osl = self.observability.cumulative_osl();
         let Some(update) = self.output_blocks.observe(cumulative_osl) else {
             return;
@@ -810,13 +881,106 @@ where
 
     pub(super) async fn finish(&mut self) {
         // Metrics must observe the completed request before cleanup releases its state.
+        self.record_cache_loss_incomplete();
+        self.finalize_cache_history();
         self.observability
             .record_metrics(self.record_itl_at_completion);
         self.cleanup.finish().await;
     }
 
     pub(super) async fn abort(&mut self) {
+        self.record_cache_loss_incomplete();
+        self.finalize_cache_history();
+        if let Some(lease) = &self.approximate_lru {
+            lease.release_now();
+        }
         self.cleanup.finish().await;
+    }
+
+    fn observe_cache_loss_worker_outcome(&mut self, item: &Annotated<LLMEngineOutput>) {
+        if self.cache_loss_recorded {
+            return;
+        }
+        let Some(route) = self.cache_loss else {
+            return;
+        };
+        let Some(value) = item
+            .data
+            .as_ref()
+            .and_then(|data| data.engine_data.as_ref())
+            .and_then(|data| data.get("cache_loss"))
+        else {
+            return;
+        };
+        let Ok(outcome) = serde_json::from_value::<CacheLossWorkerOutcome>(value.clone()) else {
+            self.record_cache_loss_incomplete();
+            return;
+        };
+        if !outcome.complete || outcome.prompt_tokens != route.prompt_tokens {
+            self.record_cache_loss_incomplete();
+            return;
+        }
+
+        let f1 = route.previously_computed_tokens;
+        let f2 = route.best_router_tokens.min(f1);
+        let f3 = route.selected_router_tokens.min(f2);
+        let f4 = outcome
+            .gpu_hit_tokens
+            .saturating_add(outcome.cpu_lookup_tokens)
+            .min(f3);
+        let f5 = outcome
+            .gpu_hit_tokens
+            .saturating_add(outcome.cpu_hit_tokens)
+            .min(f4);
+        self.observability
+            .request_metrics()
+            .observe_cache_loss_funnel([route.prompt_tokens, f1, f2, f3, f4, f5]);
+        if let Some(history_request) = self.cache_history_request.as_mut() {
+            let prompt_hashes = history_request.prompt_hashes();
+            let Some(cache_history) = self.cache_history.as_ref() else {
+                self.record_cache_loss_incomplete();
+                return;
+            };
+            let mut history = cache_history.lock();
+            history_request.record_prompt(&mut history, prompt_hashes);
+            let stats = history.stats();
+            self.observability
+                .request_metrics()
+                .set_cache_loss_history(stats);
+            self.cache_history_verified = true;
+        }
+        self.cache_loss_recorded = true;
+    }
+
+    fn record_cache_loss_incomplete(&mut self) {
+        if self.cache_loss_recorded || self.cache_loss.is_none() {
+            return;
+        }
+        self.observability
+            .request_metrics()
+            .observe_cache_loss_incomplete();
+        self.cache_loss_recorded = true;
+    }
+
+    fn finalize_cache_history(&mut self) {
+        if !self.cache_history_verified || self.cache_history_finalized {
+            return;
+        }
+        self.cache_history_finalized = true;
+        let Some(history_request) = self.cache_history_request.as_mut() else {
+            return;
+        };
+        let prompt_hashes = history_request.prompt_hashes();
+        let output_hashes = history_request.output_hashes();
+        let Some(cache_history) = self.cache_history.as_ref() else {
+            return;
+        };
+        let mut history = cache_history.lock();
+        history_request.finalize(&mut history, prompt_hashes, output_hashes);
+        let stats = history.stats();
+        self.observability
+            .request_metrics()
+            .set_cache_loss_history(stats);
     }
 }
 
@@ -825,6 +989,8 @@ where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
     fn drop(&mut self) {
+        self.record_cache_loss_incomplete();
+        self.finalize_cache_history();
         self.observability
             .record_metrics(self.record_itl_at_completion);
         // RequestCleanup drops immediately afterward and performs resource cleanup.
@@ -991,6 +1157,15 @@ mod prefill_start_tests {
     }
 
     fn test_metrics() -> Arc<RouterRequestMetrics> {
+        fn counter(name: &str) -> prometheus::IntCounter {
+            prometheus::IntCounter::new(name, name).unwrap()
+        }
+        fn counter_vec(name: &str, label: &str) -> prometheus::IntCounterVec {
+            prometheus::IntCounterVec::new(prometheus::Opts::new(name, name), &[label]).unwrap()
+        }
+        fn gauge(name: &str) -> prometheus::IntGauge {
+            prometheus::IntGauge::new(name, name).unwrap()
+        }
         fn hist(name: &str) -> prometheus::Histogram {
             prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(name, name)).unwrap()
         }
@@ -1014,6 +1189,20 @@ mod prefill_start_tests {
             )
             .unwrap(),
             overlap_blocks_lost: hist_vec("overlap_blocks_lost"),
+            cache_loss_observation_input_tokens_total: counter(
+                "cache_loss_observation_input_tokens_total",
+            ),
+            cache_loss_funnel_tokens_total: counter_vec("cache_loss_funnel_tokens_total", "stage"),
+            cache_loss_observations_total: counter_vec("cache_loss_observations_total", "result"),
+            cache_loss_history_block_records: gauge("cache_loss_history_block_records"),
+            cache_loss_history_unique_hashes: gauge("cache_loss_history_unique_hashes"),
+            cache_loss_history_represented_tokens: gauge("cache_loss_history_represented_tokens"),
+            cache_loss_history_estimated_bytes: gauge("cache_loss_history_estimated_bytes"),
+            cache_loss_history_capacity_bytes: gauge("cache_loss_history_capacity_bytes"),
+            cache_loss_history_capacity_blocks: gauge("cache_loss_history_capacity_blocks"),
+            cache_loss_history_oldest_chunk_age_seconds: gauge(
+                "cache_loss_history_oldest_chunk_age_seconds",
+            ),
         })
     }
 

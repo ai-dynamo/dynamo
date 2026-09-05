@@ -25,11 +25,15 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
+use parking_lot::Mutex;
 use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector,
+        KvRouter,
+        metrics::RouterRequestMetrics,
+        minimal_cache_loss::{self, CacheHistory},
+        scheduler::DefaultWorkerSelector,
         to_worker_selection_session_context,
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -247,6 +251,7 @@ where
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     policy: RoutingPolicy<Sel>,
     request_metrics: Arc<RouterRequestMetrics>,
+    cache_history: Option<Arc<Mutex<CacheHistory>>>,
     affinity: Option<AffinityCoordinator>,
     session_affinity_mode: SessionAffinityMode,
     hosted_occupancy: Option<HostedOccupancy>,
@@ -402,11 +407,19 @@ where
         // and the standalone router create RoutingHost, so this covers both.
         let request_metrics =
             RouterRequestMetrics::from_component(kv_router.client().endpoint.component());
+        let cache_history =
+            minimal_cache_loss::enabled().then(|| CacheHistory::from_env(kv_router.block_size()));
+        if let Some(cache_history) = &cache_history {
+            let history = cache_history.lock();
+            let stats = history.stats();
+            request_metrics.set_cache_loss_history(stats);
+        }
 
         RoutingHost {
             inner,
             policy: RoutingPolicy::Kv(kv_router),
             request_metrics,
+            cache_history,
             affinity,
             session_affinity_mode,
             hosted_occupancy: None,
@@ -495,6 +508,7 @@ where
             inner,
             policy,
             request_metrics,
+            cache_history: None,
             affinity,
             session_affinity_mode,
             hosted_occupancy,
