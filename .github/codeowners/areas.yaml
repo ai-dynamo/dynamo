@@ -459,6 +459,7 @@ areas:
   github_team: '@ai-dynamo/dynamo-rl-codeowners'
   path_globs:
   - components/src/dynamo/common/rl/
+  - examples/rl/
   - lib/rl/
   - tests/rl/
 - label: performance
