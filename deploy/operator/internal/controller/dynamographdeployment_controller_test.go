@@ -3019,7 +3019,15 @@ func TestComponentWorkloadsReconciler_Reconcile(t *testing.T) {
 
 			var objects []client.Object
 			objects = append(objects, dgd)
-			objects = append(objects, tt.existingDCDs...)
+			t.Log("Attach the DGD owner to existing DCD fixtures")
+			// Attach the DGD controller owner before inserting existing DCDs.
+			for _, dcd := range tt.existingDCDs {
+				ownedDCD := dcd.DeepCopyObject().(client.Object)
+				ownedDCD.SetOwnerReferences([]metav1.OwnerReference{
+					*metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
+				})
+				objects = append(objects, ownedDCD)
+			}
 
 			fakeKubeClient := fake.NewClientBuilder().
 				WithScheme(s).

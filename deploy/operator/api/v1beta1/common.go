@@ -45,6 +45,7 @@ const (
 	DynamoGraphDeploymentConditionTypeAvailable            = "Available"
 	DynamoGraphDeploymentConditionTypeDynamoComponentReady = "DynamoComponentReady"
 
+	ConditionTypeOwnershipConflict            = "OwnershipConflict"
 	ConditionTypeTopologyLevelsAvailable      = "TopologyLevelsAvailable"
 	ConditionReasonAllTopologyLevelsAvailable = "AllTopologyLevelsAvailable"
 	ConditionReasonTopologyLevelsUnavailable  = "TopologyLevelsUnavailable"

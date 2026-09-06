@@ -151,7 +151,7 @@ Kubernetes: `>=1.30.0-0`
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/ai-dynamo/grove | grove(grove-charts) | v0.1.0-alpha.12-rc1 |
 | oci://ghcr.io/ai-dynamo/snapshot | snapshot | 0.1.0-rc.1 |
-| oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.13.4 |
+| oci://ghcr.io/kai-scheduler/kai-scheduler | kai-scheduler | v0.17.0 |
 
 ## Values
 

@@ -27,6 +27,7 @@ import (
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/events"
@@ -192,6 +193,18 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	programResult, programErr := program.Reconcile(ctx, workloadProgramRequest{
 		DGD: dynamoDeployment,
 	})
+	ownershipConflictCondition, ownershipConflictTransition := applyOwnershipConflict(
+		programResult.Status.Conditions,
+		dynamoDeployment.Generation,
+		programErr,
+	)
+	if ownershipConflictCondition != nil {
+		meta.SetStatusCondition(&programResult.Status.Conditions, *ownershipConflictCondition)
+	}
+	if ownershipConflictTransition == ownershipConflictRaised {
+		programResult.Eventf(corev1.EventTypeWarning, ownershipConflictCondition.Reason,
+			"Refusing to reconcile a resource with conflicting controller ownership: %s", ownershipConflictCondition.Message)
+	}
 	result = programResult.Result
 	if statusErr := r.persistWorkloadProgramResult(ctx, dynamoDeployment, programResult); statusErr != nil {
 		logger.Error(statusErr, "unable to persist workload program status")

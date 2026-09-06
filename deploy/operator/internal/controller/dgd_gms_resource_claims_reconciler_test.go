@@ -160,7 +160,13 @@ func TestDGDGMSResourceClaimsReconciler_CleansStaleNonGMSResourceClaimTemplate(t
 	}
 	templateName := "test-dgd-decode-gpu"
 	rct := &resourcev1.ResourceClaimTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: templateName, Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      templateName,
+			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(dgd, v1beta1.GroupVersion.WithKind("DynamoGraphDeployment")),
+			},
+		},
 	}
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
