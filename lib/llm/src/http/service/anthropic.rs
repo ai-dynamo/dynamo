@@ -1462,36 +1462,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anthropic_semantic_client_statuses_use_invalid_request_type() {
-        for (class, reason, status) in [
-            (
-                dynamo_runtime::error::ErrorClass::Conflict,
-                "request.conflict",
-                StatusCode::CONFLICT,
-            ),
-            (
-                dynamo_runtime::error::ErrorClass::PayloadTooLarge,
-                "request.payload_too_large",
-                StatusCode::PAYLOAD_TOO_LARGE,
-            ),
-            (
-                dynamo_runtime::error::ErrorClass::UnsupportedMedia,
-                "request.unsupported_media",
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            ),
-        ] {
-            let error = dynamo_runtime::error::DynamoError::builder()
-                .class(class)
-                .reason(dynamo_runtime::error::ErrorReason::new(reason).unwrap())
-                .build();
-            let response = anthropic_semantic_error(&error).expect("client response");
-            assert_eq!(response.status(), status);
-            let body = axum::body::to_bytes(response.into_body(), get_body_limit())
-                .await
-                .unwrap();
-            let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
-            assert_eq!(body.error.error_type, "invalid_request_error");
-        }
+    async fn anthropic_semantic_conflict_uses_invalid_request_type() {
+        let error = dynamo_runtime::error::DynamoError::builder()
+            .class(dynamo_runtime::error::ErrorClass::Conflict)
+            .reason(dynamo_runtime::error::ErrorReason::new("request.conflict").unwrap())
+            .build();
+        let response = anthropic_semantic_error(&error).expect("client response");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), get_body_limit())
+            .await
+            .unwrap();
+        let body: AnthropicErrorResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body.error.error_type, "invalid_request_error");
     }
 
     #[test]

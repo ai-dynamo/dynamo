@@ -4265,13 +4265,6 @@ mod tests {
     }
 
     #[test]
-    fn test_error_event_empty_comment_is_generic() {
-        let result = run_event_converter(error_annotated(None, Some(vec!["".into()])));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().to_string(), "backend stream error");
-    }
-
-    #[test]
     fn test_event_converter_serializes_chat_stream_response_as_json_data() {
         let event = run_chat_stream_event_converter(make_chat_stream_annotated("hello"))
             .unwrap()

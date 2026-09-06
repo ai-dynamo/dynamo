@@ -61,30 +61,16 @@ impl HasTokenIds for LLMEngineOutput {
     }
 }
 
-/// Return the semantic cause when an error chain is safe to migrate.
 fn migratable_error_in_chain<'a>(err: &'a (dyn StdError + 'static)) -> Option<&'a DynamoError> {
     let mut migratable = None;
     let mut current = Some(err);
     while let Some(source) = current {
         if let Some(error) = source.downcast_ref::<DynamoError>() {
-            match error.reason().as_str() {
-                "request.cancelled"
-                | "backend.cancelled"
-                | "capacity.exhausted"
-                | "capacity.pool_exhausted" => return None,
-                "transport.cannot_connect"
-                | "transport.disconnected"
-                | "transport.connection_timeout"
-                | "backend.cannot_connect"
-                | "backend.disconnected"
-                | "backend.connection_timeout"
-                | "backend.response_timeout"
-                | "backend.engine_shutdown"
-                | "backend.stream_incomplete"
-                | "capacity.worker_overloaded" => {
-                    migratable.get_or_insert(error);
-                }
-                _ => {}
+            if error.reason().blocks_migration() {
+                return None;
+            }
+            if error.reason().is_migration_eligible() {
+                migratable.get_or_insert(error);
             }
         }
         current = source.source();

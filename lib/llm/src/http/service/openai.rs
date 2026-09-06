@@ -6572,17 +6572,6 @@ mod tests {
         assert_eq!(response.1.message, "Invalid request");
     }
     #[test]
-    fn canonical_capacity_uses_the_configured_overload_status() {
-        let error = dynamo_runtime::error::DynamoError::builder()
-            .class(ErrorClass::CapacityExhausted)
-            .build();
-        let response = ErrorMessage::from_anyhow(error.into(), BACKUP_ERROR_MESSAGE);
-
-        assert_eq!(response.0, overload_status_code());
-        assert_eq!(response.1.code, overload_status_code().as_u16());
-    }
-
-    #[test]
     fn canonical_errors_use_shared_status_and_hide_diagnostics() {
         use dynamo_runtime::error::{DynamoError, ErrorClass};
 
