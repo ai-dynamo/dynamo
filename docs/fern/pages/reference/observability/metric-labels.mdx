@@ -7,12 +7,13 @@ subtitle: Every label dimension attached to Dynamo metric series — where each 
 
 Labels are the **dimensions** attached to Dynamo metric series, not metrics in their own right. A single metric such as `dynamo_component_requests_total` becomes many Prometheus time series once it is split by `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, and the labels the scraper adds. This page catalogs those dimensions; for the metrics themselves see the [Metrics Catalog](metrics-catalog.mdx).
 
-A label reaches a series through one of four origins:
+A label reaches a series through one of five origins:
 
 - **Auto-injected by the Dynamo runtime** — added to every metric registered through the namespace/component/endpoint hierarchy.
 - **Added at registration time by backend code** — passed by the worker when it registers an endpoint, so presence depends on the backend.
 - **Added by the metric itself** — specific to one metric family.
 - **Injected by Prometheus/Kubernetes** — attached by the scraper, not present in the exposition text the process emits.
+- **Configured deployment-wide** — set by the operator through [`DYN_METRICS_CONST_LABELS`](environment-variables.mdx), attached to every series the process exposes unless the series already carries that label.
 
 ## Scope legend
 

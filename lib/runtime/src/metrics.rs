@@ -237,8 +237,9 @@ impl PrometheusMetric for prometheus::CounterVec {
 /// process exposes, e.g. `DYN_METRICS_CONST_LABELS="cluster=us-west-2,team=search"`.
 ///
 /// Format: comma-separated `name=value` pairs (whitespace around names and values is trimmed; a
-/// value may itself contain `=`). Names must match `[a-zA-Z_][a-zA-Z0-9_]*`, must not start with
-/// the reserved `__` prefix, and must not collide with the auto-injected labels
+/// value may itself contain `=`, a name may not). Names must match `[a-zA-Z_][a-zA-Z0-9_]*`, must
+/// not start with the reserved `__` prefix, must not be `le` or `quantile` (histogram bucket and
+/// summary quantile labels), must not repeat, and must not collide with the auto-injected labels
 /// (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`). A label a metric
 /// already carries is never overwritten. The value is parsed once per process; an invalid value is
 /// logged and ignored as a whole so a typo cannot half-apply.
@@ -425,11 +426,7 @@ fn drop_duplicate_expfmt_samples(text: &str, seen_series: &mut HashSet<SeriesKey
 
 /// [`SeriesKey`] of a sample line; `None` if the line does not parse as a sample.
 fn expfmt_series_key(line: &str) -> Option<SeriesKey> {
-    let name_end = line.find(|c: char| c == '{' || c.is_whitespace())?;
-    let (name, rest) = line.split_at(name_end);
-    if name.is_empty() {
-        return None;
-    }
+    let (_indent, name, _gap, rest) = split_expfmt_sample_name(line)?;
     let labels = match rest.strip_prefix('{') {
         Some(after_brace) => {
             let close = expfmt_label_block_end(after_brace)?;
@@ -440,14 +437,24 @@ fn expfmt_series_key(line: &str) -> Option<SeriesKey> {
     Some(series_key_from_pairs(name, labels))
 }
 
-/// Rewrite one `name{labels} value [timestamp]` / `name value [timestamp]` line; `None` if the
-/// line does not look like a sample.
-fn label_expfmt_sample_line(line: &str, const_labels: &[(String, String)]) -> Option<String> {
-    let name_end = line.find(|c: char| c == '{' || c.is_whitespace())?;
-    let (name, rest) = line.split_at(name_end);
+/// Split a sample line into `(indent, name, gap, rest)`, where `rest` starts at the label block or
+/// at the value. The exposition format tolerates leading whitespace and whitespace between the
+/// metric name and `{`, so both are preserved rather than treated as a parse failure.
+fn split_expfmt_sample_name(line: &str) -> Option<(&str, &str, &str, &str)> {
+    let (indent, after_indent) = line.split_at(line.len() - line.trim_start().len());
+    let name_end = after_indent.find(|c: char| c == '{' || c.is_whitespace())?;
+    let (name, tail) = after_indent.split_at(name_end);
     if name.is_empty() {
         return None;
     }
+    let (gap, rest) = tail.split_at(tail.len() - tail.trim_start().len());
+    Some((indent, name, gap, rest))
+}
+
+/// Rewrite one `name{labels} value [timestamp]` / `name value [timestamp]` line; `None` if the
+/// line does not look like a sample.
+fn label_expfmt_sample_line(line: &str, const_labels: &[(String, String)]) -> Option<String> {
+    let (indent, name, gap, rest) = split_expfmt_sample_name(line)?;
     let mut additions = String::new();
     if let Some(after_brace) = rest.strip_prefix('{') {
         let close = expfmt_label_block_end(after_brace)?;
@@ -465,7 +472,7 @@ fn label_expfmt_sample_line(line: &str, const_labels: &[(String, String)]) -> Op
             need_comma = true;
         }
         Some(format!(
-            "{name}{{{inner}{additions}{}",
+            "{indent}{name}{gap}{{{inner}{additions}{}",
             &after_brace[close..]
         ))
     } else {
@@ -475,7 +482,7 @@ fn label_expfmt_sample_line(line: &str, const_labels: &[(String, String)]) -> Op
             }
             push_expfmt_label(&mut additions, k, v);
         }
-        Some(format!("{name}{{{additions}}}{rest}"))
+        Some(format!("{indent}{name}{{{additions}}}{gap}{rest}"))
     }
 }
 
@@ -1644,6 +1651,41 @@ mod test_metricsregistry_units {
             apply_const_labels_to_expfmt("garbage{unterminated 1\n", &labels),
             "garbage{unterminated 1\n"
         );
+    }
+
+    #[test]
+    fn test_expfmt_rewriter_handles_legal_whitespace_forms() {
+        // The exposition format allows leading whitespace on a sample line and whitespace between
+        // the metric name and its label block; neither may corrupt the rewritten line.
+        let labels = vec![("cluster".to_string(), "prod".to_string())];
+        let text = concat!(
+            "  indented 1\n",
+            "spaced {a=\"1\"} 2\n",
+            "spaced\t{a=\"2\"} 3\n",
+            "plain 4 1700000000\n",
+        );
+        let expected = concat!(
+            "  indented{cluster=\"prod\"} 1\n",
+            "spaced {a=\"1\",cluster=\"prod\"} 2\n",
+            "spaced\t{a=\"2\",cluster=\"prod\"} 3\n",
+            "plain{cluster=\"prod\"} 4 1700000000\n",
+        );
+        assert_eq!(apply_const_labels_to_expfmt(text, &labels), expected);
+
+        // The same forms must resolve to the same series identity as the canonical spelling, so
+        // whitespace cannot defeat deduplication.
+        let mut seen = HashSet::new();
+        let out = drop_duplicate_expfmt_samples(
+            concat!(
+                "dup{a=\"1\"} 1\n",
+                "  dup{a=\"1\"} 2\n",
+                "dup {a=\"1\"} 3\n",
+                "dup 4\n",
+            ),
+            &mut seen,
+        );
+        assert_eq!(out, concat!("dup{a=\"1\"} 1\n", "dup 4\n"));
+        assert_eq!(seen.len(), 2);
     }
 
     #[test]

@@ -111,6 +111,10 @@ pub mod runtime {
         /// System status server port
         pub const DYN_SYSTEM_PORT: &str = "DYN_SYSTEM_PORT";
 
+        /// Comma-separated `name=value` pairs attached as constant labels to every Prometheus
+        /// metric this process exposes. Read by `metrics::env_const_labels()`.
+        pub const DYN_METRICS_CONST_LABELS: &str = "DYN_METRICS_CONST_LABELS";
+
         /// Use endpoint health status for system health
         /// ⚠️ DEPRECATED: No longer used
         pub const DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS: &str =
