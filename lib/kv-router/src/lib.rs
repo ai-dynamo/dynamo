@@ -55,11 +55,9 @@ pub use config::{
     RouterQueuePolicy, SharedCacheType,
 };
 pub use identity::{DEFAULT_ROUTING_GROUP, DcId, RoutingPartitionId, RoutingPartitionRef};
-#[allow(deprecated)]
 pub use indexer::{
-    AnchorAwareBranchShardedIndexer, AnchorRef, AnchorTask, BranchShardedIndexer,
-    LowerTierContinuation, LowerTierIndexer, MaybeError, SharedKvCache, SyncIndexer,
-    ThreadPoolIndexer,
+    AnchorRef, AnchorTask, BranchShardedIndexer, LowerTierContinuation, LowerTierIndexer,
+    MaybeError, SharedKvCache, SyncIndexer, ThreadPoolIndexer,
 };
 pub use nested_map::PositionalIndexer;
 pub use protocols::{
