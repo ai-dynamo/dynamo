@@ -414,20 +414,6 @@ fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
     })
 }
 
-#[cfg(test)]
-mod candidate_tests {
-    use super::{pb, top_n_candidates};
-
-    #[test]
-    fn full_vocabulary_logprobs_select_all_candidates() {
-        let candidates = top_n_candidates(u32::MAX).expect("map full vocabulary");
-        assert_eq!(
-            candidates.select,
-            Some(pb::candidate_tokens::Select::All(true))
-        );
-    }
-}
-
 fn normalize_top_k(top_k: Option<i32>) -> Result<u32, DynamoError> {
     match top_k {
         None | Some(-1) | Some(0) => Ok(0),
@@ -1085,5 +1071,19 @@ fn normalize_logprob(logprob: f32) -> f64 {
         f64::from(logprob).max(VLLM_LOGPROB_FLOOR)
     } else {
         VLLM_LOGPROB_FLOOR
+    }
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::{pb, top_n_candidates};
+
+    #[test]
+    fn full_vocabulary_logprobs_select_all_candidates() {
+        let candidates = top_n_candidates(u32::MAX).expect("map full vocabulary");
+        assert_eq!(
+            candidates.select,
+            Some(pb::candidate_tokens::Select::All(true))
+        );
     }
 }
