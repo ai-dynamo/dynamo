@@ -620,8 +620,7 @@ jobs:
       operator_tag: ${{ needs.deploy-operator.outputs.operator_tag }}
       test_file: tests/deploy/test_lora_churn.py
       test_name: lora_churn
-      extra_pytest_args: >-
-        --frontend-image=${{ secrets.AZURE_ACR_HOSTNAME }}/${{ vars.ACR_REPOSITORY }}:${{ needs.frontend-copy-to-acr.outputs.image_tag }}
+      frontend_image_tag: ${{ needs.frontend-copy-to-acr.outputs.image_tag }}
       timeout_minutes: 40
     secrets: inherit
 
