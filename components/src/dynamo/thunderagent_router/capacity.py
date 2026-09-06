@@ -34,6 +34,14 @@ at most 2x GPU-only, independent of how large ``hicache-ratio`` is configured) i
 starting point between those two known-bad extremes, not a validated final constant --
 until real GPU-vs-host residency is tracked, this is the best available proxy and needs
 empirical re-validation across concurrencies.
+
+Separately, the budget also carries ``max_programs``: SGLang's own ``max_running_requests``
+(divided per DP rank), published into the card as ``runtime_config.max_num_seqs``
+(``dynamo/sglang/register.py``) but never read here before now. Token-sum admission alone
+is blind to the actual per-replica concurrent-request ceiling the engine enforces, which
+matters independently of KV memory -- a replica can be nowhere near its token budget and
+still not be able to schedule another concurrent request. Gating on both dimensions ties
+admission to a real, engine-enforced signal rather than a token proxy alone.
 """
 
 from __future__ import annotations
@@ -52,6 +60,16 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
+class ReplicaCapacity:
+    """One replica's admission budget: a token budget plus an optional request-count
+    ceiling (SGLang's ``max_running_requests``, per DP rank). ``max_programs=None`` means
+    the card didn't publish one -- callers must treat that as unlimited, not zero."""
+
+    tokens: int
+    max_programs: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class _Card:
     """Everything ``snapshot()`` needs from one card, parsed once.
 
@@ -60,6 +78,7 @@ class _Card:
     """
 
     pool_tokens: Optional[int]
+    max_programs: Optional[int]
     start_rank: int
     dp_size: int
 
@@ -91,11 +110,11 @@ class WorkerCapacityProvider:
             logger.warning("WorkerCapacityProvider shutdown error: %s", exc)
         self._subscriber = None
 
-    def snapshot(self) -> dict[ReplicaKey, int]:
-        """Program-retention budget in tokens, keyed by ``(worker_id, dp_rank)``.
+    def snapshot(self) -> dict[ReplicaKey, ReplicaCapacity]:
+        """Per-replica admission budget, keyed by ``(worker_id, dp_rank)``.
 
-        ``total_kv_blocks`` is per rank, so a worker owning ``D`` ranks yields ``D`` entries
-        of that value -- filed under the key it describes, not rescaled.
+        ``total_kv_blocks``/``max_num_seqs`` are both per rank, so a worker owning ``D``
+        ranks yields ``D`` entries of each -- filed under the key it describes, not rescaled.
         """
         if self._subscriber is None:
             return {}
@@ -105,7 +124,7 @@ class WorkerCapacityProvider:
             logger.debug("WorkerCapacityProvider snapshot error: %s", exc)
             return {}
 
-        out: dict[ReplicaKey, int] = {}
+        out: dict[ReplicaKey, ReplicaCapacity] = {}
         for worker_id_str, card_json in cards.items():
             try:
                 worker_id = int(worker_id_str)
@@ -114,8 +133,11 @@ class WorkerCapacityProvider:
             card = self._parse_card(card_json)
             if card.pool_tokens is None:
                 continue
+            capacity = ReplicaCapacity(
+                tokens=card.pool_tokens, max_programs=card.max_programs
+            )
             for dp_rank in range(card.start_rank, card.start_rank + card.dp_size):
-                out[(worker_id, dp_rank)] = card.pool_tokens
+                out[(worker_id, dp_rank)] = capacity
         return out
 
     def live_worker_ids(self) -> set[int]:
@@ -144,10 +166,11 @@ class WorkerCapacityProvider:
         except json.JSONDecodeError:
             body = None
         if not isinstance(body, dict):
-            return _Card(pool_tokens=None, start_rank=0, dp_size=1)
+            return _Card(pool_tokens=None, max_programs=None, start_rank=0, dp_size=1)
         runtime_config = body.get("runtime_config") or {}
         return _Card(
             pool_tokens=self._pool_tokens(body, runtime_config),
+            max_programs=self._max_programs(runtime_config),
             start_rank=self._start_rank(runtime_config),
             dp_size=self._dp_size(runtime_config),
         )
@@ -172,6 +195,14 @@ class WorkerCapacityProvider:
         # Cap the host-offload credit at the GPU pool's own size (module docstring):
         # admission budget is at most 2x GPU-only, regardless of hicache-ratio.
         return tokens + min(offloaded, tokens)
+
+    @staticmethod
+    def _max_programs(runtime_config: dict) -> Optional[int]:
+        """SGLang's ``max_running_requests``, already divided per DP rank by the publisher
+        (``dynamo/sglang/register.py``/``capacity.py::per_rank_max_running_requests``).
+        ``None`` when the card doesn't say -- callers must treat that as unlimited."""
+        declared = runtime_config.get("max_num_seqs")
+        return declared if isinstance(declared, int) and declared > 0 else None
 
     @staticmethod
     def _start_rank(runtime_config: dict) -> int:

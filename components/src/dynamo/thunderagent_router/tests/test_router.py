@@ -12,6 +12,7 @@ from typing import Optional
 
 import pytest
 
+from dynamo.thunderagent_router.capacity import ReplicaCapacity
 from dynamo.thunderagent_router.program_state import (
     ProgramLifecycle,
     ProgramStatus,
@@ -24,13 +25,23 @@ pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
 @dataclass
 class FakeCapacity:
-    """Stand-in for WorkerCapacityProvider with configurable replica state."""
+    """Stand-in for WorkerCapacityProvider with configurable replica state.
+
+    ``max_programs`` is a separate dict, not folded into ``workers``, so every existing
+    call site that only cares about token capacity keeps working unchanged -- a replica
+    absent from ``max_programs`` snapshots with ``max_programs=None`` (unlimited), same as
+    a card that never published ``max_num_seqs``.
+    """
 
     workers: dict[ReplicaKey, int] = field(default_factory=dict)
+    max_programs: dict[ReplicaKey, int] = field(default_factory=dict)
     live_workers: Optional[set[int]] = None
 
-    def snapshot(self) -> dict[ReplicaKey, int]:
-        return dict(self.workers)
+    def snapshot(self) -> dict[ReplicaKey, ReplicaCapacity]:
+        return {
+            key: ReplicaCapacity(tokens=tokens, max_programs=self.max_programs.get(key))
+            for key, tokens in self.workers.items()
+        }
 
     def live_worker_ids(self) -> set[int]:
         if self.live_workers is not None:
@@ -41,8 +52,11 @@ class FakeCapacity:
 def make_router(
     capacity_workers: Optional[dict[ReplicaKey, int]] = None,
     config: Optional[ThunderAgentConfig] = None,
+    capacity_max_programs: Optional[dict[ReplicaKey, int]] = None,
 ) -> tuple[ThunderAgentScheduler, FakeCapacity]:
-    capacity = FakeCapacity(workers=capacity_workers or {})
+    capacity = FakeCapacity(
+        workers=capacity_workers or {}, max_programs=capacity_max_programs or {}
+    )
     cfg = config or ThunderAgentConfig(
         scheduler_interval_seconds=0.05,
         resume_timeout_seconds=2.0,
@@ -542,6 +556,114 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
         if p.lifecycle == ProgramLifecycle.PAUSED
     )
     assert paused == 6
+
+
+@pytest.mark.asyncio
+async def test_new_program_queues_when_count_ceiling_full_even_with_token_headroom():
+    """max_programs (SGLang's max_running_requests, per DP rank) can be the binding
+    constraint even with abundant token headroom -- the two dimensions are independent."""
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=10.0,
+        resume_timeout_seconds=2.0,
+        pause_threshold=1.0,
+        resume_hysteresis=0.0,
+    )
+    workers = {(1, 0): 1_000_000}  # huge token budget, never the binding constraint
+    router, _ = make_router(
+        capacity_workers=workers,
+        capacity_max_programs={(1, 0): 1},
+        config=cfg,
+    )
+    await router.before_request("existing", estimated_prompt_tokens=10)
+    place(router, "existing", (1, 0))
+
+    waiter = asyncio.create_task(
+        router.before_request("new", estimated_prompt_tokens=10)
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(waiter), timeout=0.05)
+    assert router._table.programs["new"].lifecycle == ProgramLifecycle.PAUSED
+
+    async with router._lock:
+        router._resume_program(router._table.programs["new"], (1, 0))
+    decision = await asyncio.wait_for(waiter, timeout=1.0)
+    assert decision.was_paused is True
+
+
+@pytest.mark.asyncio
+async def test_pause_until_safe_pauses_on_count_pressure_even_under_token_budget():
+    """A replica can be far under its token budget and still need to shed load if it's at
+    its request-count ceiling."""
+    cfg = ThunderAgentConfig(
+        pause_threshold=0.80,
+        pause_target=0.80,
+        acting_token_weight=1.0,
+        scheduler_interval_seconds=10.0,
+    )
+    workers = {(1, 0): 1_000_000}
+    router, _ = make_router(
+        capacity_workers=workers,
+        capacity_max_programs={(1, 0): 2},
+        config=cfg,
+    )
+    for pid in ["a", "b"]:
+        await router.before_request(pid, estimated_prompt_tokens=10)
+        place(router, pid, (1, 0))
+        await router.after_request(pid, prompt_tokens=10, completion_tokens=0)
+
+    router._pause_until_safe_locked(usage(router))
+
+    paused = [
+        pid
+        for pid in ["a", "b"]
+        if router._table.programs[pid].lifecycle == ProgramLifecycle.PAUSED
+    ]
+    assert len(paused) == 1
+
+
+@pytest.mark.asyncio
+async def test_greedy_resume_respects_count_ceiling_even_with_token_headroom():
+    """A replica with abundant token headroom must still cap how many paused programs it
+    resumes at its request-count ceiling.
+
+    Capacity is attached after setup (same trick as
+    test_scheduler_tick_resumes_before_pausing_new_overload): admitting and pausing all
+    three programs cold-start, with no capacity visible yet, avoids both the live
+    admission-time count gate and the "new programs queue behind existing paused ones"
+    fairness rule -- neither is what this test is about.
+    """
+    cfg = ThunderAgentConfig(
+        pause_threshold=1.0,
+        pause_target=1.0,
+        resume_hysteresis=0.0,
+        scheduler_interval_seconds=10.0,
+    )
+    router, capacity = make_router(config=cfg)
+
+    for pid in ["resident", "p1", "p2"]:
+        await router.before_request(pid, estimated_prompt_tokens=10)
+        place(router, pid, (1, 0))
+
+    for pid in ["p1", "p2"]:
+        await router.after_request(pid, prompt_tokens=10, completion_tokens=0)
+        await router._pause_acting(pid)
+        assert router._table.programs[pid].lifecycle == ProgramLifecycle.PAUSED
+
+    capacity.workers = {(1, 0): 1_000_000}
+    capacity.max_programs = {(1, 0): 2}
+
+    async with router._lock:
+        router._greedy_resume_locked(usage(router))
+
+    lifecycles = {pid: router._table.programs[pid].lifecycle for pid in ["p1", "p2"]}
+    resumed = [pid for pid, lc in lifecycles.items() if lc == ProgramLifecycle.ACTIVE]
+    still_paused = [
+        pid for pid, lc in lifecycles.items() if lc == ProgramLifecycle.PAUSED
+    ]
+    # Token budget alone would let both through (1_000_000 capacity, ~10 tokens each);
+    # only the request-count ceiling (2 slots, 1 already held by "resident") caps it at 1.
+    assert len(resumed) == 1
+    assert len(still_paused) == 1
 
 
 @pytest.mark.fault_tolerance

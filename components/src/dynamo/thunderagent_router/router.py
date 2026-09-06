@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
+from dynamo.thunderagent_router.capacity import ReplicaCapacity, WorkerCapacityProvider
 from dynamo.thunderagent_router.program_state import (
     Program,
     ProgramLifecycle,
@@ -49,12 +49,19 @@ class _ReplicaUsage:
     """One replica's occupancy, from a single pass over the program table.
 
     Kept live for a whole tick: pause and resume adjust it as they mutate the table. No
-    ``used_decayed`` field -- it moves with the clock, so it is derived on demand.
+    ``used_decayed`` field -- it moves with the clock, so it is derived on demand. Program
+    count is ``len(programs)`` rather than a separate counter, so it can't drift from the
+    list every mutation already has to touch.
     """
 
     capacity: int
+    max_programs: Optional[int] = None
     used: int = 0
     programs: list[Program] = field(default_factory=list)
+
+    @property
+    def count(self) -> int:
+        return len(self.programs)
 
 
 @dataclass
@@ -453,7 +460,7 @@ class ThunderAgentScheduler:
         return int(program.token_total * (2.0 ** (-(idle / tau))))
 
     def _replica_usage_locked(
-        self, capacities: dict[ReplicaKey, int]
+        self, capacities: dict[ReplicaKey, ReplicaCapacity]
     ) -> dict[ReplicaKey, _ReplicaUsage]:
         """Bucket ACTIVE programs by replica in one O(programs + replicas) pass.
 
@@ -461,7 +468,9 @@ class ThunderAgentScheduler:
         in ``capacities``, are counted against nothing -- as before.
         """
         usage = {
-            key: _ReplicaUsage(capacity=capacity)
+            key: _ReplicaUsage(
+                capacity=capacity.tokens, max_programs=capacity.max_programs
+            )
             for key, capacity in capacities.items()
         }
         buffer = self._cfg.buffer_per_program
@@ -508,6 +517,11 @@ class ThunderAgentScheduler:
         for key, entry in usage.items():
             if entry.capacity - entry.used < required:
                 continue
+            # max_programs is SGLang's own max_running_requests (per DP rank): a real,
+            # engine-enforced concurrent-request ceiling independent of KV memory. None
+            # means the card didn't publish one -- unlimited, not zero.
+            if entry.max_programs is not None and entry.count >= entry.max_programs:
+                continue
             if best_used is None or entry.used < best_used:
                 best_key, best_used = key, entry.used
         return best_key
@@ -516,6 +530,12 @@ class ThunderAgentScheduler:
         soft_until = time.monotonic() + self._cfg.scheduler_interval_seconds * 1.5
         for entry in usage.values():
             util = entry.used / entry.capacity
+            count_util = (
+                entry.count / entry.max_programs
+                if entry.max_programs is not None
+                else 0.0
+            )
+            util = max(util, count_util)
             if not (
                 self._cfg.soft_demote_threshold <= util < self._cfg.pause_threshold
             ):
@@ -531,7 +551,12 @@ class ThunderAgentScheduler:
         """Shed load from every over-threshold replica. Caller holds ``self._lock``.
 
         Smallest-ACTING-first then mark REASONING, as upstream. Candidate order is taken
-        once per replica instead of rescanning the table on every pause.
+        once per replica instead of rescanning the table on every pause. A replica is
+        over-threshold if *either* its token budget or its request-count ceiling
+        (``max_programs`` -- SGLang's ``max_running_requests``, when the card publishes
+        one) is past ``pause_threshold``; shedding continues until *both* are back under
+        their own target, since either alone can be the real reason the engine is
+        struggling.
         """
         threshold = self._cfg.pause_threshold
         pause_target = min(self._cfg.pause_target, threshold)
@@ -539,10 +564,29 @@ class ThunderAgentScheduler:
 
         for key, entry in usage.items():
             base_used = entry.used
-            if base_used <= entry.capacity * threshold:
+            base_count = entry.count
+            over_tokens = base_used > entry.capacity * threshold
+            over_count = (
+                entry.max_programs is not None
+                and base_count > entry.max_programs * threshold
+            )
+            if not (over_tokens or over_count):
                 continue
 
-            target_limit = entry.capacity * pause_target
+            token_target = entry.capacity * pause_target
+            count_target = (
+                entry.max_programs * pause_target
+                if entry.max_programs is not None
+                else None
+            )
+
+            def _within_target(entry: _ReplicaUsage = entry) -> bool:
+                if entry.used > token_target:
+                    return False
+                if count_target is not None and entry.count > count_target:
+                    return False
+                return True
+
             paused_this_tick = 0
             marked_this_tick = 0
 
@@ -551,7 +595,7 @@ class ThunderAgentScheduler:
                 key=lambda p: p.token_total,
             )
             for program in acting:
-                if entry.used <= target_limit:
+                if _within_target():
                     break
                 if program.marked_for_pause:
                     continue
@@ -562,7 +606,7 @@ class ThunderAgentScheduler:
                 entry.used -= freed
                 paused_this_tick += 1
 
-            if entry.used > target_limit:
+            if not _within_target():
                 # Marking does not free anything now; it defers the pause to
                 # after_request. Upstream keeps marking until the candidates run out.
                 reasoning = sorted(
@@ -581,13 +625,19 @@ class ThunderAgentScheduler:
             if paused_this_tick or marked_this_tick:
                 logger.info(
                     "scheduler.tick worker=%s dp_rank=%s paused=%d marked=%d "
-                    "util=%.4f -> %.4f",
+                    "util=%.4f -> %.4f count_util=%s -> %s",
                     key[0],
                     key[1],
                     paused_this_tick,
                     marked_this_tick,
                     base_used / entry.capacity,
                     entry.used / entry.capacity,
+                    f"{base_count / entry.max_programs:.4f}"
+                    if entry.max_programs is not None
+                    else "n/a",
+                    f"{entry.count / entry.max_programs:.4f}"
+                    if entry.max_programs is not None
+                    else "n/a",
                 )
 
     async def _pause_acting(self, program_id: str) -> bool:
@@ -674,20 +724,38 @@ class ThunderAgentScheduler:
             0.0, self._cfg.pause_threshold - self._cfg.resume_hysteresis
         )
         buffer = self._cfg.buffer_per_program
+        # Free request-count slots per replica, at the same resume ceiling as tokens.
+        # None means the card published no max_programs -- unlimited, not zero.
+        slots: dict[ReplicaKey, Optional[int]] = {
+            key: (
+                max(0, int(entry.max_programs * resume_ceiling) - entry.count)
+                if entry.max_programs is not None
+                else None
+            )
+            for key, entry in usage.items()
+        }
         backend_caps = [
             (key, int(entry.capacity * resume_ceiling) - entry.used)
             for key, entry in usage.items()
         ]
-        backend_caps = [(key, r) for key, r in backend_caps if r > buffer]
+        backend_caps = [
+            (key, r) for key, r in backend_caps if r > buffer and slots[key] != 0
+        ]
         if not backend_caps:
             return
 
         backend_caps.sort(key=lambda x: -x[1])
 
         total_capacity = sum(r for _, r in backend_caps)
+        total_slots: Optional[int] = None
+        if all(slots[key] is not None for key, _ in backend_caps):
+            total_slots = sum(slots[key] for key, _ in backend_caps)  # type: ignore[misc]
+
         resumable_programs: list[Program] = []
         cumulative = 0
         for program in paused_programs:
+            if total_slots is not None and len(resumable_programs) >= total_slots:
+                break
             required = program.token_total + buffer
             if cumulative + required <= total_capacity:
                 resumable_programs.append(program)
@@ -701,6 +769,11 @@ class ThunderAgentScheduler:
 
         resumed_this_tick = 0
         for program in resumable_programs:
+            # A replica whose token headroom bubbled it back to the front but whose
+            # request-count slots are now exhausted can never accept another resume this
+            # tick -- drop it so the next-best replica gets a turn.
+            while backend_caps and slots[backend_caps[0][0]] == 0:
+                backend_caps.pop(0)
             if not backend_caps:
                 break
             replica, remaining = backend_caps[0]
@@ -714,8 +787,10 @@ class ThunderAgentScheduler:
             entry.programs.append(program)
             entry.used += self._program_tokens(program) + buffer
             resumed_this_tick += 1
+            if slots[replica] is not None:
+                slots[replica] -= 1  # type: ignore[operator]
             updated_remaining = remaining - required
-            if updated_remaining > buffer:
+            if updated_remaining > buffer and slots[replica] != 0:
                 backend_caps[0] = (replica, updated_remaining)
                 backend_caps.sort(key=lambda x: -x[1])
             else:
@@ -774,7 +849,11 @@ class ThunderAgentScheduler:
                 "utilization_decayed": (
                     used_decayed / entry.capacity if entry.capacity else None
                 ),
-                "active_programs": len(entry.programs),
+                "active_programs": entry.count,
+                "max_programs": entry.max_programs,
+                "count_utilization": (
+                    entry.count / entry.max_programs if entry.max_programs else None
+                ),
             }
         return workers
 

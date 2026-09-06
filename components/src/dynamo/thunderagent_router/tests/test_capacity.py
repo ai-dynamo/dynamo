@@ -11,7 +11,7 @@ from typing import Optional
 
 import pytest
 
-from dynamo.thunderagent_router.capacity import WorkerCapacityProvider
+from dynamo.thunderagent_router.capacity import ReplicaCapacity, WorkerCapacityProvider
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.unit, pytest.mark.gpu_0]
 
@@ -55,6 +55,7 @@ def _card(
     host_total_tokens: Optional[int] = None,
     dp_size: Optional[int] = None,
     start_rank: Optional[int] = None,
+    max_num_seqs: Optional[int] = None,
 ) -> str:
     body: dict = {}
     if block_size is not None:
@@ -69,12 +70,17 @@ def _card(
         body.setdefault("runtime_config", {})["data_parallel_size"] = dp_size
     if start_rank is not None:
         body.setdefault("runtime_config", {})["data_parallel_start_rank"] = start_rank
+    if max_num_seqs is not None:
+        body.setdefault("runtime_config", {})["max_num_seqs"] = max_num_seqs
     return json.dumps(body)
 
 
 def test_snapshot_extracts_kv_pool_tokens():
     provider, _ = _make_provider({"1": _card(16, 1000), "2": _card(8, 2000)})
-    assert provider.snapshot() == {(1, 0): 16_000, (2, 0): 16_000}
+    assert provider.snapshot() == {
+        (1, 0): ReplicaCapacity(tokens=16_000),
+        (2, 0): ReplicaCapacity(tokens=16_000),
+    }
 
 
 @pytest.mark.parametrize(
@@ -91,13 +97,15 @@ def test_snapshot_fans_out_one_entry_per_dp_rank(dp_size, start_rank, expected_r
     provider, _ = _make_provider(
         {"1": _card(16, 1000, dp_size=dp_size, start_rank=start_rank)}
     )
-    assert provider.snapshot() == {(1, rank): 16_000 for rank in expected_ranks}
+    assert provider.snapshot() == {
+        (1, rank): ReplicaCapacity(tokens=16_000) for rank in expected_ranks
+    }
 
 
 def test_snapshot_credits_native_offloading_up_to_the_gpu_pool_size():
     """Below the cap, host capacity is credited in full."""
     provider, _ = _make_provider({"1": _card(16, 1_000, host_total_tokens=300)})
-    assert provider.snapshot() == {(1, 0): 16_300}
+    assert provider.snapshot() == {(1, 0): ReplicaCapacity(tokens=16_300)}
 
 
 def test_snapshot_caps_native_offloading_credit_at_the_gpu_pool_size():
@@ -106,7 +114,7 @@ def test_snapshot_caps_native_offloading_credit_at_the_gpu_pool_size():
     host, so crediting the full host pool 1:1 would make the ratio undercount fullness
     rather than reflect it -- see module docstring."""
     provider, _ = _make_provider({"1": _card(16, 1_000, host_total_tokens=999_000)})
-    assert provider.snapshot() == {(1, 0): 32_000}
+    assert provider.snapshot() == {(1, 0): ReplicaCapacity(tokens=32_000)}
 
 
 def test_snapshot_ignores_invalid_native_offloading_capacity():
@@ -115,7 +123,40 @@ def test_snapshot_ignores_invalid_native_offloading_capacity():
         "native_offloading_capacity": {"total_tokens": "300"}
     }
     provider, _ = _make_provider({"1": json.dumps(card)})
-    assert provider.snapshot() == {(1, 0): 16_000}
+    assert provider.snapshot() == {(1, 0): ReplicaCapacity(tokens=16_000)}
+
+
+def test_snapshot_extracts_max_programs_from_max_num_seqs():
+    """max_num_seqs is SGLang's max_running_requests, already divided per DP rank by the
+    publisher (dynamo/sglang/register.py). Absent a KV-only signal, this is the real
+    engine-enforced concurrent-request ceiling -- see module docstring."""
+    provider, _ = _make_provider({"1": _card(16, 1_000, max_num_seqs=40)})
+    assert provider.snapshot() == {
+        (1, 0): ReplicaCapacity(tokens=16_000, max_programs=40)
+    }
+
+
+def test_snapshot_max_programs_defaults_to_none_when_absent():
+    """None means unlimited, not zero -- callers must not treat a missing signal as a
+    zero-request ceiling."""
+    provider, _ = _make_provider({"1": _card(16, 1_000)})
+    snap = provider.snapshot()
+    assert snap[(1, 0)].max_programs is None
+
+
+def test_snapshot_ignores_invalid_max_num_seqs():
+    card = json.loads(_card(16, 1_000))
+    card["runtime_config"]["max_num_seqs"] = "40"
+    provider, _ = _make_provider({"1": json.dumps(card)})
+    assert provider.snapshot()[(1, 0)].max_programs is None
+
+
+def test_snapshot_fans_out_max_programs_per_dp_rank():
+    provider, _ = _make_provider({"1": _card(16, 1000, dp_size=2, max_num_seqs=40)})
+    assert provider.snapshot() == {
+        (1, 0): ReplicaCapacity(tokens=16_000, max_programs=40),
+        (1, 1): ReplicaCapacity(tokens=16_000, max_programs=40),
+    }
 
 
 def test_snapshot_skips_malformed_cards():
@@ -129,7 +170,7 @@ def test_snapshot_skips_malformed_cards():
             "6": _card(16, "abc"),  # type: ignore[arg-type]
         }
     )
-    assert provider.snapshot() == {(1, 0): 16_000}
+    assert provider.snapshot() == {(1, 0): ReplicaCapacity(tokens=16_000)}
 
 
 def test_snapshot_skips_unparseable_worker_ids():
@@ -139,17 +180,21 @@ def test_snapshot_skips_unparseable_worker_ids():
 
 def test_one_cache_entry_serves_every_field_of_a_card():
     """Parsed once for all fields. Sentinel-checked by mutating the cached record: a
-    re-read of any field -- pool tokens, rank count, start rank -- would lose it."""
+    re-read of any field -- pool tokens, max programs, rank count, start rank -- would
+    lose it."""
     cards = {"1": _card(16, 1000, dp_size=4)}
     provider, _ = _make_provider(cards)
     provider.snapshot()
 
     cached = provider._parsed[cards["1"]]
     provider._parsed[cards["1"]] = replace(
-        cached, pool_tokens=999_999, start_rank=7, dp_size=2
+        cached, pool_tokens=999_999, max_programs=7, start_rank=7, dp_size=2
     )
 
-    assert provider.snapshot() == {(1, 7): 999_999, (1, 8): 999_999}
+    assert provider.snapshot() == {
+        (1, 7): ReplicaCapacity(tokens=999_999, max_programs=7),
+        (1, 8): ReplicaCapacity(tokens=999_999, max_programs=7),
+    }
 
 
 def test_snapshot_returns_empty_when_subscriber_unset():
