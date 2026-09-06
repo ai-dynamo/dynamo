@@ -3661,6 +3661,14 @@ class InstrumentedScheduler(AsyncScheduler):
 
             req.num_computed_tokens = ctx_len
             req.status = RequestStatus.RUNNING
+            # Register the request's full blocks in the prefix cache now, in
+            # the untimed injection window. allocate_slots() above deferred
+            # it, and the async scheduler would otherwise do it inside the
+            # admission step's update_from_output, whose Python per-block
+            # loop (~0.7 us/block) lands in the steady step's inter-update
+            # wall_time: at 218k blocks that is ~160 ms of CPU booked as GPU
+            # time (measured +180..430% over the real-point trend on B200).
+            self.kv_cache_manager.cache_blocks(req, ctx_len)
 
             self.requests[req_id] = req
             self.running.append(req)  # type: ignore[has-type]
