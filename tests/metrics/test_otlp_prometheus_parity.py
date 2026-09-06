@@ -54,25 +54,6 @@ WORKER = os.path.join(os.path.dirname(__file__), "parity_worker.py")
 # collected, so it has no Prometheus counterpart.
 OTLP_ONLY = {"target_info"}
 
-# Suffixes the exporter moves into `Metric.unit`, mirroring the UCUM mapping in
-# `normalized_name_and_unit`. Kept in sync deliberately: this test is the thing
-# that would catch the two drifting apart.
-_UNIT_SUFFIXES = (
-    "_seconds",
-    "_milliseconds",
-    "_microseconds",
-    "_nanoseconds",
-    "_bytes",
-    "_ratio",
-    "_percent",
-    "_celsius",
-    "_meters",
-    "_volts",
-    "_amperes",
-    "_joules",
-    "_grams",
-)
-
 
 def _free_port() -> int:
     """A free port that fits in an i16.
@@ -154,32 +135,31 @@ def _prometheus_families(text: str) -> dict[str, str]:
     return out
 
 
-def _expected_otlp_name(name: str, kind: str) -> str | None:
-    """The OTLP name the compatibility spec requires for a Prometheus family.
+def _comparable(name: str) -> str:
+    """A form both surfaces can be compared in.
 
-    The two surfaces are deliberately *not* identical. Asserting identity would
-    pin whatever we happen to emit -- it is how a wrong `_total` suffix went
-    unnoticed, because both surfaces agreed on the same wrong name.
+    The two producers name a counter family differently, and neither is wrong:
+    `prometheus_client.collect()` reports the OpenMetrics family name (`foo`)
+    while its legacy text output writes `# TYPE foo_total counter`. Dynamo's own
+    Rust counters are registered literally as `foo_total`, so they agree with the
+    text form. Comparing with a trailing `_total` removed accepts both.
 
-    Returns ``None`` for families the spec says must not be exported at all.
+    This normalises for *comparison* only. The exporter itself does not rewrite
+    names: *"The Prometheus Metric Name MUST be added as the Name of the OTLP
+    metric. The name SHOULD NOT be altered."* The `_total` and unit suffixes are
+    added when converting OTLP -> Prometheus, not stripped coming back.
     """
-    if name.endswith("_created"):
-        # An artifact of the Python client: it becomes the parent's
-        # start_time_unix_nano and is not a metric of its own.
-        return None
-    if kind == "counter":
-        # "The OTLP metric name MUST be the Prometheus name with _total
-        # removed." The scrape renders `foo_total`; `# TYPE` already names the
-        # family bare, so this is normally a no-op and guards the rendered form.
-        name = name[: -len("_total")] if name.endswith("_total") else name
+    return name[: -len("_total")] if name.endswith("_total") else name
 
-    # Prometheus encodes the unit in the name, OTLP carries it in a field, so
-    # the suffix is stripped. Both come off for a counter of bytes, in that
-    # order.
-    for suffix in _UNIT_SUFFIXES:
-        if name.endswith(suffix) and name != suffix:
-            return name[: -len(suffix)]
-    return name
+
+def _expected_otlp_name(name: str, kind: str) -> str | None:
+    """The comparable OTLP name for a scraped family, or None if it must not
+    be exported at all."""
+    if name.endswith("_created"):
+        # The Created timestamp: it becomes the parent's start_time_unix_nano
+        # rather than a metric of its own.
+        return None
+    return _comparable(name)
 
 
 class _Worker(ManagedProcess):
@@ -237,7 +217,7 @@ def test_otlp_and_prometheus_expose_the_same_metrics(request, runtime_services):
                 )
                 scrape.raise_for_status()
                 declared = _prometheus_families(scrape.text)
-                exported = receiver.names() - OTLP_ONLY
+                exported = {_comparable(n) for n in receiver.names()} - OTLP_ONLY
 
                 assert declared, "no families on /metrics; the scrape path is broken"
 
