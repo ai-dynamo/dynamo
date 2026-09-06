@@ -1292,6 +1292,9 @@ impl MetricsRegistry {
         }
 
         let mut merged: Vec<prometheus::proto::MetricFamily> = by_name.into_values().collect();
+        // A family whose every sample was dropped as a duplicate (possible when `seen_series` was
+        // seeded by another exposition source) must not emit stray `# HELP` / `# TYPE` lines.
+        merged.retain(|family| !family.metric.is_empty());
         merged.sort_by(|a, b| a.name().cmp(b.name()));
 
         let encoder = prometheus::TextEncoder::new();
@@ -1720,6 +1723,13 @@ mod test_metricsregistry_units {
         assert!(text.contains("demo_total{cluster=\"dev\"} 2\n"), "{text}");
         // The newly emitted series was recorded for any source rendered after this one.
         assert_eq!(seen.len(), 2);
+
+        // When every sample of a family is already seen, the family disappears entirely: no
+        // stray `# HELP` / `# TYPE` header for it may reach the scrape.
+        let text = registry
+            .prometheus_expfmt_combined_with(&[], &mut seen)
+            .unwrap();
+        assert!(!text.contains("demo_total"), "{text}");
     }
 
     #[test]
