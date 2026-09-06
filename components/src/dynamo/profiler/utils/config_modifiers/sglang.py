@@ -17,7 +17,6 @@ from dynamo.profiler.utils.config import (
     get_main_container,
     get_worker_component_from_config,
     remove_valued_arguments,
-    set_argument_value,
     set_unique_argument_value,
     setup_worker_component_resources,
     update_image,
@@ -329,7 +328,7 @@ class SGLangConfigModifier(BaseConfigModifier):
         args = validate_and_get_worker_args(worker_service, backend="sglang")
 
         # Set --tp argument
-        args = set_argument_value(args, "--tp", str(tp_size))
+        args = set_unique_argument_value(args, "--tp", str(tp_size))
         args = remove_valued_arguments(args, "--tp-size")
         args = remove_valued_arguments(args, "--tensor-parallel-size")
 
@@ -366,12 +365,12 @@ class SGLangConfigModifier(BaseConfigModifier):
         args = validate_and_get_worker_args(worker_service, backend="sglang")
 
         # 1. Set --tp=tep_size, if not present add it
-        args = set_argument_value(args, "--tp", str(tep_size))
+        args = set_unique_argument_value(args, "--tp", str(tep_size))
         args = remove_valued_arguments(args, "--tp-size")
         args = remove_valued_arguments(args, "--tensor-parallel-size")
 
         # 2. Set --ep=tep_size, if not present add it
-        args = set_argument_value(args, "--ep", str(tep_size))
+        args = set_unique_argument_value(args, "--ep", str(tep_size))
         args = remove_valued_arguments(args, "--ep-size")
         args = remove_valued_arguments(args, "--expert-parallel-size")
 
@@ -407,12 +406,12 @@ class SGLangConfigModifier(BaseConfigModifier):
         args = validate_and_get_worker_args(worker_service, backend="sglang")
 
         # 1. Set --tp=dep_size
-        args = set_argument_value(args, "--tp", str(dep_size))
+        args = set_unique_argument_value(args, "--tp", str(dep_size))
         args = remove_valued_arguments(args, "--tp-size")
         args = remove_valued_arguments(args, "--tensor-parallel-size")
 
         # 2. Set --dp=dep_size (data parallelism across experts)
-        args = set_argument_value(args, "--dp", str(dep_size))
+        args = set_unique_argument_value(args, "--dp", str(dep_size))
         args = remove_valued_arguments(args, "--dp-size")
         args = remove_valued_arguments(args, "--data-parallel-size")
 
@@ -421,7 +420,7 @@ class SGLangConfigModifier(BaseConfigModifier):
             args = append_argument(args, "--enable-dp-attention")
 
         # 4. Set --ep=dep_size (expert parallelism size)
-        args = set_argument_value(args, "--ep", str(dep_size))
+        args = set_unique_argument_value(args, "--ep", str(dep_size))
         args = remove_valued_arguments(args, "--ep-size")
         args = remove_valued_arguments(args, "--expert-parallel-size")
 
@@ -511,11 +510,15 @@ class SGLangConfigModifier(BaseConfigModifier):
         args = break_arguments(args)
 
         # Set max concurrency to control effective batch size
-        args = set_argument_value(args, "--max-running-requests", str(max_batch_size))
+        args = set_unique_argument_value(
+            args, "--max-running-requests", str(max_batch_size)
+        )
         args = _normalize_prefill_dp_limits(args)
 
         # Cap total tokens processed in a batch to avoid chunked prefill
-        args = set_argument_value(args, "--chunked-prefill-size", str(max_num_tokens))
+        args = set_unique_argument_value(
+            args, "--chunked-prefill-size", str(max_num_tokens)
+        )
 
         args = append_argument(args, "--enable-dp-lm-head")
 

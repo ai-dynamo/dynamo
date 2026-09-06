@@ -74,6 +74,33 @@ def _pod_spec(component: dict) -> dict:
     return component["podTemplate"]["spec"]
 
 
+def test_tp_sweep_overrides_an_equals_spelled_user_value() -> None:
+    """The swept TP must win over a user's --tp=N, not lose to it.
+
+    set_argument_value cannot match the equals spelling, so it replaced the
+    stock `--tp 1` in place and left the user's `--tp=N` sitting after it.
+    SGLang's parser takes the last occurrence, so the worker ran the user's
+    value while the point was recorded against the swept one, with GPU
+    resources sized for the swept one.
+    """
+    from dynamo.planner.config.defaults import SubComponentType
+
+    modifier = CONFIG_MODIFIERS["sglang"]
+    config = modifier.load_default_config("agg")
+    worker_args = _main_container(_worker_components(config)[0])["args"]
+    assert "--tp" in worker_args, "fixture expects a stock --tp to replace"
+    worker_args.append("--tp=7")
+
+    converted = modifier.set_config_tp_size(
+        config, 2, component_type=SubComponentType.DECODE
+    )
+    converted_args = _main_container(_worker_components(converted)[0])["args"]
+
+    occurrences = [arg for arg in converted_args if str(arg).startswith("--tp")]
+    assert occurrences == ["--tp"], f"expected one canonical --tp, got {occurrences}"
+    assert converted_args[converted_args.index("--tp") + 1] == "2"
+
+
 def _worker_components(config: dict) -> list[dict]:
     return [
         component
