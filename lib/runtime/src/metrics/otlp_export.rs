@@ -34,10 +34,11 @@ const SCOPE_NAME: &str = "dynamo.runtime.metrics";
 /// `start_time` anchors cumulative sums; it must stay fixed for the process
 /// lifetime or consumers will read every export as a counter reset.
 pub fn to_resource_metrics(
-    families: &[MetricFamily],
+    collected: &crate::metrics::CollectedFamilies,
     resource_attrs: &[KeyValue],
     start_time: SystemTime,
 ) -> ResourceMetrics {
+    let families = &collected.families;
     let now = unix_nanos(SystemTime::now());
     let start = unix_nanos(start_time);
 
@@ -62,7 +63,16 @@ pub fn to_resource_metrics(
     let metrics = families
         .iter()
         .filter(|family| !family.name().ends_with("_created"))
-        .filter_map(|family| to_metric(family, start, now, &created))
+        .filter_map(|family| {
+            to_metric(
+                family,
+                start,
+                now,
+                &created,
+                &collected.units,
+                &collected.prom_types,
+            )
+        })
         .collect();
 
     ResourceMetrics {
@@ -99,6 +109,61 @@ fn label_key(metric: &prometheus::proto::Metric) -> Vec<(String, String)> {
 
 type CreatedTimes = HashMap<(String, Vec<(String, String)>), u64>;
 
+/// Prometheus unit words translated to their UCUM abbreviation.
+///
+/// "The unit MUST be translated from words to the UCUM abbreviation if it is in
+/// the following set of commonly-used units." Anything outside that set is
+/// passed through unchanged, which is what the conditional requires.
+fn ucum(word: &str) -> &str {
+    match word {
+        "days" => "d",
+        "hours" => "h",
+        "minutes" => "min",
+        "seconds" => "s",
+        "milliseconds" => "ms",
+        "microseconds" => "us",
+        "nanoseconds" => "ns",
+        "bytes" => "By",
+        "kibibytes" => "KiBy",
+        "mebibytes" => "MiBy",
+        "gibibytes" => "GiBy",
+        "tebibytes" => "TiBy",
+        "kilobytes" => "kBy",
+        "megabytes" => "MBy",
+        "gigabytes" => "GBy",
+        "terabytes" => "TBy",
+        "meters" => "m",
+        "volts" => "V",
+        "amperes" => "A",
+        "joules" => "J",
+        "watts" => "W",
+        "grams" => "g",
+        "celsius" => "Cel",
+        "hertz" => "Hz",
+        "percent" => "%",
+        other => other,
+    }
+}
+
+/// The UCUM unit for a family, when its source declared one.
+fn unit_for(family: &MetricFamily, units: &HashMap<String, String>) -> String {
+    units
+        .get(family.name())
+        .map(|word| ucum(word).to_string())
+        .unwrap_or_default()
+}
+
+/// "The TYPE metadata MUST also be added to the OTLP metric.metadata under the
+/// `prometheus.type` key."
+fn type_metadata(prom_type: &str) -> KeyValue {
+    KeyValue {
+        key: "prometheus.type".to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::StringValue(prom_type.to_string())),
+        }),
+    }
+}
+
 /// The `prometheus.type` value the spec requires in `Metric.metadata`.
 fn prometheus_type_name(family: &MetricFamily) -> &'static str {
     match family.get_field_type() {
@@ -115,7 +180,36 @@ fn to_metric(
     start: u64,
     now: u64,
     created: &CreatedTimes,
+    units: &HashMap<String, String>,
+    prom_types: &HashMap<String, String>,
 ) -> Option<Metric> {
+    let prom_type = prom_types
+        .get(family.name())
+        .map(String::as_str)
+        .unwrap_or_else(|| prometheus_type_name(family));
+
+    // "A Prometheus Info metric MUST be converted to an OTLP Non-Monotonic
+    // Sum... the value of 1 is intended to be viewed as a count." The proto
+    // model has no Info variant, so the original type word is what tells them
+    // apart from a real gauge.
+    if prom_type == "info" || prom_type == "stateset" {
+        return Some(Metric {
+            name: family.name().to_string(),
+            description: family.help().to_string(),
+            unit: unit_for(family, units),
+            metadata: vec![type_metadata(prom_type)],
+            data: Some(metric::Data::Sum(Sum {
+                data_points: family
+                    .get_metric()
+                    .iter()
+                    .map(|m| number_point(m, m.get_gauge().value(), 0, now))
+                    .collect(),
+                aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                is_monotonic: false,
+            })),
+        });
+    }
+
     let data = match family.get_field_type() {
         MetricType::COUNTER => metric::Data::Sum(Sum {
             data_points: family
@@ -155,11 +249,9 @@ fn to_metric(
                 .map(|m| summary_point(m, start_for(family, m, start, created), now))
                 .collect(),
         }),
-        // Native families reach here straight from `Registry::gather()`,
-        // without passing through the typed builder that normalises engine
-        // metrics, so an UNTYPED family arrives as-is. Exposition format treats
-        // untyped as a gauge; do the same rather than return None, which would
-        // drop the family from OTLP without a trace.
+        // Native families bypass the typed builder, so UNTYPED arrives as-is.
+        // Exposition format treats it as a gauge; returning None instead would
+        // drop the family without a trace.
         MetricType::UNTYPED => metric::Data::Gauge(Gauge {
             data_points: family
                 .get_metric()
@@ -176,31 +268,22 @@ fn to_metric(
     Some(Metric {
         name: family.name().to_string(),
         description: family.help().to_string(),
-        unit: String::new(),
-        // "The TYPE metadata MUST also be added to the OTLP metric.metadata
-        // under the `prometheus.type` key."
-        metadata: vec![KeyValue {
-            key: "prometheus.type".to_string(),
-            value: Some(AnyValue {
-                value: Some(any_value::Value::StringValue(
-                    prometheus_type_name(family).to_string(),
-                )),
-            }),
-        }],
+        unit: unit_for(family, units),
+        metadata: vec![type_metadata(prom_type)],
         data: Some(data),
     })
 }
 
 /// When a sample carried its own timestamp, that is when it was observed;
-/// otherwise fall back to the export instant.
-///
-/// Standard `prometheus_client` and `prometheus` metrics leave this unset, but
-/// custom collectors and federated sources set it, and reporting a stale sample
-/// at the export instant misleads anything reading `time_unix_nano` -- SLO
-/// monitors especially.
+/// otherwise the export instant. Standard clients leave it unset, but a
+/// federated source sets it, and relabelling a stale sample to "now" misleads
+/// anything reading `time_unix_nano`.
 fn observed_at(metric: &prometheus::proto::Metric, now: u64) -> u64 {
     match metric.timestamp_ms() {
-        0 => now,
+        // Negative as well as zero falls back: `timestamp_ms` is an i64, and
+        // casting a negative one to u64 wraps to a timestamp far in the future
+        // -- worse than simply reporting the export instant.
+        ms if ms <= 0 => now,
         ms => (ms as u64).saturating_mul(1_000_000),
     }
 }
@@ -213,6 +296,13 @@ fn start_for(
     fallback: u64,
     created: &CreatedTimes,
 ) -> u64 {
+    // Building the key allocates a String and a Vec of label Strings, per data
+    // point. Almost every collection has no `_created` at all -- Dynamo's own
+    // metrics never emit one -- so skip the work rather than allocate to look
+    // up an empty map.
+    if created.is_empty() {
+        return fallback;
+    }
     created
         .get(&(family.name().to_string(), label_key(metric)))
         .copied()
@@ -225,11 +315,9 @@ fn number_point(
     start: u64,
     now: u64,
 ) -> NumberDataPoint {
-    // A NaN is not a value a backend can store, and several reject the payload
-    // outright. The spec's representation is the no-recorded-value flag with
-    // the value left unset. Prometheus distinguishes a stale marker from an
-    // ordinary NaN by bit pattern, but only an f64 survives to here, and both
-    // mean "nothing was recorded" to a consumer.
+    // Several backends reject a raw NaN payload; the spec's representation is
+    // the no-recorded-value flag with the value unset. Prometheus tells a stale
+    // marker from an ordinary NaN by bit pattern, but only an f64 reaches here.
     let (flags, value) = if value.is_nan() {
         (DataPointFlags::NoRecordedValueMask as u32, None)
     } else {
@@ -251,12 +339,10 @@ fn histogram_point(metric: &prometheus::proto::Metric, start: u64, now: u64) -> 
 
     // Prometheus buckets are cumulative and include a final `+Inf`; OTLP wants
     // per-bucket counts and omits the implicit overflow bound.
-    // TODO: preserve exemplars. `prometheus::proto::Bucket` carries an
-    // `exemplar` field which is dropped here. Mapping it means decoding
-    // `trace_id` / `span_id` label values into the raw bytes OTLP wants, and no
-    // engine Dynamo runs emits them today, so it is deliberately absent rather
-    // than overlooked -- without exemplars a backend cannot jump from a
-    // histogram bucket to the trace that produced it.
+    //
+    // TODO: preserve exemplars. `Bucket::exemplar` is dropped here, so a
+    // backend cannot jump from a bucket to the trace behind it. No engine we
+    // run emits them, so this is deliberate rather than overlooked.
     let mut bounds = Vec::new();
     let mut counts = Vec::new();
     let mut previous = 0u64;
@@ -345,13 +431,11 @@ pub struct ExportConfig {
     pub resource_attributes: Vec<(String, String)>,
 }
 
-/// Parse the `key=value,key=value` form the OTLP exporter spec uses for both
-/// headers and resource attributes.
+/// Parse the `key=value,key=value` form used for headers and resource
+/// attributes.
 ///
-/// Values are taken verbatim: splitting on the *first* `=` keeps base64
-/// padding in a bearer token intact. Percent-decoding, which the spec allows,
-/// is deliberately not applied -- no configuration here has needed it, and
-/// silently decoding a token containing a literal `%` would corrupt it.
+/// Splits on the *first* `=` so base64 padding in a bearer token survives.
+/// Percent-decoding, which the spec allows, is deliberately not applied.
 pub(crate) fn parse_key_value_list(raw: &str) -> Vec<(String, String)> {
     raw.split(',')
         .filter_map(|pair| pair.split_once('='))
@@ -371,15 +455,10 @@ impl ExportConfig {
             return Ok(None);
         }
 
-        // Only gRPC is implemented; failing loudly beats exporting over the
-        // wrong transport. Validate the value as configured rather than as
+        // Only gRPC is implemented. Validated as *configured* rather than as
         // resolved: the shared resolver falls back to grpc for anything it does
-        // not recognise, so a typo would otherwise be exported over gRPC --
-        // exactly the silent mis-send this check exists to prevent.
-        //
-        // The signal-specific variable wins; name whichever one supplied the
-        // value, so an operator who set only the generic one is not sent to the
-        // specific one.
+        // not recognise, so a typo would otherwise be sent over gRPC silently.
+        // The error names whichever variable actually supplied the value.
         let metrics_protocol = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_METRICS_PROTOCOL).ok();
         let generic_protocol = std::env::var(env_otlp::OTEL_EXPORTER_OTLP_PROTOCOL).ok();
         let configured = [
@@ -488,9 +567,9 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
     // reset on every export.
     let start_time = SystemTime::now();
 
-    // A call still outstanding when the next collection is due has missed its
-    // window, so the interval is the natural deadline -- but cap it, or a long
-    // interval buys an equally long hang against an unresponsive collector.
+    // The interval is the natural deadline -- a call still outstanding when the
+    // next is due has missed its window -- but capped, so a long interval does
+    // not buy an equally long hang.
     const MAX_RPC_DEADLINE: Duration = Duration::from_secs(30);
     let rpc_deadline = config.interval.min(MAX_RPC_DEADLINE);
     let mut ticker = tokio::time::interval(config.interval);
@@ -528,16 +607,10 @@ pub async fn run(registry: MetricsRegistry, config: ExportConfig, cancel: Cancel
             }
         }
 
-        // Typed callbacks cross into Python and take the GIL, which can block
-        // for as long as the engine holds it. That must not park an async
-        // worker thread.
-        //
-        // Awaited rather than raced against `cancel`: a blocking task cannot be
-        // cancelled, so racing it would only drop the handle while the closure
-        // ran on -- reaching for the GIL on a detached thread while the process
-        // tears down, and delaying shutdown anyway, since the runtime waits for
-        // blocking tasks it has already started. Exit latency is one
-        // collection; the loop checks `cancel` before the next.
+        // Callbacks take the Python GIL, so collection must not park an async
+        // worker. Awaited rather than raced against `cancel`: a blocking task
+        // cannot be cancelled, so racing it would leave the closure running
+        // detached, reaching for the GIL during teardown.
         let collector = registry.clone();
         let collected =
             tokio::task::spawn_blocking(move || collector.metric_families_combined()).await;
@@ -611,10 +684,32 @@ mod tests {
     use super::*;
     use crate::metrics::prom_typed::{TypedFamily, build_families};
 
+    /// Mirror of what `metric_families_combined` assembles, so tests exercise
+    /// the same shape the exporter consumes.
+    fn collected_from(
+        built: Vec<crate::metrics::prom_typed::BuiltFamily>,
+    ) -> crate::metrics::CollectedFamilies {
+        let mut units = HashMap::new();
+        let mut prom_types = HashMap::new();
+        let mut families = Vec::new();
+        for b in built {
+            if !b.unit.is_empty() {
+                units.insert(b.family.name().to_string(), b.unit);
+            }
+            prom_types.insert(b.family.name().to_string(), b.prom_type);
+            families.push(b.family);
+        }
+        crate::metrics::CollectedFamilies {
+            families,
+            units,
+            prom_types,
+        }
+    }
+
     fn export(typed_json: &str) -> Vec<Metric> {
         let typed: Vec<TypedFamily> = serde_json::from_str(typed_json).expect("typed");
-        let families = build_families(typed);
-        let rm = to_resource_metrics(&families, &[], UNIX_EPOCH);
+        let collected = collected_from(build_families(typed));
+        let rm = to_resource_metrics(&collected, &[], UNIX_EPOCH);
         rm.scope_metrics.into_iter().next().expect("scope").metrics
     }
 
@@ -766,8 +861,8 @@ mod tests {
             .register(Box::new(histogram))
             .expect("register histogram");
 
-        let families = registry.metric_families_combined().expect("combined");
-        let metrics = to_resource_metrics(&families, &[], UNIX_EPOCH)
+        let collected = registry.metric_families_combined().expect("combined");
+        let metrics = to_resource_metrics(&collected, &[], UNIX_EPOCH)
             .scope_metrics
             .into_iter()
             .next()
@@ -809,7 +904,12 @@ mod tests {
         metric.untyped = Some(untyped).into();
         family.mut_metric().push(metric);
 
-        let metrics = to_resource_metrics(&[family], &[], UNIX_EPOCH)
+        let collected = crate::metrics::CollectedFamilies {
+            families: vec![family],
+            units: HashMap::new(),
+            prom_types: HashMap::new(),
+        };
+        let metrics = to_resource_metrics(&collected, &[], UNIX_EPOCH)
             .scope_metrics
             .into_iter()
             .next()
@@ -924,7 +1024,12 @@ mod tests {
 
                 // service.name from OTEL_SERVICE_NAME wins, and is not emitted
                 // twice alongside the one in OTEL_RESOURCE_ATTRIBUTES.
-                let rm = to_resource_metrics(&[], &attributes_for(&config), UNIX_EPOCH);
+                let empty = crate::metrics::CollectedFamilies {
+                    families: Vec::new(),
+                    units: HashMap::new(),
+                    prom_types: HashMap::new(),
+                };
+                let rm = to_resource_metrics(&empty, &attributes_for(&config), UNIX_EPOCH);
                 let keys: Vec<&str> = rm
                     .resource
                     .as_ref()
@@ -1003,6 +1108,82 @@ mod tests {
             connected,
             "exporter never dialled the collector with the system status server disabled"
         );
+    }
+
+    /// "If `_count` is not present, the metric MUST be dropped." A histogram
+    /// with buckets but no count is incoherent: the buckets and the total can
+    /// disagree, and anything computing a quantile from it gets nonsense. A
+    /// count of zero is a real value, so absence is tracked rather than
+    /// inferred from it.
+    #[test]
+    fn histogram_without_a_count_is_dropped() {
+        let metrics = export(
+            r#"[{"name":"d_ok","help":"ok","type":"histogram","samples":[
+                 {"name":"d_ok_bucket","labels":{"le":"1"},"value":"2"},
+                 {"name":"d_ok_sum","labels":{},"value":"1.0"},
+                 {"name":"d_ok_count","labels":{},"value":"2"}]},
+                {"name":"d_missing","help":"missing","type":"histogram","samples":[
+                 {"name":"d_missing_bucket","labels":{"le":"1"},"value":"2"},
+                 {"name":"d_missing_sum","labels":{},"value":"1.0"}]}]"#,
+        );
+
+        let names: Vec<&str> = metrics.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"d_ok"), "got {names:?}");
+        assert!(
+            !names.contains(&"d_missing"),
+            "a histogram with no _count must be dropped: {names:?}"
+        );
+
+        // A zero count is a value, not an absence.
+        let zero = export(
+            r#"[{"name":"d_zero","help":"z","type":"histogram","samples":[
+                 {"name":"d_zero_bucket","labels":{"le":"1"},"value":"0"},
+                 {"name":"d_zero_count","labels":{},"value":"0"}]}]"#,
+        );
+        assert_eq!(zero.len(), 1, "a zero count must still be exported");
+    }
+
+    /// UNIT metadata reaches OTLP, translated to its UCUM abbreviation.
+    ///
+    /// It cannot ride inside the family -- the proto model has no unit field --
+    /// so it travels beside it. Without that, the unit the client declared is
+    /// dropped at the boundary and backends have nothing to label axes with.
+    #[test]
+    fn unit_metadata_is_carried_and_translated() {
+        let collected = collected_from(build_families(
+            serde_json::from_str(
+                r#"[{"name":"d_latency_seconds","help":"L","type":"gauge","unit":"seconds",
+                     "samples":[{"name":"d_latency_seconds","labels":{},"value":"0.5"}]},
+                    {"name":"d_widgets","help":"W","type":"gauge","unit":"widgets",
+                     "samples":[{"name":"d_widgets","labels":{},"value":"2"}]},
+                    {"name":"d_plain","help":"P","type":"gauge",
+                     "samples":[{"name":"d_plain","labels":{},"value":"1"}]}]"#,
+            )
+            .expect("fixture"),
+        ));
+        let metrics = to_resource_metrics(&collected, &[], UNIX_EPOCH)
+            .scope_metrics
+            .into_iter()
+            .next()
+            .expect("scope")
+            .metrics;
+
+        let unit_of = |n: &str| {
+            metrics
+                .iter()
+                .find(|m| m.name == n)
+                .unwrap_or_else(|| panic!("{n} missing"))
+                .unit
+                .clone()
+        };
+
+        assert_eq!(unit_of("d_latency_seconds"), "s", "translated to UCUM");
+        // Outside the spec's table, so passed through unchanged.
+        assert_eq!(unit_of("d_widgets"), "widgets");
+        assert_eq!(unit_of("d_plain"), "", "no UNIT metadata, no unit");
+
+        // The name is untouched either way.
+        assert!(metrics.iter().any(|m| m.name == "d_latency_seconds"));
     }
 
     /// The spec is explicit that this direction does not rewrite names: the
@@ -1157,6 +1338,9 @@ mod tests {
         );
     }
 
+    /// An Info family keeps its rendered `_info` name and converts to a
+    /// non-monotonic Sum, and the original type word survives into metadata.
+    ///
     /// `prometheus_client` reports an Info family under its bare name but
     /// renders it as `<name>_info`. Exporting the bare name would give the
     /// series a different identity than `/metrics` shows, and could collide
@@ -1169,10 +1353,23 @@ mod tests {
         );
 
         assert_eq!(metrics[0].name, "example_build_info");
-        let Some(metric::Data::Gauge(g)) = &metrics[0].data else {
-            panic!("expected gauge, got {:?}", metrics[0].data);
+
+        // "A Prometheus Info metric MUST be converted to an OTLP Non-Monotonic
+        // Sum ... because the value of 1 is intended to be viewed as a count,
+        // which should be summed together when aggregating away labels." As a
+        // Gauge, aggregating away a label would not add the 1s.
+        let Some(metric::Data::Sum(sum)) = &metrics[0].data else {
+            panic!("expected a Sum, got {:?}", metrics[0].data);
         };
-        assert_eq!(g.data_points[0].attributes[0].key, "version");
+        assert!(!sum.is_monotonic, "info is a non-monotonic sum");
+        assert_eq!(sum.data_points[0].attributes[0].key, "version");
+        assert_eq!(metrics[0].metadata[0].key, "prometheus.type");
+        let Some(any_value::Value::StringValue(t)) =
+            &metrics[0].metadata[0].value.as_ref().unwrap().value
+        else {
+            panic!("expected a string");
+        };
+        assert_eq!(t, "info", "the original type word, not the proto collapse");
     }
 
     /// Summaries only survive because we bypass the SDK, whose data model has

@@ -41,6 +41,7 @@ type PyTypedFamilies = Vec<(
     String,
     String,
     String,
+    String,
     Vec<(String, Vec<(String, String)>, f64, Option<f64>)>,
 )>;
 
@@ -66,10 +67,11 @@ fn wrap_py_typed_callback(
             typed
                 .into_iter()
                 .map(
-                    |(name, help, kind, samples)| crate::rs::metrics::prom_typed::TypedFamily {
+                    |(name, help, kind, unit, samples)| crate::rs::metrics::prom_typed::TypedFamily {
                         name,
                         help,
                         kind,
+                        unit,
                         samples: samples
                             .into_iter()
                             .map(|(name, labels, value, timestamp)| {

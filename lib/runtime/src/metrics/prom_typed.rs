@@ -8,10 +8,9 @@
 //! by parsing. This builds from the structure directly instead, which is where
 //! the type, help and family name arrive authoritative rather than re-inferred.
 //!
-//! Samples remain suffix-encoded even in the typed model -- `_bucket` with
-//! `le`, `_sum`, `_count`, `_total`, `_created` -- so grouping is still by
-//! convention, but scoped to a family of known type rather than guessed
-//! globally.
+//! Samples remain suffix-encoded even in the typed model (`_bucket` with `le`,
+//! `_sum`, `_count`, `_total`, `_created`), so grouping is still by convention
+//! -- but scoped to a family of known type rather than guessed globally.
 
 use prometheus::proto::{
     Bucket, Counter, Gauge, Histogram, LabelPair, Metric, MetricFamily, MetricType, Quantile,
@@ -63,7 +62,26 @@ pub struct TypedFamily {
     pub help: String,
     #[cfg_attr(test, serde(rename = "type"))]
     pub kind: String,
+    /// Prometheus UNIT metadata, as the word the client reports (`seconds`).
+    /// Empty when the source does not declare one.
+    #[cfg_attr(test, serde(default))]
+    pub unit: String,
     pub samples: Vec<TypedSample>,
+}
+
+/// A built family together with the UNIT metadata that came with it.
+///
+/// The unit rides alongside rather than inside: `prometheus::proto::MetricFamily`
+/// has no unit field, so it would otherwise be dropped at this boundary -- and
+/// the spec requires it be carried to OTLP when the source declares one.
+pub struct BuiltFamily {
+    pub family: MetricFamily,
+    pub unit: String,
+    /// The Prometheus type word as the client reported it (`info`, `counter`).
+    /// The proto model has no Info variant and collapses it to a gauge, so the
+    /// original is kept: the spec converts Info to a non-monotonic Sum, and
+    /// requires the word itself in `prometheus.type`.
+    pub prom_type: String,
 }
 
 /// Convert typed families into `MetricFamily`, sorted by name.
@@ -72,20 +90,38 @@ pub struct TypedFamily {
 /// `generate_latest` renders them and therefore what the text path already
 /// exports. Dropping them here would silently stop exporting series that ship
 /// today.
-pub fn build_families(typed: Vec<TypedFamily>) -> Vec<MetricFamily> {
-    let mut out = Vec::new();
+pub fn build_families(typed: Vec<TypedFamily>) -> Vec<BuiltFamily> {
+    let mut out: Vec<BuiltFamily> = Vec::new();
     for mut family in typed {
+        let unit = family.unit.clone();
+        let prom_type = family.kind.clone();
         let (created, rest) = family
             .samples
             .drain(..)
             .partition(|s| s.name.ends_with("_created"));
         family.samples = rest;
-        out.extend(promote_created(&family.help, created));
-        if let Some(built) = build_one(family) {
-            out.push(built);
+        out.extend(
+            promote_created(&family.help, created)
+                .into_iter()
+                .map(|family| {
+                    // `_created` is a timestamp, not a measurement, so it
+                    // carries no unit and is a plain gauge.
+                    BuiltFamily {
+                        family,
+                        unit: String::new(),
+                        prom_type: "gauge".to_string(),
+                    }
+                }),
+        );
+        if let Some(family) = build_one(family) {
+            out.push(BuiltFamily {
+                family,
+                unit,
+                prom_type,
+            });
         }
     }
-    out.sort_by(|a, b| a.name().cmp(b.name()));
+    out.sort_by(|a, b| a.family.name().cmp(b.family.name()));
     out
 }
 
@@ -167,6 +203,10 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
                 points: Vec<(f64, f64)>,
                 sum: f64,
                 count: u64,
+                /// "If `_count` is not present, the metric MUST be dropped."
+                /// A count of zero is a real value, so absence is tracked
+                /// separately rather than inferred from it.
+                saw_count: bool,
                 /// A histogram is one proto `Metric` built from several
                 /// samples, so keep the first timestamp any of them carried.
                 timestamp: Option<f64>,
@@ -187,6 +227,7 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
                             points: Vec::new(),
                             sum: 0.0,
                             count: 0,
+                            saw_count: false,
                             timestamp: None,
                         });
                         series.last_mut()?
@@ -205,7 +246,10 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
                         }
                     }
                     None if sample.name.ends_with("_sum") => entry.sum = sample.value,
-                    None if sample.name.ends_with("_count") => entry.count = sample.value as u64,
+                    None if sample.name.ends_with("_count") => {
+                        entry.count = sample.value as u64;
+                        entry.saw_count = true;
+                    }
                     None => {}
                 }
             }
@@ -215,9 +259,17 @@ fn build_one(family: TypedFamily) -> Option<MetricFamily> {
                 mut points,
                 sum,
                 count,
+                saw_count,
                 timestamp,
             } in series
             {
+                if !saw_count {
+                    tracing::debug!(
+                        metric_name = %out.name(),
+                        "dropping histogram/summary series with no _count sample"
+                    );
+                    continue;
+                }
                 points.sort_by(|a, b| a.0.total_cmp(&b.0));
                 let mut metric = Metric::new();
                 metric.set_label(label_pairs(labels));

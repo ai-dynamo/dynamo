@@ -214,7 +214,7 @@ def get_prometheus_typed(
 ) -> list:
     """Collect a registry as a typed structure rather than exposition text.
 
-    Returns ``[(name, help, type, [(sample_name, [(label, value)], value)])]``,
+    Returns ``[(name, help, type, unit, [(sample, [(label, value)], value, ts)])]``,
     which pyo3 extracts natively. Nothing is serialized to a string on either
     side, so the family name, type and help arrive authoritative instead of
     being re-derived from ``# TYPE`` lines by a parser.
@@ -260,6 +260,9 @@ def get_prometheus_typed(
                 metric.name,
                 metric.documentation,
                 metric.type,
+                # UNIT metadata. The spec requires it reach OTLP when declared;
+                # the proto model has no field for it, so it travels alongside.
+                metric.unit,
                 # The sample timestamp is carried, not dropped: standard
                 # prometheus_client metrics leave it None, but a custom
                 # collector or a federated source can set it, and defaulting to

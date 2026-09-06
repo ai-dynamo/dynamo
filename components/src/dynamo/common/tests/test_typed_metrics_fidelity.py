@@ -63,7 +63,8 @@ def test_filtering_is_family_level_in_the_typed_contract():
     ).observe(0.5)
     typed = get_prometheus_typed(registry, metric_prefix_filters=["vllm:latency"])
     assert len(typed) == 1
-    sample_names = {s[0] for s in typed[0][3]}
+    # (name, help, type, unit, samples)
+    sample_names = {s[0] for s in typed[0][4]}
     assert {
         "vllm:latency_seconds_bucket",
         "vllm:latency_seconds_sum",
@@ -124,7 +125,7 @@ def test_registered_callback_carries_auto_labels_into_typed_samples():
         "model": "Qwen/Qwen3-0.6B",
         "lora_adapter": "my-lora",
     }
-    for _name, _help_text, _type, samples in families:
+    for _name, _help_text, _type, _unit, samples in families:
         for sample_name, sample_labels, _value, _timestamp in samples:
             got = dict(sample_labels)
             for key, value in expected.items():

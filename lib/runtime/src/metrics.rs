@@ -709,14 +709,34 @@ impl<T: MetricsHierarchy + ?Sized> MetricsHierarchy for &T {
 /// The Arc wrapper is included in the type to make sharing explicit.
 pub type PrometheusUpdateCallback = Arc<dyn Fn() -> anyhow::Result<()> + Send + Sync + 'static>;
 
+/// One collection: the merged families, plus the UNIT metadata that came with
+/// the typed ones.
+///
+/// Kept beside the families because `prometheus::proto::MetricFamily` has no
+/// unit field, and the compatibility spec requires the unit reach OTLP when the
+/// source declares one.
+pub struct CollectedFamilies {
+    pub families: Vec<prometheus::proto::MetricFamily>,
+    /// Family name -> Prometheus unit word, for families that declared one.
+    pub units: HashMap<String, String>,
+    /// Family name -> Prometheus type word. Carried because the proto model has
+    /// no Info variant: an Info family arrives here as a gauge, and the spec
+    /// converts it to a non-monotonic Sum rather than a Gauge.
+    pub prom_types: HashMap<String, String>,
+}
+
 /// Type alias for exposition text callback functions that return Prometheus text
 pub type PrometheusExpositionFormatCallback =
     Arc<dyn Fn() -> anyhow::Result<String> + Send + Sync + 'static>;
 
 /// Returns already-built families, so engine metrics reach the structured
 /// path without being rendered to text and parsed back.
-pub type PrometheusTypedCallback =
-    Arc<dyn Fn() -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> + Send + Sync + 'static>;
+pub type PrometheusTypedCallback = Arc<
+    dyn Fn() -> anyhow::Result<Vec<crate::metrics::prom_typed::BuiltFamily>>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// Structure to hold Prometheus registries and associated callbacks for a given hierarchy.
 ///
@@ -901,22 +921,34 @@ impl MetricsRegistry {
     ///
     /// Each call re-executes the typed callbacks, which cross into Python and
     /// take the GIL, so callers should collect on a deliberate cadence.
-    pub fn metric_families_combined(&self) -> anyhow::Result<Vec<prometheus::proto::MetricFamily>> {
+    pub fn metric_families_combined(&self) -> anyhow::Result<CollectedFamilies> {
         let registries = self.registries_for_combined_scrape();
         run_update_callbacks(&registries);
 
         let mut merger = FamilyMerger::from_gathered(&registries)?;
 
+        // The unit travels beside the family, keyed by name: the proto model
+        // has no unit field, so it would otherwise be dropped here.
+        let mut units: HashMap<String, String> = HashMap::new();
+        let mut prom_types: HashMap<String, String> = HashMap::new();
         for registry in &registries {
-            for family in registry.execute_typed_callbacks() {
-                let name = family.name().to_string();
-                if let Err(error) = merger.add_family(family) {
+            for built in registry.execute_typed_callbacks() {
+                let name = built.family.name().to_string();
+                if !built.unit.is_empty() {
+                    units.insert(name.clone(), built.unit);
+                }
+                prom_types.insert(name.clone(), built.prom_type);
+                if let Err(error) = merger.add_family(built.family) {
                     tracing::warn!(metric_name = %name, %error, "skipping typed metric family");
                 }
             }
         }
 
-        Ok(merger.into_sorted())
+        Ok(CollectedFamilies {
+            families: merger.into_sorted(),
+            units,
+            prom_types,
+        })
     }
 
     /// Add a callback function that receives a reference to any MetricsHierarchy
@@ -981,7 +1013,7 @@ impl MetricsRegistry {
 
     /// Collect from every typed callback, logging and skipping failures so one
     /// broken engine cannot empty the whole collection.
-    pub fn execute_typed_callbacks(&self) -> Vec<prometheus::proto::MetricFamily> {
+    pub fn execute_typed_callbacks(&self) -> Vec<crate::metrics::prom_typed::BuiltFamily> {
         // Snapshot under the lock, then invoke without it held. The callbacks
         // take the Python GIL, and registration arrives from Python holding the
         // GIL and blocking on `write()` -- holding the read lock across the
@@ -1551,7 +1583,11 @@ mod test_metricsregistry_prefixes {
             metric.set_label(vec![label]);
             metric.set_gauge(prometheus::proto::Gauge::new());
             family.mut_metric().push(metric);
-            Ok(vec![family])
+            Ok(vec![crate::metrics::prom_typed::BuiltFamily {
+                family,
+                unit: String::new(),
+                prom_type: "gauge".to_string(),
+            }])
         });
 
         endpoint.get_metrics_registry().add_typed_callback(callback);
@@ -1569,6 +1605,7 @@ mod test_metricsregistry_prefixes {
         );
         assert!(
             families
+                .families
                 .iter()
                 .any(|f| f.name() == "dynamo_component_active_decode_blocks"),
             "typed family missing from the combined collection"
@@ -2053,11 +2090,11 @@ mod test_metric_families_combined {
             .register(Box::new(counter))
             .unwrap();
         registry.add_typed_callback(StdArc::new(|| {
-            Ok(vec![gauge_family(
-                "vllm:num_requests_running",
-                "Running requests",
-                4.0,
-            )])
+            Ok(vec![crate::metrics::prom_typed::BuiltFamily {
+                unit: String::new(),
+                prom_type: "gauge".to_string(),
+                family: gauge_family("vllm:num_requests_running", "Running requests", 4.0),
+            }])
         }));
         registry
     }
@@ -2068,9 +2105,9 @@ mod test_metric_families_combined {
 
     #[test]
     fn typed_and_native_families_share_one_collection() {
-        let families = registry().metric_families_combined().expect("combined");
-        assert!(names(&families).contains(&"vllm:num_requests_running"));
-        assert!(names(&families).contains(&"dynamo_native_total"));
+        let collected = registry().metric_families_combined().expect("combined");
+        assert!(names(&collected.families).contains(&"vllm:num_requests_running"));
+        assert!(names(&collected.families).contains(&"dynamo_native_total"));
     }
 
     /// The two surfaces are fed independently: typed callbacks reach OTLP,
@@ -2165,6 +2202,7 @@ mod test_metric_families_combined {
             registry
                 .metric_families_combined()
                 .expect("collection survives")
+                .families
                 .is_empty()
         );
     }
