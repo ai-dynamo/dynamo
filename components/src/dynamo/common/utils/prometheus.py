@@ -13,6 +13,7 @@ while Dynamo runtime metrics are available immediately after component creation.
 
 import enum
 import logging
+import os
 import re
 import threading
 from collections.abc import Mapping
@@ -38,6 +39,80 @@ if TYPE_CHECKING:
 
 
 # Single source of truth for embedding cache metric names.
+# Deployment-wide constant labels (DYN_METRICS_CONST_LABELS).
+# Rust counterpart: lib/runtime/src/metrics.rs parse_const_labels(), apply_const_labels()
+METRICS_CONST_LABELS_ENV = "DYN_METRICS_CONST_LABELS"
+_CONST_LABEL_NAME_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+_AUTO_INJECTED_LABEL_NAMES = frozenset(
+    {labels.NAMESPACE, labels.COMPONENT, labels.ENDPOINT, labels.WORKER_ID}
+)
+
+
+def parse_const_labels(raw: str) -> dict[str, str]:
+    """Parse ``name=value,name2=value2`` into a dict of constant labels.
+
+    Mirrors the Rust parser: names must match ``[a-zA-Z_][a-zA-Z0-9_]*``, must not
+    start with the reserved ``__`` prefix, must not collide with Dynamo's auto-injected
+    labels, and must not repeat. Whitespace around names and values is trimmed; a
+    value may itself contain ``=``. Raises ValueError on the first problem so a typo
+    cannot half-apply.
+    """
+    parsed: dict[str, str] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, sep, value = entry.partition("=")
+        if not sep:
+            raise ValueError(f"entry '{entry}' is not a name=value pair")
+        name = name.strip()
+        value = value.strip()
+        if not _CONST_LABEL_NAME_PATTERN.match(name):
+            raise ValueError(f"'{name}' is not a valid Prometheus label name")
+        if name.startswith("__"):
+            raise ValueError(f"label name '{name}' uses the reserved '__' prefix")
+        if name in _AUTO_INJECTED_LABEL_NAMES:
+            raise ValueError(
+                f"label name '{name}' is auto-injected by Dynamo "
+                "and cannot be overridden"
+            )
+        if name in parsed:
+            raise ValueError(f"label name '{name}' is defined more than once")
+        parsed[name] = value
+    return parsed
+
+
+@lru_cache(maxsize=1)
+def _env_const_labels_cached() -> tuple[tuple[str, str], ...]:
+    raw = os.environ.get(METRICS_CONST_LABELS_ENV, "")
+    if not raw:
+        return ()
+    try:
+        parsed = parse_const_labels(raw)
+    except ValueError as e:
+        logging.error(
+            "Ignoring invalid %s (%s); no constant labels will be attached",
+            METRICS_CONST_LABELS_ENV,
+            e,
+        )
+        return ()
+    if parsed:
+        logging.info(
+            "Attaching %d deployment-wide constant label(s) from %s to engine metrics",
+            len(parsed),
+            METRICS_CONST_LABELS_ENV,
+        )
+    return tuple(parsed.items())
+
+
+def env_const_labels() -> dict[str, str]:
+    """Constant labels from ``DYN_METRICS_CONST_LABELS``, parsed once per process.
+
+    Keep these low-cardinality (cluster, region, team, ...); never per-request data.
+    """
+    return dict(_env_const_labels_cached())
+
+
 EMBEDDING_CACHE_METRIC_PREFIX = f"{name_prefix.COMPONENT}_embedding_cache"
 
 
@@ -155,9 +230,9 @@ def register_engine_metrics_callback(
         # Add model labels if model_name is provided
         if model_name:
             auto_labels[labels.MODEL] = model_name  # "model" (OpenAI standard)
-            auto_labels[
-                labels.MODEL_NAME
-            ] = model_name  # "model_name" (engine-native compatibility)
+            auto_labels[labels.MODEL_NAME] = (
+                model_name  # "model_name" (engine-native compatibility)
+            )
 
         # Validate that user didn't provide conflicting auto-labels
         # Warn but don't error - custom labels have lower precedence than auto-labels
@@ -247,7 +322,8 @@ def get_prometheus_expfmt(
                       Label Precedence (highest to lowest):
                       1. Existing labels from source metrics - never changed
                       2. Auto-injected labels (via register_engine_metrics_callback)
-                      3. Custom labels (inject_custom_labels) - lowest precedence
+                      3. Custom labels (inject_custom_labels)
+                      4. Deployment-wide labels from DYN_METRICS_CONST_LABELS - lowest precedence
 
     Returns:
         Formatted metrics text in Prometheus exposition format. Returns empty string on error.
@@ -268,8 +344,13 @@ def get_prometheus_expfmt(
     from prometheus_client import CollectorRegistry, generate_latest
 
     try:
+        # Deployment-wide constant labels (DYN_METRICS_CONST_LABELS) have the lowest
+        # precedence: explicit inject_custom_labels win, and LabelInjectingCollector
+        # never overwrites a label a metric already carries.
+        labels_to_inject = {**env_const_labels(), **(inject_custom_labels or {})}
+
         # If label injection requested, wrap registry with custom collector
-        if inject_custom_labels:
+        if labels_to_inject:
             # Delayed import: LabelInjectingCollector imports prometheus_client.registry.Collector
             # at module level. This import must happen AFTER set_prometheus_multiproc_dir() is
             # called by SGLang's engine initialization. Importing at the top of this file would
@@ -281,9 +362,7 @@ def get_prometheus_expfmt(
 
             # Create temporary registry with label-injecting collector
             temp_registry = CollectorRegistry()
-            temp_registry.register(
-                LabelInjectingCollector(registry, inject_custom_labels)
-            )
+            temp_registry.register(LabelInjectingCollector(registry, labels_to_inject))
             registry = temp_registry
 
         # Generate metrics in Prometheus text format

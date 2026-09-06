@@ -231,6 +231,135 @@ impl PrometheusMetric for prometheus::CounterVec {
 }
 
 /// ==============================
+/// Deployment-wide constant labels
+/// ==============================
+/// Environment variable holding extra constant labels to attach to every Prometheus metric this
+/// process exposes, e.g. `DYN_METRICS_CONST_LABELS="cluster=us-west-2,team=search"`.
+///
+/// Format: comma-separated `name=value` pairs (whitespace around names and values is trimmed; a
+/// value may itself contain `=`). Names must match `[a-zA-Z_][a-zA-Z0-9_]*`, must not start with
+/// the reserved `__` prefix, and must not collide with the auto-injected labels
+/// (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`). A label a metric
+/// already carries is never overwritten. The value is parsed once per process; an invalid value is
+/// logged and ignored as a whole so a typo cannot half-apply.
+///
+/// Python counterpart: components/src/dynamo/common/utils/prometheus.py parse_const_labels()
+pub const METRICS_CONST_LABELS_ENV: &str = "DYN_METRICS_CONST_LABELS";
+
+static CONST_LABEL_NAME_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").expect("valid regex"));
+
+static ENV_CONST_LABELS: Lazy<Vec<(String, String)>> = Lazy::new(|| {
+    let raw = match std::env::var(METRICS_CONST_LABELS_ENV) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+    match parse_const_labels(&raw) {
+        Ok(labels) => {
+            if !labels.is_empty() {
+                tracing::info!(
+                    env = METRICS_CONST_LABELS_ENV,
+                    count = labels.len(),
+                    "Attaching deployment-wide constant labels to all Prometheus metrics"
+                );
+            }
+            labels
+        }
+        Err(e) => {
+            tracing::error!(
+                env = METRICS_CONST_LABELS_ENV,
+                error = %e,
+                "Ignoring invalid {METRICS_CONST_LABELS_ENV}; no constant labels will be attached"
+            );
+            Vec::new()
+        }
+    }
+});
+
+/// Constant labels configured via [`METRICS_CONST_LABELS_ENV`], parsed once per process.
+pub fn env_const_labels() -> &'static [(String, String)] {
+    &ENV_CONST_LABELS
+}
+
+/// Parse a `name=value,name2=value2` string into label pairs (see [`METRICS_CONST_LABELS_ENV`]).
+///
+/// Returns an error on the first malformed pair, invalid or reserved name, or duplicate name.
+pub fn parse_const_labels(raw: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (name, value) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("entry '{entry}' is not a name=value pair"))?;
+        let name = name.trim();
+        let value = value.trim();
+        if !CONST_LABEL_NAME_PATTERN.is_match(name) {
+            return Err(anyhow::anyhow!(
+                "'{name}' is not a valid Prometheus label name"
+            ));
+        }
+        if name.starts_with("__") {
+            return Err(anyhow::anyhow!(
+                "label name '{name}' uses the reserved '__' prefix"
+            ));
+        }
+        if is_auto_injected_label(name) {
+            return Err(anyhow::anyhow!(
+                "label name '{name}' is auto-injected by Dynamo and cannot be overridden"
+            ));
+        }
+        if out.iter().any(|(existing, _)| existing == name) {
+            return Err(anyhow::anyhow!(
+                "label name '{name}' is defined more than once"
+            ));
+        }
+        out.push((name.to_string(), value.to_string()));
+    }
+    Ok(out)
+}
+
+fn is_auto_injected_label(name: &str) -> bool {
+    name == labels::NAMESPACE
+        || name == labels::COMPONENT
+        || name == labels::ENDPOINT
+        || name == labels::WORKER_ID
+}
+
+/// Attach `const_labels` to every sample in `families`, skipping any label name the sample
+/// already carries (existing labels always win). Call this at exposition time, right before
+/// encoding, so it covers metrics created through [`create_metric`] as well as metrics
+/// registered directly with `prometheus::Opts`.
+pub fn apply_const_labels(
+    families: &mut [prometheus::proto::MetricFamily],
+    const_labels: &[(String, String)],
+) {
+    if const_labels.is_empty() {
+        return;
+    }
+    for family in families.iter_mut() {
+        for metric in family.metric.iter_mut() {
+            for (name, value) in const_labels {
+                if metric.label.iter().any(|lp| lp.name() == name) {
+                    continue;
+                }
+                let mut pair = prometheus::proto::LabelPair::default();
+                pair.set_name(name.clone());
+                pair.set_value(value.clone());
+                metric.label.push(pair);
+            }
+        }
+    }
+}
+
+/// [`apply_const_labels`] with the labels from [`METRICS_CONST_LABELS_ENV`].
+pub fn apply_env_const_labels(families: &mut [prometheus::proto::MetricFamily]) {
+    apply_const_labels(families, env_const_labels());
+}
+
+/// ==============================
 /// Metrics section
 /// ==============================
 /// Public helper function to create metrics - accessible for Python bindings
@@ -834,7 +963,19 @@ impl MetricsRegistry {
     /// - Families are merged by name; HELP and TYPE must match.
     /// - Multiple series for the same name are allowed if labels differ.
     /// - Exact duplicate series (same name + identical label pairs) are warned and dropped.
+    /// - Constant labels from [`METRICS_CONST_LABELS_ENV`] are attached to every sample
+    ///   (a label a sample already carries is never overwritten).
     pub fn prometheus_expfmt_combined(&self) -> anyhow::Result<String> {
+        self.prometheus_expfmt_combined_with_const_labels(env_const_labels())
+    }
+
+    /// Same as [`Self::prometheus_expfmt_combined`], but attaches the given constant labels
+    /// instead of the ones from [`METRICS_CONST_LABELS_ENV`]. Exposed for tests and for callers
+    /// that manage deployment labels themselves.
+    pub fn prometheus_expfmt_combined_with_const_labels(
+        &self,
+        const_labels: &[(String, String)],
+    ) -> anyhow::Result<String> {
         let registries = self.registries_for_combined_scrape();
 
         // Run per-registry update callbacks first.
@@ -909,6 +1050,7 @@ impl MetricsRegistry {
 
         let mut merged: Vec<prometheus::proto::MetricFamily> = by_name.into_values().collect();
         merged.sort_by(|a, b| a.name().cmp(b.name()));
+        apply_const_labels(&mut merged, const_labels);
 
         let encoder = prometheus::TextEncoder::new();
         let mut buffer = Vec::new();
@@ -1131,6 +1273,95 @@ mod test_helpers {
 #[cfg(test)]
 mod test_metricsregistry_units {
     use super::*;
+
+    #[test]
+    fn test_parse_const_labels_accepts_valid_pairs() {
+        let labels = parse_const_labels(" cluster=us-west-2, team = search ,, env=prod ").unwrap();
+        assert_eq!(
+            labels,
+            vec![
+                ("cluster".to_string(), "us-west-2".to_string()),
+                ("team".to_string(), "search".to_string()),
+                ("env".to_string(), "prod".to_string()),
+            ]
+        );
+        assert!(parse_const_labels("").unwrap().is_empty());
+        assert!(parse_const_labels(" , ").unwrap().is_empty());
+        // Only the first '=' splits; values may contain '='.
+        assert_eq!(
+            parse_const_labels("k=a=b").unwrap(),
+            vec![("k".to_string(), "a=b".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_parse_const_labels_rejects_bad_input() {
+        for bad in [
+            "novalue",
+            "=empty_name",
+            "1bad=x",
+            "bad-name=x",
+            "__reserved=x",
+            "dynamo_namespace=x",
+            "dynamo_component=x",
+            "dynamo_endpoint=x",
+            "worker_id=1",
+            "dup=1,dup=2",
+        ] {
+            assert!(
+                parse_const_labels(bad).is_err(),
+                "expected '{bad}' to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_apply_const_labels_never_overrides_existing_labels() {
+        let registry = MetricsRegistry::new();
+        let plain = prometheus::IntCounter::new("demo_plain_total", "plain").unwrap();
+        plain.inc();
+        let labeled = prometheus::IntCounterVec::new(
+            prometheus::Opts::new("demo_requests_total", "labeled"),
+            &["cluster"],
+        )
+        .unwrap();
+        labeled.with_label_values(&["explicit"]).inc_by(2);
+        {
+            let prom = registry.get_prometheus_registry();
+            prom.register(Box::new(plain)).unwrap();
+            prom.register(Box::new(labeled)).unwrap();
+        }
+
+        let const_labels = vec![
+            ("cluster".to_string(), "from_env".to_string()),
+            ("team".to_string(), "search".to_string()),
+        ];
+        let text = registry
+            .prometheus_expfmt_combined_with_const_labels(&const_labels)
+            .unwrap();
+        assert!(
+            text.contains(r#"demo_plain_total{cluster="from_env",team="search"} 1"#),
+            "{text}"
+        );
+        assert!(
+            text.contains(r#"demo_requests_total{cluster="explicit",team="search"} 2"#),
+            "{text}"
+        );
+        assert!(
+            !text.contains(r#"cluster="from_env",team="search"} 2"#),
+            "{text}"
+        );
+
+        // No constant labels -> output is untouched.
+        let text = registry
+            .prometheus_expfmt_combined_with_const_labels(&[])
+            .unwrap();
+        assert!(text.contains("demo_plain_total 1\n"), "{text}");
+        assert!(
+            text.contains(r#"demo_requests_total{cluster="explicit"} 2"#),
+            "{text}"
+        );
+    }
 
     #[test]
     fn test_build_component_metric_name_with_prefix() {

@@ -20,6 +20,16 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model <model>
 
 Prometheus Exposition Format text metrics will be available at: `http://localhost:8081/metrics`
 
+## Deployment-Wide Constant Labels
+
+Set `DYN_METRICS_CONST_LABELS` to attach the same constant labels to every metric a process exposes, without code changes. The value is a comma-separated list of `name=value` pairs:
+
+```bash
+DYN_METRICS_CONST_LABELS="cluster=us-west-2,team=search" DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model <model>
+```
+
+Rules: names must match `[a-zA-Z_][a-zA-Z0-9_]*`, must not start with `__`, and cannot override the auto-injected `dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, or `worker_id` labels. A label a metric already carries is never overwritten. If the value is malformed, the whole variable is logged and ignored. Labels are applied at exposition time to Rust runtime metrics, frontend metrics, and engine metrics re-exported through `dynamo.common.utils.prometheus`, so set the variable on every process (frontend and workers). Keep values low-cardinality.
+
 ## Metric Name Constants
 
 The [prometheus_names.rs](https://github.com/ai-dynamo/dynamo/tree/main/lib/runtime/src/metrics/prometheus_names.rs) module provides centralized metric name constants and sanitization functions to ensure consistency across all Dynamo components.
