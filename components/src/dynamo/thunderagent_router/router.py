@@ -77,6 +77,9 @@ class ThunderAgentConfig:
     acting_token_weight: float = 1.0
     acting_decay_tau_seconds: float = 1.0
     buffer_per_program: int = 100
+    # A program whose last turn finished this long ago, with no new turn in flight, is
+    # released as if it had sent session_final. 0 disables expiry.
+    program_idle_ttl_seconds: float = 600.0
 
 
 @dataclass
@@ -109,6 +112,7 @@ class ThunderAgentScheduler:
         self._stat_marked_for_pause = 0
         self._stat_worker_assignments = 0
         self._stat_admissions_cancelled = 0
+        self._stat_programs_expired = 0
 
     def start(self) -> None:
         if self._scheduler_task is not None:
@@ -439,12 +443,57 @@ class ThunderAgentScheduler:
         # One lock acquisition and one table pass for the whole tick: per-phase rescans
         # cost O(replicas x programs), and replicas went from W to W x dp_size.
         async with self._lock:
+            # Release abandoned programs first so the usage this tick reasons about
+            # only holds sessions that can still send a turn.
+            self._expire_idle_programs_locked()
             usage = self._replica_usage_locked(capacities)
             # Upstream TA ordering: resume first, then pause -- a program paused
             # this tick can't resume until the next.
             self._apply_soft_demotes(usage)
             self._greedy_resume_locked(usage)
             self._pause_until_safe_locked(usage)
+
+    def _expire_idle_programs_locked(self) -> int:
+        """Release programs whose session went away without a ``session_final`` turn.
+
+        Caller holds ``self._lock``. Only ``end_program`` ever removed a program before
+        this, and only a harness that sends ``x-dynamo-session-final`` calls it. Any other
+        client leaves every finished session's ``token_total`` in its replica's budget for
+        the life of the router, so utilization climbs toward the pause threshold no matter
+        how little is actually running. A program is idle when its last turn completed
+        (``ACTING``, so ``acting_since`` is its completion time) at least
+        ``program_idle_ttl_seconds`` ago and no ``before_request`` for it is in progress or
+        parked on a pause. In-flight turns are ``REASONING`` and never expire.
+        """
+        ttl = self._cfg.program_idle_ttl_seconds
+        if ttl <= 0 or not self._table.programs:
+            return 0
+        now = time.monotonic()
+        expired: list[Program] = []
+        for program in self._table.programs.values():
+            if program.status != ProgramStatus.ACTING or program.acting_since <= 0:
+                continue
+            if program.program_id in self._admission_gates:
+                continue
+            if now - program.acting_since < ttl:
+                continue
+            expired.append(program)
+        for program in expired:
+            program.lifecycle = ProgramLifecycle.TERMINATED
+            if program.waiting is not None:
+                program.waiting.set()
+                program.waiting = None
+            self._table.release(program.program_id)
+            self._stat_programs_expired += 1
+            self._stat_programs_ended += 1
+            logger.info(
+                "thunderagent.program expired program=%s idle=%.0fs tokens=%d remaining=%d",
+                program.program_id,
+                now - program.acting_since,
+                program.token_total,
+                len(self._table.programs),
+            )
+        return len(expired)
 
     def _program_tokens(self, program: Program, *, decayed: bool = False) -> int:
         if program.status != ProgramStatus.ACTING:
@@ -902,6 +951,7 @@ class ThunderAgentScheduler:
                 "counters": {
                     "programs_created_total": self._stat_programs_created,
                     "programs_ended_total": self._stat_programs_ended,
+                    "programs_expired_total": self._stat_programs_expired,
                     "requests_admitted_total": self._stat_requests_admitted,
                     "requests_paused_total": self._stat_requests_paused,
                     "program_pauses_total": self._stat_pauses,

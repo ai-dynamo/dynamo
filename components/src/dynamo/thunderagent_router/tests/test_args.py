@@ -61,6 +61,19 @@ def test_sglang_generate_capability_requires_model_name() -> None:
         )
 
 
+def test_program_idle_ttl_flag_reaches_scheduler_config() -> None:
+    base = ["--endpoint", "dynamo.sglang.generate"]
+    assert parse_args(base).to_thunderagent_config().program_idle_ttl_seconds == 600.0
+    assert (
+        parse_args([*base, "--program-idle-ttl-seconds", "0"])
+        .to_thunderagent_config()
+        .program_idle_ttl_seconds
+        == 0.0
+    )
+    with pytest.raises(ValueError, match="--program-idle-ttl-seconds must be >= 0"):
+        parse_args([*base, "--program-idle-ttl-seconds", "-1"])
+
+
 def test_publish_sglang_generate_capability_uses_backend_contract(monkeypatch) -> None:
     module = ModuleType("dynamo.sglang.engine_generate")
     module.SGLANG_GENERATE_CAPABILITY = "sglang_generate"

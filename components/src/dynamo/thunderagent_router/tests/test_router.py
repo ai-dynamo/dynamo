@@ -561,7 +561,8 @@ async def test_scheduler_tick_resumes_before_pausing_new_overload():
 @pytest.mark.asyncio
 async def test_new_program_queues_when_count_ceiling_full_even_with_token_headroom():
     """max_programs (SGLang's max_running_requests, per DP rank) can be the binding
-    constraint even with abundant token headroom -- the two dimensions are independent."""
+    constraint even with abundant token headroom -- the two dimensions are independent.
+    """
     cfg = ThunderAgentConfig(
         scheduler_interval_seconds=10.0,
         resume_timeout_seconds=2.0,
@@ -664,6 +665,104 @@ async def test_greedy_resume_respects_count_ceiling_even_with_token_headroom():
     # only the request-count ceiling (2 slots, 1 already held by "resident") caps it at 1.
     assert len(resumed) == 1
     assert len(still_paused) == 1
+
+
+@pytest.mark.asyncio
+async def test_idle_program_expires_and_frees_its_budget():
+    """A finished session that never sends session_final stops counting after the TTL."""
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=10.0, program_idle_ttl_seconds=5.0
+    )
+    router, _ = make_router(capacity_workers={(1, 0): 1_000_000}, config=cfg)
+    await router.before_request("dead", estimated_prompt_tokens=100)
+    place(router, "dead", (1, 0))
+    await router.after_request("dead", prompt_tokens=100, completion_tokens=10)
+    assert usage(router)[(1, 0)].count == 1
+
+    # Not idle long enough yet.
+    assert router._expire_idle_programs_locked() == 0
+    router._table.programs["dead"].acting_since = time.monotonic() - 6.0
+    assert router._expire_idle_programs_locked() == 1
+
+    assert "dead" not in router._table.programs
+    assert usage(router)[(1, 0)].count == 0
+    assert usage(router)[(1, 0)].used == 0
+    assert router._stat_programs_expired == 1
+    assert router._stat_programs_ended == 1
+
+
+@pytest.mark.asyncio
+async def test_in_flight_turn_never_expires():
+    """A program mid-turn is REASONING; its age is irrelevant until the turn completes."""
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=10.0, program_idle_ttl_seconds=0.01
+    )
+    router, _ = make_router(capacity_workers={(1, 0): 1_000_000}, config=cfg)
+    await router.before_request("live", estimated_prompt_tokens=100)
+    place(router, "live", (1, 0))
+    await asyncio.sleep(0.02)
+    assert router._expire_idle_programs_locked() == 0
+    assert router._table.programs["live"].status == ProgramStatus.REASONING
+
+
+@pytest.mark.asyncio
+async def test_program_parked_on_admission_never_expires():
+    """A paused program with a turn waiting in before_request is a live client, however
+    long it has been parked."""
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=1000.0,
+        resume_timeout_seconds=5.0,
+        program_idle_ttl_seconds=0.01,
+    )
+    router, _ = make_router(capacity_workers={(1, 0): 1_000_000}, config=cfg)
+    await router.before_request("parked", estimated_prompt_tokens=100)
+    place(router, "parked", (1, 0))
+    await router.after_request("parked", prompt_tokens=100, completion_tokens=10)
+    await router._pause_acting("parked")
+
+    waiter = asyncio.create_task(router.before_request("parked"))
+    await asyncio.sleep(0.05)
+    try:
+        assert router._expire_idle_programs_locked() == 0
+        assert router._table.programs["parked"].lifecycle == ProgramLifecycle.PAUSED
+    finally:
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+
+@pytest.mark.asyncio
+async def test_idle_paused_program_expires_out_of_the_paused_set():
+    """The dead-session case from the DSv4 sweeps: paused, client gone, nothing ever
+    resumes it. Expiry must clear it from the paused set too, or resume keeps re-placing
+    a ghost."""
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=10.0, program_idle_ttl_seconds=5.0
+    )
+    router, _ = make_router(capacity_workers={(1, 0): 1_000_000}, config=cfg)
+    await router.before_request("ghost", estimated_prompt_tokens=100)
+    place(router, "ghost", (1, 0))
+    await router.after_request("ghost", prompt_tokens=100, completion_tokens=10)
+    await router._pause_acting("ghost")
+    router._table.programs["ghost"].acting_since = time.monotonic() - 6.0
+
+    assert router._expire_idle_programs_locked() == 1
+    assert "ghost" not in router._table.paused
+    assert "ghost" not in router._table.programs
+
+
+@pytest.mark.asyncio
+async def test_zero_ttl_disables_expiry():
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=10.0, program_idle_ttl_seconds=0.0
+    )
+    router, _ = make_router(capacity_workers={(1, 0): 1_000_000}, config=cfg)
+    await router.before_request("keep", estimated_prompt_tokens=100)
+    place(router, "keep", (1, 0))
+    await router.after_request("keep", prompt_tokens=100, completion_tokens=10)
+    router._table.programs["keep"].acting_since = time.monotonic() - 1e6
+    assert router._expire_idle_programs_locked() == 0
+    assert "keep" in router._table.programs
 
 
 @pytest.mark.fault_tolerance

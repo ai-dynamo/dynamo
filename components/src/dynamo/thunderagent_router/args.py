@@ -32,6 +32,7 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
     acting_token_weight: float
     acting_decay_tau_seconds: float
     scheduler_interval_seconds: float
+    program_idle_ttl_seconds: float
     model_name: Optional[str] = None
     model_path: Optional[str] = None
     tool_call_parser: Optional[str] = None
@@ -50,6 +51,7 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
             acting_token_weight=self.acting_token_weight,
             acting_decay_tau_seconds=self.acting_decay_tau_seconds,
             scheduler_interval_seconds=self.scheduler_interval_seconds,
+            program_idle_ttl_seconds=self.program_idle_ttl_seconds,
         )
 
     def validate(self) -> None:  # type: ignore[override]
@@ -70,6 +72,8 @@ class ThunderAgentRouterConfig(DynamoRouterConfig):
             raise ValueError("--scheduler-interval-seconds must be > 0")
         if self.resume_timeout_seconds <= 0:
             raise ValueError("--resume-timeout-seconds must be > 0")
+        if self.program_idle_ttl_seconds < 0:
+            raise ValueError("--program-idle-ttl-seconds must be >= 0")
         if self.publish_sglang_generate and not self.model_name:
             raise ValueError("--publish-sglang-generate requires --model-name")
 
@@ -127,6 +131,17 @@ class ThunderAgentArgGroup(ArgGroup):
             default=1800.0,
             help="Maximum wait on a paused program before a forced resume "
             "(default: 1800)",
+            arg_type=float,
+        )
+        add_argument(
+            g,
+            flag_name="--program-idle-ttl-seconds",
+            env_var="DYN_THUNDERAGENT_PROGRAM_IDLE_TTL_SECONDS",
+            default=600.0,
+            help="Release a program whose last turn finished this many seconds ago "
+            "with no new turn in flight, as if it had sent x-dynamo-session-final. "
+            "Set above the longest legitimate gap between turns. 0 disables "
+            "(default: 600)",
             arg_type=float,
         )
         add_argument(
