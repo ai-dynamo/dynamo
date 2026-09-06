@@ -49,9 +49,9 @@ class _ReplicaUsage:
     """One replica's occupancy, from a single pass over the program table.
 
     Kept live for a whole tick: pause and resume adjust it as they mutate the table. No
-    ``used_decayed`` field -- it moves with the clock, so it is derived on demand. Program
-    count is ``len(programs)`` rather than a separate counter, so it can't drift from the
-    list every mutation already has to touch.
+    ``used_decayed`` field -- it moves with the clock, so it is derived on demand. Both
+    counts are derived from ``programs`` rather than kept as separate counters, so they
+    can't drift from the list every mutation already has to touch.
     """
 
     capacity: int
@@ -61,6 +61,15 @@ class _ReplicaUsage:
 
     @property
     def count(self) -> int:
+        """Turns in flight on this replica: what ``max_programs`` (SGLang's
+        ``max_running_requests``) actually bounds. A program between turns (ACTING) holds
+        no request slot; its KV stays resident, which the token dimension already models.
+        Counting it here made every rank look full at 8 live sessions once a few hundred
+        sessions had passed through it."""
+        return sum(1 for p in self.programs if p.status == ProgramStatus.REASONING)
+
+    @property
+    def resident(self) -> int:
         return len(self.programs)
 
 
@@ -644,7 +653,9 @@ class ThunderAgentScheduler:
                 key=lambda p: p.token_total,
             )
             for program in acting:
-                if _within_target():
+                # Pausing an ACTING program frees tokens but no request slot, so only
+                # token pressure justifies it; count pressure is handled by marking below.
+                if entry.used <= token_target:
                     break
                 if program.marked_for_pause:
                     continue
@@ -787,9 +798,9 @@ class ThunderAgentScheduler:
             (key, int(entry.capacity * resume_ceiling) - entry.used)
             for key, entry in usage.items()
         ]
-        backend_caps = [
-            (key, r) for key, r in backend_caps if r > buffer and slots[key] != 0
-        ]
+        # A replica out of request slots can still take back idle (ACTING) programs, so
+        # only token headroom excludes it here; slots are checked per program below.
+        backend_caps = [(key, r) for key, r in backend_caps if r > buffer]
         if not backend_caps:
             return
 
@@ -802,13 +813,18 @@ class ThunderAgentScheduler:
 
         resumable_programs: list[Program] = []
         cumulative = 0
+        slots_needed = 0
         for program in paused_programs:
-            if total_slots is not None and len(resumable_programs) >= total_slots:
-                break
+            # Only a program with a turn waiting on it (REASONING) takes a request slot
+            # when it comes back; an idle one just becomes resident again.
+            takes_slot = program.status == ProgramStatus.REASONING
+            if takes_slot and total_slots is not None and slots_needed >= total_slots:
+                continue
             required = program.token_total + buffer
             if cumulative + required <= total_capacity:
                 resumable_programs.append(program)
                 cumulative += required
+                slots_needed += int(takes_slot)
 
         if not resumable_programs:
             return
@@ -818,32 +834,36 @@ class ThunderAgentScheduler:
 
         resumed_this_tick = 0
         for program in resumable_programs:
-            # A replica whose token headroom bubbled it back to the front but whose
-            # request-count slots are now exhausted can never accept another resume this
-            # tick -- drop it so the next-best replica gets a turn.
-            while backend_caps and slots[backend_caps[0][0]] == 0:
-                backend_caps.pop(0)
-            if not backend_caps:
-                break
-            replica, remaining = backend_caps[0]
-            if min_required > remaining:
+            if not backend_caps or min_required > backend_caps[0][1]:
                 break
             required = program.token_total + buffer
-            if required > remaining:
+            takes_slot = program.status == ProgramStatus.REASONING
+            # Most token headroom first; a replica whose request slots are exhausted is
+            # skipped only for a program that needs one.
+            chosen = next(
+                (
+                    idx
+                    for idx, (key, remaining) in enumerate(backend_caps)
+                    if required <= remaining and not (takes_slot and slots[key] == 0)
+                ),
+                None,
+            )
+            if chosen is None:
                 continue
+            replica, remaining = backend_caps[chosen]
             self._resume_program(program, replica)
             entry = usage[replica]
             entry.programs.append(program)
             entry.used += self._program_tokens(program) + buffer
             resumed_this_tick += 1
-            if slots[replica] is not None:
+            if takes_slot and slots[replica] is not None:
                 slots[replica] -= 1  # type: ignore[operator]
             updated_remaining = remaining - required
-            if updated_remaining > buffer and slots[replica] != 0:
-                backend_caps[0] = (replica, updated_remaining)
+            if updated_remaining > buffer:
+                backend_caps[chosen] = (replica, updated_remaining)
                 backend_caps.sort(key=lambda x: -x[1])
             else:
-                backend_caps.pop(0)
+                backend_caps.pop(chosen)
 
         if resumed_this_tick:
             logger.info(
@@ -899,6 +919,7 @@ class ThunderAgentScheduler:
                     used_decayed / entry.capacity if entry.capacity else None
                 ),
                 "active_programs": entry.count,
+                "resident_programs": entry.resident,
                 "max_programs": entry.max_programs,
                 "count_utilization": (
                     entry.count / entry.max_programs if entry.max_programs else None

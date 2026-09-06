@@ -118,7 +118,9 @@ async def test_status_snapshot_reports_programs_and_worker_utilization():
     assert snapshot["workers"]["1:0"]["dp_rank"] == 0
     assert snapshot["workers"]["1:0"]["capacity"] == 1000
     assert snapshot["workers"]["1:0"]["used"] == 225
-    assert snapshot["workers"]["1:0"]["active_programs"] == 1
+    # p1 finished its turn: resident (KV counted) but no request in flight.
+    assert snapshot["workers"]["1:0"]["active_programs"] == 0
+    assert snapshot["workers"]["1:0"]["resident_programs"] == 1
     assert {
         (program["program_id"], program["assigned_worker_id"])
         for program in snapshot["programs"]
@@ -592,9 +594,10 @@ async def test_new_program_queues_when_count_ceiling_full_even_with_token_headro
 
 
 @pytest.mark.asyncio
-async def test_pause_until_safe_pauses_on_count_pressure_even_under_token_budget():
-    """A replica can be far under its token budget and still need to shed load if it's at
-    its request-count ceiling."""
+async def test_pause_until_safe_marks_in_flight_turns_on_count_pressure():
+    """A replica can be far under its token budget and still be at its request-count
+    ceiling. Only in-flight turns hold a slot, and an in-flight turn can't be paused
+    mid-request, so count pressure marks them to pause when they complete."""
     cfg = ThunderAgentConfig(
         pause_threshold=0.80,
         pause_target=0.80,
@@ -610,16 +613,48 @@ async def test_pause_until_safe_pauses_on_count_pressure_even_under_token_budget
     for pid in ["a", "b"]:
         await router.before_request(pid, estimated_prompt_tokens=10)
         place(router, pid, (1, 0))
-        await router.after_request(pid, prompt_tokens=10, completion_tokens=0)
 
     router._pause_until_safe_locked(usage(router))
 
-    paused = [
-        pid
-        for pid in ["a", "b"]
-        if router._table.programs[pid].lifecycle == ProgramLifecycle.PAUSED
-    ]
-    assert len(paused) == 1
+    programs = [router._table.programs[pid] for pid in ["a", "b"]]
+    assert all(p.lifecycle == ProgramLifecycle.ACTIVE for p in programs)
+    assert all(p.marked_for_pause for p in programs)
+
+
+@pytest.mark.asyncio
+async def test_idle_programs_do_not_count_against_request_slots():
+    """The DSv4 c64 pathology: eight live sessions per rank looked like a full 40-slot
+    rank because every session that had finished a turn still counted. Programs between
+    turns hold KV, not a request slot, so count pressure must ignore them and pausing
+    them must not be used to relieve it."""
+    cfg = ThunderAgentConfig(
+        pause_threshold=0.80,
+        pause_target=0.80,
+        scheduler_interval_seconds=10.0,
+    )
+    router, _ = make_router(
+        capacity_workers={(1, 0): 1_000_000},
+        capacity_max_programs={(1, 0): 4},
+        config=cfg,
+    )
+    for pid in ["done1", "done2", "done3", "done4", "done5"]:
+        await router.before_request(pid, estimated_prompt_tokens=10)
+        place(router, pid, (1, 0))
+        await router.after_request(pid, prompt_tokens=10, completion_tokens=0)
+    await router.before_request("live", estimated_prompt_tokens=10)
+    place(router, "live", (1, 0))
+
+    entry = usage(router)[(1, 0)]
+    assert entry.resident == 6
+    assert entry.count == 1
+
+    router._pause_until_safe_locked(usage(router))
+    assert router._table.paused == {}
+    assert not any(p.marked_for_pause for p in router._table.programs.values())
+
+    # A new turn still gets a slot: 1 in flight of 4.
+    decision = await router.before_request("newcomer", estimated_prompt_tokens=10)
+    assert decision.was_paused is False
 
 
 @pytest.mark.asyncio
@@ -649,6 +684,8 @@ async def test_greedy_resume_respects_count_ceiling_even_with_token_headroom():
         await router.after_request(pid, prompt_tokens=10, completion_tokens=0)
         await router._pause_acting(pid)
         assert router._table.programs[pid].lifecycle == ProgramLifecycle.PAUSED
+        # A turn arrived while paused and is waiting on the resume: it will need a slot.
+        router._table.programs[pid].status = ProgramStatus.REASONING
 
     capacity.workers = {(1, 0): 1_000_000}
     capacity.max_programs = {(1, 0): 2}
@@ -668,6 +705,38 @@ async def test_greedy_resume_respects_count_ceiling_even_with_token_headroom():
 
 
 @pytest.mark.asyncio
+async def test_greedy_resume_restores_idle_programs_past_the_count_ceiling():
+    """Paused programs with no turn waiting take no request slot, so a rank that is out
+    of slots but has token headroom still takes them back."""
+    cfg = ThunderAgentConfig(
+        pause_threshold=1.0,
+        pause_target=1.0,
+        resume_hysteresis=0.0,
+        scheduler_interval_seconds=10.0,
+    )
+    router, capacity = make_router(config=cfg)
+
+    for pid in ["resident", "p1", "p2"]:
+        await router.before_request(pid, estimated_prompt_tokens=10)
+        place(router, pid, (1, 0))
+    for pid in ["p1", "p2"]:
+        await router.after_request(pid, prompt_tokens=10, completion_tokens=0)
+        await router._pause_acting(pid)
+
+    capacity.workers = {(1, 0): 1_000_000}
+    capacity.max_programs = {(1, 0): 1}  # fully held by the in-flight "resident"
+
+    async with router._lock:
+        router._greedy_resume_locked(usage(router))
+
+    assert all(
+        router._table.programs[pid].lifecycle == ProgramLifecycle.ACTIVE
+        for pid in ["p1", "p2"]
+    )
+    assert router._table.paused == {}
+
+
+@pytest.mark.asyncio
 async def test_idle_program_expires_and_frees_its_budget():
     """A finished session that never sends session_final stops counting after the TTL."""
     cfg = ThunderAgentConfig(
@@ -677,7 +746,7 @@ async def test_idle_program_expires_and_frees_its_budget():
     await router.before_request("dead", estimated_prompt_tokens=100)
     place(router, "dead", (1, 0))
     await router.after_request("dead", prompt_tokens=100, completion_tokens=10)
-    assert usage(router)[(1, 0)].count == 1
+    assert usage(router)[(1, 0)].resident == 1
 
     # Not idle long enough yet.
     assert router._expire_idle_programs_locked() == 0
@@ -685,7 +754,7 @@ async def test_idle_program_expires_and_frees_its_budget():
     assert router._expire_idle_programs_locked() == 1
 
     assert "dead" not in router._table.programs
-    assert usage(router)[(1, 0)].count == 0
+    assert usage(router)[(1, 0)].resident == 0
     assert usage(router)[(1, 0)].used == 0
     assert router._stat_programs_expired == 1
     assert router._stat_programs_ended == 1
