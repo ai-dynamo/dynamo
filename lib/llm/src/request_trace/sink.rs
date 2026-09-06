@@ -465,4 +465,43 @@ mod tests {
             .unwrap();
         assert!(content.contains("\"request_id\":\"req-123\""));
     }
+
+    #[tokio::test]
+    async fn gzip_sink_emit_after_shutdown_drops_record() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("request_trace_after_shutdown");
+        let sink = JsonlGzipRequestTraceSink::new(
+            path.display().to_string(),
+            JsonlGzipSinkOptions {
+                buffer_bytes: 1024 * 1024,
+                flush_interval: Duration::from_secs(60),
+                roll_uncompressed_bytes: 1024 * 1024,
+                roll_lines: None,
+                max_segments: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // After shutdown the writer is gone, so emit() must hit the closed-writer
+        // branch: the record is dropped (with a warning) rather than written, and
+        // nothing panics.
+        RequestTraceSink::shutdown(&sink).await;
+        sink.emit(&sample_record()).await;
+
+        let segment = segment_path(&path, 0);
+        let written = if segment.exists() {
+            let bytes = std::fs::read(&segment).unwrap();
+            let mut content = String::new();
+            let _ = MultiGzDecoder::new(bytes.as_slice()).read_to_string(&mut content);
+            content.contains("\"request_id\":\"req-123\"")
+        } else {
+            false
+        };
+        assert!(
+            !written,
+            "record emitted after shutdown must be dropped, not written to {}",
+            segment.display()
+        );
+    }
 }
