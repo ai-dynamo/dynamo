@@ -3908,16 +3908,103 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert post._decode_context_ids == [ord("a")]
         assert post._pending_decode_ids == []
 
-    def test_strips_all_configured_trailing_eos_token_ids(self, tokenizer):
-        """Any configured EOS id is stripped from the final chunk before decode."""
+    def test_strips_only_the_exact_matched_stop_suffix(self, tokenizer):
+        """Matched metadata, not configured membership alone, selects the suffix."""
         post = SglangStreamingPostProcessor(
             tokenizer=tokenizer,
             tool_call_parser=None,
             reasoning_parser=None,
             eos_token_ids=[2, 3],
+            stop_token_ids={4, 5},
         )
 
-        assert post._strip_trailing_stop_token_ids([10, 3, 2]) == [10]
+        assert post._strip_matched_stop_token_ids([10, 3, 2], None) == [10, 3]
+        assert post._strip_matched_stop_token_ids([10, 4, 5], 5) == [10, 4]
+        assert post._strip_matched_stop_token_ids([10, 4, 5], [4, 5]) == [10]
+
+    @pytest.mark.parametrize(
+        "stop_config",
+        [
+            {"stop_token_ids": {ord("A")}},
+            {"eos_token_ids": [ord("A")]},
+        ],
+        ids=["request-stop-id", "model-eos-id"],
+    )
+    def test_length_finish_keeps_configured_token_and_logprob(self, stop_config):
+        """A length finish does not turn a configured final ID into a match."""
+        routed_engine = FakeRoutedEngine(
+            items=[
+                {
+                    "token_ids": [ord("A")],
+                    "finish_reason": "length",
+                    "log_probs": [-0.25],
+                }
+            ]
+        )
+        processor = SglangProcessor(
+            tokenizer=self.ByteTokenizer(),
+            routed_engine=routed_engine,
+            tool_call_parser_name=None,
+            reasoning_parser_name=None,
+            eos_token_ids=None,
+        )
+        post = SglangStreamingPostProcessor(
+            tokenizer=self.ByteTokenizer(),
+            tool_call_parser=None,
+            reasoning_parser=None,
+            **stop_config,
+        )
+
+        async def collect():
+            return [
+                item["data"]
+                async for item in processor._generate_and_stream(
+                    "req-length", {"model": "test-model"}, {}, [], post
+                )
+                if "data" in item
+            ]
+
+        chunks = asyncio.run(collect())
+
+        assert len(chunks) == 1
+        choice = chunks[0]["choices"][0]
+        assert choice["delta"]["content"] == "A"
+        assert choice["finish_reason"] == "length"
+        assert choice["logprobs"]["content"] == [
+            {
+                "token": "A",
+                "logprob": -0.25,
+                "bytes": [65],
+                "top_logprobs": [],
+            }
+        ]
+
+    def test_string_match_inside_configured_stop_token_keeps_visible_prefix(
+        self, tokenizer
+    ):
+        """An engine-reported string match wins over configured token membership."""
+        token_ids = tokenizer.encode("alphabet")
+        assert len(token_ids) == 1
+        post = SglangStreamingPostProcessor(
+            tokenizer=tokenizer,
+            tool_call_parser=None,
+            reasoning_parser=None,
+            stop_strings={"pha"},
+            stop_token_ids=set(token_ids),
+        )
+
+        choice = post.process_output(
+            {
+                "token_ids": token_ids,
+                "finish_reason": "stop",
+                "stop_reason": "pha",
+                "stop_terminated": True,
+            }
+        )
+
+        assert choice is not None
+        assert choice["delta"]["content"] == "al"
+        assert choice["finish_reason"] == "stop"
 
     def test_request_stop_token_id_is_hidden_by_python_frontend(self):
         """Match the Rust frontend when SGLang returns a request stop token."""
@@ -3945,6 +4032,7 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     # Native SGLang includes the matched stop position.
                     "token_ids": generated_ids,
                     "finish_reason": "stop",
+                    "stop_reason": stop_token_id,
                 }
             ]
         )

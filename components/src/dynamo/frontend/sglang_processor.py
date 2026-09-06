@@ -147,7 +147,7 @@ def _request_stop_strings(request: dict[str, Any]) -> set[str]:
 
 
 def _request_stop_token_ids(request: dict[str, Any]) -> list[int]:
-    """Return the request token stops forwarded to the engine."""
+    """Merge ``stop_token_ids`` with the legacy integer-valued ``stop`` form."""
     values: list[Any] = list(request.get("stop_token_ids") or [])
     stop = request.get("stop")
     if isinstance(stop, list) and all(
@@ -741,6 +741,7 @@ class SglangProcessor:
                 *,
                 finish_reason: str | None,
                 stop_reason: Any | None,
+                stop_terminated: bool,
                 engine_data: Any | None,
             ) -> dict[str, Any]:
                 nonlocal pending_token_ids
@@ -756,6 +757,7 @@ class SglangProcessor:
                     "token_ids": pending_token_ids,
                     "finish_reason": finish_reason,
                     "stop_reason": stop_reason,
+                    "stop_terminated": stop_terminated,
                 }
                 if pending_log_probs is not None:
                     mapped_response["log_probs"] = pending_log_probs
@@ -878,6 +880,7 @@ class SglangProcessor:
                         envelope = flush_pending(
                             finish_reason=None,
                             stop_reason=None,
+                            stop_terminated=False,
                             engine_data=None,
                         )
                         yield envelope
@@ -886,8 +889,10 @@ class SglangProcessor:
 
                 chunk_tokens = len(new_ids)
                 cumulative_output_tokens += chunk_tokens
-                finish_reason = _map_finish_reason(engine_response.get("finish_reason"))
+                raw_finish_reason = engine_response.get("finish_reason")
+                finish_reason = _map_finish_reason(raw_finish_reason)
                 stop_reason = engine_response.get("stop_reason")
+                stop_terminated = raw_finish_reason in {"eos", "stop"}
 
                 if usage := engine_response.get("completion_usage"):
                     pending_usage = usage
@@ -912,6 +917,7 @@ class SglangProcessor:
                     envelope = flush_pending(
                         finish_reason=finish_reason,
                         stop_reason=stop_reason,
+                        stop_terminated=stop_terminated,
                         engine_data=engine_data,
                     )
                     yield envelope
