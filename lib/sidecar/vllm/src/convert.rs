@@ -399,6 +399,11 @@ fn build_media(
 }
 
 fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
+    if count == u32::MAX {
+        return Ok(pb::CandidateTokens {
+            select: Some(pb::candidate_tokens::Select::All(true)),
+        });
+    }
     i32::try_from(count).map_err(|_| {
         client::invalid_argument(format!(
             "vLLM logprobs request must fit in i32; got {count}"
@@ -407,6 +412,20 @@ fn top_n_candidates(count: u32) -> Result<pb::CandidateTokens, DynamoError> {
     Ok(pb::CandidateTokens {
         select: Some(pb::candidate_tokens::Select::TopN(count)),
     })
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::{pb, top_n_candidates};
+
+    #[test]
+    fn full_vocabulary_logprobs_select_all_candidates() {
+        let candidates = top_n_candidates(u32::MAX).expect("map full vocabulary");
+        assert_eq!(
+            candidates.select,
+            Some(pb::candidate_tokens::Select::All(true))
+        );
+    }
 }
 
 fn normalize_top_k(top_k: Option<i32>) -> Result<u32, DynamoError> {
