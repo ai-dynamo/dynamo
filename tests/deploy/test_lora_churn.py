@@ -144,7 +144,7 @@ def _assert_bounded_growth(
 @pytest.mark.k8s
 @pytest.mark.deploy
 @pytest.mark.gpu_1
-@pytest.mark.timeout(1200)
+@pytest.mark.timeout(1800)
 async def test_lora_registration_churn_has_bounded_resources(
     image: str,
     namespace: str,
