@@ -76,6 +76,13 @@ struct DecoderUnfoldState {
     /// (e.g. SGLang with --skip-tokenizer-init forcibly drops it).
     tokenizer: Tokenizer,
     skip_special_tokens: bool,
+    /// Text flushed from a choice's decoder because the underlying engine stream ended
+    /// without ever sending that choice a terminal `finish_reason`, queued here so each
+    /// flushed choice can be emitted as its own synthetic final chunk.
+    pending_flush: Vec<(u32, String)>,
+    /// Set once `stream` has yielded `None`, so it is never polled again -- a `Stream` is
+    /// not guaranteed to be safely pollable past its first `None`.
+    stream_ended: bool,
 }
 
 fn fill_missing_top_logprob_text(
@@ -180,6 +187,8 @@ impl Backend {
             finished: false,
             tokenizer: tokenizer.clone(),
             skip_special_tokens: params.skip_special_tokens,
+            pending_flush: Vec::new(),
+            stream_ended: false,
         })
     }
 }
@@ -209,6 +218,20 @@ impl
             // If we've already detected a local stop condition, end the stream
             if state.finished {
                 return None;
+            }
+
+            // `stream` already yielded `None` once; do not poll it again (unspecified
+            // behavior for most `Stream` impls). Only drain the flush queue from here on.
+            if state.stream_ended {
+                return state.pending_flush.pop().map(|(idx, flushed)| {
+                    let output = Annotated::from_data(LLMEngineOutput {
+                        index: Some(idx),
+                        text: Some(flushed),
+                        finish_reason: Some(FinishReason::Stop),
+                        ..Default::default()
+                    });
+                    (output, state)
+                });
             }
 
             match state.stream.next().await {
@@ -404,7 +427,28 @@ impl
                     Some((output, state))
                 }
 
-                None => None,
+                None => {
+                    // The engine's stream ended without ever sending a terminal
+                    // `finish_reason` to some choice -- no more tokens are coming for any
+                    // of them, so flush whatever each decoder still holds back as an
+                    // incomplete hidden-stop-sequence match before the decoders are
+                    // dropped, and drain the flushed choices one synthetic chunk at a time.
+                    state.stream_ended = true;
+                    for (idx, decoder) in state.decoders.iter_mut() {
+                        if let Some(flushed) = decoder.flush_jailed() {
+                            state.pending_flush.push((*idx, flushed));
+                        }
+                    }
+                    state.pending_flush.pop().map(|(idx, flushed)| {
+                        let output = Annotated::from_data(LLMEngineOutput {
+                            index: Some(idx),
+                            text: Some(flushed),
+                            finish_reason: Some(FinishReason::Stop),
+                            ..Default::default()
+                        });
+                        (output, state)
+                    })
+                }
             }
         })
         .fuse();
@@ -523,21 +567,49 @@ pub enum StopTrigger {
 }
 
 pub struct StepResult {
+    /// This step's own decoded text, independent of any stop-sequence withholding.
+    /// `SeqResult.tokens[i]` must equal the text of `token_ids[i]` so that consumers
+    /// zipping `tokens` with per-token logprobs (e.g. `create_logprobs`) stay aligned --
+    /// logprobs describe what the model generated and must not change because a hidden
+    /// stop sequence also happens to be in flight.
     pub token: Option<String>,
+    /// Text to append to the caller-visible `text`/content this step. May be `None` on a
+    /// step whose text is being withheld as a possible hidden-stop-sequence prefix, and may
+    /// carry more than one prior step's worth of text on the step that releases a withheld
+    /// backlog.
+    pub released_text: Option<String>,
     pub stop_trigger: Option<StopTrigger>,
 }
 
 impl StepResult {
+    /// No stop-sequence withholding in effect: the token's own text is released as-is.
     fn ok(token: Option<String>) -> Self {
         Self {
-            token,
+            token: token.clone(),
+            released_text: token,
             stop_trigger: None,
         }
     }
 
-    fn with_stop_trigger(token: Option<String>, stop_trigger: StopTrigger) -> Self {
+    /// `token` and `released_text` differ, e.g. because `released_text` also carries a
+    /// previously withheld backlog, or because a matched stop sequence is excluded from
+    /// `released_text` but not from `token`.
+    fn ok_split(token: Option<String>, released_text: Option<String>) -> Self {
         Self {
             token,
+            released_text,
+            stop_trigger: None,
+        }
+    }
+
+    fn with_stop_trigger(
+        token: Option<String>,
+        released_text: Option<String>,
+        stop_trigger: StopTrigger,
+    ) -> Self {
+        Self {
+            token,
+            released_text,
             stop_trigger: Some(stop_trigger),
         }
     }
@@ -638,8 +710,21 @@ impl Decoder {
 
         // Check token stops. Visible token IDs are included in output.
         if self.visible_stop_ids.contains(&token_id) {
+            // Any text still withheld as a partial hidden-stop-sequence match can never
+            // complete now, so it goes out ahead of this (included) token's own text --
+            // otherwise it would be silently dropped and, if it were released later, would
+            // come out of order.
+            let released = match (self.flush_jailed(), &token) {
+                (Some(mut flushed), Some(t)) => {
+                    flushed.push_str(t);
+                    Some(flushed)
+                }
+                (Some(flushed), None) => Some(flushed),
+                (None, t) => t.clone(),
+            };
             return Ok(StepResult::with_stop_trigger(
                 token,
+                released,
                 StopTrigger::VisibleStopTokenDetected(token_id),
             ));
         }
@@ -652,19 +737,26 @@ impl Decoder {
             } else {
                 StopTrigger::HiddenStopTokenDetected(token_id)
             };
-            return Ok(StepResult::with_stop_trigger(None, trigger));
+            // This token's own text stays hidden, as before. But any text still withheld
+            // from an earlier, never-completed hidden-stop-sequence prefix match is not
+            // part of *this* stop and must still reach the caller.
+            return Ok(StepResult::with_stop_trigger(
+                None,
+                self.flush_jailed(),
+                trigger,
+            ));
         }
 
         // check stop sequences - the jail will always hold at least the largest stop sequence
         // if jail_max_bytes is 0, then there are no stop sequences
         if self.jail_max_bytes > 0
-            && let Some(token) = &token
+            && let Some(token_text) = &token
         {
             // bytes at the tail of `jail` withheld by a previous step because they could
             // still grow into a complete hidden stop sequence; everything before this point
             // has already been released to the caller.
             let release_start = self.jail.len() - self.jailed_bytes;
-            self.jail.push_str(token);
+            self.jail.push_str(token_text);
 
             // Check hidden stop sequences first (excluded from output)
             for seq in &self.hidden_stop_sequences {
@@ -679,7 +771,11 @@ impl Decoder {
                         .then(|| self.jail[release_start..offset].to_string())
                         .filter(|s| !s.is_empty());
                     self.jailed_bytes = 0;
+                    // `token` (this step's own raw decoded text) is reported unchanged so
+                    // that SeqResult.tokens[i] keeps describing token_ids[i] for logprobs;
+                    // only the caller-visible `released_text` excludes the matched sequence.
                     return Ok(StepResult::with_stop_trigger(
+                        token.clone(),
                         partial_token,
                         StopTrigger::HiddenStopSequenceDetected(seq.to_string()),
                     ));
@@ -698,6 +794,7 @@ impl Decoder {
                         .filter(|s| !s.is_empty());
                     self.jailed_bytes = 0;
                     return Ok(StepResult::with_stop_trigger(
+                        token.clone(),
                         token_with_stop,
                         StopTrigger::VisibleStopSequenceDetected(seq.to_string()),
                     ));
@@ -715,7 +812,9 @@ impl Decoder {
                 .then(|| self.jail[release_start..release_end].to_string());
 
             Self::maybe_drain_to_max_bytes(&mut self.jail, self.jail_max_bytes);
-            return Ok(StepResult::ok(released));
+            // `token` is this step's own raw decoded text (for logprobs); `released` is
+            // what, if anything, newly clears the jail this step (for `text`/content).
+            return Ok(StepResult::ok_split(token, released));
         }
 
         Ok(StepResult::ok(token))
@@ -763,13 +862,17 @@ impl Decoder {
         for token_id in token_ids {
             let StepResult {
                 token,
+                released_text,
                 stop_trigger,
             } = self.step(*token_id)?;
 
-            // Always include token text (for visible stops, the stop string is already in the token)
-            if let Some(token) = &token {
+            // `text` accumulates the caller-visible content, which can lag behind and later
+            // release more than one step's worth at once. `tokens[i]` always reports
+            // token_ids[i]'s own decoded text, independent of that withholding, so per-token
+            // consumers (logprobs) stay aligned with token_ids.
+            if let Some(released_text) = &released_text {
                 text.get_or_insert_with(|| String::with_capacity(token_ids.len()))
-                    .push_str(token);
+                    .push_str(released_text);
             }
             tokens.push(token);
 

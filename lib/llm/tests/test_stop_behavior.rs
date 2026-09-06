@@ -189,6 +189,19 @@ fn hidden_stop_sequence_split_across_tokens_is_not_leaked() {
         result.stop_trigger,
         Some(StopTrigger::HiddenStopSequenceDetected(ref s)) if s == " zeta eta theta"
     ));
+    // Withholding for `text` must not disturb `tokens[i]`: it always reports token_ids[i]'s
+    // own decoded text, matched-hidden-sequence tokens included, so logprob consumers that
+    // zip `tokens` with `token_ids` stay aligned.
+    assert_eq!(
+        result.tokens,
+        vec![
+            Some(" delta".to_string()),
+            Some(" epsilon".to_string()),
+            Some(" zeta".to_string()),
+            Some(" eta".to_string()),
+            Some(" theta".to_string()),
+        ]
+    );
 }
 
 /// A withheld candidate prefix that turns out not to be part of the stop sequence must be
@@ -202,6 +215,12 @@ fn withheld_prefix_is_released_once_it_cannot_complete() {
     // the buffered text can no longer become "ozzy", so all of it is released together.
     assert_eq!(result.text.as_deref(), Some("othere"));
     assert!(result.stop_trigger.is_none());
+    // Regression check: withholding used to bunch both tokens' text onto the releasing
+    // step, pairing (OH, OTHER) with ("", "othere") instead of their own ("o", "there").
+    assert_eq!(
+        result.tokens,
+        vec![Some("o".to_string()), Some("there".to_string())]
+    );
 }
 
 /// A stop sequence that never completes must still be flushed when generation ends for a
@@ -221,4 +240,46 @@ fn flush_jailed_releases_incomplete_partial_match() {
     assert_eq!(flushed.as_deref(), Some(" zeta eta"));
     // A second flush has nothing left to give.
     assert_eq!(decoder.flush_jailed(), None);
+}
+
+/// A hidden stop *token* ending the stream is a different stop from any hidden stop
+/// *sequence* prefix still being withheld -- that withheld text never completed, so it must
+/// still reach the caller even though this particular stop hides its own token's text.
+#[test]
+fn hidden_stop_token_flushes_prior_jailed_prefix() {
+    // "hi" (from HI) is a genuine, never-completed prefix of the hidden sequence "hiya".
+    let mut decoder = make_decoder(None, None, Some(vec![EOS]), Some(vec!["hiya"]), false);
+    let result = decoder.process_token_ids(&[HI, EOS]).unwrap();
+
+    assert_eq!(result.text.as_deref(), Some("hi"));
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::HiddenStopTokenDetected(id)) if id == EOS
+    ));
+    assert_eq!(result.tokens, vec![Some("hi".to_string()), None]);
+}
+
+/// Same as above but the terminating stop is a *visible* token: the flushed backlog must
+/// come out before this token's own (included) text, not after or in place of it.
+#[test]
+fn visible_stop_token_flushes_and_orders_prior_jailed_prefix() {
+    let tokenizer: Arc<dyn tokenizer_traits::Tokenizer> = Arc::new(TestTokenizer);
+    let decode_stream = tokenizers::DecodeStream::new(tokenizer, &[], false);
+    let stop_conditions = StopConditions {
+        stop_token_ids_visible: Some(vec![STOP]),
+        stop: Some(vec!["hiya".to_string()]),
+        ..Default::default()
+    };
+    let mut decoder = Decoder::new(decode_stream, stop_conditions, false, None);
+    let result = decoder.process_token_ids(&[HI, STOP]).unwrap();
+
+    assert_eq!(result.text.as_deref(), Some("hiSTOP"));
+    assert!(matches!(
+        result.stop_trigger,
+        Some(StopTrigger::VisibleStopTokenDetected(id)) if id == STOP
+    ));
+    assert_eq!(
+        result.tokens,
+        vec![Some("hi".to_string()), Some("STOP".to_string())]
+    );
 }
