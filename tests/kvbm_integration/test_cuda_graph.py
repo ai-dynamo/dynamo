@@ -23,11 +23,7 @@ import pytest
 import requests
 
 from tests.utils.engine_process import FRONTEND_PORT
-from tests.utils.managed_process import (
-    DynamoFrontendProcess,
-    ManagedProcess,
-    check_health_ready,
-)
+from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api
 
 from .common import check_module_available
@@ -89,7 +85,7 @@ class DynamoWorkerProcess(ManagedProcess):
             env=env,
             health_check_urls=[
                 (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
-                ("http://localhost:9345/health", check_health_ready),
+                ("http://localhost:9345/health", self.is_ready),
             ],
             timeout=300,
             display_output=True,
@@ -100,6 +96,24 @@ class DynamoWorkerProcess(ManagedProcess):
     def get_pid(self) -> int | None:
         """Get the PID of the worker process"""
         return self.proc.pid if hasattr(self, "proc") and self.proc else None
+
+    def is_ready(self, response) -> bool:
+        """Check the health of the worker process"""
+        try:
+            data = response.json()
+            if data.get("status") == "ready":
+                logger.info(
+                    f"{self.__class__.__name__} {{ name: {self.worker_id} }} status is ready"
+                )
+                return True
+            logger.warning(
+                f"{self.__class__.__name__} {{ name: {self.worker_id} }} status is not ready: {data.get('status')}"
+            )
+        except ValueError:
+            logger.warning(
+                f"{self.__class__.__name__} {{ name: {self.worker_id} }} health response is not valid JSON"
+            )
+        return False
 
 
 def send_completion_request(

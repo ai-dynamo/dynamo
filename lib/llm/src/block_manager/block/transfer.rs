@@ -300,3 +300,86 @@ where
         L::handle_transfer(self, dst, ctx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_to_strategy() {
+        // System to ...
+        assert_eq!(
+            <SystemStorage as WriteToStrategy<SystemStorage>>::write_to_strategy(),
+            TransferStrategy::Memcpy
+        );
+
+        assert_eq!(
+            <SystemStorage as WriteToStrategy<PinnedStorage>>::write_to_strategy(),
+            TransferStrategy::Memcpy
+        );
+
+        assert_eq!(
+            <SystemStorage as WriteToStrategy<DeviceStorage>>::write_to_strategy(),
+            TransferStrategy::CudaBlockingH2D
+        );
+
+        assert_eq!(
+            <SystemStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
+            TransferStrategy::Nixl(NixlTransfer::Write)
+        );
+
+        // Pinned to ...
+        assert_eq!(
+            <PinnedStorage as WriteToStrategy<SystemStorage>>::write_to_strategy(),
+            TransferStrategy::Memcpy
+        );
+        assert_eq!(
+            <PinnedStorage as WriteToStrategy<PinnedStorage>>::write_to_strategy(),
+            TransferStrategy::Memcpy
+        );
+        assert_eq!(
+            <PinnedStorage as WriteToStrategy<DeviceStorage>>::write_to_strategy(),
+            TransferStrategy::CudaAsyncH2D
+        );
+        assert_eq!(
+            <PinnedStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
+            TransferStrategy::Nixl(NixlTransfer::Write)
+        );
+
+        // Device to ...
+        assert_eq!(
+            <DeviceStorage as WriteToStrategy<SystemStorage>>::write_to_strategy(),
+            TransferStrategy::CudaBlockingD2H
+        );
+        assert_eq!(
+            <DeviceStorage as WriteToStrategy<PinnedStorage>>::write_to_strategy(),
+            TransferStrategy::CudaAsyncD2H
+        );
+        assert_eq!(
+            <DeviceStorage as WriteToStrategy<DeviceStorage>>::write_to_strategy(),
+            TransferStrategy::CudaAsyncD2D
+        );
+        assert_eq!(
+            <DeviceStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
+            TransferStrategy::Nixl(NixlTransfer::Write)
+        );
+
+        // Nixl to ... should fail to compile
+        // assert_eq!(
+        //     <NixlStorage as WriteToStrategy<SystemStorage>>::write_to_strategy(),
+        //     TransferStrategy::Invalid
+        // );
+        // assert_eq!(
+        //     <NixlStorage as WriteToStrategy<PinnedStorage>>::write_to_strategy(),
+        //     TransferStrategy::Invalid
+        // );
+        // assert_eq!(
+        //     <NixlStorage as WriteToStrategy<DeviceStorage>>::write_to_strategy(),
+        //     TransferStrategy::Invalid
+        // );
+        // assert_eq!(
+        //     <NixlStorage as WriteToStrategy<NixlStorage>>::write_to_strategy(),
+        //     TransferStrategy::Invalid
+        // );
+    }
+}
