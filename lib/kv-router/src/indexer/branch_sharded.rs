@@ -30,7 +30,9 @@ use rustc_hash::{FxBuildHasher, FxHashSet};
 #[cfg(feature = "bench")]
 use super::ShardedIndexerMetrics;
 use super::shard_handle::AsyncShardHandle;
-use super::{AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError, ShardSizeSnapshot};
+use super::{
+    AnchorRef, AnchorTask, KvIndexerInterface, KvRouterError, ShardSizeSnapshot, ThreadPoolIndexer,
+};
 use crate::protocols::*;
 
 type WorkerRoutingLookup = DashMap<ExternalSequenceBlockHash, BlockRoutingEntry, FxBuildHasher>;
@@ -121,6 +123,10 @@ pub struct BranchShardedIndexer<S: AsyncShardHandle> {
     #[cfg(feature = "bench")]
     metrics: ShardedIndexerMetrics,
 }
+
+/// Compatibility alias for the previous implementation name.
+#[deprecated(note = "use BranchShardedIndexer<ThreadPoolIndexer<T>> instead")]
+pub type AnchorAwareBranchShardedIndexer<T> = BranchShardedIndexer<ThreadPoolIndexer<T>>;
 
 impl<S: AsyncShardHandle> BranchShardedIndexer<S> {
     /// Create a branch-sharded indexer from pre-built shard handles.
