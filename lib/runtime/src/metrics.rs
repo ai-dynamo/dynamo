@@ -397,7 +397,7 @@ pub fn apply_const_labels_to_expfmt(text: &str, const_labels: &[(String, String)
 /// rest. This mirrors the merged-registry deduplication for exposition-callback text, so a
 /// callback cannot emit a series the gathered families (or an earlier callback) already produced.
 /// Comment and blank lines pass through; a line that does not parse as a sample is kept.
-fn drop_duplicate_expfmt_samples(text: &str, seen_series: &mut HashSet<String>) -> String {
+fn drop_duplicate_expfmt_samples(text: &str, seen_series: &mut HashSet<SeriesKey>) -> String {
     let mut out = String::with_capacity(text.len());
     for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
@@ -423,8 +423,8 @@ fn drop_duplicate_expfmt_samples(text: &str, seen_series: &mut HashSet<String>) 
     out
 }
 
-/// `name|k=v,...` series key of a sample line, in the same shape the merged-registry path uses.
-fn expfmt_series_key(line: &str) -> Option<String> {
+/// [`SeriesKey`] of a sample line; `None` if the line does not parse as a sample.
+fn expfmt_series_key(line: &str) -> Option<SeriesKey> {
     let name_end = line.find(|c: char| c == '{' || c.is_whitespace())?;
     let (name, rest) = line.split_at(name_end);
     if name.is_empty() {
@@ -558,22 +558,27 @@ fn expfmt_label_pairs(inner: &str) -> Option<Vec<(String, String)>> {
     Some(pairs)
 }
 
-fn series_key_from_pairs(name: &str, mut labels: Vec<(String, String)>) -> String {
-    labels.sort();
-    format!(
-        "{}|{}",
-        name,
-        labels
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    )
+/// Identity of one Prometheus series: metric name plus its sorted label pairs. Used to
+/// deduplicate samples across registries, exposition-callback text and other exposition sources
+/// rendered in the same scrape. A structured key (rather than a `name|k=v,...` string) cannot be
+/// confused by label values that contain `,` or `=`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SeriesKey {
+    pub name: String,
+    pub labels: Vec<(String, String)>,
 }
 
-/// `name|k=v,...` series key of one gathered sample (labels sorted); the shape
-/// [`MetricsRegistry::prometheus_expfmt_combined_with`] deduplicates on.
-pub fn series_key(name: &str, metric: &prometheus::proto::Metric) -> String {
+fn series_key_from_pairs(name: &str, mut labels: Vec<(String, String)>) -> SeriesKey {
+    labels.sort();
+    SeriesKey {
+        name: name.to_string(),
+        labels,
+    }
+}
+
+/// [`SeriesKey`] of one gathered sample; what [`MetricsRegistry::prometheus_expfmt_combined_with`]
+/// deduplicates on.
+pub fn series_key(name: &str, metric: &prometheus::proto::Metric) -> SeriesKey {
     let labels = metric
         .label
         .iter()
@@ -585,7 +590,7 @@ pub fn series_key(name: &str, metric: &prometheus::proto::Metric) -> String {
 /// Series keys of every sample in `families`. Use it to seed
 /// [`MetricsRegistry::prometheus_expfmt_combined_with`] when another exposition source is rendered
 /// in the same scrape.
-pub fn series_keys(families: &[prometheus::proto::MetricFamily]) -> HashSet<String> {
+pub fn series_keys(families: &[prometheus::proto::MetricFamily]) -> HashSet<SeriesKey> {
     families
         .iter()
         .flat_map(|family| {
@@ -1220,7 +1225,7 @@ impl MetricsRegistry {
         &self,
         const_labels: &[(String, String)],
     ) -> anyhow::Result<String> {
-        let mut seen_series: HashSet<String> = HashSet::new();
+        let mut seen_series: HashSet<SeriesKey> = HashSet::new();
         self.prometheus_expfmt_combined_with(const_labels, &mut seen_series)
     }
 
@@ -1231,7 +1236,7 @@ impl MetricsRegistry {
     pub fn prometheus_expfmt_combined_with(
         &self,
         const_labels: &[(String, String)],
-        seen_series: &mut HashSet<String>,
+        seen_series: &mut HashSet<SeriesKey>,
     ) -> anyhow::Result<String> {
         let registries = self.registries_for_combined_scrape();
 
@@ -1279,7 +1284,7 @@ impl MetricsRegistry {
                     if !seen_series.insert(key.clone()) {
                         tracing::warn!(
                             metric_name = %name,
-                            series = %key,
+                            series = ?key,
                             registry_idx,
                             "Duplicate Prometheus series while merging registries; dropping later sample"
                         );
@@ -1730,6 +1735,29 @@ mod test_metricsregistry_units {
             .prometheus_expfmt_combined_with(&[], &mut seen)
             .unwrap();
         assert!(!text.contains("demo_total"), "{text}");
+    }
+
+    #[test]
+    fn test_series_key_distinguishes_values_containing_separators() {
+        let mut seen = HashSet::new();
+        let text = concat!(
+            "metric{a=\"x,b=y\"} 1\n",
+            "metric{a=\"x\",b=\"y\"} 2\n",
+            "metric{a=\"x\"} 3\n",
+            "metric{a=\"x\"} 4\n",
+        );
+        let out = drop_duplicate_expfmt_samples(text, &mut seen);
+        // The first two are distinct series even though a `k=v,` string encoding would collide;
+        // only the genuine repeat is dropped.
+        assert_eq!(
+            out,
+            concat!(
+                "metric{a=\"x,b=y\"} 1\n",
+                "metric{a=\"x\",b=\"y\"} 2\n",
+                "metric{a=\"x\"} 3\n",
+            )
+        );
+        assert_eq!(seen.len(), 3);
     }
 
     #[test]
