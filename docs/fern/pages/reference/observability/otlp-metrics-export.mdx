@@ -1,5 +1,5 @@
 ---
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 title: OTLP Metrics Export
 subtitle: Push the same metrics Dynamo serves at /metrics to an OpenTelemetry collector, and how the Prometheus-to-OTLP conversion behaves.
@@ -83,5 +83,5 @@ The original Prometheus type word travels with each metric in `metric.metadata` 
 
 ### Known gaps
 
-- **Exemplars are not converted.** No engine Dynamo runs emits them today, so nothing is lost in practice, but a backend cannot yet jump from a histogram bucket to the trace that produced it.
+- **Exemplars are not converted**, so a backend cannot jump from a histogram bucket to the trace that produced it. This is a limitation of the data model rather than a choice: upstream Prometheus defines `Bucket.exemplar` and `Counter.exemplar`, but the `prometheus` Rust crate vendors a reduced copy of that schema without them, so an exemplar has nowhere to arrive. Nothing is being discarded.
 - **`target_info` and `job`/`instance` handling** are scrape-side concerns and do not apply, since Dynamo pushes rather than being scraped by the collector.

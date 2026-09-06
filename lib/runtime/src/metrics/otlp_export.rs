@@ -340,9 +340,12 @@ fn histogram_point(metric: &prometheus::proto::Metric, start: u64, now: u64) -> 
     // Prometheus buckets are cumulative and include a final `+Inf`; OTLP wants
     // per-bucket counts and omits the implicit overflow bound.
     //
-    // TODO: preserve exemplars. `Bucket::exemplar` is dropped here, so a
-    // backend cannot jump from a bucket to the trace behind it. No engine we
-    // run emits them, so this is deliberate rather than overlooked.
+    // Exemplars cannot be carried: upstream Prometheus defines
+    // `Bucket.exemplar` (field 3) and `Counter.exemplar` (field 2), but the
+    // `prometheus` crate vendors a reduced copy of that schema with neither, so
+    // there is nowhere for one to arrive. Nothing is dropped here; the type
+    // simply cannot represent it. Supporting them means the crate gaining the
+    // fields, or a side channel like the one units use.
     let mut bounds = Vec::new();
     let mut counts = Vec::new();
     let mut previous = 0u64;
