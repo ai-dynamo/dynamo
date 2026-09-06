@@ -66,8 +66,8 @@ fn wrap_py_typed_callback(
         Ok(crate::rs::metrics::prom_typed::build_families(
             typed
                 .into_iter()
-                .map(
-                    |(name, help, kind, unit, samples)| crate::rs::metrics::prom_typed::TypedFamily {
+                .map(|(name, help, kind, unit, samples)| {
+                    crate::rs::metrics::prom_typed::TypedFamily {
                         name,
                         help,
                         kind,
@@ -83,8 +83,8 @@ fn wrap_py_typed_callback(
                                 }
                             })
                             .collect(),
-                    },
-                )
+                    }
+                })
                 .collect(),
         ))
     })
