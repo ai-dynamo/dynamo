@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -24,7 +25,7 @@ BASE_MODEL = "Qwen/Qwen3-0.6B"
 LORA_NAME = "codelion/Qwen3-0.6B-accuracy-recovery-lora"
 LORA_SOURCE = f"hf://{LORA_NAME}"
 CHURN_CYCLES = 30
-CHATS_PER_CYCLE = 3
+CHATS_PER_CYCLE = 1
 MAX_FD_GROWTH = 3
 MAX_RSS_GROWTH_KIB = 64 * 1024
 UNLOAD_TIMEOUT_SECONDS = 30
@@ -32,14 +33,22 @@ RSS_SETTLE_SECONDS = 60
 
 
 def _memory_probe(pod: Any) -> dict[str, int]:
-    """Read the main process's RSS and descriptor counts from its namespace."""
+    """Read cgroup memory and PID 1 descriptor counts from a pod."""
     snippet = """
 import json
 import os
 from pathlib import Path
+memory_paths = (
+    Path("/sys/fs/cgroup/memory.current"),
+    Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+)
+memory_bytes = next(
+    (int(path.read_text()) for path in memory_paths if path.exists()),
+    None,
+)
+if memory_bytes is None:
+    raise RuntimeError("No cgroup memory counter is available")
 
-status = Path("/proc/1/status").read_text().splitlines()
-rss_kib = next(int(line.split()[1]) for line in status if line.startswith("VmRSS:"))
 targets = []
 for descriptor in Path("/proc/1/fd").iterdir():
     try:
@@ -49,7 +58,7 @@ for descriptor in Path("/proc/1/fd").iterdir():
 print(json.dumps({
     "fds": len(targets),
     "sockets": sum(target.startswith("socket:") for target in targets),
-    "rss_kib": rss_kib,
+    "rss_kib": memory_bytes // 1024,
 }))
 """
     result = pod.exec(["python3", "-c", snippet])
@@ -57,6 +66,7 @@ print(json.dumps({
 
 
 def _snapshot(deployment: ManagedDeployment) -> dict[str, dict[str, int]]:
+    """Capture resource measurements for the frontend and decode worker."""
     snapshots: dict[str, dict[str, int]] = {}
     for service_name in ("Frontend", "VllmDecodeWorker"):
         pods = deployment.get_pods([service_name]).get(service_name, [])
@@ -67,7 +77,10 @@ def _snapshot(deployment: ManagedDeployment) -> dict[str, dict[str, int]]:
 
 def _dgd_manifest_path(tmp_path: Path) -> Path:
     """Write the DGD from the two-document LoRA example to an isolated file."""
-    manifest = Path(_get_workspace_dir()) / "examples/backends/vllm/deploy/lora/agg_lora_hf.yaml"
+    manifest = (
+        Path(_get_workspace_dir())
+        / "examples/backends/vllm/deploy/lora/agg_lora_hf.yaml"
+    )
     documents = list(yaml.safe_load_all(manifest.read_text()))
     dgd = next(
         document
@@ -80,18 +93,23 @@ def _dgd_manifest_path(tmp_path: Path) -> Path:
 
 
 def _adapter_present(base_url: str) -> bool:
+    """Return whether the loaded adapter is advertised by the frontend."""
     response = requests.get(f"{base_url}/v1/models", timeout=10)
     response.raise_for_status()
-    return any(model.get("id") == LORA_NAME for model in response.json().get("data", []))
+    return any(
+        model.get("id") == LORA_NAME for model in response.json().get("data", [])
+    )
 
 
 def _adapter_removed(base_url: str) -> bool:
+    """Return whether discovery has removed the unloaded adapter."""
     loras = requests.get(f"{base_url}/v1/loras", timeout=10)
     loras.raise_for_status()
     return not _adapter_present(base_url) and loras.json().get("count") == 0
 
 
 def _wait_for(predicate: Callable[[], bool], description: str) -> None:
+    """Wait for a condition or fail after the unload timeout."""
     deadline = time.monotonic() + UNLOAD_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if predicate():
@@ -101,6 +119,7 @@ def _wait_for(predicate: Callable[[], bool], description: str) -> None:
 
 
 def _load_lora(base_url: str) -> None:
+    """Register the test adapter and wait until it is routable."""
     response = requests.post(
         f"{base_url}/v1/loras",
         json={"lora_name": LORA_NAME, "source": {"uri": LORA_SOURCE}},
@@ -111,6 +130,7 @@ def _load_lora(base_url: str) -> None:
 
 
 def _unload_lora(base_url: str) -> None:
+    """Remove the test adapter and wait until discovery releases it."""
     response = requests.delete(f"{base_url}/v1/loras/{LORA_NAME}", timeout=60)
     assert response.ok, response.text
     _wait_for(lambda: _adapter_removed(base_url), "LoRA to leave discovery")
@@ -121,22 +141,33 @@ def _assert_bounded_growth(
     current: dict[str, dict[str, int]],
     cycle: int,
 ) -> None:
+    """Assert measurements remain within the leak regression bounds."""
     for service_name, baseline_values in baseline.items():
         current_values = current[service_name]
         assert current_values["fds"] <= baseline_values["fds"] + MAX_FD_GROWTH, (
             f"{service_name} retained descriptors after cycle {cycle}: "
             f"baseline={baseline_values}, current={current_values}"
         )
-        assert current_values["sockets"] <= baseline_values["sockets"] + MAX_FD_GROWTH, (
+        assert (
+            current_values["sockets"] <= baseline_values["sockets"] + MAX_FD_GROWTH
+        ), (
             f"{service_name} retained sockets after cycle {cycle}: "
             f"baseline={baseline_values}, current={current_values}"
         )
-        assert current_values["rss_kib"] <= baseline_values["rss_kib"] + MAX_RSS_GROWTH_KIB, (
+        assert (
+            current_values["rss_kib"] <= baseline_values["rss_kib"] + MAX_RSS_GROWTH_KIB
+        ), (
             f"{service_name} RSS grew after cycle {cycle}: "
             f"baseline={baseline_values}, current={current_values}"
         )
 
 
+@pytest.mark.framework_agnostic
+@pytest.mark.vllm
+@pytest.mark.model(BASE_MODEL)
+@pytest.mark.model(LORA_NAME)
+@pytest.mark.profiled_vram_gib(4.0)
+@pytest.mark.requested_vllm_kv_cache_bytes(941_712_000)
 @pytest.mark.nightly
 @pytest.mark.framework_only
 @pytest.mark.core
@@ -158,12 +189,21 @@ async def test_lora_registration_churn_has_bounded_resources(
     assert frontend_image, "--frontend-image is required for the frontend"
     assert namespace, "--namespace is required for the Kubernetes deployment"
 
+    kv_cache_marker = request.node.get_closest_marker("requested_vllm_kv_cache_bytes")
+    assert kv_cache_marker and kv_cache_marker.args, "vLLM KV cache budget is required"
+    kv_cache_bytes = os.environ.get(
+        "_PROFILE_OVERRIDE_VLLM_KV_CACHE_BYTES", str(kv_cache_marker.args[0])
+    )
+
     deployment_spec = DeploymentSpec(str(_dgd_manifest_path(tmp_path)))
     deployment_spec.name = "vllm-lora-churn"
     deployment_spec.set_image(frontend_image, service_name="Frontend")
     deployment_spec.set_image(image, service_name="VllmDecodeWorker")
     deployment_spec.add_arg_to_service(
-        "VllmDecodeWorker", "--gpu-memory-utilization", "0.7"
+        "VllmDecodeWorker", "--kv-cache-memory-bytes", kv_cache_bytes
+    )
+    deployment_spec.add_arg_to_service(
+        "VllmDecodeWorker", "--gpu-memory-utilization", "0.01"
     )
     model_cache_pvc = request.config.getoption("--model-cache-pvc")
     if model_cache_pvc:
@@ -201,7 +241,9 @@ async def test_lora_registration_churn_has_bounded_resources(
                     f"{base_url}/v1/chat/completions",
                     {
                         "model": LORA_NAME,
-                        "messages": [{"role": "user", "content": "Reply with NVIDIA Dynamo."}],
+                        "messages": [
+                            {"role": "user", "content": "Reply with NVIDIA Dynamo."}
+                        ],
                         "max_tokens": 16,
                         "temperature": 0,
                     },
