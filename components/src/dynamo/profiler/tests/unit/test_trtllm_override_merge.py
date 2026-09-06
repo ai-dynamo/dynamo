@@ -81,6 +81,55 @@ def test_merge_overrides_into_existing_override_engine_args():
     assert merged["kv_cache_config"]["tokens_per_block"] == 32
 
 
+def test_merge_overrides_into_equals_spelled_override_engine_args():
+    """The equals spelling must merge too, not fall through to --trtllm.* flags.
+
+    A DGD can carry the flag as one list element, `--override-engine-args={...}`.
+    Treating that as absent produces exactly the mutually exclusive pair this
+    module exists to avoid, and silently drops the user's engine args.
+    """
+    user_args = {"kv_cache_config": {"free_gpu_memory_fraction": 0.5}}
+    args = ["--model-path", "m", f"--override-engine-args={json.dumps(user_args)}"]
+
+    merged_args = _merge_overrides_into_args(args, {"max_batch_size": 64})
+
+    assert not [arg for arg in merged_args if arg.startswith("--trtllm.")]
+    assert merged_args.count("--override-engine-args") == 1
+    blob = json.loads(merged_args[merged_args.index("--override-engine-args") + 1])
+    assert blob["max_batch_size"] == 64
+    assert blob["kv_cache_config"] == {"free_gpu_memory_fraction": 0.5}
+
+
+def test_enable_chunked_prefill_with_equals_spelled_override_engine_args():
+    """Same for the chunked-prefill entry point, which reads the flag itself."""
+    user_args = {"kv_cache_config": {"free_gpu_memory_fraction": 0.5}}
+    config = {
+        "spec": {
+            "components": [
+                _component(
+                    "worker",
+                    "worker",
+                    [
+                        "--model-path",
+                        "m",
+                        f"--override-engine-args={json.dumps(user_args)}",
+                    ],
+                )
+            ]
+        }
+    }
+
+    updated_args = enable_trtllm_chunked_prefill(config)["spec"]["components"][0][
+        "podTemplate"
+    ]["spec"]["containers"][0]["args"]
+
+    assert not [arg for arg in updated_args if arg.startswith("--trtllm.")]
+    assert updated_args.count("--override-engine-args") == 1
+    blob = json.loads(updated_args[updated_args.index("--override-engine-args") + 1])
+    assert blob["enable_chunked_prefill"] is True
+    assert blob["kv_cache_config"] == {"free_gpu_memory_fraction": 0.5}
+
+
 def test_enable_chunked_prefill_updates_generated_trtllm_workers():
     prefill_override = json.dumps(
         {

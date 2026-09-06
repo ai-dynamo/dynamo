@@ -197,15 +197,23 @@ def break_arguments(args: list[str] | str | None) -> list[str]:
     else:
         for arg in args:
             if arg is not None:
-                # If the arg looks like it might be JSON (starts with { or [) or is already a single token,
-                # don't split it further. Only split if it contains spaces AND doesn't look like JSON.
-                if (
-                    isinstance(arg, str)
-                    and (" " in arg or "\t" in arg)
-                    and not (arg.strip().startswith(("{", "[")))
-                ):
-                    # Use shlex.split to properly handle quoted arguments
-                    ans.extend(shlex.split(arg))
+                # Don't split a token that carries a JSON value: either bare
+                # ({...}) or attached to a flag (--flag={...}). Both spellings
+                # contain spaces, and shlex would shred the JSON and strip its
+                # quotes. Only split when it has spaces and carries no JSON.
+                if isinstance(arg, str) and (" " in arg or "\t" in arg):
+                    stripped = arg.strip()
+                    _, separator, value = stripped.partition("=")
+                    carries_json = stripped.startswith(("{", "[")) or (
+                        bool(separator)
+                        and stripped.startswith("-")
+                        and value.lstrip().startswith(("{", "["))
+                    )
+                    if carries_json:
+                        ans.append(arg)
+                    else:
+                        # Use shlex.split to properly handle quoted arguments
+                        ans.extend(shlex.split(arg))
                 else:
                     ans.append(arg)
     return ans
@@ -295,26 +303,44 @@ def find_arg_index(args: list[str]) -> int:
     return idx
 
 
-def parse_override_engine_args(args: list[str]) -> tuple[dict, list[str]]:
+def parse_override_engine_args(args: list[str]) -> tuple[dict | None, list[str]]:
     """
     Parse and extract --override-engine-args from argument list.
 
-    Returns:
-        tuple: (override_dict, modified_args) where override_dict is the parsed JSON
-               and modified_args is the args list with --override-engine-args removed
-    """
-    override_dict = {}
-    try:
-        idx = args.index("--override-engine-args")
-        if idx + 1 < len(args):
-            # Parse existing override
-            override_dict = json.loads(args[idx + 1])
-            # Remove the old override args
-            del args[idx : idx + 2]
-    except (ValueError, json.JSONDecodeError):
-        pass  # No existing override or invalid JSON
+    Handles both ``--override-engine-args {...}`` and
+    ``--override-engine-args={...}``.
 
-    return override_dict, args
+    Returns:
+        tuple: (override_dict, modified_args). ``override_dict`` is ``None``
+               when the flag is absent, and a dict when it is present, so a
+               caller can tell "no override" apart from an explicit ``{}``.
+               Unparseable JSON is reported as an empty dict rather than as
+               absent: the flag was there, so the caller must still merge
+               rather than emit a mutually exclusive alternative.
+               ``modified_args`` has every occurrence removed.
+    """
+    flag = "--override-engine-args"
+    raw = None
+    for index, arg in enumerate(args):
+        if arg == flag:
+            raw = args[index + 1] if index + 1 < len(args) else None
+            break
+        if isinstance(arg, str) and arg.startswith(f"{flag}="):
+            raw = arg.split("=", 1)[1]
+            break
+
+    override_dict = None
+    if raw is not None:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = None
+        override_dict = parsed if isinstance(parsed, dict) else {}
+
+    # Strip every occurrence, in either spelling. Callers append the merged
+    # value back, and a survivor here is what lets a caller emit
+    # --override-engine-args alongside the mutually exclusive --trtllm.* flags.
+    return override_dict, remove_all_argument_occurrences(args, flag)
 
 
 def get_requested_total_gpus(total_gpus_needed: Any) -> int | None:

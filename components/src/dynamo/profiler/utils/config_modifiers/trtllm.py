@@ -181,7 +181,7 @@ def _merge_overrides_into_args(args: list[str], overrides: dict) -> list[str]:
     """
     override_dict, args = parse_override_engine_args(args)
 
-    if override_dict:
+    if override_dict is not None:
         nested = _dotted_to_nested(overrides)
         merged = _deep_merge(override_dict, nested)
         args = append_argument(args, ["--override-engine-args", json.dumps(merged)])
@@ -238,20 +238,8 @@ def enable_trtllm_chunked_prefill(config: dict) -> dict:
             ):
                 del args[idx]
 
-        if _OVERRIDE_ENGINE_ARGS_FLAG in args:
-            idx = args.index(_OVERRIDE_ENGINE_ARGS_FLAG)
-            if idx + 1 < len(args):
-                try:
-                    override = json.loads(args[idx + 1])
-                except json.JSONDecodeError:
-                    pass
-                else:
-                    if isinstance(override, dict):
-                        override["enable_chunked_prefill"] = True
-                        args[idx + 1] = json.dumps(override)
-            main_container["args"] = args
-            continue
-
+        # _merge_overrides_into_args already folds the flag into an existing
+        # --override-engine-args blob when there is one, in either spelling.
         main_container["args"] = _merge_overrides_into_args(
             args, {"enable_chunked_prefill": True}
         )
