@@ -393,6 +393,62 @@ pub fn apply_const_labels_to_expfmt(text: &str, const_labels: &[(String, String)
     out
 }
 
+/// Drop sample lines whose series (name + label set) is already in `seen_series`, recording the
+/// rest. This mirrors the merged-registry deduplication for exposition-callback text, so a
+/// callback cannot emit a series the gathered families (or an earlier callback) already produced.
+/// Comment and blank lines pass through; a line that does not parse as a sample is kept.
+fn drop_duplicate_expfmt_samples(text: &str, seen_series: &mut HashSet<String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let trimmed = body.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            out.push_str(line);
+            continue;
+        }
+        match expfmt_series_key(body) {
+            Some(key) => {
+                if seen_series.insert(key) {
+                    out.push_str(line);
+                } else {
+                    tracing::warn!(
+                        sample = %body,
+                        "Duplicate Prometheus series in exposition-callback output; dropping later sample"
+                    );
+                }
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
+/// `name|k=v,...` series key of a sample line, in the same shape the merged-registry path uses.
+fn expfmt_series_key(line: &str) -> Option<String> {
+    let name_end = line.find(|c: char| c == '{' || c.is_whitespace())?;
+    let (name, rest) = line.split_at(name_end);
+    if name.is_empty() {
+        return None;
+    }
+    let mut labels = match rest.strip_prefix('{') {
+        Some(after_brace) => {
+            let close = expfmt_label_block_end(after_brace)?;
+            expfmt_label_pairs(&after_brace[..close])?
+        }
+        None => Vec::new(),
+    };
+    labels.sort();
+    Some(format!(
+        "{}|{}",
+        name,
+        labels
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    ))
+}
+
 /// Rewrite one `name{labels} value [timestamp]` / `name value [timestamp]` line; `None` if the
 /// line does not look like a sample.
 fn label_expfmt_sample_line(line: &str, const_labels: &[(String, String)]) -> Option<String> {
@@ -405,10 +461,10 @@ fn label_expfmt_sample_line(line: &str, const_labels: &[(String, String)]) -> Op
     if let Some(after_brace) = rest.strip_prefix('{') {
         let close = expfmt_label_block_end(after_brace)?;
         let inner = &after_brace[..close];
-        let existing = expfmt_label_names(inner)?;
+        let existing = expfmt_label_pairs(inner)?;
         let mut need_comma = !inner.trim().is_empty() && !inner.trim_end().ends_with(',');
         for (k, v) in const_labels {
-            if existing.contains(&k.as_str()) {
+            if existing.iter().any(|(name, _)| name == k) {
                 continue;
             }
             if need_comma {
@@ -469,9 +525,10 @@ fn expfmt_label_block_end(s: &str) -> Option<usize> {
     None
 }
 
-/// Label names inside a `name="value",name2="value2"` block; `None` if malformed.
-fn expfmt_label_names(inner: &str) -> Option<Vec<&str>> {
-    let mut names = Vec::new();
+/// Label pairs inside a `name="value",name2="value2"` block, with the values unescaped;
+/// `None` if malformed.
+fn expfmt_label_pairs(inner: &str) -> Option<Vec<(String, String)>> {
+    let mut pairs = Vec::new();
     let mut rest = inner.trim_start();
     while !rest.is_empty() {
         let eq = rest.find('=')?;
@@ -479,28 +536,35 @@ fn expfmt_label_names(inner: &str) -> Option<Vec<&str>> {
         if name.is_empty() {
             return None;
         }
-        names.push(name);
-        let value = rest[eq + 1..].trim_start().strip_prefix('"')?;
+        let quoted = rest[eq + 1..].trim_start().strip_prefix('"')?;
+        let mut value = String::new();
         let mut escaped = false;
         let mut close = None;
-        for (idx, b) in value.bytes().enumerate() {
+        for (idx, c) in quoted.char_indices() {
             if escaped {
+                value.push(match c {
+                    'n' => '\n',
+                    other => other,
+                });
                 escaped = false;
-            } else if b == b'\\' {
+            } else if c == '\\' {
                 escaped = true;
-            } else if b == b'"' {
+            } else if c == '"' {
                 close = Some(idx);
                 break;
+            } else {
+                value.push(c);
             }
         }
-        rest = value[close? + 1..].trim_start();
+        pairs.push((name.to_string(), value));
+        rest = quoted[close? + 1..].trim_start();
         match rest.strip_prefix(',') {
             Some(after_comma) => rest = after_comma.trim_start(),
             None if rest.is_empty() => {}
             None => return None,
         }
     }
-    Some(names)
+    Some(pairs)
 }
 
 /// [`apply_const_labels`] with the labels from [`METRICS_CONST_LABELS_ENV`].
@@ -1111,7 +1175,8 @@ impl MetricsRegistry {
     ///
     /// - Families are merged by name; HELP and TYPE must match.
     /// - Multiple series for the same name are allowed if labels differ.
-    /// - Exact duplicate series (same name + identical label pairs) are warned and dropped.
+    /// - Exact duplicate series (same name + identical label pairs) are warned and dropped, also
+    ///   when they come from exposition-callback text.
     /// - Constant labels from [`METRICS_CONST_LABELS_ENV`] are attached to every sample
     ///   (a label a sample already carries is never overwritten).
     pub fn prometheus_expfmt_combined(&self) -> anyhow::Result<String> {
@@ -1213,6 +1278,7 @@ impl MetricsRegistry {
         for registry in registries {
             let text = registry.execute_expfmt_callbacks();
             let text = apply_const_labels_to_expfmt(&text, const_labels);
+            let text = drop_duplicate_expfmt_samples(&text, &mut seen_series);
             if !text.is_empty() {
                 if !expfmt.is_empty() && !expfmt.ends_with('\n') {
                     expfmt.push('\n');
@@ -1513,6 +1579,7 @@ mod test_metricsregistry_units {
             ("cluster".to_string(), "prod".to_string()),
             ("team".to_string(), "a\"b".to_string()),
         ];
+        // A trailing comma inside the label block is legal exposition syntax, hence the +Inf line.
         let text = concat!(
             "# HELP demo_total help\n",
             "# TYPE demo_total counter\n",
@@ -1539,7 +1606,6 @@ mod test_metricsregistry_units {
         // No labels or no text: untouched.
         assert_eq!(apply_const_labels_to_expfmt(text, &[]), text);
         assert_eq!(apply_const_labels_to_expfmt("", &labels), "");
-        // A line that is not a sample is passed through unchanged.
         assert_eq!(
             apply_const_labels_to_expfmt("garbage{unterminated 1\n", &labels),
             "garbage{unterminated 1\n"
@@ -1565,7 +1631,16 @@ mod test_metricsregistry_units {
             .register(Box::new(plain))
             .unwrap();
         parent.add_child_registry(&child);
-        child.add_expfmt_callback(Arc::new(|| Ok("engine_total 7\n".to_string())));
+        // Callback text: one new series, one duplicate of a gathered series once labelled, and one
+        // duplicate of an earlier callback line.
+        child.add_expfmt_callback(Arc::new(|| {
+            Ok(concat!(
+                "engine_total 7\n",
+                "demo_total 9\n",
+                "engine_total{cluster=\"prod\"} 8\n",
+            )
+            .to_string())
+        }));
 
         let labels = vec![("cluster".to_string(), "prod".to_string())];
         let text = parent
@@ -1583,6 +1658,9 @@ mod test_metricsregistry_units {
             text.contains("engine_total{cluster=\"prod\"} 7\n"),
             "{text}"
         );
+        assert_eq!(text.matches("engine_total{").count(), 1, "{text}");
+        assert!(!text.contains("} 9\n"), "{text}");
+        assert!(!text.contains("} 8\n"), "{text}");
     }
 
     #[test]
