@@ -1257,7 +1257,7 @@ fn anthropic_error(
     anthropic_error_unrecorded(status, error_type, message)
 }
 
-fn anthropic_error_type_for_status<'a>(status: StatusCode, fallback: &'a str) -> &'a str {
+fn anthropic_error_type_for_status(status: StatusCode, fallback: &str) -> &str {
     match status.as_u16() {
         400 => "invalid_request_error",
         401 => "authentication_error",
