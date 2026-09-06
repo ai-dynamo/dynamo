@@ -4250,6 +4250,66 @@ def test_kvwarm_prepare_follows_peer_ineligibility(monkeypatch):
     assert stub._kvwarm_eligible_cache is False
 
 
+def _kvwarm_planner_stub(usable_blocks, groups=1, block_size=16):
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    meta = {"warm_eligible": True, "skip_reason": None}
+    stub._kvwarm_meta_init = lambda: meta
+    stub._kvwarm_warm_eligible = lambda: True
+    stub._bench_negotiated_capacity = None
+    stub.max_model_len = 8192
+    stub.cache_config = SimpleNamespace(block_size=block_size)
+    stub.kv_cache_manager = SimpleNamespace(
+        coordinator=SimpleNamespace(single_type_managers=[object()] * groups)
+    )
+    stub._bench_blocks_per_req = lambda depth, **_: groups * -(-depth // block_size)
+    stub._bench_usable_blocks = lambda batch, reserve_watermark=False: usable_blocks
+    return stub
+
+
+def test_kvwarm_shadow_tail_blocks_worst_case():
+    stub = _kvwarm_planner_stub(usable_blocks=0)
+    # ctx one slot short of a boundary: 1 block for the admission write plus
+    # ceil(headroom / block_size) for the steady steps.
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks(stub, 3) == 2
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks(stub, 1) == 2  # floor 2
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks(stub, 20) == 3
+    two = _kvwarm_planner_stub(usable_blocks=0, groups=2)
+    assert InstrumentedScheduler._kvwarm_shadow_tail_blocks(two, 3) == 4
+
+
+def test_kvwarm_prepare_reserves_shadow_tail_blocks(monkeypatch):
+    """A rung whose chains exactly fill the pool must leave room for the
+    shadows' private tail blocks, or injection dies with
+    "Cannot get N free blocks from the pool" (seen at batch=1024 on B200)."""
+    monkeypatch.setenv("DYN_BENCH_KV_WARMUP", "on")
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_THRESHOLD", str(10**12))
+    monkeypatch.setenv("DYN_BENCH_GIANT_KV_REPEATS", "3")
+    batch, ctx = 4, 1000
+    want = ctx + 2  # max(ctx) + 1 + non-giant headroom
+    chain_blocks = -(-want // 16) * batch  # 63 blocks per chain, 252 total
+    stub = _kvwarm_planner_stub(usable_blocks=chain_blocks)
+    stub._bench_grid = deque(
+        [
+            BenchmarkPoint(
+                point_type="decode",
+                total_kv_read_tokens=batch * ctx,
+                batch_size=batch,
+            )
+        ]
+    )
+    InstrumentedScheduler._kvwarm_prepare(stub, "decode")
+    depth = stub._kvwarm_plan[batch]
+    tail = InstrumentedScheduler._kvwarm_shadow_tail_blocks(stub, 3)
+    assert tail == 2
+    assert depth > 8
+    assert depth < want, "chains alone filling the pool must be trimmed"
+    assert (stub._bench_blocks_per_req(depth) + tail) * batch <= chain_blocks
+    # The trimmed stage can no longer serve the point: it falls back to fake
+    # injection instead of crashing the run.
+    point = stub._bench_grid[-1]
+    assert not InstrumentedScheduler._kvwarm_plan_covers(stub, point)
+
+
 def test_kvwarm_step_busy_stops_building_after_soft_timeout():
     stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
     stub._kvwarm_plan = {4: 64}
@@ -4329,9 +4389,11 @@ def test_kvwarm_shadow_registration_shares_prefix_and_forks_tail_with_cow():
     table, zero_ids = InstrumentedScheduler._kvwarm_register_shadow(
         stub, "shadow", "chain", 40, 3
     )
-    assert [b.block_id for b in pool.touched] == [0, 1]
-    assert all(chain[i].ref_cnt == 2 for i in range(2))
-    assert chain[2].ref_cnt == 1, "CoW source keeps only the chain's ref"
+    # Shared prefix takes the shadow's ref; the CoW source takes the hit-ref
+    # that the retained release after the copy will consume (production
+    # semantics: the source is a prefix-cache hit of the request).
+    assert [b.block_id for b in pool.touched] == [0, 1, 2]
+    assert all(chain[i].ref_cnt == 2 for i in range(3))
     assert mgr.cows == [(2, 1000)]
     assert table == ([0, 1, 1000],)
     assert zero_ids == []
@@ -4347,6 +4409,35 @@ def test_kvwarm_shadow_registration_zero_fills_tail_without_cow():
     assert table == ([0, 1, 1000, 1001],)
     assert zero_ids == [1000, 1001]
     assert [b.block_id for b in mgr.req_to_blocks["chain"]] == list(range(10))
+
+
+def test_kvwarm_shadow_registration_takes_tail_before_touching_prefix():
+    """A pool that cannot supply the private tail must fail before any chain
+    block is over-referenced (a leaked ref breaks reset_prefix_cache)."""
+    stub, mgr, pool, chain = _shadow_stub(cow=True)
+
+    def exhausted(n):
+        raise ValueError(f"Cannot get {n} free blocks from the pool")
+
+    pool.get_new_blocks = exhausted
+    with pytest.raises(ValueError, match="free blocks"):
+        InstrumentedScheduler._kvwarm_register_shadow(stub, "shadow", "chain", 40, 3)
+    assert pool.touched == []
+    assert all(b.ref_cnt == 1 for b in chain)
+    assert "shadow" not in mgr.req_to_blocks
+
+
+def test_kvwarm_shadow_pool_shortfall_matches_tail_arithmetic():
+    stub, mgr, pool, chain = _shadow_stub(cow=True)
+    pool.get_num_free_blocks = lambda: 3
+    # ctx=40 -> writes 40..43 need block 2 only (1 fresh); ctx=47 -> writes
+    # 47..50 span blocks 2 and 3 (2 fresh): 3 fresh blocks in total.
+    assert InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [40, 47], 3) == 0
+    pool.get_num_free_blocks = lambda: 2
+    assert InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [40, 47], 3) == 1
+    # Without the pool API the check is skipped rather than guessed.
+    del pool.get_num_free_blocks
+    assert InstrumentedScheduler._kvwarm_shadow_pool_shortfall(stub, [40, 47], 3) == 0
 
 
 def test_kvwarm_shadow_registration_rejects_too_shallow_chain():

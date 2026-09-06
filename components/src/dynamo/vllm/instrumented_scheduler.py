@@ -4516,9 +4516,15 @@ class InstrumentedScheduler(AsyncScheduler):
             # already carries the first sampled token); keep drift headroom.
             want = min(max(ctxs) + margin, self.max_model_len - 4)
             plan[p.batch_size] = max(plan.get(p.batch_size, 0), want)
+        # Shadows own private tail blocks (the admission write plus the steady
+        # headroom) on top of the shared chain prefix, drawn from the same pool
+        # while the chains are parked. Reserve them per request and per KV
+        # group; otherwise a rung whose chains fill the pool dies at injection
+        # ("Cannot get N free blocks from the pool").
+        shadow_tail_blocks = self._kvwarm_shadow_tail_blocks(repeats)
         for batch, depth in list(plan.items()):
             while depth > 8 and (
-                self._bench_blocks_per_req(depth) * batch
+                (self._bench_blocks_per_req(depth) + shadow_tail_blocks) * batch
                 > self._bench_usable_blocks(batch, reserve_watermark=True)
             ):
                 depth -= 1
@@ -4544,6 +4550,23 @@ class InstrumentedScheduler(AsyncScheduler):
         )
 
     # ------- Warmup state machine (intercepts before phase dispatch) -------
+
+    def _kvwarm_shadow_tail_blocks(self, repeats: int) -> int:
+        """Worst-case private tail blocks one measurement shadow draws from
+        the pool on top of the chain prefix it shares (see
+        ``_kvwarm_register_shadow``): ``ceil((ctx + 1 + headroom) / bs) -
+        ctx // bs`` peaks at ``1 + ceil(headroom / bs)`` when ``ctx`` ends one
+        slot short of a block boundary; the headroom is the giant repeat
+        count (at least 2). Every KV-cache group draws its own tail."""
+        coordinator = getattr(
+            getattr(self, "kv_cache_manager", None), "coordinator", None
+        )
+        n_groups = max(1, len(getattr(coordinator, "single_type_managers", ()) or ()))
+        block_size = int(
+            getattr(getattr(self, "cache_config", None), "block_size", 16) or 16
+        )
+        headroom = max(2, int(repeats))
+        return n_groups * (1 + -(-headroom // block_size))
 
     def _kvwarm_plan_covers(self, point) -> bool:
         """Plan-level coverage decision (independent of live chains): the shared
@@ -4773,10 +4796,20 @@ class InstrumentedScheduler(AsyncScheduler):
                 )
             shared = chain_blocks[:n_shared]
             tail_src = chain_blocks[n_shared:n_total]
-            block_pool.touch(shared)
+            # Take the private tail first: if the pool cannot supply it the
+            # shadow holds nothing yet, so nothing leaks (a failed shadow
+            # must not leave the chain prefix over-referenced).
             fresh = block_pool.get_new_blocks(len(tail_src))
+            block_pool.touch(shared)
             apply_cow = getattr(mgr, "_apply_cow", None)
             if callable(apply_cow):
+                # Production redirects a *prefix-cache hit* to a CoW block, so
+                # the source carries the request's hit-ref and the retained
+                # release after the copy consumes exactly that ref. Give the
+                # chain's tail blocks the same hit-ref here, otherwise the
+                # release drops the chain's own reference (1 -> 0) and the
+                # chain keeps pointing at a recycled block.
+                block_pool.touch(tail_src)
                 mgr.req_to_blocks[req_id] = shared + tail_src
                 for offset, (src, dst) in enumerate(zip(tail_src, fresh)):
                     apply_cow(req_id, n_shared + offset, src, dst)
@@ -4791,6 +4824,23 @@ class InstrumentedScheduler(AsyncScheduler):
             table.append([b.block_id for b in mgr.req_to_blocks[req_id]])
         return tuple(table), zero_ids
 
+    def _kvwarm_shadow_pool_shortfall(self, context_lengths, headroom: int) -> int:
+        """Free blocks the pool lacks for the private tails of these shadows
+        (0 when they fit). Mirrors the per-group tail arithmetic of
+        ``_kvwarm_register_shadow`` so the check and the allocation agree."""
+        manager = self.kv_cache_manager
+        free_fn = getattr(manager.block_pool, "get_num_free_blocks", None)
+        if not callable(free_fn):
+            return 0
+        need = 0
+        for mgr in manager.coordinator.single_type_managers:
+            bs = int(
+                getattr(mgr, "block_size", getattr(self.cache_config, "block_size", 16))
+            )
+            for ctx_len in context_lengths:
+                need += -(-(ctx_len + 1 + headroom) // bs) - ctx_len // bs
+        return max(0, need - int(free_fn()))
+
     def _kvwarm_inject_borrowed(self, context_lengths) -> "SchedulerOutput":
         """Real-content counterpart of _bench_inject_fake_decode: the prompt is
         the chain's real token prefix; the block table shares the chain's
@@ -4800,7 +4850,22 @@ class InstrumentedScheduler(AsyncScheduler):
         new_reqs_data: list = []
         num_scheduled_tokens: dict = {}
         zero_ids: list[int] = []
-        headroom = max(2, self._kvwarm_giant_repeats())
+        # Steady steps this point will run (repeats for giants, else 1): the
+        # shadow writes positions ctx .. ctx+headroom, which is exactly what
+        # ``_kvwarm_point_need`` (1 + headroom) and the plan margin reserve.
+        headroom = max(1, int(getattr(self, "_bench_extra_steps_left", 1)))
+        shortfall = self._kvwarm_shadow_pool_shortfall(context_lengths, headroom)
+        if shortfall > 0:
+            # Not enough free blocks for the private tails: register nothing
+            # and hand back an empty step; the caller's injection-shortfall
+            # path skips the point (explicit points still fail loudly there).
+            logger.warning(
+                "KVWARM: pool short of %d block(s) for %d shadow tail(s); "
+                "skipping point instead of over-referencing the chains",
+                shortfall,
+                len(context_lengths),
+            )
+            context_lengths = []
         for index, ctx_len in enumerate(context_lengths):
             chain_id = self._kvwarm_chain_ids[index]
             chain_req = self.requests[chain_id]
