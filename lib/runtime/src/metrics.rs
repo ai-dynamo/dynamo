@@ -242,8 +242,6 @@ impl PrometheusMetric for prometheus::CounterVec {
 /// (`dynamo_namespace`, `dynamo_component`, `dynamo_endpoint`, `worker_id`). A label a metric
 /// already carries is never overwritten. The value is parsed once per process; an invalid value is
 /// logged and ignored as a whole so a typo cannot half-apply.
-///
-/// Python counterpart: components/src/dynamo/common/utils/prometheus.py parse_const_labels()
 pub const METRICS_CONST_LABELS_ENV: &str = "DYN_METRICS_CONST_LABELS";
 
 static CONST_LABEL_NAME_PATTERN: Lazy<Regex> =
@@ -306,6 +304,11 @@ pub fn parse_const_labels(raw: &str) -> anyhow::Result<Vec<(String, String)>> {
                 "label name '{name}' uses the reserved '__' prefix"
             ));
         }
+        if name == "le" || name == "quantile" {
+            return Err(anyhow::anyhow!(
+                "label name '{name}' is reserved by the Prometheus exposition format"
+            ));
+        }
         if is_auto_injected_label(name) {
             return Err(anyhow::anyhow!(
                 "label name '{name}' is auto-injected by Dynamo and cannot be overridden"
@@ -328,10 +331,26 @@ fn is_auto_injected_label(name: &str) -> bool {
         || name == labels::WORKER_ID
 }
 
-/// Attach `const_labels` to every sample in `families`, skipping any label name the sample
-/// already carries (existing labels always win). Call this at exposition time, right before
-/// encoding, so it covers metrics created through [`create_metric`] as well as metrics
-/// registered directly with `prometheus::Opts`.
+/// Attach `const_labels` to one gathered sample, skipping any label name it already carries
+/// (existing labels always win).
+pub fn apply_const_labels_to_metric(
+    metric: &mut prometheus::proto::Metric,
+    const_labels: &[(String, String)],
+) {
+    for (name, value) in const_labels {
+        if metric.label.iter().any(|lp| lp.name() == name) {
+            continue;
+        }
+        let mut pair = prometheus::proto::LabelPair::default();
+        pair.set_name(name.clone());
+        pair.set_value(value.clone());
+        metric.label.push(pair);
+    }
+}
+
+/// Attach `const_labels` to every sample in `families` (see [`apply_const_labels_to_metric`]).
+/// Call this at exposition time, right before encoding, so it covers metrics created through
+/// [`create_metric`] as well as metrics registered directly with `prometheus::Opts`.
 pub fn apply_const_labels(
     families: &mut [prometheus::proto::MetricFamily],
     const_labels: &[(String, String)],
@@ -341,17 +360,147 @@ pub fn apply_const_labels(
     }
     for family in families.iter_mut() {
         for metric in family.metric.iter_mut() {
-            for (name, value) in const_labels {
-                if metric.label.iter().any(|lp| lp.name() == name) {
-                    continue;
-                }
-                let mut pair = prometheus::proto::LabelPair::default();
-                pair.set_name(name.clone());
-                pair.set_value(value.clone());
-                metric.label.push(pair);
-            }
+            apply_const_labels_to_metric(metric, const_labels);
         }
     }
+}
+
+/// Attach `const_labels` to every sample line of Prometheus text-exposition output, such as the
+/// text returned by exposition callbacks (engine metrics from Python workers, failover collectors,
+/// ...). `# HELP` / `# TYPE` / blank lines are left untouched, a label a sample already carries is
+/// never overwritten, and a line that does not parse as a sample is passed through unchanged.
+pub fn apply_const_labels_to_expfmt(text: &str, const_labels: &[(String, String)]) -> String {
+    if const_labels.is_empty() || text.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 64 * const_labels.len());
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        let ending = &line[body.len()..];
+        let trimmed = body.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            out.push_str(line);
+            continue;
+        }
+        match label_expfmt_sample_line(body, const_labels) {
+            Some(labeled) => {
+                out.push_str(&labeled);
+                out.push_str(ending);
+            }
+            None => out.push_str(line),
+        }
+    }
+    out
+}
+
+/// Rewrite one `name{labels} value [timestamp]` / `name value [timestamp]` line; `None` if the
+/// line does not look like a sample.
+fn label_expfmt_sample_line(line: &str, const_labels: &[(String, String)]) -> Option<String> {
+    let name_end = line.find(|c: char| c == '{' || c.is_whitespace())?;
+    let (name, rest) = line.split_at(name_end);
+    if name.is_empty() {
+        return None;
+    }
+    let mut additions = String::new();
+    if let Some(after_brace) = rest.strip_prefix('{') {
+        let close = expfmt_label_block_end(after_brace)?;
+        let inner = &after_brace[..close];
+        let existing = expfmt_label_names(inner)?;
+        let mut need_comma = !inner.trim().is_empty() && !inner.trim_end().ends_with(',');
+        for (k, v) in const_labels {
+            if existing.contains(&k.as_str()) {
+                continue;
+            }
+            if need_comma {
+                additions.push(',');
+            }
+            push_expfmt_label(&mut additions, k, v);
+            need_comma = true;
+        }
+        Some(format!(
+            "{name}{{{inner}{additions}{}",
+            &after_brace[close..]
+        ))
+    } else {
+        for (k, v) in const_labels {
+            if !additions.is_empty() {
+                additions.push(',');
+            }
+            push_expfmt_label(&mut additions, k, v);
+        }
+        Some(format!("{name}{{{additions}}}{rest}"))
+    }
+}
+
+fn push_expfmt_label(out: &mut String, name: &str, value: &str) {
+    out.push_str(name);
+    out.push_str("=\"");
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Index of the `}` closing a label block (input starts right after `{`), honouring quoted values
+/// and backslash escapes.
+fn expfmt_label_block_end(s: &str) -> Option<usize> {
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (idx, b) in s.bytes().enumerate() {
+        if in_quotes {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_quotes = false;
+            }
+        } else if b == b'"' {
+            in_quotes = true;
+        } else if b == b'}' {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// Label names inside a `name="value",name2="value2"` block; `None` if malformed.
+fn expfmt_label_names(inner: &str) -> Option<Vec<&str>> {
+    let mut names = Vec::new();
+    let mut rest = inner.trim_start();
+    while !rest.is_empty() {
+        let eq = rest.find('=')?;
+        let name = rest[..eq].trim();
+        if name.is_empty() {
+            return None;
+        }
+        names.push(name);
+        let value = rest[eq + 1..].trim_start().strip_prefix('"')?;
+        let mut escaped = false;
+        let mut close = None;
+        for (idx, b) in value.bytes().enumerate() {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                close = Some(idx);
+                break;
+            }
+        }
+        rest = value[close? + 1..].trim_start();
+        match rest.strip_prefix(',') {
+            Some(after_comma) => rest = after_comma.trim_start(),
+            None if rest.is_empty() => {}
+            None => return None,
+        }
+    }
+    Some(names)
 }
 
 /// [`apply_const_labels`] with the labels from [`METRICS_CONST_LABELS_ENV`].
@@ -1015,7 +1164,10 @@ impl MetricsRegistry {
                 }
 
                 let mut metrics = family.take_metric();
-                for metric in metrics.drain(..) {
+                for mut metric in metrics.drain(..) {
+                    // Label before deduplication so two registries that differ only by a label
+                    // the environment also sets collapse into one series instead of colliding.
+                    apply_const_labels_to_metric(&mut metric, const_labels);
                     let mut labels: Vec<(String, String)> = metric
                         .get_label()
                         .iter()
@@ -1050,7 +1202,6 @@ impl MetricsRegistry {
 
         let mut merged: Vec<prometheus::proto::MetricFamily> = by_name.into_values().collect();
         merged.sort_by(|a, b| a.name().cmp(b.name()));
-        apply_const_labels(&mut merged, const_labels);
 
         let encoder = prometheus::TextEncoder::new();
         let mut buffer = Vec::new();
@@ -1061,6 +1212,7 @@ impl MetricsRegistry {
         let mut expfmt = String::new();
         for registry in registries {
             let text = registry.execute_expfmt_callbacks();
+            let text = apply_const_labels_to_expfmt(&text, const_labels);
             if !text.is_empty() {
                 if !expfmt.is_empty() && !expfmt.ends_with('\n') {
                     expfmt.push('\n');
@@ -1307,6 +1459,8 @@ mod test_metricsregistry_units {
             "dynamo_endpoint=x",
             "worker_id=1",
             "dup=1,dup=2",
+            "le=0.5",
+            "quantile=0.9",
         ] {
             assert!(
                 parse_const_labels(bad).is_err(),
@@ -1351,14 +1505,82 @@ mod test_metricsregistry_units {
             !text.contains(r#"cluster="from_env",team="search"} 2"#),
             "{text}"
         );
+    }
 
-        // No constant labels -> output is untouched.
-        let text = registry
-            .prometheus_expfmt_combined_with_const_labels(&[])
+    #[test]
+    fn test_apply_const_labels_to_expfmt_labels_every_sample_line() {
+        let labels = vec![
+            ("cluster".to_string(), "prod".to_string()),
+            ("team".to_string(), "a\"b".to_string()),
+        ];
+        let text = concat!(
+            "# HELP demo_total help\n",
+            "# TYPE demo_total counter\n",
+            "demo_total 3\n",
+            "demo_total{cluster=\"explicit\",path=\"/v1,x}\"} 4 1700000000\n",
+            "hist_bucket{le=\"0.5\"} 1\n",
+            "hist_bucket{le=\"+Inf\",} 2\n",
+            "hist_count 2\n",
+            "\n",
+            "# EOF\n",
+        );
+        let expected = concat!(
+            "# HELP demo_total help\n",
+            "# TYPE demo_total counter\n",
+            "demo_total{cluster=\"prod\",team=\"a\\\"b\"} 3\n",
+            "demo_total{cluster=\"explicit\",path=\"/v1,x}\",team=\"a\\\"b\"} 4 1700000000\n",
+            "hist_bucket{le=\"0.5\",cluster=\"prod\",team=\"a\\\"b\"} 1\n",
+            "hist_bucket{le=\"+Inf\",cluster=\"prod\",team=\"a\\\"b\"} 2\n",
+            "hist_count{cluster=\"prod\",team=\"a\\\"b\"} 2\n",
+            "\n",
+            "# EOF\n",
+        );
+        assert_eq!(apply_const_labels_to_expfmt(text, &labels), expected);
+        // No labels or no text: untouched.
+        assert_eq!(apply_const_labels_to_expfmt(text, &[]), text);
+        assert_eq!(apply_const_labels_to_expfmt("", &labels), "");
+        // A line that is not a sample is passed through unchanged.
+        assert_eq!(
+            apply_const_labels_to_expfmt("garbage{unterminated 1\n", &labels),
+            "garbage{unterminated 1\n"
+        );
+    }
+
+    #[test]
+    fn test_const_labels_are_applied_before_series_dedup_and_to_callbacks() {
+        let parent = MetricsRegistry::new();
+        let child = MetricsRegistry::new();
+        let labeled =
+            prometheus::IntCounterVec::new(prometheus::Opts::new("demo_total", "d"), &["cluster"])
+                .unwrap();
+        labeled.with_label_values(&["prod"]).inc();
+        let plain = prometheus::IntCounter::new("demo_total", "d").unwrap();
+        plain.inc_by(5);
+        parent
+            .get_prometheus_registry()
+            .register(Box::new(labeled))
             .unwrap();
-        assert!(text.contains("demo_plain_total 1\n"), "{text}");
+        child
+            .get_prometheus_registry()
+            .register(Box::new(plain))
+            .unwrap();
+        parent.add_child_registry(&child);
+        child.add_expfmt_callback(Arc::new(|| Ok("engine_total 7\n".to_string())));
+
+        let labels = vec![("cluster".to_string(), "prod".to_string())];
+        let text = parent
+            .prometheus_expfmt_combined_with_const_labels(&labels)
+            .unwrap();
+        // The child's unlabeled sample becomes demo_total{cluster="prod"} too and is dropped as a
+        // duplicate of the parent's series rather than emitted twice.
+        assert_eq!(
+            text.matches("demo_total{cluster=\"prod\"}").count(),
+            1,
+            "{text}"
+        );
+        assert!(text.contains("demo_total{cluster=\"prod\"} 1\n"), "{text}");
         assert!(
-            text.contains(r#"demo_requests_total{cluster="explicit"} 2"#),
+            text.contains("engine_total{cluster=\"prod\"} 7\n"),
             "{text}"
         );
     }
