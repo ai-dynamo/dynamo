@@ -94,9 +94,19 @@ def test_snapshot_fans_out_one_entry_per_dp_rank(dp_size, start_rank, expected_r
     assert provider.snapshot() == {(1, rank): 16_000 for rank in expected_ranks}
 
 
-def test_snapshot_adds_native_offloading_tokens_to_retention_budget():
+def test_snapshot_credits_native_offloading_up_to_the_gpu_pool_size():
+    """Below the cap, host capacity is credited in full."""
     provider, _ = _make_provider({"1": _card(16, 1_000, host_total_tokens=300)})
     assert provider.snapshot() == {(1, 0): 16_300}
+
+
+def test_snapshot_caps_native_offloading_credit_at_the_gpu_pool_size():
+    """Above the cap (host capacity > GPU pool), the credit stops growing at 2x GPU-only.
+    `used` (router.py) never tracks how many of a program's tokens are actually spilled to
+    host, so crediting the full host pool 1:1 would make the ratio undercount fullness
+    rather than reflect it -- see module docstring."""
+    provider, _ = _make_provider({"1": _card(16, 1_000, host_total_tokens=999_000)})
+    assert provider.snapshot() == {(1, 0): 32_000}
 
 
 def test_snapshot_ignores_invalid_native_offloading_capacity():

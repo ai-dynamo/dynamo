@@ -1,10 +1,39 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Per-replica retention budget derived from worker model deployment cards.
+"""Per-replica admission budget derived from worker model deployment cards.
 
 ``block_size * total_kv_blocks`` is per DP rank, so the budget keys on
 ``(worker_id, dp_rank)``. The backend still owns admission, spill, restore and eviction.
+
+The budget is GPU-resident KV capacity plus a *capped* credit for the worker's native
+HiCache/host-offload capacity (``get_native_offloading_capacity_tokens``). Two bugs
+motivate the cap:
+
+1. #11185 added the two uncapped, on the theory that a 0.95 pause threshold against
+   GPU+host means "95% of the memory that can retain the program locally." That assumes
+   programs pushed past GPU residency get credited back out of ``used`` once SGLang
+   spills them to host. Nothing does that: ``_ReplicaUsage.used`` (router.py) only ever
+   tracks live ``program.token_total`` for programs the scheduler still considers
+   admitted -- there's no signal here for how many of those tokens are actually
+   GPU-resident versus already spilled to HiCache. So the numerator never grows with host
+   capacity the way the uncapped denominator did, and pause/soft-demote/resume became
+   correspondingly harder to trigger the larger ``hicache-ratio`` is. Confirmed live on a
+   `hicache-ratio: 8` DP-attention deployment: zero pause events from c8 through c160
+   concurrency while the router's own client logs showed 532 backend_connection_timeout
+   warnings and climbing InvalidInferenceResultError counts at the high end
+   (NVIDIA/InferenceMAX#271).
+2. Dropping the credit to zero isn't right either: before the SGLang sidecar correctly
+   published this field for DeepSeek V4 (#14313), the router only ever saw GPU-only
+   capacity, and that empirically over-paused (300+ programs paused throughout a c64 run,
+   worse throughput than an unthrottled baseline -- see the recipe history in
+   NVIDIA/InferenceMAX#271). GPU-only is too little credit; GPU+full-host is too much.
+
+Capping the credited host capacity at the GPU pool's own size (so the combined budget is
+at most 2x GPU-only, independent of how large ``hicache-ratio`` is configured) is a
+starting point between those two known-bad extremes, not a validated final constant --
+until real GPU-vs-host residency is tracked, this is the best available proxy and needs
+empirical re-validation across concurrencies.
 """
 
 from __future__ import annotations
@@ -138,7 +167,11 @@ class WorkerCapacityProvider:
         offloaded = get_native_offloading_capacity_tokens(
             runtime_config.get("runtime_data", {})
         )
-        return tokens + offloaded if offloaded is not None else tokens
+        if offloaded is None:
+            return tokens
+        # Cap the host-offload credit at the GPU pool's own size (module docstring):
+        # admission budget is at most 2x GPU-only, regardless of hicache-ratio.
+        return tokens + min(offloaded, tokens)
 
     @staticmethod
     def _start_rank(runtime_config: dict) -> int:
