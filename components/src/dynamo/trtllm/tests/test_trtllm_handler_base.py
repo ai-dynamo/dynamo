@@ -824,6 +824,7 @@ class TestGenerateLocally:
         for index, prompt_logprobs in enumerate(prompt_logprobs_per_chunk):
             output = MagicMock()
             output.token_ids = list(range(42, 43 + index))
+            output.index = 0
             output.finish_reason = "stop" if index == last_index else None
             output.stop_reason = None
             output.request_perf_metrics = None
@@ -892,6 +893,36 @@ class TestGenerateLocally:
         handler.engine.llm.generate_async.assert_called_once()
         _, kwargs = handler.engine.llm.generate_async.call_args
         assert kwargs["priority"] == DEFAULT_REQUEST_PRIORITY
+
+    @pytest.mark.asyncio
+    async def test_cumulative_stream_passes_token_delta_to_logprob_extractor(self):
+        """Pass each choice's response delta to shared logprob extraction."""
+        handler = self._make_handler()
+        generation_result = self._make_mock_generation_result_sequence([[], []])
+        handler.engine.llm.generate_async = MagicMock(return_value=generation_result)
+
+        request = {
+            "token_ids": [1, 2, 3],
+            "stop_conditions": {"max_tokens": 10},
+            "sampling_options": {},
+            "output_options": {"logprobs": 0},
+        }
+
+        with mock.patch.object(
+            HandlerBase, "_extract_logprobs", return_value=(None, None)
+        ) as extract_logprobs:
+            chunks = [
+                chunk
+                async for chunk in handler.generate_locally(
+                    request, self._make_context()
+                )
+            ]
+
+        assert [call.args[1] for call in extract_logprobs.call_args_list] == [0, 1]
+        assert [
+            call.kwargs["token_ids_delta"] for call in extract_logprobs.call_args_list
+        ] == [[42], [43]]
+        assert [chunk["token_ids"] for chunk in chunks] == [[42], [43]]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
