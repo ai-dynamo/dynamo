@@ -430,23 +430,14 @@ fn expfmt_series_key(line: &str) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    let mut labels = match rest.strip_prefix('{') {
+    let labels = match rest.strip_prefix('{') {
         Some(after_brace) => {
             let close = expfmt_label_block_end(after_brace)?;
             expfmt_label_pairs(&after_brace[..close])?
         }
         None => Vec::new(),
     };
-    labels.sort();
-    Some(format!(
-        "{}|{}",
-        name,
-        labels
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(",")
-    ))
+    Some(series_key_from_pairs(name, labels))
 }
 
 /// Rewrite one `name{labels} value [timestamp]` / `name value [timestamp]` line; `None` if the
@@ -565,6 +556,45 @@ fn expfmt_label_pairs(inner: &str) -> Option<Vec<(String, String)>> {
         }
     }
     Some(pairs)
+}
+
+fn series_key_from_pairs(name: &str, mut labels: Vec<(String, String)>) -> String {
+    labels.sort();
+    format!(
+        "{}|{}",
+        name,
+        labels
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+/// `name|k=v,...` series key of one gathered sample (labels sorted); the shape
+/// [`MetricsRegistry::prometheus_expfmt_combined_with`] deduplicates on.
+pub fn series_key(name: &str, metric: &prometheus::proto::Metric) -> String {
+    let labels = metric
+        .label
+        .iter()
+        .map(|lp| (lp.name().to_string(), lp.value().to_string()))
+        .collect();
+    series_key_from_pairs(name, labels)
+}
+
+/// Series keys of every sample in `families`. Use it to seed
+/// [`MetricsRegistry::prometheus_expfmt_combined_with`] when another exposition source is rendered
+/// in the same scrape.
+pub fn series_keys(families: &[prometheus::proto::MetricFamily]) -> HashSet<String> {
+    families
+        .iter()
+        .flat_map(|family| {
+            family
+                .metric
+                .iter()
+                .map(move |metric| series_key(family.name(), metric))
+        })
+        .collect()
 }
 
 /// [`apply_const_labels`] with the labels from [`METRICS_CONST_LABELS_ENV`].
@@ -1190,6 +1220,19 @@ impl MetricsRegistry {
         &self,
         const_labels: &[(String, String)],
     ) -> anyhow::Result<String> {
+        let mut seen_series: HashSet<String> = HashSet::new();
+        self.prometheus_expfmt_combined_with(const_labels, &mut seen_series)
+    }
+
+    /// Same as [`Self::prometheus_expfmt_combined_with_const_labels`], but deduplicates against
+    /// `seen_series` (keys from [`series_key`]) and records every emitted series into it. A caller
+    /// that renders another exposition source in the same scrape (the frontend renders its own HTTP
+    /// registry first) seeds it with [`series_keys`] so no series appears twice.
+    pub fn prometheus_expfmt_combined_with(
+        &self,
+        const_labels: &[(String, String)],
+        seen_series: &mut HashSet<String>,
+    ) -> anyhow::Result<String> {
         let registries = self.registries_for_combined_scrape();
 
         // Run per-registry update callbacks first.
@@ -1203,7 +1246,6 @@ impl MetricsRegistry {
 
         // Merge metric families.
         let mut by_name: HashMap<String, prometheus::proto::MetricFamily> = HashMap::new();
-        let mut seen_series: HashSet<String> = HashSet::new();
 
         for (registry_idx, registry) in registries.iter().enumerate() {
             let families = registry.get_prometheus_registry().gather();
@@ -1233,27 +1275,11 @@ impl MetricsRegistry {
                     // Label before deduplication so two registries that differ only by a label
                     // the environment also sets collapse into one series instead of colliding.
                     apply_const_labels_to_metric(&mut metric, const_labels);
-                    let mut labels: Vec<(String, String)> = metric
-                        .get_label()
-                        .iter()
-                        .map(|lp| (lp.name().to_string(), lp.value().to_string()))
-                        .collect();
-                    labels.sort_by(|(ka, va), (kb, vb)| (ka, va).cmp(&(kb, vb)));
-
-                    let key = format!(
-                        "{}|{}",
-                        name,
-                        labels
-                            .iter()
-                            .map(|(k, v)| format!("{}={}", k, v))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    );
-
-                    if !seen_series.insert(key) {
+                    let key = series_key(&name, &metric);
+                    if !seen_series.insert(key.clone()) {
                         tracing::warn!(
                             metric_name = %name,
-                            labels = ?labels,
+                            series = %key,
                             registry_idx,
                             "Duplicate Prometheus series while merging registries; dropping later sample"
                         );
@@ -1278,7 +1304,7 @@ impl MetricsRegistry {
         for registry in registries {
             let text = registry.execute_expfmt_callbacks();
             let text = apply_const_labels_to_expfmt(&text, const_labels);
-            let text = drop_duplicate_expfmt_samples(&text, &mut seen_series);
+            let text = drop_duplicate_expfmt_samples(&text, seen_series);
             if !text.is_empty() {
                 if !expfmt.is_empty() && !expfmt.ends_with('\n') {
                     expfmt.push('\n');
@@ -1661,6 +1687,39 @@ mod test_metricsregistry_units {
         assert_eq!(text.matches("engine_total{").count(), 1, "{text}");
         assert!(!text.contains("} 9\n"), "{text}");
         assert!(!text.contains("} 8\n"), "{text}");
+    }
+
+    #[test]
+    fn test_combined_with_seeded_series_skips_already_emitted_samples() {
+        // Another exposition source (think: the frontend's own HTTP registry) already emitted
+        // demo_total{cluster="prod"} in this scrape.
+        let local = prometheus::Registry::new();
+        let local_counter =
+            prometheus::IntCounterVec::new(prometheus::Opts::new("demo_total", "d"), &["cluster"])
+                .unwrap();
+        local_counter.with_label_values(&["prod"]).inc_by(5);
+        local.register(Box::new(local_counter)).unwrap();
+        let mut seen = series_keys(&local.gather());
+        assert_eq!(seen.len(), 1);
+
+        let registry = MetricsRegistry::new();
+        let counter =
+            prometheus::IntCounterVec::new(prometheus::Opts::new("demo_total", "d"), &["cluster"])
+                .unwrap();
+        counter.with_label_values(&["prod"]).inc();
+        counter.with_label_values(&["dev"]).inc_by(2);
+        registry
+            .get_prometheus_registry()
+            .register(Box::new(counter))
+            .unwrap();
+
+        let text = registry
+            .prometheus_expfmt_combined_with(&[], &mut seen)
+            .unwrap();
+        assert!(!text.contains("cluster=\"prod\""), "{text}");
+        assert!(text.contains("demo_total{cluster=\"dev\"} 2\n"), "{text}");
+        // The newly emitted series was recorded for any source rendered after this one.
+        assert_eq!(seen.len(), 2);
     }
 
     #[test]
