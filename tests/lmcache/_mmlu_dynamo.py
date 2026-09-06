@@ -43,7 +43,7 @@ def prompt_string(df: pd.DataFrame, idx: int, include_answer: bool = True) -> st
         "any explanation, analysis, or extra words. Answer:"
     )
     if include_answer:
-        prompt += f" {df.iloc[idx, option_count]}\n\n"
+        prompt += f" {df.iloc[idx, option_count + 1]}\n\n"
     return prompt
 
 
