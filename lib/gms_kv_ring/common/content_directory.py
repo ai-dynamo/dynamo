@@ -34,7 +34,9 @@ def resolve_directory_mode(value: Optional[str] = None) -> str:
     return mode
 
 
-def resolve_manifest_id(engine: str, block_size: int) -> str:
+def resolve_manifest_id(
+    engine: str, block_size: int, *, keyspace: Optional[str] = None
+) -> str:
     """Return the explicit compatibility manifest or a safe POC fallback.
 
     Production deployments should set ``GMS_KV_DIRECTORY_MANIFEST`` from the
@@ -44,6 +46,10 @@ def resolve_manifest_id(engine: str, block_size: int) -> str:
     explicit = os.environ.get("GMS_KV_DIRECTORY_MANIFEST", "").strip()
     if explicit:
         return explicit
+        # The explicit value is the complete compatibility identity shared by
+        # engine adapters and failover orchestration. Appending adapter-local
+        # fields here made those two clients silently address different
+        # manifests during promotion.
     model = (
         os.environ.get("DYN_MODEL_PATH")
         or os.environ.get("DYN_MODEL")
@@ -51,7 +57,10 @@ def resolve_manifest_id(engine: str, block_size: int) -> str:
         or "unknown-model"
     )
     salt = os.environ.get("GMS_KVR_CROSS_NODE_SALT", "")
-    return f"poc-v1|{engine}|{model}|block={int(block_size)}|salt={salt}"
+    manifest = f"poc-v1|{engine}|{model}|block={int(block_size)}|salt={salt}"
+    if keyspace:
+        manifest = f"{manifest}|keyspace={str(keyspace).strip()}"
+    return manifest
 
 
 def resolve_writer_id(engine_id: Optional[str] = None) -> str:
@@ -76,9 +85,7 @@ class ContentDirectory:
         self.mode = resolve_directory_mode(mode)
         self.engine = str(engine)
         self.socket_path = str(socket_path or "")
-        self.manifest_id = resolve_manifest_id(engine, block_size)
-        if keyspace:
-            self.manifest_id = f"{self.manifest_id}|keyspace={str(keyspace).strip()}"
+        self.manifest_id = resolve_manifest_id(engine, block_size, keyspace=keyspace)
         self.writer_id = resolve_writer_id(engine_id)
         if standby is None:
             standby = os.environ.get("GMS_KV_DIRECTORY_STANDBY", "0").lower() not in (
@@ -111,6 +118,10 @@ class ContentDirectory:
         self._view_revision = 0
         self._view_epoch: Optional[int] = None
         self._view_writer: Optional[str] = None
+        # Published last by the single view-reader thread. CPython object
+        # reference assignment is atomic under the GIL, so hot-path readers do
+        # not need the view mutex merely to consume this derived status bit.
+        self._view_current_writer = False
         self._view_ready = threading.Event()
         self._view_caught_up = False
         self._view_stop = threading.Event()
@@ -129,6 +140,7 @@ class ContentDirectory:
             "off",
             "",
         )
+        self._mutation_submit_lock = threading.Lock()
         self._mutation_condition = threading.Condition()
         self._mutations = deque()
         self._mutation_thread: Optional[threading.Thread] = None
@@ -180,7 +192,8 @@ class ContentDirectory:
         self._mutation_thread.start()
 
     def _defer_mutation(self, kind: str, payload) -> int:
-        with self._mutation_condition:
+        # Keep direct durability commits ordered with concurrent producers.
+        with self._mutation_submit_lock, self._mutation_condition:
             if self._mutation_error is not None:
                 raise RuntimeError("GMS directory mutation worker failed") from (
                     self._mutation_error
@@ -228,12 +241,27 @@ class ContentDirectory:
                     raise RuntimeError("GMS directory mutation worker failed") from (
                         self._mutation_error
                     )
-                remaining = (
-                    None if deadline is None else deadline - time.monotonic()
-                )
+                remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     return False
                 self._mutation_condition.wait(remaining)
+            return True
+
+    def commit_hbm_dormant(
+        self, content_hashes: list[bytes], timeout: Optional[float] = None
+    ) -> bool:
+        """Commit completed HBM blocks without a queue-and-wake round trip.
+
+        Earlier active publications remain ordered through the mutation worker.
+        Once they drain, this scheduler-thread call writes the READY transition
+        directly to the daemon and returns only after its writer fence commits.
+        """
+        if not content_hashes:
+            return True
+        with self._mutation_submit_lock:
+            if self.async_publish_enabled and not self.flush_deferred(timeout):
+                return False
+            self.mark_hbm_dormant(content_hashes)
             return True
 
     def _mutation_loop(self) -> None:
@@ -252,15 +280,25 @@ class ContentDirectory:
                 else:
                     raise AssertionError(f"unknown directory mutation {kind!r}")
             except BaseException as exc:  # noqa: BLE001
-                # A single mutation failure -- a transient daemon error, or this
-                # engine being fenced/demoted mid-drain -- must NOT permanently
-                # kill the writer and silently stop ALL future publications. An
-                # unpublished entry is a safe cache miss (recompute), never a
-                # stale hit, so skip this one and keep serving the queue: a
-                # transient error self-heals on the next mutation, and a fenced
-                # writer simply drops its now-rejected publications. Record the
-                # failure for observability and advance the committed sequence so
-                # flush_deferred does not block on the skipped mutation.
+                stale_writer = isinstance(
+                    exc, RuntimeError
+                ) and "rejected stale writer" in str(exc)
+                if stale_writer:
+                    logger.error(
+                        "GMS deferred directory mutation rejected a stale writer; "
+                        "stopping the writer to preserve the generation fence",
+                        exc_info=True,
+                    )
+                    with self._mutation_condition:
+                        self._mutation_error = exc
+                        self._mutations.clear()
+                        self._mutation_condition.notify_all()
+                    return
+
+                # Other publication failures are safe cache misses. Keep the
+                # ordered writer alive so a transient daemon error can heal on
+                # the next mutation, and advance the committed sequence so an
+                # explicit flush cannot strand forever on the skipped entry.
                 logger.warning(
                     "GMS deferred directory mutation (%s) failed; skipping "
                     "(published entry will be a safe cache miss)",
@@ -278,7 +316,9 @@ class ContentDirectory:
         try:
             self.flush_deferred(timeout=2.0)
         except Exception:  # noqa: BLE001
-            logger.warning("GMS directory close could not flush mutations", exc_info=True)
+            logger.warning(
+                "GMS directory close could not flush mutations", exc_info=True
+            )
         with self._mutation_condition:
             self._mutation_stop = True
             self._mutation_condition.notify_all()
@@ -325,12 +365,11 @@ class ContentDirectory:
 
     @property
     def read_view_is_current_writer(self) -> bool:
-        if not self._view_ready.is_set():
-            return False
-        with self._view_lock:
-            return self._view_caught_up and self._view_writer == self.writer_id
+        return bool(self._view_current_writer)
 
     def _invalidate_read_view(self) -> None:
+        # Revoke the lock-free status before clearing any view state.
+        self._view_current_writer = False
         self._view_ready.clear()
         with self._view_lock:
             self._view = {}
@@ -352,6 +391,7 @@ class ContentDirectory:
             self._view_epoch = int(epoch)
             self._view_writer = writer_id
             self._view_caught_up = True
+            self._view_current_writer = writer_id == self.writer_id
         self._view_ready.set()
 
     def _apply_changes(self, response: dict) -> None:
@@ -371,6 +411,9 @@ class ContentDirectory:
             writer = response.get("writer_id")
             self._view_writer = None if writer is None else str(writer)
             self._view_caught_up = not bool(response["has_more"])
+            self._view_current_writer = (
+                self._view_caught_up and self._view_writer == self.writer_id
+            )
         self._view_ready.set()
 
     def _read_view_loop(self) -> None:
@@ -445,9 +488,7 @@ class ContentDirectory:
                     break
             return result
 
-    def _read_view_lookup(
-        self, content_hashes: list[bytes]
-    ) -> list[Optional[dict]]:
+    def _read_view_lookup(self, content_hashes: list[bytes]) -> list[Optional[dict]]:
         if not self._view_ready.is_set():
             return [None] * len(content_hashes)
         with self._view_lock:
@@ -587,8 +628,7 @@ class ContentDirectory:
             # Misses and host/storage hits are read-only. Only HBM adoption
             # needs the daemon claim that fences eviction and slot reuse.
             if not any(
-                entry is not None and entry.get("tier") == "hbm"
-                for entry in local
+                entry is not None and entry.get("tier") == "hbm" for entry in local
             ):
                 return local, None
 
@@ -649,3 +689,17 @@ class ContentDirectory:
             ),
             {},
         )
+
+    def compare_prefix(
+        self,
+        content_hashes: list[bytes],
+        legacy_count: int,
+    ) -> tuple[list[Optional[dict]], bool]:
+        """Lookup once and report whether its contiguous prefix agrees."""
+        entries = self.lookup(content_hashes)
+        directory_count = 0
+        for entry in entries:
+            if entry is None:
+                break
+            directory_count += 1
+        return entries, directory_count == int(legacy_count)
