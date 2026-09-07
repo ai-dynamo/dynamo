@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from gpu_memory_service.server.fsm import ServerState
+from gms_kv_ring.daemon.client import DaemonClient
 
 from tests.gpu_memory_service.common.runtime import (
     GMSProcessManager,
@@ -41,6 +42,11 @@ pytestmark = [pytest.mark.nightly, pytest.mark.fault_tolerance]
 # 6. Shadow A enters a new RW KV layout, hits allocation_oom, then finishes resume.
 
 logger = logging.getLogger(__name__)
+
+_HBM_RECOVERY_PROMPT = (
+    "GMS persistent HBM recovery probe. The promoted shadow must reuse this exact "
+    "deterministic prefix without recomputing its key value cache. "
+) * 16
 
 
 def _kill_process_group(process: ManagedProcess) -> None:
@@ -253,6 +259,78 @@ def _run_shadow_failover_test(
             success_message="Shadow inference after failover OK",
             retry_timeout=30.0,
         )
+
+
+@pytest.mark.e2e
+@pytest.mark.gpu_1
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
+@pytest.mark.vllm
+def test_gms_minimal_cold_hbm_failover_vllm(
+    request, runtime_services_dynamic_ports, predownload_models, monkeypatch
+):
+    """Prove the smallest local persistent-KV failover loop.
+
+    The replacement starts only after the primary is killed. There is no
+    prewarm, async metadata view, request replay, cooperative handoff or
+    latency target in this baseline.
+    """
+    monkeypatch.setenv("VLLM_GMS_GPU_MEM_UTIL", "0.22")
+
+    with GMSProcessManager(request, VLLMWithGMSProcess, kv_directory=True) as manager:
+        assert manager.frontend_port is not None
+        assert manager.kv_directory_socket is not None
+        assert manager.kv_directory_manifest is not None
+
+        primary = manager.start_engine("primary")
+        primary_output = assert_completion_ok(
+            manager.frontend_port,
+            _HBM_RECOVERY_PROMPT,
+            failure_message="Primary cold-failover warmup failed",
+            success_message="Primary cold-failover warmup OK",
+            body_overrides={"temperature": 0},
+        )
+        repeated_primary_output = assert_completion_ok(
+            manager.frontend_port,
+            _HBM_RECOVERY_PROMPT,
+            failure_message="Primary deterministic repeat failed",
+            success_message="Primary deterministic repeat OK",
+            body_overrides={"temperature": 0},
+        )
+        assert repeated_primary_output == primary_output
+
+        with DaemonClient(manager.kv_directory_socket) as directory:
+            _entries, epoch, writer = directory.directory_lookup(
+                manager.kv_directory_manifest, []
+            )
+            assert writer == "engine-primary"
+            protected, rejected = directory.directory_hbm_inventory(
+                writer, epoch, scope="vllm"
+            )
+            assert not rejected
+            assert sum(map(len, protected.values())) > 0
+
+            _kill_process_group(primary)
+            promoted, _new_epoch, active = directory.directory_promote(
+                epoch, "engine-shadow"
+            )
+            assert promoted and active == "engine-shadow"
+
+        shadow = manager.start_engine(
+            "shadow",
+            read_only_weights=True,
+            directory_standby=True,
+        )
+        shadow_output = assert_completion_ok(
+            manager.frontend_port,
+            _HBM_RECOVERY_PROMPT,
+            failure_message="Cold replacement HBM recovery probe failed",
+            success_message="Cold replacement HBM recovery probe OK",
+            retry_timeout=30.0,
+            body_overrides={"temperature": 0},
+        )
+        assert shadow_output == primary_output
+        assert "adopted_hbm_blocks=" in shadow.read_logs()
 
 
 @pytest.mark.e2e

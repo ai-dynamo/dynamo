@@ -24,13 +24,17 @@ def assert_completion_ok(
     success_message: str,
     retry_timeout: float = 0.0,
     retry_interval: float = 1.0,
-):
+    body_overrides: dict | None = None,
+) -> str:
+    body = {
+        "model": FAULT_TOLERANCE_MODEL_NAME,
+        "prompt": prompt,
+        "max_tokens": 20,
+    }
+    if body_overrides:
+        body.update(body_overrides)
     completion = CompletionPayload(
-        body={
-            "model": FAULT_TOLERANCE_MODEL_NAME,
-            "prompt": prompt,
-            "max_tokens": 20,
-        },
+        body=body,
         expected_response=[],
         expected_log=[],
         timeout=120,
@@ -49,8 +53,11 @@ def assert_completion_ok(
             result = response.json()
             if not isinstance(result, dict) or not result.get("choices"):
                 raise AssertionError(failure_message)
+            output = result["choices"][0].get("text")
+            if not isinstance(output, str):
+                raise AssertionError(failure_message)
             logger.info("%s: %s", success_message, result)
-            return
+            return output
         except (AssertionError, KeyError, requests.RequestException, ValueError):
             if time.monotonic() >= deadline:
                 raise

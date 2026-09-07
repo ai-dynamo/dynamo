@@ -20,38 +20,46 @@ logger = logging.getLogger(__name__)
 
 # Per-GPU threshold: absorbs small driver baseline residue, catches any real
 # leak (the bug that motivated the subprocess refactor was ~2.4 GiB).
-_LEAK_THRESHOLD_MIB = 100
+_LEAK_THRESHOLD_MIB = int(
+    __import__("os").environ.get("GMS_TEST_LEAK_THRESHOLD_MIB", "100")
+)
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _assert_no_gpu_memory_leak():
+    before = _gpu_memory_usage()
     yield
-    # The restored-engine probe attaches to a GMS server owned by the external
-    # CUDA/CRIU controller. That server intentionally remains alive until the
-    # probe exits and the controller can finish its own validation and cleanup.
+    # An externally owned GMS server intentionally remains alive until its
+    # CUDA/CRIU controller completes validation and cleanup.
     if os.environ.get("DYN_GMS_EXTERNAL_SERVER") == "1":
         return
+    after = _gpu_memory_usage()
+    if before is None or after is None:
+        return
+
+    leaked_mib = [end - start for start, end in zip(before, after)]
+    logger.info(
+        "GPU memory.used before/after/delta (MiB): %s",
+        list(zip(before, after, leaked_mib)),
+    )
+    leakers = [
+        (gpu_id, mib)
+        for gpu_id, mib in enumerate(leaked_mib)
+        if mib >= _LEAK_THRESHOLD_MIB
+    ]
+    assert not leakers, (
+        f"GMS tests leaked GPU memory on device(s): {leakers} "
+        f"(threshold {_LEAK_THRESHOLD_MIB} MiB per device)."
+    )
+
+
+def _gpu_memory_usage() -> list[int] | None:
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
             text=True,
             timeout=5,
         )
-        usage_mib = [int(line) for line in out.strip().splitlines()]
+        return [int(line) for line in out.strip().splitlines()]
     except (FileNotFoundError, subprocess.SubprocessError, ValueError):
-        return  # No GPU or unparseable output — skip the check.
-
-    # Surfaced live in CI via pyproject.toml's `log_cli_level = "INFO"` so we
-    # can confirm the guard is firing with expected values. Safe to leave in —
-    # one line per module, useful forensics if a later test ever OOMs.
-    logger.info("post-module memory.used per GPU (MiB): %s", usage_mib)
-
-    leakers = [
-        (gpu_id, mib)
-        for gpu_id, mib in enumerate(usage_mib)
-        if mib >= _LEAK_THRESHOLD_MIB
-    ]
-    assert not leakers, (
-        f"GMS tests left memory pinned on GPU(s): {leakers} "
-        f"(threshold {_LEAK_THRESHOLD_MIB} MiB per device)."
-    )
+        return None
