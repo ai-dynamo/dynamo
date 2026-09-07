@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+# standalone crate — keep out of any parent workspace
+
+[package]
+name = "gms_rust_ring"
+version = "0.1.0"
+edition = "2021"
+authors = ["NVIDIA"]
+license = "Apache-2.0"
+description = "Native hot-path SPSC ring push/pop for GMS RestoreRing"
+
+[lib]
+name = "gms_rust_ring"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py312"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
