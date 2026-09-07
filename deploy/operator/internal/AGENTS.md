@@ -22,6 +22,17 @@ reconciliation, rollout, restart, readiness, status, watches, and provider integ
   small request/result contract and concrete operations with genuinely identical
   invariants. Do not introduce a common provider lifecycle or make one complete program
   invoke another.
+- Identify a workload pathway by lifecycle ownership, not by the Kubernetes workload
+  kind it eventually renders. A feature that owns provider-specific preflight, retries,
+  rollout, scaling, readiness, fencing, cleanup, or status is either a complete workload
+  program or a persisted child reconciler boundary. Do not thread such a feature through
+  the outer DGD controller or another program as a mode, boolean, or `selected*` value.
+- The outer DGD controller may select a workload program, but it must not execute
+  provider-specific preflight before dispatch or overlay provider-specific readiness
+  after the program returns.
+- Requiring one joint `PodCliqueSet` does not justify merging lifecycle state machines.
+  Make PCS composition ownership explicit; do not turn one provider's lifecycle into a
+  conditional branch inside another provider's program.
 - The DCD CR and controller remain the child retry, ownership, status, and observability
   boundary. A workload mechanism selected within the DCD controller does not become a
   graph-level program.
