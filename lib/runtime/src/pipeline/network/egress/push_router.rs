@@ -539,12 +539,10 @@ fn spawn_multimodal_cache_cleanup_watcher(
             let discovery = endpoint.drt().discovery();
             let discovery_request = discovery.list_and_watch(query, None);
             tokio::pin!(discovery_request);
-            let discovery_result = loop {
-                tokio::select! {
-                    result = &mut discovery_request => break result,
-                    _ = cancel_token.cancelled() => break 'reconnect,
-                    _ = &mut indexer_dropped => break 'reconnect,
-                }
+            let discovery_result = tokio::select! {
+                result = &mut discovery_request => result,
+                _ = cancel_token.cancelled() => break 'reconnect,
+                _ = &mut indexer_dropped => break 'reconnect,
             };
 
             let mut stream = match discovery_result {
@@ -556,12 +554,10 @@ fn spawn_multimodal_cache_cleanup_watcher(
                     );
                     let reconnect_delay = tokio::time::sleep(RECONNECT_BACKOFF);
                     tokio::pin!(reconnect_delay);
-                    loop {
-                        tokio::select! {
-                            _ = &mut reconnect_delay => continue 'reconnect,
-                            _ = cancel_token.cancelled() => break 'reconnect,
-                            _ = &mut indexer_dropped => break 'reconnect,
-                        }
+                    tokio::select! {
+                        _ = &mut reconnect_delay => continue 'reconnect,
+                        _ = cancel_token.cancelled() => break 'reconnect,
+                        _ = &mut indexer_dropped => break 'reconnect,
                     }
                 }
             };
