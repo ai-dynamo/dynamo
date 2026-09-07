@@ -42,12 +42,97 @@ var protectedLabelKeys = map[string]struct{}{
 // applyProfilingJobOverrides merges user-provided overrides from
 // spec.overrides.profilingJob into the controller-generated Job.
 // Uses a deterministic allowlist: only explicitly handled fields are merged.
-func applyProfilingJobOverrides(job *batchv1.Job, overrides *batchv1.JobSpec) {
+// Security-sensitive values are rejected first: a DGDR creator holds only the
+// namespaced dynamographdeploymentrequests/create permission, so an override
+// must not escalate the operator-created Job to host-level access.
+func applyProfilingJobOverrides(job *batchv1.Job, overrides *batchv1.JobSpec) error {
 	if overrides == nil {
-		return
+		return nil
+	}
+	if err := validateProfilingJobOverridesSecurity(overrides); err != nil {
+		return err
 	}
 	applyJobSpecOverrides(&job.Spec, overrides)
 	applyPodTemplateOverrides(&job.Spec.Template, &overrides.Template)
+	return nil
+}
+
+// validateProfilingJobOverridesSecurity rejects overrides that would let the
+// operator-created profiling Job escape to the node. The controller runs the
+// profiling pod non-root by default; these checks apply the same deny doctrine
+// as protectedLabelKeys to the PodSpec fields that grant host access.
+func validateProfilingJobOverridesSecurity(overrides *batchv1.JobSpec) error {
+	ps := &overrides.Template.Spec
+	const base = "spec.overrides.profilingJob.template.spec"
+	var errs []error
+
+	// Host namespaces expose the node and its other pods directly.
+	if ps.HostNetwork {
+		errs = append(errs, fmt.Errorf("%s.hostNetwork must not be set", base))
+	}
+	if ps.HostPID {
+		errs = append(errs, fmt.Errorf("%s.hostPID must not be set", base))
+	}
+	if ps.HostIPC {
+		errs = append(errs, fmt.Errorf("%s.hostIPC must not be set", base))
+	}
+
+	// hostPath volumes mount the node filesystem into the pod.
+	for _, v := range ps.Volumes {
+		if v.HostPath != nil {
+			errs = append(errs, fmt.Errorf("%s.volumes[%q]: hostPath volumes are not allowed", base, v.Name))
+		}
+	}
+
+	// Pod-level security context must not undo the non-root baseline.
+	if sc := ps.SecurityContext; sc != nil {
+		if sc.RunAsNonRoot != nil && !*sc.RunAsNonRoot {
+			errs = append(errs, fmt.Errorf("%s.securityContext.runAsNonRoot must not be false", base))
+		}
+		if sc.RunAsUser != nil && *sc.RunAsUser == 0 {
+			errs = append(errs, fmt.Errorf("%s.securityContext.runAsUser must not be 0 (root)", base))
+		}
+	}
+
+	// Every container, init or main, is checked for privileged execution.
+	for _, c := range ps.InitContainers {
+		errs = append(errs, containerSecurityErrors(base+".initContainers", c)...)
+	}
+	for _, c := range ps.Containers {
+		errs = append(errs, containerSecurityErrors(base+".containers", c)...)
+	}
+
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("forbidden profiling job override(s): %w", errors.Join(errs...))
+}
+
+// containerSecurityErrors returns the privilege-escalation violations in a
+// single container's securityContext, if any.
+func containerSecurityErrors(base string, c corev1.Container) []error {
+	sc := c.SecurityContext
+	if sc == nil {
+		return nil
+	}
+	p := fmt.Sprintf("%s[%q].securityContext", base, c.Name)
+	var errs []error
+	if sc.Privileged != nil && *sc.Privileged {
+		errs = append(errs, fmt.Errorf("%s.privileged must not be true", p))
+	}
+	if sc.AllowPrivilegeEscalation != nil && *sc.AllowPrivilegeEscalation {
+		errs = append(errs, fmt.Errorf("%s.allowPrivilegeEscalation must not be true", p))
+	}
+	if sc.RunAsNonRoot != nil && !*sc.RunAsNonRoot {
+		errs = append(errs, fmt.Errorf("%s.runAsNonRoot must not be false", p))
+	}
+	if sc.RunAsUser != nil && *sc.RunAsUser == 0 {
+		errs = append(errs, fmt.Errorf("%s.runAsUser must not be 0 (root)", p))
+	}
+	if sc.Capabilities != nil && len(sc.Capabilities.Add) > 0 {
+		errs = append(errs, fmt.Errorf("%s.capabilities.add must be empty", p))
+	}
+	return errs
 }
 
 // ensureOutputCopierKubeAPIAccess preserves the user's pod-level

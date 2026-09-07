@@ -1675,7 +1675,9 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 		if dgdr.Spec.Overrides != nil {
 			jobOverrides = dgdr.Spec.Overrides.ProfilingJob
 		}
-		applyProfilingJobOverrides(job, jobOverrides)
+		if err := applyProfilingJobOverrides(job, jobOverrides); err != nil {
+			return job, false, err
+		}
 		ensureOutputCopierKubeAPIAccess(job)
 		if dgdr.Spec.Overrides != nil && dgdr.Spec.Overrides.DGD != nil {
 			if err := ensureDGDOverrideTool(

@@ -883,39 +883,48 @@ func TestApplyProfilingJobOverrides_ContainerSecurityContext(t *testing.T) {
 	}
 }
 
-func TestApplyProfilingJobOverrides_PodSecurityContext(t *testing.T) {
+func TestApplyProfilingJobOverrides_PodSecurityContext_BenignApplied(t *testing.T) {
+	t.Log("Seed a default pod-level security context (mimics what the controller sets).")
 	job := baseJob()
-	// Seed a default pod-level security context (mimics what the controller sets).
 	job.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
 		RunAsNonRoot: ptr.To(true),
 		RunAsUser:    ptr.To[int64](1000),
 		RunAsGroup:   ptr.To[int64](1000),
 		FSGroup:      ptr.To[int64](1000),
 	}
-	override := &corev1.PodSecurityContext{
-		RunAsNonRoot: ptr.To(false),
+
+	t.Log("A benign override (FSGroup only) is applied and controller defaults are preserved.")
+	override := &corev1.PodSecurityContext{FSGroup: ptr.To[int64](2000)}
+	if err := applyProfilingJobOverrides(job, &batchv1.JobSpec{
+		Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{SecurityContext: override}},
+	}); err != nil {
+		t.Fatalf("benign pod securityContext override rejected: %v", err)
 	}
-	applyProfilingJobOverrides(job, &batchv1.JobSpec{
+	got := job.Spec.Template.Spec.SecurityContext
+	if got.FSGroup == nil || *got.FSGroup != 2000 {
+		t.Errorf("expected FSGroup=2000 (override applied), got %v", got.FSGroup)
+	}
+	if got.RunAsNonRoot == nil || !*got.RunAsNonRoot {
+		t.Errorf("expected RunAsNonRoot=true (controller default preserved), got %v", got.RunAsNonRoot)
+	}
+}
+
+func TestApplyProfilingJobOverrides_PodSecurityContext_RunAsNonRootFalseRejected(t *testing.T) {
+	t.Log("Seed the controller's non-root baseline.")
+	job := baseJob()
+	job.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(true)}
+
+	t.Log("An override flipping RunAsNonRoot to false is rejected and the baseline is left untouched.")
+	err := applyProfilingJobOverrides(job, &batchv1.JobSpec{
 		Template: corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				SecurityContext: override,
-			},
+			Spec: corev1.PodSpec{SecurityContext: &corev1.PodSecurityContext{RunAsNonRoot: ptr.To(false)}},
 		},
 	})
-	got := job.Spec.Template.Spec.SecurityContext
-	if got == nil {
-		t.Fatal("pod securityContext is nil after override")
+	if err == nil {
+		t.Fatal("expected RunAsNonRoot=false override to be rejected")
 	}
-	// User override wins: RunAsNonRoot should be false.
-	if got.RunAsNonRoot == nil || *got.RunAsNonRoot != false {
-		t.Errorf("expected RunAsNonRoot=false, got %v", got.RunAsNonRoot)
-	}
-	// Controller defaults preserved for fields not specified in the override.
-	if got.RunAsUser == nil || *got.RunAsUser != 1000 {
-		t.Errorf("expected RunAsUser=1000 (controller default preserved), got %v", got.RunAsUser)
-	}
-	if got.FSGroup == nil || *got.FSGroup != 1000 {
-		t.Errorf("expected FSGroup=1000 (controller default preserved), got %v", got.FSGroup)
+	if got := job.Spec.Template.Spec.SecurityContext.RunAsNonRoot; got == nil || !*got {
+		t.Errorf("expected baseline RunAsNonRoot=true to be preserved, got %v", got)
 	}
 }
 
@@ -1055,7 +1064,7 @@ func TestApplyProfilingJobOverrides_OutputCopierOnlyImageAndResources(t *testing
 							Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
 						},
 						SecurityContext: &corev1.SecurityContext{
-							RunAsNonRoot: ptr.To(false),
+							RunAsUser: ptr.To[int64](2000),
 						},
 						Command: []string{"/bin/bash"},
 						Args:    []string{"-c", "echo overridden"},
@@ -1484,4 +1493,61 @@ func findOutputCopierKubeAPIAccessMount(mounts []corev1.VolumeMount) *corev1.Vol
 		}
 	}
 	return nil
+}
+
+// TestApplyProfilingJobOverrides_SecurityRejections asserts that overrides which
+// would escalate the operator-created profiling Job to host access are rejected
+// and leave the controller-generated Job unmodified.
+func TestApplyProfilingJobOverrides_SecurityRejections(t *testing.T) {
+	privileged := corev1.PodSpec{
+		Containers: []corev1.Container{{SecurityContext: &corev1.SecurityContext{Privileged: ptr.To(true)}}},
+	}
+	tests := []struct {
+		name    string
+		spec    corev1.PodSpec
+		wantErr bool
+	}{
+		{"privileged container", privileged, true},
+		{"allowPrivilegeEscalation container", corev1.PodSpec{
+			Containers: []corev1.Container{{SecurityContext: &corev1.SecurityContext{AllowPrivilegeEscalation: ptr.To(true)}}},
+		}, true},
+		{"added capabilities container", corev1.PodSpec{
+			Containers: []corev1.Container{{SecurityContext: &corev1.SecurityContext{
+				Capabilities: &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN"}},
+			}}},
+		}, true},
+		{"container runs as root", corev1.PodSpec{
+			Containers: []corev1.Container{{SecurityContext: &corev1.SecurityContext{RunAsUser: ptr.To[int64](0)}}},
+		}, true},
+		{"privileged init container", corev1.PodSpec{
+			InitContainers: []corev1.Container{{Name: "setup", SecurityContext: &corev1.SecurityContext{Privileged: ptr.To(true)}}},
+		}, true},
+		{"hostPath volume", corev1.PodSpec{
+			Volumes: []corev1.Volume{{Name: "host-root", VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/"},
+			}}},
+		}, true},
+		{"host network", corev1.PodSpec{HostNetwork: true}, true},
+		{"host pid", corev1.PodSpec{HostPID: true}, true},
+		{"host ipc", corev1.PodSpec{HostIPC: true}, true},
+		{"benign override accepted", corev1.PodSpec{
+			Containers: []corev1.Container{{SecurityContext: &corev1.SecurityContext{
+				Privileged: ptr.To(false), RunAsUser: ptr.To[int64](2000), AllowPrivilegeEscalation: ptr.To(false),
+			}}},
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Logf("Applying override %q and expecting rejected=%v.", tt.name, tt.wantErr)
+			err := applyProfilingJobOverrides(baseJob(), &batchv1.JobSpec{
+				Template: corev1.PodTemplateSpec{Spec: tt.spec},
+			})
+			if tt.wantErr && err == nil {
+				t.Fatalf("expected override %q to be rejected, got nil error", tt.name)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("expected override %q to be accepted, got error: %v", tt.name, err)
+			}
+		})
+	}
 }
