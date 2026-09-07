@@ -230,9 +230,6 @@ impl PrometheusMetric for prometheus::CounterVec {
     }
 }
 
-/// ==============================
-/// Deployment-wide constant labels
-/// ==============================
 /// Environment variable holding extra constant labels to attach to every Prometheus metric this
 /// process exposes, e.g. `DYN_METRICS_CONST_LABELS="cluster=us-west-2,team=search"`.
 ///
@@ -323,7 +320,7 @@ fn const_label_name_error(name: &str) -> Option<String> {
     if name.starts_with("__") {
         return Some(format!("label name '{name}' uses the reserved '__' prefix"));
     }
-    if name == "le" || name == "quantile" {
+    if name == labels_reserved::LE || name == labels_reserved::QUANTILE {
         return Some(format!(
             "label name '{name}' is reserved by the Prometheus exposition format"
         ));
@@ -675,12 +672,111 @@ pub fn series_keys(families: &[prometheus::proto::MetricFamily]) -> HashSet<Seri
     families
         .iter()
         .flat_map(|family| {
+            let field_type = family.get_field_type();
             family
                 .metric
                 .iter()
-                .map(move |metric| series_key(family.name(), metric))
+                .flat_map(move |metric| exposed_series_keys(family.name(), field_type, metric))
         })
         .collect()
+}
+
+/// The series a gathered sample is actually exposed as. A counter or gauge is one series under the
+/// family name, but a histogram expands into `<name>_bucket` per bound -- including the `+Inf`
+/// bucket the encoder synthesises -- plus `<name>_sum` and `<name>_count`, and a summary into
+/// `<name>` per quantile plus `_sum` and `_count`. Deduplication compares these, so a callback that
+/// re-emits a histogram's `_bucket` / `_sum` / `_count` lines is recognised as the same series.
+///
+/// Bounds and quantiles are formatted the way this crate's `TextEncoder` writes them (`1`, `2.5`,
+/// `+Inf`). A producer that spells the same bound differently -- Python's `prometheus_client`
+/// writes `1.0` -- still yields a different key.
+pub fn exposed_series_keys(
+    family_name: &str,
+    field_type: prometheus::proto::MetricType,
+    metric: &prometheus::proto::Metric,
+) -> Vec<SeriesKey> {
+    let labels: Vec<(String, String)> = metric
+        .get_label()
+        .iter()
+        .map(|lp| (lp.name().to_string(), lp.value().to_string()))
+        .collect();
+    let keyed = |name: String, extra: Option<(&str, String)>| {
+        let mut pairs = labels.clone();
+        if let Some((label, value)) = extra {
+            pairs.push((label.to_string(), value));
+        }
+        series_key_from_pairs(&name, pairs)
+    };
+
+    match field_type {
+        prometheus::proto::MetricType::HISTOGRAM => {
+            let histogram = metric.get_histogram();
+            let bucket = format!("{family_name}_bucket");
+            let mut keys: Vec<SeriesKey> = histogram
+                .get_bucket()
+                .iter()
+                .map(|b| {
+                    keyed(
+                        bucket.clone(),
+                        Some((labels_reserved::LE, format_expfmt_float(b.upper_bound()))),
+                    )
+                })
+                .collect();
+            if !histogram
+                .get_bucket()
+                .iter()
+                .any(|b| b.upper_bound().is_infinite())
+            {
+                keys.push(keyed(
+                    bucket,
+                    Some((labels_reserved::LE, "+Inf".to_string())),
+                ));
+            }
+            keys.push(keyed(format!("{family_name}_sum"), None));
+            keys.push(keyed(format!("{family_name}_count"), None));
+            keys
+        }
+        prometheus::proto::MetricType::SUMMARY => {
+            let summary = metric.get_summary();
+            let mut keys: Vec<SeriesKey> = summary
+                .get_quantile()
+                .iter()
+                .map(|q| {
+                    keyed(
+                        family_name.to_string(),
+                        Some((labels_reserved::QUANTILE, format_expfmt_float(q.quantile()))),
+                    )
+                })
+                .collect();
+            keys.push(keyed(format!("{family_name}_sum"), None));
+            keys.push(keyed(format!("{family_name}_count"), None));
+            keys
+        }
+        _ => vec![series_key(family_name, metric)],
+    }
+}
+
+/// Label names the exposition format owns; they identify a bucket or a quantile rather than a
+/// dimension, so they may never be attached as constant labels.
+mod labels_reserved {
+    pub const LE: &str = "le";
+    pub const QUANTILE: &str = "quantile";
+}
+
+/// Format a bound or quantile the way the text encoder writes it.
+fn format_expfmt_float(value: f64) -> String {
+    if value.is_nan() {
+        "NaN".to_string()
+    } else if value.is_infinite() {
+        if value.is_sign_positive() {
+            "+Inf".to_string()
+        } else {
+            "-Inf".to_string()
+        }
+        .to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 /// [`apply_const_labels`] with the labels from [`METRICS_CONST_LABELS_ENV`].
@@ -1296,10 +1392,10 @@ impl MetricsRegistry {
     /// - Constant labels from [`METRICS_CONST_LABELS_ENV`] are attached to every sample
     ///   (a label a sample already carries is never overwritten).
     ///
-    /// Deduplication compares gathered samples by family name and labels, and exposition-callback
-    /// text per exposed sample line. A histogram or summary that a callback re-emits as
-    /// `<name>_bucket` / `_sum` / `_count` lines is therefore not recognised as the same series as
-    /// the gathered family it came from.
+    /// Deduplication compares the series each sample is exposed as, so a histogram gathered from a
+    /// registry is compared against the `<name>_bucket` / `_sum` / `_count` lines a callback emits
+    /// for it. Bounds are compared as the encoder writes them, so a producer that spells the same
+    /// bound differently (`le="1.0"` rather than `le="1"`) is still a distinct series.
     pub fn prometheus_expfmt_combined(&self) -> anyhow::Result<String> {
         self.prometheus_expfmt_combined_with_const_labels(env_const_labels())
     }
@@ -1365,21 +1461,25 @@ impl MetricsRegistry {
                     ));
                 }
 
+                let field_type = family.get_field_type();
                 let mut metrics = family.take_metric();
                 for mut metric in metrics.drain(..) {
                     // Label before deduplication so two registries that differ only by a label
                     // the environment also sets collapse into one series instead of colliding.
                     apply_const_labels_to_metric(&mut metric, const_labels);
-                    let key = series_key(&name, &metric);
-                    if !seen_series.insert(key.clone()) {
+                    // Key on every series the sample is exposed as, so a histogram is compared
+                    // against the `_bucket` / `_sum` / `_count` lines it will be encoded into.
+                    let keys = exposed_series_keys(&name, field_type, &metric);
+                    if let Some(seen) = keys.iter().find(|key| seen_series.contains(key)) {
                         tracing::warn!(
                             metric_name = %name,
-                            series = ?key,
+                            series = ?seen,
                             registry_idx,
                             "Duplicate Prometheus series while merging registries; dropping later sample"
                         );
                         continue;
                     }
+                    seen_series.extend(keys);
 
                     entry.mut_metric().push(metric);
                 }
@@ -1934,23 +2034,71 @@ mod test_metricsregistry_units {
     }
 
     #[test]
-    fn test_gathered_histogram_is_not_matched_against_callback_bucket_lines() {
-        // Pins the documented limitation: gathered samples are identified by family name, callback
-        // text per exposed sample, so `<name>_count` from a callback is a different series.
+    fn test_gathered_histogram_is_matched_against_callback_bucket_lines() {
         let registry = MetricsRegistry::new();
-        let hist =
-            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new("h", "d")).unwrap();
+        let hist = prometheus::Histogram::with_opts(
+            prometheus::HistogramOpts::new("h", "d").buckets(vec![1.0, 2.5]),
+        )
+        .unwrap();
         hist.observe(0.5);
         registry
             .get_prometheus_registry()
             .register(Box::new(hist))
             .unwrap();
-        registry.add_expfmt_callback(Arc::new(|| Ok("h_count 3\n".to_string())));
+        // Every line here duplicates a series the gathered histogram is exposed as, including the
+        // `+Inf` bucket the encoder synthesises; the last line is a genuinely new series.
+        registry.add_expfmt_callback(Arc::new(|| {
+            Ok(concat!(
+                "h_count 3\n",
+                "h_sum 9\n",
+                "h_bucket{le=\"1\"} 3\n",
+                "h_bucket{le=\"+Inf\"} 3\n",
+                "h_bucket{le=\"1.0\"} 3\n",
+            )
+            .to_string())
+        }));
 
         let text = registry
             .prometheus_expfmt_combined_with_const_labels(&[])
             .unwrap();
-        assert_eq!(text.matches("h_count").count(), 2, "{text}");
+        assert_eq!(text.matches("h_count").count(), 1, "{text}");
+        assert_eq!(text.matches("h_sum").count(), 1, "{text}");
+        assert_eq!(text.matches("le=\"1\"").count(), 1, "{text}");
+        assert_eq!(text.matches("le=\"+Inf\"").count(), 1, "{text}");
+        // A bound spelled differently is a different series, and is kept.
+        assert_eq!(text.matches("le=\"1.0\"").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn test_exposed_series_keys_expand_histograms_and_summaries() {
+        let hist = prometheus::HistogramVec::new(
+            prometheus::HistogramOpts::new("h", "d").buckets(vec![1.0, f64::INFINITY]),
+            &["a"],
+        )
+        .unwrap();
+        hist.with_label_values(&["1"]).observe(0.5);
+        // Fully qualified: `collect` is also an Iterator/Stream method in this scope.
+        let family = prometheus::core::Collector::collect(&hist).remove(0);
+        let keys = exposed_series_keys(
+            family.name(),
+            family.get_field_type(),
+            &family.get_metric()[0],
+        );
+        let names: Vec<&str> = keys.iter().map(|k| k.name.as_str()).collect();
+        // One key per bound (the +Inf bucket is already declared here, so it is not added twice),
+        // plus _sum and _count; the instance label rides along on all of them.
+        assert_eq!(names, vec!["h_bucket", "h_bucket", "h_sum", "h_count"]);
+        assert!(
+            keys.iter()
+                .all(|k| k.labels.iter().any(|(n, v)| n == "a" && v == "1"))
+        );
+        let bounds: Vec<&str> = keys
+            .iter()
+            .filter(|k| k.name == "h_bucket")
+            .filter_map(|k| k.labels.iter().find(|(n, _)| n == "le"))
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(bounds, vec!["1", "+Inf"]);
     }
 
     #[test]
