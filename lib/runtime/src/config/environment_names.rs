@@ -202,7 +202,10 @@ pub mod etcd {
     /// ETCD endpoints (comma-separated list of URLs)
     pub const ETCD_ENDPOINTS: &str = "ETCD_ENDPOINTS";
 
-    /// ETCD lease TTL in seconds (default: 10)
+    /// Requested ETCD lease TTL in seconds for discovery liveness. Must be >= 1;
+    /// unset, zero, or invalid values fall back to the documented default of 10
+    /// seconds. Read once per process, so every client in the process requests
+    /// the same TTL. Keep-alive cadence derives from the granted TTL.
     pub const ETCD_LEASE_TTL: &str = "ETCD_LEASE_TTL";
 
     /// Maximum time in seconds to retry the initial ETCD connection (default: 120)
