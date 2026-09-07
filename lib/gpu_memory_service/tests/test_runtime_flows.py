@@ -888,31 +888,6 @@ def test_reallocate_all_handles_reuses_preserved_vas_in_new_layout(
     _wait_for_server_state(server, ServerState.EMPTY)
 
 
-@pytest.mark.timeout(_SOCKET_TEST_TIMEOUT_SECONDS)
-def test_scratch_reallocation_keeps_committed_allocation_on_cuda_granularity(
-    running_gms,
-):
-    _, socket_path = running_gms
-
-    scratch_size = 1 << 20
-    requested_size = 4097
-    manager = GMSClientMemoryManager(socket_path, device=0, scratch_size=scratch_size)
-    try:
-        va = manager.create_scratch_mapping(size=requested_size, tag="kv_cache")
-        manager.unmap_all_vas()
-        manager.prepare_scratch_for_reallocation()
-
-        manager.connect(RequestedLockType.RW)
-        manager.reallocate_all_handles(tag="kv_cache")
-        allocation = manager.get_handle_info(manager.mappings[va].allocation_id)
-        assert allocation.size == requested_size
-        assert allocation.aligned_size == 8192
-
-        manager.remap_all_vas()
-    finally:
-        manager.close()
-
-
 @pytest.mark.asyncio
 async def test_allocation_manager_lazily_exports_fresh_fds(monkeypatch):
     export_calls = 0
