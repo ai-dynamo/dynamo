@@ -512,7 +512,7 @@ def test_compute_kv_bytes_reads_local_config_json_without_transformers(
             }
         )
     )
-    monkeypatch.setitem(sys.modules, "transformers", None)  # import would fail
+    monkeypatch.setitem(sys.modules, "transformers", None)
 
     assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
 
@@ -590,7 +590,7 @@ def test_compute_kv_bytes_unwraps_nested_thinker_text_config(monkeypatch, tmp_pa
             }
         )
     )
-    monkeypatch.setitem(sys.modules, "transformers", None)  # import would fail
+    monkeypatch.setitem(sys.modules, "transformers", None)
 
     assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
 
