@@ -1020,7 +1020,7 @@ class VllmProcessor:
                 envelope: dict[str, Any] = {"_dynamo_annotated": True}
                 if choices:
                     dynamo_out = {
-                        "id": request_id,
+                        "id": f"chatcmpl-{request_id}",
                         "choices": choices,
                         "created": int(time.time()),
                         "model": request["model"],

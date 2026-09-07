@@ -1551,7 +1551,7 @@ class TestRoutedEnginePath:
 
         assert envelope["_dynamo_annotated"] is True
         assert envelope["data"] == {
-            "id": "request-id",
+            "id": "chatcmpl-request-id",
             "choices": [
                 {
                     "index": 0,
@@ -1579,7 +1579,10 @@ class TestRoutedEnginePath:
         self, vllm_processor_module, context_id
     ):
         routed_engine = _FakeRoutedEngine(
-            [{"token_ids": [101], "index": 0, "finish_reason": None}]
+            [
+                {"token_ids": [101], "index": 0, "finish_reason": None},
+                {"token_ids": [102], "index": 0, "finish_reason": "stop"},
+            ]
         )
         processor = _make_processor(vllm_processor_module, routed_engine)
 
@@ -1590,7 +1593,10 @@ class TestRoutedEnginePath:
             context=_FakeContext(context_id),
         )
 
-        assert chunks[0]["data"]["id"] == "resolved-request"
+        assert [chunk["data"]["id"] for chunk in chunks] == [
+            "chatcmpl-resolved-request",
+            "chatcmpl-resolved-request",
+        ]
         assert routed_engine.kwargs[0]["context"].id() == context_id
 
     @pytest.mark.asyncio

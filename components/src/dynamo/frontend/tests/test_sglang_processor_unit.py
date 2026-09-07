@@ -3638,7 +3638,10 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
             processor = SglangProcessor(
                 tokenizer=tokenizer,
                 routed_engine=FakeRoutedEngine(
-                    items=[{"token_ids": [101], "finish_reason": None}]
+                    items=[
+                        {"token_ids": [101], "finish_reason": None},
+                        {"token_ids": [], "finish_reason": "stop"},
+                    ]
                 ),
                 tool_call_parser_name=None,
                 reasoning_parser_name=None,
@@ -3661,7 +3664,10 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
 
         items = asyncio.run(collect())
 
-        assert items[0]["data"]["id"] == "local-req"
+        assert [item["data"]["id"] for item in items] == [
+            "chatcmpl-local-req",
+            "chatcmpl-local-req",
+        ]
 
     def _run_stream(self, tokenizer, items):
         processor = SglangProcessor(

@@ -765,7 +765,7 @@ class SglangProcessor:
                 envelope: dict[str, Any] = {"_dynamo_annotated": True}
                 if choice:
                     dynamo_out: dict[str, Any] = {
-                        "id": request_id,
+                        "id": f"chatcmpl-{request_id}",
                         "choices": [choice],
                         "created": created_ts,
                         "model": request["model"],
