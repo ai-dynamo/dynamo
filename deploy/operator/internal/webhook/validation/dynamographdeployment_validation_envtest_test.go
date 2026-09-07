@@ -828,6 +828,86 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 
+		// Compound component role rules.
+		{
+			name: "multinode component without explicit roles preserves implicit behavior",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				betaWorkerComponent(dgd).Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+			}),
+		},
+		{
+			name: "complete explicit multinode roles are admitted",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoles(betaWorkerComponent(dgd), 4)
+			}),
+		},
+		{
+			name: "v1alpha1 explicit multinode roles convert and are admitted",
+			deployment: alphaDGDForAdmission(func(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+				worker := dgd.Spec.Services[dgdAdmissionWorkerName]
+				worker.Multinode = &nvidiacomv1alpha1.MultinodeSpec{NodeCount: 4}
+				worker.Roles = []nvidiacomv1alpha1.ComponentRoleSpec{
+					{Name: nvidiacomv1alpha1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
+					{Name: nvidiacomv1alpha1.ComponentRoleWorker, Replicas: k8sptr.To(int32(3))},
+				}
+			}),
+		},
+		{
+			name: "roles require a component role schema",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
+				}
+			}),
+			wantWebhookErrs: []string{"spec.components[1].roles: Forbidden: roles are supported only for component shapes that define a role schema; this release supports multinode components"},
+		},
+		{
+			name: "explicit multinode roles require the complete role set",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
+				}
+			}),
+			wantWebhookErrs: []string{`spec.components[1].roles: Required value: must contain the "worker" role`},
+		},
+		{
+			name: "explicit multinode roles reject unknown role names",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				worker := betaWorkerComponent(dgd)
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 4}
+				worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+					{Name: "coordinator", Replicas: k8sptr.To(int32(1))},
+				}
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].roles[0].name: Unsupported value: "coordinator": supported values: "leader", "worker"`,
+				`spec.components[1].roles: Required value: must contain the "leader" role`,
+				`spec.components[1].roles: Required value: must contain the "worker" role`,
+			},
+		},
+		{
+			name: "explicit multinode roles require per-role replicas",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoles(betaWorkerComponent(dgd), 4)
+				betaWorkerComponent(dgd).Roles[1].Replicas = nil
+			}),
+			wantWebhookErrs: []string{"spec.components[1].roles[1].replicas: Required value: is required for explicit multinode roles"},
+		},
+		{
+			name: "explicit multinode role replicas must match node count",
+			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
+				setBetaExplicitMultinodeRoles(betaWorkerComponent(dgd), 4)
+				betaWorkerComponent(dgd).Roles[1].Replicas = k8sptr.To(int32(2))
+			}),
+			wantWebhookErrs: []string{
+				`spec.components[1].roles[1].replicas: Invalid value: 2: must equal 3 for multinode role "worker"`,
+				"spec.components[1].roles: Invalid value: 3: role replicas must add up to multinode.nodeCount 4",
+			},
+		},
+
 		// Checkpoint rules.
 		{
 			name: "v1beta1 valid checkpoint configuration reaches the webhook",
@@ -1655,17 +1735,15 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 					"",
 					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"rack"}}}`,
 				)
-				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{
-					NodeCount: 2,
-					Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
-						"",
-						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
-					)},
-					Worker: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
-						"",
-						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
-					)},
-				}
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0].ProviderOverride = groveProviderOverride(
+					"",
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
+				worker.Roles[1].ProviderOverride = groveProviderOverride(
+					"",
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
 			}),
 		},
 		{
@@ -1761,32 +1839,28 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			},
 		},
 		{
-			name:               "legacy multinode role provider identity is immutable during repair",
+			name:               "legacy component role provider identity is immutable during repair",
 			seedWithoutWebhook: true,
 			oldDeployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
-				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{
-					NodeCount: 2,
-					Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
-						provideroverride.TargetPodCliqueSet,
-						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
-					)},
-				}
-				worker.Multinode.Leader.ProviderOverride.APIVersion = "grove.io/v2"
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0].ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueSet,
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
+				worker.Roles[0].ProviderOverride.APIVersion = "grove.io/v2"
 			}),
 			deployment: betaDGDForAdmission(func(dgd *nvidiacomv1beta1.DynamoGraphDeployment) {
 				worker := betaWorkerComponent(dgd)
-				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{
-					NodeCount: 2,
-					Leader: &nvidiacomv1beta1.MultinodeRoleSpec{ProviderOverride: groveProviderOverride(
-						provideroverride.TargetPodCliqueTemplateSpec,
-						`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
-					)},
-				}
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0].ProviderOverride = groveProviderOverride(
+					provideroverride.TargetPodCliqueTemplateSpec,
+					`{"topologyConstraint":{"topologyName":"grove-topology","pack":{"required":"host"}}}`,
+				)
 			}),
 			wantWebhookErrs: []string{
-				`spec.components[1].multinode.leader.providerOverride.apiVersion: Invalid value: "grove.io/v1alpha1": ` + apivalidation.FieldImmutableErrorMsg,
-				`spec.components[1].multinode.leader.providerOverride.target: Invalid value: "PodCliqueTemplateSpec": ` + apivalidation.FieldImmutableErrorMsg,
+				`spec.components[1].roles[0].providerOverride.apiVersion: Invalid value: "grove.io/v1alpha1": ` + apivalidation.FieldImmutableErrorMsg,
+				`spec.components[1].roles[0].providerOverride.target: Invalid value: "PodCliqueTemplateSpec": ` + apivalidation.FieldImmutableErrorMsg,
 			},
 		},
 
@@ -2054,6 +2128,35 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 3}
+			}),
+		},
+		{
+			name: "node count and explicit role replicas update together",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 3)
+			}),
+		},
+		{
+			name: "implicit to explicit roles is a structural mutation",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			wantWebhookErrs: []string{"spec.components[1].roles: Invalid value: [{\"name\":\"leader\",\"replicas\":1},{\"name\":\"worker\",\"replicas\":1}]: role names are immutable after creation"},
+		},
+		{
+			name: "explicit role list reorder is allowed",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+				worker.Roles[0], worker.Roles[1] = worker.Roles[1], worker.Roles[0]
 			}),
 		},
 
@@ -2763,6 +2866,17 @@ func betaWorkerComponent(
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec {
 	return dgd.GetComponentByName("worker")
+}
+
+func setBetaExplicitMultinodeRoles(
+	worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	nodeCount int32,
+) {
+	worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: nodeCount}
+	worker.Roles = []nvidiacomv1beta1.ComponentRoleSpec{
+		{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: k8sptr.To(int32(1))},
+		{Name: nvidiacomv1beta1.ComponentRoleWorker, Replicas: k8sptr.To(nodeCount - 1)},
+	}
 }
 
 func setBetaWorkerPowerInputs(

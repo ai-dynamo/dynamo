@@ -286,6 +286,33 @@ func TestValidateProviderOverrideOutsideDGD(t *testing.T) {
 	}
 }
 
+func TestValidateComponentRolesRejectsDuplicateMultinodeRole(t *testing.T) {
+	t.Log("Build an explicit multinode role list with the leader declared twice")
+	one := int32(1)
+	component := &nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec{
+		Multinode: &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2},
+		Roles: []nvidiacomv1beta1.ComponentRoleSpec{
+			{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: &one},
+			{Name: nvidiacomv1beta1.ComponentRoleLeader, Replicas: &one},
+		},
+	}
+	validation := &sharedValidation{ctx: context.Background(), runtimeVersionSource: runtimeVersionSourceDisabled}
+
+	t.Log("Validate the closed multinode role schema independently of OpenAPI list-map checks")
+	errs := validation.validateComponentRoles(
+		component,
+		field.NewPath("spec", "components").Index(0).Child("roles"),
+		false,
+		"",
+	)
+
+	t.Log("Report both the duplicate entry and the missing mandatory worker role")
+	assertFieldPaths(t, errs, []string{
+		"spec.components[0].roles[1].name",
+		"spec.components[0].roles",
+	})
+}
+
 func TestValidateDynamoComponentDeploymentSharedSpecFrontendSidecar(t *testing.T) {
 	validation := &sharedValidation{ctx: context.Background(), mgr: newGroveTopologyTestManager(t)}
 	componentPath := field.NewPath("spec", "components").Index(0)
