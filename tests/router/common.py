@@ -2732,6 +2732,7 @@ def _test_router_decisions(
     router_predicted_ttl_secs: Optional[float] = None,
     router_approximate_cache_policy: str = "ttl",
     initial_wait: float = 0.25,
+    router_init_timeout: int = 120,
 ):
     """Validate cross-worker routing decisions based on longest prefix match.
 
@@ -2757,6 +2758,7 @@ def _test_router_decisions(
             approximate routing with the configured retention policy (--no-kv-events mode).
         router_aic_config: Optional AIC router perf-model config for direct KvRouter tests.
         router_approximate_cache_policy: Retention policy for the local approximate indexer.
+        router_init_timeout: Maximum time for the router to discover its initial workers.
 
     Raises:
         AssertionError: If routing decisions don't match expected prefix logic
@@ -2797,6 +2799,7 @@ def _test_router_decisions(
             ),
             num_workers=expected_num_instances,
             engine_workers=engine_workers,
+            timeout=router_init_timeout,
         )
 
         # Wait for workers to be ready and get their instance IDs

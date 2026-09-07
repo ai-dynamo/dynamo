@@ -52,9 +52,27 @@ def build_test_payload(model_name: str) -> dict[str, Any]:
 class ManagedEngineProcessMixin:
     process_name = "worker"
     cleanup_name = "worker resources"
+    # Backends that provide a real readiness check can opt in to finishing one
+    # worker's initialization before launching the next worker.
+    serialize_startup_with_readiness = False
     init_delay_seconds = 5
     init_delay_reason = "initialize before starting next worker"
     cleanup_delay_seconds = 2
+
+    def _wait_for_worker_readiness(self, process, worker_index):
+        logger.info(
+            "[%s] Checking readiness for worker %d...",
+            self.__class__.__name__,
+            worker_index,
+        )
+        elapsed = process._check_ports(process.timeout)
+        elapsed += process._check_urls(process.timeout - elapsed)
+        process._check_funcs(process.timeout - elapsed)
+        logger.info(
+            "[%s] Worker %d readiness checks passed",
+            self.__class__.__name__,
+            worker_index,
+        )
 
     def __enter__(self):
         logger.info(
@@ -93,7 +111,18 @@ class ManagedEngineProcessMixin:
                 )
                 time.sleep(process.delayed_start)
 
-                if i < len(self.worker_processes) - 1:
+                if self.serialize_startup_with_readiness:
+                    if not (
+                        process.health_check_ports
+                        or process.health_check_urls
+                        or process.health_check_funcs
+                    ):
+                        raise ValueError(
+                            "Serialized worker startup requires at least one "
+                            "readiness check"
+                        )
+                    self._wait_for_worker_readiness(process, i)
+                elif i < len(self.worker_processes) - 1:
                     logger.info(
                         "[%s] Waiting %ss for worker %d to %s...",
                         self.__class__.__name__,
@@ -108,7 +137,7 @@ class ManagedEngineProcessMixin:
                     "[%s] Failed to start worker %d", self.__class__.__name__, i
                 )
                 try:
-                    process.__exit__(None, None, None)
+                    self.__exit__(None, None, None)
                 except Exception as cleanup_err:
                     logger.warning(
                         "[%s] Error during cleanup: %s",
@@ -122,30 +151,26 @@ class ManagedEngineProcessMixin:
             self.__class__.__name__,
             len(self.worker_processes),
         )
-        logger.info(
-            "[%s] Waiting for health checks to complete...", self.__class__.__name__
-        )
 
-        for i, process in enumerate(self.worker_processes):
+        if not self.serialize_startup_with_readiness:
             logger.info(
-                "[%s] Checking health for worker %d...", self.__class__.__name__, i
+                "[%s] Waiting for health checks to complete...",
+                self.__class__.__name__,
             )
-            try:
-                elapsed = process._check_ports(process.timeout)
-                process._check_urls(process.timeout - elapsed)
-                process._check_funcs(process.timeout - elapsed)
-                logger.info(
-                    "[%s] Worker %d health checks passed", self.__class__.__name__, i
-                )
-            except Exception:
-                logger.error(
-                    "[%s] Worker %d health check failed", self.__class__.__name__, i
-                )
-                self.__exit__(None, None, None)
-                raise
+            for i, process in enumerate(self.worker_processes):
+                try:
+                    self._wait_for_worker_readiness(process, i)
+                except Exception:
+                    logger.error(
+                        "[%s] Worker %d health check failed",
+                        self.__class__.__name__,
+                        i,
+                    )
+                    self.__exit__(None, None, None)
+                    raise
 
         logger.info(
-            "[%s] All workers started successfully and passed health checks!",
+            "[%s] All workers started successfully and passed readiness checks!",
             self.__class__.__name__,
         )
         return self
