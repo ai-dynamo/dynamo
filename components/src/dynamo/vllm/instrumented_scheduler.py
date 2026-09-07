@@ -2356,6 +2356,7 @@ class InstrumentedScheduler(AsyncScheduler):
             "need_mamba_block_aligned_split": getattr(
                 self, "need_mamba_block_aligned_split", False
             ),
+            "prefill_real_seed": self._bench_realseed_on(),
             "use_eagle": getattr(
                 getattr(self, "kv_cache_manager", None), "use_eagle", False
             ),
@@ -3172,10 +3173,11 @@ class InstrumentedScheduler(AsyncScheduler):
         registered in the prefix cache but never computed (see
         ``_bench_cache_fake_prefixes``); the measured request then attends
         over whatever those blocks hold. Dense attention does the same work
-        regardless of the values, but sparse attention (DSA: score, pick
-        top-k, gather) and hybrid-KV models measure differently on garbage
-        (GLM-5.2: +19..21% at >=256k tokens per request; DeepSeek-V4-Flash:
-        +20..70% at chunk-aligned prefixes).
+        regardless of the values, but sparse attention (DeepSeek Sparse
+        Attention: score, pick top-k, gather) and hybrid-KV models do
+        different work on uncomputed values (paired collections: GLM-5.2
+        +19..21% at >=256k tokens per request; DeepSeek-V4-Flash +20..70% at
+        chunk-aligned prefixes).
 
         On: the prefix is computed by a real prefill pass first (staging),
         then an untimed same-shape warm shot absorbs first-execution costs,
@@ -3621,11 +3623,15 @@ class InstrumentedScheduler(AsyncScheduler):
         batch_size = len(prompt_lens)
         if cache_salts is not None and len(cache_salts) != batch_size:
             raise ValueError("cache_salts must match prompt_lens")
-        if (
-            prompt_token_ids_list is not None
-            and len(prompt_token_ids_list) != batch_size
-        ):
-            raise ValueError("prompt_token_ids_list must match prompt_lens")
+        if prompt_token_ids_list is not None:
+            if len(prompt_token_ids_list) != batch_size:
+                raise ValueError("prompt_token_ids_list must match prompt_lens")
+            for ids, prompt_len in zip(prompt_token_ids_list, prompt_lens, strict=True):
+                if len(ids) != prompt_len:
+                    raise ValueError(
+                        "prompt_token_ids_list entry length "
+                        f"{len(ids)} != prompt_len {prompt_len}"
+                    )
         if (
             expected_kv_read_tokens is not None
             and len(expected_kv_read_tokens) != batch_size
@@ -4104,22 +4110,44 @@ class InstrumentedScheduler(AsyncScheduler):
         new_token_lengths: Sequence[int],
     ) -> None:
         """Real-seed shot 1 (staging): make sure every slot's chain holds real
-        KV at least as deep as this point reads, by running the prefix itself
-        as an ordinary, unbooked prefill. Slots already deep enough compute
-        nothing (prefix-cache hit). The point is parked in
+        KV at least as deep as this point reads, by running each such prefix
+        as an ordinary, unbooked prefill. Only slots whose recorded depth is
+        short of the need are injected (a slot with no past KV is never
+        seeded: vLLM rejects an empty prompt); when no slot needs seeding no
+        staging request is injected at all. The point is parked in
         ``_bench_realseed_ready``; the next scheduler pass continues with the
-        warm and measured shots."""
+        warm and measured shots.
+
+        The provenance stamp is applied here, before the first possible skip,
+        so every row of this point -- measured or skipped for any reason --
+        reports ``real_prefix``.
+        """
+        if PREFILL_REAL_SEED_REASON not in point.sample_reasons:
+            point = replace(
+                point,
+                sample_reasons=[*point.sample_reasons, PREFILL_REAL_SEED_REASON],
+            )
         chain = self._bench_realseed_chain(point.batch_size)
-        needs = [self._bench_seed_prompt_len(kv) for kv in kv_read_lengths]
-        if any(need > depth for need, depth in zip(needs, chain["depth"], strict=True)):
+        needs = [
+            self._bench_seed_prompt_len(kv) if kv > 0 else 0 for kv in kv_read_lengths
+        ]
+        slots = [
+            slot
+            for slot, (need, depth) in enumerate(
+                zip(needs, chain["depth"], strict=True)
+            )
+            if need > 0 and need > depth
+        ]
+        self._bench_realseed_staged = bool(slots)
+        if slots:
             self._bench_current_point = None
             self._bench_current_fpms = []
             injected = self._bench_inject_prefill(
-                prompt_lens=needs,
+                prompt_lens=[needs[slot] for slot in slots],
                 max_tokens=1,
-                cache_salts=chain["salts"],
+                cache_salts=[chain["salts"][slot] for slot in slots],
             )
-            if injected != point.batch_size:
+            if injected != len(slots):
                 self._bench_skip_point(point, "real_seed_injection_failed")
                 logger.warning(
                     "Skipping benchmark prefill point after real-seed staging "
@@ -4129,9 +4157,10 @@ class InstrumentedScheduler(AsyncScheduler):
                 return
             logger.info(
                 "Benchmark prefill REAL-SEED staging: kv=%d batch_size=%d "
-                "chain_depths=%s -> %s",
+                "slots=%d chain_depths=%s -> %s",
                 point.total_kv_read_tokens,
                 point.batch_size,
+                len(slots),
                 chain["depth"],
                 needs,
             )
@@ -4147,23 +4176,35 @@ class InstrumentedScheduler(AsyncScheduler):
         pass once the previous shot's requests have drained.
 
         Shot 2 (warm): the same shape -- seeded prefix plus a throwaway tail
-        -- unbooked, so the timed shot does not pay first-execution costs of
-        a new shape (measured +23% on DeepSeek-V4-Flash without it).
+        -- unbooked, so the timed shot does not pay the first-execution cost
+        of a new shape. (The collection image measured that cost at +23% on
+        DeepSeek-V4-Flash for kv=0 points timed right after a shape change;
+        kv=0 points are not covered by this path.)
 
         Shot 3 (measured): seeded prefix plus a fresh tail; the expected
-        prefix-cache hit is validated before the requests are admitted and
-        the point is skipped on a miss. Returns True when a shot was issued
-        (or the point was skipped) and the caller must not start a new point.
+        prefix-cache hit is validated before the requests are admitted. On a
+        miss the point is re-staged once (the depth registry lives in
+        scheduler memory while the blocks live in vLLM's LRU prefix cache,
+        so an evicted chain is healed by recomputing it) and skipped only on
+        a second miss. Returns True when a shot was issued (or the point was
+        skipped) and the caller must not start a new point.
         """
         pending = getattr(self, "_bench_realseed_ready", None)
         if pending is None:
             return False
         point, kv_read_lengths, new_token_lengths = pending
         chain = self._bench_realseed_chain(point.batch_size)
-        for slot, kv_read_tokens in enumerate(kv_read_lengths):
-            need = self._bench_seed_prompt_len(kv_read_tokens)
-            if chain["depth"][slot] < need:
-                chain["depth"][slot] = need
+        # Under EAGLE/MTP the prefix-cache lookup drops the last matched
+        # block, so the chain holds ``seed_len = kv + drop`` tokens per slot
+        # and the measured prompt must reproduce all of them for the hit to
+        # come back as exactly ``kv``; the fresh tail fills the rest of the
+        # request's new tokens (feasibility guarantees new > drop).
+        seed_lens = [
+            self._bench_seed_prompt_len(kv) if kv > 0 else 0 for kv in kv_read_lengths
+        ]
+        for slot, seed_len in enumerate(seed_lens):
+            if chain["depth"][slot] < seed_len:
+                chain["depth"][slot] = seed_len
         prompt_lens = [
             new_tokens + kv_read_tokens
             for new_tokens, kv_read_tokens in zip(
@@ -4172,21 +4213,25 @@ class InstrumentedScheduler(AsyncScheduler):
         ]
 
         def prompts(tail_tag: str) -> list[list[int]]:
-            return [
-                list(
+            out: list[list[int]] = []
+            for slot, (prompt_len, seed_len) in enumerate(
+                zip(prompt_lens, seed_lens, strict=True)
+            ):
+                prefix = (
+                    list(
+                        self._bench_synthetic_token_ids(chain["salts"][slot], seed_len)
+                    )
+                    if seed_len > 0
+                    else []
+                )
+                tail = list(
                     self._bench_synthetic_token_ids(
-                        chain["salts"][slot], kv_read_tokens
+                        f"__bench_{tail_tag}_{self._bench_seq}_{slot}",
+                        prompt_len - len(prefix),
                     )
                 )
-                + list(
-                    self._bench_synthetic_token_ids(
-                        f"__bench_{tail_tag}_{self._bench_seq}_{slot}", new_tokens
-                    )
-                )
-                for slot, (new_tokens, kv_read_tokens) in enumerate(
-                    zip(new_token_lengths, kv_read_lengths, strict=True)
-                )
-            ]
+                out.append(prefix + tail)
+            return out
 
         if getattr(self, "_bench_realseed_stage", "warm") == "warm":
             self._bench_current_point = None
@@ -4199,6 +4244,7 @@ class InstrumentedScheduler(AsyncScheduler):
             )
             if injected != point.batch_size:
                 self._bench_realseed_ready = None
+                self._bench_realseed_retried = False
                 self._bench_skip_point(point, "real_seed_warm_injection_failed")
                 logger.warning(
                     "Skipping benchmark prefill point after real-seed warm "
@@ -4210,14 +4256,14 @@ class InstrumentedScheduler(AsyncScheduler):
             return True
         self._bench_realseed_ready = None
         self._bench_realseed_stage = "warm"
-        point = replace(
-            point,
-            sample_reasons=[*point.sample_reasons, PREFILL_REAL_SEED_REASON],
-        )
         self._bench_current_fpms = []
         self._bench_current_point = point
         self._bench_expected_fpms = 1
         self._bench_extra_steps_left = 0
+        # No new_step_starts() here: the seeded blocks were produced by the
+        # staging/warm requests, whose forward passes completed before this
+        # pass, so vLLM's same-step hit guard does not apply (the fake-prefix
+        # path needs it because its blocks have no producer).
         injected = self._bench_inject_prefill(
             prompt_lens=prompt_lens,
             max_tokens=1,
@@ -4227,13 +4273,29 @@ class InstrumentedScheduler(AsyncScheduler):
         )
         if injected != point.batch_size:
             self._bench_current_point = None
+            if not getattr(self, "_bench_realseed_retried", False):
+                # The chain the registry believed in is gone (evicted, or a
+                # stale depth after a shed): forget it and re-stage once.
+                logger.warning(
+                    "Benchmark prefill REAL-SEED hit validation missed; "
+                    "re-staging the chain once: %s",
+                    point,
+                )
+                self._bench_realseed_retried = True
+                chain["depth"] = [0] * point.batch_size
+                self._bench_realseed_stage_point(
+                    point, kv_read_lengths, new_token_lengths
+                )
+                return True
+            self._bench_realseed_retried = False
             self._bench_skip_point(point, "real_seed_cache_validation_failed")
             logger.warning(
                 "Skipping benchmark prefill point after real-seed cache "
-                "validation failed: %s",
+                "validation failed twice: %s",
                 point,
             )
             return True
+        self._bench_realseed_retried = False
         self._bench_sync_pending = True
         logger.info(
             "Benchmark prefill REAL-SEED measured: total_tokens=%d "
@@ -4267,9 +4329,12 @@ class InstrumentedScheduler(AsyncScheduler):
             self._bench_drain_pending = True
             return None
 
-        if self._bench_stop_at_timeout_boundary("prefill"):
-            return None
+        # A parked real-seed point finishes its remaining shots before any
+        # stop decision: it is already half measured and must land as a
+        # result or a skipped row, never vanish.
         if self._bench_realseed_pending_step():
+            return None
+        if self._bench_stop_at_timeout_boundary("prefill"):
             return None
 
         next_point = self._bench_pop_next("prefill")
@@ -4290,6 +4355,7 @@ class InstrumentedScheduler(AsyncScheduler):
             point.total_kv_read_tokens, point.batch_size, point.partition, point.rows
         )
         if point.total_kv_read_tokens > 0 and self._bench_realseed_on():
+            self._bench_realseed_retried = False
             self._bench_realseed_stage_point(point, kv_read_lengths, new_token_lengths)
             return None
         if point.total_kv_read_tokens > 0:
@@ -4397,11 +4463,15 @@ class InstrumentedScheduler(AsyncScheduler):
     # with it the warm-up) instead of blocking the scheduler indefinitely.
     _KVWARM_DOWNLOAD_TIMEOUT_S = 60
     _kvwarm_stage_t0: float | None
-    # Real-seed prefill state: the parked point with its per-request KV and
-    # new-token lengths, and which shot ("warm" | "measure") comes next.
+    _kvwarm_stage_batch: int | None
+    # Real-KV prefill seeding state: per-batch-size seed chains, the parked
+    # point with its per-request KV and new-token lengths, which shot
+    # ("warm" | "measure") comes next, and whether this point staged.
+    _bench_rsc: dict[int, dict] | None = None
     _bench_realseed_ready: tuple[BenchmarkPoint, list[int], list[int]] | None = None
     _bench_realseed_stage: str = "warm"
-    _kvwarm_stage_batch: int | None
+    _bench_realseed_staged: bool = False
+    _bench_realseed_retried: bool = False
 
     def _kvwarm_flag_on(self) -> bool:
         """KV warm-up master switch (``DYN_BENCH_KV_WARMUP``, default on)."""
