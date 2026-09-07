@@ -295,24 +295,12 @@ pub fn parse_const_labels(raw: &str) -> anyhow::Result<Vec<(String, String)>> {
             .ok_or_else(|| anyhow::anyhow!("entry '{entry}' is not a name=value pair"))?;
         let name = name.trim();
         let value = value.trim();
-        if !CONST_LABEL_NAME_PATTERN.is_match(name) {
-            return Err(anyhow::anyhow!(
-                "'{name}' is not a valid Prometheus label name"
-            ));
+        if let Some(problem) = const_label_name_error(name) {
+            return Err(anyhow::anyhow!(problem));
         }
-        if name.starts_with("__") {
+        if value.is_empty() {
             return Err(anyhow::anyhow!(
-                "label name '{name}' uses the reserved '__' prefix"
-            ));
-        }
-        if name == "le" || name == "quantile" {
-            return Err(anyhow::anyhow!(
-                "label name '{name}' is reserved by the Prometheus exposition format"
-            ));
-        }
-        if is_auto_injected_label(name) {
-            return Err(anyhow::anyhow!(
-                "label name '{name}' is auto-injected by Dynamo and cannot be overridden"
+                "label '{name}' has an empty value; Prometheus treats an empty label value as an                  absent label, so the pair would have no effect"
             ));
         }
         if out.iter().any(|(existing, _)| existing == name) {
@@ -323,6 +311,47 @@ pub fn parse_const_labels(raw: &str) -> anyhow::Result<Vec<(String, String)>> {
         out.push((name.to_string(), value.to_string()));
     }
     Ok(out)
+}
+
+/// Why `name` cannot be attached as a constant label, or `None` if it can. Shared by
+/// [`parse_const_labels`] and [`usable_const_labels`] so the environment path and direct callers of
+/// the `apply_*` helpers enforce one rule set.
+fn const_label_name_error(name: &str) -> Option<String> {
+    if !CONST_LABEL_NAME_PATTERN.is_match(name) {
+        return Some(format!("'{name}' is not a valid Prometheus label name"));
+    }
+    if name.starts_with("__") {
+        return Some(format!("label name '{name}' uses the reserved '__' prefix"));
+    }
+    if name == "le" || name == "quantile" {
+        return Some(format!(
+            "label name '{name}' is reserved by the Prometheus exposition format"
+        ));
+    }
+    if is_auto_injected_label(name) {
+        return Some(format!(
+            "label name '{name}' is auto-injected by Dynamo and cannot be overridden"
+        ));
+    }
+    None
+}
+
+/// Keep only labels that may be attached. The environment path is already validated by
+/// [`parse_const_labels`]; this guards direct callers of the `apply_*` helpers, where an unusable
+/// name would corrupt the exposition rather than be rejected -- attaching `le`, for instance, emits
+/// a second `le` on every histogram bucket line and Prometheus refuses the whole scrape.
+fn usable_const_labels(const_labels: &[(String, String)]) -> Vec<(String, String)> {
+    const_labels
+        .iter()
+        .filter(|(name, value)| match const_label_name_error(name) {
+            Some(problem) => {
+                tracing::warn!(%problem, "Ignoring unusable constant label");
+                false
+            }
+            None => !value.is_empty(),
+        })
+        .cloned()
+        .collect()
 }
 
 fn is_auto_injected_label(name: &str) -> bool {
@@ -356,12 +385,13 @@ pub fn apply_const_labels(
     families: &mut [prometheus::proto::MetricFamily],
     const_labels: &[(String, String)],
 ) {
+    let const_labels = usable_const_labels(const_labels);
     if const_labels.is_empty() {
         return;
     }
     for family in families.iter_mut() {
         for metric in family.metric.iter_mut() {
-            apply_const_labels_to_metric(metric, const_labels);
+            apply_const_labels_to_metric(metric, &const_labels);
         }
     }
 }
@@ -371,9 +401,11 @@ pub fn apply_const_labels(
 /// ...). `# HELP` / `# TYPE` / blank lines are left untouched, a label a sample already carries is
 /// never overwritten, and a line that does not parse as a sample is passed through unchanged.
 pub fn apply_const_labels_to_expfmt(text: &str, const_labels: &[(String, String)]) -> String {
+    let const_labels = usable_const_labels(const_labels);
     if const_labels.is_empty() || text.is_empty() {
         return text.to_string();
     }
+    let const_labels = &const_labels[..];
     let mut out = String::with_capacity(text.len() + 64 * const_labels.len());
     for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
@@ -400,28 +432,70 @@ pub fn apply_const_labels_to_expfmt(text: &str, const_labels: &[(String, String)
 /// Comment and blank lines pass through; a line that does not parse as a sample is kept.
 fn drop_duplicate_expfmt_samples(text: &str, seen_series: &mut HashSet<SeriesKey>) -> String {
     let mut out = String::with_capacity(text.len());
+    // `# HELP` / `# TYPE` lines are held back until a sample under them survives, so a family whose
+    // every sample is dropped leaves no stray header behind.
+    let mut pending_header: Vec<&str> = Vec::new();
+    let mut pending_family: Option<&str> = None;
+    let mut dropped = 0usize;
+    let mut first_dropped: Option<&str> = None;
     for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
         let trimmed = body.trim_start();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        if trimmed.is_empty() {
             out.push_str(line);
             continue;
         }
-        match expfmt_series_key(body) {
-            Some(key) => {
-                if seen_series.insert(key) {
-                    out.push_str(line);
-                } else {
-                    tracing::warn!(
-                        sample = %body,
-                        "Duplicate Prometheus series in exposition-callback output; dropping later sample"
-                    );
+        if trimmed.starts_with('#') {
+            match expfmt_header_family(trimmed) {
+                Some(family) => {
+                    if pending_family != Some(family) {
+                        pending_header.clear();
+                        pending_family = Some(family);
+                    }
+                    pending_header.push(line);
                 }
+                None => out.push_str(line),
             }
-            None => out.push_str(line),
+            continue;
         }
+        let duplicate = match expfmt_series_key(body) {
+            Some(key) => !seen_series.insert(key),
+            None => false,
+        };
+        if duplicate {
+            dropped += 1;
+            first_dropped.get_or_insert(body);
+            continue;
+        }
+        for header in pending_header.drain(..) {
+            out.push_str(header);
+        }
+        pending_family = None;
+        out.push_str(line);
+    }
+    if dropped > 0 {
+        // One line per scrape, not one per sample: a worker whose engine registry is exported twice
+        // produces the same duplicates on every scrape, and per-sample warnings would drown the log.
+        tracing::warn!(
+            dropped,
+            first = first_dropped.unwrap_or_default(),
+            "Duplicate Prometheus series in exposition-callback output; dropped later samples"
+        );
     }
     out
+}
+
+/// Family name declared by a `# HELP <name> ...` or `# TYPE <name> ...` line; `None` for any other
+/// comment.
+fn expfmt_header_family(comment: &str) -> Option<&str> {
+    let rest = comment.strip_prefix('#')?.trim_start();
+    let rest = rest
+        .strip_prefix("HELP")
+        .or_else(|| rest.strip_prefix("TYPE"))?;
+    if !rest.starts_with(|c: char| c.is_whitespace()) {
+        return None;
+    }
+    rest.split_whitespace().next()
 }
 
 /// [`SeriesKey`] of a sample line; `None` if the line does not parse as a sample.
@@ -1221,6 +1295,11 @@ impl MetricsRegistry {
     ///   when they come from exposition-callback text.
     /// - Constant labels from [`METRICS_CONST_LABELS_ENV`] are attached to every sample
     ///   (a label a sample already carries is never overwritten).
+    ///
+    /// Deduplication compares gathered samples by family name and labels, and exposition-callback
+    /// text per exposed sample line. A histogram or summary that a callback re-emits as
+    /// `<name>_bucket` / `_sum` / `_count` lines is therefore not recognised as the same series as
+    /// the gathered family it came from.
     pub fn prometheus_expfmt_combined(&self) -> anyhow::Result<String> {
         self.prometheus_expfmt_combined_with_const_labels(env_const_labels())
     }
@@ -1239,12 +1318,16 @@ impl MetricsRegistry {
     /// Same as [`Self::prometheus_expfmt_combined_with_const_labels`], but deduplicates against
     /// `seen_series` (keys from [`series_key`]) and records every emitted series into it. A caller
     /// that renders another exposition source in the same scrape (the frontend renders its own HTTP
-    /// registry first) seeds it with [`series_keys`] so no series appears twice.
+    /// registry first) seeds it with [`series_keys`] so no series appears twice. Seed keys must be
+    /// taken from families that already carry the same constant labels, otherwise two spellings of
+    /// one series will not match.
     pub fn prometheus_expfmt_combined_with(
         &self,
         const_labels: &[(String, String)],
         seen_series: &mut HashSet<SeriesKey>,
     ) -> anyhow::Result<String> {
+        let const_labels = usable_const_labels(const_labels);
+        let const_labels = &const_labels[..];
         let registries = self.registries_for_combined_scrape();
 
         // Run per-registry update callbacks first.
@@ -1568,6 +1651,8 @@ mod test_metricsregistry_units {
             "dup=1,dup=2",
             "le=0.5",
             "quantile=0.9",
+            "empty=",
+            "empty= ",
         ] {
             assert!(
                 parse_const_labels(bad).is_err(),
@@ -1800,6 +1885,72 @@ mod test_metricsregistry_units {
             )
         );
         assert_eq!(seen.len(), 3);
+    }
+
+    #[test]
+    fn test_callback_headers_are_dropped_with_their_samples() {
+        let mut seen = HashSet::new();
+        seen.insert(series_key_from_pairs("gone", Vec::new()));
+        let out = drop_duplicate_expfmt_samples(
+            concat!(
+                "# HELP gone d\n",
+                "# TYPE gone counter\n",
+                "gone 1\n",
+                "# HELP kept d\n",
+                "# TYPE kept counter\n",
+                "kept 2\n",
+                "# EOF\n",
+            ),
+            &mut seen,
+        );
+        // The family whose only sample was a duplicate leaves no header behind; a comment that
+        // declares no family is passed through.
+        assert_eq!(
+            out,
+            concat!(
+                "# HELP kept d\n",
+                "# TYPE kept counter\n",
+                "kept 2\n",
+                "# EOF\n",
+            )
+        );
+    }
+
+    #[test]
+    fn test_unusable_const_labels_are_ignored_by_the_apply_helpers() {
+        // Direct callers do not go through parse_const_labels, so the helpers drop names that would
+        // corrupt the exposition instead of attaching them.
+        let labels = vec![
+            ("le".to_string(), "x".to_string()),
+            ("dynamo_namespace".to_string(), "x".to_string()),
+            ("__reserved".to_string(), "x".to_string()),
+            ("empty".to_string(), String::new()),
+            ("cluster".to_string(), "prod".to_string()),
+        ];
+        assert_eq!(
+            apply_const_labels_to_expfmt("demo 1\n", &labels),
+            "demo{cluster=\"prod\"} 1\n"
+        );
+    }
+
+    #[test]
+    fn test_gathered_histogram_is_not_matched_against_callback_bucket_lines() {
+        // Pins the documented limitation: gathered samples are identified by family name, callback
+        // text per exposed sample, so `<name>_count` from a callback is a different series.
+        let registry = MetricsRegistry::new();
+        let hist =
+            prometheus::Histogram::with_opts(prometheus::HistogramOpts::new("h", "d")).unwrap();
+        hist.observe(0.5);
+        registry
+            .get_prometheus_registry()
+            .register(Box::new(hist))
+            .unwrap();
+        registry.add_expfmt_callback(Arc::new(|| Ok("h_count 3\n".to_string())));
+
+        let text = registry
+            .prometheus_expfmt_combined_with_const_labels(&[])
+            .unwrap();
+        assert_eq!(text.matches("h_count").count(), 2, "{text}");
     }
 
     #[test]
