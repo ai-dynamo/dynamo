@@ -47,6 +47,9 @@ pub struct EppRouter {
     // Kept alive for the lifetime of the router; the reconcile loop runs on it.
     _adapter: TopologyAdapter,
     reflector_ready: Arc<AtomicBool>,
+    /// Replication bootstrap readiness (replicated mode only): initial peer
+    /// discovery plus KV-index recovery, or authoritative no-peer bootstrap.
+    peer_ready: Option<Arc<AtomicBool>>,
     model_name: String,
     /// Bounds total concurrent in-flight `pick()`s. HTTP/2 stream multiplexing
     /// means the TCP-connection cap (`MAX_CONCURRENT_CONNECTIONS`) does NOT bound
@@ -71,28 +74,50 @@ impl EppRouter {
         )?;
         let (reflector, reflector_ready) = PodDiscovery::spawn(&cfg).await?;
         let reflector = Arc::new(reflector);
+        let peer_ready = selector.peer_ready();
+        let recovery_required = selector.peer_recovery_required();
+
+        if recovery_required {
+            reflector.wait_until_ready().await?;
+        }
         let defaults = RegistrationDefaults::from_config(&cfg);
-        let adapter =
+        let mut adapter =
             TopologyAdapter::spawn(reflector.as_ref().clone(), selector.clone(), defaults);
 
-        // Readiness is driven solely by the live pod+pool signal (see `is_ready`);
-        // we do not block startup on a schedulable worker. A valid, empty pool is
-        // ready immediately and returns 503 per-request until capacity appears.
+        if recovery_required {
+            // The reflector is synchronized before the adapter starts, so this
+            // barrier represents the authoritative initial topology, including
+            // a valid empty pool. Each registered listener connects and enters
+            // Buffering before the peer dump is requested.
+            adapter.wait_initial_reconcile().await?;
+            selector.start_peer_recovery().await?;
+        }
+
+        // Readiness requires a synchronized worker view and, in replicated mode,
+        // completed peer discovery plus KV-index recovery/bootstrap. It does not
+        // require a schedulable worker: a valid empty pool returns 503 per request
+        // until capacity appears.
         Ok(Self {
             renderer,
             reflector,
             selector,
             _adapter: adapter,
             reflector_ready,
+            peer_ready,
             model_name: cfg.model_name,
             inflight: Arc::new(Semaphore::new(cfg.max_inflight_requests)),
         })
     }
 
-    /// Overall EPP readiness for the gRPC health signal: the pod reflector has
-    /// synced workers and resolved its InferencePool. Polled by the health mirror in `main`.
+    /// Overall EPP readiness: worker discovery is ready and replicated mode has
+    /// completed peer discovery plus KV-index recovery/bootstrap.
     pub fn is_ready(&self) -> bool {
-        self.reflector_ready.load(Ordering::Acquire)
+        compute_ready(
+            self.reflector_ready.load(Ordering::Acquire),
+            self.peer_ready
+                .as_ref()
+                .map(|ready| ready.load(Ordering::Acquire)),
+        )
     }
 
     /// Tokenize a chat body for routing → `(token_ids, priority_jump,
@@ -139,6 +164,11 @@ impl EppRouter {
             endpoint_in_subset(endpoint, &candidates, &candidate_ips)
         })
     }
+}
+
+/// Overall EPP health: pod readiness AND replication bootstrap readiness.
+fn compute_ready(pod_ready: bool, peer_ready: Option<bool>) -> bool {
+    pod_ready && peer_ready.unwrap_or(true)
 }
 
 /// True if a scheme-less `ip:port` endpoint is covered by an Envoy subset,
