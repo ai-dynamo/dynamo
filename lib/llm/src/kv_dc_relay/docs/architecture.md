@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 This document describes the Rust implementation: module ownership, actor and hub lifecycle,
 admission, and recovery invariants. For the system model and deployment shapes, see
-[Multi-DC KV Routing](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md).
+[DC KV Relay Concepts](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md).
 For deployment and runtime options, see the
 [Kubernetes how-to](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md)
 and [configuration reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/components/kv-dc-relay-configuration.md).
@@ -110,17 +110,18 @@ flowchart LR
   request", in the same semantics the Dynamo frontend uses.
 - They are deliberately two flat collections, not a tree. A topology member
   links to its pool through the **stable `KvPoolId`**; producer generations are
-  resolved through the catalog. Namespace is the topology key, never a pool
-  identity dimension: pool lifecycle (fencing, generation swaps, CKF, load) is
-  strictly endpoint-local, and namespace names are unique only within one DC.
+  resolved through the catalog. Namespace is not a separate `PoolId` field, but
+  participates in the endpoint triple used to derive its default routing scope.
+  Pool lifecycle remains endpoint-local; namespace names are unique only within one DC.
 
 ## Pools
 
 A pool is one serving endpoint's KV publication. `PoolId = (identity_version,
-IndexerDomainId, DcId)` where the cache-semantics digest covers the model
-source, KV block size, and hash format, and the routing-scope digest covers the
-endpoint triple — distinct endpoints always produce distinct pools, and
-colliding `PoolId`s are fenced, never merged.
+IndexerDomainId, DcId)`. By default, cache semantics cover model source, KV block size,
+and hash format; routing scope covers the endpoint triple. Explicit identity material can
+replace the default model-source and routing-scope inputs, but not the required block size
+or hash format. Distinct endpoints therefore need not derive distinct IDs. Colliding live
+`PoolId`s are fenced, never merged; see [identity resolution](../resolution.rs).
 
 A pool **materializes** only when all three conditions hold for the endpoint:
 

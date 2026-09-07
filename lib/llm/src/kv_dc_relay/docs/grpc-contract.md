@@ -117,7 +117,9 @@ affected stream state and requires reconnecting; it is not proof that cached sta
 | `SubscribeServingReadiness` | server stream | Complete namespace topology projections |
 | `SubscribeKvPoolLoad` | server stream | Complete pool-load windows |
 
-Streaming requests require a non-empty `subscriber_id` (≤ 128 bytes). Each
+Streaming requests require a non-empty `subscriber_id` (≤ 128 UTF-8 bytes,
+no control characters). It is a diagnostic label, not an authentication identity or resume
+token. Reusing it does not replace another stream or bypass admission limits. Each
 stream type has an independent subscriber limit; pool publication additionally
 bounds total pool streams, subscribers per pool, and initialized publication
 hubs. Breaching any bound returns `RESOURCE_EXHAUSTED`.
@@ -129,15 +131,10 @@ headers, exceeding tonic's default 4 MiB client receive limit. Rust clients can 
 
 ## Transport security boundary
 
-The Relay server is plaintext HTTP/2 gRPC. It does not provide encryption,
-server authentication, or client authentication. mTLS is optional and implemented only by an
-external sidecar; Relay has no TLS flags or certificate configuration. A sidecar is not required
-on a trusted, isolated network. A deployment that crosses a
-trust boundary must bind Relay to loopback or another isolated interface and
-place a TLS- or mutual-TLS-terminating gRPC proxy in front of it. Only the proxy
-listener should be exposed; a firewall or NetworkPolicy must prevent direct
-access to the Relay listener. Certificate validation, authorization, rotation,
-and expiry monitoring belong to the proxy.
+Relay serves plaintext HTTP/2 gRPC without authentication. mTLS is an optional external
+sidecar, not a Relay feature. Across a trust boundary, expose only the authenticated proxy
+and keep Relay's listener private. Certificates, authorization, and rotation belong to
+the proxy; see the [deployment guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/kubernetes/kv-aware-routing/kv-dc-relay.md#optional-mtls-sidecar).
 
 ## Stream contracts
 
@@ -174,6 +171,10 @@ Each format also fixes token and multimodal encoding, request-wide LoRA/cache-na
 local block hashing, and rolling sequence hashing. Compute hashes separately for each pool using
 its declared semantics; Prefill and Decode formats can differ. Unknown or unspecified formats
 must not fall back to a known format.
+
+The shared [hashing implementation and test vectors](../../../../kv-router/src/protocols.rs)
+define `compute_block_hash_for_seq` and `compute_seq_hash_for_block`. CBI1 transports bucket
+images; it does not replace this token-to-sequence-hash pipeline.
 
 The producer emits one canonical base target and any LoRA targets backed by that model. For a LoRA
 request, the hash salt is the canonical `ModelTarget.lora.adapter`, not an alias or the
@@ -252,15 +253,14 @@ identity and cannot be aggregated authoritatively across router replicas.
 | Observation | Required consumer reaction |
 | --- | --- |
 | New `ProducerIdentity` for a known `PoolId` in the catalog | Drop the CKF replica, resubscribe with the new `expected_producer`. |
-| Pool absent from a catalog snapshot | Drop its CKF and load state; the topology member loses its `pool_id`. |
-| `TopologyEntry` turns `UNAVAILABLE` | Stop routing to this key even though its pools remain published. |
-| `TopologyEntry` `UNKNOWN` | Consumer policy; conservatively skip while READY alternatives exist. |
+| Pool absent from a catalog snapshot | Drop its CKF and load state. Any topology reference to it is unresolved until the independent views converge. |
+| `TopologyEntry` turns `UNAVAILABLE` | Record authoritative unavailability; published pools do not override it. |
+| `TopologyEntry` `UNKNOWN` | Record readiness as unknown, not ready or authoritatively unavailable. |
 | Stream lag → `RESOURCE_EXHAUSTED` | Resubscribe from scratch (snapshot + deltas). |
 | Marker/version mismatch → `FAILED_PRECONDITION` | Deployment skew; do not retry without upgrading. |
 
-Routing is always gated by the topology plane and matched by the pool plane:
-pool presence alone never implies routability, and the two planes may disagree
-transiently at revision boundaries.
+Pool presence and serving readiness are separate facts. Their snapshots can temporarily
+disagree; neither stream updates the other atomically. Consumers decide how to use these facts.
 
 Keep catalog, pool filters, readiness, and load as independent state machines. Install a filter
 only after validating its complete snapshot; apply deltas only when Relay identity, producer

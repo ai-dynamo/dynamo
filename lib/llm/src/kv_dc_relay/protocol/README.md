@@ -75,7 +75,7 @@ Every snapshot chunk and delta begins with this 48-byte header:
 
 The decoder validates the magic, wire version, flags, checksum, filter format, and bucket bounds.
 Before applying the decoded frame, a consumer also verifies that its `dc_id` matches the
-enclosing producer identity.
+enclosing producer identity. `bucket_count` must be a power of two in `2..=16777216`.
 
 ### Snapshot Chunks
 
@@ -87,6 +87,11 @@ A complete CKF lane is encoded as dense `u64` bucket words. Each chunk body is:
 [8..16]  bucket_offset: u64
 [16..]   bucket words: u64[]
 ```
+
+Each word packs four 16-bit slots, least-significant slot first; zero means empty.
+For example, bytes `34 12 00 00 cd ab 01 00` encode slots `[0x1234, 0, 0xabcd, 1]`.
+See the shared [CKF addressing](../../../../kv-router/src/indexer/cuckoo/addressing.rs)
+for fingerprint and candidate-bucket derivation from a canonical sequence hash.
 
 One chunk contains at most 512 Ki buckets, or 4 MiB of bucket words. `SnapshotAssembly` accepts only
 ordered contiguous chunks from one epoch that cover the declared bucket count. Do not expose a
@@ -111,5 +116,5 @@ adapter preserves them as `FilterUpdate.base_sequence` and `FilterUpdate.sequenc
 heartbeats contain no CBI1 payload and do not advance the sequence.
 
 Absolute images are idempotent at the bucket level, but consumers must still enforce contiguous
-stream sequences. A delta is capped by `max_delta_images()` so it cannot exceed
-`IMAGES_MAX_FRAME_BYTES`; a larger publication becomes a chunked snapshot.
+stream sequences. The frame limit is 4194368 bytes: a delta contains at most 349525 images
+(`48 + 12 + 12 * image_count` bytes). A larger publication becomes a chunked snapshot.

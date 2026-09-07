@@ -7,7 +7,7 @@ subtitle: CLI arguments, environment variables, resource limits, and diagnostic 
 
 **Experimental.** This reference describes `python -m dynamo.kv_dc_relay`. For deployment, see
 [Deploy the DC KV Relay](../../kubernetes/kv-aware-routing/kv-dc-relay.md); for the producer model,
-see [Multi-DC KV Routing](../../developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md).
+see [DC KV Relay Concepts](../../developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md).
 
 ## CLI Arguments
 
@@ -41,6 +41,9 @@ Likewise, a CLI prefix list replaces, rather than extends, the environment prefi
   and surrounding whitespace. Explicit `DYN_RELAY_WATCH_ALL=false` requires a namespace allowlist.
 - With neither a CLI nor an environment scope, the Relay watches all visible Dynamo namespaces.
 
+For example, `production`, `production.backend`, and `production.backend.generate` select
+successively narrower endpoint scopes. `production.back` does not match `production.backend`.
+
 > [!IMPORTANT]
 > Dynamo namespaces are logical discovery scopes, not Kubernetes namespaces. The current
 > Kubernetes discovery backend watches only the Relay pod's Kubernetes namespace. Neither
@@ -71,7 +74,7 @@ integers. Unknown `DYN_RELAY_*` names are not consumed by the launcher; check sp
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `DYN_RELAY_PUBLICATION_THRESHOLD` | `16` | Publisher change threshold for triggering a publication. |
+| `DYN_RELAY_PUBLICATION_THRESHOLD` | `16` | Primary-residency KV events processed before a publication; not changed buckets or bytes. |
 | `DYN_RELAY_PUBLICATION_DELAY_MS` | `1` | Publication coalescing delay in milliseconds. |
 | `DYN_RELAY_RECOVERY_ATTEMPT_TIMEOUT_MS` | `30000` | Timeout for a worker recovery attempt. |
 
@@ -84,6 +87,8 @@ Every variable below requires `--bind` or `DYN_RELAY_BIND`, including publicatio
 overrides that are owned by the universal publisher. Setting one without a listener is a startup
 error. All values must be positive integers; byte limits use bytes, not MiB.
 
+### Transport and Projection Timing
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DYN_RELAY_MAX_MESSAGE_BYTES` | `8388608` | Maximum gRPC encoding and decoding message size. |
@@ -94,15 +99,29 @@ error. All values must be positive integers; byte limits use bytes, not MiB.
 | `DYN_RELAY_SNAPSHOT_PROGRESS_TIMEOUT_MS` | `60000` | Per-frame progress deadline while producing the initial snapshot. |
 | `DYN_RELAY_LOAD_WINDOW_MS` | `1000` | Load publication window. |
 | `DYN_RELAY_LOAD_FANOUT_CAPACITY` | `16` | Buffered load updates for fanout. |
+
+### Universal Publication Resources
+
+These limits belong to the publisher; the Python launcher exposes their overrides with WAN enabled.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
 | `DYN_RELAY_PUBLICATION_QUEUE_CAPACITY` | `16` | Pool-subscriber queue message bound. |
 | `DYN_RELAY_PUBLICATION_QUEUE_BYTES` | `16777216` | Pool-subscriber queue byte bound. |
 | `DYN_RELAY_PUBLICATION_ENCODING_CONCURRENCY` | `2` | Concurrent snapshot encoders. |
+| `DYN_RELAY_MAX_INITIALIZED_POOL_HUBS` | `64` | Resident initialized hubs, including idle hubs eligible for eviction. |
+
+### Stream Admission
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
 | `DYN_RELAY_MAX_CATALOG_SUBSCRIBERS` | `64` | Concurrent catalog streams. |
 | `DYN_RELAY_MAX_POOL_STREAMS_TOTAL` | `64` | Total active pool streams. |
 | `DYN_RELAY_MAX_SUBSCRIBERS_PER_POOL` | `64` | Subscribers attached to one pool. |
-| `DYN_RELAY_MAX_INITIALIZED_POOL_HUBS` | `64` | Resident initialized hubs, including idle hubs eligible for eviction. |
 | `DYN_RELAY_MAX_READINESS_SUBSCRIBERS` | `64` | Concurrent readiness streams. |
 | `DYN_RELAY_MAX_LOAD_SUBSCRIBERS` | `64` | Concurrent load streams. |
+
+### Validation Limits
 
 WAN timer values cannot exceed `31536000000` ms. Load fanout capacity cannot exceed `65536`.
 Channel and semaphore capacities must also fit their underlying Tokio limits. The message limit

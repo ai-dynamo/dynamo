@@ -462,7 +462,7 @@ navigation:
                         path: pages/developer-guide/knowledge-base/modular-components/router/topology-aware-kv-transfer.md
                       - page: Offloading Support Matrix
                         path: pages/developer-guide/knowledge-base/modular-components/router/offloading-support-matrix.md
-                      - page: Multi-DC KV Routing (Experimental)
+                      - page: DC KV Relay Concepts (Experimental)
                         slug: multi-dc-kv-routing
                         path: pages/developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md
                   - section: Standalone Services

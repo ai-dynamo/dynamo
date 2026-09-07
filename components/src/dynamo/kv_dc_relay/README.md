@@ -12,7 +12,8 @@ Protobuf/gRPC. Relay does not merge independent pools or implement cross-data-ce
 
 ## Usage
 
-Run against an existing Dynamo deployment using its discovery and event-plane settings:
+Match the existing deployment's discovery and event-plane settings using the
+[runtime environment reference](https://github.com/ai-dynamo/dynamo/blob/main/docs/fern/pages/reference/components/kv-dc-relay-configuration.md#runtime-environment), then run:
 
 ```bash
 python -m dynamo.kv_dc_relay \

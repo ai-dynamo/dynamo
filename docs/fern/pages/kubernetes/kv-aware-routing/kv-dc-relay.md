@@ -8,7 +8,7 @@ subtitle: Discover existing workers and publish endpoint-local KV pool facts fro
 **Experimental.** Deploy NVIDIA Dynamo's DC KV Relay alongside existing inference workers.
 The Relay uses the shared Dynamo runtime and universal publisher; it does not serve inference
 requests or choose a destination data center. For the producer model, see
-[Multi-DC KV Routing](../../developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md).
+[DC KV Relay Concepts](../../developer-guide/knowledge-base/modular-components/router/multi-dc-kv-routing.md).
 
 ## Prerequisites
 
@@ -17,7 +17,9 @@ requests or choose a destination data center. For the producer model, see
   advertise model cards, KV event sources, and a recoverable KV-state endpoint. Enabling a
   listener on Relay does not enable worker KV events.
 - A container image built from a revision that includes `dynamo.kv_dc_relay`, its Rust bindings,
-  and the WAN protocol. Do not assume an older released image contains this experimental module.
+  and the WAN protocol. Older released images may not contain this module; use the repository's
+  [container build instructions](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md)
+  from the same revision.
 - The workers' NATS connection settings. This example uses Kubernetes discovery with the NATS
   event plane and TCP request plane; it does not deploy a second NATS server.
 - Network access from Relay to the Kubernetes API, NATS, and advertised worker recovery endpoints.
@@ -203,7 +205,7 @@ kubectl -n dynamo rollout status deployment/kv-dc-relay --timeout=300s
 kubectl -n dynamo logs deployment/kv-dc-relay --tail=100
 ```
 
-## Verify Discovery and Publication
+## Verify Discovery and Published Metadata
 
 Forward the listener to your machine:
 
@@ -219,8 +221,18 @@ grpcurl -plaintext -d '{"contractMarker":1263948337}' \
   localhost:5561 dynamo.kvrelay.v1.KvEventRelay/GetRelayInfo
 ```
 
-Expect protocol version `1` and a populated Relay identity. Then inspect the catalog and serving
-readiness. Each command opens a stream; stop it with Ctrl-C after inspecting the first update.
+Expect this shape; identity values vary per deployment and restart:
+
+```json
+{
+  "protocolVersion": 1,
+  "relay": {"drtInstanceId": "123", "relayIncarnation": "456"},
+  "contractMarker": 1263948337
+}
+```
+
+Then inspect catalog and readiness. Each command opens a stream; stop it with Ctrl-C after
+the first update.
 
 ```bash
 grpcurl -plaintext -max-msg-sz 8388608 \
@@ -234,11 +246,20 @@ grpcurl -plaintext -max-msg-sz 8388608 \
   localhost:5561 dynamo.kvrelay.v1.KvEventRelay/SubscribeServingReadiness
 ```
 
-Confirm that catalog descriptors name the expected worker endpoints and that expected models
-appear in readiness. An empty catalog is valid for an idle Relay, but does not verify worker
-discovery. A passing pod probe confirms the transport is serving, not that any model is ready.
-These checks verify discovery/projection exposure; validating CKF bootstrap and deltas requires
-a consumer that subscribes to an advertised producer and validates CBI1 frames.
+Check these fields in the responses:
+
+| Response | Expected fields |
+| --- | --- |
+| Catalog | `snapshot.pools[]`: a `producer`, the expected `servingEndpoint`, model `registrations`, and `querySemantics`. |
+| Readiness | `entries[]`: expected `namespace` and `canonicalModelId`, `state`, and `members` with optional `poolId` links. |
+
+For a ready disaggregated model, expect separate Prefill and Decode pools but one readiness
+entry with both roles. LoRA readiness appears under the base entry's `adapters`, not as another
+top-level entry. Catalog and readiness revisions are independent.
+
+An empty catalog does not verify discovery; a passing pod probe does not prove model readiness.
+These checks expose metadata, not CKF contents. CKF validation requires subscribing to an
+advertised producer and validating its complete CBI1 snapshot and subsequent deltas.
 
 ## Expose the WAN Listener
 
@@ -247,7 +268,7 @@ The example Service is cluster-internal. A trusted in-cluster consumer can use
 unrestricted LoadBalancer or expose the pod port to another data center directly.
 
 For access across a trust boundary, terminate TLS in an external proxy and route only its
-protected listener through your gateway or load balancer. Keep its upstream connection HTTP/2
+protected listener through your network ingress. Keep its upstream connection HTTP/2
 and allow long-lived server streams. See the
 [gRPC contract](https://github.com/ai-dynamo/dynamo/blob/main/lib/llm/src/kv_dc_relay/docs/grpc-contract.md)
 for message sizes, reconnect behavior, and error reasons.
@@ -268,6 +289,15 @@ certificate loading, or authentication. For a protected deployment:
    not authenticate through mTLS.
 
 The sidecar's image and configuration depend on your organization's proxy and PKI.
+
+For local inspection after this change, forward directly to Relay's loopback listener:
+
+```bash
+kubectl -n dynamo port-forward deployment/kv-dc-relay 5561:5561
+```
+
+The plaintext `grpcurl` commands above still apply. This checks Relay through the Kubernetes
+tunnel, not the externally exposed mTLS path.
 
 ## Troubleshooting
 
