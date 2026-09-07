@@ -306,5 +306,13 @@ class GMSRPCServer:
             self._handle_connection,
             path=self.socket_path,
         )
+        # Restrict the socket to the owning user. The daemon hands out CUDA export
+        # FDs and low-entropy (engine_id, tag) persistent-KV keys; the trust model
+        # is single-tenant-per-node, but the socket is created under the process
+        # umask in a world-traversable dir, so harden it explicitly.
+        try:
+            os.chmod(self.socket_path, 0o600)
+        except OSError:
+            logger.warning("Could not chmod GMS socket %s to 0600", self.socket_path)
         logger.info("Server started: %s", self.socket_path)
         await self._server.serve_forever()
