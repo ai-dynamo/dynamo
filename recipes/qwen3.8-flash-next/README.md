@@ -228,7 +228,7 @@ A correct response should describe the visual content of the video frames.
 
 | Workload | Median ISL | Median OSL | KV cache hit rate | User output tok/s |
 | -------- | ---------- | ---------- | ----------------- | ----------------- |
-| Agentic  | 64k        | 400        | 90%               | TBD               |
+| Agentic  | 64k        | 400        | 90%               | 50              |
 
 ## Performance results
 
