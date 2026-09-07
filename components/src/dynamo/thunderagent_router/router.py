@@ -575,13 +575,19 @@ class ThunderAgentScheduler:
         for key, entry in usage.items():
             if entry.capacity - entry.used < required:
                 continue
+            # Rank replicas by in-flight load (decayed: ACTING programs fade out within
+            # ~10 tau), not by the raw resident sum. The raw sum is dominated by idle
+            # sessions parked within the expiry window, so it says little about which
+            # rank is busy now; on the DSv4 c64 sweeps it placed new programs onto
+            # already-loaded ranks 4-5x more often than a balanced spread would.
+            load = self._decayed_used(entry)
             # max_programs is SGLang's own max_running_requests (per DP rank): a real,
             # engine-enforced concurrent-request ceiling independent of KV memory. None
             # means the card didn't publish one -- unlimited, not zero.
             if entry.max_programs is not None and entry.count >= entry.max_programs:
                 continue
-            if best_used is None or entry.used < best_used:
-                best_key, best_used = key, entry.used
+            if best_used is None or load < best_used:
+                best_key, best_used = key, load
         return best_key
 
     def _apply_soft_demotes(self, usage: dict[ReplicaKey, _ReplicaUsage]) -> None:

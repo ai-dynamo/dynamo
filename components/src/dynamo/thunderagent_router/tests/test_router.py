@@ -496,6 +496,31 @@ async def test_admission_spreads_programs_across_dp_ranks_of_one_worker():
 
 
 @pytest.mark.asyncio
+async def test_admission_places_by_in_flight_load_not_resident_tokens():
+    """A rank holding many idle sessions (large resident sum, nothing running) is the
+    right place for a new program; a rank with one big turn in flight is not. Ranking
+    by the raw resident sum got this backwards on the DSv4 sweeps."""
+    cfg = ThunderAgentConfig(
+        scheduler_interval_seconds=10.0, acting_decay_tau_seconds=0.001
+    )
+    router, _ = make_router(
+        capacity_workers={(1, 0): 10_000_000, (1, 1): 10_000_000}, config=cfg
+    )
+    # Rank 0: three finished sessions, 300K resident tokens, zero in flight.
+    for pid in ["idle1", "idle2", "idle3"]:
+        await router.before_request(pid, estimated_prompt_tokens=100_000)
+        place(router, pid, (1, 0))
+        await router.after_request(pid, prompt_tokens=100_000, completion_tokens=0)
+    # Rank 1: one turn in flight, 50K tokens.
+    await router.before_request("busy", estimated_prompt_tokens=50_000)
+    place(router, "busy", (1, 1))
+    await asyncio.sleep(0.01)  # let the idle sessions decay to ~0
+
+    decision = await router.before_request("new", estimated_prompt_tokens=1_000)
+    assert decision.assigned_replica_hint == (1, 0)
+
+
+@pytest.mark.asyncio
 async def test_pause_drives_util_to_pause_target_not_threshold():
     """Each pause cycle drains util down to pause_target, not just below threshold."""
     cfg = ThunderAgentConfig(
