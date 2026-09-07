@@ -517,6 +517,55 @@ def test_compute_kv_bytes_reads_local_config_json_without_transformers(
     assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 256
 
 
+def test_compute_kv_bytes_uses_head_dim_when_the_config_declares_one(
+    monkeypatch, tmp_path
+):
+    """A declared head_dim is authoritative.
+
+    Several model families size their heads independently of
+    hidden_size / num_attention_heads, so deriving it under-counts the cache
+    and the mocker then simulates more capacity than the engine has.
+    """
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "num_hidden_layers": 2,
+                "num_key_value_heads": 4,
+                "num_attention_heads": 16,
+                "hidden_size": 3584,
+                "head_dim": 256,
+                "torch_dtype": "bfloat16",
+            }
+        )
+    )
+    monkeypatch.setitem(sys.modules, "transformers", None)
+
+    # 2 layers * 2 (K+V) * 4 kv heads * 256 head_dim * 2 bytes.
+    # Deriving 3584 // 16 = 224 would give 7168.
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 8192
+
+
+@pytest.mark.parametrize("head_dim", [None, 0, "128"])
+def test_compute_kv_bytes_derives_head_dim_when_not_usable(
+    monkeypatch, tmp_path, head_dim
+):
+    """Absent, zero or non-integer head_dim falls back to the derived value."""
+    config = {
+        "num_hidden_layers": 2,
+        "num_key_value_heads": 4,
+        "num_attention_heads": 16,
+        "hidden_size": 3584,
+        "torch_dtype": "bfloat16",
+    }
+    if head_dim is not None:
+        config["head_dim"] = head_dim
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    monkeypatch.setitem(sys.modules, "transformers", None)
+
+    # 3584 // 16 = 224 head_dim.
+    assert kv_cache.compute_kv_bytes_per_token(str(tmp_path)) == 7168
+
+
 def test_compute_kv_bytes_unwraps_multimodal_text_config_json(tmp_path):
     (tmp_path / "config.json").write_text(
         json.dumps(

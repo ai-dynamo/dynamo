@@ -136,6 +136,9 @@ def compute_kv_bytes_per_token(
 
     Formula: num_layers * 2 (K+V) * num_kv_heads * head_dim * dtype_bytes
 
+    ``head_dim`` comes from the config when it declares one, and falls back to
+    ``hidden_size // num_attention_heads`` otherwise.
+
     Reads the model's text config directly so the mocker stays independent of
     the profiler's upper AIC dependencies.
 
@@ -170,7 +173,12 @@ def compute_kv_bytes_per_token(
     num_kv_heads = _config_get(config, "num_key_value_heads", "num_kv_heads")
     if num_kv_heads is None:
         num_kv_heads = num_attention_heads
-    head_dim = hidden_size // num_attention_heads
+    # A config that declares head_dim is authoritative: several model families
+    # size their heads independently of hidden_size / num_attention_heads, so
+    # deriving it silently mis-sizes the cache for those.
+    head_dim = _config_get(config, "head_dim")
+    if not isinstance(head_dim, int) or head_dim <= 0:
+        head_dim = hidden_size // num_attention_heads
     dtype_bytes = get_kv_cache_dtype_bytes(config, kv_cache_dtype)
     kv_bytes = num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
     logger.debug(
