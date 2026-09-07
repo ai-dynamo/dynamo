@@ -991,14 +991,23 @@ class BaseWorkerHandler(LoraMixin, BaseGenerativeHandler[RequestT, ResponseT]):
             "control/stop_profile": self.stop_profile,
             "control/release_memory_occupation": self.release_memory_occupation,
             "control/resume_memory_occupation": self.resume_memory_occupation,
-            "control/update_weights_from_disk": self.update_weights_from_disk,
-            "control/update_weights_from_tensor": self.update_weights_from_tensor,
-            "control/update_weights_from_distributed": (
-                self.update_weights_from_distributed
-            ),
-            "control/update_weights_from_ipc": self.update_weights_from_ipc,
-            "control/update_weight_version": self.update_weight_version,
         }
+        # Weight-update controls exist only for RL training and drive the
+        # tokenizer_manager weight-update APIs. Register them solely when RL is
+        # enabled (--enable-rl / DYN_SGL_ENABLE_RL, default off) so a non-RL
+        # deployment does not expose the surface on the worker system server.
+        if getattr(self.config.dynamo_args, "enable_rl", False):
+            built_in_routes.update(
+                {
+                    "control/update_weights_from_disk": self.update_weights_from_disk,
+                    "control/update_weights_from_tensor": self.update_weights_from_tensor,
+                    "control/update_weights_from_distributed": (
+                        self.update_weights_from_distributed
+                    ),
+                    "control/update_weights_from_ipc": self.update_weights_from_ipc,
+                    "control/update_weight_version": self.update_weight_version,
+                }
+            )
         # Register elastic-EP scaling only on workers whose engine can serve it
         # (see _supports_elastic_ep); the rest simply don't expose the route.
         if self._supports_elastic_ep():
