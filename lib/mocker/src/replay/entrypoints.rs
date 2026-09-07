@@ -2803,7 +2803,7 @@ mod tests {
         assert_eq!(trace.nodes()[0].source_play_ordinal(), Some(0));
         assert_eq!(trace.nodes()[0].recorded_api_time_ms(), Some(200.0));
         assert_eq!(trace.nodes()[1].recorded_api_time_ms(), None);
-        assert_eq!(trace.nodes()[1].output_length(), 0);
+        assert_eq!(trace.nodes()[1].max_output_tokens(), 0);
         assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
         assert_eq!(trace.nodes()[1].not_before_ms(), 200.0);
         assert_eq!(trace.nodes()[1].dependencies()[0].delay_ms, 100.0);
