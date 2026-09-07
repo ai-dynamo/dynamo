@@ -59,7 +59,7 @@ request-trace-s3 = ["dynamo-llm/request-trace-s3"]
 # must not enable `extension-module`.
 # TODO(AIC-1810): keep this source identical to the root workspace dependency;
 # replace both review-only revisions with the same exact crates.io dev release.
-aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "d5ec73296bd24d846fd932626b80b49e08e949ee", optional = true, features = ["python"] }
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "e7f04a040d5f10b965b74deb934be594fd34a288", optional = true, features = ["python"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-mocker = { path = "../../mocker" }
 dynamo-parsers = { version = "8.1.0" }

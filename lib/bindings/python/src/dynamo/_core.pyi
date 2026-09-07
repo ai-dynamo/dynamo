@@ -2508,6 +2508,7 @@ def run_mocker_trace_replay(
     capture_planner_details: bool = True,
     scaling_policy: Optional[Any] = None,
     agentic_lanes: Optional[int] = None,
+    execution_model: Optional[str] = None,
 ) -> _OfflineReplayResult | Dict[str, Any]:
     """Replay mocker trace files and return the simulation report.
 

@@ -157,16 +157,18 @@ With the Dynamo stack, omit `planner` or set `planner.policy: disabled` for `moo
 
 ### Typed agentic replay through the Dynamo API
 
-[AISimulate](https://github.com/ai-dynamo/aisimulate) owns public Weka ingestion, validation, and
-lowering into the canonical `ValidatedAgenticGraph`. The lower-level
+AISimulate owns public Weka ingestion, validation, and lowering into the canonical
+`ValidatedAgenticGraph`. The lower-level
 `dynamo.replay.run_trace_replay(...)` API keeps `trace_format="weka"` as a compatibility adapter,
-but delegates graph construction directly to `aisimulate-core` before Dynamo composes its Router,
-Planner, and Mocker runtime behavior.
+but delegates graph construction directly to `aisimulate-core` before Dynamo composes its Router
+and Mocker runtime behavior.
 
 Set `agentic_lanes` to a positive integer to replay a fixed number of trajectories concurrently.
 Plays are stable-sorted and stride-assigned to lanes. A lane starts its next play only after its
 current play is quiescent, and lanes do not steal work. Agentic replay rejects
-`replay_concurrency`, Planner scaling, and mixed-model Weka corpora.
+`replay_concurrency` and Planner scaling. A Weka corpus may retain multiple source-model labels as
+provenance, but the current runtime projects every node onto the single configured
+`execution_model`. Per-node heterogeneous timing models are not yet supported.
 
 ```python
 from dynamo.mocker import MockEngineArgs
@@ -175,12 +177,16 @@ from dynamo.replay import run_trace_replay
 report = run_trace_replay(
     trace_files="traces/weka-agentx",
     trace_format="weka",
+    execution_model="Qwen/Qwen3-32B-FP8",
     agentic_lanes=12,
     router_mode="kv_router",
     num_workers=4,
     extra_engine_args=MockEngineArgs(engine_type="vllm", block_size=64),
 )
 ```
+
+Agentic reports retain the sorted source-model labels in `agentic_graph.source_models` and record
+the explicit projection policy and target in `agentic_model_projection`.
 
 Agentic Mooncake v2 begins with a required versioned header:
 

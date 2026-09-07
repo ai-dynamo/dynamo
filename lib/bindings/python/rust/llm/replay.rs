@@ -891,7 +891,7 @@ impl MockEngineArgs {
 }
 
 #[pyfunction]
-#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None))]
+#[pyo3(signature = (trace_files, extra_engine_args=None, prefill_engine_args=None, decode_engine_args=None, router_config=None, aic_perf_config=None, num_workers=1, num_prefill_workers=1, num_decode_workers=1, replay_concurrency=None, replay_mode="offline", router_mode="round_robin", arrival_speedup_ratio=1.0, trace_block_size=None, trace_format="mooncake", trace_shared_prefix_ratio=0.0, trace_num_prefix_groups=0, report_jsonl_path=None, max_sim_time_ms=None, model_name=None, sla_ttft_ms=None, sla_itl_ms=None, sla_e2e_ms=None, capture_per_request=false, capture_planner_details=true, scaling_policy=None, agentic_lanes=None, execution_model=None))]
 #[allow(clippy::too_many_arguments)]
 pub fn run_mocker_trace_replay(
     py: Python<'_>,
@@ -922,6 +922,7 @@ pub fn run_mocker_trace_replay(
     capture_planner_details: bool,
     scaling_policy: Option<Py<PyAny>>,
     agentic_lanes: Option<isize>,
+    execution_model: Option<String>,
 ) -> PyResult<PyObject> {
     if capture_per_request && replay_mode != "offline" {
         return Err(PyValueError::new_err(
@@ -939,6 +940,23 @@ pub fn run_mocker_trace_replay(
     )?;
     let router_mode = parse_replay_router_mode(router_mode)?;
     let trace_format = parse_trace_file_format(trace_format)?;
+    let execution_model = match execution_model {
+        Some(model) if model.trim().is_empty() => {
+            return Err(PyValueError::new_err("execution_model must be non-empty"));
+        }
+        Some(model) => Some(model.trim().to_string()),
+        None => None,
+    };
+    if matches!(
+        trace_format,
+        dynamo_mocker::loadgen::TraceFileFormat::AgenticMooncake
+            | dynamo_mocker::loadgen::TraceFileFormat::Weka
+    ) && execution_model.is_none()
+    {
+        return Err(PyValueError::new_err(
+            "agentic execution requires a configured target model",
+        ));
+    }
     dynamo_mocker::loadgen::validate_trace_files(trace_format, &trace_files).map_err(to_pyerr)?;
     let (prefill_load_estimator, _) = load_replay_prefill_load_estimator(
         py,
@@ -1003,6 +1021,9 @@ pub fn run_mocker_trace_replay(
         if trace_format == dynamo_mocker::loadgen::TraceFileFormat::Dynamo {
             let trace =
                 DynamoRequestTrace::from_request_trace_files(&trace_files, trace_block_size)?;
+            if matches!(&trace, DynamoRequestTrace::Agentic(_)) && execution_model.is_none() {
+                anyhow::bail!("agentic execution requires a configured target model");
+            }
             return run_loaded_dynamo_request_trace(
                 args_selection,
                 trace,

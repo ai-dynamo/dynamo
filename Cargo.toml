@@ -57,7 +57,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 # TODO(AIC-1810): replace this review-only revision with the matching exact
 # crates.io dev release after ai-dynamo/aisimulate#115 merges, before this PR
 # is marked ready for review.
-aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "d5ec73296bd24d846fd932626b80b49e08e949ee" }
+aisimulate-core = { git = "https://github.com/ai-dynamo/aisimulate.git", rev = "e7f04a040d5f10b965b74deb934be594fd34a288" }
 
 # Local crates
 dynamo-runtime = { path = "lib/runtime", version = "1.5.0" }

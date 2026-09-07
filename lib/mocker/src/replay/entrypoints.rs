@@ -2783,12 +2783,12 @@ mod tests {
             &source,
             serde_json::to_vec(&serde_json::json!({
                 "id": "play",
-                "models": ["model"],
+                "models": ["model", "other-model"],
                 "block_size": 4,
                 "hash_id_scope": "local",
                 "requests": [
                     {"t": 1.0, "type": "s", "model": "model", "in": 4, "out": 1, "hash_ids": [1], "api_time": 0.2},
-                    {"t": 1.4, "type": "s", "model": "model", "in": 8, "out": 1, "hash_ids": [1, 2], "api_time": 0.1}
+                    {"t": 1.4, "type": "s", "model": "other-model", "in": 8, "out": 0, "hash_ids": [1, 2]}
                 ]
             }))
             .unwrap(),
@@ -2802,9 +2802,15 @@ mod tests {
         assert_eq!(trace.node_count(), 2);
         assert_eq!(trace.nodes()[0].source_play_ordinal(), Some(0));
         assert_eq!(trace.nodes()[0].recorded_api_time_ms(), Some(200.0));
+        assert_eq!(trace.nodes()[1].recorded_api_time_ms(), None);
+        assert_eq!(trace.nodes()[1].output_length(), 0);
         assert_eq!(trace.nodes()[0].not_before_ms(), 0.0);
         assert_eq!(trace.nodes()[1].not_before_ms(), 200.0);
         assert_eq!(trace.nodes()[1].dependencies()[0].delay_ms, 100.0);
+        assert_eq!(
+            trace.identity().source_models,
+            ["model".to_string(), "other-model".to_string()]
+        );
 
         let error =
             load_agentic_trace_from_file(&source, 512, TraceFileFormat::Weka, 1.0).unwrap_err();

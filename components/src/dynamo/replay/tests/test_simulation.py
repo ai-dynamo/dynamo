@@ -81,6 +81,9 @@ def _agg_deployment() -> BackendDeploymentSpec:
         backend_version="0.11.0",
         agg_engine_args={"engine_type": "vllm", "max_num_seqs": 256},
         num_workers=3,
+        performance_model_metadata={
+            "aggregated": {"config": {"model_path": "target-model"}}
+        },
     )
 
 
@@ -168,7 +171,14 @@ def test_trace_paths_only_workload_routes_to_trace_replay(monkeypatch) -> None:
 
     def fake_run_trace_replay(**kwargs):
         seen.update(kwargs)
-        return _report({"completed_requests": 2})
+        return _report(
+            {
+                "completed_requests": 2,
+                "agentic_graph": {
+                    "source_models": ["source-a", "source-b"],
+                },
+            }
+        )
 
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
@@ -198,7 +208,14 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
 
     def fake_run_trace_replay(**kwargs):
         seen.update(kwargs)
-        return _report({"completed_requests": 2})
+        return _report(
+            {
+                "completed_requests": 2,
+                "agentic_graph": {
+                    "source_models": ["source-a", "source-b"],
+                },
+            }
+        )
 
     monkeypatch.setattr(simulation, "MockEngineArgs", _FakeEngineArgs)
     monkeypatch.setattr(simulation, "run_trace_replay", fake_run_trace_replay)
@@ -216,11 +233,41 @@ def test_weka_runner_delegates_without_inventing_a_source_block_size(
 
     assert seen["trace_block_size"] is None
     assert seen["agentic_lanes"] == 1
+    assert seen["execution_model"] == "target-model"
     assert report.metadata == {
         "agentic_qualification": "functional_only",
         "agentic_input_format": "weka",
         "agentic_lanes": 1,
+        "agentic_graph": {
+            "source_models": ["source-a", "source-b"],
+        },
+        "agentic_model_projection": {
+            "policy": "project_to_configured_target",
+            "source_models": ["source-a", "source-b"],
+            "target_model": "target-model",
+        },
     }
+
+
+def test_weka_runner_requires_a_configured_execution_target_model() -> None:
+    deployment = BackendDeploymentSpec(
+        deployment_mode="agg",
+        backend="vllm",
+        backend_version="0.11.0",
+        agg_engine_args={"engine_type": "vllm", "max_num_seqs": 256},
+        num_workers=3,
+    )
+    spec = ReplaySpec(
+        backend_deployment=deployment,
+        workload={"trace_path": "published-weka", "trace_format": "weka"},
+        goal={"target": "throughput"},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="agentic execution requires a configured target model",
+    ):
+        simulation.DynamoReplayRunnerFactory().create(0).run(spec)
 
 
 def test_trace_replay_rejects_boolean_agentic_lanes() -> None:
@@ -452,9 +499,9 @@ def test_factory_owns_replay_spec_abi_version(monkeypatch) -> None:
             **_kwargs,
         ):
             seen["version"] = replay_spec_api_version
-            seen["supports_disaggregated_attention_dp"] = (
-                supports_disaggregated_attention_dp
-            )
+            seen[
+                "supports_disaggregated_attention_dp"
+            ] = supports_disaggregated_attention_dp
             self.replay_spec_api_version = replay_spec_api_version
             self.supported_backend_topologies = supported_backend_topologies
             self.supported_hooks = supported_hooks
