@@ -2670,25 +2670,28 @@ class TestToolCallGuidedDecoding:
         assert prepost_module._is_named_tool_choice(tool_choice) is False
         assert prepost_module._is_forced_tool_choice(tool_choice) is False
 
-    # Legacy guided_* must resolve to a single constraint, not a merged dict.
+    # Legacy guided_* conflicts must be rejected rather than silently discarded.
     @pytest.mark.asyncio
-    async def test_legacy_guided_fields_yield_single_constraint(self, tokenizer):
-        result = await prepost_module.preprocess_chat_request(
-            {
-                "model": MODEL,
-                "messages": [{"role": "user", "content": "Hello"}],
-                "guided_json": {"type": "object"},
-                "guided_regex": "\\d+",
-            },
-            tokenizer=tokenizer,
-            renderer=SimpleNamespace(
-                render_messages_async=AsyncMock(
-                    return_value=(None, {"prompt_token_ids": [1]})
-                )
-            ),
-            tool_parser_class=None,
-        )
-        assert result.guided_decoding == {"json": {"type": "object"}}
+    async def test_legacy_guided_fields_reject_conflicts(self, tokenizer):
+        with pytest.raises(
+            InvalidArgument,
+            match="Only one guided-decoding constraint can be set; received: json, regex",
+        ):
+            await prepost_module.preprocess_chat_request(
+                {
+                    "model": MODEL,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "guided_json": {"type": "object"},
+                    "guided_regex": "\\d+",
+                },
+                tokenizer=tokenizer,
+                renderer=SimpleNamespace(
+                    render_messages_async=AsyncMock(
+                        return_value=(None, {"prompt_token_ids": [1]})
+                    )
+                ),
+                tool_parser_class=None,
+            )
 
     # Keep vLLM's guidance decisions aligned with the shared backend matrix.
     @pytest.mark.parametrize(

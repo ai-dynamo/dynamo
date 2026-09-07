@@ -127,8 +127,7 @@ func admissionSourceVersion(t *testing.T, object runtime.Object) string {
 	case *nvidiacomv1alpha1.DynamoGraphDeployment,
 		*nvidiacomv1alpha1.DynamoComponentDeployment,
 		*nvidiacomv1alpha1.DynamoGraphDeploymentRequest,
-		*nvidiacomv1alpha1.DynamoModel,
-		*nvidiacomv1alpha1.DynamoCheckpoint:
+		*nvidiacomv1alpha1.DynamoModel:
 		return nvidiacomv1alpha1.GroupVersion.Version
 	case *nvidiacomv1beta1.DynamoGraphDeployment,
 		*nvidiacomv1beta1.DynamoComponentDeployment,
