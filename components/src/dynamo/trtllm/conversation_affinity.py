@@ -28,7 +28,6 @@ TensorRT-LLM build newer than 1.3.0rc20; on older wheels the import is absent an
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any, Optional
 
 try:  # Requires a TensorRT-LLM release newer than 1.3.0rc20.
@@ -36,22 +35,11 @@ try:  # Requires a TensorRT-LLM release newer than 1.3.0rc20.
 except ImportError:  # pragma: no cover - depends on installed wheel
     ConversationParams = None  # type: ignore[assignment]
 
+from dynamo.common.backend.agent_context import (
+    session_id_from_request as session_id_from_request,
+)
+
 CONVERSATION_PARAMS_AVAILABLE: bool = ConversationParams is not None
-
-
-def session_id_from_request(request: Mapping[str, Any]) -> Optional[str]:
-    """Return the stable conversation/session id the frontend forwards as
-    ``agent_context.session_id``, or ``None`` if absent, blank, or malformed.
-
-    Uses ``session_id`` (the active reasoning/tool chain), not ``parent_session_id``.
-    """
-    agent_context = request.get("agent_context")
-    if not isinstance(agent_context, dict):
-        return None
-    session_id = agent_context.get("session_id")
-    if isinstance(session_id, str) and session_id.strip():
-        return session_id.strip()
-    return None
 
 
 def engine_conversation_affinity_enabled(llm: Any) -> bool:
