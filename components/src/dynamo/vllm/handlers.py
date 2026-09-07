@@ -48,6 +48,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 
 from dynamo._core import Context
 from dynamo.common.backend import logprobs as _shared_logprobs
+from dynamo.common.gms_failover import release_attached_gms_failover_lock
 from dynamo.common.lora.manager import LoRAInfo, get_lora_manager
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -375,15 +376,22 @@ class VllmEnginePauseController:
     def needs_resume_recovery(self) -> bool:
         return self._generation_paused
 
-    async def pause(self, *args: object) -> bool:
+    async def pause(self, *args: object, clear_cache: bool = True) -> bool:
         if self._is_paused or self._generation_paused:
             return False
 
         level = args[0] if args else None
-        await self._engine_client.pause_generation()
+        if clear_cache:
+            await self._engine_client.pause_generation()
+        else:
+            await self._engine_client.pause_generation(clear_cache=False)
         self._generation_paused = True
         try:
-            if level is None:
+            engine_core = getattr(self._engine_client, "engine_core", None)
+            call_utility = getattr(engine_core, "call_utility_async", None)
+            if not clear_cache and level is not None and callable(call_utility):
+                await call_utility("gms_sleep_no_clear", level, "abort")
+            elif level is None:
                 await self._engine_client.sleep()
             else:
                 await self._engine_client.sleep(level)
@@ -1401,16 +1409,26 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     )
 
                 # Step 2: Abort in-flight requests and wait for them to drain so
-                # generation is fully paused before unmapping memory.
-                if not await self._pause_controller.pause(level):
+                # generation is fully paused before unmapping memory. Preserve KV
+                # when ownership is handed to a waiting shadow.
+                preserve_kv = bool(body.get("release_failover_lock"))
+                if not await self._pause_controller.pause(
+                    level, clear_cache=not preserve_kv
+                ):
                     return {
                         "status": "ok",
                         "message": "Engine already sleeping",
                     }
 
+                lock_released = (
+                    await release_attached_gms_failover_lock(self, backend_name="vllm")
+                    if preserve_kv
+                    else False
+                )
                 return {
                     "status": "ok",
                     "message": f"Engine slept (level={level})",
+                    "failover_lock_released": lock_released,
                 }
             except Exception as e:
                 logger.error(f"Failed to sleep engine: {e}")

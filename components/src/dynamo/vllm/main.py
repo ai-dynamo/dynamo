@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 
 import asyncio
 import json
@@ -13,34 +14,102 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from dynamo.vllm.omni.args import OmniConfig
 
-import uvloop
-from huggingface_hub import try_to_load_from_cache
-from huggingface_hub.utils import HFValidationError
-from prometheus_client import REGISTRY, CollectorRegistry, multiprocess
-from vllm.config import VllmConfig
-from vllm.distributed.kv_events import ZmqEventPublisher
-from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 
-from dynamo.common.config_dump import dump_config
-from dynamo.common.configuration.groups.router_args import build_router_config
-from dynamo.common.model_fetch import fetch_model
-from dynamo.common.snapshot.lifecycle import elect_and_wake
-from dynamo.common.snapshot.restore_context import (
+def _early_truthy_env(name: str, *, default: bool = False) -> bool:
+    """Local copy of `dynamo.common.utils.env.env_bool`, kept deliberately.
+
+    The JIT/cache isolation below must run before vLLM (and therefore
+    FlashInfer) is imported, which rules out importing `dynamo.common.utils`
+    here. Keep the truth table identical to `env_bool` so one variable never
+    means different things in different parts of this file.
+    """
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    return raw.strip().lower() in ("true", "1", "yes", "on")
+
+
+def _maybe_isolate_jit_cache_dirs_by_container() -> dict[str, tuple[str | None, str]]:
+    """Keep runtime JIT/cache locks pod-local and engine-container-local.
+
+    Bulwark primary and shadow containers can compile or materialize FlashInfer
+    artifacts at the same time. Some Kubernetes-mounted filesystems do not
+    reliably support fcntl locks under that contention, so keep these caches in
+    a container-specific tmpfs namespace before vLLM imports FlashInfer.
+    """
+
+    if not _early_truthy_env(
+        "DYN_VLLM_ISOLATE_JIT_CACHE_BY_CONTAINER",
+        default=_early_truthy_env("DYN_GMS_FAILOVER_SHADOW_MODE"),
+    ):
+        return {}
+
+    container = os.environ.get("CONTAINER_NAME") or os.environ.get("ENGINE_ID")
+    if not container:
+        return {}
+
+    base = os.environ.get("DYN_VLLM_JIT_CACHE_BASE", "/dev/shm/dynamo-jit")
+    container_base = os.path.join(base, container)
+    mappings = {
+        "TMPDIR": "tmp",
+        "XDG_CACHE_HOME": "xdg-cache",
+        "VLLM_CACHE_ROOT": "vllm-cache",
+        "TORCHINDUCTOR_CACHE_DIR": "torchinductor-cache",
+        "TRITON_CACHE_DIR": "triton-cache",
+        "CUDA_CACHE_PATH": "cuda-cache",
+        "FLASHINFER_WORKSPACE_BASE": "flashinfer-workspace",
+        "FLASHINFER_CUBIN_DIR": "flashinfer-cubins",
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": "vllm-flashinfer-autotune",
+        "TILELANG_CACHE_DIR": "tilelang-cache",
+        "TILELANG_TMP_DIR": "tilelang-tmp",
+    }
+
+    changed: dict[str, tuple[str | None, str]] = {}
+    force = _early_truthy_env("DYN_VLLM_FORCE_CONTAINER_JIT_CACHE", default=True)
+    for name, suffix in mappings.items():
+        previous = os.environ.get(name)
+        value = os.path.join(container_base, suffix)
+        if previous == value:
+            continue
+        if previous and not force and not previous.startswith(base):
+            continue
+        os.environ[name] = value
+        changed[name] = (previous, value)
+    return changed
+
+
+_JIT_CACHE_DIR_ENV_CHANGES = _maybe_isolate_jit_cache_dirs_by_container()
+
+import uvloop  # noqa: E402
+from huggingface_hub import try_to_load_from_cache  # noqa: E402
+from huggingface_hub.utils import HFValidationError  # noqa: E402
+from prometheus_client import REGISTRY, CollectorRegistry, multiprocess  # noqa: E402
+from vllm.config import VllmConfig  # noqa: E402
+from vllm.distributed.kv_events import ZmqEventPublisher  # noqa: E402
+from vllm.usage.usage_lib import UsageContext  # noqa: E402
+from vllm.v1.engine.async_llm import AsyncLLM  # noqa: E402
+from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus  # noqa: E402
+
+from dynamo.common.config_dump import dump_config  # noqa: E402
+from dynamo.common.configuration.groups.router_args import (  # noqa: E402
+    build_router_config,
+)
+from dynamo.common.model_fetch import fetch_model  # noqa: E402
+from dynamo.common.snapshot.lifecycle import elect_and_wake  # noqa: E402
+from dynamo.common.snapshot.restore_context import (  # noqa: E402
     parse_snapshot_restore_runtime_config,
     refresh_snapshot_restore_config,
 )
-from dynamo.common.utils.env import env_bool
-from dynamo.common.utils.graceful_shutdown import install_signal_handlers
-from dynamo.common.utils.prometheus import (
+from dynamo.common.utils.env import env_bool  # noqa: E402
+from dynamo.common.utils.graceful_shutdown import install_signal_handlers  # noqa: E402
+from dynamo.common.utils.prometheus import (  # noqa: E402
     EMBEDDING_CACHE_METRIC_PREFIX,
     LLMBackendMetrics,
     register_engine_metrics_callback,
 )
-from dynamo.common.utils.runtime import create_runtime
-from dynamo.common.utils.topology import apply_topology_config
-from dynamo.llm import (
+from dynamo.common.utils.runtime import create_runtime  # noqa: E402
+from dynamo.common.utils.topology import apply_topology_config  # noqa: E402
+from dynamo.llm import (  # noqa: E402
     KvEventPublisher,
     ModelInput,
     ModelRuntimeConfig,
@@ -53,37 +122,47 @@ from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.kv_hints import publish_kv_hint_capabilities
 from dynamo.vllm.worker_factory import WorkerFactory
 
-from . import envs
-from .args import Config, _uses_dynamo_connector, configure_rl_logprobs_mode, parse_args
-from .cache_info import get_configured_kv_event_block_size
-from .capacity import (
+from . import envs  # noqa: E402
+from .args import (  # noqa: E402
+    Config,
+    _uses_dynamo_connector,
+    configure_rl_logprobs_mode,
+    parse_args,
+)
+from .cache_info import get_configured_kv_event_block_size  # noqa: E402
+from .capacity import (  # noqa: E402
     get_metrics_model_name,
     get_spec_decode_runtime_data,
     per_rank_kv_blocks,
     publish_vllm_token_budget,
 )
-from .dp_topology import get_dp_range_for_worker
-from .embedding_worker_processes import (
+from .dp_topology import get_dp_range_for_worker  # noqa: E402
+from .embedding_worker_processes import (  # noqa: E402
     EmbeddingEngineCleanupResource,
     create_shared_embedding_engine_client,
     is_embedding_process_child,
     start_embedding_parent_watchdog,
 )
-from .engine_generate import publish_engine_generate_capability
-from .handlers import apply_data_parallel_runtime_config
-from .headless import run_dynamo_headless
-from .instrumented_scheduler import ENV_FPM_BENCHMARK_OUTPUT_PATH, ENV_FPM_WORKER_ID
-from .kv_connector_protocols import (
+from .engine_generate import publish_engine_generate_capability  # noqa: E402
+from .handlers import apply_data_parallel_runtime_config  # noqa: E402
+from .headless import run_dynamo_headless  # noqa: E402
+from .instrumented_scheduler import (  # noqa: E402
+    ENV_FPM_BENCHMARK_OUTPUT_PATH,
+    ENV_FPM_WORKER_ID,
+)
+from .kv_connector_protocols import (  # noqa: E402
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector,
 )
-from .multimodal_utils.cache_config import configure_multimodal_embedding_cache
-from .multimodal_utils.media_config import create_frontend_media_config
-from .multimodal_utils.models.qwen_video_routing import (
+from .multimodal_utils.cache_config import (  # noqa: E402
+    configure_multimodal_embedding_cache,
+)
+from .multimodal_utils.media_config import create_frontend_media_config  # noqa: E402
+from .multimodal_utils.models.qwen_video_routing import (  # noqa: E402
     publish_vllm_qwen_video_processor_contract,
 )
-from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory
-from .snapshot import prepare_snapshot_engine
-from .state_agent import (
+from .publisher import DYNAMO_COMPONENT_REGISTRY, StatLoggerFactory  # noqa: E402
+from .snapshot import prepare_snapshot_engine  # noqa: E402
+from .state_agent import (  # noqa: E402
     StateAgentLifecycle,
     start_attachment_owner,
     state_agent_settings,
@@ -91,6 +170,13 @@ from .state_agent import (
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+if _JIT_CACHE_DIR_ENV_CHANGES:
+    logger.info(
+        "[GMS] Isolated vLLM runtime JIT/cache dirs for container=%s: %s",
+        os.environ.get("CONTAINER_NAME") or os.environ.get("ENGINE_ID"),
+        {name: value for name, (_, value) in _JIT_CACHE_DIR_ENV_CHANGES.items()},
+    )
+GMS_VLLM_WORKER_CLS = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
 shutdown_endpoints: list = []
 SPEC_DECODE_RUNTIME_KEY = "spec_decode"
 TOOL_CALL_STRUCTURAL_TAG_EXCLUDES_REASONING_RUNTIME_KEY = (
@@ -155,6 +241,105 @@ def _register_model_source_path(config: Config, vllm_config: VllmConfig) -> str:
     if getattr(vllm_config.model_config, "model_weights", ""):
         return vllm_config.model_config.model
     return config.model
+
+
+def _gms_failover_shadow_member() -> bool:
+    if not (
+        env_bool("DYN_GMS_FAILOVER_SHADOW_MODE") or env_bool("DYN_VLLM_GMS_SHADOW_MODE")
+    ):
+        return False
+    if env_bool("DYN_VLLM_GMS_ACTIVE_LOCK_HELD"):
+        return False
+    engine_id = os.environ.get("ENGINE_ID", "0")
+    primary_id = os.environ.get("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+    return engine_id != primary_id
+
+
+def _is_gms_load_format(engine_args: Any) -> bool:
+    return str(getattr(engine_args, "load_format", "")) == "gms"
+
+
+def _configure_gms_vllm_worker(engine_args: Any) -> None:
+    """Force GMS worker setup early enough for spawned vLLM workers."""
+
+    current = getattr(engine_args, "worker_cls", None)
+    if current not in (None, "auto", GMS_VLLM_WORKER_CLS):
+        logger.warning(
+            "[GMS] Overriding user-provided vLLM worker_cls=%s with %s "
+            "because --load-format=gms requires the GMS worker integration",
+            current,
+            GMS_VLLM_WORKER_CLS,
+        )
+
+    engine_args.worker_cls = GMS_VLLM_WORKER_CLS
+
+    # Import eagerly so model-loader/KV patches fail before vLLM starts worker
+    # processes. Worker subprocesses still resolve the class by string.
+    import gpu_memory_service.integrations.vllm.worker  # noqa: F401
+
+    logger.info("[GMS] vLLM worker_cls configured as %s", GMS_VLLM_WORKER_CLS)
+
+
+def _verify_gms_vllm_worker_config(vllm_config: VllmConfig) -> None:
+    worker_cls = getattr(vllm_config.parallel_config, "worker_cls", None)
+    if worker_cls != GMS_VLLM_WORKER_CLS:
+        raise RuntimeError(
+            "GMS load format requires vLLM worker_cls="
+            f"{GMS_VLLM_WORKER_CLS}, got {worker_cls!r}"
+        )
+    logger.info("[GMS] Final vLLM parallel_config.worker_cls=%s", worker_cls)
+
+
+def _gms_shadow_init_geometry_wait_ms() -> int:
+    names = (
+        "DYN_VLLM_GMS_SHADOW_INIT_GEOMETRY_WAIT_MS",
+        "GMS_VLLM_KV_GEOMETRY_WAIT_MS",
+        "GMS_KV_LEASE_GEOMETRY_WAIT_MS",
+    )
+    wait_ms = 300_000
+    for name in names:
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        try:
+            wait_ms = int(value)
+        except ValueError:
+            logger.warning("Ignoring invalid %s=%r", name, value)
+            continue
+        break
+    return max(wait_ms, 0)
+
+
+def _maybe_wait_for_gms_primary_kv_before_init(config: Config) -> None:
+    if getattr(config.engine_args, "load_format", None) != "gms":
+        return
+    if not config.gms_shadow_mode:
+        return
+    if not _gms_failover_shadow_member():
+        return
+    if not env_bool("DYN_VLLM_GMS_WAIT_FOR_PRIMARY_KV_BEFORE_INIT", default=True):
+        return
+
+    from gpu_memory_service.integrations.vllm.install_vmm_ipc_kv import (
+        _existing_shared_kv_blocks,
+    )
+
+    wait_ms = _gms_shadow_init_geometry_wait_ms()
+    logger.info(
+        "[GMS] Shadow engine waiting up to %d ms for primary KV geometry "
+        "before vLLM engine initialization",
+        wait_ms,
+    )
+    blocks = _existing_shared_kv_blocks(wait_ms=wait_ms)
+    if blocks is None:
+        raise RuntimeError(
+            "Timed out waiting for primary GMS KV geometry before shadow "
+            "vLLM engine initialization"
+        )
+    logger.info(
+        "[GMS] Shadow engine observed primary KV geometry before init: blocks=%d",
+        blocks,
+    )
 
 
 async def worker(argv: list[str] | None = None) -> None:
@@ -641,8 +826,8 @@ def setup_vllm_engine(
         if "VLLM_LORA_MODULES_LOADING_TIMEOUT" not in os.environ:
             os.environ["VLLM_LORA_MODULES_LOADING_TIMEOUT"] = "600"
 
-    if engine_args.load_format == "gms":
-        engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
+    if _is_gms_load_format(engine_args):
+        _configure_gms_vllm_worker(engine_args)
 
         if config.gms_shadow_mode:
             from gpu_memory_service.integrations.vllm.utils import (
@@ -650,14 +835,24 @@ def setup_vllm_engine(
                 configure_mx_ports,
             )
 
-            os.environ["DYN_GMS_SCRATCH_KV_ENABLED"] = "1"
-            logger.info(
-                "[GMS] Failover enabled: will use scratch KV for initialization until engine is primary"
-            )
             # ENGINE_ID=0 writes weights, all others import (RO).
             # Prevents deadlock during TP>1 failover.
             configure_gms_lock_mode(engine_args)
             configure_mx_ports(engine_args)
+
+    if engine_args.load_format in ("mx-source", "mx-target"):
+        try:
+            from modelexpress import register_modelexpress_loaders
+
+            if config.model_express_url:
+                os.environ["MODEL_EXPRESS_URL"] = config.model_express_url
+            register_modelexpress_loaders()
+            engine_args.worker_cls = "modelexpress.vllm_worker.ModelExpressWorker"
+        except ImportError as e:
+            raise ImportError(
+                f"ModelExpress package required for --load-format={engine_args.load_format}. "
+                "Install with: pip install modelexpress"
+            ) from e
 
     # Must happen before create_engine_config() so vLLM sees ec_transfer_config.
     configure_multimodal_embedding_cache(
@@ -674,6 +869,8 @@ def setup_vllm_engine(
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
     disable_hybrid_kv_cache_manager_for_incompatible_pd_connector(vllm_config)
     default_sampling_params = vllm_config.model_config.get_diff_sampling_param()
+    if _is_gms_load_format(engine_args):
+        _verify_gms_vllm_worker_config(vllm_config)
 
     # Set up consolidator endpoints if KVBM (DynamoConnector) is enabled
     consolidator_endpoints = None
@@ -726,6 +923,8 @@ def setup_vllm_engine(
     factory = []
     if stat_logger:
         factory.append(stat_logger)
+
+    _maybe_wait_for_gms_primary_kv_before_init(config)
 
     # Time engine initialization
     start_time = time.time()

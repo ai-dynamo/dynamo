@@ -305,6 +305,7 @@ async def test_custom_encoder_shutdown_engine_on_startup_failure(
         component="backend",
         endpoint="generate",
         enable_rl=False,
+        gms_shadow_mode=False,
         engine_args=SimpleNamespace(enable_lora=False),
         enable_multimodal=True,
         custom_encoder_class="encoder.Backend",

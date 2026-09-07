@@ -21,8 +21,12 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo import prometheus_names
 from dynamo.common.model_taints import register_model_taint_route
+from dynamo.common.gms_failover import (
+    release_attached_gms_failover_lock,
+    run_gms_failover_post_lock_fence,
+    run_gms_failover_promotion_warmup,
+)
 from dynamo.common.rl import first_endpoint_response, register_rl_routes
-from dynamo.common.snapshot.lifecycle import elect_and_wake
 from dynamo.common.utils.endpoint_types import parse_endpoint_types
 from dynamo.common.utils.prometheus import (
     LLMBackendMetrics,
@@ -1132,28 +1136,193 @@ class WorkerFactory:
         failover_metrics.set_state("init")
         return failover_metrics
 
+    @staticmethod
+    def _truthy_env(name: str, *, default: bool = False) -> bool:
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        return value.strip().lower() not in ("", "0", "false", "no", "off")
+
+    # Private-bootstrap/scratch shadow KV is deferred: the isolated scratch pool
+    # that used to back a shadow's pre-lock init/prewarm has been removed. These
+    # knobs are now unsafe -- with them on, a shadow would init or prewarm against
+    # the SHARED GMS KV pool before it owns the failover lock, corrupting the live
+    # primary's KV. Fail closed rather than silently run against shared KV.
+    _REMOVED_PRIVATE_BOOTSTRAP_ENV_VARS = (
+        "DYN_VLLM_GMS_PRIVATE_BOOTSTRAP_KV",
+        "GMS_VLLM_PRIVATE_BOOTSTRAP_KV",
+        "DYN_GMS_FAILOVER_PRIVATE_BOOTSTRAP_KV",
+        "DYN_VLLM_GMS_FORCE_PRIVATE_BOOTSTRAP_KV",
+        "DYN_VLLM_GMS_PRIVATE_BOOTSTRAP_SCRATCH_WARMUP",
+        "GMS_VLLM_PRIVATE_BOOTSTRAP_SCRATCH_WARMUP",
+        "DYN_VLLM_GMS_PREWARM_SHADOW_BEFORE_LOCK",
+        "DYN_VLLM_GMS_PREPROMOTE_SHADOW_KV",
+    )
+
+    @classmethod
+    def _reject_removed_private_bootstrap_options(cls) -> None:
+        enabled = [
+            name
+            for name in cls._REMOVED_PRIVATE_BOOTSTRAP_ENV_VARS
+            if cls._truthy_env(name)
+        ]
+        if enabled:
+            raise RuntimeError(
+                "Refusing to start the vLLM GMS worker: private-bootstrap/scratch "
+                f"shadow KV options are enabled ({', '.join(enabled)}), but the "
+                "isolated scratch KV that made them safe has been removed. With "
+                "these enabled a shadow would initialize or prewarm against the "
+                "SHARED GMS KV pool before it owns the failover lock, which would "
+                "corrupt the live primary's KV. Unset them; shadow prewarm is "
+                "deferred pending a replacement mechanism."
+            )
+
+    async def _acquire_failover_lock(self, *, timeout: float | None = None):
+        from gpu_memory_service.failover_lock.flock import FlockFailoverLock
+
+        lock_path = os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock")
+        engine_id = os.environ.get("ENGINE_ID", "0")
+        lock = FlockFailoverLock(lock_path)
+        await lock.acquire(engine_id=f"engine-{engine_id}", timeout=timeout)
+        return lock
+
+    async def _wake_up_kv_fenced(self, handler, tags: list[str]) -> None:
+        """Run collective_rpc('wake_up') with a bounded timeout, fail-closed.
+
+        A promotion remap that wedges (CUDA error, stuck engine core) must not
+        leave this process holding the failover lock while it reports healthy --
+        that is an unrecoverable partial failover that locks out every other
+        standby. On timeout, raise so the process exits and the kernel releases
+        the flock for another standby.
+        """
+        timeout = float(
+            os.environ.get("DYN_GMS_FAILOVER_WAKEUP_TIMEOUT_SECS", "120")
+        )
+        try:
+            await asyncio.wait_for(
+                handler.engine_client.collective_rpc(
+                    "wake_up", kwargs={"tags": tags}
+                ),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.critical(
+                "[GMS failover] wake_up/remap did not complete within %.0fs; "
+                "failing closed so the failover lock is released",
+                timeout,
+            )
+            raise
+
+    def _maybe_start_rank_liveness_monitor(self, handler, config: Config):
+        """Leader side of the cross-node ZMQ rank-liveness channel.
+
+        Only the rank-0 leader runs worker_factory (headless workers bypass it),
+        so reaching here means we are the active leader. On a worker node going
+        silent (process death), release the failover lock so the warm shadow
+        promotes in ~one heartbeat-timeout, then signal a graceful shutdown of the
+        now-broken leader — instead of waiting out the NCCL collective timeout.
+        """
+        import signal
+
+        from dynamo.common import rank_liveness as rl
+
+        if not rl.liveness_enabled() or not getattr(config, "gms_shadow_mode", False):
+            return None
+        nnodes = int(getattr(config.engine_args, "nnodes", 1) or 1)
+        if nnodes <= 1:
+            return None
+
+        loop = asyncio.get_running_loop()
+
+        def on_rank_lost(rank: int, reason: str) -> None:
+            logger.warning(
+                "[GMS liveness] vLLM worker rank %d lost (%s); releasing lock + "
+                "shutting down broken leader for fast shadow promotion",
+                rank,
+                reason,
+            )
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    release_attached_gms_failover_lock(handler, backend_name="vllm"),
+                    loop,
+                )
+            except Exception:
+                logger.debug(
+                    "[GMS liveness] lock release on rank loss failed", exc_info=True
+                )
+            # The cohort is broken (a TP rank is gone); bring the leader down so it
+            # stops holding the GPU/KV and the shadow (now lock holder) serves.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        monitor = rl.RankLivenessMonitor(on_rank_lost, expected_ranks=range(1, nnodes))
+        setattr(handler, "_gms_rank_liveness_monitor", monitor)
+        monitor.start()
+        logger.info("[GMS liveness] started vLLM leader rank-liveness monitor")
+        return monitor
+
     async def _maybe_wait_for_failover_lock(
         self,
         handler,
         runtime: DistributedRuntime,
         config: Config,
         failover_metrics=None,
+        *,
+        lock_already_acquired: bool = False,
+        promotion_warmup: Callable[[], Awaitable[None]] | None = None,
+        post_lock_fence_already_run: bool = False,
     ) -> bool:
-        # Shadow mode: sleep → probe → block on lock → wake. True only for a real
-        # (contended) failover, not the initial bootup. The election itself is
-        # shared with the snapshot restore path, which arrives already paused;
-        # a cold-start engine is awake, so it sleeps here first.
-        if config.gms_shadow_mode is not True:
+        """Elect one active GMS writer and prepare it before discovery registration."""
+        if not config.gms_shadow_mode:
             return False
 
-        await handler._pause_controller.pause(1)
-        lock = await elect_and_wake(
-            handler._pause_controller,
-            runtime,
-            lock_path=os.environ.get("FAILOVER_LOCK_PATH", "/shared/failover.lock"),
-            failover_metrics=failover_metrics,
+        if lock_already_acquired:
+            if not post_lock_fence_already_run:
+                await run_gms_failover_post_lock_fence(
+                    backend_name="vllm", role="pre-init"
+                )
+            self._maybe_start_rank_liveness_monitor(handler, config)
+            logger.info(
+                "[Shadow] Failover lock already acquired before engine init; "
+                "registering with discovery"
+            )
+            return False
+
+        engine_id = os.environ.get("ENGINE_ID", "0")
+        primary_engine_id = os.environ.get("DYN_GMS_FAILOVER_PRIMARY_ENGINE_ID", "0")
+        is_shadow = engine_id != primary_engine_id
+        if not is_shadow:
+            logger.info("[Primary] Acquiring active failover lock before discovery")
+            lock = await self._acquire_failover_lock()
+            setattr(handler, "_gms_failover_lock", lock)
+            await run_gms_failover_post_lock_fence(
+                backend_name="vllm", role="active"
+            )
+            self._maybe_start_rank_liveness_monitor(handler, config)
+            return False
+
+        # The pre-initialized standby relinquishes its writer role without clearing
+        # prefix metadata, then waits while remaining healthy but undiscoverable.
+        await handler._pause_controller.pause(1, clear_cache=False)
+        if failover_metrics is not None:
+            failover_metrics.set_state("standby")
+        runtime.set_health_status(True)
+        logger.info("[Shadow] Engine sleeping, waiting for failover lock")
+        lock = await self._acquire_failover_lock()
+        setattr(handler, "_gms_failover_lock", lock)
+        was_contended = bool(getattr(lock, "was_contended", False))
+        if failover_metrics is not None:
+            failover_metrics.set_state("waking")
+            if was_contended:
+                failover_metrics.record_switch_attempt()
+        await run_gms_failover_post_lock_fence(
+            backend_name="vllm", role="shadow"
         )
-        return lock is not None and lock.was_contended
+        await handler._pause_controller.resume()
+        handler._pause_controller.mark_resumed()
+        if promotion_warmup is not None:
+            await promotion_warmup()
+        logger.info("[Shadow] Engine awake, registering with discovery")
+        return was_contended
 
     async def _create_decode_worker(
         self,
@@ -1189,6 +1358,7 @@ class WorkerFactory:
         lifecycle: _DecodeWorkerLifecycle,
     ) -> None:
         """Initialize and serve a decode worker."""
+        self._reject_removed_private_bootstrap_options()
 
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
@@ -1233,6 +1403,33 @@ class WorkerFactory:
         failover_metrics = self._maybe_create_failover_metrics(
             config, generate_endpoint
         )
+        early_failover_lock = None
+        early_failover_fence_run = False
+        lock_before_init = os.environ.get("DYN_VLLM_GMS_LOCK_BEFORE_INIT", "1").lower()
+        if config.gms_shadow_mode and lock_before_init not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            logger.info(
+                "[Shadow] Waiting for failover lock before vLLM engine init "
+                "to protect shared GMS KV warmup"
+            )
+            # Signal startup/liveness health BEFORE blocking on the lock so a
+            # waiting standby's probe passes and the orchestrator does not kill
+            # it (CrashLoopBackOff) while the primary holds the lock. This is
+            # liveness only -- the engine is not registered for serving until
+            # init and discovery registration complete further below.
+            runtime.set_health_status(True)
+            early_failover_lock = await self._acquire_failover_lock()
+            await run_gms_failover_post_lock_fence(
+                backend_name="vllm",
+                role=f"engine-{os.environ.get('ENGINE_ID', '0')}-pre-init",
+            )
+            early_failover_fence_run = True
+            os.environ["DYN_VLLM_GMS_ACTIVE_LOCK_HELD"] = "1"
+            logger.info("[Shadow] Failover lock acquired before vLLM engine init")
 
         # Use pre-created engine if provided (checkpoint mode), otherwise create new
         fpm_worker_id = str(generate_endpoint.connection_id())
@@ -1297,6 +1494,8 @@ class WorkerFactory:
         )
         lifecycle.handler = handler
         handler.add_temp_dir(prometheus_temp_dir)
+        if early_failover_lock is not None:
+            setattr(handler, "_gms_failover_lock", early_failover_lock)
 
         # Check if kv event consolidator is enabled (port was allocated in setup_vllm_engine)
         consolidator_enabled = False
@@ -1363,10 +1562,25 @@ class WorkerFactory:
                 "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
             )
 
+        health_check_payload = VllmHealthCheckPayload(
+            engine_client, use_text_input=config.use_vllm_tokenizer
+        ).to_dict()
+
+        async def promotion_warmup() -> None:
+            await run_gms_failover_promotion_warmup(
+                handler.generate, health_check_payload, backend_name="vllm"
+            )
+
         was_failover = False
         if snapshot_engine is None:
             was_failover = await self._maybe_wait_for_failover_lock(
-                handler, runtime, config, failover_metrics
+                handler,
+                runtime,
+                config,
+                failover_metrics,
+                lock_already_acquired=early_failover_lock is not None,
+                promotion_warmup=promotion_warmup,
+                post_lock_fence_already_run=early_failover_fence_run,
             )
 
         # Wait for self-benchmark to complete before registering.
@@ -1412,10 +1626,6 @@ class WorkerFactory:
             failover_metrics.set_state("active")
             if was_failover:
                 failover_metrics.record_switch_success()
-
-        health_check_payload = VllmHealthCheckPayload(
-            engine_client, use_text_input=config.use_vllm_tokenizer
-        ).to_dict()
 
         perf_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.get_perf_metrics"
@@ -1518,6 +1728,7 @@ class WorkerFactory:
         """
         Instantiate and serve
         """
+        self._reject_removed_private_bootstrap_options()
         generate_endpoint = runtime.endpoint(
             f"{config.namespace}.{config.component}.{config.endpoint}"
         )
@@ -1653,10 +1864,23 @@ class WorkerFactory:
             lora_enabled=config.engine_args.enable_lora,
         )
 
+        health_check_payload = VllmPrefillHealthCheckPayload(
+            engine_client, use_text_input=config.use_vllm_tokenizer
+        ).to_dict()
+
+        async def promotion_warmup() -> None:
+            await run_gms_failover_promotion_warmup(
+                handler.generate, health_check_payload, backend_name="vllm"
+            )
+
         was_failover = False
         if snapshot_engine is None:
             was_failover = await self._maybe_wait_for_failover_lock(
-                handler, runtime, config, failover_metrics
+                handler,
+                runtime,
+                config,
+                failover_metrics,
+                promotion_warmup=promotion_warmup,
             )
 
         # Wait for self-benchmark to complete before registering.
@@ -1708,10 +1932,6 @@ class WorkerFactory:
             failover_metrics.set_state("active")
             if was_failover:
                 failover_metrics.record_switch_success()
-
-        health_check_payload = VllmPrefillHealthCheckPayload(
-            engine_client, use_text_input=config.use_vllm_tokenizer
-        ).to_dict()
 
         prefill_metrics_labels = [
             (
