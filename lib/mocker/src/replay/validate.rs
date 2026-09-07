@@ -42,12 +42,7 @@ pub fn validate_replay_args_mode(
     }
 }
 
-fn validate_replay_args(
-    args: &MockEngineArgs,
-    num_workers: usize,
-    mode: &str,
-    allow_dp_replication: bool,
-) -> Result<()> {
+fn validate_replay_args(args: &MockEngineArgs, num_workers: usize, mode: &str) -> Result<()> {
     if num_workers == 0 {
         bail!("{mode} requires num_workers >= 1");
     }
@@ -57,16 +52,6 @@ fn validate_replay_args(
             args.worker_type,
         );
     }
-    // Offline replay treats dp_size>1 as rank topology: each mocker worker gets
-    // that many independent scheduler/KV-pool states, mirroring the live path.
-    // Online replay does not support it.
-    if args.dp_size != 1 && !allow_dp_replication {
-        bail!(
-            "{mode} only supports data_parallel_size=1, got {}",
-            args.dp_size,
-        );
-    }
-
     Ok(())
 }
 
@@ -74,11 +59,12 @@ fn validate_offline_router_mode(
     router_mode: ReplayRouterMode,
     num_workers: usize,
     dp_size: u32,
+    scaling_enabled: bool,
 ) -> Result<()> {
     if router_mode != ReplayRouterMode::KvRouter {
         return Ok(());
     }
-    if num_workers.saturating_mul(dp_size.max(1) as usize) > 1 {
+    if scaling_enabled || num_workers.saturating_mul(dp_size.max(1) as usize) > 1 {
         return Ok(());
     }
 
@@ -91,9 +77,10 @@ pub(super) fn validate_offline_replay_args(
     args: &MockEngineArgs,
     num_workers: usize,
     router_mode: ReplayRouterMode,
+    scaling_enabled: bool,
 ) -> Result<()> {
-    validate_offline_router_mode(router_mode, num_workers, args.dp_size)?;
-    validate_replay_args(args, num_workers, "trace replay", true)
+    validate_offline_router_mode(router_mode, num_workers, args.dp_size, scaling_enabled)?;
+    validate_replay_args(args, num_workers, "trace replay")
 }
 
 pub(super) fn validate_offline_concurrency_args(
@@ -101,17 +88,18 @@ pub(super) fn validate_offline_concurrency_args(
     num_workers: usize,
     max_in_flight: usize,
     router_mode: ReplayRouterMode,
+    scaling_enabled: bool,
 ) -> Result<()> {
     if max_in_flight == 0 {
         bail!("concurrency replay requires max_in_flight >= 1");
     }
 
-    validate_offline_router_mode(router_mode, num_workers, args.dp_size)?;
-    validate_replay_args(args, num_workers, "concurrency replay", true)
+    validate_offline_router_mode(router_mode, num_workers, args.dp_size, scaling_enabled)?;
+    validate_replay_args(args, num_workers, "concurrency replay")
 }
 
 pub(super) fn validate_online_replay_args(args: &MockEngineArgs, num_workers: usize) -> Result<()> {
-    validate_replay_args(args, num_workers, "online replay", false)
+    validate_replay_args(args, num_workers, "online replay")
 }
 
 pub(super) fn validate_online_concurrency_args(
@@ -123,7 +111,7 @@ pub(super) fn validate_online_concurrency_args(
         bail!("online concurrency replay requires max_in_flight >= 1");
     }
 
-    validate_replay_args(args, num_workers, "online replay", false)
+    validate_replay_args(args, num_workers, "online replay")
 }
 
 fn validate_disagg_args(config: &OfflineDisaggReplayConfig, mode: &str) -> Result<()> {
@@ -271,6 +259,32 @@ mod tests {
     fn offline_kv_router_accepts_one_worker_with_multiple_dp_ranks() {
         let mut args = args(EngineType::Vllm, WorkerType::Aggregated);
         args.dp_size = 2;
-        validate_offline_replay_args(&args, 1, ReplayRouterMode::KvRouter).unwrap();
+        validate_offline_replay_args(&args, 1, ReplayRouterMode::KvRouter, false).unwrap();
+    }
+
+    #[test]
+    fn online_replay_accepts_attention_dp() {
+        let mut args = args(EngineType::Vllm, WorkerType::Aggregated);
+        args.dp_size = 2;
+
+        validate_online_replay_args(&args, 1).unwrap();
+        validate_online_concurrency_args(&args, 1, 1).unwrap();
+    }
+
+    #[test]
+    fn offline_kv_router_accepts_one_worker_with_scaling() {
+        let args = args(EngineType::Vllm, WorkerType::Aggregated);
+        validate_offline_replay_args(&args, 1, ReplayRouterMode::KvRouter, true).unwrap();
+    }
+
+    #[test]
+    fn offline_kv_router_rejects_one_worker_without_scaling() {
+        let args = args(EngineType::Vllm, WorkerType::Aggregated);
+        let error =
+            validate_offline_replay_args(&args, 1, ReplayRouterMode::KvRouter, false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "offline replay only supports router_mode=kv_router with more than one worker/DP-rank target"
+        );
     }
 }

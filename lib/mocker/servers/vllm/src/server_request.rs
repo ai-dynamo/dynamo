@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use dynamo_mocker::common::protocols::DirectRequest;
+use dynamo_mocker::live::stable_request_uuid;
 use dynamo_vllm_sidecar::proto as pb;
 use prost_types::{ListValue, Struct, Value, value::Kind};
 use tonic::Status;
@@ -173,7 +174,7 @@ impl PreparedRequest {
         } else {
             request.request_id
         };
-        let uuid = stable_uuid(config.seed, &request_id);
+        let uuid = stable_request_uuid(config.seed, &request_id);
         let output_token_seed = synthetic_token_seed(config.seed, &request_id);
         let max_output_tokens = max_new_tokens as usize;
         Ok(Self {
@@ -290,6 +291,7 @@ impl PreparedRequest {
                 finish_reason: pb::finish_info::FinishReason::Length as i32,
                 stop_reason: None,
                 kv_transfer_params: (self.mode == ServerMode::Prefill).then(|| self.handoff()),
+                ec_transfer_params: None,
             }),
         }
     }
@@ -380,19 +382,6 @@ impl KvTransferRole {
             }
         }
     }
-}
-
-fn stable_uuid(seed: u64, request_id: &str) -> Uuid {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&seed.to_le_bytes());
-    hasher.update(request_id.as_bytes());
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
-    // Mark the stable digest as an RFC 4122 variant/version-4 UUID. It remains
-    // deterministic; these bits only make diagnostics parse cleanly.
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    Uuid::from_bytes(bytes)
 }
 
 fn synthetic_token_seed(seed: u64, request_id: &str) -> u64 {
@@ -493,6 +482,17 @@ fn require_port(value: &Struct, key: &str) -> BoxedStatusResult<u16> {
         {
             Ok(*value as u16)
         }
+        // The vLLM sidecar sends remote_port as a string so vLLM renders a valid
+        // NIXL side-channel ZMQ URL (a protobuf Struct number would arrive as a
+        // double like `5600.0`); accept a string-encoded port too.
+        Some(Value {
+            kind: Some(Kind::StringValue(text)),
+        }) => text.parse::<u16>().map_err(|_| {
+            Status::invalid_argument(format!(
+                "decode KV transfer field '{key}' must be an integer port",
+            ))
+            .into()
+        }),
         _ => Err(Status::invalid_argument(format!(
             "decode KV transfer field '{key}' must be an integer port",
         ))

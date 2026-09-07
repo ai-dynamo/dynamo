@@ -462,6 +462,22 @@ class TestKalmanPredictor:
         result = predictor.predict_next()
         assert result >= 0.0
 
+    def test_uses_last_value_until_minimum_points(self):
+        """Forecasting starts only after kalman_min_points observations."""
+        predictor = KalmanPredictor(_make_config(kalman_min_points=3))
+
+        predictor.add_data_point(10.0)
+        assert predictor.predict_next() == 10.0
+        assert not predictor._has_cached_pred
+
+        predictor.add_data_point(20.0)
+        assert predictor.predict_next() == 20.0
+        assert not predictor._has_cached_pred
+
+        predictor.add_data_point(30.0)
+        predictor.predict_next()
+        assert predictor._has_cached_pred
+
     def test_caches_prediction_between_observations(self):
         """Calling predict_next() twice without new data returns the same value."""
         predictor = KalmanPredictor(_make_config())

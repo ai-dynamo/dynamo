@@ -37,7 +37,7 @@ metadata:
     {{- include "dynamo-operator.labels" . | nindent 4 }}
 rules:
 - apiGroups: ["nvidia.com"]
-  resources: ["dynamocomponentdeployments", "dynamographdeployments"]
+  resources: ["dynamographdeployments"]
   verbs: ["get", "list", "create", "update", "patch"]
 - apiGroups: ["nvidia.com"]
   resources: ["dynamographdeploymentscalingadapters/scale"]
@@ -48,6 +48,16 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamoworkermetadatas"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- if .Values.planner.powerAwareness.enabled }}
+# Pods (list only): startup settlement reads non-terminal pod annotations to
+# verify the DGD-owned power cap has propagated before caching it. No write
+# surface: caps are authored on the DGD podTemplate and enforced by the Power
+# Agent; the Planner never patches Pods.
+# Requires planner.powerAwareness.enabled=true in Helm values.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -65,7 +75,10 @@ roleRef:
   name: planner-role
   apiGroup: rbac.authorization.k8s.io
 {{- else }}
-# Cluster-wide mode: ClusterRole for planner
+# Cluster-wide mode: ClusterRole for planner.
+# Even though this is a ClusterRole, the operator binds it via a namespace-scoped
+# RoleBinding (internal/rbac/manager.go EnsureServiceAccountWithRBAC), so all
+# permissions — including pods/list — are effective only in the DGD's namespace.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -75,7 +88,7 @@ metadata:
     {{- include "dynamo-operator.labels" . | nindent 4 }}
 rules:
 - apiGroups: ["nvidia.com"]
-  resources: ["dynamocomponentdeployments", "dynamographdeployments"]
+  resources: ["dynamographdeployments"]
   verbs: ["get", "list", "create", "update", "patch"]
 - apiGroups: ["nvidia.com"]
   resources: ["dynamographdeploymentscalingadapters/scale"]
@@ -86,4 +99,14 @@ rules:
 - apiGroups: ["nvidia.com"]
   resources: ["dynamoworkermetadatas"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+{{- if .Values.planner.powerAwareness.enabled }}
+# Pods (list only): startup settlement reads non-terminal pod annotations to
+# verify the DGD-owned power cap has propagated before caching it. No write
+# surface: caps are authored on the DGD podTemplate and enforced by the Power
+# Agent; the Planner never patches Pods.
+# Requires planner.powerAwareness.enabled=true in Helm values.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list"]
+{{- end }}
 {{- end }}

@@ -26,6 +26,7 @@ impl ConfiguredModel {
         EngineConfig {
             model: self.source.clone(),
             served_model_name: None,
+            model_aliases: Vec::new(),
             runtime_data,
             llm: Some(LlmRegistration {
                 context_length: self.context_length,

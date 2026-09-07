@@ -24,7 +24,6 @@ data:
     moe_config:
       backend: TRTLLM
     moe_expert_parallel_size: 1
-    num_postprocess_workers: 4
     pipeline_parallel_size: 1
     print_iter_log: true
     stream_interval: 20
@@ -52,7 +51,6 @@ data:
     moe_config:
       backend: TRTLLM
     moe_expert_parallel_size: 1
-    num_postprocess_workers: 4
     pipeline_parallel_size: 1
     print_iter_log: true
     stream_interval: 20

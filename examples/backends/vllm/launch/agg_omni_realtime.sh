@@ -28,11 +28,12 @@ done
 
 HTTP_PORT="${DYN_HTTP_PORT:-8000}"
 GPU_MEM_ARGS=$(build_vllm_gpu_mem_args)
-print_launch_banner --no-curl "Launching vLLM-Omni Realtime (1 GPU)" "$MODEL" "$HTTP_PORT"
+print_launch_banner --no-curl "Launching vLLM-Omni Realtime" "$MODEL" "$HTTP_PORT"
 print_curl_footer <<TEST
   # /v1/realtime is a WebSocket endpoint; drive it with the realtime client
   # (omit --input-audio to fetch a sample clip from the vLLM-Omni repo):
-  python ${SCRIPT_DIR}/realtime_omni_client.py \\
+  python ${SCRIPT_DIR}/realtime_audio_client.py \\
+    --session-type realtime \\
     --url ws://localhost:${HTTP_PORT}/v1/realtime \\
     --model "${MODEL}" \\
     --output-dir dynamo-realtime
@@ -40,9 +41,6 @@ TEST
 
 
 python -m dynamo.frontend &
-FRONTEND_PID=$!
-
-sleep 2
 
 echo "Starting Omni Realtime worker..."
 # --realtime serves a ModelType.Realtime bidirectional endpoint backed by

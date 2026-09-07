@@ -1,11 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
+# Optional-dependency preflight must run before replay CLI imports.
 
 """Regression tests for planner replay FPM handling."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
+
+pytest.importorskip(
+    "aisimulate.replay",
+    reason="AI Simulate is an optional Dynamo simulation dependency",
+)
 
 from dynamo.mocker import MockEngineArgs
 from dynamo.planner.config.planner_config import PlannerConfig
@@ -21,7 +30,8 @@ from dynamo.planner.offline.replay_adapter import (
     _update_fpm_cache,
 )
 from dynamo.planner.plugins.orchestrator.engine_adapter import OrchestratorEngineAdapter
-from dynamo.replay.main import _engine_caps
+from dynamo.replay import planner as replay_planner
+from dynamo.replay.planner import _engine_caps
 
 pytestmark = [
     pytest.mark.gpu_0,
@@ -50,7 +60,7 @@ def _agg_config_sla() -> PlannerConfig:
 
 
 def _snap(worker_id: str, wall_time: float, dp_rank: int = 0) -> dict:
-    """A bridge FPM snapshot dict with every key ``_build_fpm_from_dict`` reads."""
+    """A replay FPM snapshot dict with every key ``_build_fpm_from_dict`` reads."""
     return {
         "worker_id": worker_id,
         "dp_rank": dp_rank,
@@ -110,6 +120,33 @@ def _orch_agg_config_sla() -> PlannerConfig:
     return _agg_config_sla()
 
 
+def test_replay_adapter_uses_injected_engine_protocol_and_owns_cleanup():
+    class _Engine:
+        def __init__(self):
+            self.closed = False
+
+        def initial_tick(self, start_s):
+            return ScheduledTick(at_s=start_s + 5.0)
+
+        async def tick(self, scheduled_tick, tick_input):
+            raise AssertionError("tick is not needed by this ownership test")
+
+        async def shutdown(self):
+            self.closed = True
+
+    engine = _Engine()
+    adapter = ReplayPlannerAdapter(
+        PlannerConfig(mode="agg"),
+        capabilities=_agg_caps(),
+        engine=engine,
+    )
+
+    with adapter:
+        assert adapter.initial_tick_ms() == 5_000.0
+
+    assert engine.closed
+
+
 def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
     """Review #3: the orchestrator replay path must actually install
     regressions. ``ReplayPlannerAdapter.install_benchmark_fpms`` routes to
@@ -129,6 +166,92 @@ def test_install_benchmark_fpms_installs_regression_on_orchestrator_path():
 
     # After: the agg regression is installed (non-None).
     assert adapter._engine._orchestrator.get_regression("agg") is not None
+
+
+def test_summary_only_planner_details_preserve_tick_count():
+    class _Recorder:
+        def finalize(self):
+            raise AssertionError("summary-only replay must not finalize diagnostics")
+
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+    adapter._capture_details = False
+    adapter._recorder = _Recorder()
+    adapter._config = PlannerConfig(mode="agg")
+    adapter._benchmark_granularity = 8
+    adapter._bootstrap_metadata = {"status": "not_required"}
+    adapter._ticks = [{"large": "tick payload"}]
+    adapter._scaling_events = []
+    adapter._total_ticks = 4
+
+    details = adapter.finalize([{"large": "lifecycle payload"}])
+
+    assert details.total_ticks == 4
+    assert details.ticks == []
+    assert details.lifecycle_operations == []
+    assert details.metadata["details_captured"] is False
+
+
+def test_planner_metadata_identifies_custom_plugins_without_secrets():
+    config = PlannerConfig(
+        mode="agg",
+        plugin_registration={
+            "in_process_plugins": [
+                {
+                    "module": "custom.plugins",
+                    "class": "Predictor",
+                    "plugin_id": "custom_predict",
+                    "plugin_type": "predict",
+                    "priority": 5,
+                    "kwargs": {"window": 4},
+                }
+            ]
+        },
+        scheduling={
+            "external_plugins": [
+                {
+                    "plugin_id": "external_propose",
+                    "plugin_type": "propose",
+                    "priority": 10,
+                    "endpoint": "grpc://planner-plugin:9000",
+                    "auth_token": "secret",
+                    "version": "v2",
+                }
+            ]
+        },
+    )
+    adapter = ReplayPlannerAdapter.__new__(ReplayPlannerAdapter)
+    adapter._config = config
+    adapter._benchmark_granularity = 8
+    adapter._bootstrap_metadata = {"status": "not_required"}
+    adapter._capture_details = True
+
+    metadata = adapter._planner_metadata()
+    identities = metadata["configured_plugin_identities"]
+
+    assert [identity["plugin_id"] for identity in identities] == [
+        "custom_predict",
+        "external_propose",
+    ]
+    serialized = str(identities)
+    assert "secret" not in serialized
+    assert "grpc://planner-plugin:9000" not in serialized
+
+    changed_port_config = config.model_copy(
+        update={"control_api_port": config.control_api_port + 1}
+    )
+    adapter._config = changed_port_config
+    assert (
+        adapter._planner_metadata()["planner_config_digest"]
+        == metadata["planner_config_digest"]
+    )
+
+    changed_config = config.model_copy(deep=True)
+    changed_config.plugin_registration.in_process_plugins[0].kwargs["window"] = 8
+    adapter._config = changed_config
+    assert (
+        adapter._planner_metadata()["planner_config_digest"]
+        != metadata["planner_config_digest"]
+    )
 
 
 def test_build_tick_input_maps_replay_accept_length():
@@ -253,6 +376,111 @@ def test_replay_engine_caps_keeps_single_rank_defaults():
     assert caps.num_gpu == 1
 
 
+def test_disagg_bootstrap_uses_role_specific_performance_model_identities(
+    monkeypatch,
+):
+    class _Session:
+        def __init__(self, tp_size):
+            self.tp_size = tp_size
+
+        def predict_prefill(self, batch_size, isl, prefix):
+            del batch_size, isl, prefix
+            return float(self.tp_size)
+
+        def predict_decode(self, batch_size, isl, osl):
+            del batch_size, isl, osl
+            return float(self.tp_size)
+
+    class _Adapter:
+        def __init__(self):
+            self.bootstrap_metadata = None
+            self.prefill_fpms = None
+            self.decode_fpms = None
+
+        def set_bootstrap_metadata(self, metadata):
+            self.bootstrap_metadata = metadata
+
+        def _is_easy_mode(self):
+            return False
+
+        def install_benchmark_fpms(
+            self, *, agg_fpms=None, prefill_fpms=None, decode_fpms=None
+        ):
+            assert agg_fpms is None
+            self.prefill_fpms = prefill_fpms
+            self.decode_fpms = decode_fpms
+
+    adapter = _Adapter()
+    session_requests = []
+
+    def create_session(**kwargs):
+        session_requests.append(kwargs)
+        return _Session(kwargs["tp_size"])
+
+    monkeypatch.setattr(replay_planner, "create_session", create_session)
+    monkeypatch.setattr(
+        "dynamo.planner.offline.replay_adapter.create_replay_planner_adapter",
+        lambda **kwargs: adapter,
+    )
+    prefill_args = MockEngineArgs(
+        max_num_batched_tokens=128,
+        max_num_seqs=1,
+        num_gpu_blocks=64,
+        block_size=16,
+    )
+    decode_args = MockEngineArgs(
+        max_num_batched_tokens=128,
+        max_num_seqs=2,
+        num_gpu_blocks=64,
+        block_size=16,
+    )
+    metadata = {
+        "prefill": {
+            "provider": "aic",
+            "config": {
+                "backend": "vllm",
+                "system": "h200_sxm",
+                "model_path": "example/model",
+                "tp_size": 2,
+                "attention_dp_size": 1,
+            },
+        },
+        "decode": {
+            "provider": "aic",
+            "config": {
+                "backend": "vllm",
+                "system": "h200_sxm",
+                "model_path": "example/model",
+                "tp_size": 1,
+                "attention_dp_size": 1,
+            },
+        },
+    }
+
+    result = replay_planner.prepare_planner_replay(
+        extra_engine_args=None,
+        prefill_engine_args=prefill_args,
+        decode_engine_args=decode_args,
+        planner_config_arg=json.dumps(
+            {
+                "mode": "disagg",
+                "optimization_target": "sla",
+                "enable_throughput_scaling": True,
+                "enable_load_scaling": False,
+            }
+        ),
+        benchmark_granularity=1,
+        performance_model_metadata=metadata,
+    )
+
+    assert result is adapter
+    assert [request["tp_size"] for request in session_requests] == [2, 1]
+    assert adapter.prefill_fpms
+    assert adapter.decode_fpms
+    assert adapter.prefill_fpms[0].wall_time == pytest.approx(0.002)
+    assert adapter.decode_fpms[0].wall_time == pytest.approx(0.001)
+
+
 def test_merge_traffic_weights_ratio_fields_by_native_counts():
     # kv_hit_rate and accept_length must merge by their true denominators
     # (hit_rate_count / accept_length_forward_count), not num_req, so a window
@@ -290,3 +518,37 @@ def test_merge_traffic_weights_ratio_fields_by_native_counts():
     assert merged["hit_rate_count"] == 100
     assert merged["accept_length_forward_count"] == 100
     assert merged["avg_isl"] == pytest.approx(100.0)
+
+
+def test_merge_traffic_keeps_offered_count_separate_from_completion_samples():
+    a = {
+        "num_req": 100,
+        "duration_s": 1.0,
+        "avg_isl": 10.0,
+        "avg_osl": 20.0,
+        "shape_count": 1,
+        "avg_ttft_ms": 1_000.0,
+        "ttft_count": 1,
+        "avg_itl_ms": 10.0,
+        "itl_count": 1,
+    }
+    b = {
+        "num_req": 1,
+        "duration_s": 1.0,
+        "avg_isl": 100.0,
+        "avg_osl": 200.0,
+        "shape_count": 9,
+        "avg_ttft_ms": 2_000.0,
+        "ttft_count": 9,
+        "avg_itl_ms": 20.0,
+        "itl_count": 9,
+    }
+
+    merged = _merge_traffic(a, b)
+
+    assert merged["num_req"] == 101
+    assert merged["shape_count"] == 10
+    assert merged["avg_isl"] == pytest.approx(91.0)
+    assert merged["avg_osl"] == pytest.approx(182.0)
+    assert merged["avg_ttft_ms"] == pytest.approx(1_900.0)
+    assert merged["avg_itl_ms"] == pytest.approx(19.0)

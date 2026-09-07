@@ -3,12 +3,14 @@
 
 //! Optional multimodal encoder hop for token-serving pipelines.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
+use arc_swap::ArcSwapOption;
 use futures::StreamExt;
-use tokio::sync::oneshot;
+use parking_lot::Mutex;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
@@ -18,7 +20,7 @@ use dynamo_runtime::{
         Context, ManyOut, Operator, PushRouter, RouterMode, ServerStreamingEngine, SingleIn,
         async_trait,
     },
-    protocols::{annotated::Annotated, maybe_error::MaybeError},
+    protocols::{EndpointId, annotated::Annotated, maybe_error::MaybeError},
 };
 
 use crate::protocols::common::{
@@ -27,6 +29,11 @@ use crate::protocols::common::{
 };
 
 type EncodePushRouter = PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>;
+
+struct EncoderBinding {
+    endpoint_id: EndpointId,
+    router: Arc<EncodePushRouter>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -54,7 +61,9 @@ impl EncoderLifecycleState {
 /// Encode workers are selected round-robin independently of the downstream
 /// token router mode; they do not participate in KV-aware routing.
 pub struct EncoderRouter {
-    router: OnceLock<Arc<EncodePushRouter>>,
+    binding: ArcSwapOption<EncoderBinding>,
+    target: Mutex<Option<EndpointId>>,
+    target_tx: Option<watch::Sender<Option<Endpoint>>>,
     cancel_token: CancellationToken,
     lifecycle: AtomicU8,
     model_name: String,
@@ -71,7 +80,9 @@ impl EncoderRouter {
     /// Create a permanently-disabled passthrough router.
     pub fn disabled() -> Arc<Self> {
         Arc::new(Self {
-            router: OnceLock::new(),
+            binding: ArcSwapOption::empty(),
+            target: Mutex::new(None),
+            target_tx: None,
             cancel_token: CancellationToken::new(),
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
             model_name: String::new(),
@@ -79,15 +90,30 @@ impl EncoderRouter {
         })
     }
 
-    /// Create a router that activates when discovery observes an Encode peer.
-    pub fn new(
-        activation_rx: oneshot::Receiver<Endpoint>,
+    /// Create a router whose endpoint is driven by committed discovery topology.
+    pub fn new(model_name: String, namespace: String) -> Arc<Self> {
+        Self::new_inner(model_name, namespace, None)
+    }
+
+    pub(crate) fn new_with_task_guard(
         model_name: String,
         namespace: String,
+        task_guard: dynamo_runtime::engine::EngineContextGuard,
+    ) -> Arc<Self> {
+        Self::new_inner(model_name, namespace, Some(task_guard))
+    }
+
+    fn new_inner(
+        model_name: String,
+        namespace: String,
+        task_guard: Option<dynamo_runtime::engine::EngineContextGuard>,
     ) -> Arc<Self> {
         let cancel_token = CancellationToken::new();
+        let (target_tx, target_rx) = watch::channel(None);
         let router = Arc::new(Self {
-            router: OnceLock::new(),
+            binding: ArcSwapOption::empty(),
+            target: Mutex::new(None),
+            target_tx: Some(target_tx),
             cancel_token: cancel_token.clone(),
             lifecycle: AtomicU8::new(EncoderLifecycleState::Pending as u8),
             model_name,
@@ -96,83 +122,162 @@ impl EncoderRouter {
 
         let router_weak = Arc::downgrade(&router);
         tokio::spawn(async move {
-            tokio::select! {
-                result = activation_rx => {
-                    let Ok(endpoint) = result else {
-                        tracing::debug!("Encoder router activation channel closed");
-                        return;
-                    };
-                    let Some(router) = router_weak.upgrade() else {
-                        tracing::debug!("Encoder router dropped before activation");
-                        return;
-                    };
-                    if let Err(error) = router.activate(endpoint).await {
-                        tracing::error!(%error, "Failed to activate encoder router");
-                    }
-                }
-                _ = cancel_token.cancelled() => {
-                    tracing::debug!("Encoder router activation cancelled");
-                }
-            }
+            let _task_guard = task_guard;
+            Self::drive_target(router_weak, target_rx, cancel_token).await;
         });
 
         router
     }
 
-    async fn activate(&self, endpoint: Endpoint) -> Result<()> {
+    async fn build(endpoint: Endpoint) -> Result<EncoderBinding> {
+        let endpoint_id = endpoint.id();
         let client = endpoint.client().await?;
         let router =
             EncodePushRouter::from_client_with_monitor(client, RouterMode::RoundRobin, None)
                 .await?;
-        let _ = self.router.set(Arc::new(router));
-        if self.mark_active_if_pending() {
-            tracing::info!(
-                model = %self.model_name,
-                namespace = %self.namespace,
-                "Encoder router activated"
-            );
-        } else {
-            tracing::debug!(
-                model = %self.model_name,
-                namespace = %self.namespace,
-                state = ?self.lifecycle_state(),
-                "Encoder router initialized after its activation was superseded"
-            );
-        }
-        Ok(())
+        Ok(EncoderBinding {
+            endpoint_id,
+            router: Arc::new(router),
+        })
     }
 
-    fn mark_active_if_pending(&self) -> bool {
-        self.lifecycle
-            .compare_exchange(
-                EncoderLifecycleState::Pending as u8,
-                EncoderLifecycleState::Active as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
+    async fn drive_target(
+        router: std::sync::Weak<Self>,
+        mut target_rx: watch::Receiver<Option<Endpoint>>,
+        cancel_token: CancellationToken,
+    ) {
+        loop {
+            let target = target_rx.borrow_and_update().clone();
+            let Some(endpoint) = target else {
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => return,
+                    changed = target_rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
+                }
+                continue;
+            };
+            let endpoint_id = endpoint.id();
+            let reuses_binding = router.upgrade().is_some_and(|router| {
+                router
+                    .binding
+                    .load_full()
+                    .is_some_and(|binding| binding.endpoint_id == endpoint_id)
+                    && router.lifecycle_state() == EncoderLifecycleState::Active
+            });
+            if reuses_binding {
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => return,
+                    changed = target_rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
+                }
+                continue;
+            }
+            let build = Self::build(endpoint);
+            tokio::pin!(build);
+            let result = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => return,
+                changed = target_rx.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                result = &mut build => result,
+            };
+
+            let Some(router) = router.upgrade() else {
+                return;
+            };
+            match result {
+                Ok(binding) => {
+                    let current_target = router.target.lock();
+                    if current_target.as_ref() != Some(&endpoint_id) {
+                        continue;
+                    }
+                    router.binding.store(Some(Arc::new(binding)));
+                    router
+                        .lifecycle
+                        .store(EncoderLifecycleState::Active as u8, Ordering::Release);
+                    drop(current_target);
+                    tracing::info!(
+                        model = %router.model_name,
+                        namespace = %router.namespace,
+                        %endpoint_id,
+                        "Encoder router target activated"
+                    );
+                }
+                Err(error) => {
+                    if router.target.lock().as_ref() != Some(&endpoint_id) {
+                        continue;
+                    }
+                    tracing::error!(
+                        %error,
+                        model = %router.model_name,
+                        namespace = %router.namespace,
+                        %endpoint_id,
+                        "Failed to activate encoder router target"
+                    );
+                    drop(router);
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => return,
+                        changed = target_rx.changed() => {
+                            if changed.is_err() {
+                                return;
+                            }
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                    }
+                }
+            }
+        }
     }
 
     fn lifecycle_state(&self) -> EncoderLifecycleState {
         EncoderLifecycleState::load(self.lifecycle.load(Ordering::Acquire))
     }
 
-    pub fn deactivate(&self) {
-        self.lifecycle
-            .store(EncoderLifecycleState::Unavailable as u8, Ordering::Release);
+    /// Update the desired Encode endpoint. Clearing is synchronous so requests
+    /// holding an older catalog snapshot stop using a removed endpoint before
+    /// the new catalog is published.
+    pub(crate) fn set_target(&self, target: Option<Endpoint>) {
+        let target_id = target.as_ref().map(Endpoint::id);
+        let mut current = self.target.lock();
+        if *current == target_id {
+            return;
+        }
+        *current = target_id.clone();
+        let reuses_binding = target_id.is_some()
+            && self
+                .binding
+                .load_full()
+                .is_some_and(|binding| Some(&binding.endpoint_id) == target_id.as_ref());
+        let lifecycle = if target.is_none() {
+            EncoderLifecycleState::Unavailable
+        } else if reuses_binding {
+            EncoderLifecycleState::Active
+        } else {
+            self.binding.store(None);
+            EncoderLifecycleState::Pending
+        };
+        self.lifecycle.store(lifecycle as u8, Ordering::Release);
+        if let Some(target_tx) = &self.target_tx {
+            target_tx.send_replace(target);
+        }
     }
 
-    pub fn reactivate(&self) {
-        let _ = self.lifecycle.compare_exchange(
-            EncoderLifecycleState::Unavailable as u8,
-            EncoderLifecycleState::Active as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-    }
-
-    pub fn is_deactivated(&self) -> bool {
-        self.lifecycle_state() == EncoderLifecycleState::Unavailable
+    #[cfg(test)]
+    pub(crate) fn target_endpoint_id(&self) -> Option<EndpointId> {
+        self.target.lock().clone()
     }
 
     fn should_encode(request: &PreprocessedRequest) -> bool {
@@ -235,11 +340,11 @@ impl
             context.metadata().clone(),
         );
         let encode_result = async {
-            let router = self
-                .router
-                .get()
+            let binding = self
+                .binding
+                .load_full()
                 .context("Encoder router is active but not initialized")?;
-            let response = router.generate(encode_context).await?;
+            let response = binding.router.generate(encode_context).await?;
             Self::consume_encode_stream(response).await
         }
         .await;
@@ -332,23 +437,12 @@ mod tests {
 
     #[tokio::test]
     async fn pending_activation_does_not_keep_router_alive() {
-        let (_activation_tx, activation_rx) = oneshot::channel();
-        let router = EncoderRouter::new(activation_rx, "model".into(), "namespace".into());
+        let router = EncoderRouter::new("model".into(), "namespace".into());
         let weak = Arc::downgrade(&router);
 
         drop(router);
 
         assert!(weak.upgrade().is_none());
-    }
-
-    #[test]
-    fn deactivation_wins_an_in_flight_activation() {
-        let router = EncoderRouter::disabled();
-
-        router.deactivate();
-
-        assert!(!router.mark_active_if_pending());
-        assert_eq!(router.lifecycle_state(), EncoderLifecycleState::Unavailable);
     }
 
     #[tokio::test]

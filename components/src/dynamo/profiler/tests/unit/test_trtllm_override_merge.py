@@ -22,6 +22,25 @@ pytestmark = [
 ]
 
 
+def _component(name: str, component_type: str, args: list[str], **fields) -> dict:
+    return {
+        "name": name,
+        "type": component_type,
+        "podTemplate": {
+            "spec": {
+                "containers": [{"name": "main", "args": args, **fields}],
+            }
+        },
+    }
+
+
+def _main_containers_by_name(config: dict) -> dict[str, dict]:
+    return {
+        component["name"]: component["podTemplate"]["spec"]["containers"][0]
+        for component in config["spec"]["components"]
+    }
+
+
 def test_merge_overrides_into_existing_override_engine_args():
     """When --override-engine-args is already present, overrides merge into the
     JSON blob instead of appending mutually-exclusive --trtllm.* flags."""
@@ -71,88 +90,60 @@ def test_enable_chunked_prefill_updates_generated_trtllm_workers():
     )
     config = {
         "spec": {
-            "services": {
-                "Frontend": {"componentType": "frontend"},
-                "prefill": {
-                    "componentType": "worker",
-                    "subComponentType": "prefill",
-                    "extraPodSpec": {
-                        "mainContainer": {
-                            "args": ["--override-engine-args", prefill_override]
-                        }
-                    },
-                },
-                "empty_override": {
-                    "componentType": "worker",
-                    "subComponentType": "prefill",
-                    "extraPodSpec": {
-                        "mainContainer": {"args": ["--override-engine-args", "{}"]}
-                    },
-                },
-                "decode": {
-                    "componentType": "worker",
-                    "subComponentType": "decode",
-                    "extraPodSpec": {
-                        "mainContainer": {
-                            "args": [
-                                "--trtllm.enable_chunked_prefill",
-                                "false",
-                            ]
-                        }
-                    },
-                },
-                "dangling": {
-                    "componentType": "worker",
-                    "subComponentType": "decode",
-                    "extraPodSpec": {
-                        "mainContainer": {"args": ["--trtllm.enable_chunked_prefill"]}
-                    },
-                },
-                "encode": {
-                    "componentType": "worker",
-                    "subComponentType": "encode",
-                    "extraPodSpec": {"mainContainer": {"args": []}},
-                },
-            }
+            "components": [
+                _component("Frontend", "frontend", []),
+                _component(
+                    "prefill",
+                    "prefill",
+                    ["--override-engine-args", prefill_override],
+                ),
+                _component(
+                    "empty_override",
+                    "prefill",
+                    ["--override-engine-args", "{}"],
+                ),
+                _component(
+                    "decode",
+                    "decode",
+                    ["--trtllm.enable_chunked_prefill", "false"],
+                ),
+                _component(
+                    "dangling",
+                    "decode",
+                    ["--trtllm.enable_chunked_prefill"],
+                ),
+                _component("encode", "encode", []),
+            ]
         }
     }
 
     result = enable_trtllm_chunked_prefill(config)
     result = enable_trtllm_chunked_prefill(result)
 
-    prefill_args = result["spec"]["services"]["prefill"]["extraPodSpec"][
-        "mainContainer"
-    ]["args"]
+    containers = _main_containers_by_name(result)
+    prefill_args = containers["prefill"]["args"]
     assert not any(arg.startswith("--trtllm.") for arg in prefill_args)
     override_idx = prefill_args.index("--override-engine-args")
     override = json.loads(prefill_args[override_idx + 1])
     assert override["enable_chunked_prefill"] is True
     assert override["kv_cache_config"]["tokens_per_block"] == 32
 
-    empty_override_args = result["spec"]["services"]["empty_override"]["extraPodSpec"][
-        "mainContainer"
-    ]["args"]
+    empty_override_args = containers["empty_override"]["args"]
     assert not any(arg.startswith("--trtllm.") for arg in empty_override_args)
     override_idx = empty_override_args.index("--override-engine-args")
     assert json.loads(empty_override_args[override_idx + 1]) == {
         "enable_chunked_prefill": True
     }
 
-    decode_args = result["spec"]["services"]["decode"]["extraPodSpec"]["mainContainer"][
-        "args"
-    ]
+    decode_args = containers["decode"]["args"]
     assert decode_args.count("--trtllm.enable_chunked_prefill") == 1
     flag_idx = decode_args.index("--trtllm.enable_chunked_prefill")
     assert decode_args[flag_idx + 1] == "true"
 
-    dangling_args = result["spec"]["services"]["dangling"]["extraPodSpec"][
-        "mainContainer"
-    ]["args"]
+    dangling_args = containers["dangling"]["args"]
     assert dangling_args == ["--trtllm.enable_chunked_prefill", "true"]
 
-    encode_args = result["spec"]["services"]["encode"]["extraPodSpec"]["mainContainer"][
-        "args"
-    ]
+    encode_args = containers["encode"]["args"]
     assert encode_args == []
 
 
@@ -170,46 +161,35 @@ def test_enable_chunked_prefill_preserves_shell_form_workers():
     )
     config = {
         "spec": {
-            "services": {
-                "dynamic": {
-                    "componentType": "worker",
-                    "subComponentType": "decode",
-                    "extraPodSpec": {
-                        "mainContainer": {
-                            "command": ["/bin/sh", "-c"],
-                            "args": [dynamic_command],
-                        }
-                    },
-                },
-                "override": {
-                    "componentType": "worker",
-                    "subComponentType": "prefill",
-                    "extraPodSpec": {
-                        "mainContainer": {
-                            "command": ["sh", "-c"],
-                            "args": [override_command],
-                        }
-                    },
-                },
-            }
+            "components": [
+                _component(
+                    "dynamic",
+                    "decode",
+                    [dynamic_command],
+                    command=["/bin/sh", "-c"],
+                ),
+                _component(
+                    "override",
+                    "prefill",
+                    [override_command],
+                    command=["sh", "-c"],
+                ),
+            ]
         }
     }
 
     result = enable_trtllm_chunked_prefill(config)
     result = enable_trtllm_chunked_prefill(result)
 
-    dynamic_args = result["spec"]["services"]["dynamic"]["extraPodSpec"][
-        "mainContainer"
-    ]["args"]
+    containers = _main_containers_by_name(result)
+    dynamic_args = containers["dynamic"]["args"]
     assert dynamic_args == [
         "export READY=1 && python3 -m dynamo.trtllm "
         '--model-path "${MODEL_PATH}" '
         "--trtllm.enable_chunked_prefill true && echo ready"
     ]
 
-    override_args = result["spec"]["services"]["override"]["extraPodSpec"][
-        "mainContainer"
-    ]["args"]
+    override_args = containers["override"]["args"]
     assert len(override_args) == 1
     assert '--model-path "${MODEL_PATH}"' in override_args[0]
     override_tokens = shlex.split(override_args[0])

@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::Either;
-use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::leader::InstanceLeader;
@@ -87,6 +87,11 @@ pub struct PipelineConfig<Src: BlockMetadata, Dst: BlockMetadata> {
     /// Setting this higher can improve throughput at the cost of memory.
     /// Default: 1 (sequential execution)
     pub max_concurrent_transfers: usize,
+    /// Whether transfer reservations must start in batch-input order.
+    ///
+    /// This keeps concurrent transfers but removes executor scheduling from
+    /// the order in which a synchronous worker observes their reservations.
+    pub ordered_transfer_starts: bool,
     /// Pending tracker for duplicate prevention.
     ///
     /// If provided, this tracker is used. If None, the pipeline creates its own.
@@ -115,6 +120,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Default for PipelineConfig<Src, Dst
             sweep_interval: Duration::from_millis(10),
             skip_transfers: false,
             max_concurrent_transfers: 1,
+            ordered_transfer_starts: false,
             pending_tracker: None,
             max_concurrent_precondition_awaits: 8,
             _marker: PhantomData,
@@ -195,6 +201,12 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> PipelineBuilder<Src, Dst> {
     /// 1 (sequential execution)
     pub fn max_concurrent_transfers(mut self, n: usize) -> Self {
         self.config.max_concurrent_transfers = n.max(1);
+        self
+    }
+
+    /// Preserve batch-input order for synchronous transfer reservation.
+    pub fn ordered_transfer_starts(mut self, ordered: bool) -> Self {
+        self.config.ordered_transfer_starts = ordered;
         self
     }
 
@@ -372,6 +384,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> Pipeline<Src, Dst> {
             dst_layout,
             skip_transfers: config.skip_transfers,
             max_concurrent_transfers: config.max_concurrent_transfers,
+            ordered_transfer_starts: config.ordered_transfer_starts,
             chain_tx,
             settlement: settlement.clone(),
             _src_marker: PhantomData::<Src>,
@@ -1336,6 +1349,8 @@ struct BlockTransferExecutor<Src: BlockMetadata, Dst: BlockMetadata> {
     skip_transfers: bool,
     /// Maximum concurrent transfers
     max_concurrent_transfers: usize,
+    /// Whether synchronous transfer reservations start in batch-input order.
+    ordered_transfer_starts: bool,
     /// Channel to send registered blocks for chaining to downstream pipeline
     chain_tx: Option<mpsc::Sender<ChainOutput<Dst>>>,
     settlement: PipelineSettlementTracker,
@@ -1350,6 +1365,39 @@ struct SharedBlockExecutorState<Dst: BlockMetadata> {
     dst_layout: LogicalLayoutHandle,
     skip_transfers: bool,
     chain_tx: Option<mpsc::Sender<ChainOutput<Dst>>>,
+}
+
+struct OrderedTransferStart {
+    predecessor: Option<oneshot::Receiver<()>>,
+    successor: Option<oneshot::Sender<()>>,
+}
+
+impl OrderedTransferStart {
+    fn next(predecessor: &mut Option<oneshot::Receiver<()>>) -> Self {
+        let (successor, next_predecessor) = oneshot::channel();
+        Self {
+            predecessor: predecessor.replace(next_predecessor),
+            successor: Some(successor),
+        }
+    }
+
+    async fn wait(&mut self) {
+        if let Some(predecessor) = self.predecessor.take() {
+            let _ = predecessor.await;
+        }
+    }
+
+    fn release(&mut self) {
+        if let Some(successor) = self.successor.take() {
+            let _ = successor.send(());
+        }
+    }
+}
+
+impl Drop for OrderedTransferStart {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
@@ -1370,6 +1418,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
         });
         let settlement = self.settlement.clone();
         let run_guard = PipelineRunGuard::new(settlement.clone(), "block transfer executor");
+        let mut transfer_start_predecessor = None;
 
         while let Some(batch) = self.input_rx.recv().await {
             if batch.is_empty() {
@@ -1416,8 +1465,21 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
             // Spawn transfer task
             let shared_clone = shared.clone();
             let mut phase = BatchPhaseGuard::starting(settlement.clone(), transfer_permit);
+            let mut transfer_start = self
+                .ordered_transfer_starts
+                .then(|| OrderedTransferStart::next(&mut transfer_start_predecessor));
             tokio::spawn(async move {
-                match Self::execute_transfer(&shared_clone, upgraded, &mut phase).await {
+                if let Some(transfer_start) = &mut transfer_start {
+                    transfer_start.wait().await;
+                }
+                match Self::execute_transfer(
+                    &shared_clone,
+                    upgraded,
+                    &mut phase,
+                    transfer_start.as_mut(),
+                )
+                .await
+                {
                     Ok(()) => phase.finish_success(),
                     Err(error) => {
                         tracing::error!("BlockTransferExecutor: transfer failed: {}", error);
@@ -1459,6 +1521,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
         shared: &SharedBlockExecutorState<Dst>,
         mut batch: ResolvedBatch<Src>,
         phase: &mut BatchPhaseGuard,
+        mut transfer_start: Option<&mut OrderedTransferStart>,
     ) -> anyhow::Result<()> {
         nvtx_range!("offload::transfer");
         if batch.is_empty() {
@@ -1522,6 +1585,9 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
                 state_guard.mark_in_flight(block_ids.iter().copied());
             }
             phase.mark_in_flight();
+            if let Some(transfer_start) = &mut transfer_start {
+                transfer_start.release();
+            }
 
             // Wait for transfer completion
             if let Err(error) = notification.await {
@@ -1622,6 +1688,9 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
             }
         } else {
             phase.mark_in_flight();
+            if let Some(transfer_start) = &mut transfer_start {
+                transfer_start.release();
+            }
             phase.mark_settling();
             for (state, block_ids) in transfer_states.values() {
                 let mut state_guard = state.lock().unwrap();
@@ -2101,6 +2170,31 @@ mod tests {
         assert!(config.policies.is_empty());
         assert!(!config.auto_chain);
         assert_eq!(config.sweep_interval, Duration::from_millis(10));
+        assert!(!config.ordered_transfer_starts);
+    }
+
+    #[tokio::test]
+    async fn ordered_transfer_starts_ignore_task_schedule_order() {
+        let observed = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let mut predecessor = None;
+        let starts = (0..3)
+            .map(|_| OrderedTransferStart::next(&mut predecessor))
+            .collect::<Vec<_>>();
+        let mut tasks = Vec::new();
+
+        for (index, mut start) in starts.into_iter().enumerate().rev() {
+            let observed = observed.clone();
+            tasks.push(tokio::spawn(async move {
+                start.wait().await;
+                observed.lock().await.push(index);
+                start.release();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        assert_eq!(*observed.lock().await, vec![0, 1, 2]);
     }
 
     /// Mock ObjectBlockOps that fails specific hashes.

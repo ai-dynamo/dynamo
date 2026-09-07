@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: planner RBAC — powerAwareness.enabled gate
+templates:
+  - charts/dynamo-operator/templates/planner.yaml
+
+tests:
+  # ── cluster-wide mode (default) ──────────────────────────────────────────────
+
+  - it: omits pods/list from ClusterRole when powerAwareness is disabled (default)
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - ""
+            resources:
+              - pods
+            verbs:
+              - list
+        documentIndex: 0
+
+  - it: includes pods/list in ClusterRole when powerAwareness is enabled
+    set:
+      dynamo-operator.planner.powerAwareness.enabled: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - ""
+            resources:
+              - pods
+            verbs:
+              - list
+        documentIndex: 0
+
+  # ── namespace-restricted mode ─────────────────────────────────────────────────
+
+  - it: omits pods/list from Role when powerAwareness is disabled in namespace-restricted mode
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+    asserts:
+      - notContains:
+          path: rules
+          content:
+            apiGroups:
+              - ""
+            resources:
+              - pods
+            verbs:
+              - list
+        documentIndex: 1
+
+  - it: includes pods/list in Role when powerAwareness is enabled in namespace-restricted mode
+    set:
+      dynamo-operator.namespaceRestriction.enabled: true
+      dynamo-operator.upgradeCRD: false
+      dynamo-operator.planner.powerAwareness.enabled: true
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups:
+              - ""
+            resources:
+              - pods
+            verbs:
+              - list
+        documentIndex: 1

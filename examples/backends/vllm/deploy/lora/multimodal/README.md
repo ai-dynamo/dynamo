@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Multimodal LoRA Deployment with MinIO on Kubernetes
 
 This guide explains how to deploy multimodal (vision-language) LoRA-enabled vLLM inference with S3-compatible storage backend on Kubernetes.
@@ -6,12 +11,15 @@ This guide explains how to deploy multimodal (vision-language) LoRA-enabled vLLM
 
 This deployment pattern enables dynamic LoRA adapter loading from S3-compatible storage (MinIO) for vision-language models in a Kubernetes environment. It uses the aggregated single-worker architecture where the Rust OpenAIPreprocessor in the Frontend handles image URLs directly.
 
+The DynamoGraphDeployment (DGD) manifest uses `nvidia.com/v1beta1`. `DynamoModel` does not have a
+`v1beta1` API and continues to use `nvidia.com/v1alpha1`.
+
 ## Prerequisites
 
 - Kubernetes cluster with GPU support
 - Helm 3.x installed
 - `kubectl` configured to access your cluster
-- Dynamo Kubernetes Platform installed ([Installation Guide](../../../../../../docs/fern/kubernetes/installation-guide.md))
+- Dynamo Kubernetes Platform installed ([Installation Guide](../../../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md))
 - HuggingFace token for downloading base and LoRA adapters
 
 ## Files in This Directory
@@ -160,13 +168,13 @@ Edit `agg_qwen_lora.yaml` to use your container image:
 ```bash
 # Using yq to update the image
 export FRAMEWORK_RUNTIME_IMAGE=your-registry/your-image:tag
-yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' v1beta1/agg_qwen_lora.yaml > v1beta1/agg_qwen_lora_updated.yaml
+yq '.spec.components[].podTemplate.spec.containers[] |= (if .name == "main" then .image = env(FRAMEWORK_RUNTIME_IMAGE) else . end)' agg_qwen_lora.yaml > agg_qwen_lora_updated.yaml
 ```
 
 ### Deploy the LoRA-enabled Multimodal Graph
 
 ```bash
-kubectl apply -f v1beta1/agg_qwen_lora_updated.yaml -n ${NAMESPACE}
+kubectl apply -f agg_qwen_lora_updated.yaml -n ${NAMESPACE}
 ```
 
 ### Verify Deployment
@@ -366,5 +374,5 @@ kubectl delete secret hf-token-secret -n ${NAMESPACE}
 
 - [Multimodal LoRA Launch Guide](../../../launch/lora/multimodal/README.md) - Local launch with shell scripts
 - [LLM LoRA Deployment](../README.md) - Text-only LoRA deployment pattern
-- [Dynamo Kubernetes Guide](../../../../../../docs/fern/kubernetes/quickstart.mdx) - Platform setup
-- [Installation Guide](../../../../../../docs/fern/kubernetes/installation-guide.md) - Platform installation
+- [Dynamo Kubernetes Guide](../../../../../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx) - Platform setup
+- [Installation Guide](../../../../../../docs/fern/pages/kubernetes/installation/install-dynamo.md) - Platform installation

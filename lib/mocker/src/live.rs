@@ -8,200 +8,249 @@
 //! owned operation, while cancellation uses a separate bounded scheduler lane
 //! that remains responsive during a long modeled pass.
 
+use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{Context, anyhow, bail};
-use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
+use futures::future::{BoxFuture, FutureExt, Shared};
+#[cfg(test)]
+use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot, watch};
+#[cfg(test)]
+use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::common::handoff::HandoffId;
 use crate::common::protocols::{
     DirectRequest, FpmPublisher, KvEventPublishers, MockEngineArgs, OutputSignal,
 };
-use crate::engine::create_engine_with_output_sender;
+use crate::engine::{LiveEngineScheduler, create_engine_with_rank_sink};
+#[cfg(test)]
+use crate::grouped_scheduler::CompletionBoundaryTestControl;
+use crate::grouped_scheduler::{
+    CompletionBoundaryDrain, GroupedSchedulers, RankOutputSink, RankSinks,
+    create_grouped_scheduler_with_rank_sinks,
+};
 use crate::scheduler::{
-    MockerMetrics, SchedulerCancellationEnvelope, SchedulerCommand, SchedulerCommandEnvelope,
-    SchedulerCommandResult, SchedulerHandle, SchedulerOutputSender,
+    AdmissionEvent, MockerMetrics, SchedulerCancellationEnvelope, SchedulerCommand,
+    SchedulerCommandEnvelope, SchedulerCommandResult, SchedulerHandle,
 };
 
-#[derive(Default)]
-struct RequestRoutes {
-    by_client: DashMap<Uuid, Arc<RequestRoute>>,
-    by_scheduler: DashMap<Uuid, Arc<RequestRoute>>,
-}
+mod handoff;
+mod request;
 
-type Routes = Arc<RequestRoutes>;
+pub use handoff::{LiveHandoffControl, LiveHandoffEvent, LiveHandoffEvents};
 
-const SCHEDULER_OUTPUT_CAPACITY: usize = 8;
+use handoff::{
+    DestinationCancellation, HandoffRoutes, SharedHandoffRoutes, run_lifecycle_dispatcher,
+    shutdown_handoff_routes, supervise_lifecycle_dispatcher,
+};
+use request::{
+    ObservedOutput, OutputDelivery, RequestCancellation, RequestRoute, RequestRoutes, Routes,
+    remove_route, route_is_registered, shutdown_routes,
+};
+
 const DEFAULT_REQUEST_OUTPUT_CAPACITY: usize = 8;
 
+/// Controls how much output one live request may retain before it is consumed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RequestState {
-    Submitting,
-    Active,
-    Cancelling,
-    Closed,
+pub enum RequestOutputBuffering {
+    /// Cancel the request when its output queue reaches `capacity`.
+    CancelOnOverflow { capacity: NonZeroUsize },
+    /// Buffer the request's full declared response.
+    FullResponse,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RequestLifecycle {
-    state: RequestState,
-    stream_abandoned: bool,
-    terminal_seen: bool,
+impl Default for RequestOutputBuffering {
+    fn default() -> Self {
+        Self::CancelOnOverflow {
+            capacity: NonZeroUsize::new(DEFAULT_REQUEST_OUTPUT_CAPACITY).unwrap(),
+        }
+    }
 }
 
-struct RequestRoute {
-    client_id: Uuid,
-    scheduler_id: Uuid,
-    output_tx: Mutex<Option<mpsc::Sender<OutputSignal>>>,
-    lifecycle_tx: watch::Sender<RequestLifecycle>,
-    cancel_lock: tokio::sync::Mutex<()>,
+impl RequestOutputBuffering {
+    fn capacity_for(self, output_length: usize) -> usize {
+        let output_length = output_length.max(1);
+        match self {
+            Self::CancelOnOverflow { capacity } => output_length.min(capacity.get()),
+            Self::FullResponse => output_length,
+        }
+    }
 }
 
-impl RequestRoute {
-    fn new(client_id: Uuid, scheduler_id: Uuid, output_tx: mpsc::Sender<OutputSignal>) -> Self {
-        let (lifecycle_tx, _) = watch::channel(RequestLifecycle {
-            state: RequestState::Submitting,
-            stream_abandoned: false,
-            terminal_seen: false,
-        });
-        Self {
-            client_id,
-            scheduler_id,
-            output_tx: Mutex::new(Some(output_tx)),
-            lifecycle_tx,
-            cancel_lock: tokio::sync::Mutex::new(()),
+/// Runtime publishers used by one live Mocker scheduler.
+#[derive(Clone, Default)]
+pub struct LiveEngineConfig {
+    pub kv_event_publishers: KvEventPublishers,
+    pub fpm_publisher: FpmPublisher,
+}
+
+pub(crate) struct ObservedAdmission {
+    pub(crate) event: crate::scheduler::AdmissionEvent,
+    pub(crate) observed_at: tokio::time::Instant,
+}
+
+#[derive(Clone)]
+pub(crate) struct LiveRouteDelivery {
+    routes: Routes,
+    cancel: CancellationToken,
+    #[cfg(test)]
+    output_gate: Option<watch::Receiver<bool>>,
+    admission_tx: Option<mpsc::UnboundedSender<ObservedAdmission>>,
+}
+
+impl LiveRouteDelivery {
+    pub(crate) fn wants_admissions(&self) -> bool {
+        self.admission_tx.is_some()
+    }
+
+    pub(crate) fn publish_admissions(&self, admissions: Vec<AdmissionEvent>) -> anyhow::Result<()> {
+        if self.cancel.is_cancelled() {
+            return Ok(());
         }
+        dispatch_admission_batch(admissions, &self.routes, self.admission_tx.as_ref())
     }
 
-    fn activate(&self) {
-        self.lifecycle_tx.send_if_modified(|lifecycle| {
-            if lifecycle.state != RequestState::Submitting {
-                return false;
-            }
-            lifecycle.state = RequestState::Active;
-            true
-        });
-    }
-
-    fn abandon_stream(&self) -> bool {
-        self.close_output();
-        let mut abandoned = false;
-        self.lifecycle_tx.send_if_modified(|lifecycle| {
-            if lifecycle.stream_abandoned {
-                return false;
-            }
-            lifecycle.stream_abandoned = true;
-            abandoned = true;
-            true
-        });
-        abandoned
-    }
-
-    async fn wait_for_admission(&self) -> bool {
-        let mut lifecycle_rx = self.lifecycle_tx.subscribe();
-        loop {
-            match lifecycle_rx.borrow_and_update().state {
-                RequestState::Submitting | RequestState::Cancelling => {}
-                RequestState::Active => return true,
-                RequestState::Closed => return false,
-            }
-            if lifecycle_rx.changed().await.is_err() {
-                return false;
-            }
+    pub(crate) async fn publish_outputs(
+        &self,
+        outputs: Vec<OutputSignal>,
+    ) -> anyhow::Result<Option<Vec<Uuid>>> {
+        #[cfg(test)]
+        if let Some(gate) = self.output_gate.as_ref()
+            && !*gate.borrow()
+        {
+            return self.publish_gated_outputs(outputs, gate).await;
         }
+        Ok(dispatch_output_batch(outputs, &self.routes, &self.cancel))
     }
 
-    fn begin_cancellation(&self) -> bool {
-        let mut started = false;
-        self.lifecycle_tx.send_if_modified(|lifecycle| {
-            if lifecycle.state == RequestState::Active {
-                lifecycle.state = RequestState::Cancelling;
-                started = true;
-                return true;
-            }
-            false
-        });
-        started
-    }
-
-    fn finish_cancellation(&self, result: &anyhow::Result<bool>) -> bool {
-        let mut remove = false;
-        self.lifecycle_tx.send_if_modified(|lifecycle| {
-            if lifecycle.state != RequestState::Cancelling {
-                return false;
-            }
-            remove = match result {
-                Ok(true) => true,
-                Ok(false) => lifecycle.stream_abandoned || lifecycle.terminal_seen,
-                Err(_) => lifecycle.terminal_seen,
-            };
-            lifecycle.state = if remove {
-                RequestState::Closed
-            } else {
-                RequestState::Active
-            };
-            true
-        });
-        if remove {
-            self.close_output();
-        }
-        remove
-    }
-
-    fn send_output(&self, signal: OutputSignal) -> OutputDelivery {
-        let output_tx = self.output_tx.lock().unwrap().as_ref().cloned();
-        let Some(output_tx) = output_tx else {
-            return OutputDelivery::Closed;
+    #[cfg(test)]
+    async fn publish_gated_outputs(
+        &self,
+        outputs: Vec<OutputSignal>,
+        gate: &watch::Receiver<bool>,
+    ) -> anyhow::Result<Option<Vec<Uuid>>> {
+        let mut failed = Vec::new();
+        let Some(mut pending) = self.partition_gated_outputs(outputs, &mut failed) else {
+            return Ok(None);
         };
-        match output_tx.try_send(signal) {
-            Ok(()) => OutputDelivery::Delivered,
-            Err(mpsc::error::TrySendError::Full(_)) => OutputDelivery::Full,
-            Err(mpsc::error::TrySendError::Closed(_)) => OutputDelivery::Closed,
+        if pending.is_empty() {
+            return Ok(Some(failed));
+        }
+
+        let mut gate = gate.clone();
+        loop {
+            if *gate.borrow_and_update() {
+                let Some(delivered) = dispatch_output_batch(pending, &self.routes, &self.cancel)
+                else {
+                    return Ok(None);
+                };
+                failed.extend(delivered);
+                return Ok(Some(failed));
+            }
+
+            let route_bypasses = FuturesUnordered::new();
+            for signal in &pending {
+                if let Some(route) = self
+                    .routes
+                    .by_scheduler
+                    .get(&signal.uuid)
+                    .map(|entry| Arc::clone(entry.value()))
+                {
+                    route_bypasses.push(async move { route.wait_for_output_gate_bypass().await });
+                }
+            }
+            tokio::pin!(route_bypasses);
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => return Ok(None),
+                changed = gate.changed() => {
+                    if changed.is_err() {
+                        bail!("live Mocker output gate closed");
+                    }
+                }
+                _ = route_bypasses.next() => {
+                    let Some(still_pending) = self.partition_gated_outputs(pending, &mut failed)
+                    else {
+                        return Ok(None);
+                    };
+                    pending = still_pending;
+                    if pending.is_empty() {
+                        return Ok(Some(failed));
+                    }
+                }
+            }
         }
     }
 
-    /// Record a terminal signal and return whether the route can be removed.
-    /// An in-flight cancellation retains it until the scheduler acknowledges
-    /// cleanup; its scheduler ID is never reused by a replacement request.
-    fn observe_terminal(&self) -> bool {
-        self.close_output();
-        let mut remove = false;
-        self.lifecycle_tx.send_if_modified(|lifecycle| {
-            lifecycle.terminal_seen = true;
-            if lifecycle.state != RequestState::Cancelling {
-                lifecycle.state = RequestState::Closed;
-                remove = true;
+    #[cfg(test)]
+    fn partition_gated_outputs(
+        &self,
+        outputs: Vec<OutputSignal>,
+        failed: &mut Vec<Uuid>,
+    ) -> Option<Vec<OutputSignal>> {
+        let mut pending = Vec::with_capacity(outputs.len());
+        for signal in outputs {
+            let waits_for_gate = self
+                .routes
+                .by_scheduler
+                .get(&signal.uuid)
+                .is_some_and(|route| !route.output_gate_bypass_requested());
+            if waits_for_gate {
+                pending.push(signal);
+                continue;
             }
-            true
-        });
-        remove
-    }
-
-    fn shutdown(&self) {
-        self.close_output();
-        self.lifecycle_tx.send_if_modified(|lifecycle| {
-            if lifecycle.state == RequestState::Closed {
-                return false;
-            }
-            lifecycle.state = RequestState::Closed;
-            true
-        });
-    }
-
-    fn close_output(&self) {
-        self.output_tx.lock().unwrap().take();
+            failed.extend(dispatch_output_batch(
+                vec![signal],
+                &self.routes,
+                &self.cancel,
+            )?);
+        }
+        Some(pending)
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OutputDelivery {
-    Delivered,
-    Full,
-    Closed,
+#[derive(Default)]
+pub(crate) struct LiveEngineOptions {
+    pub(crate) kv_event_publishers: KvEventPublishers,
+    pub(crate) admission_tx: Option<mpsc::UnboundedSender<ObservedAdmission>>,
+    pub(crate) fpm_publisher: FpmPublisher,
+    pub(crate) request_output_buffering: RequestOutputBuffering,
+    pub(crate) allow_zero_output: bool,
+    #[cfg(test)]
+    pub(crate) output_gate: Option<watch::Receiver<bool>>,
+}
+
+/// Map a wire-protocol request ID to a deterministic scheduler UUID.
+pub fn stable_request_uuid(seed: u64, request_id: &str) -> Uuid {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&seed.to_le_bytes());
+    hasher.update(request_id.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    // Mark the digest as an RFC 4122 variant/version-4 UUID. The identifier
+    // remains deterministic; these bits only make diagnostics parse cleanly.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
+}
+
+/// Produce deterministic, tokenizer-independent output token IDs.
+pub fn deterministic_output_tokens(seed: u64, request_id: &str, count: usize) -> Vec<u32> {
+    (0..count)
+        .map(|position| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&seed.to_le_bytes());
+            hasher.update(request_id.as_bytes());
+            hasher.update(&(position as u64).to_le_bytes());
+            let bytes = hasher.finalize();
+            1_000 + (u32::from_le_bytes(bytes.as_bytes()[..4].try_into().unwrap()) % 31_000)
+        })
+        .collect()
 }
 
 /// A running Mocker scheduler with request-scoped output streams.
@@ -214,64 +263,308 @@ struct LiveEngineInner {
     command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
     cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
     routes: Routes,
+    handoff_routes: SharedHandoffRoutes,
     metrics_rx: tokio::sync::watch::Receiver<MockerMetrics>,
-    request_output_capacity: usize,
+    request_output_buffering: RequestOutputBuffering,
+    allow_zero_output: bool,
+    group: Arc<LiveEngineGroup>,
     cancel: CancellationToken,
     runtime: Handle,
-    // The supervisor owns dispatcher failure propagation and route cleanup.
-    #[allow(dead_code)]
-    dispatcher_supervisor: tokio::task::JoinHandle<()>,
+    tasks: Mutex<LiveEngineTasks>,
     // The scheduler's drop guard owns its task lifetime.
     #[allow(dead_code)]
     scheduler: Box<dyn SchedulerHandle>,
 }
 
+struct LiveEngineTasks {
+    lifecycle_supervisor: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    shutdown: Option<SharedShutdown>,
+}
+
+type SharedShutdown = Shared<BoxFuture<'static, Result<(), Arc<str>>>>;
+
+struct LiveEngineGroup {
+    cancel: CancellationToken,
+    actor: Mutex<Option<tokio::task::JoinHandle<anyhow::Result<()>>>>,
+    shutdown: Mutex<Option<SharedShutdown>>,
+    completion_drain: CompletionBoundaryDrain,
+}
+
+impl LiveEngineGroup {
+    fn new(
+        cancel: CancellationToken,
+        actor: tokio::task::JoinHandle<anyhow::Result<()>>,
+        completion_drain: CompletionBoundaryDrain,
+    ) -> Self {
+        Self {
+            cancel,
+            actor: Mutex::new(Some(actor)),
+            shutdown: Mutex::new(None),
+            completion_drain,
+        }
+    }
+
+    fn shutdown(&self) -> SharedShutdown {
+        self.cancel.cancel();
+        let mut shutdown = self.shutdown.lock().unwrap();
+        if let Some(shutdown) = shutdown.as_ref() {
+            return shutdown.clone();
+        }
+        let actor = self.actor.lock().unwrap().take();
+        let future = async move {
+            let Some(actor) = actor else {
+                return Ok(());
+            };
+            match actor.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(Arc::from(format!(
+                    "live Mocker scheduler failed: {error:#}"
+                ))),
+                Err(error) => Err(Arc::from(format!(
+                    "live Mocker scheduler task failed: {error}"
+                ))),
+            }
+        }
+        .boxed()
+        .shared();
+        *shutdown = Some(future.clone());
+        future
+    }
+}
+
+impl Drop for LiveEngineGroup {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
 impl LiveEngine {
     /// Start one live scheduler at `dp_rank`.
     pub fn start(args: MockEngineArgs, dp_rank: u32) -> anyhow::Result<Self> {
-        Self::start_with_output_gate(args, dp_rank, None, DEFAULT_REQUEST_OUTPUT_CAPACITY)
+        Self::start_internal(args, dp_rank, LiveEngineOptions::default())
     }
 
+    /// Start one live scheduler with runtime-owned KV and FPM publishers.
+    pub fn start_with_config(
+        args: MockEngineArgs,
+        dp_rank: u32,
+        config: LiveEngineConfig,
+    ) -> anyhow::Result<Self> {
+        Self::start_with_config_and_request_output_buffering(
+            args,
+            dp_rank,
+            config,
+            RequestOutputBuffering::default(),
+        )
+    }
+
+    /// Start one live scheduler with runtime-owned publishers and an explicit
+    /// per-request output buffering policy.
+    pub fn start_with_config_and_request_output_buffering(
+        args: MockEngineArgs,
+        dp_rank: u32,
+        config: LiveEngineConfig,
+        request_output_buffering: RequestOutputBuffering,
+    ) -> anyhow::Result<Self> {
+        Self::start_internal(
+            args,
+            dp_rank,
+            LiveEngineOptions {
+                kv_event_publishers: config.kv_event_publishers,
+                fpm_publisher: config.fpm_publisher,
+                request_output_buffering,
+                ..LiveEngineOptions::default()
+            },
+        )
+    }
+
+    /// Start all attention-DP ranks as one logical grouped engine.
+    ///
+    /// Each returned [`LiveEngine`] retains the latest-main rank-scoped request
+    /// and handoff API, while all ranks share one scheduler actor and one
+    /// [`aisimulate_core::engine::generalized::GeneralizedMockerEngine`] barrier.
+    pub fn start_grouped_with_configs(
+        args: MockEngineArgs,
+        configs: Vec<LiveEngineConfig>,
+    ) -> anyhow::Result<Vec<Self>> {
+        Self::start_grouped_with_configs_and_request_output_buffering(
+            args,
+            configs,
+            RequestOutputBuffering::default(),
+        )
+    }
+
+    /// Start all attention-DP ranks with an explicit per-request output
+    /// buffering policy.
+    pub fn start_grouped_with_configs_and_request_output_buffering(
+        args: MockEngineArgs,
+        configs: Vec<LiveEngineConfig>,
+        request_output_buffering: RequestOutputBuffering,
+    ) -> anyhow::Result<Vec<Self>> {
+        let options = configs
+            .into_iter()
+            .map(|config| LiveEngineOptions {
+                kv_event_publishers: config.kv_event_publishers,
+                fpm_publisher: config.fpm_publisher,
+                request_output_buffering,
+                ..LiveEngineOptions::default()
+            })
+            .collect();
+        Self::start_grouped_with_options(args, options)
+    }
+
+    pub(crate) fn start_grouped_with_options(
+        args: MockEngineArgs,
+        options: Vec<LiveEngineOptions>,
+    ) -> anyhow::Result<Vec<Self>> {
+        let runtime = Handle::try_current()
+            .context("LiveEngine::start_grouped_with_options requires an active Tokio runtime")?;
+        let args = args
+            .normalized()
+            .context("invalid Mocker engine arguments")?;
+        anyhow::ensure!(
+            options.len() == args.dp_size as usize,
+            "grouped live Mocker requires one options value per DP rank: expected {}, got {}",
+            args.dp_size,
+            options.len()
+        );
+
+        let cancel = CancellationToken::new();
+        let mut route_sets = Vec::with_capacity(options.len());
+        let mut rank_sinks = Vec::with_capacity(options.len());
+        for options_for_rank in &options {
+            let routes = Arc::new(RequestRoutes::default());
+            rank_sinks.push(RankSinks {
+                output: RankOutputSink::Routes(LiveRouteDelivery {
+                    routes: Arc::clone(&routes),
+                    cancel: cancel.clone(),
+                    #[cfg(test)]
+                    output_gate: options_for_rank.output_gate.clone(),
+                    admission_tx: options_for_rank.admission_tx.clone(),
+                }),
+                kv_event_publishers: options_for_rank.kv_event_publishers.clone(),
+                fpm_publisher: options_for_rank.fpm_publisher.clone(),
+            });
+            route_sets.push(routes);
+        }
+
+        let GroupedSchedulers {
+            schedulers,
+            actor,
+            completion_drain,
+        } = create_grouped_scheduler_with_rank_sinks(args, rank_sinks, Some(cancel.clone()))?;
+        let group = Arc::new(LiveEngineGroup::new(cancel, actor, completion_drain));
+        schedulers
+            .into_iter()
+            .zip(route_sets)
+            .zip(options)
+            .map(|((scheduler, routes), options)| {
+                Self::from_scheduler(
+                    runtime.clone(),
+                    scheduler,
+                    Arc::clone(&group),
+                    routes,
+                    options,
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_with_options(
+        args: MockEngineArgs,
+        dp_rank: u32,
+        options: LiveEngineOptions,
+    ) -> anyhow::Result<Self> {
+        Self::start_internal(args, dp_rank, options)
+    }
+
+    #[cfg(test)]
     fn start_with_output_gate(
         args: MockEngineArgs,
         dp_rank: u32,
         output_gate: Option<watch::Receiver<bool>>,
         request_output_capacity: usize,
     ) -> anyhow::Result<Self> {
+        let request_output_capacity = NonZeroUsize::new(request_output_capacity)
+            .ok_or_else(|| anyhow!("request output capacity must be greater than 0"))?;
+        Self::start_internal(
+            args,
+            dp_rank,
+            LiveEngineOptions {
+                request_output_buffering: RequestOutputBuffering::CancelOnOverflow {
+                    capacity: request_output_capacity,
+                },
+                output_gate,
+                ..LiveEngineOptions::default()
+            },
+        )
+    }
+
+    fn start_internal(
+        args: MockEngineArgs,
+        dp_rank: u32,
+        options: LiveEngineOptions,
+    ) -> anyhow::Result<Self> {
         let runtime =
             Handle::try_current().context("LiveEngine::start requires an active Tokio runtime")?;
         let args = args
             .normalized()
             .context("invalid Mocker engine arguments")?;
-        anyhow::ensure!(
-            request_output_capacity > 0,
-            "request output capacity must be greater than 0"
-        );
-        let cancel = CancellationToken::new();
-        let (output_tx, output_rx) = mpsc::channel::<Vec<OutputSignal>>(SCHEDULER_OUTPUT_CAPACITY);
-        let scheduler = create_engine_with_output_sender(
+        let group_cancel = CancellationToken::new();
+        let routes = Arc::new(RequestRoutes::default());
+        let LiveEngineScheduler {
+            handle: scheduler,
+            actor: scheduler_actor,
+            completion_drain,
+        } = create_engine_with_rank_sink(
             args,
             dp_rank,
-            Some(SchedulerOutputSender::Bounded(output_tx)),
-            KvEventPublishers::default(),
-            Some(cancel.clone()),
-            FpmPublisher::default(),
-        );
+            RankSinks {
+                output: RankOutputSink::Routes(LiveRouteDelivery {
+                    routes: Arc::clone(&routes),
+                    cancel: group_cancel.clone(),
+                    #[cfg(test)]
+                    output_gate: options.output_gate.clone(),
+                    admission_tx: options.admission_tx.clone(),
+                }),
+                kv_event_publishers: options.kv_event_publishers.clone(),
+                fpm_publisher: options.fpm_publisher.clone(),
+            },
+            Some(group_cancel.clone()),
+        )?;
+        let group = Arc::new(LiveEngineGroup::new(
+            group_cancel,
+            scheduler_actor,
+            completion_drain,
+        ));
+        Self::from_scheduler(runtime, scheduler, group, routes, options)
+    }
+
+    fn from_scheduler(
+        runtime: Handle,
+        mut scheduler: Box<dyn SchedulerHandle>,
+        group: Arc<LiveEngineGroup>,
+        routes: Routes,
+        options: LiveEngineOptions,
+    ) -> anyhow::Result<Self> {
+        let cancel = group.cancel.child_token();
         let command_tx = scheduler.command_sender();
         let cancellation_tx = scheduler.cancellation_sender();
         let metrics_rx = scheduler.metrics_receiver();
-        let routes = Arc::new(RequestRoutes::default());
-        let dispatcher = runtime.spawn(run_output_dispatcher(
-            output_rx,
-            Arc::clone(&routes),
-            cancellation_tx.clone(),
-            runtime.clone(),
+        let lifecycle_rx = scheduler
+            .take_lifecycle_receiver()
+            .expect("new live scheduler must expose one lifecycle receiver");
+        let handoff_routes = Arc::new(HandoffRoutes::default());
+        let lifecycle_dispatcher = runtime.spawn(run_lifecycle_dispatcher(
+            lifecycle_rx,
+            Arc::clone(&handoff_routes),
             cancel.clone(),
-            output_gate,
         ));
-        let dispatcher_supervisor = runtime.spawn(supervise_output_dispatcher(
-            dispatcher,
+        let lifecycle_supervisor = runtime.spawn(supervise_lifecycle_dispatcher(
+            lifecycle_dispatcher,
             Arc::clone(&routes),
+            Arc::clone(&handoff_routes),
             cancel.clone(),
         ));
 
@@ -280,41 +573,49 @@ impl LiveEngine {
                 command_tx,
                 cancellation_tx,
                 routes,
+                handoff_routes,
                 metrics_rx,
-                request_output_capacity,
+                request_output_buffering: options.request_output_buffering,
+                allow_zero_output: options.allow_zero_output,
+                group,
                 cancel,
                 runtime,
-                dispatcher_supervisor,
+                tasks: Mutex::new(LiveEngineTasks {
+                    lifecycle_supervisor: Some(lifecycle_supervisor),
+                    shutdown: None,
+                }),
                 scheduler,
             }),
         })
     }
 
-    /// Submit a request and return its scoped output receiver.
-    pub async fn submit(&self, mut request: DirectRequest) -> anyhow::Result<LiveRequest> {
+    /// Register a request route without submitting it to the scheduler.
+    ///
+    /// Disaggregated handoff commands consume the returned registration after
+    /// their bootstrap session is ready. Dropping an unused registration
+    /// removes the route and closes the paired response stream.
+    pub fn prepare_request(
+        &self,
+        mut request: DirectRequest,
+    ) -> anyhow::Result<(LiveRequestRegistration, LiveRequest)> {
         anyhow::ensure!(
             !self.inner.cancel.is_cancelled(),
             "live Mocker engine is not running"
         );
-        // Both scheduler cores treat an explicit token plan as authoritative.
-        // Normalize the effective length while keeping delivery buffering
-        // independent of a caller's declared maximum response length.
-        let output_length = request
-            .output_token_ids
-            .as_ref()
-            .map_or(request.max_output_tokens, Vec::len);
+        let output_length = request.effective_max_output_tokens();
         anyhow::ensure!(
-            output_length > 0,
+            self.inner.allow_zero_output || output_length > 0,
             "live requests must generate at least one output token"
         );
         request.max_output_tokens = output_length;
         let client_id = request.uuid.unwrap_or_else(Uuid::new_v4);
         let scheduler_id = Uuid::new_v4();
         request.uuid = Some(scheduler_id);
-        // The dispatcher never waits on a request stream. A caller that leaves
-        // this fixed queue full is cancelled so it cannot block unrelated
-        // requests or turn its declared response length into admission policy.
-        let (tx, rx) = mpsc::channel(output_length.min(self.inner.request_output_capacity));
+        let output_capacity = self
+            .inner
+            .request_output_buffering
+            .capacity_for(output_length);
+        let (tx, rx) = mpsc::channel(output_capacity);
         let route = Arc::new(RequestRoute::new(client_id, scheduler_id, tx));
         match self.inner.routes.by_client.entry(client_id) {
             Entry::Occupied(_) => bail!("request {client_id} is already active"),
@@ -331,42 +632,69 @@ impl LiveEngine {
                 entry.insert(Arc::clone(&route));
             }
         }
-        // Own the registration before the first await. The scheduler admission
-        // task survives cancellation of this submit future, so stream-drop
-        // cleanup can wait for admission before using the independent
-        // cancellation lane.
+        if self.inner.cancel.is_cancelled() {
+            route.shutdown();
+            remove_route(&self.inner.routes, &route);
+            bail!("live Mocker engine is not running");
+        }
+
         let live = LiveRequest {
             client_id,
             rx,
             route: Arc::downgrade(&route),
             routes: Arc::clone(&self.inner.routes),
+            command_tx: self.inner.command_tx.clone(),
             cancellation_tx: self.inner.cancellation_tx.clone(),
             runtime: self.inner.runtime.clone(),
+            #[cfg(test)]
+            drop_bypasses_output_gate: true,
         };
+        let registration = LiveRequestRegistration {
+            engine: Arc::downgrade(&self.inner),
+            routes: Arc::clone(&self.inner.routes),
+            prepared: Some(PreparedRequest { request, route }),
+        };
+        Ok((registration, live))
+    }
 
+    /// Submit a request and return its scoped output receiver.
+    pub async fn submit(&self, request: DirectRequest) -> anyhow::Result<LiveRequest> {
+        let (registration, live) = self.prepare_request(request)?;
+        self.submit_prepared(registration, PreparedSubmission::Ordinary, None)
+            .await?;
+        Ok(live)
+    }
+
+    async fn submit_prepared(
+        &self,
+        mut registration: LiveRequestRegistration,
+        submission: PreparedSubmission,
+        command_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.inner.cancel.is_cancelled(),
+            "live Mocker engine is not running"
+        );
+        let PreparedRequest { request, route } = registration.take_for(&self.inner)?;
+        let scheduler_id = route.scheduler_id;
+        let client_id = route.client_id;
         let routes = Arc::clone(&self.inner.routes);
         let submission_route = Arc::clone(&route);
         let command_tx = self.inner.command_tx.clone();
-        let submission = self.inner.runtime.spawn(async move {
-            let result = send_command(&command_tx, SchedulerCommand::Submit(request)).await;
-            let admission = match result {
-                Ok(SchedulerCommandResult::Submitted(submitted)) if submitted == scheduler_id => {
-                    Ok(())
-                }
-                Ok(result) => Err(anyhow!(
-                    "unexpected scheduler submit result for {client_id}: {result:?}"
-                )),
-                Err(error) => Err(error),
-            };
+        let task = self.inner.runtime.spawn(async move {
+            let _command_guard = command_guard;
+            let command = submission.command(request);
+            let result = send_command(&command_tx, command).await;
+            let admission = submission.validate(result, client_id, scheduler_id);
             if admission.is_ok() {
-                submission_route.activate();
+                submission_route.activate(submission.cancellation());
             } else {
                 submission_route.shutdown();
                 remove_route(&routes, &submission_route);
             }
             admission
         });
-        match submission.await {
+        match task.await {
             Ok(result) => result?,
             Err(error) => {
                 route.shutdown();
@@ -379,8 +707,7 @@ impl LiveEngine {
             remove_route(&self.inner.routes, &route);
             bail!("live Mocker engine stopped during submission");
         }
-
-        Ok(live)
+        Ok(())
     }
 
     /// Cancel an active request and wait until the scheduler applies it.
@@ -400,6 +727,7 @@ impl LiveEngine {
         route.abandon_stream();
         await_cancellation(spawn_cancellation(
             &self.inner.runtime,
+            self.inner.command_tx.clone(),
             self.inner.cancellation_tx.clone(),
             Arc::clone(&self.inner.routes),
             route,
@@ -417,6 +745,80 @@ impl LiveEngine {
     pub fn active_request_count(&self) -> usize {
         self.inner.routes.by_client.len()
     }
+
+    pub(crate) async fn drain_completion_boundary(&self) -> anyhow::Result<()> {
+        self.inner.group.completion_drain.wait().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_completion_boundary_before_finish(&self) -> CompletionBoundaryTestControl {
+        self.inner.group.completion_drain.pause_before_finish()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn group_is_cancelled(&self) -> bool {
+        self.inner.group.cancel.is_cancelled()
+    }
+
+    pub async fn shutdown(&self) -> anyhow::Result<()> {
+        let group_shutdown = self.inner.group.shutdown();
+        self.inner.cancel.cancel();
+        shutdown_routes(&self.inner.routes);
+        shutdown_handoff_routes(&self.inner.handoff_routes);
+        let shutdown = {
+            let mut tasks = self.inner.tasks.lock().unwrap();
+            if let Some(shutdown) = tasks.shutdown.as_ref() {
+                shutdown.clone()
+            } else {
+                let shutdown = shutdown_engine(
+                    group_shutdown,
+                    tasks.lifecycle_supervisor.take(),
+                    Arc::clone(&self.inner.routes),
+                    Arc::clone(&self.inner.handoff_routes),
+                )
+                .boxed()
+                .shared();
+                tasks.shutdown = Some(shutdown.clone());
+                shutdown
+            }
+        };
+        shutdown.await.map_err(|error| anyhow!("{error}"))
+    }
+}
+
+async fn shutdown_engine(
+    group_shutdown: SharedShutdown,
+    lifecycle_supervisor: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+    routes: Routes,
+    handoff_routes: SharedHandoffRoutes,
+) -> Result<(), Arc<str>> {
+    let mut first_error = group_shutdown.await.err().map(|error| anyhow!("{error}"));
+    if let Some(lifecycle_supervisor) = lifecycle_supervisor {
+        match lifecycle_supervisor.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if first_error.is_none() => {
+                first_error = Some(error.context("live Mocker lifecycle dispatcher failed"))
+            }
+            Err(error) if first_error.is_none() => {
+                first_error = Some(anyhow!(
+                    "live Mocker lifecycle dispatcher supervisor failed: {error}"
+                ))
+            }
+            Ok(Err(_)) | Err(_) => {}
+        }
+    }
+    shutdown_routes(&routes);
+    shutdown_handoff_routes(&handoff_routes);
+    if let Some(error) = first_error {
+        return Err(Arc::from(format!("{error:#}")));
+    }
+    if !routes.by_client.is_empty() || !routes.by_scheduler.is_empty() {
+        return Err(Arc::from("live Mocker shutdown left active request routes"));
+    }
+    if !handoff_routes.is_empty() {
+        return Err(Arc::from("live Mocker shutdown left active handoff routes"));
+    }
+    Ok(())
 }
 
 impl Drop for LiveEngineInner {
@@ -425,14 +827,107 @@ impl Drop for LiveEngineInner {
     }
 }
 
+struct PreparedRequest {
+    request: DirectRequest,
+    route: Arc<RequestRoute>,
+}
+
+/// An output route prepared for ordinary or disaggregated scheduler admission.
+pub struct LiveRequestRegistration {
+    engine: Weak<LiveEngineInner>,
+    routes: Routes,
+    prepared: Option<PreparedRequest>,
+}
+
+impl LiveRequestRegistration {
+    fn take_for(&mut self, engine: &Arc<LiveEngineInner>) -> anyhow::Result<PreparedRequest> {
+        let Some(owner) = self.engine.upgrade() else {
+            bail!("live Mocker engine no longer exists");
+        };
+        anyhow::ensure!(
+            Arc::ptr_eq(&owner, engine),
+            "prepared request belongs to a different live Mocker engine"
+        );
+        self.prepared
+            .take()
+            .ok_or_else(|| anyhow!("prepared request was already consumed"))
+    }
+}
+
+impl Drop for LiveRequestRegistration {
+    fn drop(&mut self) {
+        if let Some(prepared) = self.prepared.take() {
+            prepared.route.shutdown();
+            remove_route(&self.routes, &prepared.route);
+        }
+    }
+}
+
+#[derive(Clone)]
+enum PreparedSubmission {
+    Ordinary,
+    Source(HandoffId),
+    Destination(DestinationCancellation),
+}
+
+impl PreparedSubmission {
+    fn cancellation(&self) -> RequestCancellation {
+        match self {
+            Self::Destination(cancellation) => {
+                RequestCancellation::Destination(cancellation.clone())
+            }
+            Self::Ordinary | Self::Source(_) => RequestCancellation::Request,
+        }
+    }
+
+    fn command(&self, request: DirectRequest) -> SchedulerCommand {
+        match self {
+            Self::Ordinary => SchedulerCommand::Submit(request),
+            Self::Source(handoff_id) => SchedulerCommand::SubmitHandoffPrefill {
+                handoff_id: *handoff_id,
+                request,
+            },
+            Self::Destination(cancellation) => SchedulerCommand::ReserveDestination {
+                handoff_id: cancellation.handoff_id(),
+                request,
+            },
+        }
+    }
+
+    fn validate(
+        &self,
+        result: anyhow::Result<SchedulerCommandResult>,
+        client_id: Uuid,
+        scheduler_id: Uuid,
+    ) -> anyhow::Result<()> {
+        match (self, result) {
+            (
+                Self::Ordinary | Self::Source(_),
+                Ok(SchedulerCommandResult::Submitted(submitted)),
+            ) if submitted == scheduler_id => Ok(()),
+            (
+                Self::Destination(_),
+                Ok(SchedulerCommandResult::DestinationAccepted { request_id }),
+            ) if request_id == scheduler_id => Ok(()),
+            (_, Ok(result)) => Err(anyhow!(
+                "unexpected scheduler submit result for {client_id}: {result:?}"
+            )),
+            (_, Err(error)) => Err(error),
+        }
+    }
+}
+
 /// Request-owned stream of Mocker output signals.
 pub struct LiveRequest {
     client_id: Uuid,
-    rx: mpsc::Receiver<OutputSignal>,
+    rx: mpsc::Receiver<ObservedOutput>,
     route: Weak<RequestRoute>,
     routes: Routes,
+    command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
     cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
     runtime: Handle,
+    #[cfg(test)]
+    drop_bypasses_output_gate: bool,
 }
 
 impl LiveRequest {
@@ -441,19 +936,32 @@ impl LiveRequest {
     }
 
     pub async fn recv(&mut self) -> Option<OutputSignal> {
+        self.recv_observed().await.map(|output| output.event)
+    }
+
+    pub(crate) async fn recv_observed(&mut self) -> Option<ObservedOutput> {
         self.rx.recv().await
     }
 
     /// Cancel this request and wait for scheduler-side cleanup.
     pub async fn cancel(self) -> anyhow::Result<bool> {
-        let Some(route) = self.route.upgrade() else {
+        #[cfg(test)]
+        let request = {
+            let mut request = self;
+            request.drop_bypasses_output_gate = false;
+            request
+        };
+        #[cfg(not(test))]
+        let request = self;
+        let Some(route) = request.route.upgrade() else {
             return Ok(false);
         };
         route.abandon_stream();
         await_cancellation(spawn_cancellation(
-            &self.runtime,
-            self.cancellation_tx.clone(),
-            Arc::clone(&self.routes),
+            &request.runtime,
+            request.command_tx.clone(),
+            request.cancellation_tx.clone(),
+            Arc::clone(&request.routes),
             route,
             true,
         ))
@@ -467,8 +975,13 @@ impl Drop for LiveRequest {
             return;
         };
         route.abandon_stream();
+        #[cfg(test)]
+        if self.drop_bypasses_output_gate {
+            route.request_output_gate_bypass();
+        }
         drop(spawn_cancellation(
             &self.runtime,
+            self.command_tx.clone(),
             self.cancellation_tx.clone(),
             Arc::clone(&self.routes),
             route,
@@ -477,114 +990,45 @@ impl Drop for LiveRequest {
     }
 }
 
-fn remove_route(routes: &RequestRoutes, route: &Arc<RequestRoute>) -> bool {
-    let removed = routes
-        .by_client
-        .remove_if(&route.client_id, |_, current| Arc::ptr_eq(current, route))
-        .is_some();
-    routes
-        .by_scheduler
-        .remove_if(&route.scheduler_id, |_, current| {
-            Arc::ptr_eq(current, route)
-        });
-    removed
-}
-
-fn route_is_registered(routes: &RequestRoutes, route: &Arc<RequestRoute>) -> bool {
-    routes
-        .by_client
-        .get(&route.client_id)
-        .is_some_and(|current| Arc::ptr_eq(current.value(), route))
-        && routes
-            .by_scheduler
-            .get(&route.scheduler_id)
-            .is_some_and(|current| Arc::ptr_eq(current.value(), route))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_output_dispatcher(
-    mut output_rx: mpsc::Receiver<Vec<OutputSignal>>,
-    routes: Routes,
-    cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
-    runtime: Handle,
-    cancel: CancellationToken,
-    mut output_gate: Option<watch::Receiver<bool>>,
-) {
-    loop {
-        let output_enabled = output_gate.as_ref().is_none_or(|gate| *gate.borrow());
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => break,
-            batch = output_rx.recv(), if output_enabled => {
-                let Some(batch) = batch else { break };
-                if !dispatch_output_batch(
-                    batch,
-                    &routes,
-                    &runtime,
-                    &cancellation_tx,
-                    &cancel,
-                ) {
-                    break;
-                }
-            }
-            changed = wait_for_output_gate(&mut output_gate), if output_gate.is_some() => {
-                if !changed {
-                    break;
-                }
-            }
-        }
-    }
-}
-
-async fn supervise_output_dispatcher(
-    dispatcher: tokio::task::JoinHandle<()>,
-    routes: Routes,
-    cancel: CancellationToken,
-) {
-    match dispatcher.await {
-        Ok(()) if !cancel.is_cancelled() => {
-            tracing::error!("live Mocker output dispatcher exited unexpectedly");
-        }
-        Err(error) => {
-            tracing::error!(%error, "live Mocker output dispatcher task failed");
-        }
-        Ok(()) => {}
-    }
-    cancel.cancel();
-    shutdown_routes(&routes);
-}
-
-fn shutdown_routes(routes: &RequestRoutes) {
-    let active_routes = routes
-        .by_client
-        .iter()
-        .map(|entry| Arc::clone(entry.value()))
-        .collect::<Vec<_>>();
-    for route in active_routes {
-        route.shutdown();
-    }
-    routes.by_client.clear();
-    routes.by_scheduler.clear();
-}
-
-async fn wait_for_output_gate(gate: &mut Option<watch::Receiver<bool>>) -> bool {
-    let Some(gate) = gate else {
-        std::future::pending::<()>().await;
-        return false;
+fn dispatch_admission_batch(
+    batch: Vec<crate::scheduler::AdmissionEvent>,
+    routes: &Routes,
+    admission_tx: Option<&mpsc::UnboundedSender<ObservedAdmission>>,
+) -> anyhow::Result<()> {
+    let Some(admission_tx) = admission_tx else {
+        return Ok(());
     };
-    gate.changed().await.is_ok()
+    let observed_at = tokio::time::Instant::now();
+    for mut admission in batch {
+        let scheduler_id = admission.uuid;
+        let Some(route) = routes
+            .by_scheduler
+            .get(&scheduler_id)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            continue;
+        };
+        admission.uuid = route.client_id;
+        admission_tx
+            .send(ObservedAdmission {
+                event: admission,
+                observed_at,
+            })
+            .map_err(|_| anyhow!("live Mocker admission receiver closed"))?;
+    }
+    Ok(())
 }
 
 fn dispatch_output_batch(
     batch: Vec<OutputSignal>,
     routes: &Routes,
-    runtime: &Handle,
-    cancellation_tx: &mpsc::Sender<SchedulerCancellationEnvelope>,
     cancel: &CancellationToken,
-) -> bool {
+) -> Option<Vec<Uuid>> {
+    let observed_at = tokio::time::Instant::now();
+    let mut failed = Vec::new();
     for mut signal in batch {
         if cancel.is_cancelled() {
-            return false;
+            return None;
         }
         let scheduler_id = signal.uuid;
         let terminal = signal.completed;
@@ -593,36 +1037,48 @@ fn dispatch_output_batch(
             .get(&scheduler_id)
             .map(|entry| Arc::clone(entry.value()))
         else {
+            failed.push(scheduler_id);
             continue;
         };
 
         signal.uuid = route.client_id;
-        let delivery = route.send_output(signal);
-        if delivery != OutputDelivery::Delivered && route.abandon_stream() {
-            if delivery == OutputDelivery::Full {
-                tracing::debug!(
-                    client_id = %route.client_id,
-                    scheduler_id = %route.scheduler_id,
-                    "cancelling live Mocker request with a full output stream"
-                );
+        let delivery = route.send_output(ObservedOutput {
+            event: signal,
+            observed_at,
+        });
+        match delivery {
+            OutputDelivery::Delivered => {
+                if terminal && route.observe_terminal() {
+                    remove_route(routes, &route);
+                }
+                continue;
             }
-            drop(spawn_cancellation(
-                runtime,
-                cancellation_tx.clone(),
-                Arc::clone(routes),
-                Arc::clone(&route),
-                true,
-            ));
+            OutputDelivery::Full => {
+                let newly_abandoned = route.abandon_stream();
+                if newly_abandoned {
+                    tracing::debug!(
+                        client_id = %route.client_id,
+                        scheduler_id = %route.scheduler_id,
+                        "cancelling live Mocker request with a full output stream"
+                    );
+                }
+            }
+            OutputDelivery::Closed => {
+                route.abandon_stream();
+            }
         }
-        if terminal && route.observe_terminal() {
-            remove_route(routes, &route);
-        }
+        // Retire the route before the grouped completion dispatcher cancels
+        // the native request so a replacement cannot receive stale output.
+        route.shutdown();
+        remove_route(routes, &route);
+        failed.push(scheduler_id);
     }
-    true
+    Some(failed)
 }
 
 fn spawn_cancellation(
     runtime: &Handle,
+    command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
     cancellation_tx: mpsc::Sender<SchedulerCancellationEnvelope>,
     routes: Routes,
     route: Arc<RequestRoute>,
@@ -640,16 +1096,21 @@ fn spawn_cancellation(
         if abandon_stream {
             route.abandon_stream();
         }
-        if !route.begin_cancellation() {
+        let Some(cancellation) = route.begin_cancellation() else {
             return Ok(false);
-        }
+        };
 
-        let result = cancel_request(
-            &cancellation_tx,
-            route.scheduler_id,
-            abandon_stream,
-        )
-        .await;
+        let result = match cancellation {
+            RequestCancellation::Request => {
+                cancel_request(
+                    &cancellation_tx,
+                    route.scheduler_id,
+                    abandon_stream,
+                )
+                .await
+            }
+            RequestCancellation::Destination(cancellation) => cancellation.cancel(&command_tx).await,
+        };
         if route.finish_cancellation(&result) {
             remove_route(&routes, &route);
         }
@@ -691,6 +1152,24 @@ async fn cancel_request(
         SchedulerCommandResult::Noop => Ok(false),
         result => Err(anyhow!(
             "unexpected scheduler cancellation result for {request_id}: {result:?}"
+        )),
+    }
+}
+
+async fn cancel_destination(
+    command_tx: &mpsc::Sender<SchedulerCommandEnvelope>,
+    handoff_id: HandoffId,
+) -> anyhow::Result<bool> {
+    match send_command(
+        command_tx,
+        SchedulerCommand::CancelDestination { handoff_id },
+    )
+    .await?
+    {
+        SchedulerCommandResult::Applied => Ok(true),
+        SchedulerCommandResult::Noop => Ok(false),
+        result => Err(anyhow!(
+            "unexpected scheduler destination cancellation result for {handoff_id:?}: {result:?}"
         )),
     }
 }

@@ -57,7 +57,7 @@ Use narrower paths when the user names a subsystem:
 
 ```bash
 python3 .agents/skills/dynamo-clone-hotpath-audit/scripts/clone_inventory.py \
-  --paths lib/kv-router/src/scheduling lib/llm/src/backend \
+  --paths lib/kv-router/src/scheduling lib/llm/src/backend.rs \
   --only-actionable
 ```
 

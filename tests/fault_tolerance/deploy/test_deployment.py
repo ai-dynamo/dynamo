@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 import pytest
 
+from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
 from tests.fault_tolerance.deploy.base_checker import ValidationContext
 from tests.fault_tolerance.deploy.client_factory import get_client_function
 from tests.fault_tolerance.deploy.parse_factory import parse_test_results
@@ -25,7 +26,6 @@ from tests.fault_tolerance.deploy.scenarios import (
     Scenario,
     scenarios,
 )
-from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
 from tests.utils.test_output import resolve_test_output_path
 
 

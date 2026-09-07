@@ -9,7 +9,7 @@ use crate::protocols::{
     openai::stream_aggregator::{StreamAggregable, aggregate_stream},
 };
 
-use dynamo_runtime::engine::DataStream;
+use dynamo_runtime::{engine::DataStream, error::DynamoError};
 use futures::Stream;
 
 impl StreamAggregable for NvCreateEmbeddingResponse {
@@ -28,7 +28,7 @@ impl NvCreateEmbeddingResponse {
     /// Converts an SSE stream into a [`NvCreateEmbeddingResponse`].
     pub async fn from_sse_stream(
         stream: DataStream<Result<Message, SseCodecError>>,
-    ) -> Result<NvCreateEmbeddingResponse, String> {
+    ) -> Result<NvCreateEmbeddingResponse, DynamoError> {
         let stream = convert_sse_stream::<NvCreateEmbeddingResponse>(stream);
         NvCreateEmbeddingResponse::from_annotated_stream(stream).await
     }
@@ -36,7 +36,7 @@ impl NvCreateEmbeddingResponse {
     /// Aggregates an annotated stream of embedding responses into a final response.
     pub async fn from_annotated_stream(
         stream: impl Stream<Item = Annotated<NvCreateEmbeddingResponse>>,
-    ) -> Result<NvCreateEmbeddingResponse, String> {
+    ) -> Result<NvCreateEmbeddingResponse, DynamoError> {
         aggregate_stream(stream).await
     }
 }
@@ -44,6 +44,7 @@ impl NvCreateEmbeddingResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dynamo_runtime::error::{BackendError, ErrorType};
     use futures::stream;
 
     fn create_test_embedding_response(
@@ -141,7 +142,40 @@ mod tests {
         let result = NvCreateEmbeddingResponse::from_annotated_stream(Box::pin(stream)).await;
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Test error"));
+        assert!(result.unwrap_err().to_string().contains("Test error"));
+    }
+
+    #[tokio::test]
+    async fn test_typed_error_after_data_is_preserved() {
+        let embedding = dynamo_protocols::types::Embedding {
+            index: 0,
+            object: "embedding".to_string(),
+            embedding: dynamo_protocols::types::EmbeddingVector::Float(vec![0.1]),
+        };
+        let response = create_test_embedding_response(vec![embedding], 1, 1);
+        let error = Annotated::<NvCreateEmbeddingResponse> {
+            data: None,
+            id: None,
+            event: Some("error".to_string()),
+            comment: None,
+            error: Some(
+                DynamoError::builder()
+                    .error_type(ErrorType::Backend(BackendError::InvalidArgument))
+                    .message("invalid embedding request")
+                    .build(),
+            ),
+        };
+
+        let result =
+            NvCreateEmbeddingResponse::from_annotated_stream(stream::iter(vec![response, error]))
+                .await;
+
+        let error = result.expect_err("typed error must win over partial data");
+        assert_eq!(
+            error.error_type(),
+            ErrorType::Backend(BackendError::InvalidArgument)
+        );
+        assert_eq!(error.message(), "invalid embedding request");
     }
 
     #[tokio::test]

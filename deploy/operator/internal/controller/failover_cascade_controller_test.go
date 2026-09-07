@@ -25,14 +25,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
 const (
@@ -56,7 +59,7 @@ func newFailoverPod(name string, phase corev1.PodPhase, replicaIdx, podIdx strin
 	}
 }
 
-func newCascadeReconciler(objs ...client.Object) (*FailoverCascadeReconciler, client.Client) {
+func newCascadeReconciler(objs ...client.Object) (*failoverCascadeReconciler, client.Client) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 
@@ -66,7 +69,10 @@ func newCascadeReconciler(objs ...client.Object) (*FailoverCascadeReconciler, cl
 	}
 	c := cb.Build()
 
-	return NewFailoverCascadeReconciler(c, record.NewFakeRecorder(16)), c
+	return &failoverCascadeReconciler{
+		Client:   c,
+		recorder: events.NewFakeRecorder(16),
+	}, c
 }
 
 func TestFailoverCascade_FailedPodDeletesEntireGroup(t *testing.T) {
@@ -107,21 +113,68 @@ func TestFailoverCascade_SucceededPodDeletesEntireGroup(t *testing.T) {
 }
 
 func TestFailoverCascade_DifferentGroupUnaffected(t *testing.T) {
+	t.Log("Build a failed trigger, exact sibling, and Pods differing in each selector dimension")
+	failedPod := newFailoverPod("trigger", corev1.PodFailed, "0", "0")
+	sibling := newFailoverPod("sibling", corev1.PodRunning, "0", "0")
+	differentPCSG := newFailoverPod("different-pcsg", corev1.PodRunning, "0", "0")
+	differentPCSG.Labels[groveLabelPCSG] = "other-pcsg"
+	differentReplica := newFailoverPod("different-replica", corev1.PodRunning, "1", "0")
+	differentPodIndex := newFailoverPod("different-pod-index", corev1.PodRunning, "0", "1")
+	differentMember := newFailoverPod("different-member", corev1.PodRunning, "0", "0")
+	differentMember.Labels[commonconsts.KubeLabelDynamoFailoverEngineGroupMember] = "false"
+	differentNamespace := newFailoverPod("different-namespace", corev1.PodRunning, "0", "0")
+	differentNamespace.Namespace = "other-ns"
 
-	failedPod := newFailoverPod("ldr-0", corev1.PodFailed, "0", "0")
-	differentGroup := newFailoverPod("ldr-1", corev1.PodRunning, "0", "1")
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 
-	r, c := newCascadeReconciler(failedPod, differentGroup)
+	var deleteOptions client.DeleteAllOfOptions
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&corev1.Pod{}).
+		WithObjects(
+			failedPod,
+			sibling,
+			differentPCSG,
+			differentReplica,
+			differentPodIndex,
+			differentMember,
+			differentNamespace,
+		).
+		WithInterceptorFuncs(interceptor.Funcs{
+			DeleteAllOf: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteAllOfOption) error {
+				deleteOptions.ApplyOptions(opts)
+				return c.DeleteAllOf(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := &failoverCascadeReconciler{Client: c, recorder: events.NewFakeRecorder(16)}
 
+	t.Log("Reconcile the failed trigger and capture the destructive delete options")
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ldr-0", Namespace: cascadeTestNamespace},
+		NamespacedName: client.ObjectKeyFromObject(failedPod),
 	})
 	require.NoError(t, err)
 
-	var remaining corev1.PodList
-	require.NoError(t, c.List(context.Background(), &remaining, client.InNamespace(cascadeTestNamespace)))
-	assert.Len(t, remaining.Items, 1, "only the different engine group pod should remain")
-	assert.Equal(t, "ldr-1", remaining.Items[0].Name)
+	t.Log("Verify the delete is namespace-scoped and uses zero grace")
+	assert.Equal(t, cascadeTestNamespace, deleteOptions.Namespace)
+	assert.True(t, deleteOptions.LabelSelector.Matches(labels.Set(failedPod.Labels)))
+	assert.True(t, deleteOptions.LabelSelector.Matches(labels.Set(sibling.Labels)))
+	require.NotNil(t, deleteOptions.GracePeriodSeconds)
+	assert.Zero(t, *deleteOptions.GracePeriodSeconds)
+
+	t.Log("Verify only the exact engine group was deleted")
+	require.True(t, apierrors.IsNotFound(c.Get(context.Background(), client.ObjectKeyFromObject(failedPod), &corev1.Pod{})))
+	require.True(t, apierrors.IsNotFound(c.Get(context.Background(), client.ObjectKeyFromObject(sibling), &corev1.Pod{})))
+	for _, pod := range []*corev1.Pod{
+		differentPCSG,
+		differentReplica,
+		differentPodIndex,
+		differentMember,
+		differentNamespace,
+	} {
+		require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(pod), &corev1.Pod{}))
+	}
 }
 
 func TestFailoverCascade_MultipleFailedPodsAllDeleted(t *testing.T) {
@@ -196,7 +249,7 @@ func TestFailoverCascade_MissingGroveLabelsIsNoop(t *testing.T) {
 			Namespace: cascadeTestNamespace,
 			Labels: map[string]string{
 				commonconsts.KubeLabelDynamoFailoverEngineGroupMember: commonconsts.KubeLabelValueTrue,
-				groveLabelPCSG: "my-pcsg",
+				groveLabelPCSG: cascadeTestPCSG,
 			},
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodFailed},

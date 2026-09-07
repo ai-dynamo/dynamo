@@ -11,22 +11,22 @@ use dynamo_kv_router::identity::{
 use dynamo_kv_router::indexer::cuckoo::{CKF_LANE_COUNT, GlobalCkfIndexer};
 use dynamo_runtime::protocols::EndpointId;
 
+use super::identity::{KvQueryHashFormat, KvQuerySemantics, KvQuerySemanticsError};
 use crate::model_card::ModelDeploymentCard;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedIndexerDomain {
     pub(crate) id: IndexerDomainId,
+    // Test fixtures construct this field, but only the diagnostics feature reads it.
     #[cfg(any(test, feature = "ckf-diagnostics"))]
+    #[cfg_attr(all(test, not(feature = "ckf-diagnostics")), allow(dead_code))]
     pub(crate) diagnostic_model_artifact: String,
-    pub(crate) kv_block_size: u32,
-    pub(crate) event_hash_format: u16,
+    pub(crate) query_semantics: KvQuerySemantics,
 }
 
 impl PartialEq for ResolvedIndexerDomain {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-            && self.kv_block_size == other.kv_block_size
-            && self.event_hash_format == other.event_hash_format
+        self.id == other.id && self.query_semantics == other.query_semantics
     }
 }
 
@@ -35,8 +35,7 @@ impl Eq for ResolvedIndexerDomain {}
 impl Hash for ResolvedIndexerDomain {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.id.hash(state);
-        self.kv_block_size.hash(state);
-        self.event_hash_format.hash(state);
+        self.query_semantics.hash(state);
     }
 }
 
@@ -46,6 +45,7 @@ pub(crate) struct EndpointLocator {
     endpoint_id: EndpointId,
 }
 
+#[allow(dead_code)]
 impl EndpointLocator {
     pub(crate) fn new(dc_id: DcId, endpoint_id: EndpointId) -> Self {
         Self { dc_id, endpoint_id }
@@ -66,6 +66,7 @@ pub(crate) struct PoolBinding {
     kv_state_endpoint: Option<EndpointLocator>,
 }
 
+#[allow(dead_code)]
 impl PoolBinding {
     pub(crate) fn new(
         pool_id: PoolId,
@@ -200,14 +201,15 @@ impl PublishedGlobalCkfIndexer {
 pub(crate) fn resolve_indexer_domain(
     card: &ModelDeploymentCard,
     serving_endpoint: &EndpointId,
-    event_hash_format: u16,
-) -> ResolvedIndexerDomain {
+) -> Result<ResolvedIndexerDomain, KvQuerySemanticsError> {
+    let hash_format = KvQueryHashFormat::from_enable_eagle(card.runtime_config.enable_eagle);
+    let query_semantics = KvQuerySemantics::new(card.kv_cache_block_size, hash_format)?;
     let spec = card.indexer_identity.as_ref();
     let semantic_material = CanonicalIdentityMaterial::cache_semantics(
         &[card.source_path()],
         spec.and_then(|spec| spec.semantics()),
-        card.kv_cache_block_size,
-        event_hash_format,
+        query_semantics.kv_block_size(),
+        query_semantics.hash_format().identity_version(),
     );
     let routing_material = CanonicalIdentityMaterial::routing_scope(
         &[
@@ -225,13 +227,12 @@ pub(crate) fn resolve_indexer_domain(
         digest16(routing_material.bytes()),
         routing_material.source(),
     );
-    ResolvedIndexerDomain {
+    Ok(ResolvedIndexerDomain {
         id: IndexerDomainId::new(cache_semantics, routing_scope),
         #[cfg(any(test, feature = "ckf-diagnostics"))]
         diagnostic_model_artifact: card.source_path().to_string(),
-        kv_block_size: card.kv_cache_block_size,
-        event_hash_format,
-    }
+        query_semantics,
+    })
 }
 
 pub(crate) fn stable_dc_id(value: &str) -> DcId {
@@ -259,7 +260,13 @@ mod tests {
 
     use dynamo_kv_router::identity::{ExplicitIdentityMap, IdentitySource, IndexerIdentitySpec};
     use dynamo_kv_router::indexer::cuckoo::{
-        CkfConfig, ConsumerInstanceId, DcCkfState, GlobalCkfManifest, PrefixSearchConfig,
+        CkfConfig, ConsumerInstanceId, DcCkfState, GlobalCkfIngestOutcome, GlobalCkfManifest,
+        GlobalCkfSnapshot, LaneLease, PrefixSearchConfig, ProducerIdentity,
+    };
+    use dynamo_kv_router::protocols::{
+        BlockHashOptions, ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData,
+        KvCacheStoreData, KvCacheStoredBlockData, RouterEvent, compute_block_hash_for_seq,
+        compute_seq_hash_for_block,
     };
 
     use super::*;
@@ -321,8 +328,8 @@ mod tests {
         let mut b = card("b", "repo/b");
         b.indexer_identity = Some(spec);
 
-        let a = resolve_indexer_domain(&a, &endpoint_a, 1);
-        let b = resolve_indexer_domain(&b, &endpoint_b, 1);
+        let a = resolve_indexer_domain(&a, &endpoint_a).unwrap();
+        let b = resolve_indexer_domain(&b, &endpoint_b).unwrap();
         assert_eq!(a.id, b.id);
         let pool_a = PoolId::new(a.id, stable_dc_id("dc-a"));
         let pool_b = PoolId::new(b.id, stable_dc_id("dc-b"));
@@ -334,13 +341,13 @@ mod tests {
     #[test]
     fn default_and_explicit_sources_never_alias() {
         let endpoint = EndpointId::from("ns/router/generate");
-        let default = resolve_indexer_domain(&card("model", "same"), &endpoint, 1);
+        let default = resolve_indexer_domain(&card("model", "same"), &endpoint).unwrap();
         let explicit =
             ExplicitIdentityMap::new(BTreeMap::from([("model".to_string(), "same".to_string())]))
                 .unwrap();
         let mut explicit_card = card("model", "same");
         explicit_card.indexer_identity = Some(IndexerIdentitySpec::new(Some(explicit), None));
-        let explicit = resolve_indexer_domain(&explicit_card, &endpoint, 1);
+        let explicit = resolve_indexer_domain(&explicit_card, &endpoint).unwrap();
         assert_ne!(default.id, explicit.id);
     }
 
@@ -358,8 +365,8 @@ mod tests {
         second.kv_cache_block_size = 1024;
         second.indexer_identity = Some(IndexerIdentitySpec::new(Some(explicit), None));
 
-        let first = resolve_indexer_domain(&first, &endpoint, 1);
-        let second = resolve_indexer_domain(&second, &endpoint, 1);
+        let first = resolve_indexer_domain(&first, &endpoint).unwrap();
+        let second = resolve_indexer_domain(&second, &endpoint).unwrap();
 
         assert_ne!(first.id.cache_semantics(), second.id.cache_semantics());
     }
@@ -367,7 +374,7 @@ mod tests {
     #[test]
     fn relay_derivation_has_frozen_golden_vectors() {
         let endpoint = EndpointId::from("prod/router/generate");
-        let resolved = resolve_indexer_domain(&card("display", "meta/llama"), &endpoint, 1);
+        let resolved = resolve_indexer_domain(&card("display", "meta/llama"), &endpoint).unwrap();
         assert_eq!(
             resolved.id.cache_semantics().to_string(),
             "7d31eb9019357572470605f4a8be687e"
@@ -376,6 +383,112 @@ mod tests {
             resolved.id.routing_scope().to_string(),
             "18270d3ba03effaec8d167ba02c7752d"
         );
+    }
+
+    #[test]
+    fn eagle_is_a_distinct_cache_semantics_pipeline() {
+        let endpoint = EndpointId::from("prod/router/generate");
+        let standard = resolve_indexer_domain(&card("llama", "meta/llama"), &endpoint).unwrap();
+        let mut eagle_card = card("llama", "meta/llama");
+        eagle_card.runtime_config.enable_eagle = true;
+        let eagle = resolve_indexer_domain(&eagle_card, &endpoint).unwrap();
+
+        assert_eq!(
+            standard.query_semantics.hash_format(),
+            KvQueryHashFormat::DynamoStandardV1
+        );
+        assert_eq!(
+            eagle.query_semantics.hash_format(),
+            KvQueryHashFormat::DynamoEagleV1
+        );
+        assert_ne!(standard.id.cache_semantics(), eagle.id.cache_semantics());
+    }
+
+    #[test]
+    fn zero_block_size_cannot_form_a_queryable_domain() {
+        let endpoint = EndpointId::from("prod/router/generate");
+        let mut invalid = card("llama", "meta/llama");
+        invalid.kv_cache_block_size = 0;
+
+        assert_eq!(
+            resolve_indexer_domain(&invalid, &endpoint).unwrap_err(),
+            KvQuerySemanticsError::ZeroBlockSize
+        );
+    }
+
+    fn assert_query_pipeline_parity(hash_format: KvQueryHashFormat, lora_name: Option<&str>) {
+        let block_size = 4;
+        let tokens: Vec<u32> = (0..13).collect();
+        let hash_options = BlockHashOptions {
+            lora_name,
+            cache_namespace: Some("tenant-ns"),
+            is_eagle: Some(hash_format.is_eagle()),
+            ..Default::default()
+        };
+        let local_hashes = compute_block_hash_for_seq(&tokens, block_size, hash_options);
+        let sequence_hashes = compute_seq_hash_for_block(&local_hashes);
+        assert!(!local_hashes.is_empty());
+
+        let endpoint = EndpointId::from("prod/router/generate");
+        let mut deployment = card("llama", "meta/llama");
+        deployment.kv_cache_block_size = block_size;
+        deployment.runtime_config.enable_eagle = hash_format.is_eagle();
+        let resolved = resolve_indexer_domain(&deployment, &endpoint).unwrap();
+        assert_eq!(resolved.query_semantics.hash_format(), hash_format);
+
+        let mut producer = DcCkfState::new(CkfConfig::new(64)).unwrap();
+        producer.apply_event(RouterEvent::new(
+            1,
+            KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    start_position: None,
+                    blocks: local_hashes
+                        .iter()
+                        .zip(&sequence_hashes)
+                        .map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
+                            block_hash: ExternalSequenceBlockHash(
+                                *sequence_hash ^ 0xE771_6E00_5A17_CAFE,
+                            ),
+                            tokens_hash: *local_hash,
+                            mm_extra_info: None,
+                        })
+                        .collect(),
+                }),
+                dp_rank: 0,
+            },
+        ));
+        let (_, buckets) = producer.barrier_snapshot().unwrap();
+
+        let pool_id = PoolId::new(resolved.id, DcId::new(7));
+        let identity = ProducerIdentity::new(pool_id, 11, 1, producer.format());
+        let consumer_instance = ConsumerInstanceId::new(13);
+        let mut lanes = [None; CKF_LANE_COUNT];
+        lanes[0] = Some(pool_id);
+        let manifest =
+            GlobalCkfManifest::new(consumer_instance, resolved.id, producer.format(), lanes)
+                .unwrap();
+        let consumer = GlobalCkfIndexer::new(manifest, PrefixSearchConfig::default()).unwrap();
+        let mut ingestor = consumer.claim_lane(0).unwrap();
+        let lease = LaneLease::new(consumer_instance, 0, 1);
+        ingestor.assign(identity, lease).unwrap();
+        assert_eq!(
+            ingestor.install_snapshot(&GlobalCkfSnapshot::new(identity, lease, 1, buckets)),
+            GlobalCkfIngestOutcome::SnapshotInstalled { sequence: 1 }
+        );
+
+        let result = consumer.find_prefix_matches(&local_hashes).unwrap();
+        let lane = result.lanes()[0].expect("pool lane must be queryable");
+        assert_eq!(lane.pool_id(), pool_id);
+        assert_eq!(lane.prefix_depth(), local_hashes.len() as u32);
+    }
+
+    #[test]
+    fn declared_query_semantics_match_dc_snapshot_and_global_query() {
+        assert_query_pipeline_parity(KvQueryHashFormat::DynamoStandardV1, None);
+        assert_query_pipeline_parity(KvQueryHashFormat::DynamoStandardV1, Some("tenant-a"));
+        assert_query_pipeline_parity(KvQueryHashFormat::DynamoEagleV1, Some("tenant-a"));
     }
 
     #[test]

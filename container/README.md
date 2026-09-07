@@ -27,7 +27,7 @@ Below is a summary of the general file structure for the framework Dockerfile st
 | Stage/Filepath | Target |
 | --- | --- |
 | **STAGE dynamo_base** | **FROM ${BASE_IMAGE}** |
-| /bin/uv, /bin/uvx | COPY from ghcr.io/astral-sh/uv:latest (→ framework, runtime) |
+| /opt/uv/bin/uv, /opt/uv/bin/uvx | COPY from ghcr.io/astral-sh/uv:${uv_version}, prepended to PATH (→ framework, runtime) |
 |  /usr/bin/nats-server | Downloaded from GitHub (→ runtime) |
 |  /usr/local/bin/etcd/ | Downloaded from GitHub (→ runtime) |
 |  /usr/local/rustup/ | Installed via rustup-init (→ wheel_builder, dev) |
@@ -266,14 +266,7 @@ The frontend image is a specialized container that includes the Dynamo component
 
 **Build EPP Image**
 ```bash
-sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler libclang-dev
-curl --retry 5 --retry-delay 3 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-. "$HOME/.cargo/env"
-cargo install cbindgen
-
-pushd deploy/inference-gateway/epp
-make all
-popd
+make -C deploy/inference-gateway/ext-proc all
 
 EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
 EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
@@ -284,12 +277,15 @@ EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
 # Build the frontend image (automatically builds EPP image as a dependency)
 container/render.py --framework=dynamo --target=frontend --output-short-filename
 docker build -t dynamo:frontend --build-arg EPP_IMAGE=${EPP_IMAGE} -f container/rendered.Dockerfile .
+
+# NIXL comes from PyPI; override the release with --build-arg NIXL_REF=v1.4.0
 ```
 
+**Note on `EPP_IMAGE`**: it must be an image built from `deploy/inference-gateway/ext-proc/Dockerfile`, not an arbitrary EPP image. Beyond the `/epp` binary, the frontend's compliance stages read `/sbom-rust-epp.cdx.json` and `/rust-licenses` out of it, and only that Dockerfile places them there. Pointing `EPP_IMAGE` at an older release or a third-party EPP fails the build on the `COPY --from=epp` of those paths, with a message (`lstat /sbom-rust-epp.cdx.json: no such file or directory`) that mentions neither EPP nor SBOMs. CI is unaffected: it builds the EPP image in the same workflow and feeds that URI straight through.
+
 The build process automatically:
-1. Builds the Dynamo static library for EPP KV-aware routing
-2. Builds the custom EPP Docker image using `make all` from `deploy/inference-gateway/epp/Makefile`
-3. Builds the frontend image with the EPP binary and Dynamo runtime components
+1. Builds the native Rust EPP Docker image using `make all` from `deploy/inference-gateway/ext-proc/Makefile`
+2. Builds the frontend image with the EPP binary and Dynamo runtime components
 
 For more details, see [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md).
 
@@ -484,6 +480,8 @@ container/run.sh --image dynamo:latest-sglang-xpu-local-dev --device=xpu \
 sudo chown -R dynamo:0 /opt/miniforge3/envs/sglang
 cargo build --locked --features dynamo-llm/block-manager --workspace
 # 3a. ai_dynamo_runtime (Rust bindings: dynamo._core)
+# Add `--features request-trace-s3` to enable the S3 request-trace sink
+# (DYN_REQUEST_TRACE_SINKS=s3); it is off by default to keep the local build lean.
 cd lib/bindings/python && maturin develop --uv && cd -
 # 3b. ai-dynamo (Python namespace packages: dynamo.frontend, dynamo.sglang, ...)
 uv pip install --no-deps -e /workspace
@@ -544,6 +542,8 @@ etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0
 
 # 4. Compile code
 cargo build --locked --features dynamo-llm/block-manager --workspace
+# Add `--features request-trace-s3` to enable the S3 request-trace sink
+# (DYN_REQUEST_TRACE_SINKS=s3); it is off by default to keep the local build lean.
 cd lib/bindings/python && maturin develop --uv && cd -
 
 # 5. Sanity check (optional but recommended)

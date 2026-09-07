@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Download and Extract Artifacts
-        uses: dawidd6/action-download-artifact@20319c5641d495c8a52e688b7dc5fada6c3a9fbc # v8
+        uses: dawidd6/action-download-artifact@20319c5641d495c8a52e688b7dc5fada6c3a9fbc  # v8
         with:
            run_id: ${{ github.event.workflow_run.id }}
            path: artifacts
@@ -97,7 +97,7 @@ jobs:
       - name: Complete report test status
         if: always()
         id: report_test_status
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7.1.0
         with:
           script: |
             const fs = require('fs');

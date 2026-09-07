@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Pattern
 
 from typing_extensions import Required, TypedDict
 
-from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
+from tests.deploy.dgd_utils import DeploymentSpec, ManagedDeployment
 
 if TYPE_CHECKING:
     from tests.fault_tolerance.deploy.base_checker import BaseChecker

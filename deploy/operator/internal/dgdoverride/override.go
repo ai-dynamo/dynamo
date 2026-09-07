@@ -473,7 +473,7 @@ func prepareBetaComponents(
 		return nil, nil
 	}
 
-	baseNames := make(map[string]struct{}, len(baseComponents))
+	baseByName := make(map[string]map[string]interface{}, len(baseComponents))
 	for i, value := range baseComponents {
 		component, ok := value.(map[string]interface{})
 		if !ok {
@@ -483,7 +483,7 @@ func prepareBetaComponents(
 		if !ok || name == "" {
 			return nil, fmt.Errorf("beta blueprint spec.components[%d].name must be a non-empty string", i)
 		}
-		baseNames[name] = struct{}{}
+		baseByName[name] = component
 	}
 
 	filtered := make([]interface{}, 0, len(overrideComponents))
@@ -497,12 +497,18 @@ func prepareBetaComponents(
 		if !ok || name == "" {
 			return warnings, fmt.Errorf("beta override spec.components[%d].name must be a non-empty string", i)
 		}
-		if _, exists := baseNames[name]; !exists {
+		baseComponent, exists := baseByName[name]
+		if !exists {
 			warnings = append(warnings, Warning{
 				Path:    fmt.Sprintf("spec.components[name=%s]", name),
 				Message: "ignored because the generated blueprint has no such component",
 			})
 			continue
+		}
+
+		// Materialize explicit append directives before structural merge consumes them.
+		if err := materializeBetaContainerArgsAppends(component, baseComponent, i); err != nil {
+			return warnings, err
 		}
 		filtered = append(filtered, component)
 	}
@@ -511,4 +517,131 @@ func prepareBetaComponents(
 		return warnings, fmt.Errorf("prepare beta override components: %w", err)
 	}
 	return warnings, nil
+}
+
+func materializeBetaContainerArgsAppends(
+	component map[string]interface{},
+	baseComponent map[string]interface{},
+	componentIndex int,
+) error {
+	// Read the override containers that may carry append directives.
+	containers, found, err := unstructured.NestedSlice(
+		component,
+		"podTemplate",
+		"spec",
+		"containers",
+	)
+	if err != nil {
+		return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers must be a list: %w", componentIndex, err)
+	}
+	if !found {
+		return nil
+	}
+
+	modified := false
+	for containerIndex, value := range containers {
+		// Require object-shaped containers before inspecting custom modifiers.
+		container, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d] must be an object, got %T", componentIndex, containerIndex, value)
+		}
+		modifier, hasModifier := container["$patch"]
+		if !hasModifier {
+			continue
+		}
+
+		// Keep the modifier surface intentionally limited to args append.
+		modifierMap, ok := modifier.(map[string]interface{})
+		if !ok || len(modifierMap) != 1 || modifierMap["args"] != "append" {
+			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d].$patch only supports args: append", componentIndex, containerIndex)
+		}
+		name, ok := container["name"].(string)
+		if !ok || name == "" {
+			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d].name must be a non-empty string when $patch is used", componentIndex, containerIndex)
+		}
+
+		// Resolve the target from the generated blueprint before combining arguments.
+		baseContainer, err := betaBlueprintContainerByName(baseComponent, name, componentIndex)
+		if err != nil {
+			return err
+		}
+		if baseContainer == nil {
+			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d].name %q is not present in the generated blueprint", componentIndex, containerIndex, name)
+		}
+
+		// Require a non-empty string list for the arguments to append.
+		args, found, err := unstructured.NestedStringSlice(container, "args")
+		if err != nil {
+			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d].args must be a list of strings: %w", componentIndex, containerIndex, err)
+		}
+		if !found || len(args) == 0 {
+			return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d].args must be non-empty when $patch args is append", componentIndex, containerIndex)
+		}
+
+		// Reject empty entries before materializing the combined argument list.
+		for argIndex, arg := range args {
+			if arg == "" {
+				return fmt.Errorf("beta override spec.components[%d].podTemplate.spec.containers[%d].args[%d] must be non-empty when $patch args is append", componentIndex, containerIndex, argIndex)
+			}
+		}
+
+		// Append only to an explicit base list so implicit operator or image defaults stay intact.
+		baseArgs, found, err := unstructured.NestedStringSlice(baseContainer, "args")
+		if err != nil {
+			return fmt.Errorf("beta blueprint spec.components[%d] container %q args must be a list of strings: %w", componentIndex, name, err)
+		}
+		if !found {
+			return fmt.Errorf("beta blueprint spec.components[%d] container %q must define args explicitly before they can be appended", componentIndex, name)
+		}
+
+		// Replace the directive with the complete list consumed by structural merge.
+		combinedArgs := append(append([]string(nil), baseArgs...), args...)
+		delete(container, "$patch")
+		if err := unstructured.SetNestedStringSlice(container, combinedArgs, "args"); err != nil {
+			return fmt.Errorf("prepare beta override component container args: %w", err)
+		}
+		containers[containerIndex] = container
+		modified = true
+	}
+	if !modified {
+		return nil
+	}
+
+	// Persist the transformed containers for the normal structural merge.
+	if err := unstructured.SetNestedSlice(component, containers, "podTemplate", "spec", "containers"); err != nil {
+		return fmt.Errorf("prepare beta override component containers: %w", err)
+	}
+	return nil
+}
+
+func betaBlueprintContainerByName(
+	component map[string]interface{},
+	name string,
+	componentIndex int,
+) (map[string]interface{}, error) {
+	// Append targets must already exist in the generated blueprint.
+	containers, found, err := unstructured.NestedSlice(
+		component,
+		"podTemplate",
+		"spec",
+		"containers",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("beta blueprint spec.components[%d].podTemplate.spec.containers must be a list: %w", componentIndex, err)
+	}
+	if !found {
+		return nil, nil
+	}
+
+	// Match containers by the same name key used by structural merge.
+	for containerIndex, value := range containers {
+		container, ok := value.(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("beta blueprint spec.components[%d].podTemplate.spec.containers[%d] must be an object, got %T", componentIndex, containerIndex, value)
+		}
+		if container["name"] == name {
+			return container, nil
+		}
+	}
+	return nil, nil
 }

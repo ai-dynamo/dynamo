@@ -88,6 +88,8 @@ func ReconcileModelServicesForComponents(
 			func(ctx context.Context) (*corev1.Service, bool, error) {
 				return headlessService, false, nil
 			},
+			// Components that serve the same base model share this Service.
+			commonController.WithSharedOwnership(),
 		)
 		if err != nil {
 			logger.Error(err, "Failed to sync headless service for model",
@@ -110,7 +112,7 @@ func ReconcileModelServicesForComponents(
 			err = reconciler.Update(ctx, syncedService)
 			if err != nil {
 				logger.Error(err, fmt.Sprintf("Failed to update model service %s.", componentName))
-				reconciler.GetRecorder().Eventf(owner, corev1.EventTypeWarning, "UpdateService", "Failed to update model Service %s: %s", componentName, err)
+				reconciler.GetRecorder().Eventf(owner, syncedService, corev1.EventTypeWarning, "UpdateService", "Update", "Failed to update model Service %s: %s", componentName, err)
 				return fmt.Errorf("failed to update main component service %s: %w", componentName, err)
 			}
 		}

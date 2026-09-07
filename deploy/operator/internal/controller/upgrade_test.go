@@ -27,6 +27,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/features"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
 	"github.com/stretchr/testify/require"
@@ -100,7 +101,7 @@ func TestLegacyWorkerIdentityUpgradeDoesNotTriggerRollout(t *testing.T) {
 						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 							MainContainer: &corev1.Container{
 								Name:    commonconsts.MainContainerName,
-								Image:   "test-image:latest",
+								Image:   "test-image:1.4.0",
 								Command: []string{"python3"},
 								Args:    []string{"-m", "dynamo.vllm"},
 								Resources: corev1.ResourceRequirements{
@@ -144,7 +145,7 @@ spec:
           sizeLimit: 8Gi
       containers:
       - name: main
-        image: test-image:latest
+        image: test-image:1.4.0
         command:
         - python3
         args:
@@ -295,7 +296,7 @@ spec:
 						ExtraPodSpec: &v1alpha1.ExtraPodSpec{
 							MainContainer: &corev1.Container{
 								Name:    commonconsts.MainContainerName,
-								Image:   "test-image:latest",
+								Image:   "test-image:1.4.0",
 								Command: []string{"python3"},
 								Args:    []string{"-m", "dynamo.vllm"},
 								Resources: corev1.ResourceRequirements{
@@ -339,7 +340,7 @@ spec:
             sizeLimit: 8Gi
         containers:
         - name: main
-          image: test-image:latest
+          image: test-image:1.4.0
           command:
           - python3
           args:
@@ -446,7 +447,7 @@ spec:
             sizeLimit: 8Gi
         containers:
         - name: main
-          image: test-image:latest
+          image: test-image:1.4.0
           command:
           - python3
           args:
@@ -796,29 +797,19 @@ spec:
 				render: func(ctx context.Context, t *testing.T, parent, child client.Object) (client.Object, map[string]string) {
 					t.Helper()
 
-					t.Log("prepare Grove render deployment from the converted DGD and existing PodCliqueSet")
+					t.Log("render Grove workloads from the converted DGD and existing PodCliqueSet")
 					dgd := parent.(*v1beta1.DynamoGraphDeployment)
 					reconciler := newUpgradeDGDReconciler(t, dgd, child)
-					renderDGD, existing, err := reconciler.prepareGroveRenderDeployment(ctx, dgd)
-					require.NoError(t, err)
-					require.NotNil(t, existing)
-
-					t.Log("generate the desired Grove PodCliqueSet from the prepared render deployment")
-					pcs, err := dynamo.GenerateGrovePodCliqueSet(
-						ctx,
-						renderDGD,
+					renderer := newGroveWorkloadRenderer(
+						reconciler.Client,
 						&configv1alpha1.OperatorConfiguration{},
 						&controller_common.RuntimeConfig{},
-						reconciler.Client,
-						nil,
-						nil,
-						nil,
 						nil,
 					)
+					renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 					require.NoError(t, err)
-
-					t.Log("preserve the existing PodCliqueSet clique order before comparing specs")
-					preserveGrovePodCliqueSetOrder(pcs, existing)
+					pcs := renderedPCS.desired
+					renderDGD := renderedPCS.renderDeployment
 
 					t.Log("generate the decode service selector from the same prepared Grove component")
 					decodeComponent := renderDGD.GetComponentByName("VllmDecodeWorker")
@@ -879,8 +870,8 @@ spec:
 			oldPodLabels := tt.childPodLabels(t, oldChild)
 			newPodLabels := tt.childPodLabels(t, newChild)
 
-			t.Log("compare old and new child specs; a change here would trigger a rollout")
-			require.Equal(t, specHash(t, oldChild), specHash(t, newChild), "upgrade should not change the child spec hash")
+			t.Log("compare old and new child specs; an operator-only upgrade must not trigger a rollout")
+			require.Equal(t, specHash(t, oldChild), specHash(t, newChild), "upgrade should preserve the child spec hash for a pinned older runtime")
 
 			t.Log("assert worker pod labels keep the legacy worker identity")
 			for site, subComponentType := range tt.expectedWorkerSites {
@@ -934,27 +925,17 @@ func TestGroveNativeWorkerIdentityLabelsStayNative(t *testing.T) {
 	t.Log("seed the fake client with a native v1beta1 DGD and existing PodCliqueSet")
 	reconciler := newUpgradeDGDReconciler(t, dgd, existingPCS)
 
-	t.Log("prepare the Grove render deployment without legacy worker selector migration")
-	renderDGD, existing, err := reconciler.prepareGroveRenderDeployment(ctx, dgd)
-	require.NoError(t, err)
-	require.NotNil(t, existing)
-
-	t.Log("generate the desired PodCliqueSet from the prepared native render deployment")
-	desired, err := dynamo.GenerateGrovePodCliqueSet(
-		ctx,
-		renderDGD,
+	t.Log("render Grove workloads without legacy worker selector migration")
+	renderer := newGroveWorkloadRenderer(
+		reconciler.Client,
 		&configv1alpha1.OperatorConfiguration{},
 		&controller_common.RuntimeConfig{},
-		reconciler.Client,
-		nil,
-		nil,
-		nil,
 		nil,
 	)
+	renderedPCS, err := renderer.Render(ctx, dgd, nil, nil, false)
 	require.NoError(t, err)
-
-	t.Log("preserve existing clique order before checking native labels")
-	preserveGrovePodCliqueSetOrder(desired, existing)
+	desired := renderedPCS.desired
+	renderDGD := renderedPCS.renderDeployment
 
 	t.Log("assert the native prefill component stays prefill instead of legacy worker")
 	prefillComponent := renderDGD.GetComponentByName("prefill")
@@ -1019,4 +1000,115 @@ func specHash(t *testing.T, obj client.Object) string {
 	hash, err := controller_common.GetSpecHash(obj)
 	require.NoError(t, err)
 	return hash
+}
+
+func TestLegacyGoEPPUpgradeDoesNotChangePodContract(t *testing.T) {
+	ctx := context.Background()
+
+	t.Log("build a Go-EPP DCD that still carries deprecated eppConfig after operator upgrade")
+	dcd := &v1beta1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gaie-epp",
+			Namespace: "default",
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoComponent:           "epp",
+				commonconsts.KubeLabelDynamoGraphDeploymentName: "gaie",
+				commonconsts.KubeLabelDynamoComponentType:       commonconsts.ComponentTypeEPP,
+			},
+		},
+		Spec: v1beta1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: v1beta1.DynamoComponentDeploymentSharedSpec{
+				ComponentName: "epp",
+				ComponentType: v1beta1.ComponentTypeEPP,
+				Replicas:      ptr.To(int32(1)),
+				EPPConfig: &v1beta1.EPPConfig{
+					ConfigMapRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "gaie-epp-config"},
+						Key:                  "epp-config-dynamo.yaml",
+					},
+				},
+				PodTemplate: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  commonconsts.MainContainerName,
+							Image: "nvcr.io/nvidia/ai-dynamo/epp-image:1.4.0",
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	t.Log("render the Go-EPP Deployment and Service that the upgraded operator must preserve")
+	reconciler := newUpgradeDCDReconciler(t, dcd)
+	oldDeployment, toDelete, err := reconciler.generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	oldService, toDelete, err := reconciler.generateService(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+
+	t.Log("assert the Go EPP launch contract (CLI flags + config mount) is still rendered")
+	main := requireMainContainer(t, oldDeployment)
+	require.Contains(t, main.Args, "--config-file")
+	require.Contains(t, main.Args, "--pool-name")
+	require.Contains(t, main.Args, epp.GetConfigFilePath())
+	require.True(t, hasVolumeMount(main.VolumeMounts, "epp-config", "/etc/epp"))
+	require.True(t, hasVolume(oldDeployment.Spec.Template.Spec.Volumes, "epp-config"))
+
+	t.Log("re-render with the same DCD; upgrade alone must not change the Pod template or Service selector")
+	newReconciler := newUpgradeDCDReconciler(t, dcd, oldDeployment.DeepCopy())
+	newDeployment, toDelete, err := newReconciler.generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	newService, toDelete, err := newReconciler.generateService(ctx, generateResourceOption{dynamoComponentDeployment: dcd})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+
+	require.Equal(t, specHash(t, oldDeployment), specHash(t, newDeployment), "Go-EPP Pod template must stay unchanged until migration starts")
+	require.Equal(t, oldService.Spec.Selector, newService.Spec.Selector, "Go-EPP serving endpoint selector must stay unchanged until migration starts")
+	require.Equal(t, oldService.Spec.Ports, newService.Spec.Ports, "Go-EPP Service ports must stay unchanged until migration starts")
+
+	t.Log("clear eppConfig to start explicit Rust-EPP migration and assert the Pod contract switches")
+	migrated := dcd.DeepCopy()
+	migrated.Spec.EPPConfig = nil
+	migrated.Spec.PodTemplate.Spec.Containers[0].Image = "nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.5.0"
+	migratedReconciler := newUpgradeDCDReconciler(t, migrated)
+	migratedDeployment, toDelete, err := migratedReconciler.generateDeployment(ctx, generateResourceOption{dynamoComponentDeployment: migrated})
+	require.NoError(t, err)
+	require.False(t, toDelete)
+	migratedMain := requireMainContainer(t, migratedDeployment)
+	require.Empty(t, migratedMain.Args, "Rust EPP takes no CLI flags after explicit migration")
+	require.False(t, hasVolumeMount(migratedMain.VolumeMounts, "epp-config", "/etc/epp"))
+	require.False(t, hasVolume(migratedDeployment.Spec.Template.Spec.Volumes, "epp-config"))
+	require.NotEqual(t, specHash(t, oldDeployment), specHash(t, migratedDeployment), "explicit migration must change the Pod template")
+}
+
+func requireMainContainer(t *testing.T, deployment *appsv1.Deployment) corev1.Container {
+	t.Helper()
+	for _, c := range deployment.Spec.Template.Spec.Containers {
+		if c.Name == commonconsts.MainContainerName {
+			return c
+		}
+	}
+	t.Fatalf("main container not found in deployment %s", deployment.Name)
+	return corev1.Container{}
+}
+
+func hasVolumeMount(mounts []corev1.VolumeMount, name, path string) bool {
+	for _, m := range mounts {
+		if m.Name == name && m.MountPath == path {
+			return true
+		}
+	}
+	return false
+}
+
+func hasVolume(volumes []corev1.Volume, name string) bool {
+	for _, v := range volumes {
+		if v.Name == name {
+			return true
+		}
+	}
+	return false
 }

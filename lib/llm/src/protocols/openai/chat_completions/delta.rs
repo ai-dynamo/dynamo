@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use super::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse};
 use crate::{
@@ -9,7 +9,7 @@ use crate::{
         common::{self, extensions::NvExtProvider, timing::RequestTracker},
         openai::{
             convert_backend_top_logprobs,
-            delta_common::{self, DeltaGeneratorOptions},
+            delta_common::{self, DeltaGeneratorOptions, DeltaGeneratorState},
             token_to_utf8_bytes,
         },
     },
@@ -39,47 +39,31 @@ impl NvCreateChatCompletionRequest {
 
 /// Generates incremental chat completion responses in a streaming fashion.
 pub struct DeltaGenerator {
-    /// Unique identifier for the chat completion session.
-    id: String,
-    /// Object type, representing a streamed chat completion response.
-    object: String,
-    /// Timestamp (Unix epoch) when the response was created.
-    created: u32,
-    model: String,
-    /// Optional system fingerprint for version tracking.
-    system_fingerprint: Option<String>,
+    /// State shared with the text completion delta generator.
+    state: DeltaGeneratorState,
     /// Optional service tier information for the response.
     service_tier: Option<dynamo_protocols::types::ServiceTierResponse>,
-    /// Tracks token usage for the completion request.
-    usage: dynamo_protocols::types::CompletionUsage,
-    /// Counter tracking the number of messages issued.
-    msg_counter: u64,
-    /// Configuration options for response generation.
-    options: DeltaGeneratorOptions,
-    /// Request tracker for per-request metrics (shared with PreprocessedRequest).
-    tracker: Arc<RequestTracker>,
+    /// Choice indices for which the assistant role has already been emitted.
+    emitted_role_choices: HashSet<u32>,
 }
 
 impl DeltaGenerator {
     pub fn new(model: String, options: DeltaGeneratorOptions, request_id: String) -> Self {
-        let (now, usage, tracker) = delta_common::initial_state();
         Self {
-            id: format!("chatcmpl-{request_id}"),
-            object: "chat.completion.chunk".to_string(),
-            created: now,
-            model,
-            system_fingerprint: None,
+            state: DeltaGeneratorState::new(
+                format!("chatcmpl-{request_id}"),
+                "chat.completion.chunk".to_string(),
+                model,
+                options,
+            ),
             service_tier: None,
-            usage,
-            msg_counter: 0,
-            options,
-            tracker,
+            emitted_role_choices: HashSet::new(),
         }
     }
 
     /// Returns the request tracker. Tracking is enabled. For sharing with PreprocessedRequest.
     pub fn tracker(&self) -> Arc<RequestTracker> {
-        self.tracker.clone()
+        self.state.tracker()
     }
 
     /// Updates the prompt token usage count.
@@ -87,7 +71,7 @@ impl DeltaGenerator {
     /// # Arguments
     /// * `isl` - Input Sequence Length. The number of prompt tokens used.
     pub fn update_isl(&mut self, isl: u32) {
-        self.usage.prompt_tokens = isl;
+        self.state.update_isl(isl);
     }
 
     pub fn create_logprobs(
@@ -97,7 +81,7 @@ impl DeltaGenerator {
         logprobs: Option<common::llm_backend::LogProbs>,
         top_logprobs: Option<common::llm_backend::TopLogprobs>,
     ) -> Option<dynamo_protocols::types::ChatChoiceLogprobs> {
-        if !self.options.enable_logprobs || logprobs.is_none() {
+        if !self.state.options().enable_logprobs || logprobs.is_none() {
             return None;
         }
 
@@ -112,31 +96,35 @@ impl DeltaGenerator {
             .map(|(_, lp)| lp as f32)
             .collect::<Vec<f32>>();
 
-        let return_as_ids = self.options.return_tokens_as_token_ids;
-        let content = top_logprobs.map(|top_logprobs| {
-            toks.iter()
-                .zip(tok_lps)
-                .zip(top_logprobs)
-                .map(|(((t, tid), lp), top_lps)| {
-                    let token_str = if return_as_ids {
-                        format!("token_id:{}", tid)
-                    } else {
-                        t.clone()
-                    };
-                    let converted =
-                        convert_backend_top_logprobs(&top_lps, t, *tid, lp, return_as_ids);
-                    dynamo_protocols::types::ChatCompletionTokenLogprob {
-                        token: token_str.clone(),
-                        logprob: lp,
-                        bytes: token_to_utf8_bytes(&token_str),
-                        top_logprobs: converted,
-                    }
-                })
-                .collect()
-        });
+        let return_as_ids = self.state.options().return_tokens_as_token_ids;
+        let content = toks
+            .iter()
+            .zip(tok_lps)
+            .enumerate()
+            .map(|(index, ((t, tid), lp))| {
+                let top_lps = top_logprobs
+                    .as_ref()
+                    .and_then(|positions| positions.get(index))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let token_str = if return_as_ids {
+                    format!("token_id:{}", tid)
+                } else {
+                    t.clone()
+                };
+                let converted = convert_backend_top_logprobs(top_lps, t, *tid, lp, return_as_ids);
+                dynamo_protocols::types::ChatCompletionTokenLogprob {
+                    token: token_str.clone(),
+                    logprob: lp,
+                    token_id: Some(*tid),
+                    bytes: token_to_utf8_bytes(&token_str),
+                    top_logprobs: converted,
+                }
+            })
+            .collect();
 
         Some(dynamo_protocols::types::ChatChoiceLogprobs {
-            content,
+            content: Some(content),
             refusal: None,
         })
     }
@@ -153,11 +141,10 @@ impl DeltaGenerator {
             content: text.map(dynamo_protocols::types::ChatCompletionMessageContent::Text),
             function_call: None,
             tool_calls: None,
-            role: if self.msg_counter == 0 {
-                Some(dynamo_protocols::types::Role::Assistant)
-            } else {
-                None
-            },
+            role: self
+                .emitted_role_choices
+                .insert(index)
+                .then_some(dynamo_protocols::types::Role::Assistant),
             refusal: None,
             reasoning_content: None,
         };
@@ -170,19 +157,19 @@ impl DeltaGenerator {
         };
 
         let choices = vec![choice];
-
         // According to OpenAI spec: when stream_options.include_usage is true,
         // all intermediate chunks should have usage: null
         // The final usage chunk will be sent separately with empty choices
         NvCreateChatCompletionStreamResponse {
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
-                id: self.id.clone(),
-                object: self.object.clone(),
-                created: self.created,
-                model: self.model.clone(),
-                system_fingerprint: self.system_fingerprint.clone(),
+                id: self.state.id().to_string(),
+                object: self.state.object().to_string(),
+                created: self.state.created(),
+                model: self.state.model().to_string(),
+                system_fingerprint: self.state.system_fingerprint().cloned(),
                 choices,
-                usage: if self.options.enable_usage && self.options.continuous_usage_stats {
+                usage: if self.state.is_usage_enabled() && self.state.is_continuous_usage_enabled()
+                {
                     Some(self.get_usage())
                 } else {
                     None
@@ -198,17 +185,17 @@ impl DeltaGenerator {
     /// This should be sent after the last content chunk when stream_options.include_usage is true.
     ///
     /// # Returns
-    /// * A [`CreateChatCompletionStreamResponse`] with empty choices and usage stats.
+    /// * A `CreateChatCompletionStreamResponse` with empty choices and usage stats.
     pub fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
         let usage = self.get_usage();
 
         NvCreateChatCompletionStreamResponse {
             inner: dynamo_protocols::types::CreateChatCompletionStreamResponse {
-                id: self.id.clone(),
-                object: self.object.clone(),
-                created: self.created,
-                model: self.model.clone(),
-                system_fingerprint: self.system_fingerprint.clone(),
+                id: self.state.id().to_string(),
+                object: self.state.object().to_string(),
+                created: self.state.created(),
+                model: self.state.model().to_string(),
+                system_fingerprint: self.state.system_fingerprint().cloned(),
                 choices: vec![], // Empty choices for usage-only chunk
                 usage: Some(usage),
                 service_tier: self.service_tier.clone(),
@@ -220,18 +207,16 @@ impl DeltaGenerator {
 
     /// Check if usage tracking is enabled
     pub fn is_usage_enabled(&self) -> bool {
-        self.options.enable_usage
+        self.state.is_usage_enabled()
     }
 
     /// Check if continuous usage tracking is enabled
     pub fn is_continuous_usage_enabled(&self) -> bool {
-        self.options.continuous_usage_stats
+        self.state.is_continuous_usage_enabled()
     }
 
     pub fn get_usage(&self) -> dynamo_protocols::types::CompletionUsage {
-        let mut usage = self.usage.clone();
-        usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
-        usage
+        self.state.get_usage()
     }
 }
 
@@ -247,34 +232,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         &mut self,
         delta: crate::protocols::common::llm_backend::BackendOutput,
     ) -> anyhow::Result<NvCreateChatCompletionStreamResponse> {
-        // Aggregate token usage even if usage tracking is disabled for metrics tracking
-        // SAFETY: Casting from `usize` to `u32` could lead to precision loss after `u32::MAX`,
-        // but this will not be an issue until context lengths exceed 4_294_967_295.
-        let token_length: u32 = delta
-            .token_ids
-            .len()
-            .try_into()
-            .expect("token_ids length exceeds u32::MAX");
-
-        self.usage.completion_tokens += token_length;
-
-        // If backend provides completion_usage, use it to update usage stats
-        // This is critical for prompt embeddings where prompt_tokens comes from
-        // the embedding sequence length computed by the worker
-        if let Some(completion_usage) = delta.completion_usage.as_ref() {
-            // Update prompt_tokens from worker if provided (e.g., for embeddings)
-            self.usage.prompt_tokens = completion_usage.prompt_tokens;
-
-            // Propagate prompt token details if provided
-            if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
-                self.usage.prompt_tokens_details = Some(prompt_details.clone());
-            }
-
-            // Propagate completion token details if provided, including reasoning tokens.
-            if let Some(completion_details) = completion_usage.completion_tokens_details.as_ref() {
-                self.usage.completion_tokens_details = Some(completion_details.clone());
-            }
-        }
+        self.state.update_usage_from_backend_output(&delta);
 
         let logprobs = self.create_logprobs(
             delta.tokens,
@@ -310,7 +268,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         // Record finish for timing/ITL accounting even when timing is not returned to the client.
         // Kept at call site because it's a side effect on the tracker — not a gating decision.
         if finish_reason.is_some() {
-            self.tracker.record_finish();
+            self.state.tracker_ref().record_finish();
         }
 
         // Build the nvext response payload via the shared gating helper on
@@ -320,8 +278,8 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
         let prompt_logprobs_payload =
             common::llm_backend::prompt_logprobs_from_engine_data(delta.engine_data.as_ref());
         let completion_token_ids_slice: &[u32] = &delta.token_ids;
-        if let Some(nvext_response) = self.options.response_fields.build_response_nvext(
-            Some(&self.tracker),
+        if let Some(nvext_response) = self.state.options().response_fields.build_response_nvext(
+            Some(self.state.tracker_ref()),
             finish_reason.is_some(),
             delta.engine_data,
             stop_reason,
@@ -355,7 +313,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
     }
 
     fn get_isl(&self) -> Option<u32> {
-        Some(self.usage.prompt_tokens)
+        Some(self.state.get_isl())
     }
 
     fn create_usage_chunk(&self) -> NvCreateChatCompletionStreamResponse {
@@ -375,7 +333,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
     }
 
     fn tracker(&self) -> Option<Arc<RequestTracker>> {
-        Some(self.tracker.clone())
+        Some(self.state.tracker())
     }
 }
 
@@ -484,6 +442,18 @@ mod tests {
     }
 
     #[test]
+    fn test_response_identity_matches_chat_completion_protocol() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("request-id".to_string());
+
+        let response = generator.create_choice(0, None, None, None);
+
+        assert_eq!(response.inner.id, "chatcmpl-request-id");
+        assert_eq!(response.inner.object, "chat.completion.chunk");
+        assert_eq!(response.inner.model, "test-model");
+    }
+
+    #[test]
     fn test_completion_token_details_are_propagated_from_backend_usage() {
         let request = create_test_request();
         let mut generator = request.response_generator("req-token-details".to_string());
@@ -510,6 +480,176 @@ mod tests {
             .expect("completion token details should be propagated");
 
         assert_eq!(completion_details.reasoning_tokens, Some(3));
+    }
+
+    #[test]
+    fn test_role_is_emitted_once_per_choice() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-stream-role".to_string());
+
+        let first_choice_zero = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("first choice 0 generation");
+
+        let mut choice_one_output = final_backend_output();
+        choice_one_output.index = Some(1);
+        let first_choice_one = generator
+            .choice_from_postprocessor(choice_one_output)
+            .expect("first choice 1 generation");
+
+        let second_choice_zero = generator
+            .choice_from_postprocessor(final_backend_output())
+            .expect("second choice 0 generation");
+
+        let mut choice_one_output = final_backend_output();
+        choice_one_output.index = Some(1);
+        let second_choice_one = generator
+            .choice_from_postprocessor(choice_one_output)
+            .expect("second choice 1 generation");
+
+        assert_eq!(
+            first_choice_zero.inner.choices[0].delta.role,
+            Some(dynamo_protocols::types::Role::Assistant)
+        );
+        assert_eq!(
+            first_choice_one.inner.choices[0].delta.role,
+            Some(dynamo_protocols::types::Role::Assistant)
+        );
+        assert_eq!(second_choice_zero.inner.choices[0].delta.role, None);
+        assert_eq!(second_choice_one.inner.choices[0].delta.role, None);
+    }
+
+    #[test]
+    fn test_chat_logprobs_include_backend_token_id() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(true);
+        let mut generator = request.response_generator("req-logprob-token-id".to_string());
+        let mut output = final_backend_output();
+        output.log_probs = Some(vec![-0.5]);
+        output.top_logprobs = Some(vec![vec![]]);
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        let logprob = &response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("logprobs")
+            .content
+            .as_ref()
+            .expect("logprob content")[0];
+        assert_eq!(logprob.token_id, Some(1));
+
+        let response_json = serde_json::to_value(response).expect("serialize response");
+        assert_eq!(
+            response_json["choices"][0]["logprobs"]["content"][0]["token_id"],
+            1
+        );
+    }
+
+    #[test]
+    fn test_chat_logprobs_without_top_logprobs_include_sampled_token() {
+        let mut request = create_test_request();
+        request.inner.logprobs = Some(true);
+        let mut generator = request.response_generator("req-sampled-logprob".to_string());
+        let mut output = final_backend_output();
+        output.log_probs = Some(vec![-0.5]);
+        output.top_logprobs = None;
+
+        let response = generator
+            .choice_from_postprocessor(output)
+            .expect("choice generation");
+
+        let content = response.inner.choices[0]
+            .logprobs
+            .as_ref()
+            .expect("logprobs")
+            .content
+            .as_ref()
+            .expect("logprob content");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0].token_id, Some(1));
+        assert_eq!(content[0].logprob, -0.5);
+    }
+
+    #[test]
+    fn test_completion_tokens_use_backend_usage_when_higher() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-backend-usage".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.token_ids.clear();
+        backend_output.tokens.clear();
+        backend_output.completion_usage = Some(CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 1,
+            total_tokens: 6,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        });
+
+        generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        let usage = generator.get_usage();
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 1);
+        assert_eq!(usage.total_tokens, 6);
+    }
+
+    #[test]
+    fn test_completion_tokens_treat_backend_usage_as_request_total() {
+        let mut request = create_test_request();
+        request.inner.n = Some(2);
+        let mut generator = request.response_generator("req-multi-choice-usage".to_string());
+
+        for index in 0..2 {
+            let mut backend_output = final_backend_output();
+            backend_output.index = Some(index);
+            backend_output.token_ids.clear();
+            backend_output.tokens.clear();
+            backend_output.completion_usage = Some(CompletionUsage {
+                prompt_tokens: 5,
+                completion_tokens: 5,
+                total_tokens: 10,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            });
+            generator
+                .choice_from_postprocessor(backend_output)
+                .expect("choice generation");
+        }
+
+        let usage = generator.get_usage();
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 10);
+    }
+
+    #[test]
+    fn test_completion_tokens_keep_aggregated_count_when_backend_usage_is_zero() {
+        let request = create_test_request();
+        let mut generator = request.response_generator("req-backend-zero-usage".to_string());
+
+        let mut backend_output = final_backend_output();
+        backend_output.completion_usage = Some(CompletionUsage {
+            prompt_tokens: 5,
+            completion_tokens: 0,
+            total_tokens: 5,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        });
+
+        generator
+            .choice_from_postprocessor(backend_output)
+            .expect("choice generation");
+
+        let usage = generator.get_usage();
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 1);
+        assert_eq!(usage.total_tokens, 6);
     }
 
     fn create_test_request_with_extra_fields(fields: Vec<String>) -> NvCreateChatCompletionRequest {

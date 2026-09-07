@@ -11,9 +11,16 @@ from pydantic import BaseModel
 from transformers import AutoConfig
 
 try:
-    from aiconfigurator.sdk.utils import get_model_config_from_model_path
+    from aiconfigurator_core.sdk.utils import (
+        HuggingFaceDownloadError,
+        _load_model_config_from_model_path,
+    )
 except ImportError:
-    get_model_config_from_model_path = None
+
+    class HuggingFaceDownloadError(Exception):
+        pass
+
+    _load_model_config_from_model_path = None
 logger = logging.getLogger(__name__)
 
 DTYPE_BYTES_MAP = {
@@ -30,8 +37,12 @@ DTYPE_BYTES_MAP = {
 CONTEXT_LENGTH_ATTRS = [
     "max_position_embeddings",  # Most common (BERT, GPT, LLaMA, etc.)
     "n_positions",  # GPT-2, GPT-Neo
+    "max_seq_len",  # MPT
     "max_sequence_length",  # Some models
+    "max_seq_length",  # Some encoder configs
     "seq_length",  # Some older models
+    "seq_len",  # Alternative spelling
+    "max_target_positions",  # Encoder-decoder models
     "model_max_length",  # Some tokenizer configs
     "sliding_window",  # Mistral with sliding window attention
 ]
@@ -220,12 +231,50 @@ def _positive_int_config_value(config: object, attr: str) -> Optional[int]:
     value = _get_config_value(config, attr)
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except (OverflowError, TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
 
 
-def _load_model_config_for_mamba(
+def _load_tokenizer_config(
+    model_name_or_path: Union[str, Path],
+) -> Optional[dict]:
+    """Load optional tokenizer metadata without making context lookup fail."""
+    path = Path(model_name_or_path)
+    if path.is_dir():
+        config_path = path / "tokenizer_config.json"
+        if not config_path.is_file():
+            return None
+    else:
+        try:
+            config_path = Path(
+                hf_hub_download(
+                    repo_id=str(model_name_or_path),
+                    filename="tokenizer_config.json",
+                )
+            )
+        except Exception:
+            logger.debug(
+                "Could not load tokenizer config for %s",
+                model_name_or_path,
+                exc_info=True,
+            )
+            return None
+
+    try:
+        with open(config_path) as f:
+            config = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        logger.debug(
+            "Could not read tokenizer config for %s",
+            model_name_or_path,
+            exc_info=True,
+        )
+        return None
+    return config if isinstance(config, dict) else None
+
+
+def _load_model_config(
     model_name_or_path: Union[str, Path],
     trust_remote_code: bool = False,
 ) -> object:
@@ -235,16 +284,113 @@ def _load_model_config_for_mamba(
         with open(config_path) as f:
             return json.load(f)
 
-    if get_model_config_from_model_path is not None:
-        model_config = get_model_config_from_model_path(str(model_name_or_path))
-        raw_config = model_config.get("raw_config")
-        if raw_config is not None:
-            return raw_config
+    if _load_model_config_from_model_path is not None:
+        try:
+            return _load_model_config_from_model_path(str(model_name_or_path))
+        except HuggingFaceDownloadError:
+            logger.debug(
+                "AIConfigurator could not load model config for %s; falling back "
+                "to Transformers",
+                model_name_or_path,
+                exc_info=True,
+            )
 
     return AutoConfig.from_pretrained(
         model_name_or_path,
         trust_remote_code=trust_remote_code,
     )
+
+
+def get_model_context_length(
+    model_name_or_path: Union[str, Path],
+    trust_remote_code: bool = False,
+) -> Optional[int]:
+    """Return vLLM's config-derived context-window ceiling when available."""
+    config = _load_model_config(model_name_or_path, trust_remote_code)
+    tokenizer_config = _load_tokenizer_config(model_name_or_path)
+    tokenizer_context_length = _positive_int_config_value(
+        tokenizer_config, "model_max_length"
+    )
+    candidates = []
+    candidate_ids = set()
+
+    def add_candidate(candidate: object) -> None:
+        if candidate is None or id(candidate) in candidate_ids:
+            return
+        candidate_ids.add(id(candidate))
+        candidates.append(candidate)
+
+    thinker_config = _get_config_value(config, "thinker_config")
+    add_candidate(_get_config_value(thinker_config, "text_config"))
+    if not isinstance(config, dict):
+        get_text_config = getattr(config, "get_text_config", None)
+        if callable(get_text_config):
+            add_candidate(get_text_config())
+    for key in ("text_config", "language_config", "decoder", "generator"):
+        add_candidate(_get_config_value(config, key))
+    add_candidate(config)
+
+    for candidate in candidates:
+        lengths = []
+        for attr in CONTEXT_LENGTH_ATTRS:
+            if attr in ("model_max_length", "sliding_window"):
+                continue
+            value = _positive_int_config_value(candidate, attr)
+            if value is not None:
+                lengths.append(value)
+
+        context_length = min(lengths) if lengths else None
+        model_max_length = _positive_int_config_value(candidate, "model_max_length")
+        if model_max_length is not None:
+            context_length = model_max_length
+        if tokenizer_context_length is not None:
+            context_length = (
+                min(context_length, tokenizer_context_length)
+                if context_length is not None
+                else tokenizer_context_length
+            )
+        if context_length is None:
+            continue
+
+        rope_params = _get_config_value(candidate, "rope_parameters")
+        if rope_params is None:
+            rope_params = _get_config_value(candidate, "rope_scaling")
+        if rope_params is None and candidate is not config:
+            rope_params = _get_config_value(config, "rope_parameters")
+            if rope_params is None:
+                rope_params = _get_config_value(config, "rope_scaling")
+        model_type = str(
+            _get_config_value(candidate, "model_type")
+            or _get_config_value(config, "model_type")
+            or ""
+        )
+        if isinstance(rope_params, dict) and "gemma3" not in model_type:
+            if any(isinstance(value, dict) for value in rope_params.values()):
+                rope_configs = [
+                    value for value in rope_params.values() if isinstance(value, dict)
+                ]
+            else:
+                rope_configs = [rope_params]
+
+            scaling_factor = 1.0
+            for rope_config in rope_configs:
+                rope_type = rope_config.get("rope_type") or rope_config.get("type")
+                if rope_type not in ("su", "longrope", "llama3"):
+                    try:
+                        scaling_factor = float(
+                            rope_config.get("factor", scaling_factor) or 1.0
+                        )
+                    except (TypeError, ValueError):
+                        scaling_factor = 1.0
+                    if rope_type == "yarn":
+                        original = rope_config.get("original_max_position_embeddings")
+                        try:
+                            context_length = int(original)
+                        except (TypeError, ValueError):
+                            pass
+            context_length = int(context_length * scaling_factor)
+        return context_length
+    return None
 
 
 def get_mamba_cache_align_block_size(
@@ -257,7 +403,7 @@ def get_mamba_cache_align_block_size(
     when Mamba cache mode is ``align``. Nemotron-H configs expose the fields
     needed to compute it directly.
     """
-    config = _load_model_config_for_mamba(model_name_or_path, trust_remote_code)
+    config = _load_model_config(model_name_or_path, trust_remote_code)
     mamba_num_heads = _positive_int_config_value(config, "mamba_num_heads")
     mamba_head_dim = _positive_int_config_value(config, "mamba_head_dim")
     ssm_state_size = _positive_int_config_value(config, "ssm_state_size")

@@ -569,8 +569,7 @@ impl GenerateAggregator {
         let mut aggregator = GenerateAggregator::new(request_id);
         pin_mut!(stream);
         while let Some(delta) = stream.next().await {
-            let delta = delta.ok().map_err(anyhow::Error::msg)?;
-            if let Some(output) = delta.data {
+            if let Some(output) = delta.into_data().map_err(anyhow::Error::new)? {
                 aggregator.apply_output(output, options)?;
             }
         }
@@ -885,6 +884,7 @@ mod tests {
         let expected = dynamo_protocols::types::ChatCompletionTokenLogprob {
             token: "token_id:100".to_string(),
             logprob: -9999.0,
+            token_id: None,
             bytes: Some(b"token_id:100".to_vec()),
             top_logprobs: vec![
                 dynamo_protocols::types::TopLogprobs {

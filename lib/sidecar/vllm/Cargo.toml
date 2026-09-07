@@ -36,6 +36,7 @@ tracing = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
 tonic = { workspace = true }
+tonic-health = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

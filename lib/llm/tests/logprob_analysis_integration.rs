@@ -371,6 +371,7 @@ fn create_response_with_linear_probs(
             ChatCompletionTokenLogprob {
                 token: token.to_string(),
                 logprob: prob.ln(),
+                token_id: None,
                 bytes: None,
                 top_logprobs,
             }
@@ -452,6 +453,7 @@ fn create_multi_choice_response(
                     ChatCompletionTokenLogprob {
                         token,
                         logprob: prob.ln(),
+                        token_id: None,
                         bytes: None,
                         top_logprobs,
                     }

@@ -8,7 +8,9 @@ use std::path::Path;
 use serde::Deserialize;
 use thiserror::Error;
 
-use super::{config::RouterQueuePolicy, queue_admission::AdmissionPolicyConfig};
+use super::config::RouterQueuePolicy;
+use super::worker_selection_config::RawWorkerSelectionConfig;
+pub use super::worker_selection_config::{WorkerSelectionConfig, WorkerSelectionInstance};
 
 const SYNTHETIC_POLICY_CLASS: &str = "default";
 
@@ -34,7 +36,6 @@ pub enum RouterPolicyConfigError {
 pub struct PolicyClassConfig {
     pub name: String,
     pub queue_policy: RouterQueuePolicy,
-    pub admission: Option<AdmissionPolicyConfig>,
     pub quantum: usize,
     pub prefill_busy_threshold: Option<usize>,
     pub prefill_busy_threshold_frac: Option<f64>,
@@ -116,7 +117,6 @@ impl PolicyProfile {
         let class = PolicyClassConfig {
             name: SYNTHETIC_POLICY_CLASS.to_string(),
             queue_policy: router_queue_policy,
-            admission: None,
             quantum: 1,
             prefill_busy_threshold: None,
             prefill_busy_threshold_frac: router_queue_threshold,
@@ -166,6 +166,7 @@ impl PolicyProfile {
 pub struct RouterPolicyConfig {
     root: Option<PolicyProfile>,
     models: HashMap<String, PolicyProfile>,
+    worker_selection: Option<WorkerSelectionConfig>,
 }
 
 impl RouterPolicyConfig {
@@ -208,6 +209,16 @@ impl RouterPolicyConfig {
             .cloned()
             .unwrap_or_else(|| PolicyProfile::synthetic(fallback_threshold, fallback_policy))
     }
+
+    /// Returns the process-wide worker-selection policy configuration, if present.
+    pub fn worker_selection(&self) -> Option<&WorkerSelectionConfig> {
+        self.worker_selection.as_ref()
+    }
+
+    /// Whether this document configures queue policy profiles.
+    pub fn has_routing_profiles(&self) -> bool {
+        self.root.is_some() || !self.models.is_empty()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +232,8 @@ struct RawRouterPolicyConfig {
     uncached_isl_buckets: Option<Vec<RawUncachedIslBucket>>,
     #[serde(default)]
     models: HashMap<String, RawPolicyProfile>,
+    #[serde(default)]
+    worker_selection: Option<RawWorkerSelectionConfig>,
 }
 
 impl RawRouterPolicyConfig {
@@ -259,14 +272,22 @@ impl RawRouterPolicyConfig {
             models.insert(model_name, resolved);
         }
 
-        if root.is_none() && models.is_empty() {
+        let worker_selection = match self.worker_selection {
+            Some(config) => Some(config.resolve()?),
+            None => None,
+        };
+
+        if root.is_none() && models.is_empty() && worker_selection.is_none() {
             return Err(RouterPolicyConfigError::Validation(
-                "router policy config must define a root profile or at least one model profile"
-                    .to_string(),
+                "router policy config must define a root profile, at least one model profile, or worker_selection".to_string(),
             ));
         }
 
-        Ok(RouterPolicyConfig { root, models })
+        Ok(RouterPolicyConfig {
+            root,
+            models,
+            worker_selection,
+        })
     }
 }
 
@@ -295,8 +316,6 @@ struct RawPolicyClassConfig {
     cache_bucket: Option<String>,
     #[serde(default)]
     queue_policy: RouterQueuePolicy,
-    #[serde(default)]
-    admission: Option<AdmissionPolicyConfig>,
     quantum: usize,
     #[serde(default)]
     prefill_busy_threshold: Option<usize>,
@@ -490,7 +509,6 @@ fn resolve_policy_class(
         config: PolicyClassConfig {
             name: raw.name,
             queue_policy: raw.queue_policy,
-            admission: raw.admission,
             quantum: raw.quantum,
             prefill_busy_threshold: raw.prefill_busy_threshold,
             prefill_busy_threshold_frac: raw.prefill_busy_threshold_frac,
@@ -558,7 +576,7 @@ fn resolve_uncached_isl_buckets(
     })
 }
 
-fn validate_identifier(
+pub(super) fn validate_identifier(
     name: &str,
     kind: &str,
     location: &str,
@@ -579,6 +597,126 @@ fn validate_identifier(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_selection_only_config_preserves_parameter_mapping() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
+  aggregated: example
+  instances:
+    - name: example
+      type: example-policy
+      parameters:
+        score_weight: 1.0
+"#,
+        )
+        .unwrap();
+
+        let selection = config.worker_selection().unwrap();
+        assert_eq!(selection.aggregated_instance(), Some("example"));
+        let instance = selection.instance("example").unwrap();
+        assert_eq!(instance.policy_type(), "example-policy");
+        assert!(matches!(
+            instance.parameters(),
+            serde_yaml::Value::Mapping(_)
+        ));
+        assert_eq!(
+            config
+                .resolve_profile(None, Some(2.0), RouterQueuePolicy::Wspt)
+                .default_class()
+                .queue_policy,
+            RouterQueuePolicy::Wspt
+        );
+    }
+
+    #[test]
+    fn worker_selection_accepts_every_worker_type() {
+        let config = RouterPolicyConfig::from_yaml(
+            r#"
+worker_selection:
+  prefill: prefill-policy
+  decode: default
+  encode: encode-policy
+  instances:
+    - name: prefill-policy
+      type: cache-aware
+      parameters: {}
+    - name: encode-policy
+      type: media-aware
+      parameters: {}
+"#,
+        )
+        .unwrap();
+
+        let selection = config.worker_selection().unwrap();
+        assert_eq!(selection.aggregated_instance(), None);
+        assert_eq!(selection.prefill_instance(), Some("prefill-policy"));
+        assert_eq!(selection.decode_instance(), Some("default"));
+        assert_eq!(selection.encode_instance(), Some("encode-policy"));
+    }
+
+    #[test]
+    fn rejects_invalid_worker_selection_config() {
+        for yaml in [
+            r#"
+worker_selection: {}
+"#,
+            r#"
+worker_selection:
+  aggregated: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  prefill: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  decode: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  encode: missing
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  default: present
+  instances:
+    - name: present
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  instances:
+    - name: default
+      type: alpha
+"#,
+            r#"
+worker_selection:
+  instances:
+    - name: alpha
+      type: alpha
+      parameters: 1
+"#,
+        ] {
+            assert!(
+                RouterPolicyConfig::from_yaml(yaml).is_err(),
+                "unexpectedly accepted {yaml}"
+            );
+        }
+    }
 
     #[test]
     fn model_profile_replaces_root_and_unmatched_model_uses_root() {
@@ -683,51 +821,6 @@ models:
             fallback.default_class().queue_policy,
             RouterQueuePolicy::Wspt
         );
-    }
-
-    #[test]
-    fn accepts_opaque_admission_policy_config() {
-        let config = RouterPolicyConfig::from_yaml(
-            r#"
-default_policy_family: standard
-uncached_isl_buckets:
-  - min_tokens: 0
-    bucket: all
-policy_classes:
-  - name: standard
-    policy_family: standard
-    cache_bucket: all
-    quantum: 1
-  - name: agents
-    admission:
-      type: experimental_scheduler
-      custom_knob: 7
-      nested:
-        enabled: true
-    quantum: 1
-"#,
-        )
-        .unwrap();
-
-        let profile = config.resolve_profile(None, None, RouterQueuePolicy::Fcfs);
-        let agents = profile.class(profile.resolve_class_index(Some("agents"), 0));
-        let admission = agents.admission.as_ref().unwrap();
-        assert_eq!(admission.policy_type(), "experimental_scheduler");
-        assert_eq!(admission.options().len(), 2);
-        assert_eq!(
-            admission
-                .options()
-                .get(serde_yaml::Value::from("custom_knob"))
-                .and_then(serde_yaml::Value::as_u64),
-            Some(7)
-        );
-    }
-
-    #[test]
-    fn synthetic_profile_has_no_admission_policy() {
-        let profile = PolicyProfile::synthetic(None, RouterQueuePolicy::Fcfs);
-
-        assert!(profile.default_class().admission.is_none());
     }
 
     #[test]

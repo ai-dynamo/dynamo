@@ -9,8 +9,9 @@ macro_rules! impl_frontend {
     ($type:ident) => {
         impl<In: PipelineIO, Out: PipelineIO> $type<In, Out> {
             pub fn new() -> Arc<Self> {
-                Arc::new(Self {
+                Arc::new_cyclic(|self_weak| Self {
                     inner: Frontend::default(),
+                    self_weak: self_weak.clone(),
                 })
             }
         }
@@ -40,7 +41,14 @@ macro_rules! impl_frontend {
             for $type<In, Out>
         {
             async fn generate(&self, request: In) -> Result<Out, Error> {
-                self.inner.generate(request).await
+                if let Some(root) = self.self_weak.upgrade() {
+                    request.context().retain(root.clone());
+                    let response = self.inner.generate(request).await?;
+                    response.context().retain(root);
+                    Ok(response)
+                } else {
+                    self.inner.generate(request).await
+                }
             }
         }
     };

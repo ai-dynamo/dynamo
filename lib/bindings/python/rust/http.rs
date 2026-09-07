@@ -106,7 +106,13 @@ impl HttpService {
                 )
             })?;
 
+        // Hold Phase 2 of Runtime::shutdown until axum finishes draining
+        // in-flight requests, so discovery watches are not torn down while
+        // multi-minute streams are still draining.
+        let guard = runtime.inner().register_graceful_task();
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let _guard = guard;
             service.run(token).await.map_err(to_pyerr)?;
             Ok(())
         })
@@ -136,8 +142,9 @@ impl HttpService {
                 ))
             })?;
 
-        self.inner.enable_model_endpoint(endpoint_type, enabled);
-        Ok(())
+        self.inner
+            .enable_model_endpoint(endpoint_type, enabled)
+            .map_err(to_pyerr)
     }
 }
 

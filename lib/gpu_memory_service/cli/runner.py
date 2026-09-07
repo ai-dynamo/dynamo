@@ -13,12 +13,16 @@ Usage:
     python -m gpu_memory_service --device 0
     python -m gpu_memory_service --device 0 --tag weights
     python -m gpu_memory_service --device 0 --tag weights --socket-path /tmp/gms.sock
+
+Set DYN_GMS_USE_V1=true to run the CUDA-only V1 server.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
+import os
 from collections.abc import Sequence
 
 import uvloop
@@ -82,10 +86,15 @@ async def serve_configs(configs: Sequence[Config]) -> None:
     await run_servers(servers)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     """Entry point for GPU Memory Service server."""
+    if os.environ.get("DYN_GMS_USE_V1") == "true":
+        v1_cli = importlib.import_module("gpu_memory_service.v1.cli")
+        v1_cli.main(argv)
+        return
+
     uvloop.install()
-    asyncio.run(serve_configs(parse_args()))
+    asyncio.run(serve_configs(parse_args(argv)))
 
 
 if __name__ == "__main__":

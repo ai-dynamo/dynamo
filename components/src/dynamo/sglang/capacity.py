@@ -24,12 +24,38 @@ def local_dp_rank_bounds(server_args: Any) -> tuple[int, int]:
     nnodes = getattr(server_args, "nnodes", 1) or 1
     node_rank = getattr(server_args, "node_rank", 0) or 0
 
-    if enable_dp_attention and dp_size > 1:
+    if not enable_dp_attention:
+        return 0, dp_size
+
+    if dp_size > 1:
         local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
         start_dp_rank = node_rank * local_dp_size
         return start_dp_rank, start_dp_rank + local_dp_size
 
     return 0, 1
+
+
+def publishes_kv_events(server_args: Any) -> bool:
+    """Whether this node should advertise a KV-event source.
+
+    The router keys KV sources by ``(worker_id, dp_rank)``, and non-leader nodes
+    publish under the leader's worker ID so the router-visible trees stay keyed
+    to one logical worker. That only yields a unique key per node while DP
+    attention gives each node a distinct rank slice.
+
+    Pure DP is single-node in SGLang, so its leader publishes every replica's
+    distinct rank. Only the leader owns the single logical rank in multinode
+    TP-only mode.
+    """
+    dp_size = getattr(server_args, "dp_size", 1) or 1
+    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
+    nnodes = getattr(server_args, "nnodes", 1) or 1
+    node_rank = getattr(server_args, "node_rank", 0) or 0
+
+    if enable_dp_attention and dp_size > 1:
+        return True
+
+    return not (nnodes > 1 and node_rank > 0)
 
 
 def model_card_dp_rank_bounds(server_args: Any) -> tuple[int, int]:
@@ -43,7 +69,8 @@ def per_rank_max_running_requests(server_args: Any) -> int | None:
         return None
 
     dp_size = getattr(server_args, "dp_size", 1) or 1
-    if dp_size <= 1:
+    enable_dp_attention = getattr(server_args, "enable_dp_attention", False)
+    if dp_size <= 1 or not enable_dp_attention:
         return max_running_requests
 
     return max_running_requests // dp_size
@@ -56,11 +83,25 @@ def tokens_to_kv_blocks(tokens: int, page_size: int | None) -> int:
     return (tokens + page_size - 1) // page_size
 
 
+def kv_event_block_size(server_args: Any) -> int:
+    """Return the router-facing block size for SGLang's paged KV allocator.
+
+    Under DCP, SGLang widens the allocator and radix-tree page size to
+    ``page_size * dcp_size``; the tree emits KV events at that granularity.
+    """
+    page_size = int(server_args.page_size)
+    # Older SGLang configs and non-LLM argument stubs may omit dcp_size.
+    dcp_size = int(getattr(server_args, "dcp_size", 1) or 1)
+    return page_size * dcp_size
+
+
 def runtime_capacity(
     server_args: Any, scheduler_info: dict[str, Any]
 ) -> RuntimeCapacity:
     max_total_tokens = scheduler_info.get("max_total_num_tokens")
     page_size = getattr(server_args, "page_size", None)
+    # SGLang reports tokens per DCP rank here, so division by the physical
+    # page size already produces the widened logical-block count.
     total_kv_blocks = (
         tokens_to_kv_blocks(max_total_tokens, page_size)
         if max_total_tokens and page_size
@@ -111,13 +152,33 @@ def get_hicache_native_offloading_capacity(
     if device_capacity is None:
         return None
 
-    host_capacity = native_offloading_capacity(
-        scheduler_info.get("hicache_host_total_tokens")
-    )
+    host_tokens = scheduler_info.get("hicache_host_total_tokens")
+    policy = getattr(server_args, "hicache_write_policy", None)
+    if "hicache_host_total_tokens" not in scheduler_info:
+        model_config = getattr(server_args, "model_config", None)
+        if (
+            not getattr(server_args, "enable_hierarchical_cache", False)
+            or getattr(server_args, "hicache_size", None) != 0
+            or policy not in ("write_back", "write_through")
+            or (getattr(server_args, "dcp_size", 1) or 1) > 1
+            or getattr(model_config, "is_deepseek_v4_arch", False)
+        ):
+            return None
+        page_size = getattr(server_args, "page_size", None)
+        ratio = getattr(server_args, "hicache_ratio", None)
+        if not page_size or ratio is None:
+            return None
+        try:
+            host_tokens = int(device_capacity["total_tokens"] * ratio)
+            # Match SGLang HostKVCache's realized ratio-based allocation.
+            host_tokens = (host_tokens // page_size + 1) * page_size
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    host_capacity = native_offloading_capacity(host_tokens)
     if host_capacity is None:
         return None
 
-    policy = getattr(server_args, "hicache_write_policy", None)
     host_tokens = host_capacity["total_tokens"]
     # The router already counts device capacity: write-back adds the disjoint host
     # pool, write-through subtracts its device mirror, and selective overlap is dynamic.

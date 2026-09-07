@@ -9,6 +9,7 @@ import sglang as sgl
 
 from dynamo import prometheus_names
 from dynamo.common.constants import DisaggregationMode
+from dynamo.common.model_taints import register_model_taint_route
 from dynamo.common.utils.prometheus import register_embedding_cache_metrics
 from dynamo.llm import (
     ModelInput,
@@ -65,6 +66,7 @@ async def init_multimodal_encode_worker(
         cache_publisher,
         shutdown_event,
     )
+    server_args = config.use_resolved_server_args(handler.encoder.server_args)
 
     if handler._embedding_cache is not None:
         register_embedding_cache_metrics(
@@ -78,6 +80,7 @@ async def init_multimodal_encode_worker(
 
     ready_event = asyncio.Event()
 
+    register_model_taint_route(runtime, generate_endpoint)
     try:
         _ = await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -143,6 +146,7 @@ async def init_multimodal_worker(
     shutdown_endpoints[:] = [generate_endpoint]
 
     engine = sgl.Engine(server_args=server_args)
+    server_args = config.use_resolved_server_args(engine.server_args)
 
     if config.serving_mode == DisaggregationMode.DECODE:
         logging.info("Initializing prefill client for multimodal decode worker")
@@ -172,6 +176,7 @@ async def init_multimodal_worker(
         readiness_worker_type = WorkerType.Aggregated
         readiness_needs = [[WorkerType.Encode]]
 
+    register_model_taint_route(runtime, generate_endpoint)
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
@@ -212,6 +217,7 @@ async def init_multimodal_prefill_worker(
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
     engine = sgl.Engine(server_args=server_args)
+    server_args = config.use_resolved_server_args(engine.server_args)
 
     generate_endpoint = runtime.endpoint(
         f"{dynamo_args.namespace}.{dynamo_args.component}.{dynamo_args.endpoint}"
@@ -223,6 +229,7 @@ async def init_multimodal_prefill_worker(
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
+    register_model_taint_route(runtime, generate_endpoint)
     # No OpenAI surface (ModelType.Empty): internal prefill worker, reached via
     # the decode worker / prefill router, never by the frontend. Registers a
     # topology card so the serving-readiness gate counts it.
@@ -249,7 +256,7 @@ async def init_multimodal_prefill_worker(
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
-        handler.cleanup()
+        await handler.cleanup_async()
         if run_deferred_handlers is not None:
             logging.info("Running deferred handlers")
             await run_deferred_handlers()

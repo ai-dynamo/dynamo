@@ -28,8 +28,11 @@ pytestmark = [
     # the `gpu_0` marker.
     pytest.mark.gpu_1,
     pytest.mark.pre_merge,
-    pytest.mark.profiled_vram_gib(0),
 ]
+
+# Intentionally unprofiled: these import-heavy, zero-VRAM tests run in the
+# sequential GPU stage so TensorRT-LLM initialization is shared.
+
 _PYTORCH_LLM_CLS_NAME = "dynamo.trtllm.engine.LLM"
 _AUTODEPLOY_LLM_CLS_NAME = "tensorrt_llm._torch.auto_deploy.LLM"
 

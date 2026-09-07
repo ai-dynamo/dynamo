@@ -20,7 +20,7 @@ Use the pre-configured test deployment with sample profiling data, we provide th
 
 ### Option B: Use Your Own Profiling Results
 
-1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../../../../../docs/fern/components/profiler/profiler-guide.md) for detailed instructions.
+1. Run pre-deployment profiling for your specific setup. See the [pre-deployment profiling documentation](../../../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/profiler/profiler-guide.md) for detailed instructions.
 
 ## Generating Load Dataset
 
@@ -74,8 +74,8 @@ Test complete scaling behavior including Kubernetes deployment and load generati
 
 **Prerequisites:**
 
-- **[kube-prometheus-stack](../../../../../../docs/fern/kubernetes/observability/metrics.mdx) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
-- Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../../../../../docs/fern/components/planner/planner-guide.md#prerequisites) for details).
+- **[kube-prometheus-stack](../../../../../../docs/fern/pages/kubernetes/operations/observability.mdx) installed and running.** The SLA planner requires Prometheus to observe metrics and make scaling decisions.
+- Ensure the Dynamo operator was installed with the Prometheus endpoint configured (see [SLA Planner Quickstart Guide](../../../../../../docs/fern/pages/developer-guide/knowledge-base/modular-components/planner/planner-guide.md#prerequisites) for details).
 
 **Test Scenario**
 

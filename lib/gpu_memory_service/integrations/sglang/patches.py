@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 from contextlib import contextmanager
 from typing import Optional
@@ -163,84 +162,33 @@ def patch_model_runner() -> None:
     if hasattr(ModelRunner, "_gms_patched"):
         return
 
-    original_init_memory_pool = ModelRunner.init_memory_pool
-    memory_arg_name = next(
-        (
-            name
-            for name in inspect.signature(original_init_memory_pool).parameters
-            if name != "self"
-        ),
-        None,
-    )
+    original_alloc_memory_pool = ModelRunner.alloc_memory_pool
 
-    def patched_init_memory_pool(self, *args, **kwargs):
-        """Patch memory baseline for SGLang old/new init_memory_pool signatures."""
+    def patched_alloc_memory_pool(self, *args, **kwargs):
         impl = get_gms_memory_saver_impl()
-        preloaded_weights_gib = 0.0
-        if impl is not None:
-            preloaded_weights_gib = impl.preloaded_weights_bytes / (1 << 30)
-
-        if preloaded_weights_gib > 0 and memory_arg_name in (
-            "pre_model_load_memory",
-            "total_gpu_memory",
+        if (
+            impl is not None
+            and impl.preloaded_weights_bytes > 0
+            and not self.__dict__.get("_gms_memory_baseline_adjusted", False)
         ):
-            if args:
-                old_value = args[0]
-                new_value = (
-                    old_value + preloaded_weights_gib
-                    if isinstance(old_value, (int, float))
-                    else old_value
-                )
-                args = (new_value,) + args[1:]
-            elif memory_arg_name in kwargs:
-                old_value = kwargs[memory_arg_name]
-                new_value = (
-                    old_value + preloaded_weights_gib
-                    if isinstance(old_value, (int, float))
-                    else old_value
-                )
-                kwargs = dict(kwargs)
-                kwargs[memory_arg_name] = new_value
-            else:
-                old_value = None
-                new_value = None
+            preloaded_weights_gib = impl.preloaded_weights_bytes / (1 << 30)
+            old_value = self.pre_model_load_memory
+            self.pre_model_load_memory += preloaded_weights_gib
+            self._gms_memory_baseline_adjusted = True
+            logger.info(
+                "[GMS] Adjusted pre_model_load_memory for preloaded weights: "
+                "%.2f GiB + %.2f GiB = %.2f GiB",
+                old_value,
+                preloaded_weights_gib,
+                self.pre_model_load_memory,
+            )
 
-            if isinstance(old_value, (int, float)) and isinstance(
-                new_value, (int, float)
-            ):
-                logger.info(
-                    "[GMS] Adjusted %s for preloaded weights: "
-                    "%.2f GiB + %.2f GiB = %.2f GiB",
-                    memory_arg_name,
-                    old_value,
-                    preloaded_weights_gib,
-                    new_value,
-                )
-            else:
-                logger.info(
-                    "[GMS] Could not adjust %s for preloaded weights; value=%r",
-                    memory_arg_name,
-                    old_value,
-                )
-        elif impl is not None and impl.imported_weights_bytes > 0:
-            if preloaded_weights_gib > 0:
-                logger.info(
-                    "[GMS] Leaving %s unchanged; unsupported SGLang "
-                    "init_memory_pool signature for preloaded weights",
-                    memory_arg_name,
-                )
-            else:
-                logger.info(
-                    "[GMS] Leaving %s unchanged; weights were loaded by this process",
-                    memory_arg_name,
-                )
+        return original_alloc_memory_pool(self, *args, **kwargs)
 
-        return original_init_memory_pool(self, *args, **kwargs)
-
-    ModelRunner.init_memory_pool = patched_init_memory_pool
+    ModelRunner.alloc_memory_pool = patched_alloc_memory_pool
     ModelRunner._gms_patched = True
     _model_runner_patched = True
-    logger.info("[GMS] Patched ModelRunner.init_memory_pool")
+    logger.info("[GMS] Patched ModelRunner.alloc_memory_pool")
 
 
 def patch_static_state_for_gms() -> None:

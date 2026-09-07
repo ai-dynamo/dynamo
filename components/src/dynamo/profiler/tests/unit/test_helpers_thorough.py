@@ -110,26 +110,30 @@ def test_profile_candidates_enable_trtllm_chunked_prefill():
     prefill = SimpleNamespace(
         dgd_config={
             "spec": {
-                "services": {
-                    "prefill": {
-                        "componentType": "worker",
-                        "subComponentType": "prefill",
-                        "extraPodSpec": {"mainContainer": {"args": []}},
+                "components": [
+                    {
+                        "name": "prefill",
+                        "type": "prefill",
+                        "podTemplate": {
+                            "spec": {"containers": [{"name": "main", "args": []}]}
+                        },
                     }
-                }
+                ]
             }
         }
     )
     decode = SimpleNamespace(
         dgd_config={
             "spec": {
-                "services": {
-                    "decode": {
-                        "componentType": "worker",
-                        "subComponentType": "decode",
-                        "extraPodSpec": {"mainContainer": {"args": []}},
+                "components": [
+                    {
+                        "name": "decode",
+                        "type": "decode",
+                        "podTemplate": {
+                            "spec": {"containers": [{"name": "main", "args": []}]}
+                        },
                     }
-                }
+                ]
             }
         }
     )
@@ -137,8 +141,8 @@ def test_profile_candidates_enable_trtllm_chunked_prefill():
     _enable_chunked_prefill_for_trtllm_candidates([prefill], [decode])
 
     for candidate in (prefill, decode):
-        worker = next(iter(candidate.dgd_config["spec"]["services"].values()))
-        args = worker["extraPodSpec"]["mainContainer"]["args"]
+        worker = candidate.dgd_config["spec"]["components"][0]
+        args = worker["podTemplate"]["spec"]["containers"][0]["args"]
         idx = args.index("--trtllm.enable_chunked_prefill")
         assert args[idx + 1] == "true"
 

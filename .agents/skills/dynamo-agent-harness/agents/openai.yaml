@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+interface:
+  display_name: "Dynamo Agent Harness"
+  short_description: "Drive coding agents through Dynamo over ACP"
+  default_prompt: "Use $dynamo-agent-harness to start a persistent coding-agent session against a Dynamo endpoint."

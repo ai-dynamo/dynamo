@@ -30,7 +30,7 @@ bitflags! {
     /// Using bitflags avoids deep branching on a single enum variant,
     /// simplifies checks like `supports_chat()`, and enables efficient,
     /// type-safe combinations of multiple endpoint types.
-    #[derive(Copy, Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq)]
+    #[derive(Copy, Debug, Default, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
     pub struct ModelType: u16 {
         const Chat = 1 << 0;
         const Completions = 1 << 1;
@@ -52,6 +52,16 @@ bitflags! {
         const Audios = 1 << 6;
         const Videos = 1 << 7;
         const Realtime = 1 << 8;
+        /// Sequence-classification / cross-encoder pooling models served on
+        /// the `/v1/classify` endpoint (e.g. NLI, sentiment). Like `Embedding`,
+        /// this is a pooling capability, not a token-generating surface.
+        const Classify = 1 << 9;
+        /// Raw pooler output served on the `/v1/pooling` endpoint (token-level
+        /// embeddings, per-token classification logits, reward scores, …).
+        /// Usually combined with `Classify` or `Embedding`: native vLLM
+        /// mounts its `/pooling` alongside those surfaces for every
+        /// pooling-runner model.
+        const Pooling = 1 << 10;
     }
 }
 
@@ -91,6 +101,12 @@ impl ModelType {
     pub fn supports_realtime(&self) -> bool {
         self.contains(ModelType::Realtime)
     }
+    pub fn supports_classify(&self) -> bool {
+        self.contains(ModelType::Classify)
+    }
+    pub fn supports_pooling(&self) -> bool {
+        self.contains(ModelType::Pooling)
+    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
@@ -120,6 +136,12 @@ impl ModelType {
         }
         if self.supports_realtime() {
             result.push("realtime");
+        }
+        if self.supports_classify() {
+            result.push("classify");
+        }
+        if self.supports_pooling() {
+            result.push("pooling");
         }
         result
     }
@@ -154,6 +176,12 @@ impl ModelType {
         }
         if self.supports_realtime() {
             result.push(ModelType::Realtime);
+        }
+        if self.supports_classify() {
+            result.push(ModelType::Classify);
+        }
+        if self.supports_pooling() {
+            result.push(ModelType::Pooling);
         }
         result
     }
@@ -198,6 +226,12 @@ impl ModelType {
         }
         if self.contains(Self::Realtime) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Realtime);
+        }
+        if self.contains(Self::Classify) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Classify);
+        }
+        if self.contains(Self::Pooling) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Pooling);
         }
         // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
         // current use of endpoint type is LLM specific and so does the HTTP
@@ -319,6 +353,65 @@ mod tests {
         let endpoints = (ModelType::Chat | ModelType::Realtime).as_endpoint_types();
         assert!(endpoints.contains(&EndpointType::Chat));
         assert!(endpoints.contains(&EndpointType::Realtime));
+    }
+
+    #[test]
+    fn classify_bit_position() {
+        assert_eq!(ModelType::Classify.bits(), 1 << 9);
+    }
+
+    #[test]
+    fn classify_supports_classify() {
+        assert!(ModelType::Classify.supports_classify());
+        assert!(!ModelType::Chat.supports_classify());
+        assert!(!ModelType::Embedding.supports_classify());
+    }
+
+    #[test]
+    fn classify_in_as_vec_and_units() {
+        assert_eq!(ModelType::Classify.as_vec(), vec!["classify"]);
+        assert_eq!(ModelType::Classify.units(), vec![ModelType::Classify]);
+    }
+
+    #[test]
+    fn classify_endpoint_mapping() {
+        assert_eq!(
+            ModelType::Classify.as_endpoint_types(),
+            vec![EndpointType::Classify]
+        );
+    }
+
+    #[test]
+    fn pooling_bit_position() {
+        assert_eq!(ModelType::Pooling.bits(), 1 << 10);
+    }
+
+    #[test]
+    fn pooling_supports_pooling() {
+        assert!(ModelType::Pooling.supports_pooling());
+        assert!(!ModelType::Classify.supports_pooling());
+        assert!(!ModelType::Embedding.supports_pooling());
+    }
+
+    #[test]
+    fn pooling_in_as_vec_and_units() {
+        assert_eq!(ModelType::Pooling.as_vec(), vec!["pooling"]);
+        assert_eq!(ModelType::Pooling.units(), vec![ModelType::Pooling]);
+    }
+
+    #[test]
+    fn classify_pooling_combination_decomposes() {
+        let combined = ModelType::Classify | ModelType::Pooling;
+        assert!(combined.supports_classify());
+        assert!(combined.supports_pooling());
+        assert_eq!(
+            combined.units(),
+            vec![ModelType::Classify, ModelType::Pooling]
+        );
+        assert_eq!(
+            combined.as_endpoint_types(),
+            vec![EndpointType::Classify, EndpointType::Pooling]
+        );
     }
 
     #[test]

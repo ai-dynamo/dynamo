@@ -6,17 +6,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow, bail};
-use dashmap::DashMap;
-use dashmap::mapref::entry::Entry;
+use async_trait::async_trait;
 use dynamo_mocker::common::handoff::{
     HandoffAction, HandoffActionId, HandoffActionOutcome, HandoffCoordinatorCore, HandoffFact,
     HandoffId, HandoffOrder, HandoffTransferTiming, IssuedHandoffAction, NormalizedHandoffEvent,
     validate_transfer_delay_ms, validate_transfer_timing,
 };
-use dynamo_mocker::common::protocols::{DirectRequest, EngineType, KvTransferTimingMode};
-use dynamo_mocker::scheduler::{
-    SchedulerCommand, SchedulerCommandEffects, SchedulerCommandEnvelope, SchedulerCommandResult,
-    SchedulerLifecycleEvent,
+use dynamo_mocker::common::protocols::{EngineType, KvTransferTimingMode};
+use dynamo_mocker::live::{
+    LiveHandoffControl, LiveHandoffEvent, LiveHandoffEvents, LiveRequestRegistration,
 };
 use dynamo_mocker::services::bootstrap::{
     BootstrapConnection, BootstrapIdentity, BootstrapMessage, IncomingBootstrapConnection,
@@ -59,99 +57,133 @@ pub(crate) fn order_for_engine(engine_type: EngineType) -> Result<HandoffOrder> 
     }
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct HandoffEventRegistry {
-    routes: Arc<DashMap<HandoffId, mpsc::Sender<HandoffEventEnvelope>>>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HandoffControlAction {
+    SubmitPrefill,
+    ReleaseSource,
+    CancelSource,
+    ReserveDestination,
+    ActivateDestination,
+    CancelDestination,
 }
 
-struct HandoffEventEnvelope {
-    event: SchedulerLifecycleEvent,
-    #[cfg(test)]
-    received: Option<oneshot::Sender<()>>,
+#[async_trait]
+trait HandoffSchedulerControl: Send + Sync {
+    async fn execute(&self, action: HandoffControlAction) -> Result<HandoffActionOutcome>;
 }
 
-impl HandoffEventRegistry {
-    pub(crate) fn register(&self, handoff_id: HandoffId) -> Result<HandoffEventRoute> {
-        let (tx, rx) = mpsc::channel(SESSION_INBOX_CAPACITY);
-        match self.routes.entry(handoff_id) {
-            Entry::Vacant(entry) => {
-                entry.insert(tx);
+#[derive(Clone)]
+pub(crate) struct HandoffControl {
+    inner: Arc<dyn HandoffSchedulerControl>,
+}
+
+impl HandoffControl {
+    fn new(inner: Arc<dyn HandoffSchedulerControl>) -> Self {
+        Self { inner }
+    }
+
+    async fn execute(&self, action: HandoffControlAction) -> Result<HandoffActionOutcome> {
+        self.inner.execute(action).await
+    }
+}
+
+struct LiveHandoffAdapter {
+    control: LiveHandoffControl,
+    registration: tokio::sync::Mutex<Option<LiveRequestRegistration>>,
+}
+
+#[async_trait]
+impl HandoffSchedulerControl for LiveHandoffAdapter {
+    async fn execute(&self, action: HandoffControlAction) -> Result<HandoffActionOutcome> {
+        match action {
+            HandoffControlAction::SubmitPrefill => {
+                let registration = self
+                    .registration
+                    .lock()
+                    .await
+                    .take()
+                    .ok_or_else(|| anyhow!("source request was submitted more than once"))?;
+                self.control.submit_prefill(registration).await?;
+                Ok(HandoffActionOutcome::Submitted)
             }
-            Entry::Occupied(_) => {
-                bail!("handoff {handoff_id:?} already has a lifecycle route");
+            HandoffControlAction::ReserveDestination => {
+                let registration =
+                    self.registration.lock().await.take().ok_or_else(|| {
+                        anyhow!("destination request was reserved more than once")
+                    })?;
+                self.control.reserve_destination(registration).await?;
+                Ok(HandoffActionOutcome::Accepted)
+            }
+            HandoffControlAction::ReleaseSource => {
+                self.control.release_source().await?;
+                Ok(HandoffActionOutcome::Applied)
+            }
+            HandoffControlAction::CancelSource => {
+                let registration = self.registration.lock().await.take();
+                drop(registration);
+                self.control.cancel_source().await?;
+                Ok(HandoffActionOutcome::Applied)
+            }
+            HandoffControlAction::ActivateDestination => {
+                self.control.activate_destination().await?;
+                Ok(HandoffActionOutcome::Applied)
+            }
+            HandoffControlAction::CancelDestination => {
+                let registration = self.registration.lock().await.take();
+                drop(registration);
+                self.control.cancel_destination().await?;
+                Ok(HandoffActionOutcome::Applied)
             }
         }
-        Ok(HandoffEventRoute {
-            handoff_id,
-            routes: self.routes.clone(),
-            rx,
-        })
-    }
-
-    pub(crate) async fn deliver(&self, event: SchedulerLifecycleEvent) {
-        let handoff_id = event.handoff_id();
-        let sender = self.routes.get(&handoff_id).map(|entry| entry.clone());
-        if let Some(sender) = sender {
-            let _ = sender
-                .send(HandoffEventEnvelope {
-                    event,
-                    #[cfg(test)]
-                    received: None,
-                })
-                .await;
-        }
-    }
-
-    #[cfg(test)]
-    async fn deliver_and_wait(&self, event: SchedulerLifecycleEvent) {
-        let handoff_id = event.handoff_id();
-        let Some(sender) = self.routes.get(&handoff_id).map(|entry| entry.clone()) else {
-            return;
-        };
-        let (received, wait) = oneshot::channel();
-        if sender
-            .send(HandoffEventEnvelope {
-                event,
-                received: Some(received),
-            })
-            .await
-            .is_ok()
-        {
-            let _ = wait.await;
-        }
     }
 }
 
-pub(crate) struct HandoffEventRoute {
-    handoff_id: HandoffId,
-    routes: Arc<DashMap<HandoffId, mpsc::Sender<HandoffEventEnvelope>>>,
-    rx: mpsc::Receiver<HandoffEventEnvelope>,
+#[async_trait]
+trait HandoffEventStream: Send {
+    async fn recv(&mut self) -> Option<LiveHandoffEvent>;
 }
 
-impl HandoffEventRoute {
-    async fn recv(&mut self) -> Option<SchedulerLifecycleEvent> {
-        let envelope = self.rx.recv().await?;
-        #[cfg(test)]
-        if let Some(received) = envelope.received {
-            let _ = received.send(());
-        }
-        Some(envelope.event)
+#[async_trait]
+impl HandoffEventStream for LiveHandoffEvents {
+    async fn recv(&mut self) -> Option<LiveHandoffEvent> {
+        LiveHandoffEvents::recv(self).await
     }
 }
 
-impl Drop for HandoffEventRoute {
-    fn drop(&mut self) {
-        self.routes.remove(&self.handoff_id);
+pub(crate) struct HandoffEvents {
+    inner: Box<dyn HandoffEventStream>,
+}
+
+impl HandoffEvents {
+    fn new(inner: Box<dyn HandoffEventStream>) -> Self {
+        Self { inner }
     }
+
+    async fn recv(&mut self) -> Option<LiveHandoffEvent> {
+        self.inner.recv().await
+    }
+}
+
+pub(crate) fn live_handoff_boundary(
+    control: LiveHandoffControl,
+    events: LiveHandoffEvents,
+    registration: LiveRequestRegistration,
+) -> (HandoffControl, HandoffEvents) {
+    (
+        HandoffControl::new(Arc::new(LiveHandoffAdapter {
+            control,
+            registration: tokio::sync::Mutex::new(Some(registration)),
+        })),
+        HandoffEvents::new(Box::new(events)),
+    )
 }
 
 pub(crate) struct SourceRegistration {
     pub identity: BootstrapIdentity,
     pub order: HandoffOrder,
     pub engine_type: EngineType,
-    pub request: DirectRequest,
-    pub command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
-    pub lifecycle: HandoffEventRoute,
+    pub control: HandoffControl,
+    pub lifecycle: HandoffEvents,
     pub completion_tx: oneshot::Sender<Result<(), String>>,
     pub cancel: CancellationToken,
     pub observer: Option<mpsc::UnboundedSender<NormalizedHandoffEvent>>,
@@ -171,7 +203,6 @@ pub(crate) struct SourceHandoffManager {
 struct SourceHandoffManagerTestState {
     pending_sources: HashSet<HandoffId>,
     pending_destinations: HashSet<HandoffId>,
-    active: HashSet<HandoffId>,
     retired: HashSet<HandoffId>,
 }
 
@@ -251,14 +282,6 @@ impl SourceHandoffManager {
         let mut state = self.state_rx.clone();
         let _ = state
             .wait_for(|state| state.pending_destinations.contains(&handoff_id))
-            .await;
-    }
-
-    #[cfg(test)]
-    async fn wait_for_active(&self, handoff_id: HandoffId) {
-        let mut state = self.state_rx.clone();
-        let _ = state
-            .wait_for(|state| state.active.contains(&handoff_id))
             .await;
     }
 
@@ -499,7 +522,6 @@ async fn run_manager(
             let _ = state_tx.send(SourceHandoffManagerTestState {
                 pending_sources,
                 pending_destinations,
-                active: active.clone(),
                 retired: retired.keys().copied().collect(),
             });
         }
@@ -656,7 +678,7 @@ fn prune_retired(
 }
 
 enum SourceSessionEvent {
-    Scheduler(SchedulerLifecycleEvent),
+    Scheduler(LiveHandoffEvent),
     Remote(std::result::Result<Option<BootstrapMessage>, String>),
     LocalOutcome {
         action_id: HandoffActionId,
@@ -805,8 +827,7 @@ async fn run_source_session(
         identity,
         order,
         engine_type: _,
-        request,
-        command_tx,
+        control,
         mut lifecycle,
         completion_tx,
         cancel,
@@ -842,7 +863,6 @@ async fn run_source_session(
     queue_source_message(&outbound_tx, BootstrapMessage::Registered)?;
     let mut coordinator = HandoffCoordinatorCore::new(handoff_id, order);
     let mut actions = VecDeque::from(coordinator.start()?);
-    let mut request = Some(request);
     let deadline = tokio::time::sleep_until(session_deadline);
     tokio::pin!(deadline);
 
@@ -850,14 +870,11 @@ async fn run_source_session(
         loop {
             while let Some(action) = actions.pop_front() {
                 match action.action {
-                    HandoffAction::SubmitPrefill { handoff_id } => {
-                        let Some(request) = request.take() else {
-                            bail!("source request was submitted more than once");
-                        };
+                    HandoffAction::SubmitPrefill { .. } => {
                         if pending_submit_action.replace(action.id).is_some() {
                             bail!("source prefill submission was already pending");
                         }
-                        let command_tx = command_tx.clone();
+                        let control = control.clone();
                         let event_tx = event_tx.clone();
                         let cancel = cancel.clone();
                         let shutdown = shutdown.clone();
@@ -867,12 +884,9 @@ async fn run_source_session(
                             let result = tokio::select! {
                                 biased;
                                 _ = action_stop.cancelled() => return,
-                                result = send_source_command(
-                                    &command_tx,
-                                    SchedulerCommand::SubmitHandoffPrefill {
-                                        handoff_id,
-                                        request,
-                                    },
+                                result = execute_source_action(
+                                    &control,
+                                    HandoffControlAction::SubmitPrefill,
                                     deadline,
                                     &cancel,
                                     &shutdown,
@@ -883,10 +897,7 @@ async fn run_source_session(
                                 &action_stop,
                                 SourceSessionEvent::LocalOutcome {
                                     action_id: action.id,
-                                    outcome: command_outcome(
-                                        result,
-                                        SchedulerCommandResultKind::Submitted,
-                                    ),
+                                    outcome: action_outcome(result),
                                 },
                             )
                             .await;
@@ -920,26 +931,23 @@ async fn run_source_session(
                             }
                         });
                     }
-                    HandoffAction::ReleaseSource { handoff_id }
-                    | HandoffAction::CancelSource { handoff_id } => {
+                    HandoffAction::ReleaseSource { .. } | HandoffAction::CancelSource { .. } => {
                         if matches!(action.action, HandoffAction::ReleaseSource { .. }) {
                             observe_handoff(
                                 &observer,
                                 NormalizedHandoffEvent::DestinationActivated,
                             );
                         }
-                        let (command, expected) = match action.action {
-                            HandoffAction::ReleaseSource { .. } => (
-                                SchedulerCommand::ReleaseSource { handoff_id },
-                                SchedulerCommandResultKind::AppliedOrNoop,
-                            ),
-                            HandoffAction::CancelSource { .. } => (
-                                SchedulerCommand::CancelSource { handoff_id },
-                                SchedulerCommandResultKind::AppliedOrNoop,
-                            ),
+                        let control_action = match action.action {
+                            HandoffAction::ReleaseSource { .. } => {
+                                HandoffControlAction::ReleaseSource
+                            }
+                            HandoffAction::CancelSource { .. } => {
+                                HandoffControlAction::CancelSource
+                            }
                             _ => unreachable!(),
                         };
-                        let command_tx = command_tx.clone();
+                        let control = control.clone();
                         let event_tx = event_tx.clone();
                         let cancel = cancel.clone();
                         let shutdown = shutdown.clone();
@@ -949,9 +957,9 @@ async fn run_source_session(
                             let result = tokio::select! {
                                 biased;
                                 _ = action_stop.cancelled() => return,
-                                result = send_source_command(
-                                    &command_tx,
-                                    command,
+                                result = execute_source_action(
+                                    &control,
+                                    control_action,
                                     deadline,
                                     &cancel,
                                     &shutdown,
@@ -962,7 +970,7 @@ async fn run_source_session(
                                 &action_stop,
                                 SourceSessionEvent::LocalOutcome {
                                     action_id: action.id,
-                                    outcome: command_outcome(result, expected),
+                                    outcome: action_outcome(result),
                                 },
                             )
                             .await;
@@ -1027,11 +1035,7 @@ async fn run_source_session(
                 })?,
             };
             match event {
-                SourceSessionEvent::Scheduler(SchedulerLifecycleEvent::SourceHeld {
-                    handoff_id: observed,
-                    transfer_timing,
-                    ..
-                }) if observed == handoff_id => {
+                SourceSessionEvent::Scheduler(LiveHandoffEvent::SourceHeld { transfer_timing }) => {
                     validate_transfer_timing(transfer_timing)?;
                     source_transfer_timing = Some(transfer_timing);
                     if let Some(Some(timeout_delay)) = transfer_timeout_delay(
@@ -1066,12 +1070,9 @@ async fn run_source_session(
                         transfer_timing,
                     )?;
                 }
-                SourceSessionEvent::Scheduler(SchedulerLifecycleEvent::SourceHeld { .. }) => {
-                    bail!("source lifecycle event belongs to another handoff")
+                SourceSessionEvent::Scheduler(LiveHandoffEvent::DestinationReserved { .. }) => {
+                    bail!("source scheduler emitted a destination lifecycle event")
                 }
-                SourceSessionEvent::Scheduler(SchedulerLifecycleEvent::DestinationReserved {
-                    ..
-                }) => bail!("source scheduler emitted a destination lifecycle event"),
                 SourceSessionEvent::Remote(Ok(Some(BootstrapMessage::ActionAck {
                     action_id,
                     outcome,
@@ -1166,9 +1167,9 @@ async fn run_source_session(
     if let Err(error) = &result {
         let cleanup_deadline =
             tokio::time::Instant::now() + session_timeout.max(PARTICIPANT_RENDEZVOUS_TIMEOUT);
-        let cleanup = send_cleanup_command(
-            &command_tx,
-            SchedulerCommand::CancelSource { handoff_id },
+        let cleanup = execute_cleanup_action(
+            &control,
+            HandoffControlAction::CancelSource,
             cleanup_deadline,
         );
         let abort = send_source_message_and_wait(
@@ -1192,15 +1193,13 @@ async fn run_source_session(
 
 pub(crate) async fn run_destination_session(
     mut connection: BootstrapConnection,
-    request: DirectRequest,
-    command_tx: mpsc::Sender<SchedulerCommandEnvelope>,
-    mut lifecycle: HandoffEventRoute,
+    control: HandoffControl,
+    mut lifecycle: HandoffEvents,
     cancel: CancellationToken,
     session_timeout: Duration,
     shutdown: CancellationToken,
 ) -> Result<()> {
     let handoff_id = connection.identity().handoff_id;
-    let mut request = Some(request);
     let mut outcomes = HashMap::<HandoffActionId, (HandoffAction, HandoffActionOutcome)>::new();
     let mut complete = false;
     let mut session_started = None;
@@ -1272,13 +1271,9 @@ pub(crate) async fn run_destination_session(
                     break;
                 };
                 match event {
-                    SchedulerLifecycleEvent::DestinationReserved {
-                        handoff_id: observed,
+                    LiveHandoffEvent::DestinationReserved {
                         transferable_prompt_tokens: observed_transferable_prompt_tokens,
-                        ..
-                    }
-                        if observed == handoff_id =>
-                    {
+                    } => {
                         if destination_reserved_sent || pending_destination_reserved.is_some() {
                             continue;
                         }
@@ -1322,10 +1317,9 @@ pub(crate) async fn run_destination_session(
                             bail!("destination reserved before its action was pending");
                         }
                     }
-                    SchedulerLifecycleEvent::SourceHeld { .. } => {
+                    LiveHandoffEvent::SourceHeld { .. } => {
                         bail!("destination scheduler emitted a source lifecycle event")
                     }
-                    _ => bail!("destination lifecycle event belongs to another handoff"),
                 }
             }
             message = connection.recv() => {
@@ -1387,10 +1381,7 @@ pub(crate) async fn run_destination_session(
                         if outcomes.len() >= 16 {
                             bail!("bootstrap action outcome cache exceeded its bound");
                         }
-                        let (command, expected) = match prepare_destination_action(
-                            &mut request,
-                            action,
-                        ) {
+                        let control_action = match prepare_destination_action(handoff_id, action) {
                             Ok(prepared) => prepared,
                             Err(outcome) => {
                                 outcomes.insert(action.id, (action.action, outcome.clone()));
@@ -1402,7 +1393,7 @@ pub(crate) async fn run_destination_session(
                             }
                         };
                         pending_action = Some(action);
-                        let command_tx = command_tx.clone();
+                        let control = control.clone();
                         let cancel = cancel.clone();
                         let shutdown = shutdown.clone();
                         let action_stop = action_stop.clone();
@@ -1412,15 +1403,15 @@ pub(crate) async fn run_destination_session(
                             let result = tokio::select! {
                                 biased;
                                 _ = action_stop.cancelled() => return,
-                                result = send_destination_command(
-                                    &command_tx,
-                                    command,
+                                result = execute_destination_action(
+                                    &control,
+                                    control_action,
                                     action_deadline,
                                     &cancel,
                                     &shutdown,
                                 ) => result,
                             };
-                            let outcome = command_outcome(result, expected);
+                            let outcome = action_outcome(result);
                             tokio::select! {
                                 biased;
                                 _ = action_stop.cancelled() => {}
@@ -1456,9 +1447,9 @@ pub(crate) async fn run_destination_session(
     if !matches!(result, Ok(true)) {
         let cleanup_deadline =
             tokio::time::Instant::now() + session_timeout.max(PARTICIPANT_RENDEZVOUS_TIMEOUT);
-        let _ = send_cleanup_command(
-            &command_tx,
-            SchedulerCommand::CancelDestination { handoff_id },
+        let _ = execute_cleanup_action(
+            &control,
+            HandoffControlAction::CancelDestination,
             cleanup_deadline,
         )
         .await;
@@ -1471,147 +1462,88 @@ pub(crate) async fn run_destination_session(
 }
 
 fn prepare_destination_action(
-    request: &mut Option<DirectRequest>,
+    expected_handoff_id: HandoffId,
     action: IssuedHandoffAction,
-) -> std::result::Result<(SchedulerCommand, SchedulerCommandResultKind), HandoffActionOutcome> {
-    let (command, expected) = match action.action {
+) -> std::result::Result<HandoffControlAction, HandoffActionOutcome> {
+    let (observed_handoff_id, action) = match action.action {
         HandoffAction::ReserveDestination { handoff_id } => {
-            let Some(request) = request.take() else {
-                return Err(HandoffActionOutcome::Failed(
-                    "destination request was reserved more than once".to_string(),
-                ));
-            };
-            (
-                SchedulerCommand::ReserveDestination {
-                    handoff_id,
-                    request,
-                },
-                SchedulerCommandResultKind::Accepted,
-            )
+            (handoff_id, HandoffControlAction::ReserveDestination)
         }
-        HandoffAction::ActivateDestination { handoff_id } => (
-            SchedulerCommand::ActivateDestination { handoff_id },
-            SchedulerCommandResultKind::Applied,
-        ),
-        HandoffAction::CancelDestination { handoff_id } => (
-            SchedulerCommand::CancelDestination { handoff_id },
-            SchedulerCommandResultKind::AppliedOrNoop,
-        ),
+        HandoffAction::ActivateDestination { handoff_id } => {
+            (handoff_id, HandoffControlAction::ActivateDestination)
+        }
+        HandoffAction::CancelDestination { handoff_id } => {
+            (handoff_id, HandoffControlAction::CancelDestination)
+        }
         _ => {
             return Err(HandoffActionOutcome::Failed(
                 "source sent a non-destination scheduler action".to_string(),
             ));
         }
     };
-    Ok((command, expected))
+    if observed_handoff_id != expected_handoff_id {
+        return Err(HandoffActionOutcome::Failed(format!(
+            "destination action handoff {observed_handoff_id:?} does not match bootstrap handoff {expected_handoff_id:?}"
+        )));
+    }
+    Ok(action)
 }
 
-async fn send_source_command(
-    command_tx: &mpsc::Sender<SchedulerCommandEnvelope>,
-    command: SchedulerCommand,
+async fn execute_source_action(
+    control: &HandoffControl,
+    action: HandoffControlAction,
     deadline: tokio::time::Instant,
     cancel: &CancellationToken,
     shutdown: &CancellationToken,
-) -> Result<SchedulerCommandEffects> {
+) -> Result<HandoffActionOutcome> {
     tokio::select! {
         biased;
         _ = shutdown.cancelled() => bail!("mocker is shutting down"),
         _ = cancel.cancelled() => bail!("source request was canceled"),
         _ = tokio::time::sleep_until(deadline) => bail!("handoff session timed out"),
-        result = send_command(command_tx, command) => result,
+        result = control.execute(action) => result,
     }
 }
 
-async fn send_destination_command(
-    command_tx: &mpsc::Sender<SchedulerCommandEnvelope>,
-    command: SchedulerCommand,
+async fn execute_destination_action(
+    control: &HandoffControl,
+    action: HandoffControlAction,
     deadline: tokio::time::Instant,
     cancel: &CancellationToken,
     shutdown: &CancellationToken,
-) -> Result<SchedulerCommandEffects> {
+) -> Result<HandoffActionOutcome> {
     tokio::select! {
         biased;
         _ = shutdown.cancelled() => bail!("mocker is shutting down"),
         _ = cancel.cancelled() => bail!("destination request was canceled"),
         _ = tokio::time::sleep_until(deadline) => bail!("handoff session timed out"),
-        result = send_command(command_tx, command) => result,
+        result = control.execute(action) => result,
     }
 }
 
-async fn send_cleanup_command(
-    command_tx: &mpsc::Sender<SchedulerCommandEnvelope>,
-    command: SchedulerCommand,
+async fn execute_cleanup_action(
+    control: &HandoffControl,
+    action: HandoffControlAction,
     deadline: tokio::time::Instant,
-) -> Result<SchedulerCommandEffects> {
-    tokio::time::timeout_at(deadline, send_command(command_tx, command))
+) -> Result<HandoffActionOutcome> {
+    tokio::time::timeout_at(deadline, control.execute(action))
         .await
         .map_err(|_| anyhow!("scheduler cleanup command timed out"))?
 }
 
-async fn send_command(
-    command_tx: &mpsc::Sender<SchedulerCommandEnvelope>,
-    command: SchedulerCommand,
-) -> Result<SchedulerCommandEffects> {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    command_tx
-        .send(SchedulerCommandEnvelope {
-            command,
-            reply: reply_tx,
-        })
-        .await
-        .map_err(|_| anyhow!("scheduler command channel closed"))?;
-    reply_rx
-        .await
-        .map_err(|_| anyhow!("scheduler command reply was dropped"))?
-}
-
-pub(crate) async fn cancel_destination(
-    command_tx: &mpsc::Sender<SchedulerCommandEnvelope>,
-    handoff_id: HandoffId,
-    timeout: Duration,
-) {
-    let _ = send_cleanup_command(
-        command_tx,
-        SchedulerCommand::CancelDestination { handoff_id },
+pub(crate) async fn cancel_destination(control: &HandoffControl, timeout: Duration) {
+    let _ = execute_cleanup_action(
+        control,
+        HandoffControlAction::CancelDestination,
         tokio::time::Instant::now() + timeout,
     )
     .await;
 }
 
-#[derive(Clone, Copy)]
-enum SchedulerCommandResultKind {
-    Submitted,
-    Accepted,
-    Applied,
-    AppliedOrNoop,
-}
-
-fn command_outcome(
-    result: Result<SchedulerCommandEffects>,
-    expected: SchedulerCommandResultKind,
-) -> HandoffActionOutcome {
-    let effects = match result {
-        Ok(effects) => effects,
-        Err(error) => return HandoffActionOutcome::Failed(error.to_string()),
-    };
-    match (expected, effects.result) {
-        (SchedulerCommandResultKind::Submitted, SchedulerCommandResult::Submitted(_)) => {
-            HandoffActionOutcome::Submitted
-        }
-        (
-            SchedulerCommandResultKind::Accepted,
-            SchedulerCommandResult::DestinationAccepted { .. },
-        ) => HandoffActionOutcome::Accepted,
-        (SchedulerCommandResultKind::Applied, SchedulerCommandResult::Applied) => {
-            HandoffActionOutcome::Applied
-        }
-        (SchedulerCommandResultKind::AppliedOrNoop, SchedulerCommandResult::Applied) => {
-            HandoffActionOutcome::Applied
-        }
-        (SchedulerCommandResultKind::AppliedOrNoop, SchedulerCommandResult::Noop) => {
-            HandoffActionOutcome::Noop
-        }
-        _ => HandoffActionOutcome::Failed("scheduler returned an unexpected result".to_string()),
+fn action_outcome(result: Result<HandoffActionOutcome>) -> HandoffActionOutcome {
+    match result {
+        Ok(outcome) => outcome,
+        Err(error) => HandoffActionOutcome::Failed(error.to_string()),
     }
 }
 

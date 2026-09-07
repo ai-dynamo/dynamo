@@ -99,6 +99,28 @@ class TestPromptEmbedsDecode:
         with pytest.raises(ValueError, match=error_match):
             mock_handler._decode_prompt_embeds(invalid_input)
 
+    def test_missing_model_config_is_server_error(self, mock_handler):
+        mock_handler.model_config = None
+
+        with pytest.raises(RuntimeError, match="ModelConfig is unavailable"):
+            mock_handler._decode_prompt_embeds("unused")
+
+    @pytest.mark.parametrize(
+        "error",
+        [MemoryError("host allocation failed"), torch.OutOfMemoryError("OOM")],
+        ids=["memory-error", "torch-oom"],
+    )
+    def test_decode_resource_errors_propagate(self, mock_handler, monkeypatch, error):
+        monkeypatch.setattr(
+            "dynamo.vllm.handlers.safe_load_prompt_embeds",
+            Mock(side_effect=error),
+        )
+
+        with pytest.raises(type(error)) as exc_info:
+            mock_handler._decode_prompt_embeds("unused")
+
+        assert exc_info.value is error
+
     def test_decode_numpy_format_rejected(self, mock_handler):
         """Test that NumPy format is rejected (PyTorch format required)."""
         embeddings = np.random.randn(10, 768).astype(np.float32)

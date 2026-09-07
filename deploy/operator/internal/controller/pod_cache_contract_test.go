@@ -9,6 +9,7 @@ import (
 	"context"
 	"testing"
 
+	podcontract "github.com/ai-dynamo/snapshot/api/podcontract"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -16,13 +17,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1beta1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1beta1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/gms"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/podcache"
 )
@@ -37,6 +39,7 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 			Labels: map[string]string{
 				consts.KubeLabelDynamoGraphDeploymentName:       "graph",
 				consts.KubeLabelDynamoComponent:                 "prefill",
+				consts.KubeLabelDynamoNamespace:                 "inference-graph",
 				consts.KubeLabelDynamoSelector:                  "graph-prefill-old",
 				consts.KubeLabelDynamoComponentType:             consts.ComponentTypeWorker,
 				consts.KubeLabelDynamoSubComponentType:          consts.ComponentTypePrefill,
@@ -58,6 +61,11 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 				Command: []string{"python"},
 				Args:    []string{"-m", "dynamo.vllm"},
 			}},
+			InitContainers: []corev1.Container{{
+				Name:          gms.ServerContainerName,
+				Image:         "discarded-image",
+				RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+			}},
 			Volumes: []corev1.Volume{{
 				Name: "topology",
 				VolumeSource: corev1.VolumeSource{DownwardAPI: &corev1.DownwardAPIVolumeSource{
@@ -69,14 +77,22 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		},
 		Status: corev1.PodStatus{
 			Phase: corev1.PodFailed,
-			Conditions: []corev1.PodCondition{{
-				Type: corev1.PodReady, Status: corev1.ConditionTrue,
-			}},
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				{
+					Type:   corev1.PodConditionType(podcontract.RestoredCondition),
+					Status: corev1.ConditionTrue,
+					Reason: podcontract.RestoreReasonSucceeded,
+				},
+			},
 			ContainerStatuses: []corev1.ContainerStatus{{
 				Name: ContainerNameProfiler,
 				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
 					ExitCode: 23, Reason: "Error", Message: "profiling failed",
 				}},
+			}},
+			InitContainerStatuses: []corev1.ContainerStatus{{
+				Name: gms.ServerContainerName, RestartCount: 1,
 			}},
 		},
 	})
@@ -90,12 +106,13 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		assert.True(t, failoverCascadePredicate().Create(event.CreateEvent{Object: pod}))
 	})
 
-	t.Run("checkpoint and snapshot", func(t *testing.T) {
-		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{ObjectMeta: metav1.ObjectMeta{Name: "checkpoint", Namespace: pod.Namespace}}
-		snapshot := buildPodSnapshot(ckpt, "checkpoint-id", pod)
-		assert.Equal(t, pod.Name, snapshot.Spec.Source.PodRef.Name)
-		assert.Equal(t, pod.UID, snapshot.Spec.Source.PodRef.UID)
-		require.NoError(t, validateSourcePod(snapshot, pod))
+	t.Run("GMS Pod replacement", func(t *testing.T) {
+		t.Log("Build a projected Dynamo Pod carrying standalone Snapshot restore state")
+		nativeRestorePod := pod.DeepCopy()
+		nativeRestorePod.Annotations[podcontract.RestoreFromAnnotation] = "snapshot-a"
+
+		t.Log("Verify GMS replacement observes the projected native sidecar restart")
+		assert.True(t, gmsPodReplacementPredicate().Create(event.CreateEvent{Object: nativeRestorePod}))
 	})
 
 	t.Run("model", func(t *testing.T) {
@@ -113,7 +130,7 @@ func TestProjectedPodSupportsControllerContract(t *testing.T) {
 		client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 		reconciler := &DynamoGraphDeploymentRequestReconciler{
 			Client:   client,
-			Recorder: record.NewFakeRecorder(1),
+			Recorder: events.NewFakeRecorder(1),
 		}
 		dgdr := &nvidiacomv1beta1.DynamoGraphDeploymentRequest{ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace}}
 		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "profiling-job", Namespace: pod.Namespace}}

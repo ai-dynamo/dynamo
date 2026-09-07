@@ -239,7 +239,15 @@ export interface ReadingItem {
 function buildReadingChips(readingList: ReadingItem[]): { label: string; href: string }[] {
   return readingList.flatMap((item) => {
     const stats = RELEASE_STATS[item.version];
-    if (!stats) return [];
+    /* Both conditions, and notesHref is the load-bearing one: the hrefs below
+       point at per-release sections of the Deprecations and Known Issues
+       pages, which exist only for releases that have a notes page. Testing
+       stats alone was the same coincidence that broke the from-candidate
+       filter in UpgradeSelector -- it held only while RELEASE_STATS happened
+       to contain nothing older than v1.0.0, and stopped holding the moment
+       the pre-v1.0.0 rows were backfilled. */
+    const release = RELEASES.find((r) => r.version === item.version);
+    if (!stats || !release?.notesHref) return [];
     const anchor = item.version.replace(/\./g, "");
     return item.kind === "breaking"
       ? [

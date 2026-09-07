@@ -99,7 +99,7 @@ spec:
               --model $MODEL_PATH \
               --served-model-name $SERVED_MODEL_NAME \
               --enable-multimodal \
-              --multimodal-encode-worker \
+              --disaggregation-mode encode \
               --enable-mm-embeds \
               --dtype bfloat16 \
               --enforce-eager \
@@ -174,7 +174,7 @@ spec:
               --model $MODEL_PATH \
               --served-model-name $SERVED_MODEL_NAME \
               --enable-multimodal \
-              --multimodal-worker \
+              --disaggregation-mode pd \
               --enable-mm-embeds \
               --route-to-encoder \
               --mm-prompt-template "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n" \
@@ -185,4 +185,3 @@ spec:
           resources:
             claims:
               - name: gpu-rdma-resource
-

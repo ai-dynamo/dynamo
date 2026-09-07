@@ -163,6 +163,11 @@ impl ModelRuntimeConfig {
     }
 
     #[setter]
+    fn set_kv_event_source_mode(&mut self, mode: Option<String>) {
+        self.inner.kv_event_source_mode = mode;
+    }
+
+    #[setter]
     fn set_kv_state_endpoint(&mut self, kv_state_endpoint: Option<String>) {
         self.inner.kv_state_endpoint = kv_state_endpoint.as_deref().map(EndpointId::from);
     }
@@ -241,6 +246,16 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
+    fn data_parallel_start_rank(&self) -> u32 {
+        self.inner.data_parallel_start_rank
+    }
+
+    #[getter]
+    fn data_parallel_size(&self) -> u32 {
+        self.inner.data_parallel_size
+    }
+
+    #[getter]
     fn enable_local_indexer(&self) -> bool {
         self.inner.enable_local_indexer
     }
@@ -248,6 +263,11 @@ impl ModelRuntimeConfig {
     #[getter]
     fn kv_event_publishing_enabled(&self) -> Option<bool> {
         self.inner.kv_event_publishing_enabled
+    }
+
+    #[getter]
+    fn kv_event_source_mode(&self) -> Option<String> {
+        self.inner.kv_event_source_mode.clone()
     }
 
     #[getter]

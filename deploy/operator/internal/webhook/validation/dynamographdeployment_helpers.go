@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -28,6 +29,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	grovev1alpha1 "github.com/ai-dynamo/grove/operator/api/core/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -135,6 +137,27 @@ func grovePathwayForDynamoGraphDeployment(
 	groveEnabled bool,
 	dgd *nvidiacomv1beta1.DynamoGraphDeployment,
 ) (bool, string) {
+	// A durable selection takes precedence over current capabilities and the
+	// original routing annotation. Availability is reported by the selected
+	// workload program, while admission retains that program's API semantics.
+	if provider, exists := dgd.Annotations[consts.KubeAnnotationWorkloadProvider]; exists {
+		switch provider {
+		case consts.WorkloadProviderGrove:
+			return true, ""
+		case consts.WorkloadProviderComponent:
+			return false, fmt.Sprintf(
+				"requires the Grove pathway, but workload provider %q is selected",
+				provider,
+			)
+		default:
+			return false, fmt.Sprintf(
+				"requires the Grove pathway, but annotation %q has unsupported value %q",
+				consts.KubeAnnotationWorkloadProvider,
+				provider,
+			)
+		}
+	}
+
 	if !groveEnabled {
 		return false, "requires the Grove pathway, but Grove is disabled in the operator configuration"
 	}
@@ -159,7 +182,7 @@ func dgdComponentResourceNameLength(
 	combinedLength := len(pcsName) + len(strings.ToLower(componentName))
 	detail := "PCS name + component name"
 
-	if component.GetNumberOfNodes() > 1 || component.IsInterPodGMSEnabled() {
+	if component.UsesPCSG() {
 		longestPodCliqueName := dynamo.LongestPodCliqueNameForDGDComponent(componentName, component)
 		combinedLength += len(longestPodCliqueName)
 		detail = fmt.Sprintf("PCS name + PCSG name + longest PodClique name %q", longestPodCliqueName)
@@ -185,6 +208,114 @@ func componentsByName(
 		byName[components[i].ComponentName] = &components[i]
 	}
 	return byName
+}
+
+func dgdPowerLimit(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+) (string, bool) {
+	if component.PodTemplate == nil {
+		return "", false
+	}
+	value, exists := component.PodTemplate.Annotations[consts.KubeAnnotationGPUPowerLimit]
+	return value, exists
+}
+
+// validateDGDPowerLimitValue checks that the power-limit annotation value is a
+// positive decimal integer. The annotation is made immutable on creation, so an
+// invalid value that slips through requires a DGD delete-and-recreate to correct.
+func validateDGDPowerLimitValue(value string, fldPath *field.Path) *field.Error {
+	watts, err := strconv.Atoi(value)
+	if err != nil {
+		return field.Invalid(fldPath, value, "must be a decimal integer")
+	}
+	if watts <= 0 {
+		return field.Invalid(fldPath, value, "must be greater than zero")
+	}
+	return nil
+}
+
+func dgdDRAPath(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) *field.Path {
+	if gpuMemoryServiceFor(component) != nil {
+		return fldPath.Child("experimental", "gpuMemoryService")
+	}
+	if component.PodTemplate == nil {
+		return nil
+	}
+
+	// The claim's DeviceClass is external to the DGD, so fail closed for every consumed claim.
+	containersPath := fldPath.Child("podTemplate", "spec", "containers")
+	for i := range component.PodTemplate.Spec.Containers {
+		if len(component.PodTemplate.Spec.Containers[i].Resources.Claims) != 0 {
+			return containersPath.Index(i).Child("resources", "claims")
+		}
+	}
+	initContainersPath := fldPath.Child("podTemplate", "spec", "initContainers")
+	for i := range component.PodTemplate.Spec.InitContainers {
+		if len(component.PodTemplate.Spec.InitContainers[i].Resources.Claims) != 0 {
+			return initContainersPath.Index(i).Child("resources", "claims")
+		}
+	}
+	return nil
+}
+
+// effectiveNumberOfGPUs captures the effective scalar GPU count and its source field.
+type effectiveNumberOfGPUs struct {
+	value   string
+	present bool
+	path    *field.Path
+}
+
+func (input effectiveNumberOfGPUs) equal(other effectiveNumberOfGPUs) bool {
+	return input.present == other.present && (!input.present || input.value == other.value)
+}
+
+func (input effectiveNumberOfGPUs) invalidValue() any {
+	if !input.present {
+		return nil
+	}
+	return input.value
+}
+
+// effectiveNumberOfGPUsV1Beta1 returns the main container's scalar GPU count, preferring limits to requests.
+func effectiveNumberOfGPUsV1Beta1(
+	component *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	fldPath *field.Path,
+) effectiveNumberOfGPUs {
+	containersPath := fldPath.Child("podTemplate", "spec", "containers")
+	if component.PodTemplate == nil {
+		return effectiveNumberOfGPUs{path: containersPath}
+	}
+
+	// Phase-1 power admission rejects DRA-backed components, matching the Planner's scalar-only
+	// GPU count. Read the limit before the request, as the Planner does.
+	resourceName := corev1.ResourceName(consts.KubeResourceGPUNvidia)
+	for i := range component.PodTemplate.Spec.Containers {
+		container := &component.PodTemplate.Spec.Containers[i]
+		if container.Name != consts.MainContainerName {
+			continue
+		}
+
+		resourcesPath := containersPath.Index(i).Child("resources")
+		if quantity, exists := container.Resources.Limits[resourceName]; exists {
+			return effectiveNumberOfGPUs{
+				value:   quantity.String(),
+				present: true,
+				path:    resourcesPath.Child("limits").Key(consts.KubeResourceGPUNvidia),
+			}
+		}
+		if quantity, exists := container.Resources.Requests[resourceName]; exists {
+			return effectiveNumberOfGPUs{
+				value:   quantity.String(),
+				present: true,
+				path:    resourcesPath.Child("requests").Key(consts.KubeResourceGPUNvidia),
+			}
+		}
+		return effectiveNumberOfGPUs{path: resourcesPath}
+	}
+	return effectiveNumberOfGPUs{path: containersPath}
 }
 
 func sortedComponentNames(

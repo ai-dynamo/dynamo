@@ -63,6 +63,7 @@ pub async fn run(
                 local_model_path,
                 model.metrics_prefix(),
                 model.runtime_config().tokenizer_backend,
+                model.runtime_config().tokenizer_fallback_enabled,
             )
             .await?;
             grpc_service
@@ -132,6 +133,7 @@ async fn run_watcher(
     local_model_path: Option<PathBuf>,
     metrics_prefix: Option<String>,
     tokenizer_backend: Option<TokenizerBackend>,
+    tokenizer_fallback_enabled: Option<bool>,
 ) -> anyhow::Result<()> {
     // Start the LoRA allocation controller when LoRA serving is enabled (mirrors http.rs;
     // additionally gated on DYN_LORA_ALLOCATION_ENABLED inside start_lora_controller). Without
@@ -154,6 +156,7 @@ async fn run_watcher(
     );
     watch_obj.set_local_model_path(local_model_path);
     watch_obj.set_tokenizer_backend(tokenizer_backend);
+    watch_obj.set_tokenizer_fallback_enabled(tokenizer_fallback_enabled);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

@@ -1,14 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Disaggregation helpers shared by the legacy (`init_llm.py`,
-`register.py`) and unified (`llm_engine.py`) entry points.
+"""Disaggregation helpers used by the SGLang worker.
 
-* :func:`compute_bootstrap_address` — resolve the `(host, port)` triple a
+* :func:`compute_bootstrap_address` — resolve the `(host, port)` pair a
   prefill worker advertises to decode peers from a live `sgl.Engine`.
-  Returns `(None, None)` on any failure so legacy callers can keep their
-  graceful-degradation behaviour; the unified path treats `None` as a
-  fatal configuration error and raises.
+  Returns `(None, None)` on any failure so callers can degrade gracefully.
 
 * :func:`get_sglang_worker_group_id` — normalize the SGLang multinode
   `dist_init_addr` into a runtime-data key that non-leader workers can use
@@ -49,8 +46,7 @@ def compute_bootstrap_address(
 
     Returns `(None, None)` when the engine doesn't advertise a
     `disaggregation_bootstrap_port` or when address resolution raises.
-    Caller decides whether `None` is fatal — legacy `register.py` treats
-    it as soft-skip; the unified path treats it as a fatal misconfig.
+    Callers treat `(None, None)` as a soft skip.
     """
     # Deferred to function body so pre-commit test collection can import
     # `_disagg` without sglang installed.

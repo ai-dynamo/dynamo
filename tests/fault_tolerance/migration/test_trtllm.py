@@ -80,7 +80,7 @@ class DynamoWorkerProcess(ManagedProcess):
         request: pytest request fixture
         worker_id: Unique identifier for the worker (e.g., "worker1", "prefill1")
         frontend_port: Port where the frontend is running
-        mode: "prefill_and_decode" for aggregated, "prefill" or "decode" for disaggregated
+        mode: "agg" for aggregated, "prefill" or "decode" for disaggregated
     """
 
     def __init__(
@@ -88,7 +88,7 @@ class DynamoWorkerProcess(ManagedProcess):
         request,
         worker_id: str,
         frontend_port: int,
-        mode: str = "prefill_and_decode",
+        mode: str = "agg",
     ):
         self.worker_id = worker_id
         self.system_port = allocate_port(DynamoPortRange.SERVE.value)
@@ -110,7 +110,7 @@ class DynamoWorkerProcess(ManagedProcess):
             "--free-gpu-memory-fraction",
             "0.15",  # avoid validation error on TRT-LLM available memory checks
         ]
-        if mode != "prefill_and_decode":
+        if mode != "agg":
             config_file = (
                 f"test_request_migration_trtllm_config_{self.system_port}.yaml"
             )
@@ -143,7 +143,7 @@ class DynamoWorkerProcess(ManagedProcess):
         health_check_urls = [
             (f"http://localhost:{self.system_port}/health", self.is_ready)
         ]
-        if mode in ["decode", "prefill_and_decode"]:
+        if mode in ["decode", "agg"]:
             health_check_urls.append(
                 (f"http://localhost:{frontend_port}/v1/models", check_models_api)
             )

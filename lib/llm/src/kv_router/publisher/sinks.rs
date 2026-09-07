@@ -7,8 +7,10 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use dynamo_kv_router::RouterEventSink;
-use dynamo_kv_router::indexer::LocalKvIndexer;
-use dynamo_kv_router::protocols::{KvCacheEvent, KvCacheEventData, RouterEvent, StorageTier};
+use dynamo_kv_router::indexer::{KvRouterError, LocalKvIndexer};
+use dynamo_kv_router::protocols::{
+    KvCacheEvent, KvCacheEventData, ResidencyDomain, RouterEvent, StorageTier,
+};
 use dynamo_runtime::transports::event_plane::EventPublisher;
 
 pub(super) struct EventPlanePublisher(pub(super) EventPublisher);
@@ -82,9 +84,10 @@ impl RouterEventBatchSink for EventPlanePublisher {
             MAX_EVENT_PLANE_KV_EVENTS_PER_BATCH,
             MAX_EVENT_PLANE_KV_EVENT_BATCH_BLOCKS,
         ) {
+            let first_event_id = batch.first().map(|event| event.event.event_id);
+            let last_event_id = batch.last().map(|event| event.event.event_id);
+            let worker_id = batch.first().map(|event| event.worker_id);
             if let Err(error) = self.0.publish(&batch).await {
-                let first_event_id = batch.first().map(|event| event.event.event_id);
-                let last_event_id = batch.last().map(|event| event.event.event_id);
                 tracing::error!(
                     transport = ?self.0.transport_kind(),
                     event_count = batch.len(),
@@ -94,6 +97,15 @@ impl RouterEventBatchSink for EventPlanePublisher {
                     "Failed to publish KV event batch"
                 );
                 failures.record(batch.len(), error);
+            } else {
+                tracing::trace!(
+                    transport = ?self.0.transport_kind(),
+                    ?worker_id,
+                    event_count = batch.len(),
+                    ?first_event_id,
+                    ?last_event_id,
+                    "Forwarded KV event batch to router event plane"
+                );
             }
         }
         failures.into_result()
@@ -139,18 +151,37 @@ pub(super) fn event_plane_event_batches(
     })
 }
 
+/// Apply one canonical event using the shared local queue-admission contract.
+///
+/// Callers own logging and fail-open/fail-closed policy. `Cleared` is stronger
+/// inside `LocalKvIndexer` and returns only after every affected tier completes.
+pub(super) async fn admit_local_event(
+    local_indexer: Option<&LocalKvIndexer>,
+    event: &RouterEvent,
+) -> Result<(), KvRouterError> {
+    let Some(local_indexer) = local_indexer else {
+        return Ok(());
+    };
+    local_indexer.apply_event_with_buffer(event.clone()).await
+}
+
 pub(super) async fn emit(
     local_indexer: &Option<Arc<LocalKvIndexer>>,
     worker_id: u64,
     storage_tier: StorageTier,
+    residency_domain: ResidencyDomain,
     event: KvCacheEvent,
     output: &mut Vec<RouterEvent>,
-) {
-    let router_event = RouterEvent::with_storage_tier(worker_id, event, storage_tier);
-    if let Some(indexer) = local_indexer
-        && let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await
-    {
-        tracing::warn!(worker_id, error = %e, "Failed to apply event to local indexer");
-    }
+) -> bool {
+    let router_event =
+        RouterEvent::with_residency_domain(worker_id, event, storage_tier, residency_domain);
+    let applied = match admit_local_event(local_indexer.as_deref(), &router_event).await {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(worker_id, %error, "Failed to apply event to local indexer");
+            false
+        }
+    };
     output.push(router_event);
+    applied
 }

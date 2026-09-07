@@ -3,7 +3,6 @@
 
 use crate::component::{
     self, Component, ComponentBuilder, Endpoint, EndpointDiscoverySource, Instance, Namespace,
-    RoutingOccupancyState,
 };
 use crate::config::environment_names::tcp_response_stream;
 use crate::pipeline::PipelineError;
@@ -12,7 +11,7 @@ use crate::service::{ServiceClient, ServiceSet};
 use crate::storage::kv;
 use crate::{discovery, system_status_server, transports};
 use crate::{
-    discovery::Discovery,
+    discovery::{Discovery, DiscoverySpec, EndpointRegistrationLease, EndpointRegistrationManager},
     metrics::PrometheusUpdateCallback,
     metrics::{MetricsHierarchy, MetricsRegistry},
     transports::{etcd, nats, tcp},
@@ -20,6 +19,7 @@ use crate::{
 
 use super::utils::GracefulShutdownTracker;
 use crate::SystemHealth;
+use crate::routing_policy::RoutingOccupancyState;
 use crate::runtime::Runtime;
 
 // Used instead of std::cell::OnceCell because get_or_try_init there is nightly
@@ -40,8 +40,57 @@ use tokio_util::sync::CancellationToken;
 type EndpointDiscoverySourceMap = HashMap<Endpoint, Weak<EndpointDiscoverySource>>;
 type RoutingOccupancyMap = HashMap<Endpoint, Weak<RoutingOccupancyState>>;
 
-/// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
-/// communication protocols and transports.
+fn parse_tcp_response_stream_port(value: Option<&str>) -> Result<u16, PipelineError> {
+    let Some(port) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(0);
+    };
+
+    port.parse::<u16>().map_err(|_| {
+        PipelineError::Generic(format!(
+            "invalid {}: '{}' is not a valid port number",
+            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
+            port
+        ))
+    })
+}
+
+#[cfg(test)]
+mod unit_tests {
+    use super::parse_tcp_response_stream_port;
+    use crate::pipeline::PipelineError;
+
+    #[test]
+    fn response_stream_port_trims_and_treats_empty_as_unset() {
+        for value in [None, Some(""), Some(" \t ")] {
+            assert_eq!(parse_tcp_response_stream_port(value).unwrap(), 0);
+        }
+        assert_eq!(
+            parse_tcp_response_stream_port(Some(" 8080 ")).unwrap(),
+            8080
+        );
+    }
+
+    #[test]
+    fn response_stream_port_rejects_invalid_values() {
+        let error = parse_tcp_response_stream_port(Some(" 65536 ")).unwrap_err();
+        assert!(matches!(
+            error,
+            PipelineError::Generic(message)
+                if message
+                    == "invalid DYN_TCP_RESPONSE_STREAM_PORT: '65536' is not a valid port number"
+        ));
+    }
+}
+
+/// Distributed [Runtime] providing cluster-wide communication, transport, and discovery resources.
+///
+/// `DistributedRuntime` is not a process singleton. Calling [`DistributedRuntime::new`] more than
+/// once creates independent DRT instances with distinct discovery connection IDs, even when they
+/// share a process. Cloning a DRT continues to share the original instance and connection ID.
+///
+/// Production services should normally treat one DRT per service replica/process as a soft
+/// invariant. Multiple DRTs in one process are primarily supported for single-process test
+/// topologies and for the mocker, which models multiple isolated workers in one process.
 #[derive(Clone)]
 pub struct DistributedRuntime {
     // local runtime
@@ -55,6 +104,7 @@ pub struct DistributedRuntime {
 
     // Service discovery client
     discovery_client: Arc<dyn discovery::Discovery>,
+    endpoint_registrations: Arc<EndpointRegistrationManager>,
 
     // Discovery metadata (only used for Kubernetes backend)
     // Shared with system status server to expose via /metadata endpoint
@@ -193,6 +243,11 @@ impl DistributedRuntime {
             request_plane,
         );
 
+        let endpoint_registrations = EndpointRegistrationManager::new(
+            discovery_client.clone(),
+            runtime.secondary(),
+            runtime.primary_token(),
+        );
         let distributed_runtime = Self {
             runtime,
             network_manager: Arc::new(network_manager),
@@ -200,6 +255,7 @@ impl DistributedRuntime {
             tcp_server: Arc::new(OnceCell::new()),
             system_status_server: Arc::new(OnceLock::new()),
             discovery_client,
+            endpoint_registrations,
             discovery_metadata,
             component_registry,
             endpoint_discovery_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -342,6 +398,10 @@ impl DistributedRuntime {
         &self.metadata_artifacts
     }
 
+    /// Returns this DRT instance's discovery identity.
+    ///
+    /// This identifies the DRT, not the operating-system process. Multiple DRTs in one process
+    /// receive distinct connection IDs.
     pub fn connection_id(&self) -> u64 {
         self.discovery_client.instance_id()
     }
@@ -361,25 +421,27 @@ impl DistributedRuntime {
         self.discovery_client.clone()
     }
 
+    /// Register an endpoint until the last runtime-wide owner drops its lease.
+    pub async fn register_endpoint_lease(
+        &self,
+        spec: DiscoverySpec,
+    ) -> Result<EndpointRegistrationLease> {
+        self.endpoint_registrations.register(spec).await
+    }
+
     pub async fn tcp_server(&self) -> Result<Arc<tcp::server::TcpStreamServer>> {
         Ok(self
             .tcp_server
             .get_or_try_init(async move {
-                let port = match std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT) {
-                    Ok(p) => p.parse::<u16>().map_err(|_| {
-                        PipelineError::Generic(format!(
-                            "invalid {}: '{}' is not a valid port number",
-                            tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT,
-                            p
-                        ))
-                    })?,
-                    Err(_) => 0,
-                };
-                let interface = std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST)
-                    .ok()
-                    .filter(|h| !h.is_empty());
+                let port_value =
+                    std::env::var(tcp_response_stream::DYN_TCP_RESPONSE_STREAM_PORT).ok();
+                let port = parse_tcp_response_stream_port(port_value.as_deref())?;
+                let host = crate::utils::ip_resolver::host_override_from_env(
+                    tcp_response_stream::DYN_TCP_RESPONSE_STREAM_HOST,
+                )
+                .map_err(|error| PipelineError::Generic(error.to_string()))?;
 
-                let host_suffix = interface
+                let host_suffix = host
                     .as_ref()
                     .map_or(String::new(), |h| format!(" on host {h}"));
                 if port == 0 {
@@ -392,7 +454,10 @@ impl DistributedRuntime {
                     );
                 }
 
-                let options = tcp::server::ServerOptions { port, interface };
+                let options = tcp::server::ServerOptions {
+                    port,
+                    interface: host,
+                };
                 let server = tcp::server::TcpStreamServer::new(options).await?;
                 Ok::<_, PipelineError>(server)
             })
@@ -435,7 +500,7 @@ impl DistributedRuntime {
     /// The value is resolved once at construction time by `DiscoveryBackend::resolve_event_transport_kind`:
     /// if `DYN_EVENT_PLANE` is set explicitly that value wins; otherwise the default is ZMQ.
     ///
-    /// Use this instead of [`EventTransportKind::from_env_or_default`] wherever you have
+    /// Use this instead of `EventTransportKind::from_env_or_default` wherever you have
     /// access to a `DistributedRuntime`.
     pub fn default_event_transport_kind(&self) -> crate::discovery::EventTransportKind {
         self.event_transport_kind
@@ -806,7 +871,7 @@ impl RequestPlaneMode {
     /// Get the request plane mode from environment variable (uncached)
     /// Reads from `DYN_REQUEST_PLANE` environment variable.
     fn from_env() -> Self {
-        std::env::var("DYN_REQUEST_PLANE")
+        std::env::var(crate::config::environment_names::request_plane::DYN_REQUEST_PLANE)
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_default()

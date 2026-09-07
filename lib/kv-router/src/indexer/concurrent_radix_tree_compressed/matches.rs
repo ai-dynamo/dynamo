@@ -16,10 +16,24 @@ impl ConcurrentRadixTreeCompressed {
         sequence: &[LocalBlockHash],
         early_exit: bool,
     ) -> MatchDetails {
+        self.find_match_details_impl_with_options(sequence, early_exit, false)
+    }
+
+    pub fn find_match_details_impl_with_options(
+        &self,
+        sequence: &[LocalBlockHash],
+        early_exit: bool,
+        retain_router_hint_chain: bool,
+    ) -> MatchDetails {
         let next_child = sequence
             .first()
             .and_then(|&local_hash| self.root.child_snapshot(local_hash));
-        self.find_details_from_seq(next_child, SliceHashSequence(sequence), early_exit)
+        self.find_details_from_seq(
+            next_child,
+            SliceHashSequence(sequence),
+            early_exit,
+            retain_router_hint_chain,
+        )
     }
 
     #[cfg_attr(feature = "profile", inline(never))]
@@ -28,16 +42,20 @@ impl ConcurrentRadixTreeCompressed {
         next_child: Option<SharedNode>,
         sequence: S,
         early_exit: bool,
+        retain_router_hint_chain: bool,
     ) -> MatchDetails {
         let mut details = MatchDetails::new();
         if sequence.len() == 0 {
             return details;
         }
+        let mut router_hint_root_chain =
+            retain_router_hint_chain.then(|| Vec::with_capacity(sequence.len()));
 
         let walk_result = {
             let MatchDetails {
                 overlap_scores: ref mut scores,
                 ref mut last_matched_hashes,
+                router_hint_root_candidates: _,
             } = details;
             Self::walk_match_path(
                 next_child,
@@ -45,10 +63,14 @@ impl ConcurrentRadixTreeCompressed {
                 early_exit,
                 scores,
                 Some(last_matched_hashes),
+                router_hint_root_chain.as_mut(),
             )
         };
 
         Self::record_surviving_details(&mut details, &walk_result);
+        if let Some(block_hashes) = router_hint_root_chain {
+            details.retain_router_hint_root_candidates(block_hashes);
+        }
         details
     }
 
@@ -61,6 +83,7 @@ impl ConcurrentRadixTreeCompressed {
         mut last_matched_hashes: Option<
             &mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
         >,
+        mut router_hint_root_chain: Option<&mut Vec<ExternalSequenceBlockHash>>,
     ) -> MatchWalkResult {
         let mut active: FxHashSet<WorkerWithDpRank> = FxHashSet::default();
         let mut active_count: usize = 0;
@@ -91,6 +114,7 @@ impl ConcurrentRadixTreeCompressed {
                 active_count,
                 scores,
                 last_matched_hashes: last_matched_hashes.as_deref_mut(),
+                router_hint_root_chain: router_hint_root_chain.as_deref_mut(),
             });
             let edge_len = outcome.edge_len;
             let edge_match_len = outcome.edge_match_len;
@@ -160,7 +184,7 @@ impl ConcurrentRadixTreeCompressed {
             .and_then(|&local_hash| self.root.child_snapshot(local_hash));
         let sequence = SliceHashSequence(sequence);
         let walk_result =
-            Self::walk_match_path(next_child, &sequence, early_exit, &mut scores, None);
+            Self::walk_match_path(next_child, &sequence, early_exit, &mut scores, None, None);
         Self::record_surviving_scores(&mut scores, &walk_result);
         scores
     }

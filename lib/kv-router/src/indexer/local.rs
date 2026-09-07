@@ -14,8 +14,11 @@ use tokio_util::sync::CancellationToken;
 use super::{
     GetWorkersRequest, KvEventSender, KvIndexer, KvIndexerInterface, KvIndexerMetrics,
     KvRouterError, LowerTierIndexer, ThreadPoolIndexer, WorkerKvQueryResponse,
+    record_unsupported_residency_event,
 };
 use crate::protocols::*;
+
+type LowerTierRegistry = Arc<Mutex<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>;
 
 #[cfg(test)]
 use super::DumpRequest;
@@ -40,6 +43,7 @@ impl CachedRecoverySnapshot {
         WorkerKvQueryResponse::TreeDump {
             events: self.events.as_ref().clone(),
             last_event_id: self.last_event_id,
+            reset_scope: ResetScope::All,
         }
     }
 }
@@ -131,6 +135,7 @@ impl RecoverySnapshotCache {
                     return CacheReuseDecision::ReturnExtended(WorkerKvQueryResponse::TreeDump {
                         events: shared_events.as_ref().clone(),
                         last_event_id,
+                        reset_scope: ResetScope::All,
                     });
                 }
                 TailAppendSafety::Invalidate => {
@@ -206,12 +211,12 @@ pub struct LocalKvIndexer {
     /// The underlying indexer
     indexer: KvIndexer,
     /// Lazily-created exact lower-tier indexes partitioned by storage tier.
-    lower_tier_indexers: Arc<Mutex<HashMap<StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>>>>,
+    lower_tier_indexers: LowerTierRegistry,
     /// Circular buffer of recent events.
     ///
     /// NOTE: One `LocalKvIndexer` belongs to one rank publisher, so its sequence and any latest
     /// `Cleared` event are rank-local. Do not merge independent rank streams into this buffer.
-    pub(super) event_buffer: Mutex<VecDeque<RouterEvent>>,
+    pub(super) event_buffer: Arc<Mutex<VecDeque<RouterEvent>>>,
     /// Coordinates single-flight tree dumps and the cached recovery snapshot.
     /// This stays separate from `event_buffer` so dump wait/build state can be
     /// managed on the async path without holding the buffer lock across `.await`.
@@ -239,7 +244,7 @@ impl LocalKvIndexer {
             indexer: KvIndexer::new(token, kv_block_size, metrics.clone()),
             metrics,
             lower_tier_indexers: Arc::new(Mutex::new(HashMap::new())),
-            event_buffer: Mutex::new(VecDeque::with_capacity(max_buffer_size)),
+            event_buffer: Arc::new(Mutex::new(VecDeque::with_capacity(max_buffer_size))),
             recovery_cache: Arc::new(RecoverySnapshotCache::new()),
             max_buffer_size,
             #[cfg(test)]
@@ -267,9 +272,9 @@ impl LocalKvIndexer {
     /// ### Returns
     ///
     /// - `Events`: Buffered events with original IDs through the current buffered tail,
-    ///   plus the buffered `last_event_id`. If the buffered suffix contains one or more
-    ///   `Cleared` events, events before the last clear may be omitted because this local indexer
-    ///   and recovery history belong to one rank publisher.
+    ///   plus the buffered `last_event_id`. If the buffered suffix contains an all-domain
+    ///   `Cleared` event, events before the last such clear may be omitted because it supersedes
+    ///   every residency owned by this rank publisher.
     /// - `TreeDump`: Full tree dump with synthetic IDs and the worker's latest real event ID (when range is too old or unspecified)
     /// - `TooNew`: Error when requested range is newer than available data
     /// - `InvalidRange`: Error when end_id < start_id
@@ -306,6 +311,11 @@ impl LocalKvIndexer {
 
         let first_buffered = buffer.front().unwrap().event.event_id;
         start_id.unwrap() >= first_buffered
+    }
+
+    /// Newest locally applied outbound event cursor.
+    pub fn current_event_id(&self) -> u64 {
+        self.current_buffer_last_event_id().unwrap_or(0)
     }
 
     /// Record an event in the buffer
@@ -345,9 +355,19 @@ impl LocalKvIndexer {
 
     /// Apply event with buffering.
     ///
-    /// This forwards the event to the underlying indexer and records it on success.
+    /// Stored and Removed events are recorded after successful queue admission; this does not
+    /// wait for the physical mutation to complete. Cleared is intentionally a stronger ordering
+    /// barrier and waits for every affected physical indexer before it is recorded.
     pub async fn apply_event_with_buffer(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         let result = self.apply_event_by_tier(&event).await;
+        self.record_applied_event(event, result).await
+    }
+
+    async fn record_applied_event(
+        &self,
+        event: RouterEvent,
+        result: Result<(), KvRouterError>,
+    ) -> Result<(), KvRouterError> {
         if result.is_ok() {
             let should_invalidate = matches!(event.event.data, KvCacheEventData::Cleared);
             let detected_gap = self.record_event(event);
@@ -443,7 +463,12 @@ impl LocalKvIndexer {
         buffer
             .iter()
             .skip(start_idx)
-            .rposition(|event| matches!(&event.event.data, KvCacheEventData::Cleared))
+            .rposition(|event| {
+                matches!(
+                    event.reset_scope(),
+                    Ok(Some(crate::protocols::ResetScope::All))
+                )
+            })
             .map_or(start_idx, |idx| start_idx + idx)
     }
 
@@ -555,6 +580,8 @@ impl LocalKvIndexer {
         last_event_id: u64,
     ) -> tokio::task::JoinHandle<BuildTaskResult> {
         let indexer = self.indexer.clone();
+        let lower_tier_indexers = self.lower_tier_indexers.clone();
+        let event_buffer = self.event_buffer.clone();
         let recovery_cache = self.recovery_cache.clone();
         #[cfg(test)]
         let build_delay = *self.dump_build_delay.lock().unwrap();
@@ -567,7 +594,9 @@ impl LocalKvIndexer {
                 tokio::time::sleep(delay).await;
             }
 
-            let build_output = Self::build_fresh_dump(indexer, last_event_id).await;
+            let build_output =
+                Self::build_fresh_dump(indexer, lower_tier_indexers, event_buffer, last_event_id)
+                    .await;
             let notify = build.notify.clone();
             let result = recovery_cache.finish_build(&build, build_output).await;
 
@@ -576,8 +605,18 @@ impl LocalKvIndexer {
         })
     }
 
-    async fn build_fresh_dump(indexer: KvIndexer, last_event_id: u64) -> FreshDumpOutput {
-        match indexer.dump_events().await {
+    async fn build_fresh_dump(
+        indexer: KvIndexer,
+        lower_tier_indexers: LowerTierRegistry,
+        event_buffer: Arc<Mutex<VecDeque<RouterEvent>>>,
+        fallback_last_event_id: u64,
+    ) -> FreshDumpOutput {
+        let last_event_id = event_buffer
+            .lock()
+            .unwrap()
+            .back()
+            .map_or(fallback_last_event_id, |event| event.event.event_id);
+        match Self::dump_all_tiers(&indexer, &lower_tier_indexers).await {
             Ok(events) => {
                 let represented_blocks = events
                     .iter()
@@ -596,6 +635,7 @@ impl LocalKvIndexer {
                     response: WorkerKvQueryResponse::TreeDump {
                         events: events.clone(),
                         last_event_id,
+                        reset_scope: ResetScope::All,
                     },
                     snapshot: Some(CachedRecoverySnapshot {
                         events: Arc::new(events),
@@ -615,6 +655,39 @@ impl LocalKvIndexer {
                 }
             }
         }
+    }
+
+    async fn dump_all_tiers(
+        indexer: &KvIndexer,
+        lower_tier_indexers: &LowerTierRegistry,
+    ) -> Result<Vec<RouterEvent>, KvRouterError> {
+        let lower_tiers: Vec<_> = {
+            let indexers = lower_tier_indexers.lock().unwrap();
+            indexers
+                .iter()
+                .map(|(&tier, indexer)| (tier, indexer.clone()))
+                .collect()
+        };
+
+        // NOTE: This is intentionally not an atomic cross-tier snapshot. Watermark N is captured
+        // only after events through N have been enqueued. The primary drains its accepted mutation
+        // channels before dumping; each lower tier handles its dump request behind prior mutations
+        // on every FIFO lane. Every returned tier is therefore at least N but may include a
+        // different suffix after N. Recovery replays the complete tail after N, and ownership
+        // mutations converge under duplicate replay. A duplicate remove may report BlockNotFound;
+        // any ownership it encounters from ahead of that remove was created by a later tail store,
+        // which ordered replay reapplies. Do not add a global application lock merely to align
+        // snapshot times. Any tier dump failure fails this complete response; the recovery cursor
+        // must not advance.
+        let mut events = indexer.dump_events().await?;
+        for (tier, lower_tier) in lower_tiers {
+            let tier_events = lower_tier.dump_events().await?;
+            events.extend(tier_events.into_iter().map(|mut event| {
+                event.storage_tier = tier;
+                event
+            }));
+        }
+        Ok(events)
     }
 
     #[cfg(test)]
@@ -663,22 +736,29 @@ impl LocalKvIndexer {
 
     async fn apply_event_to_lower_tier(&self, event: RouterEvent) -> Result<(), KvRouterError> {
         self.get_or_create_lower_tier_indexer(event.storage_tier)
-            .apply_event(event)
-            .await;
-        Ok(())
+            .enqueue_event(event)
     }
 
     async fn apply_event_by_tier(&self, event: &RouterEvent) -> Result<(), KvRouterError> {
-        match &event.event.data {
-            KvCacheEventData::Cleared => {
-                self.apply_event_to_primary(event.clone()).await?;
-                for indexer in self.all_lower_tier_indexers() {
-                    indexer.apply_event(event.clone()).await;
-                }
-                Ok(())
+        let targets_primary = match event.targets_primary() {
+            Ok(targets_primary) => targets_primary,
+            Err(_) => {
+                record_unsupported_residency_event(Some(&self.metrics), event);
+                return Ok(());
             }
-            _ if event.storage_tier.is_gpu() => self.apply_event_to_primary(event.clone()).await,
-            _ => self.apply_event_to_lower_tier(event.clone()).await,
+        };
+        if matches!(&event.event.data, KvCacheEventData::Cleared) {
+            if targets_primary {
+                self.indexer.apply_event_and_wait(event.clone()).await?;
+            }
+            for indexer in self.all_lower_tier_indexers() {
+                indexer.apply_event_and_wait(event.clone()).await?;
+            }
+            Ok(())
+        } else if targets_primary {
+            self.apply_event_to_primary(event.clone()).await
+        } else {
+            self.apply_event_to_lower_tier(event.clone()).await
         }
     }
 
@@ -753,27 +833,7 @@ impl KvIndexerInterface for LocalKvIndexer {
     }
 
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
-        let mut events = self.indexer.dump_events().await?;
-
-        // Also dump lower-tier indexer state so the router receives
-        // host-pinned / disk block information during recovery.
-        let lower_tiers: Vec<(StorageTier, Arc<ThreadPoolIndexer<LowerTierIndexer>>)> = {
-            let indexers = self.lower_tier_indexers.lock().unwrap();
-            indexers
-                .iter()
-                .map(|(&tier, idx)| (tier, idx.clone()))
-                .collect()
-        };
-        for (tier, indexer) in lower_tiers {
-            if let Ok(tier_events) = indexer.dump_events().await {
-                for mut event in tier_events {
-                    event.storage_tier = tier;
-                    events.push(event);
-                }
-            }
-        }
-
-        Ok(events)
+        Self::dump_all_tiers(&self.indexer, &self.lower_tier_indexers).await
     }
 
     async fn process_routing_decision_for_request(
@@ -791,7 +851,7 @@ impl KvIndexerInterface for LocalKvIndexer {
     async fn flush(&self) -> usize {
         let queued = self.indexer.flush().await;
         for indexer in self.all_lower_tier_indexers() {
-            let _ = indexer.dump_events().await;
+            let _ = indexer.flush_and_wait().await;
         }
         queued
     }
@@ -805,11 +865,31 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::LocalKvIndexer;
-    use crate::indexer::{KvIndexerInterface, KvIndexerMetrics, LowerTierContinuation};
+    use crate::identity::{
+        CacheOwnerId, CacheSemanticsId, DcId, IdentitySource, IndexerDomainId, PoolId,
+        RoutingScopeId, StableDpSlotId,
+    };
+    use crate::indexer::{
+        KvIndexerInterface, KvIndexerMetrics, LowerTierContinuation, WorkerKvQueryResponse,
+    };
     use crate::protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheStoreData,
-        KvCacheStoredBlockData, LocalBlockHash, RouterEvent, StorageTier, WorkerWithDpRank,
+        KvCacheStoredBlockData, LocalBlockHash, ResetScope, ResidencyDomain, ResidencyProjection,
+        RouterEvent, StorageTier, WorkerWithDpRank,
     };
+
+    fn cache_owner_id() -> CacheOwnerId {
+        CacheOwnerId::new(
+            PoolId::new(
+                IndexerDomainId::new(
+                    CacheSemanticsId::new([1; 16], IdentitySource::Explicit),
+                    RoutingScopeId::new([2; 16], IdentitySource::Explicit),
+                ),
+                DcId::new(3),
+            ),
+            StableDpSlotId::new([4; 16], IdentitySource::Explicit),
+        )
+    }
 
     fn lower_tier_store_event(
         worker_id: u64,
@@ -839,6 +919,43 @@ mod tests {
         )
     }
 
+    fn lower_tier_store_event_in_domain(
+        worker_id: u64,
+        event_id: u64,
+        parent_hash: u64,
+        tokens_hash: u64,
+        block_hash: u64,
+        residency_domain: ResidencyDomain,
+    ) -> RouterEvent {
+        let event = KvCacheEvent {
+            event_id,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: Some(ExternalSequenceBlockHash(parent_hash)),
+                start_position: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(block_hash),
+                    tokens_hash: LocalBlockHash(tokens_hash),
+                    mm_extra_info: None,
+                }],
+            }),
+            dp_rank: 0,
+        };
+        match residency_domain {
+            ResidencyDomain::Worker => RouterEvent::with_residency_domain(
+                worker_id,
+                event,
+                StorageTier::HostPinned,
+                ResidencyDomain::Worker,
+            ),
+            ResidencyDomain::CacheOwner => RouterEvent::with_cache_owner(
+                worker_id,
+                event,
+                StorageTier::HostPinned,
+                cache_owner_id(),
+            ),
+        }
+    }
+
     fn lower_tier_hits(
         indexer: &LocalKvIndexer,
         storage_tier: StorageTier,
@@ -862,9 +979,20 @@ mod tests {
             LowerTierContinuation::new(0, ExternalSequenceBlockHash(parent_hash)),
         );
 
+        let projection = ResidencyProjection::new([(
+            cache_owner_id(),
+            WorkerWithDpRank::new(worker_id, dp_rank),
+        )])
+        .unwrap();
         lower_tier_indexer
             .backend()
-            .query_contiguous_hits(&[LocalBlockHash(tokens_hash)], &continuations)
+            .query_match_details_with_options_and_projection(
+                &[LocalBlockHash(tokens_hash)],
+                &continuations,
+                false,
+                &projection,
+            )
+            .hits
             .get(&WorkerWithDpRank::new(worker_id, dp_rank))
             .copied()
             .unwrap_or(0)
@@ -957,6 +1085,127 @@ mod tests {
             lower_tier_hits(&indexer, StorageTier::Disk, 19, 0, 1000, 31),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn scoped_clear_history_and_all_tier_snapshot_preserve_cache_owner() {
+        let make_indexer = || {
+            LocalKvIndexer::new(
+                CancellationToken::new(),
+                4,
+                Arc::new(KvIndexerMetrics::new_unregistered()),
+                16,
+            )
+        };
+        let indexer = make_indexer();
+        let worker = WorkerWithDpRank::new(19, 0);
+
+        indexer
+            .apply_event_with_buffer(lower_tier_store_event_in_domain(
+                19,
+                1,
+                900,
+                11,
+                101,
+                ResidencyDomain::CacheOwner,
+            ))
+            .await
+            .unwrap();
+        indexer
+            .apply_event_with_buffer(lower_tier_store_event_in_domain(
+                19,
+                2,
+                900,
+                11,
+                101,
+                ResidencyDomain::Worker,
+            ))
+            .await
+            .unwrap();
+        indexer
+            .apply_event_with_buffer(RouterEvent::with_residency_domain(
+                19,
+                KvCacheEvent {
+                    event_id: 3,
+                    data: KvCacheEventData::Cleared,
+                    dp_rank: 0,
+                },
+                StorageTier::Device,
+                ResidencyDomain::Worker,
+            ))
+            .await
+            .unwrap();
+        indexer
+            .apply_event_with_buffer(lower_tier_store_event_in_domain(
+                19,
+                4,
+                101,
+                12,
+                102,
+                ResidencyDomain::CacheOwner,
+            ))
+            .await
+            .unwrap();
+
+        let WorkerKvQueryResponse::Events { events, .. } =
+            indexer.get_events_in_id_range(Some(1), Some(4)).await
+        else {
+            panic!("history should be served from the recovery buffer");
+        };
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.event.event_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+
+        let WorkerKvQueryResponse::TreeDump {
+            events,
+            last_event_id,
+            reset_scope,
+        } = indexer.get_events_in_id_range(None, None).await
+        else {
+            panic!("full recovery should return a tree dump");
+        };
+        assert_eq!(last_event_id, 4);
+        assert_eq!(reset_scope, ResetScope::All);
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| {
+            event.storage_tier == StorageTier::HostPinned
+                && event.resolved_residency_domain() == Ok(ResidencyDomain::CacheOwner)
+        }));
+
+        let restored = make_indexer();
+        for event in events {
+            restored.apply_event_with_buffer(event).await.unwrap();
+        }
+        let _ = restored.flush().await;
+        let continuations = FxHashMap::from_iter([(
+            worker,
+            LowerTierContinuation::new(0, ExternalSequenceBlockHash(900)),
+        )]);
+        for candidate in [&indexer, &restored] {
+            let tier = candidate
+                .lower_tier_indexers
+                .lock()
+                .unwrap()
+                .get(&StorageTier::HostPinned)
+                .cloned()
+                .unwrap();
+            assert_eq!(
+                tier.backend()
+                    .query_match_details_with_options_and_projection(
+                        &[LocalBlockHash(11), LocalBlockHash(12)],
+                        &continuations,
+                        false,
+                        &ResidencyProjection::new([(cache_owner_id(), worker)]).unwrap(),
+                    )
+                    .hits
+                    .get(&worker),
+                Some(&2)
+            );
+        }
     }
 
     #[tokio::test]

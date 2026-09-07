@@ -13,6 +13,8 @@ use dynamo_runtime::config::{
     environment_names::llm::{self as env_llm, metrics as env_metrics},
 };
 
+use crate::reasoning_field::ReasoningField;
+
 /// Metrics naming controls for frontend-owned services.
 ///
 /// Contains the optional metric name prefix resolved from `--metrics-prefix` or
@@ -137,23 +139,46 @@ impl Default for StreamingDispatchConfig {
     }
 }
 
+fn default_reasoning_field() -> ReasoningField {
+    match std::env::var(env_llm::DYN_REASONING_FIELD_NAME) {
+        Ok(value) => match value.parse::<ReasoningField>() {
+            Ok(field) => field,
+            Err(_) => {
+                tracing::warn!(
+                    "{}={value:?} is not \"reasoning\" or \"reasoning_content\"; defaulting to {}",
+                    env_llm::DYN_REASONING_FIELD_NAME,
+                    ReasoningField::default()
+                );
+                ReasoningField::default()
+            }
+        },
+        Err(_) => ReasoningField::default(),
+    }
+}
+
 /// Frontend API behavior consumed by the HTTP service.
 ///
 /// Groups endpoint-surface and streaming-behavior settings that originate from
 /// the frontend CLI/env contract. `EntrypointArgs` builds this from flat Python
 /// kwargs, `LocalModel` carries it, and `HttpServiceConfig` installs it into
 /// request-handler state.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrontendApiConfig {
     anthropic: AnthropicApiConfig,
     streaming_dispatch: StreamingDispatchConfig,
+    reasoning_field: ReasoningField,
 }
 
 impl FrontendApiConfig {
-    pub fn new(anthropic: AnthropicApiConfig, streaming_dispatch: StreamingDispatchConfig) -> Self {
+    pub fn new(
+        anthropic: AnthropicApiConfig,
+        streaming_dispatch: StreamingDispatchConfig,
+        reasoning_field: ReasoningField,
+    ) -> Self {
         Self {
             anthropic,
             streaming_dispatch,
+            reasoning_field,
         }
     }
 
@@ -162,6 +187,7 @@ impl FrontendApiConfig {
         strip_anthropic_preamble: bool,
         enable_streaming_tool_dispatch: bool,
         enable_streaming_reasoning_dispatch: bool,
+        reasoning_field: ReasoningField,
     ) -> Self {
         Self {
             anthropic: AnthropicApiConfig::new(enable_anthropic_api, strip_anthropic_preamble),
@@ -169,6 +195,7 @@ impl FrontendApiConfig {
                 enable_streaming_tool_dispatch,
                 enable_streaming_reasoning_dispatch,
             ),
+            reasoning_field,
         }
     }
 
@@ -177,11 +204,13 @@ impl FrontendApiConfig {
         strip_anthropic_preamble: Option<bool>,
         enable_streaming_tool_dispatch: Option<bool>,
         enable_streaming_reasoning_dispatch: Option<bool>,
+        reasoning_field: Option<ReasoningField>,
     ) -> Option<Self> {
         if enable_anthropic_api.is_none()
             && strip_anthropic_preamble.is_none()
             && enable_streaming_tool_dispatch.is_none()
             && enable_streaming_reasoning_dispatch.is_none()
+            && reasoning_field.is_none()
         {
             return None;
         }
@@ -194,6 +223,7 @@ impl FrontendApiConfig {
                 .unwrap_or_else(|| defaults.streaming_dispatch().tool_dispatch()),
             enable_streaming_reasoning_dispatch
                 .unwrap_or_else(|| defaults.streaming_dispatch().reasoning_dispatch()),
+            reasoning_field.unwrap_or_else(|| defaults.reasoning_field()),
         ))
     }
 
@@ -212,6 +242,24 @@ impl FrontendApiConfig {
     pub fn streaming_dispatch_mut(&mut self) -> &mut StreamingDispatchConfig {
         &mut self.streaming_dispatch
     }
+
+    pub fn reasoning_field(&self) -> ReasoningField {
+        self.reasoning_field
+    }
+
+    pub fn set_reasoning_field(&mut self, reasoning_field: ReasoningField) {
+        self.reasoning_field = reasoning_field;
+    }
+}
+
+impl Default for FrontendApiConfig {
+    fn default() -> Self {
+        Self {
+            anthropic: Default::default(),
+            streaming_dispatch: Default::default(),
+            reasoning_field: default_reasoning_field(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -220,7 +268,7 @@ mod tests {
 
     #[test]
     fn optional_flags_return_none_when_all_values_are_unspecified() {
-        let config = FrontendApiConfig::from_optional_flags(None, None, None, None);
+        let config = FrontendApiConfig::from_optional_flags(None, None, None, None, None);
 
         assert_eq!(config, None);
     }
@@ -232,6 +280,7 @@ mod tests {
             Some(true),
             Some(false),
             Some(true),
+            Some(ReasoningField::Reasoning),
         )
         .expect("explicit flags should produce a config");
 
@@ -239,6 +288,7 @@ mod tests {
         assert!(config.anthropic().strip_preamble());
         assert!(!config.streaming_dispatch().tool_dispatch());
         assert!(config.streaming_dispatch().reasoning_dispatch());
+        assert_eq!(config.reasoning_field(), ReasoningField::Reasoning);
     }
 
     #[test]
@@ -249,17 +299,33 @@ mod tests {
                 (env_llm::DYN_STRIP_ANTHROPIC_PREAMBLE, Some("1")),
                 (env_llm::DYN_ENABLE_STREAMING_TOOL_DISPATCH, Some("1")),
                 (env_llm::DYN_ENABLE_STREAMING_REASONING_DISPATCH, Some("1")),
+                (env_llm::DYN_REASONING_FIELD_NAME, Some("reasoning")),
             ],
             || {
-                let config =
-                    FrontendApiConfig::from_optional_flags(Some(false), None, None, Some(false))
-                        .expect("partial flags should produce a config");
+                let config = FrontendApiConfig::from_optional_flags(
+                    Some(false),
+                    None,
+                    None,
+                    Some(false),
+                    None,
+                )
+                .expect("partial flags should produce a config");
 
                 assert!(!config.anthropic().enabled());
                 assert!(config.anthropic().strip_preamble());
                 assert!(config.streaming_dispatch().tool_dispatch());
                 assert!(!config.streaming_dispatch().reasoning_dispatch());
+                assert_eq!(config.reasoning_field(), ReasoningField::Reasoning);
             },
         );
+    }
+
+    #[test]
+    fn invalid_reasoning_field_env_defaults_to_reasoning_content() {
+        temp_env::with_var(env_llm::DYN_REASONING_FIELD_NAME, Some("invalid"), || {
+            let config = FrontendApiConfig::default();
+
+            assert_eq!(config.reasoning_field(), ReasoningField::ReasoningContent);
+        });
     }
 }

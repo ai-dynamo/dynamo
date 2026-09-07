@@ -204,17 +204,17 @@ daemonset:
   enabled: true
 
   # Conservative default by design: when a Power Agent restarts, the GPUs
-  # on its node have no power-cap enforcement until it comes back. If the
-  # planner just emitted new annotations expecting them to apply, that
-  # propagation stalls. `maxUnavailable: 1` ensures only one node's worth
-  # of GPUs ever loses enforcement at a time.
+  # on its node have no power-cap enforcement until it comes back. If worker
+  # pods on that node carry DGD-owned per-GPU cap annotations (applied by the
+  # operator), those caps are not enforced during the gap. `maxUnavailable: 1`
+  # ensures only one node's worth of GPUs ever loses enforcement at a time.
   #
   # Override for large fleets: on clusters with hundreds of GPU nodes,
   # a 1-at-a-time rollout (~30s/pod × N nodes) gets slow. Operators can
   # opt into faster rollouts with:
   #   --set daemonset.updateStrategy.rollingUpdate.maxUnavailable=10%
   # (or any percentage / integer). The trade-off is more concurrent
-  # enforcement gaps during a rollout; safe when the planner's reconcile
+  # enforcement gaps during a rollout; safe when the agent's reconcile
   # interval (15s) is much shorter than the rollout duration anyway.
   updateStrategy:
     type: RollingUpdate

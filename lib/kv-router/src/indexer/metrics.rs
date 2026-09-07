@@ -5,8 +5,7 @@
 use std::sync::Arc;
 #[cfg(all(feature = "metrics", feature = "runtime-protocols"))]
 use std::sync::OnceLock;
-#[cfg(feature = "bench")]
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "runtime-protocols")]
 use dynamo_runtime::component::Component;
@@ -15,7 +14,9 @@ use dynamo_runtime::metrics::MetricsHierarchy;
 #[cfg(feature = "metrics")]
 use prometheus::{IntCounter, IntCounterVec, Opts};
 
-use crate::protocols::{KvCacheEventData, KvCacheEventError};
+use crate::protocols::{KvCacheEventData, KvCacheEventError, RouterEvent};
+
+static IGNORED_RESIDENCY_EVENT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Lightweight, `Copy` discriminant for [`KvCacheEventData`].
 ///
@@ -41,15 +42,41 @@ impl EventKind {
             KvCacheEventData::Cleared => Self::Cleared,
         }
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stored => METRIC_EVENT_STORED,
+            Self::Removed => METRIC_EVENT_REMOVED,
+            Self::Cleared => METRIC_EVENT_CLEARED,
+        }
+    }
 }
 
 impl std::fmt::Display for EventKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Stored => f.write_str(METRIC_EVENT_STORED),
-            Self::Removed => f.write_str(METRIC_EVENT_REMOVED),
-            Self::Cleared => f.write_str(METRIC_EVENT_CLEARED),
-        }
+        f.write_str(self.label())
+    }
+}
+
+/// Record and rate-limit diagnostics for a wire event that cannot enter the
+/// canonical residency model. The metric label has fixed cardinality.
+pub fn record_unsupported_residency_event(metrics: Option<&KvIndexerMetrics>, event: &RouterEvent) {
+    if let Some(metrics) = metrics {
+        metrics.increment_event_applied(
+            EventKind::of(&event.event.data).label(),
+            Err(KvCacheEventError::UnsupportedResidencyDomain),
+        );
+    }
+
+    let ignored_count = IGNORED_RESIDENCY_EVENT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    if ignored_count.is_power_of_two() {
+        tracing::warn!(
+            ignored_count,
+            worker_id = event.worker_id,
+            dp_rank = event.event.dp_rank,
+            storage_tier = ?event.storage_tier,
+            "Ignoring KV event with unsupported residency domain"
+        );
     }
 }
 
@@ -162,6 +189,7 @@ pub const METRIC_STATUS_CAPACITY_EXHAUSTED: &str = "capacity_exhausted";
 pub const METRIC_STATUS_ALLOCATION_FAILED: &str = "allocation_failed";
 pub const METRIC_STATUS_OWNERSHIP_DEGREE_OVERFLOW: &str = "ownership_degree_overflow";
 pub const METRIC_STATUS_INDEXER_INVARIANT_VIOLATION: &str = "indexer_invariant_violation";
+pub const METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN: &str = "unsupported_residency_domain";
 
 /// Metric event labels.
 pub const METRIC_EVENT_STORED: &str = "stored";
@@ -339,6 +367,9 @@ impl KvIndexerMetrics {
                         KvCacheEventError::IndexerInvariantViolation => {
                             METRIC_STATUS_INDEXER_INVARIANT_VIOLATION
                         }
+                        KvCacheEventError::UnsupportedResidencyDomain => {
+                            METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN
+                        }
                     };
                     self.kv_cache_events_applied
                         .with_label_values(&[event_type, error_label])
@@ -405,6 +436,7 @@ struct ResultCounters {
     allocation_failed: IntCounter,
     ownership_degree_overflow: IntCounter,
     indexer_invariant_violation: IntCounter,
+    unsupported_residency_domain: IntCounter,
 }
 
 #[cfg(feature = "metrics")]
@@ -425,6 +457,8 @@ impl ResultCounters {
                 .with_label_values(&[event_type, METRIC_STATUS_OWNERSHIP_DEGREE_OVERFLOW]),
             indexer_invariant_violation: counters
                 .with_label_values(&[event_type, METRIC_STATUS_INDEXER_INVARIANT_VIOLATION]),
+            unsupported_residency_domain: counters
+                .with_label_values(&[event_type, METRIC_STATUS_UNSUPPORTED_RESIDENCY_DOMAIN]),
         }
     }
 
@@ -438,6 +472,9 @@ impl ResultCounters {
             Err(KvCacheEventError::AllocationFailed) => &self.allocation_failed,
             Err(KvCacheEventError::OwnershipDegreeOverflow) => &self.ownership_degree_overflow,
             Err(KvCacheEventError::IndexerInvariantViolation) => &self.indexer_invariant_violation,
+            Err(KvCacheEventError::UnsupportedResidencyDomain) => {
+                &self.unsupported_residency_domain
+            }
         }
     }
 }

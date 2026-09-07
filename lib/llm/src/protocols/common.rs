@@ -15,6 +15,7 @@
 
 use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_runtime::error::{DynamoError, ErrorType};
 use serde::{Deserialize, Serialize};
 
 use super::TokenIdType;
@@ -23,7 +24,16 @@ use dynamo_protocols::types::StopReason;
 /// Maximum nesting depth allowed in guided_grammar EBNF strings.
 const MAX_GRAMMAR_NESTING_DEPTH: usize = 500;
 
+pub(crate) fn invalid_argument_error(message: impl Into<String>) -> anyhow::Error {
+    DynamoError::builder()
+        .error_type(ErrorType::InvalidArgument)
+        .message(message.into())
+        .build()
+        .into()
+}
+
 pub mod extensions;
+pub mod input_trigger;
 pub mod llm_backend;
 pub mod metrics;
 pub mod postprocessor;
@@ -44,7 +54,22 @@ pub trait OutputOptionsProvider {
     fn extract_output_options(&self) -> Result<OutputOptions>;
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+/// Why an engine stopped producing tokens for a request.
+///
+/// # Wire contract
+///
+/// Serializes as a bare string for the unit variants (`"stop"`, etc.) and a
+/// single-key map for [`FinishReason::Error`] (`{"error": "<message>"}`) —
+/// the form every Rust producer emits and every frontend expects.
+///
+/// Deserialization also accepts the [`Display`] form, `"error: <message>"`,
+/// since Python engine adapters (e.g. `dynamo.vllm`'s custom-encoder path)
+/// report failures that way. A bare `"error"` is accepted defensively with a
+/// diagnostic fallback message so a malformed backend error does not become a
+/// frontend deserialization failure.
+///
+/// [`Display`]: std::fmt::Display
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub enum FinishReason {
     #[serde(rename = "eos")]
     EoS,
@@ -87,9 +112,71 @@ impl std::str::FromStr for FinishReason {
             "length" => Ok(FinishReason::Length),
             "stop" => Ok(FinishReason::Stop),
             "cancelled" | "abort" => Ok(FinishReason::Cancelled),
+            "content_filter" => Ok(FinishReason::ContentFilter),
+            "error" => Ok(FinishReason::Error(
+                "backend emitted finish_reason=error without a message".into(),
+            )),
             s if s.starts_with("error: ") => Ok(FinishReason::Error(s[7..].to_string())),
             _ => Err(anyhow::anyhow!("Invalid FinishReason variant: '{}'", s)),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for FinishReason {
+    // `deserialize_any` needs a self-describing format, since the visitor
+    // decides from the wire data itself whether to expect a string or a
+    // map. The request-plane codec (`rmp_serde::to_vec_named`) is
+    // self-describing, so this holds today. A non-self-describing format
+    // (plain `bincode`, for instance) would fail here, even though the
+    // derived `Deserialize` this replaced would have accepted it.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(FinishReasonVisitor)
+    }
+}
+
+struct FinishReasonVisitor;
+
+impl<'de> serde::de::Visitor<'de> for FinishReasonVisitor {
+    type Value = FinishReason;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            r#"a finish reason: "eos", "length", "stop", "cancelled", "abort", "content_filter", "error", "error: <message>", or {"error": "<message>"}"#,
+        )
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<FinishReason, E>
+    where
+        E: serde::de::Error,
+    {
+        // `parse()` carries the specific reason a string failed to match
+        // any known form. `E::custom` passes that message through instead
+        // of the generic `invalid_value` error.
+        value.parse().map_err(E::custom)
+    }
+
+    /// Unit variants route to [`Self::visit_str`] instead; this method
+    /// handles only the `Error` map case.
+    fn visit_map<A>(self, mut map: A) -> Result<FinishReason, A::Error>
+    where
+        A: serde::de::MapAccess<'de>,
+    {
+        let Some(tag) = map.next_key::<String>()? else {
+            return Err(serde::de::Error::invalid_length(0, &self));
+        };
+        if tag != "error" {
+            return Err(serde::de::Error::unknown_variant(&tag, &["error"]));
+        }
+        let reason = FinishReason::Error(map.next_value()?);
+        if map.next_key::<serde::de::IgnoredAny>()?.is_some() {
+            return Err(serde::de::Error::custom(
+                "expected a finish reason map with a single key",
+            ));
+        }
+        Ok(reason)
     }
 }
 
@@ -354,7 +441,9 @@ pub struct SamplingOptions {
 
 /// Guided Decoding Options
 ///
-/// Only one of `json`, `regex`, `choice`, or `grammar` should be set.
+/// Only one constraint may be set: `json`, `regex`, `choice`, `grammar` or
+/// `structural_tag`. `backend` and `whitespace_pattern` are modifiers rather than
+/// constraints, so either may accompany a constraint. See [`Self::validate`].
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct GuidedDecodingOptions {
     /// If specified, the output will follow the JSON schema. Can be a string, an object, or null.
@@ -446,7 +535,6 @@ impl GuidedDecodingOptions {
             && regex.is_none()
             && is_empty_choice
             && grammar.is_none()
-            && whitespace_pattern.is_none()
             && structural_tag.is_none()
         {
             return Ok(None);
@@ -465,24 +553,38 @@ impl GuidedDecodingOptions {
 
     /// Validate that only one guided decoding option is set, and that
     /// grammar nesting depth is bounded.
+    ///
+    /// `whitespace_pattern` and `backend` are deliberately absent from the count. Both
+    /// modify how a constraint is applied rather than being a constraint themselves, so
+    /// pairing either with `json` is a normal request, not a conflict. Counting
+    /// `whitespace_pattern` made `guided_json` + `guided_whitespace_pattern` fail while
+    /// the error text below never named it, and while the Python frontend
+    /// (`components/src/dynamo/frontend/prepost.py`) builds exactly that pair on purpose.
+    ///
+    /// `from_optional` above skips the same two fields when it decides whether any
+    /// constraint was requested at all, so a request carrying only a modifier engages no
+    /// guided decoding rather than building a constraint-less object.
     pub fn validate(&self) -> Result<()> {
-        let count = [
-            self.json.is_some(),
-            self.regex.is_some(),
-            self.choice.as_ref().is_some_and(|v| !v.is_empty()),
-            self.grammar.is_some(),
-            self.whitespace_pattern.is_some(),
-            self.structural_tag.is_some(),
-        ]
-        .iter()
-        .filter(|&&v| v)
-        .count();
+        let constraints = [
+            ("json", self.json.is_some()),
+            ("regex", self.regex.is_some()),
+            (
+                "choice",
+                self.choice.as_ref().is_some_and(|value| !value.is_empty()),
+            ),
+            ("grammar", self.grammar.is_some()),
+            ("structural_tag", self.structural_tag.is_some()),
+        ];
 
-        if count > 1 {
-            return Err(anyhow::anyhow!(
-                "Only one of json, regex, choice, grammar, or structural_tag can be set, but multiple are specified: {:?}",
-                self
-            ));
+        if constraints.iter().filter(|(_, is_set)| *is_set).count() > 1 {
+            let active_constraints = constraints
+                .into_iter()
+                .filter_map(|(name, is_set)| is_set.then_some(name))
+                .collect::<Vec<_>>();
+            return Err(invalid_argument_error(format!(
+                "Only one guided-decoding constraint can be set; received: {}",
+                active_constraints.join(", ")
+            )));
         }
 
         if let Some(ref grammar) = self.grammar {
@@ -508,11 +610,10 @@ impl GuidedDecodingOptions {
                 }
             }
             if max > MAX_GRAMMAR_NESTING_DEPTH {
-                return Err(anyhow::anyhow!(
+                return Err(invalid_argument_error(format!(
                     "guided_grammar exceeds maximum nesting depth of {} (got {})",
-                    MAX_GRAMMAR_NESTING_DEPTH,
-                    max
-                ));
+                    MAX_GRAMMAR_NESTING_DEPTH, max
+                )));
             }
         }
 
@@ -554,7 +655,7 @@ pub struct OutputOptions {
     /// templates that are applied during the backend preprocessing.
     pub formatted_prompt: Option<bool>,
 
-    /// When true, logprob token fields are returned as "token_id:<id>"
+    /// When true, logprob token fields are returned as "token_id:`<id>`"
     /// instead of decoded text.
     pub return_tokens_as_token_ids: Option<bool>,
 }
@@ -723,33 +824,137 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn test_completion_context_new() {
-        let prompt = "Hello, world!".to_string();
-        let system_prompt = Some("This is a system prompt.".to_string());
-        let context = CompletionContext::new(prompt.clone(), system_prompt.clone());
+    fn all_finish_reasons() -> Vec<FinishReason> {
+        vec![
+            FinishReason::EoS,
+            FinishReason::Length,
+            FinishReason::Stop,
+            FinishReason::Cancelled,
+            FinishReason::ContentFilter,
+            FinishReason::Error("boom".to_string()),
+            FinishReason::Error(String::new()),
+        ]
+    }
 
-        assert_eq!(context.prompt, prompt);
-        assert_eq!(context.system_prompt, system_prompt);
+    /// The wire form Rust producers emit must not drift: every frontend in the
+    /// N-2 compatibility window still has to read it.
+    #[test]
+    fn test_finish_reason_serializes_to_the_external_tag_form() {
+        let cases = [
+            (FinishReason::EoS, r#""eos""#),
+            (FinishReason::Length, r#""length""#),
+            (FinishReason::Stop, r#""stop""#),
+            (FinishReason::Cancelled, r#""cancelled""#),
+            (FinishReason::ContentFilter, r#""content_filter""#),
+            (
+                FinishReason::Error("boom".to_string()),
+                r#"{"error":"boom"}"#,
+            ),
+        ];
+        for (reason, expected) in cases {
+            assert_eq!(serde_json::to_string(&reason).unwrap(), expected);
+        }
     }
 
     #[test]
-    fn test_completion_context_from_prompt() {
-        let prompt = "Hello, world!".to_string();
-        let context = CompletionContext::from_prompt(prompt.clone());
+    fn test_finish_reason_deserializes_every_producer_form() {
+        let cases = [
+            (r#""eos""#, FinishReason::EoS),
+            (r#""length""#, FinishReason::Length),
+            (r#""stop""#, FinishReason::Stop),
+            (r#""cancelled""#, FinishReason::Cancelled),
+            (r#""abort""#, FinishReason::Cancelled),
+            (r#""content_filter""#, FinishReason::ContentFilter),
+            // Rust producers (the `Serialize` form).
+            (r#"{"error":"boom"}"#, FinishReason::Error("boom".into())),
+            // Python engine adapters (the `Display` form).
+            (r#""error: boom""#, FinishReason::Error("boom".into())),
+            // A message that itself contains "error: " must survive intact.
+            (
+                r#""error: CustomEncoder failed: error: nested""#,
+                FinishReason::Error("CustomEncoder failed: error: nested".into()),
+            ),
+        ];
+        for (json, expected) in cases {
+            assert_eq!(
+                serde_json::from_str::<FinishReason>(json).unwrap(),
+                expected,
+                "deserializing {json}"
+            );
+        }
+    }
 
-        assert_eq!(context.prompt, prompt);
-        assert_eq!(context.system_prompt, None);
+    /// The defect this guards: a backend's request-level message reaching the
+    /// frontend inside a terminal chunk rather than failing the whole response.
+    #[test]
+    fn test_engine_output_carries_string_form_error_message() {
+        use dynamo_runtime::protocols::maybe_error::MaybeError;
+
+        let chunk = r#"{"token_ids":[],"finish_reason":"error: CustomEncoder failed: placeholder tokens (0) != image tensors (1)"}"#;
+        let output: llm_backend::LLMEngineOutput = serde_json::from_str(chunk).unwrap();
+        let err = output.err().expect("error finish reason must surface");
+        assert!(
+            err.to_string().contains("placeholder tokens (0)"),
+            "message was dropped: {err}"
+        );
     }
 
     #[test]
-    fn test_completion_context_with_system_prompt() {
-        let prompt = "Hello, world!".to_string();
-        let system_prompt = "This is a system prompt.".to_string();
-        let context = CompletionContext::with_system_prompt(prompt.clone(), system_prompt.clone());
+    fn test_finish_reason_accepts_bare_error_from_msgpack() {
+        let msgpack = rmp_serde::to_vec_named("error").unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<FinishReason>(&msgpack).unwrap(),
+            FinishReason::Error("backend emitted finish_reason=error without a message".into())
+        );
+    }
 
-        assert_eq!(context.prompt, prompt);
-        assert_eq!(context.system_prompt, Some(system_prompt));
+    #[test]
+    fn test_finish_reason_rejects_unknown_forms() {
+        for json in [
+            r#""nonsense""#,
+            r#"{"nonsense":"boom"}"#,
+            r#"{"error":"a","stop":"b"}"#,
+            "{}",
+            "17",
+        ] {
+            assert!(
+                serde_json::from_str::<FinishReason>(json).is_err(),
+                "{json} should not deserialize"
+            );
+        }
+    }
+
+    #[test]
+    fn test_finish_reason_round_trips_through_json_and_msgpack() {
+        for reason in all_finish_reasons() {
+            let json = serde_json::to_string(&reason).unwrap();
+            assert_eq!(
+                serde_json::from_str::<FinishReason>(&json).unwrap(),
+                reason,
+                "json round trip"
+            );
+
+            let msgpack = rmp_serde::to_vec_named(&reason).unwrap();
+            assert_eq!(
+                rmp_serde::from_slice::<FinishReason>(&msgpack).unwrap(),
+                reason,
+                "msgpack round trip"
+            );
+        }
+    }
+
+    /// `Display` and `FromStr` are the string convention; keeping them mutually
+    /// inverse is what lets the tolerant reader defer to `FromStr`.
+    #[test]
+    fn test_finish_reason_display_round_trips_through_from_str() {
+        for reason in all_finish_reasons() {
+            let rendered = reason.to_string();
+            assert_eq!(
+                rendered.parse::<FinishReason>().unwrap(),
+                reason,
+                "{rendered} did not round trip"
+            );
+        }
     }
 
     #[test]
@@ -958,6 +1163,22 @@ mod tests {
         let val = opts.unwrap();
         assert!(val.is_none());
 
+        // whitespace_pattern modifies a constraint rather than being one, so on its own it
+        // must not engage guided decoding. Returning Some here would hand the backend a
+        // constraint-less object, which vLLM rejects and which disables request migration.
+        let opts = GuidedDecodingOptions::from_optional(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(r"[\n ]?".to_string()),
+            None,
+        );
+        assert!(opts.is_ok());
+        let val = opts.unwrap();
+        assert!(val.is_none());
+
         // Choice set with non-empty vector
         let opts = GuidedDecodingOptions::from_optional(
             None,
@@ -976,12 +1197,49 @@ mod tests {
     }
 
     #[test]
+    fn test_guided_decoding_conflict_is_typed_and_bounded() {
+        let large_schema = serde_json::json!({
+            "type": "object",
+            "description": "x".repeat(1_200_000),
+        });
+        let error = GuidedDecodingOptions::validated(
+            Some(large_schema),
+            Some("a+".to_string()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        let dynamo_error = error
+            .downcast_ref::<dynamo_runtime::error::DynamoError>()
+            .expect("guided-decoding conflicts must remain typed for HTTP 400 mapping");
+        assert_eq!(
+            dynamo_error.error_type(),
+            dynamo_runtime::error::ErrorType::InvalidArgument
+        );
+        assert_eq!(
+            dynamo_error.message(),
+            "Only one guided-decoding constraint can be set; received: json, regex"
+        );
+    }
+
+    #[test]
     fn test_guided_grammar_deep_nesting_rejected() {
         let grammar = "(".repeat(501) + "a" + &")".repeat(501);
         let result =
             GuidedDecodingOptions::validated(None, None, None, Some(grammar), None, None, None);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("nesting depth"));
+        let error = result.unwrap_err();
+        let dynamo_error = error
+            .downcast_ref::<dynamo_runtime::error::DynamoError>()
+            .expect("guided grammar depth must remain typed for HTTP 400 mapping");
+        assert_eq!(
+            dynamo_error.error_type(),
+            dynamo_runtime::error::ErrorType::InvalidArgument
+        );
+        assert!(dynamo_error.message().contains("nesting depth"));
     }
 
     #[test]

@@ -108,6 +108,7 @@ pub(super) struct FindStepInput<'a, S: HashSequence> {
     pub(super) scores: &'a mut OverlapScores,
     pub(super) last_matched_hashes:
         Option<&'a mut FxHashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
+    pub(super) router_hint_root_chain: Option<&'a mut Vec<ExternalSequenceBlockHash>>,
 }
 
 pub(super) struct FindStepOutcome {
