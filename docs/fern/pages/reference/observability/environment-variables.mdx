@@ -302,11 +302,15 @@ These variables tune the vLLM worker's self-benchmark collector (`--benchmark-mo
   Content source for synthetic benchmark prompts: unset keeps salt-seeded random token ids; `sharegpt` draws deterministic windows from a real-text token pool; `sharegpt_chain` reuses the KV warm-up chain texts so seeded and measured requests share one construction.
 </ParamField>
 
+<ParamField path="DYN_BENCH_PREFILL_REAL_SEED" type="string" default="off">
+  Real-KV seeding for prefill points that read past KV (`on`/`1`/`true`). The seeded prefix is first computed by a real prefill pass (staging), an untimed same-shape warm shot follows, and only then does the timed request hit the real KV in the prefix cache; the expected hit length is validated before admission and the point is skipped on a miss. Off keeps the synthetic prefix blocks that are registered but never computed. Dense-attention models measure the same either way; sparse-attention (DSA) and hybrid-KV models need it for deep past-KV points.
+</ParamField>
+
 <ParamField path="DYN_BENCH_POOL_TAG" type="string">
   Optional tag mixed into the real-text pool draw so repeated collections sample different content windows under otherwise identical settings.
 </ParamField>
 
-Every result and skipped-point entry in the artifact carries a `kv_seed_regime` field — `real_kv`, `fake_fallback`, `legacy` (warm-up switched off), `skip:<reason>` (gate rejected the configuration), `unstamped` (decode point that never reached injection), or `not_applicable` (prefill) — plus `kvwarm` and `synthetic_prompts` metadata blocks, so downstream consumers can filter by seeding provenance.
+Every result and skipped-point entry in the artifact carries a `kv_seed_regime` field — `real_kv`, `fake_fallback`, `legacy` (warm-up switched off), `skip:<reason>` (gate rejected the configuration), `unstamped` (decode point that never reached injection); prefill rows that read past KV carry `real_prefix` or `fake_prefix`, other prefill rows `not_applicable`, or `not_applicable` (prefill) — plus `kvwarm` and `synthetic_prompts` metadata blocks, so downstream consumers can filter by seeding provenance.
 
 ## Request tracing
 

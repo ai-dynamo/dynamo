@@ -201,6 +201,9 @@ class _BenchPhase(enum.Enum):
 
 
 EAGER_WARMUP_REASON = "eager_warmup"
+# Prefill provenance stamps: how a point that reads past KV got that KV.
+PREFILL_REAL_SEED_REASON = "prefill_real_seed"
+PREFILL_FAKE_PREFIX_REASON = "prefill_fake_prefix"
 
 
 @dataclass
@@ -3155,6 +3158,54 @@ class InstrumentedScheduler(AsyncScheduler):
             return self._bench_hash_block_size
         return self.block_size
 
+    def _bench_realseed_on(self) -> bool:
+        """Real-KV seeding for prefill points (``DYN_BENCH_PREFILL_REAL_SEED``,
+        default off).
+
+        Off: a point that reads past KV gets synthetic prefix blocks that are
+        registered in the prefix cache but never computed (see
+        ``_bench_cache_fake_prefixes``); the measured request then attends
+        over whatever those blocks hold. Dense attention does the same work
+        regardless of the values, but sparse attention (DSA: score, pick
+        top-k, gather) and hybrid-KV models measure differently on garbage
+        (GLM-5.2: +19..21% at >=256k tokens per request; DeepSeek-V4-Flash:
+        +20..70% at chunk-aligned prefixes).
+
+        On: the prefix is computed by a real prefill pass first (staging),
+        then an untimed same-shape warm shot absorbs first-execution costs,
+        and only then does the timed request hit the real KV in the prefix
+        cache. Every timed injection validates the expected hit length and
+        skips the point on a miss, so an evicted prefix can never be measured
+        silently as a fake one.
+        """
+        return os.environ.get("DYN_BENCH_PREFILL_REAL_SEED", "off").lower() in (
+            "on",
+            "1",
+            "true",
+        )
+
+    def _bench_realseed_chain(self, batch_size: int) -> dict:
+        """Per-batch seeding registry: one fixed cache salt per request slot
+        (the salt fixes the prefix content, so any two lengths drawn for it
+        are strict prefixes of each other) and the depth already computed per
+        slot. Deeper points of the same batch only compute the increment;
+        the blocks themselves live in vLLM's prefix cache, so a hit is always
+        re-validated at injection."""
+        chains = getattr(self, "_bench_rsc", None)
+        if chains is None:
+            chains = {}
+            self._bench_rsc = chains
+        chain = chains.get(batch_size)
+        if chain is None:
+            chain = {
+                "salts": [
+                    f"__bench_rsc_bp{batch_size}_slot{i}" for i in range(batch_size)
+                ],
+                "depth": [0] * batch_size,
+            }
+            chains[batch_size] = chain
+        return chain
+
     def _bench_seed_prompt_len(self, kv_read_tokens: int) -> int:
         # EAGLE/MTP deliberately drops the last matched cache block. Seed one
         # additional block so the measured request still reads the grid target.
@@ -3553,11 +3604,22 @@ class InstrumentedScheduler(AsyncScheduler):
         max_tokens: int,
         cache_salts: Sequence[str] | None = None,
         expected_kv_read_tokens: Sequence[int] | None = None,
+        prompt_token_ids_list: Sequence[Sequence[int]] | None = None,
     ) -> int:
-        """Build and atomically enqueue a possibly heterogeneous prefill batch."""
+        """Build and atomically enqueue a possibly heterogeneous prefill batch.
+
+        ``prompt_token_ids_list`` overrides the salt-derived prompt per
+        request (real-seed shots pair a seeded prefix with a fresh tail); the
+        salt still names the prefix-cache entry.
+        """
         batch_size = len(prompt_lens)
         if cache_salts is not None and len(cache_salts) != batch_size:
             raise ValueError("cache_salts must match prompt_lens")
+        if (
+            prompt_token_ids_list is not None
+            and len(prompt_token_ids_list) != batch_size
+        ):
+            raise ValueError("prompt_token_ids_list must match prompt_lens")
         if (
             expected_kv_read_tokens is not None
             and len(expected_kv_read_tokens) != batch_size
@@ -3572,7 +3634,11 @@ class InstrumentedScheduler(AsyncScheduler):
                 request_id=req_id,
                 # Same salt as the fake-prefix seed for this slot: the first
                 # expected_kv_read_tokens ids reproduce the seeded prefix.
-                prompt_token_ids=self._bench_synthetic_token_ids(salt, prompt_len),
+                prompt_token_ids=(
+                    list(prompt_token_ids_list[index])
+                    if prompt_token_ids_list is not None
+                    else self._bench_synthetic_token_ids(salt, prompt_len)
+                ),
                 sampling_params=SamplingParams(max_tokens=max_tokens),
                 pooling_params=None,
                 block_hasher=self._bench_block_hasher,
@@ -4020,6 +4086,153 @@ class InstrumentedScheduler(AsyncScheduler):
         self._schedule_times.clear()
         return True
 
+    def _bench_realseed_stage_point(
+        self,
+        point: BenchmarkPoint,
+        kv_read_lengths: Sequence[int],
+        new_token_lengths: Sequence[int],
+    ) -> None:
+        """Real-seed shot 1 (staging): make sure every slot's chain holds real
+        KV at least as deep as this point reads, by running the prefix itself
+        as an ordinary, unbooked prefill. Slots already deep enough compute
+        nothing (prefix-cache hit). The point is parked in
+        ``_bench_realseed_ready``; the next scheduler pass continues with the
+        warm and measured shots."""
+        chain = self._bench_realseed_chain(point.batch_size)
+        needs = [self._bench_seed_prompt_len(kv) for kv in kv_read_lengths]
+        if any(need > depth for need, depth in zip(needs, chain["depth"], strict=True)):
+            self._bench_current_point = None
+            self._bench_current_fpms = []
+            injected = self._bench_inject_prefill(
+                prompt_lens=needs,
+                max_tokens=1,
+                cache_salts=chain["salts"],
+            )
+            if injected != point.batch_size:
+                self._bench_skip_point(point, "real_seed_injection_failed")
+                logger.warning(
+                    "Skipping benchmark prefill point after real-seed staging "
+                    "injection failed: %s",
+                    point,
+                )
+                return
+            logger.info(
+                "Benchmark prefill REAL-SEED staging: kv=%d batch_size=%d "
+                "chain_depths=%s -> %s",
+                point.total_kv_read_tokens,
+                point.batch_size,
+                chain["depth"],
+                needs,
+            )
+        self._bench_realseed_ready = (
+            point,
+            list(kv_read_lengths),
+            list(new_token_lengths),
+        )
+        self._bench_realseed_stage = "warm"
+
+    def _bench_realseed_pending_step(self) -> bool:
+        """Real-seed shots 2 and 3 for the parked point, one per scheduler
+        pass once the previous shot's requests have drained.
+
+        Shot 2 (warm): the same shape -- seeded prefix plus a throwaway tail
+        -- unbooked, so the timed shot does not pay first-execution costs of
+        a new shape (measured +23% on DeepSeek-V4-Flash without it).
+
+        Shot 3 (measured): seeded prefix plus a fresh tail; the expected
+        prefix-cache hit is validated before the requests are admitted and
+        the point is skipped on a miss. Returns True when a shot was issued
+        (or the point was skipped) and the caller must not start a new point.
+        """
+        pending = getattr(self, "_bench_realseed_ready", None)
+        if pending is None:
+            return False
+        point, kv_read_lengths, new_token_lengths = pending
+        chain = self._bench_realseed_chain(point.batch_size)
+        for slot, kv_read_tokens in enumerate(kv_read_lengths):
+            need = self._bench_seed_prompt_len(kv_read_tokens)
+            if chain["depth"][slot] < need:
+                chain["depth"][slot] = need
+        prompt_lens = [
+            new_tokens + kv_read_tokens
+            for new_tokens, kv_read_tokens in zip(
+                new_token_lengths, kv_read_lengths, strict=True
+            )
+        ]
+
+        def prompts(tail_tag: str) -> list[list[int]]:
+            return [
+                list(
+                    self._bench_synthetic_token_ids(
+                        chain["salts"][slot], kv_read_tokens
+                    )
+                )
+                + list(
+                    self._bench_synthetic_token_ids(
+                        f"__bench_{tail_tag}_{self._bench_seq}_{slot}", new_tokens
+                    )
+                )
+                for slot, (new_tokens, kv_read_tokens) in enumerate(
+                    zip(new_token_lengths, kv_read_lengths, strict=True)
+                )
+            ]
+
+        if getattr(self, "_bench_realseed_stage", "warm") == "warm":
+            self._bench_current_point = None
+            self._bench_current_fpms = []
+            injected = self._bench_inject_prefill(
+                prompt_lens=prompt_lens,
+                max_tokens=1,
+                cache_salts=chain["salts"],
+                prompt_token_ids_list=prompts("rswarm"),
+            )
+            if injected != point.batch_size:
+                self._bench_realseed_ready = None
+                self._bench_skip_point(point, "real_seed_warm_injection_failed")
+                logger.warning(
+                    "Skipping benchmark prefill point after real-seed warm "
+                    "injection failed: %s",
+                    point,
+                )
+                return True
+            self._bench_realseed_stage = "measure"
+            return True
+        self._bench_realseed_ready = None
+        self._bench_realseed_stage = "warm"
+        point = replace(
+            point,
+            sample_reasons=[*point.sample_reasons, PREFILL_REAL_SEED_REASON],
+        )
+        self._bench_current_fpms = []
+        self._bench_current_point = point
+        self._bench_expected_fpms = 1
+        self._bench_extra_steps_left = 0
+        injected = self._bench_inject_prefill(
+            prompt_lens=prompt_lens,
+            max_tokens=1,
+            cache_salts=chain["salts"],
+            expected_kv_read_tokens=list(kv_read_lengths),
+            prompt_token_ids_list=prompts("rsm"),
+        )
+        if injected != point.batch_size:
+            self._bench_current_point = None
+            self._bench_skip_point(point, "real_seed_cache_validation_failed")
+            logger.warning(
+                "Skipping benchmark prefill point after real-seed cache "
+                "validation failed: %s",
+                point,
+            )
+            return True
+        self._bench_sync_pending = True
+        logger.info(
+            "Benchmark prefill REAL-SEED measured: total_tokens=%d "
+            "total_kv_reads=%d batch_size=%d",
+            point.total_prefill_tokens,
+            point.total_kv_read_tokens,
+            point.batch_size,
+        )
+        return True
+
     def _bench_step_prefill(self) -> SchedulerOutput | None:
         if self._bench_drain_if_pending():
             pass  # fall through to inject next point
@@ -4045,6 +4258,8 @@ class InstrumentedScheduler(AsyncScheduler):
 
         if self._bench_stop_at_timeout_boundary("prefill"):
             return None
+        if self._bench_realseed_pending_step():
+            return None
 
         next_point = self._bench_pop_next("prefill")
         if next_point is None:
@@ -4063,7 +4278,14 @@ class InstrumentedScheduler(AsyncScheduler):
         kv_read_lengths = self._bench_prefill_kv_read_lengths(
             point.total_kv_read_tokens, point.batch_size, point.partition, point.rows
         )
+        if point.total_kv_read_tokens > 0 and self._bench_realseed_on():
+            self._bench_realseed_stage_point(point, kv_read_lengths, new_token_lengths)
+            return None
         if point.total_kv_read_tokens > 0:
+            point = replace(
+                point,
+                sample_reasons=[*point.sample_reasons, PREFILL_FAKE_PREFIX_REASON],
+            )
             cache_salts = [
                 f"__bench_kv_seed_{self._bench_seq}_{index}"
                 for index in range(point.batch_size)
@@ -4164,6 +4386,10 @@ class InstrumentedScheduler(AsyncScheduler):
     # with it the warm-up) instead of blocking the scheduler indefinitely.
     _KVWARM_DOWNLOAD_TIMEOUT_S = 60
     _kvwarm_stage_t0: float | None
+    # Real-seed prefill state: the parked point with its per-request KV and
+    # new-token lengths, and which shot ("warm" | "measure") comes next.
+    _bench_realseed_ready: tuple[BenchmarkPoint, list[int], list[int]] | None = None
+    _bench_realseed_stage: str = "warm"
     _kvwarm_stage_batch: int | None
 
     def _kvwarm_flag_on(self) -> bool:
@@ -4221,12 +4447,19 @@ class InstrumentedScheduler(AsyncScheduler):
         ``real_kv`` / ``fake_fallback`` come from the injection stamp;
         ``legacy`` means the warm-up was switched off; ``skip:<reason>`` means
         the gate rejected the configuration; ``unstamped`` is a decode point
-        that never reached injection (e.g. skipped before it); prefill points
-        are ``not_applicable``.
+        that never reached injection (e.g. skipped before it). Prefill points
+        that read past KV are ``real_prefix`` (real-seed, see
+        ``_bench_realseed_on``) or ``fake_prefix`` (synthetic, never-computed
+        prefix blocks); prefill points without past KV, or skipped before the
+        path was chosen, are ``not_applicable``.
         """
-        if getattr(point, "point_type", None) != "decode":
-            return "not_applicable"
         reasons = list(getattr(point, "sample_reasons", None) or [])
+        if getattr(point, "point_type", None) != "decode":
+            if PREFILL_REAL_SEED_REASON in reasons:
+                return "real_prefix"
+            if PREFILL_FAKE_PREFIX_REASON in reasons:
+                return "fake_prefix"
+            return "not_applicable"
         if "kvwarm_real_kv" in reasons:
             return "real_kv"
         if "kvwarm_fake_fallback" in reasons:

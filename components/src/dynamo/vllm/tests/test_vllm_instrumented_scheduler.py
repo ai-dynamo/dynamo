@@ -2643,7 +2643,14 @@ def test_prefill_kv_read_uses_fake_cache_and_measures_immediately():
 
     InstrumentedScheduler._bench_step_prefill(stub)
 
-    assert stub._bench_current_point is point
+    # The measured point carries the prefill provenance stamp.
+    assert stub._bench_current_point == replace(
+        point, sample_reasons=[*point.sample_reasons, "prefill_fake_prefix"]
+    )
+    assert (
+        InstrumentedScheduler._kvwarm_seed_regime(stub, stub._bench_current_point)
+        == "fake_prefix"
+    )
     seed_salts = stub._bench_cache_fake_prefixes.call_args.kwargs["cache_salts"]
     assert len(seed_salts) == point.batch_size
     assert len(set(seed_salts)) == point.batch_size
@@ -2661,6 +2668,224 @@ def test_prefill_kv_read_uses_fake_cache_and_measures_immediately():
         }
     ]
     assert stub._bench_sync_pending is True
+
+
+def _realseed_prefill_stub(point, monkeypatch, seq=0):
+    monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", "on")
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_grid = deque([point])
+    stub._bench_config = SimpleNamespace(mode="prefill")
+    stub._bench_active_req_ids = set()
+    stub._bench_current_point = None
+    stub._bench_current_fpms = []
+    stub._bench_drain_pending = False
+    stub._bench_seq = seq
+    stub._bench_hash_block_size = 8
+    stub._schedule_times = deque()
+    stub._bench_skipped_points = []
+    stub._bench_sync_pending = False
+    stub.requests = {}
+    stub.kv_cache_manager = SimpleNamespace(new_step_starts=MagicMock())
+    stub._bench_eagle_cache_drop_tokens = lambda: 0
+    # Deterministic, prefix-consistent content: one id per salt, repeated.
+    stub._bench_synthetic_token_ids = (
+        lambda salt, n: [(sum(map(ord, salt)) % 97) + 1] * n
+    )
+    stub._bench_cache_fake_prefixes = MagicMock(
+        side_effect=AssertionError("fake prefix path must not run under real-seed")
+    )
+    calls = []
+
+    def inject(**kwargs):
+        calls.append(kwargs)
+        return len(kwargs["prompt_lens"])
+
+    stub._bench_inject_prefill = inject
+    return stub, calls
+
+
+def test_prefill_real_seed_stages_warms_then_measures(monkeypatch):
+    point = BenchmarkPoint(
+        point_type="prefill",
+        total_prefill_tokens=25,
+        total_kv_read_tokens=40,
+        batch_size=3,
+    )
+    stub, calls = _realseed_prefill_stub(point, monkeypatch)
+
+    # Shot 1: staging computes the seeded prefixes (unbooked, salts fixed
+    # per slot); the point is parked.
+    InstrumentedScheduler._bench_step_prefill(stub)
+    chain = stub._bench_rsc[3]
+    assert chain["salts"] == [
+        "__bench_rsc_bp3_slot0",
+        "__bench_rsc_bp3_slot1",
+        "__bench_rsc_bp3_slot2",
+    ]
+    assert calls == [
+        {"prompt_lens": [16, 16, 8], "max_tokens": 1, "cache_salts": chain["salts"]}
+    ]
+    assert stub._bench_current_point is None
+    assert stub._bench_realseed_ready[0] is point
+    assert stub._bench_sync_pending is False
+
+    # Shot 2: same-shape warm pass, unbooked; chain depth recorded.
+    InstrumentedScheduler._bench_step_prefill(stub)
+    assert chain["depth"] == [16, 16, 8]
+    warm = calls[1]
+    assert warm["prompt_lens"] == [25, 24, 16]
+    assert warm["cache_salts"] == chain["salts"]
+    assert "expected_kv_read_tokens" not in warm
+    prefix_ids = [stub._bench_synthetic_token_ids(s, 1)[0] for s in chain["salts"]]
+    for slot, prompt in enumerate(warm["prompt_token_ids_list"]):
+        kv = [16, 16, 8][slot]
+        assert prompt[:kv] == [prefix_ids[slot]] * kv, "seeded prefix must lead"
+        assert len(prompt) == warm["prompt_lens"][slot]
+    assert stub._bench_current_point is None
+    assert stub._bench_realseed_stage == "measure"
+
+    # Shot 3: measured pass validates the hit and stamps provenance.
+    InstrumentedScheduler._bench_step_prefill(stub)
+    measured = calls[2]
+    assert measured["prompt_lens"] == [25, 24, 16]
+    assert measured["expected_kv_read_tokens"] == [16, 16, 8]
+    assert measured["cache_salts"] == chain["salts"]
+    assert [p[:8] for p in measured["prompt_token_ids_list"]] == [
+        p[:8] for p in warm["prompt_token_ids_list"]
+    ]
+    assert (
+        measured["prompt_token_ids_list"][0][16:]
+        != warm["prompt_token_ids_list"][0][16:]
+    )
+    assert stub._bench_current_point == replace(
+        point, sample_reasons=[*point.sample_reasons, "prefill_real_seed"]
+    )
+    assert (
+        InstrumentedScheduler._kvwarm_seed_regime(stub, stub._bench_current_point)
+        == "real_prefix"
+    )
+    assert stub._bench_sync_pending is True
+    assert stub._bench_realseed_ready is None
+    assert stub._bench_realseed_stage == "warm"
+    stub._bench_cache_fake_prefixes.assert_not_called()
+
+
+def test_prefill_real_seed_skips_staging_when_chain_is_deep_enough(monkeypatch):
+    point = BenchmarkPoint(
+        point_type="prefill",
+        total_prefill_tokens=25,
+        total_kv_read_tokens=40,
+        batch_size=3,
+    )
+    stub, calls = _realseed_prefill_stub(point, monkeypatch)
+    chain = InstrumentedScheduler._bench_realseed_chain(stub, 3)
+    chain["depth"] = [64, 64, 64]
+
+    InstrumentedScheduler._bench_step_prefill(stub)
+
+    assert calls == [], "a chain deeper than the point computes nothing"
+    assert stub._bench_realseed_ready[0] is point
+    assert chain["depth"] == [64, 64, 64]
+
+
+def test_prefill_real_seed_staging_failure_skips_point(monkeypatch):
+    point = BenchmarkPoint(
+        point_type="prefill",
+        total_prefill_tokens=25,
+        total_kv_read_tokens=40,
+        batch_size=3,
+    )
+    stub, calls = _realseed_prefill_stub(point, monkeypatch)
+    stub._bench_inject_prefill = MagicMock(return_value=0)
+
+    InstrumentedScheduler._bench_step_prefill(stub)
+
+    assert stub._bench_skipped_points[0].reason == "real_seed_injection_failed"
+    assert getattr(stub, "_bench_realseed_ready", None) is None
+    assert stub._bench_current_point is None
+
+
+def test_prefill_real_seed_validation_miss_skips_measured_point(monkeypatch):
+    point = BenchmarkPoint(
+        point_type="prefill",
+        total_prefill_tokens=25,
+        total_kv_read_tokens=40,
+        batch_size=3,
+    )
+    stub, calls = _realseed_prefill_stub(point, monkeypatch)
+    InstrumentedScheduler._bench_step_prefill(stub)  # staging
+    InstrumentedScheduler._bench_step_prefill(stub)  # warm
+    stub._bench_inject_prefill = MagicMock(return_value=0)
+
+    InstrumentedScheduler._bench_step_prefill(stub)  # measured: hit validation fails
+
+    assert stub._bench_skipped_points[0].reason == "real_seed_cache_validation_failed"
+    assert stub._bench_current_point is None
+    assert stub._bench_realseed_ready is None
+    assert stub._bench_sync_pending is False
+
+
+def test_prefill_real_seed_switch_parsing(monkeypatch):
+    monkeypatch.delenv("DYN_BENCH_PREFILL_REAL_SEED", raising=False)
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    assert InstrumentedScheduler._bench_realseed_on(stub) is False
+    for value in ("on", "1", "true", "ON"):
+        monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", value)
+        assert InstrumentedScheduler._bench_realseed_on(stub) is True
+    monkeypatch.setenv("DYN_BENCH_PREFILL_REAL_SEED", "off")
+    assert InstrumentedScheduler._bench_realseed_on(stub) is False
+
+
+def test_seed_regime_for_prefill_rows():
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    base = BenchmarkPoint(
+        point_type="prefill", total_prefill_tokens=8, total_kv_read_tokens=16
+    )
+    assert InstrumentedScheduler._kvwarm_seed_regime(stub, base) == "not_applicable"
+    real = replace(base, sample_reasons=["prefill_real_seed"])
+    fake = replace(base, sample_reasons=["prefill_fake_prefix"])
+    assert InstrumentedScheduler._kvwarm_seed_regime(stub, real) == "real_prefix"
+    assert InstrumentedScheduler._kvwarm_seed_regime(stub, fake) == "fake_prefix"
+
+
+def test_bench_inject_prefill_uses_explicit_prompt_token_ids(monkeypatch):
+    created = []
+
+    class FakeRequest:
+        def __init__(self, request_id, prompt_token_ids, cache_salt, **kwargs):
+            self.request_id = request_id
+            self.prompt_token_ids = prompt_token_ids
+            self.cache_salt = cache_salt
+            created.append(self)
+
+    monkeypatch.setattr(instrumented_scheduler_module, "Request", FakeRequest)
+    monkeypatch.setattr(
+        instrumented_scheduler_module, "SamplingParams", lambda **kwargs: object()
+    )
+    stub = InstrumentedScheduler.__new__(InstrumentedScheduler)
+    stub._bench_seq = 4
+    stub._bench_block_hasher = None
+    stub._bench_active_req_ids = set()
+    stub._bench_synthetic_token_ids = MagicMock(
+        side_effect=AssertionError("explicit prompts must bypass salt generation")
+    )
+    stub.add_request = MagicMock()
+
+    injected = InstrumentedScheduler._bench_inject_prefill(
+        stub,
+        prompt_lens=[3, 2],
+        max_tokens=1,
+        cache_salts=["seed-0", "seed-1"],
+        prompt_token_ids_list=[(7, 7, 9), [5, 6]],
+    )
+
+    assert injected == 2
+    assert [r.prompt_token_ids for r in created] == [[7, 7, 9], [5, 6]]
+    assert [r.cache_salt for r in created] == ["seed-0", "seed-1"]
+    with pytest.raises(ValueError, match="prompt_token_ids_list"):
+        InstrumentedScheduler._bench_inject_prefill(
+            stub, prompt_lens=[3], max_tokens=1, prompt_token_ids_list=[[1], [2]]
+        )
 
 
 def test_prefill_fake_cache_validation_miss_skips_measured_point():
