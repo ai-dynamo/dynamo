@@ -48,15 +48,19 @@ class PauseDecision:
 class _ReplicaUsage:
     """One replica's occupancy, from a single pass over the program table.
 
-    Kept live for a whole tick: pause and resume adjust it as they mutate the table. No
-    ``used_decayed`` field -- it moves with the clock, so it is derived on demand. Both
-    counts are derived from ``programs`` rather than kept as separate counters, so they
-    can't drift from the list every mutation already has to touch.
+    Kept live for a whole tick: pause and resume adjust ``used``/``used_decayed`` as they
+    mutate the table. ``used_decayed`` is accumulated in the same build pass as ``used``
+    rather than rescanned per read. The two request counts (``count``, ``resident``) are
+    derived from ``programs`` so they can't drift from the list every mutation touches.
     """
 
     capacity: int
     max_programs: Optional[int] = None
     used: int = 0
+    # ACTING-decayed occupancy, frozen at build time. The decay clock moves, but usage is
+    # rebuilt every tick and every admission under the lock, so freezing it here instead of
+    # recomputing per read keeps admission O(replicas) rather than O(replicas x programs).
+    used_decayed: int = 0
     programs: list[Program] = field(default_factory=list)
 
     @property
@@ -541,13 +545,13 @@ class ThunderAgentScheduler:
                 continue
             entry.programs.append(program)
             entry.used += self._program_tokens(program) + buffer
+            entry.used_decayed += self._program_tokens(program, decayed=True) + buffer
         return usage
 
     def _decayed_used(self, entry: _ReplicaUsage) -> int:
-        """``entry.used`` with the ACTING decay applied; derived on demand because it moves
-        with the clock."""
-        tokens = sum(self._program_tokens(p, decayed=True) for p in entry.programs)
-        return tokens + len(entry.programs) * self._cfg.buffer_per_program
+        """ACTING-decayed occupancy, accumulated in the one pass ``_replica_usage_locked``
+        already makes over the table. Reads the frozen value rather than rescanning."""
+        return entry.used_decayed
 
     def _least_loaded_replica_locked(
         self, usage: dict[ReplicaKey, _ReplicaUsage]
@@ -670,6 +674,9 @@ class ThunderAgentScheduler:
                     continue
                 entry.programs.remove(program)
                 entry.used -= freed
+                entry.used_decayed -= (
+                    self._program_tokens(program, decayed=True) + buffer
+                )
                 paused_this_tick += 1
 
             if not _within_target():
@@ -861,6 +868,7 @@ class ThunderAgentScheduler:
             entry = usage[replica]
             entry.programs.append(program)
             entry.used += self._program_tokens(program) + buffer
+            entry.used_decayed += self._program_tokens(program, decayed=True) + buffer
             resumed_this_tick += 1
             if takes_slot and slots[replica] is not None:
                 slots[replica] -= 1  # type: ignore[operator]
