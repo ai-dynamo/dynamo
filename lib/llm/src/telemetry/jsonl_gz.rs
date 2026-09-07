@@ -91,6 +91,14 @@ where
         }
     }
 
+    /// A cloned handle to the writer's input channel, for enqueuing records
+    /// concurrently without holding a lock on the writer. `None` after shutdown.
+    /// Sending on the clone fails once the writer task exits, so records emitted
+    /// after shutdown are dropped rather than written.
+    pub fn sender(&self) -> Option<mpsc::Sender<T>> {
+        self.tx.clone()
+    }
+
     /// Drain all accepted records, flush the active segment, and wait for the
     /// writer task to exit.
     pub async fn shutdown(&mut self) -> anyhow::Result<()> {

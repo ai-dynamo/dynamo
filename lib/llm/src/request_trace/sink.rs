@@ -13,7 +13,7 @@ use async_nats::jetstream;
 use async_trait::async_trait;
 use dynamo_runtime::config::environment_names::llm::request_trace as env_request_trace;
 use dynamo_runtime::transports::nats;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::telemetry::jsonl::{JsonlSinkOptions, JsonlWriter};
@@ -139,6 +139,9 @@ impl RequestTraceSink for JsonlRequestTraceSink {
 }
 
 pub struct JsonlGzipRequestTraceSink {
+    // Cloned input channel used by emit, so concurrent emits never contend on the
+    // writer lock. Sending fails once the writer task exits, dropping late records.
+    sender: mpsc::Sender<RequestTraceRecord>,
     // shutdown consumes the writer; None means it has already closed.
     writer: Mutex<Option<JsonlGzipWriter<RequestTraceRecord>>>,
 }
@@ -148,7 +151,12 @@ impl JsonlGzipRequestTraceSink {
         let writer = JsonlGzipWriter::new(path.clone(), options)
             .await
             .with_context(|| format!("opening gzip jsonl request trace sink at {path}"))?;
+        // A freshly constructed writer always has its sender, so this is Some.
+        let sender = writer
+            .sender()
+            .expect("newly constructed JsonlGzipWriter always has a sender");
         Ok(Self {
+            sender,
             writer: Mutex::new(Some(writer)),
         })
     }
@@ -182,12 +190,9 @@ impl RequestTraceSink for JsonlGzipRequestTraceSink {
     }
 
     async fn emit(&self, record: &RequestTraceRecord) {
-        let writer = self.writer.lock().await;
-        let accepted = match writer.as_ref() {
-            Some(writer) => writer.send(record.clone()).await.is_ok(),
-            None => false,
-        };
-        if !accepted {
+        // Lock-free: send straight to the writer task's channel. After shutdown the
+        // receiver is gone, so this errors and the record is dropped.
+        if self.sender.send(record.clone()).await.is_err() {
             tracing::warn!("request trace file sink closed; dropping record");
         }
     }
