@@ -188,6 +188,7 @@ where
     /// the cache-hot decode worker. `None` for non-KV routing and disabled routers.
     decode_router: Option<Arc<super::KvRouter<Sel>>>,
     worker_selector_factory: Option<WorkerSelectorFactory<Sel>>,
+    kv_hint_policy: Option<Arc<dyn crate::kv_router::KvHintPolicy>>,
     decode_session_affinity: OnceLock<AffinityCoordinator>,
     model_manager: Arc<ModelManager>,
     cancel_token: CancellationToken,
@@ -234,6 +235,7 @@ where
     /// Fallback mode for the prefill hop when the prefill card advertises none.
     decode_router_mode: RouterMode,
     worker_selector_factory: WorkerSelectorFactory<Sel>,
+    kv_hint_policy: Option<Arc<dyn crate::kv_router::KvHintPolicy>>,
     prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
     session_affinity_ttl: Option<std::time::Duration>,
     model_name: String,

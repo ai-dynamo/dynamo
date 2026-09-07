@@ -26,7 +26,7 @@ use tracing::Instrument;
 
 use crate::{
     kv_router::{
-        KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector,
+        KvHintPolicy, KvRouter, metrics::RouterRequestMetrics, scheduler::DefaultWorkerSelector,
         to_worker_selection_session_context,
     },
     local_model::runtime_config::ModelRuntimeConfig,
@@ -195,6 +195,7 @@ where
     affinity: Option<AffinityCoordinator>,
     hosted_occupancy: Option<HostedOccupancy>,
     lora: Option<LoraRouting>,
+    kv_hint_policy: Option<Arc<dyn KvHintPolicy>>,
 }
 
 /// Compatibility name for the KV-only host used by existing callers.
@@ -219,10 +220,36 @@ where
         Ok(Self::new_with_coordinator(inner, kv_router, affinity))
     }
 
+    pub fn new_with_kv_hint_policy(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        kv_router: Arc<KvRouter<Sel>>,
+        session_affinity_ttl: Option<Duration>,
+        kv_hint_policy: Arc<dyn KvHintPolicy>,
+    ) -> Result<Self, Error> {
+        let affinity = session_affinity_ttl
+            .map(AffinityCoordinator::new)
+            .transpose()?;
+        Ok(Self::new_with_coordinator_and_kv_hint_policy(
+            inner,
+            kv_router,
+            affinity,
+            Some(kv_hint_policy),
+        ))
+    }
+
     pub(crate) fn new_with_coordinator(
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         kv_router: Arc<KvRouter<Sel>>,
         affinity: Option<AffinityCoordinator>,
+    ) -> Self {
+        Self::new_with_coordinator_and_kv_hint_policy(inner, kv_router, affinity, None)
+    }
+
+    pub(crate) fn new_with_coordinator_and_kv_hint_policy(
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+        kv_router: Arc<KvRouter<Sel>>,
+        affinity: Option<AffinityCoordinator>,
+        kv_hint_policy: Option<Arc<dyn KvHintPolicy>>,
     ) -> Self {
         // Eagerly register router request metrics (as zeros) so they are
         // scrapeable before any requests arrive. Both the frontend pipeline
@@ -237,6 +264,7 @@ where
             affinity,
             hosted_occupancy: None,
             lora: None,
+            kv_hint_policy,
         }
     }
 
@@ -312,6 +340,7 @@ where
                     load_estimator,
                     selector,
                 }),
+            kv_hint_policy: None,
         })
     }
 

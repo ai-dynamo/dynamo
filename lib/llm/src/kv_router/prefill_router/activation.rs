@@ -144,6 +144,7 @@ impl PrefillRouter<DefaultWorkerSelector> {
             }),
             prefill_load_estimator,
             session_affinity_ttl_secs,
+            None,
             model_name,
             namespace,
             worker_monitor,
@@ -167,6 +168,7 @@ where
             target_tx: None,
             decode_router: None,
             worker_selector_factory: None,
+            kv_hint_policy: None,
             decode_session_affinity: std::sync::OnceLock::new(),
             model_manager,
             cancel_token: tokio_util::sync::CancellationToken::new(),
@@ -196,6 +198,7 @@ where
         worker_selector_factory: WorkerSelectorFactory<Sel>,
         prefill_load_estimator: Option<Arc<dyn PrefillLoadEstimator>>,
         session_affinity_ttl_secs: Option<u64>,
+        kv_hint_policy: Option<Arc<dyn crate::kv_router::KvHintPolicy>>,
         model_name: String,
         namespace: String,
         worker_monitor: Option<crate::discovery::KvWorkerMonitor>,
@@ -218,6 +221,7 @@ where
             target_tx: Some(target_tx),
             decode_router,
             worker_selector_factory: Some(worker_selector_factory),
+            kv_hint_policy,
             decode_session_affinity: std::sync::OnceLock::new(),
             model_manager: model_manager.clone(),
             cancel_token: cancel_token.clone(),
@@ -377,10 +381,11 @@ where
             .await?;
 
             (
-                Arc::new(RoutingHost::new_with_coordinator(
+                Arc::new(RoutingHost::new_with_coordinator_and_kv_hint_policy(
                     push_router,
                     kv_chooser,
                     affinity,
+                    context.kv_hint_policy.clone(),
                 )),
                 prefill_client,
             )
@@ -526,6 +531,7 @@ where
                     .expect("enabled prefill router has a worker selector factory"),
                 prefill_load_estimator: router_ref.prefill_load_estimator.clone(),
                 session_affinity_ttl: router_ref.session_affinity_ttl,
+                kv_hint_policy: router_ref.kv_hint_policy.clone(),
                 model_name: router_ref.model_name.clone(),
             };
             drop(router_ref);

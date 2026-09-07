@@ -19,6 +19,7 @@ use uuid::Uuid;
 use super::extensions::{AgentContext, RouterParams};
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
+use crate::kv_router::KvHintsEnvelope;
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
 
@@ -377,6 +378,11 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_context: Option<AgentContext>,
 
+    /// Router-planned KV actions for the selected backend worker.
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_hints: Option<KvHintsEnvelope>,
+
     /// Multimodal processor kwargs forwarded to the backend engine
     /// (e.g. `{"use_audio_in_video": true}` for omni models).
     #[builder(default)]
@@ -535,6 +541,39 @@ impl PreprocessedEmbeddingRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kv_hints_round_trip_as_first_class_request_metadata() {
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "block_hashes".to_string(),
+            serde_json::json!(["18446744073709551615"]),
+        );
+        let hints = KvHintsEnvelope {
+            protocol_version: "1.0".to_string(),
+            message_id: "message-1".to_string(),
+            actions: vec![crate::kv_router::KvHintAction {
+                action_id: "action-1".to_string(),
+                action_type: "kv.evict".to_string(),
+                action_version: "1.0".to_string(),
+                payload,
+            }],
+        };
+        let req = PreprocessedRequest::builder()
+            .model("t".to_string())
+            .token_ids(vec![1])
+            .stop_conditions(StopConditions::default())
+            .sampling_options(SamplingOptions::default())
+            .output_options(OutputOptions::default())
+            .kv_hints(Some(hints.clone()))
+            .build()
+            .unwrap();
+
+        let wire = serde_json::to_vec(&req).unwrap();
+        let decoded: PreprocessedRequest = serde_json::from_slice(&wire).unwrap();
+
+        assert_eq!(decoded.kv_hints, Some(hints));
+    }
 
     #[test]
     fn attach_router_hint_preserves_extra_args_object() {

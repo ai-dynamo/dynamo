@@ -121,6 +121,7 @@ _DELTA_REQUEST_OUTPUT_KIND = RequestOutputKind.DELTA
 _RL_INIT_WEIGHTS_TIMEOUT_ENV = "DYN_RL_INIT_WEIGHTS_TIMEOUT_S"
 _RL_INIT_WEIGHTS_TIMEOUT_DEFAULT_S = 30.0
 _KV_TRANSFER_PARAMS_EXTRA_ARGS_KEY: Final = "kv_transfer_params"
+_KV_HINTS_REQUEST_KEY: Final = "kv_hints"
 # Request payload key under extra_args.kv_transfer_params. This intentionally
 # matches the runtime capability string, but it lives in a different namespace.
 _ROUTER_HINT_EXTRA_ARGS_KEY: Final = "router_hint"
@@ -1027,6 +1028,42 @@ def _engine_generate_reasoning_support(
     except Exception:
         pass
     return support
+
+
+def _engine_generate_kv_hints_kwargs(request: Mapping[str, Any]) -> dict[str, Any]:
+    raw_envelope = request.get(_KV_HINTS_REQUEST_KEY)
+    if raw_envelope is None:
+        return {}
+    if not isinstance(raw_envelope, Mapping):
+        raise ValueError("kv_hints must be an object")
+
+    from vllm.v1.kv_hints import KvHintAction, KvHintsEnvelope
+
+    raw_actions = raw_envelope.get("actions")
+    if not isinstance(raw_actions, list):
+        raise ValueError("kv_hints.actions must be a list")
+    actions = []
+    for raw_action in raw_actions:
+        if not isinstance(raw_action, Mapping):
+            raise ValueError("each kv_hints action must be an object")
+        payload = raw_action.get("payload")
+        if not isinstance(payload, Mapping):
+            raise ValueError("kv_hints action payload must be an object")
+        actions.append(
+            KvHintAction(
+                action_id=str(raw_action["action_id"]),
+                action_type=str(raw_action["action_type"]),
+                action_version=str(raw_action["action_version"]),
+                payload=dict(payload),
+            )
+        )
+    return {
+        "kv_hints": KvHintsEnvelope(
+            protocol_version=str(raw_envelope["protocol_version"]),
+            message_id=str(raw_envelope["message_id"]),
+            actions=actions,
+        )
+    }
 
 
 def _request_reasoning_metadata(
@@ -2968,6 +3005,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
         priority=0,
         reasoning_ended=None,
         reasoning_parser_kwargs=None,
+        kv_hints=None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
@@ -2986,6 +3024,7 @@ class BaseWorkerHandler(ABC, Generic[RequestT, ResponseT]):
                     data_parallel_rank=data_parallel_rank,
                     trace_headers=trace_headers,
                     priority=priority,
+                    **({"kv_hints": kv_hints} if kv_hints is not None else {}),
                     **_engine_generate_reasoning_kwargs(
                         self.engine_client,
                         reasoning_ended,
@@ -3416,6 +3455,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
+        kv_hints_kwargs = _engine_generate_kv_hints_kwargs(request)
 
         # In disagg decode mode, defer engine_client.abort() until the first
         # token so we don't abort while a NIXL KV transfer is still in flight
@@ -3464,6 +3504,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         priority=priority,
                         reasoning_ended=reasoning_ended,
                         reasoning_parser_kwargs=reasoning_parser_kwargs,
+                        kv_hints=kv_hints_kwargs.get("kv_hints"),
                     ):
                         if abort_guard is not None:
                             abort_guard.signal_first_token()
@@ -3514,6 +3555,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         first_token_output_seen = False
 
         trace_headers = context.trace_headers()
+        kv_hints_kwargs = _engine_generate_kv_hints_kwargs(request)
 
         is_decode_only = self.config.disaggregation_mode == DisaggregationMode.DECODE
         if is_decode_only and BYPASS_REMOTE_PREFILL_ANNOTATION in (
@@ -3547,6 +3589,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     data_parallel_rank=dp_rank,
                     trace_headers=trace_headers,
                     priority=priority,
+                    **kv_hints_kwargs,
                 )
 
                 async for res in gen:
@@ -3731,6 +3774,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         trace_headers = context.trace_headers()
         reasoning_ended, reasoning_parser_kwargs = _request_reasoning_metadata(request)
+        kv_hints_kwargs = _engine_generate_kv_hints_kwargs(request)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
@@ -3744,6 +3788,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                         lora_request=admitted_lora_request,
                         trace_headers=trace_headers,
                         priority=priority,
+                        **kv_hints_kwargs,
                         **_engine_generate_reasoning_kwargs(
                             self.engine_client,
                             reasoning_ended,

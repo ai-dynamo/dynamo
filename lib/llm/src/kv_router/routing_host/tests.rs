@@ -11,8 +11,9 @@ use std::{
 };
 
 use dynamo_kv_router::{
-    DefaultWorkerSelector, WorkerSelectionPolicy, config::KvRouterConfig,
-    protocols::RoutingConstraints,
+    DefaultWorkerSelector, WorkerSelectionPolicy,
+    config::KvRouterConfig,
+    protocols::{ExternalSequenceBlockHash, RoutingConstraints, WorkerWithDpRank},
 };
 use dynamo_runtime::{
     DistributedRuntime, Runtime,
@@ -31,6 +32,7 @@ use tokio::sync::watch;
 use super::*;
 use crate::{
     http::service::metrics::Metrics,
+    kv_router::{KvHintPolicyContext, KvHintPolicyError, KvHintsEnvelope},
     local_model::runtime_config::ModelRuntimeConfig,
     lora::{LoraReplicaConfig, LoraRoutingTable, LoraStateTracker},
     migration::Migration,
@@ -623,6 +625,24 @@ async fn router_with_worker_configs(
     session_affinity_ttl: Option<Duration>,
     workers: HashMap<u64, ModelRuntimeConfig>,
 ) -> (RoutingHost, Runtime) {
+    router_with_worker_configs_and_config(
+        session_affinity_ttl,
+        workers,
+        KvRouterConfig {
+            skip_initial_worker_wait: true,
+            use_kv_events: false,
+            router_track_active_blocks: false,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+async fn router_with_worker_configs_and_config(
+    session_affinity_ttl: Option<Duration>,
+    workers: HashMap<u64, ModelRuntimeConfig>,
+    config: KvRouterConfig,
+) -> (RoutingHost, Runtime) {
     let runtime = Runtime::from_current().unwrap();
     let distributed = DistributedRuntime::new(runtime.clone(), DistributedConfig::process_local())
         .await
@@ -636,12 +656,6 @@ async fn router_with_worker_configs(
     let client = endpoint.client().await.unwrap();
     let worker_ids = workers.keys().copied().collect::<Vec<_>>();
     let (_tx, workers) = watch::channel(workers);
-    let config = KvRouterConfig {
-        skip_initial_worker_wait: true,
-        use_kv_events: false,
-        router_track_active_blocks: false,
-        ..Default::default()
-    };
     let chooser = KvRouter::new(
         endpoint,
         client.clone(),
@@ -669,6 +683,74 @@ async fn router_with_worker_configs(
         .override_discovered_instances(worker_ids.clone());
     router.inner.client.override_instance_avail(worker_ids);
     (router, runtime)
+}
+
+struct TestKvHintPolicy;
+
+impl KvHintPolicy for TestKvHintPolicy {
+    fn evaluate(
+        &self,
+        context: &KvHintPolicyContext<'_>,
+    ) -> Result<Option<KvHintsEnvelope>, KvHintPolicyError> {
+        assert_eq!(context.selected_worker, WorkerWithDpRank::new(7, 2));
+        assert_eq!(
+            context.agent_context.map(|agent| agent.session_id.as_str()),
+            Some("session-1")
+        );
+        assert_eq!(
+            context
+                .session_lineage
+                .expect("session lineage")
+                .unique_block_hashes(),
+            vec![ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(12)]
+        );
+        Ok(Some(KvHintsEnvelope {
+            protocol_version: "1.0".to_string(),
+            message_id: "message-1".to_string(),
+            actions: Vec::new(),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn kv_hint_policy_observes_selection_and_materialized_session_lineage() {
+    let workers = [(7, ModelRuntimeConfig::default())].into_iter().collect();
+    let config = KvRouterConfig {
+        skip_initial_worker_wait: true,
+        use_kv_events: false,
+        router_track_active_blocks: false,
+        enable_session_prefix_index: true,
+        ..Default::default()
+    };
+    let (mut router, runtime) = router_with_worker_configs_and_config(None, workers, config).await;
+    let index = router
+        .kv_router()
+        .session_prefix_indexer()
+        .expect("session prefix index");
+    index
+        .update_session_from_stored_blocks(
+            "session-1",
+            None,
+            &[ExternalSequenceBlockHash(11), ExternalSequenceBlockHash(12)],
+        )
+        .unwrap();
+    router.kv_hint_policy = Some(Arc::new(TestKvHintPolicy));
+
+    let mut input = request();
+    input.agent_context = Some(
+        crate::protocols::common::extensions::AgentContext::builder()
+            .session_id("session-1".to_string())
+            .build()
+            .unwrap(),
+    );
+    let request = Context::new(input);
+    let hints = router
+        .evaluate_kv_hint_policy(&request, WorkerWithDpRank::new(7, 2))
+        .expect("planned hints");
+
+    assert_eq!(hints.message_id, "message-1");
+    drop(router);
+    runtime.shutdown();
 }
 
 async fn track_request(

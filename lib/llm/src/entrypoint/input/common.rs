@@ -164,6 +164,7 @@ fn preprocessed_backend_engine<Sel>(
     model_manager: &Arc<crate::discovery::ModelManager>,
     endpoint_id: &dynamo_runtime::protocols::EndpointId,
     affinity: Option<AffinityCoordinator>,
+    kv_hint_policy: Option<Arc<dyn crate::kv_router::KvHintPolicy>>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -182,7 +183,12 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            Arc::new(RoutingHost::new_with_coordinator(router, chooser, affinity))
+            Arc::new(RoutingHost::new_with_coordinator_and_kv_hint_policy(
+                router,
+                chooser,
+                affinity,
+                kv_hint_policy,
+            ))
         }
         _ => {
             let lora = model_manager
@@ -219,6 +225,7 @@ pub async fn build_preprocessed_routing(
         encoder_chooser,
         enable_multimodal_cache_indexer,
         session_affinity_ttl_secs,
+        None,
     )
     .await
 }
@@ -234,6 +241,7 @@ pub(crate) async fn build_preprocessed_routing_with_selector<Sel>(
     encoder_chooser: Option<Arc<EncoderRouter>>,
     enable_multimodal_cache_indexer: bool,
     session_affinity_ttl_secs: Option<u64>,
+    kv_hint_policy: Option<Arc<dyn crate::kv_router::KvHintPolicy>>,
 ) -> anyhow::Result<PreprocessedRouting<Sel>>
 where
     Sel: WorkerSelector<crate::local_model::runtime_config::ModelRuntimeConfig> + Send + 'static,
@@ -306,6 +314,7 @@ where
         &model_manager,
         &endpoint_id,
         affinity,
+        kv_hint_policy,
     )?;
     Ok(PreprocessedRouting {
         backend_engine,

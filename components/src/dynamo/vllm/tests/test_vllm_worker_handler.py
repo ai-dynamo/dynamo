@@ -10,8 +10,9 @@
 import asyncio
 import base64
 import json
+import sys
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
@@ -486,6 +487,44 @@ class TestReasoningParserForwarding:
 
 
 # ── Tests ────────────────────────────────────────────────────────────
+
+
+def test_engine_generate_kv_hints_kwargs_builds_vllm_types(monkeypatch):
+    class FakeAction:
+        def __init__(self, **kwargs):
+            vars(self).update(kwargs)
+
+    class FakeEnvelope:
+        def __init__(self, **kwargs):
+            vars(self).update(kwargs)
+
+    kv_hints_module = ModuleType("vllm.v1.kv_hints")
+    kv_hints_module.KvHintAction = FakeAction
+    kv_hints_module.KvHintsEnvelope = FakeEnvelope
+    monkeypatch.setitem(sys.modules, "vllm.v1.kv_hints", kv_hints_module)
+
+    kwargs = mod._engine_generate_kv_hints_kwargs(
+        {
+            "kv_hints": {
+                "protocol_version": "1.0",
+                "message_id": "message-1",
+                "actions": [
+                    {
+                        "action_id": "action-1",
+                        "action_type": "kv.evict",
+                        "action_version": "1.0",
+                        "payload": {"block_hashes": ["17"]},
+                    }
+                ],
+            }
+        }
+    )
+
+    envelope = kwargs["kv_hints"]
+    assert envelope.protocol_version == "1.0"
+    assert envelope.message_id == "message-1"
+    assert envelope.actions[0].action_type == "kv.evict"
+    assert envelope.actions[0].payload == {"block_hashes": ["17"]}
 
 
 @pytest.mark.skip(reason="Need to revisit tests, see comment at top of the file")

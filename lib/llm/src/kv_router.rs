@@ -59,6 +59,7 @@ pub use dynamo_kv_router::selector;
 
 pub mod encoder_router;
 pub mod indexer;
+pub mod kv_hint_policy;
 pub mod metrics;
 pub mod prefill_router;
 pub mod publisher;
@@ -73,6 +74,10 @@ pub use dynamo_kv_router::scheduling::{
 };
 pub use encoder_router::EncoderRouter;
 pub use indexer::{Indexer, ServedIndexerHandle, ServedIndexerMode, ensure_served_indexer_service};
+pub use kv_hint_policy::{
+    KvHintAction, KvHintPolicy, KvHintPolicyContext, KvHintPolicyError, KvHintsEnvelope,
+    NoopKvHintPolicy, SessionLineageView,
+};
 pub use prefill_router::PrefillRouter;
 pub use routing_host::{KvPushRouter, RoutingHost};
 
@@ -883,6 +888,10 @@ where
         &self.kv_router_config
     }
 
+    pub fn session_prefix_indexer(&self) -> Option<&Arc<SessionPrefixIndexer>> {
+        self.session_prefix_index.as_ref()
+    }
+
     pub fn required_worker_inputs(&self) -> dynamo_kv_router::selector::WorkerInputs {
         self.required_worker_inputs
     }
@@ -1397,11 +1406,6 @@ where
                     index.update_session_from_match(session.session_id(), matched_hash)
             {
                 tracing::warn!(%err, "failed to record session prefix match");
-            }
-
-            // Reclaim after recording the final match.
-            if session.session_final() == Some(true) {
-                index.remove_session(session.session_id());
             }
         }
 

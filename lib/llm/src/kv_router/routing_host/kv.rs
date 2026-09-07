@@ -7,6 +7,55 @@ impl<Sel> RoutingHost<Sel>
 where
     Sel: WorkerSelector<ModelRuntimeConfig> + Send + 'static,
 {
+    pub(super) fn evaluate_kv_hint_policy(
+        &self,
+        request: &SingleIn<PreprocessedRequest>,
+        selected_worker: WorkerWithDpRank,
+    ) -> Option<crate::kv_router::KvHintsEnvelope> {
+        let policy = self.kv_hint_policy.as_ref()?;
+        let session_lineage = request
+            .agent_context
+            .as_ref()
+            .and_then(|context| {
+                self.kv_router()
+                    .session_prefix_indexer()
+                    .map(|index| (context, index))
+            })
+            .and_then(|(context, index)| {
+                match index.get_session_block_lineage(&context.session_id, None) {
+                    Ok(lineages) if !lineages.is_empty() => {
+                        Some(crate::kv_router::SessionLineageView::new(lineages))
+                    }
+                    Ok(_) => None,
+                    Err(error) => {
+                        tracing::warn!(
+                            session_id = %context.session_id,
+                            %error,
+                            "Failed to materialize session lineage for KV hint planning"
+                        );
+                        None
+                    }
+                }
+            });
+        let context = crate::kv_router::KvHintPolicyContext {
+            agent_context: request.agent_context.as_ref(),
+            selected_worker,
+            session_lineage: session_lineage.as_ref(),
+        };
+        match policy.evaluate(&context) {
+            Ok(hints) => hints,
+            Err(error) => {
+                tracing::warn!(
+                    request_id = request.context().id(),
+                    worker_id = selected_worker.worker_id,
+                    %error,
+                    "KV hint policy failed; dispatching request without planned hints"
+                );
+                None
+            }
+        }
+    }
+
     async fn select_request(
         &self,
         request: &SingleIn<PreprocessedRequest>,
@@ -173,7 +222,12 @@ where
         guard.start_dispatch(&phase_label);
         self.warn_if_output_replay_annotation_ignored(&request, &selection);
 
+        let kv_hints = self.evaluate_kv_hint_policy(&request, selection.worker);
         let (mut backend_input, context) = request.into_parts();
+        if let Some(planned_kv_hints) = kv_hints {
+            // TODO: Validate and potentially concatenate actions if an envelope already exists.
+            backend_input.kv_hints = Some(planned_kv_hints);
+        }
         backend_input.routing_mut().dp_rank = Some(selection.worker.dp_rank);
         let _ = backend_input
             .extra_args
