@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from gpu_memory_service.client.torch.allocator import (
+    get_gms_client_memory_manager,
     get_or_create_gms_client_memory_manager,
     gms_use_mem_pool,
 )
@@ -147,6 +148,53 @@ def abort_pending_gms_write() -> bool:
     return True
 
 
+def patch_vllm_worker_memory_accounting() -> None:
+    """Avoid double-counting RW GMS weights during KV memory profiling."""
+    try:
+        from vllm.v1.worker.gpu_worker import Worker
+    except Exception:
+        logger.debug(
+            "[GMS] vLLM GPU Worker unavailable for memory patch", exc_info=True
+        )
+        return
+
+    original = Worker.determine_available_memory
+    if getattr(original, "_gms_weight_accounting_patched", False):
+        return
+
+    def patched_determine_available_memory(self, *args, **kwargs):
+        manager = get_gms_client_memory_manager("weights")
+        model_runner = getattr(self, "model_runner", None)
+        if (
+            manager is None
+            or manager.granted_lock_type != GrantedLockType.RW
+            or model_runner is None
+            or not hasattr(model_runner, "model_memory_usage")
+        ):
+            return original(self, *args, **kwargs)
+
+        old_usage = int(getattr(model_runner, "model_memory_usage") or 0)
+        if old_usage <= 0:
+            return original(self, *args, **kwargs)
+
+        logger.info(
+            "[GMS] Suppressing %.2f GiB RW GMS weight bytes from vLLM "
+            "weights_memory during KV profiling; cudaMemGetInfo already "
+            "accounts for them as non-torch memory",
+            old_usage / (1 << 30),
+        )
+        model_runner.model_memory_usage = 0
+        try:
+            return original(self, *args, **kwargs)
+        finally:
+            model_runner.model_memory_usage = old_usage
+
+    patched_determine_available_memory._gms_weight_accounting_patched = True
+    patched_determine_available_memory._gms_original = original
+    Worker.determine_available_memory = patched_determine_available_memory
+    logger.info("[GMS] Patched vLLM Worker.determine_available_memory")
+
+
 # =============================================================================
 # MX (ModelExpress) Integration — Optional P2P weight transfer
 #
@@ -192,6 +240,7 @@ def get_mx_load_context(
 
 def register_gms_loader(load_format: str = "gms") -> None:
     """Register the GMS model loader with vLLM's loader registry."""
+    patch_vllm_worker_memory_accounting()
     from vllm.model_executor.model_loader import register_model_loader
     from vllm.model_executor.model_loader.base_loader import BaseModelLoader
     from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -218,6 +267,9 @@ def register_gms_loader(load_format: str = "gms") -> None:
             self.default_loader.load_weights(model, model_config)
 
         def load_model(self, vllm_config, model_config, prefix="") -> torch.nn.Module:
+            # A spawned worker may have imported this module during gpu_worker's
+            # circular import. Retry after worker initialization.
+            patch_vllm_worker_memory_accounting()
             device = torch.cuda.current_device()
             extra = getattr(self.load_config, "model_loader_extra_config", {}) or {}
             mode = get_gms_lock_mode(extra)
