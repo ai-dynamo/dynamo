@@ -3632,9 +3632,8 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
         assert chunk["nvext"]["stop_reason"] == "END"
         assert "stop_reason" not in chunk["choices"][0]
 
-    def test_stream_uses_context_id_for_response_id(self, tokenizer):
-        """OpenAI response id matches Dynamo's internal context id."""
-
+    @pytest.mark.parametrize("context_id", ["ctx-123", None])
+    def test_stream_keeps_caller_request_id(self, tokenizer, context_id):
         async def collect():
             processor = SglangProcessor(
                 tokenizer=tokenizer,
@@ -3656,13 +3655,13 @@ class TestIncrementalDetokenization:  # FRONTEND.6 — token-id stream → text
                     {},
                     [],
                     post,
-                    context=FakeContext("ctx-123"),
+                    context=FakeContext(context_id),
                 )
             ]
 
         items = asyncio.run(collect())
 
-        assert items[0]["data"]["id"] == "ctx-123"
+        assert items[0]["data"]["id"] == "local-req"
 
     def _run_stream(self, tokenizer, items):
         processor = SglangProcessor(

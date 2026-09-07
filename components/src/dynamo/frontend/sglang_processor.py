@@ -45,8 +45,8 @@ from .utils import (
     handle_engine_error,
     make_internal_error,
     nvext_extra_field_requested,
-    request_id_from_context,
     read_jinja_chat_template,
+    request_id_from_context,
     resolve_chat_template,
     worker_warmup,
 )
@@ -690,7 +690,6 @@ class SglangProcessor:
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Shared streaming logic for both single-process and pool paths."""
-        request_id = request_id_from_context(context) if context is not None else request_id
         token_count = 0
         post_proc_total_ms = 0.0
         created_ts = int(time.time())

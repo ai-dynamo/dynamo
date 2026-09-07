@@ -63,13 +63,7 @@ def random_uuid() -> str:
 
 def request_id_from_context(context: Any | None) -> str:
     """Use the Dynamo context id when available, otherwise generate a local id."""
-    if context is not None:
-        context_id = getattr(context, "id", None)
-        if callable(context_id):
-            context_id = context_id()
-        if context_id:
-            return str(context_id)
-    return random_uuid()
+    return context.id() if context is not None else random_uuid()
 
 
 def random_call_id() -> str:

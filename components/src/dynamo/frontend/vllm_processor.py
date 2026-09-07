@@ -848,7 +848,6 @@ class VllmProcessor:
         mm_routing_info: dict[str, Any] | None = None,
         context: Any | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        request_id = request_id_from_context(context) if context is not None else request_id
         sp = vllm_preproc.sampling_params
         output_request_ids: dict[int, str]
         registered_request_ids: list[str]
