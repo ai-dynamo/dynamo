@@ -6,6 +6,7 @@ import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiohttp.test_utils import TestClient, TestServer
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.control_api import _build_app
@@ -60,13 +61,14 @@ def _provider(namespace_source=None):
     return provider, client_class.return_value, client_patch
 
 
-def test_accept_length_uses_current_runtime_namespace():
+@pytest.mark.asyncio
+async def test_accept_length_uses_current_runtime_namespace():
     namespace_source = MagicMock()
     namespace_source.runtime_namespace.return_value = "base-ns-workerhash"
     provider, client, client_patch = _provider(namespace_source)
     client.get_avg_spec_decode_accept_length.return_value = 2.5
     try:
-        assert provider.collect_accept_length("30s") == 2.5
+        assert await provider.collect_accept_length("30s") == 2.5
     finally:
         client_patch.stop()
 
@@ -96,11 +98,12 @@ def test_provider_passes_prometheus_request_timeout():
         assert client_class.call_args.kwargs["request_timeout_seconds"] == 3.5
 
 
-def test_accept_length_falls_back_to_configured_namespace():
+@pytest.mark.asyncio
+async def test_accept_length_falls_back_to_configured_namespace():
     provider, client, client_patch = _provider()
     client.get_avg_spec_decode_accept_length.return_value = 2.5
     try:
-        provider.collect_accept_length("30s")
+        await provider.collect_accept_length("30s")
     finally:
         client_patch.stop()
 
@@ -159,7 +162,7 @@ async def traffic_provider():
 
 @pytest.fixture
 async def blocked_query(traffic_provider):
-    provider, client = traffic_provider
+    _, client = traffic_provider
     started = asyncio.Event()
     release = threading.Event()
     loop = asyncio.get_running_loop()
@@ -182,10 +185,6 @@ async def blocked_query(traffic_provider):
 async def test_control_api_responds_during_collection(
     traffic_provider, blocked_query, full
 ):
-    # The marker-report environment stubs aiohttp without test_utils. Import
-    # these helpers only when executing the HTTP test, as in test_control_api.
-    from aiohttp.test_utils import TestClient, TestServer
-
     provider, client = traffic_provider
     started, release = blocked_query
     controller = MagicMock()
@@ -301,3 +300,106 @@ async def test_idle_normalization_preserves_load_metrics(traffic_provider):
     assert provider.metrics_state.ttft == provider.metrics_state.itl == 0
     assert provider.metrics_state.p_load == 0.4
     assert provider.metrics_state.d_load == 0.6
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_source", ["global", "decode", "prefill"])
+async def test_query_context_uses_one_deployment_snapshot(
+    traffic_provider, model_source
+):
+    provider, client = traffic_provider
+    state = _state_source().deployment_state()
+    if model_source != "global":
+        state.model_name = None
+        if model_source == "decode":
+            state.decode.info.model_name = "Qwen/Qwen3"
+        else:
+            state.prefill.info = WorkerInfo(model_name="Qwen/Qwen3")
+    other = DeploymentState(model_name="other-model")
+    other.decode.info = WorkerInfo(component_name="other", endpoint="other-endpoint")
+    provider.state_source.deployment_state.side_effect = [state, other]
+
+    assert await provider.collect_accept_length("30s") == 2.5
+
+    provider.state_source.deployment_state.assert_called_once_with()
+    client.get_avg_spec_decode_accept_length.assert_called_once_with(
+        "30s",
+        "vllm",
+        "backend",
+        "Qwen/Qwen3",
+        namespace="base-ns",
+        endpoint_name="generate",
+    )
+    client.get_avg_kv_hit_rate.assert_not_called()
+    client.get_avg_time_to_first_token.assert_not_called()
+    assert provider.metrics_state == Metrics()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+async def test_accept_length_waits_for_collection(
+    traffic_provider, blocked_query, cancel_waiter
+):
+    provider, client = traffic_provider
+    started, release = blocked_query
+    collection = asyncio.create_task(provider.collect_traffic())
+    await asyncio.wait_for(started.wait(), timeout=2)
+    waiter = asyncio.create_task(provider.collect_accept_length("10s"))
+    try:
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        client.get_avg_spec_decode_accept_length.assert_not_called()
+        if cancel_waiter:
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+    finally:
+        release.set()
+        await collection
+        await asyncio.gather(waiter, return_exceptions=True)
+
+    if cancel_waiter:
+        assert await provider.collect_accept_length("10s") == 2.5
+    else:
+        assert waiter.result() == 2.5
+    assert client.get_avg_spec_decode_accept_length.call_count == 2
+    assert client.get_avg_kv_hit_rate.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(10)
+async def test_direct_accept_length_is_responsive_and_cancellation_safe(
+    traffic_provider, blocked_query
+):
+    provider, client = traffic_provider
+    started, release = blocked_query
+    client.get_avg_spec_decode_accept_length.side_effect = (
+        client.get_avg_kv_hit_rate.side_effect
+    )
+    controller = MagicMock()
+    controller.get_min_endpoints = AsyncMock(return_value={"decode_min_endpoint": 1})
+    async with TestClient(TestServer(_build_app(controller))) as http:
+        collection = asyncio.create_task(provider.collect_accept_length("30s"))
+        waiter = None
+        try:
+            await asyncio.wait_for(started.wait(), timeout=2)
+            response = await asyncio.wait_for(http.get("/v1/min-endpoints"), timeout=2)
+            assert response.status == 200
+            assert not collection.done()
+            collection.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await collection
+            waiter = asyncio.create_task(provider.collect_accept_length("10s"))
+            await asyncio.sleep(0)
+            assert not waiter.done()
+            assert client.get_avg_spec_decode_accept_length.call_count == 1
+        finally:
+            release.set()
+            await asyncio.gather(collection, return_exceptions=True)
+            if waiter is not None:
+                await asyncio.gather(waiter, return_exceptions=True)
+        assert waiter.result() == 0.5
+    assert client.get_avg_spec_decode_accept_length.call_count == 2
+    client.get_avg_kv_hit_rate.assert_not_called()
+    assert provider.metrics_state == Metrics()

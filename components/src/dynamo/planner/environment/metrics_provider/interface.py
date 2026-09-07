@@ -13,7 +13,7 @@ class TrafficMetricsProvider(Protocol):
     async def collect_traffic(self) -> Optional[TrafficObservation]:
         pass
 
-    def collect_accept_length(self, interval_str: str) -> Optional[float]:
+    async def collect_accept_length(self, interval_str: str) -> Optional[float]:
         pass
 
     async def collect_kv_hit_rate_observation(

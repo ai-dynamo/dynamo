@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 from dynamo.planner.config.planner_config import PlannerConfig
 from dynamo.planner.core.types import TrafficObservation
@@ -15,6 +15,7 @@ from dynamo.planner.environment.interface import (
     RuntimeNamespaceSource,
 )
 from dynamo.planner.environment.metrics_provider.interface import TrafficMetricsProvider
+from dynamo.planner.environment.state import DeploymentState
 from dynamo.planner.monitoring.traffic_metrics import Metrics, PrometheusAPIClient
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
 
     async def collect_traffic(self) -> Optional[TrafficObservation]:
         duration_s = self.config.throughput_adjustment_interval_seconds
-        result = await self._collect_metrics(f"{duration_s}s", full=True)
+        result = await self._collect_metrics(f"{duration_s}s", scope="traffic")
         if result is None:
             return None
         m = self.metrics_state
@@ -110,7 +111,7 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
         )
 
     async def _collect_metrics(
-        self, interval_str: str, *, full: bool
+        self, interval_str: str, *, scope: Literal["traffic", "kv", "accept_length"]
     ) -> Optional[Metrics]:
         async with self._collection_lock:
             # Cancellation cannot stop Requests in a thread. Wait for the previous
@@ -122,7 +123,9 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
                 logger.info("Model name is not available, skipping traffic collection")
                 return None
             task = asyncio.create_task(
-                asyncio.to_thread(self._query_metrics, interval_str, context, full=full)
+                asyncio.to_thread(
+                    self._query_metrics, interval_str, context, scope=scope
+                )
             )
             self._collection_task = task
             # Retrieve failures even when the caller abandons the shielded task.
@@ -135,10 +138,11 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
             task.exception()
 
     def _query_context(self) -> Optional[_QueryContext]:
-        model_name = self._model_name()
+        state = self.state_source.deployment_state()
+        model_name = self._model_name(state)
         if model_name is None:
             return None
-        decode_info = self.state_source.deployment_state().decode.info
+        decode_info = state.decode.info
         collect_accept = self.config.mode in ("disagg", "decode", "agg")
         return _QueryContext(
             model_name=model_name,
@@ -151,11 +155,15 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
         )
 
     def _query_metrics(
-        self, interval_str: str, context: _QueryContext, *, full: bool
+        self,
+        interval_str: str,
+        context: _QueryContext,
+        *,
+        scope: Literal["traffic", "kv", "accept_length"],
     ) -> Metrics:
         # Only local results and the synchronous client are accessed off-loop.
         m = Metrics()
-        if full:
+        if scope == "traffic":
             ttft = self.prometheus_traffic_client.get_avg_time_to_first_token(
                 interval_str, context.model_name
             )
@@ -178,18 +186,18 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
             m.osl = self.prometheus_traffic_client.get_avg_output_sequence_tokens(
                 interval_str, context.model_name
             )
-        m.kv_hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
-            interval_str, context.model_name, namespace=context.namespace
-        )
+        if scope != "accept_length":
+            m.kv_hit_rate = self.prometheus_traffic_client.get_avg_kv_hit_rate(
+                interval_str, context.model_name, namespace=context.namespace
+            )
         m.accept_length = self._query_accept_length(interval_str, context)
 
         return m
 
-    def collect_accept_length(self, interval_str: str) -> Optional[float]:
-        context = self._query_context()
-        if context is None:
-            return None
-        return self._query_accept_length(interval_str, context)
+    async def collect_accept_length(self, interval_str: str) -> Optional[float]:
+        """Collect accept length without overlapping other Prometheus queries."""
+        result = await self._collect_metrics(interval_str, scope="accept_length")
+        return result.accept_length if result is not None else None
 
     def _query_accept_length(
         self, interval_str: str, context: _QueryContext
@@ -212,7 +220,7 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
             return None
 
         interval_str = f"{int(duration_s)}s"
-        result = await self._collect_metrics(interval_str, full=False)
+        result = await self._collect_metrics(interval_str, scope="kv")
         if result is None:
             return None
         hit_rate = result.kv_hit_rate
@@ -238,8 +246,8 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
             accept_length=accept_length,
         )
 
-    def _model_name(self) -> Optional[str]:
-        state = self.state_source.deployment_state()
+    @staticmethod
+    def _model_name(state: DeploymentState) -> Optional[str]:
         if state.model_name:
             return state.model_name
         if state.decode.info is not None and state.decode.info.model_name:
