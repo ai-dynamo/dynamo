@@ -25,24 +25,24 @@ The checkpoint natively supports 262,144 tokens (extensible to 1M with YaRN). We
 
 Dynamo + vLLM deployment profiles for the B200 agentic workload (64K ISL / 400 OSL, 90% KV cache reuse):
 
-|                          | B200 Aggregated (4-GPU)                      | B200 Aggregated (8-GPU)                         | B200 Disaggregated                              |
-| ------------------------ | -------------------------------------------- | ------------------------------------------------ | ----------------------------------------------- |
-| **GPU** (per worker)     | 4x B200                                      | 4x B200 (×2 workers)                             | 4x B200 prefill + 4x B200 decode                |
-| **Total GPUs**           | 4                                            | 8                                                | 8 (1P1D)                                        |
-| **Nodes**                | 1                                            | 1                                                | 1 (colocated via podAffinity)                    |
-| **Mode**                 | Aggregated                                   | Aggregated (2 replicas)                           | Prefill/decode disaggregated                    |
-| **Framework**            | vLLM                                         | vLLM                                            | vLLM                                            |
-| **Precision**            | NVFP4 weights                               | NVFP4 weights                                  | NVFP4 weights                                  |
-| **Parallelism**          | TP4 + expert parallel                        | TP4 + expert parallel (×2)                       | TP4 + expert parallel, both roles              |
-| **Routing**              | KV-aware                                     | KV-aware                                        | KV-aware                                        |
-| **Speculative decoding** | MTP3                                         | MTP3                                            | MTP3                                            |
-| **Context length**       | 262,144                                      | 262,144                                          | 262,144                                         |
-| **N-gram embedding**     | Offloaded to host RAM                        | Offloaded to host RAM                           | Offloaded to host RAM                           |
-| **KV transfer**          | —                                            | —                                                | NIXL over UCX (rc_x + rc + cuda_copy + cuda_ipc) via InfiniBand RDMA |
-| **Prefix caching**       | Enabled                                      | Enabled                                          | Enabled                                         |
-| **RDMA devices**         | —                                            | —                                                | `rdma/rdma_shared_device_a: 4` per worker      |
-| **hostIPC**              | —                                            | —                                                | Not required (RDMA handles cross-pod transfer)  |
-| **Prefill `--max-num-seqs`** | —                                         | —                                                | 32 (reduced from 256 to avoid prefill OOM)      |
+|                          | B200 Aggregated (4-GPU)                      | B200 Aggregated (8-GPU)                         | B200 Aggregated (12-GPU)                        | B200 Disaggregated (1P1D)                       | B200 Disaggregated (2P1D)                       |
+| ------------------------ | -------------------------------------------- | ------------------------------------------------ | ------------------------------------------------ | ------------------------------------------------ | ------------------------------------------------ |
+| **GPU** (per worker)     | 4x B200                                      | 4x B200 (×2 workers)                             | 4x B200 (×3 workers)                             | 4x B200 prefill + 4x B200 decode                | 8x B200 prefill + 4x B200 decode                |
+| **Total GPUs**           | 4                                            | 8                                                | 12                                               | 8 (1P1D)                                        | 12 (2P1D)                                        |
+| **Nodes**                | 1                                            | 1                                                | 1                                                | 1 (colocated via podAffinity)                    | 1-3 (preferred affinity)                          |
+| **Mode**                 | Aggregated                                   | Aggregated (2 replicas)                           | Aggregated (3 replicas)                           | Prefill/decode disaggregated                    | Prefill/decode disaggregated                    |
+| **Framework**            | vLLM                                         | vLLM                                            | vLLM                                            | vLLM                                            | vLLM                                            |
+| **Precision**            | NVFP4 weights                               | NVFP4 weights                                  | NVFP4 weights                                  | NVFP4 weights                                  | NVFP4 weights                                  |
+| **Parallelism**          | TP4 + expert parallel                        | TP4 + expert parallel (×2)                       | TP4 + expert parallel (×3)                       | TP4 + expert parallel, both roles              | TP4 + expert parallel, both roles              |
+| **Routing**              | KV-aware                                     | KV-aware                                        | KV-aware                                        | KV-aware                                        | KV-aware                                        |
+| **Speculative decoding** | MTP3                                         | MTP3                                            | MTP3                                            | MTP3                                            | MTP3                                            |
+| **Context length**       | 262,144                                      | 262,144                                          | 262,144                                          | 262,144                                          | 262,144                                          |
+| **N-gram embedding**     | Offloaded to host RAM                        | Offloaded to host RAM                           | Offloaded to host RAM                           | Offloaded to host RAM                           | Offloaded to host RAM                           |
+| **KV transfer**          | —                                            | —                                                | —                                                | NIXL over UCX (rc_x + rc + cuda_copy + cuda_ipc) via InfiniBand RDMA | NIXL over UCX (rc_x + rc + cuda_copy + cuda_ipc) via InfiniBand RDMA |
+| **Prefix caching**       | Enabled                                      | Enabled                                          | Enabled                                          | Enabled                                          | Enabled                                          |
+| **RDMA devices**         | —                                            | —                                                | —                                                | `rdma/rdma_shared_device_a: 4` per worker      | `rdma/rdma_shared_device_a: 4` per worker      |
+| **hostIPC**              | —                                            | —                                                | —                                                | Not required (RDMA handles cross-pod transfer)  | Not required (RDMA handles cross-pod transfer)  |
+| **Prefill `--max-num-seqs`** | —                                         | —                                                | —                                                | 32 (reduced from 256 to avoid prefill OOM)      | 32 (reduced from 256 to avoid prefill OOM)      |
 
 ## Supported features
 
