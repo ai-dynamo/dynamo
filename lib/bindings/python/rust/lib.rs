@@ -1784,7 +1784,9 @@ impl Endpoint {
     ) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            endpoint_taint_snapshot(&inner, only_live).await.map_err(to_pyerr)
+            endpoint_taint_snapshot(&inner, only_live)
+                .await
+                .map_err(to_pyerr)
         })
     }
 }
