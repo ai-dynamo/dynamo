@@ -12,7 +12,7 @@ This module provides module-level tensor operations:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Iterator, Tuple
+from typing import TYPE_CHECKING, Any, Iterator, Tuple
 
 import torch
 from gpu_memory_service.client.torch.tensor import GMSTensorSpec, TensorMetadata
@@ -73,6 +73,12 @@ def _iter_module_tensors(
             continue
 
         if torch.is_tensor(attr_val) and attr_val.is_cuda:
+            if _is_read_only_property(module, attr_name):
+                logger.debug(
+                    "[GMS] Skipping read-only tensor property %r",
+                    f"{prefix}{attr_name}" if prefix else attr_name,
+                )
+                continue
             qualified = f"{prefix}{attr_name}" if prefix else attr_name
             yield (qualified, attr_val, "tensor_attr")
         elif isinstance(attr_val, (list, tuple)) and attr_val:
@@ -88,6 +94,11 @@ def _iter_module_tensors(
         if submodule is not None:
             subprefix = f"{prefix}{name}." if prefix else f"{name}."
             yield from _iter_module_tensors(submodule, subprefix)
+
+
+def _is_read_only_property(module: Any, attr_name: str) -> bool:
+    descriptor = getattr(type(module), attr_name, None)
+    return isinstance(descriptor, property) and descriptor.fset is None
 
 
 def _resolve_module_attr(
@@ -188,14 +199,24 @@ def materialize_module_from_gms(
             ):
                 mod._buffers[attr] = tensor.detach().clone()
             else:
-                setattr(mod, attr, tensor.detach().clone())
+                try:
+                    setattr(mod, attr, tensor.detach().clone())
+                except AttributeError:
+                    if tensor_type == "tensor_attr" and _is_read_only_property(
+                        mod, attr
+                    ):
+                        logger.debug("[GMS] Skipping read-only property %r", name)
+                        continue
+                    raise
             continue
 
         # Parameters: in-place update or replace meta tensors
         if hasattr(mod, "_parameters") and attr in mod._parameters:
             param = mod._parameters[attr]
             if param is not None:
-                if param.shape != tensor.shape or param.dtype != tensor.dtype:
+                if not param.is_meta and (
+                    param.shape != tensor.shape or param.dtype != tensor.dtype
+                ):
                     raise RuntimeError(
                         f"Shape/dtype mismatch for {name}: "
                         f"param={tuple(param.shape)}/{param.dtype}, "

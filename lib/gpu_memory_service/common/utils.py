@@ -22,12 +22,29 @@ ENV_VMM_GRANULARITY = "DYN_GMS_VMM_GRANULARITY"
 # serve exactly these logical memory pools, one UDS socket per (device, tag).
 GMS_TAGS = ("weights", "kv_cache")
 
-_TRUTHY = ("true", "1", "yes")
+_TRUTHY = ("true", "1", "yes", "on")
+_FALSEY_ENV_VALUES = frozenset({"", "0", "false", "no", "off"})
 
 
 def is_truthy_env(name: str) -> bool:
-    """True when the named env var is set to a recognized truthy string."""
-    return os.environ.get(name, "").lower() in _TRUTHY
+    """True when the named env var is set to a recognized truthy string.
+
+    Use this for opt-in flags: anything unrecognized reads as off.
+    """
+    return os.environ.get(name, "").strip().lower() in _TRUTHY
+
+
+def env_enabled_by_default(name: str, *, default: bool = True) -> bool:
+    """True unless the named env var explicitly disables the feature.
+
+    Use this for opt-out flags: only a recognized falsey value turns the
+    feature off. This is the single implementation shared by the engine
+    integrations — do not add per-module copies.
+    """
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in _FALSEY_ENV_VALUES
 
 
 def is_scratch_kv_enabled() -> bool:
