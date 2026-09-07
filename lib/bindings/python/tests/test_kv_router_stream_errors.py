@@ -67,8 +67,11 @@ async def error_router_endpoint(temp_file_store):
 @pytest.mark.timeout(30)
 @pytest.mark.parametrize("response_buffer_size", [0, 100])
 async def test_kv_router_propagates_stream_errors(
-    error_router_endpoint, response_buffer_size
+    error_router_endpoint, response_buffer_size, monkeypatch
 ):
+    # Wait for the router's worker watcher to observe the registered endpoint before
+    # issuing the request. The fixture's endpoint client has a separate watcher.
+    monkeypatch.setenv("DYN_ROUTER_MIN_INITIAL_WORKERS", "1")
     router = KvRouter(
         error_router_endpoint,
         4,

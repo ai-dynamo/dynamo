@@ -65,22 +65,6 @@ inputs:
     description: 'Enable operator checkpoint/restore injection'
     required: false
     default: 'false'
-  checkpoint_storage_pvc_name:
-    description: 'Checkpoint PVC name created in workload namespaces when checkpointing is enabled'
-    required: false
-    default: snapshot-pvc
-  checkpoint_storage_base_path:
-    description: 'Checkpoint PVC mount path inside checkpoint and restore pods'
-    required: false
-    default: /checkpoints
-  checkpoint_storage_size:
-    description: 'Checkpoint PVC size created by the operator'
-    required: false
-    default: 1Gi
-  checkpoint_storage_access_mode:
-    description: 'Checkpoint PVC access mode created by the operator'
-    required: false
-    default: ReadWriteOnce
 
 outputs:
   namespace:
@@ -263,8 +247,10 @@ runs:
         if [ -n "${VCLUSTER_HOST_PRIORITY_CLASS}" ]; then
           VCLUSTER_HELM_ARGS+=(--set "sync.toHost.pods.priorityClassName=${VCLUSTER_HOST_PRIORITY_CLASS}")
         fi
-        # Sync the model-cache PV to the host so its mount options are honored.
-        if [ -n "${MODEL_CACHE_SERVER}" ] && [ -n "${MODEL_CACHE_PATH}" ]; then
+        # Model-cache static PVs and Snapshot dynamically provisioned PVs must
+        # be represented in both the virtual and host clusters.
+        if [[ "${CHECKPOINT_ENABLED}" == "true" || \
+              ( -n "${MODEL_CACHE_SERVER}" && -n "${MODEL_CACHE_PATH}" ) ]]; then
           VCLUSTER_HELM_ARGS+=(--set "sync.toHost.persistentVolumes.enabled=true")
         fi
         if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
@@ -279,6 +265,8 @@ runs:
                 labels:
                   kubernetes.azure.com/mode: "user"
             runtimeClasses:
+              enabled: true
+            storageClasses:
               enabled: true
         EOF
           VCLUSTER_HELM_ARGS+=(--values "${VCLUSTER_CHECKPOINT_VALUES}")
@@ -471,14 +459,15 @@ runs:
         echo "${DOCKERHUB_PASS}" | helm registry login registry-1.docker.io -u "${DOCKERHUB_USER}" --password-stdin
 
     # The operator refuses to start when checkpoint is enabled unless the
-    # PodSnapshot API exists. Snapshot-agent (which owns that CRD) is installed
-    # in a later job, so apply the CRDs first and let that later job adopt them.
+    # standalone Snapshot APIs exist. Snapshot (which owns those CRDs) is
+    # installed in a later job, so apply the CRDs first and let that later job
+    # adopt them.
     - name: Install snapshot CRDs for checkpoint
       if: inputs.checkpoint_enabled == 'true'
       shell: bash
       env:
         # Keep in lockstep with .github/actions/setup-snapshot-agent/action.yml.
-        SNAPSHOT_CHART_VERSION: 0.1.0-alpha.1
+        SNAPSHOT_CHART_VERSION: 0.1.0-rc.1
       run: |
         echo "::group::Install snapshot CRDs before operator start"
         set -euo pipefail
@@ -490,6 +479,7 @@ runs:
         kubectl --kubeconfig="${VKUBECONFIG}" wait --for=condition=established \
           crd/podsnapshots.nvidia.com \
           crd/podsnapshotcontents.nvidia.com \
+          crd/snapshotjobs.nvidia.com \
           --timeout=120s
         echo "::endgroup::"
 
@@ -500,10 +490,6 @@ runs:
         REPOSITORY: ${{ inputs.repository }}
         OPERATOR_TAG: ${{ inputs.operator_tag }}
         CHECKPOINT_ENABLED: ${{ inputs.checkpoint_enabled }}
-        CHECKPOINT_STORAGE_PVC_NAME: ${{ inputs.checkpoint_storage_pvc_name }}
-        CHECKPOINT_STORAGE_BASE_PATH: ${{ inputs.checkpoint_storage_base_path }}
-        CHECKPOINT_STORAGE_SIZE: ${{ inputs.checkpoint_storage_size }}
-        CHECKPOINT_STORAGE_ACCESS_MODE: ${{ inputs.checkpoint_storage_access_mode }}
       run: |
         echo "::group::Install Dynamo platform via Helm (inside vCluster)"
         set -euo pipefail
@@ -536,16 +522,6 @@ runs:
         CHECKPOINT_HELM_ARGS=(
           --set dynamo-operator.checkpoint.enabled="${CHECKPOINT_ENABLED}"
         )
-        if [[ "${CHECKPOINT_ENABLED}" == "true" ]]; then
-          CHECKPOINT_HELM_ARGS+=(
-            --set dynamo-operator.checkpoint.storage.type=pvc
-            --set dynamo-operator.checkpoint.storage.pvc.pvcName="${CHECKPOINT_STORAGE_PVC_NAME}"
-            --set dynamo-operator.checkpoint.storage.pvc.basePath="${CHECKPOINT_STORAGE_BASE_PATH}"
-            --set dynamo-operator.checkpoint.storage.pvc.create=true
-            --set dynamo-operator.checkpoint.storage.pvc.size="${CHECKPOINT_STORAGE_SIZE}"
-            --set dynamo-operator.checkpoint.storage.pvc.accessMode="${CHECKPOINT_STORAGE_ACCESS_MODE}"
-          )
-        fi
 
         # helm reads release history before writing it, so concurrent bootstrap
         # callers both choose install and the loser collides on the same release.

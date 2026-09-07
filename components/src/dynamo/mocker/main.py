@@ -1,8 +1,7 @@
 #  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
-# Internal worker launcher. The public `python -m dynamo.mocker` CLI is removed while online
-# simulation is unavailable.
+# Offline virtual-clock replay lives in AISimulate.
 
 import argparse
 import asyncio

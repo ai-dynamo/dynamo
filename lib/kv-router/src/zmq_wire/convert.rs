@@ -193,7 +193,7 @@ fn mm_token_kind(
 /// timestamp-separated runs, so consecutive video runs belong to one object.
 /// Only an exact ordered run/object mapping is normalized. Boundary or mixed
 /// blocks that cannot be mapped exactly preserve vLLM's native MM hash path.
-fn substitute_pad_values(
+pub fn normalize_mm_placeholder_runs(
     token_ids: &[u32],
     image_token_id: Option<u32>,
     video_token_id: Option<u32>,
@@ -346,7 +346,7 @@ fn create_stored_block_from_parts_with_video_context(
     let normalized_tokens = match mm_extra_info.as_ref() {
         Some(info) if requires_exact_mm_mapping && !info.mm_objects.is_empty() => {
             let mm_hashes: Vec<u64> = info.mm_objects.iter().map(|o| o.mm_hash).collect();
-            substitute_pad_values(token_ids, image_token_id, video_token_id, &mm_hashes)
+            normalize_mm_placeholder_runs(token_ids, image_token_id, video_token_id, &mm_hashes)
                 .map(|(tokens, _)| tokens)
         }
         Some(info)
@@ -778,7 +778,7 @@ mod normalize_tests {
             image_token_id,
         ];
 
-        let normalized = substitute_pad_values(
+        let normalized = normalize_mm_placeholder_runs(
             &tokens,
             Some(image_token_id),
             Some(video_token_id),
@@ -802,7 +802,9 @@ mod normalize_tests {
         let video_token_id = 151656u32;
         let tokens = [video_token_id, 7, video_token_id];
 
-        assert!(substitute_pad_values(&tokens, None, Some(video_token_id), &[41, 42]).is_none());
+        assert!(
+            normalize_mm_placeholder_runs(&tokens, None, Some(video_token_id), &[41, 42]).is_none()
+        );
     }
 
     #[test]
@@ -811,7 +813,7 @@ mod normalize_tests {
         let video_token_id = 151656u32;
 
         assert!(
-            substitute_pad_values(
+            normalize_mm_placeholder_runs(
                 &[image_token_id, 7, image_token_id],
                 Some(image_token_id),
                 Some(video_token_id),
@@ -820,7 +822,7 @@ mod normalize_tests {
             .is_none()
         );
         assert!(
-            substitute_pad_values(
+            normalize_mm_placeholder_runs(
                 &[image_token_id, image_token_id],
                 Some(image_token_id),
                 Some(video_token_id),
@@ -842,7 +844,7 @@ mod normalize_tests {
         let mm_objects: Vec<u64> = (0..28).collect();
 
         assert!(
-            substitute_pad_values(
+            normalize_mm_placeholder_runs(
                 &tokens,
                 Some(image_token_id),
                 Some(video_token_id),
