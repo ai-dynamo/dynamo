@@ -5,6 +5,7 @@ import asyncio
 import fcntl
 import logging
 import os
+import threading
 import time
 
 from gpu_memory_service.failover_lock.interface import FailoverLock, FailoverLockError
@@ -30,6 +31,7 @@ class FlockFailoverLock(FailoverLock):
         self._lock_path = lock_path
         self._fd: int | None = None
         self._engine_id: str | None = None
+        self._state_lock = threading.Lock()
         # True once acquire() had to wait for a predecessor to release the lock
         # (a real failover), False if it acquired immediately (initial bootup).
         self._was_contended: bool = False
@@ -97,41 +99,37 @@ class FlockFailoverLock(FailoverLock):
                 f"{engine_id}: {e}"
             ) from e
 
-        self._fd = fd
-        self._engine_id = engine_id
-
-        # Write identity into the lock file for observability (owner() reads
-        # this). We use raw fd ops because we must keep the fd open — closing
-        # it would release the flock. ftruncate clears any stale content from
-        # the previous holder, lseek rewinds, write stamps our id.
-        os.ftruncate(self._fd, 0)
-        os.lseek(self._fd, 0, os.SEEK_SET)
-        os.write(self._fd, engine_id.encode())
+        # Write identity before publishing the held fd. Keeping the fd open is
+        # what owns the kernel flock.
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, engine_id.encode())
+        with self._state_lock:
+            self._fd = fd
+            self._engine_id = engine_id
 
         logger.info("Failover lock acquired: %s", engine_id)
 
     async def release(self) -> None:
-        if self._fd is None:
-            return
+        self.release_nowait()
 
-        # Guard: only the holder should release. If we don't hold the lock
-        # (e.g. double-release or programming error), closing the fd is a
-        # no-op for flock semantics — but log a warning for visibility.
-        try:
-            current = await self.owner()
-            if current != self._engine_id:
-                logger.warning(
-                    "Releasing lock but owner is %r, expected %r",
-                    current,
-                    self._engine_id,
-                )
-        except OSError as e:
-            logger.debug("Could not read owner during release: %s", e)
+    def release_nowait(self) -> bool:
+        """Release from a liveness/watchdog thread without an event loop.
 
-        logger.info("Failover lock released: %s", self._engine_id)
-        os.close(self._fd)
-        self._fd = None
-        self._engine_id = None
+        Taking and clearing the fd under one lock makes concurrent graceful and
+        crash-path releases idempotent. ``close(2)`` releases the flock.
+        """
+        with self._state_lock:
+            fd = self._fd
+            engine_id = self._engine_id
+            if fd is None:
+                return False
+            self._fd = None
+            self._engine_id = None
+
+        logger.info("Failover lock released: %s", engine_id)
+        os.close(fd)
+        return True
 
     async def owner(self) -> str | None:
         try:
