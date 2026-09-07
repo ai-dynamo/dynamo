@@ -357,6 +357,41 @@ def test_redact_masks_url_credentials():
     assert "https://***@pypi.corp/simple" in masked
 
 
+def test_redact_masks_credentials_when_the_username_holds_an_unencoded_at():
+    """Registry URLs are routinely written with an email as the username.
+
+    Stopping at the first "@" masked only the username and left the password
+    in the log line.
+    """
+    line = "pip install --index-url https://user@corp.com:secret@pypi.corp/simple"
+    masked = install_media_decoders._redact(line)
+
+    assert "secret" not in masked
+    assert "https://***@pypi.corp/simple" in masked
+
+
+def test_redact_masks_every_credentialed_url_on_one_line():
+    line = "https://a@h1/x https://user@corp.com:secret@h2/y"
+    masked = install_media_decoders._redact(line)
+
+    assert "secret" not in masked
+    assert masked == "https://***@h1/x https://***@h2/y"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "https://pypi.org/simple and mail user@example.com",
+        "contact: ops@example.com",
+        "https://pypi.org/simple",
+        "pip install numpy",
+    ],
+)
+def test_redact_leaves_lines_without_url_userinfo_alone(line: str):
+    """A bare address in the text is not userinfo and must not be rewritten."""
+    assert install_media_decoders._redact(line) == line
+
+
 # ---------------------------------------------------------------------------
 # CLI.
 # ---------------------------------------------------------------------------
