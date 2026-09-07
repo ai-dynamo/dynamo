@@ -58,11 +58,13 @@ Relay uses the shared `DistributedRuntime`, created by `@dynamo_worker()`.
 | `DYN_NAMESPACE` | `dynamo` | Namespace of Relay's own runtime endpoints; does not select watched worker namespaces. |
 | `DYN_DISCOVERY_BACKEND` | `etcd` | Shared discovery backend; set `kubernetes` for the Kubernetes how-to. |
 | `DYN_REQUEST_PLANE` | `tcp` | Shared runtime request transport, independent of the WAN gRPC listener. |
-| `DYN_EVENT_PLANE` | Backend-dependent | Match worker event transport; the Kubernetes how-to uses `nats`. |
+| `DYN_EVENT_PLANE` | Backend-dependent | Match worker event transport: `zmq` for direct TCP events without NATS, or `nats`. Set explicitly in deployment manifests. |
 | `NATS_SERVER` | `nats://localhost:4222` | Address of the workers' NATS service when using the NATS event plane. |
 | `DYN_SYSTEM_PORT` | Disabled (`-1`) | Enables the runtime HTTP health and metrics server when set to a nonnegative port. |
 
 For connection settings and runtime defaults, see [Runtime Configuration](runtime-configuration.mdx).
+For direct event transport and TCP response-stream addressing, see
+[TCP-only deployment](../../kubernetes/kv-aware-routing/kv-dc-relay.md#tcp-only-local-planes-no-nats).
 For Kubernetes pod identity and RBAC, see [Deploy the DC KV Relay](../../kubernetes/kv-aware-routing/kv-dc-relay.md).
 Relay's CLI does not accept the Frontend's runtime CLI flags; configure the runtime through its
 environment variables.

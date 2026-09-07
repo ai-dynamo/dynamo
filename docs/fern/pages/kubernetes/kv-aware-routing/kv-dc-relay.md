@@ -20,9 +20,11 @@ requests or choose a destination data center. For the producer model, see
   and the WAN protocol. Older released images may not contain this module; use the repository's
   [container build instructions](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md)
   from the same revision.
-- The workers' NATS connection settings. This example uses Kubernetes discovery with the NATS
-  event plane and TCP request plane; it does not deploy a second NATS server.
-- Network access from Relay to the Kubernetes API, NATS, and advertised worker recovery endpoints.
+- The workers' event-plane settings: direct ZeroMQ (ZMQ) over TCP, or NATS. Only the NATS variant
+  requires a NATS server and its connection credentials.
+- Network access to the Kubernetes API and advertised worker event/recovery endpoints. TCP
+  recovery also needs a return path from workers to Relay's advertised response-stream address.
+  The NATS variant additionally requires access to the workers' NATS server.
 - `kubectl`, and `grpcurl` on the machine used for verification.
 - Kubernetes support for native gRPC startup and readiness probes.
 
@@ -61,10 +63,10 @@ discovery modes without checking the workers' registration mode.
 ## Deploy the Relay
 
 Save the following manifest as `kv-dc-relay.yaml`. Replace `REPLACE_WITH_RELAY_IMAGE` with your
-image and `nats://nats.dynamo-system.svc.cluster.local:4222` with the workers' NATS address.
-If NATS requires authentication, supply the same runtime connection credentials through Secrets,
-not literal credentials in the manifest. Set `--dc-id` to your stable logical data-center name.
-Add `imagePullSecrets` if your registry requires them.
+image and set `--dc-id` to your stable logical data-center name. Add `imagePullSecrets` if needed.
+The manifest uses TCP requests and NATS events. For a deployment without NATS, apply the
+[TCP-only settings](#tcp-only-local-planes-no-nats) below before deploying. Otherwise, replace
+the sample NATS address with the workers' address and supply any credentials through Secrets.
 
 The manifest runs one replica with `Recreate` updates. Restarting Relay changes its incarnation
 and requires consumers to reconnect; this is not an HA deployment. CPU and memory values are
@@ -199,6 +201,48 @@ This example assumes a trusted cluster network. The Service exposes plaintext gR
 authentication; `ClusterIP` does not itself restrict which pods can connect. Use local
 port-forwarding to inspect runtime diagnostic ports, which are not included in the Service.
 
+### TCP-Only Local Planes (No NATS)
+
+Use Kubernetes discovery, TCP requests, and direct ZMQ events for a deployment without a
+messaging server. `DYN_EVENT_PLANE=zmq` selects ZeroMQ over TCP; `tcp` is not an event-plane value.
+This is independent of the WAN Protobuf/gRPC listener on `5561`.
+
+In the Relay container's `env` list, replace the request/event-plane entries with the following
+and remove `NATS_SERVER`. Keep the other environment entries from the manifest:
+
+```yaml
+- name: DYN_REQUEST_PLANE
+  value: tcp
+- name: DYN_EVENT_PLANE
+  value: zmq
+- name: DYN_TCP_RESPONSE_STREAM_HOST
+  valueFrom:
+    fieldRef:
+      fieldPath: status.podIP
+- name: DYN_TCP_RESPONSE_STREAM_PORT
+  value: "5562"
+```
+
+The fixed response-stream port is optional; without it, the runtime allocates a free port.
+Port `5562` is used for worker responses to Relay's runtime requests, not for WAN subscriptions.
+It does not need to be added to the WAN Service: workers connect to the advertised pod address.
+
+Workers and other local event consumers must also use `DYN_EVENT_PLANE=zmq`. For an entirely
+TCP-based request path, configure workers with `DYN_REQUEST_PLANE=tcp`. Changing Relay alone
+does not migrate worker publishers. Keep worker KV-event publication enabled, and do not
+register a ZMQ broker for these scopes when using direct mode.
+
+Relay discovers direct ZMQ publishers through Kubernetes metadata and connects to their
+advertised TCP addresses. Allow those pod-to-pod connections, worker recovery requests, and
+the return path to Relay's response port. Publisher ports may be dynamically allocated;
+opening only `5561` is insufficient. On multi-interface workers, set `DYN_EVENT_PLANE_HOST`
+to a reachable pod IP if automatic selection advertises the wrong address. It changes the
+advertised address, not the listener's bind address; use routable IPv4 addresses for direct ZMQ.
+
+Discovery RBAC, the WAN Service, optional mTLS sidecar, and the gRPC checks below are unchanged.
+
+### Apply the Manifest
+
 ```bash
 kubectl -n dynamo apply -f kv-dc-relay.yaml
 kubectl -n dynamo rollout status deployment/kv-dc-relay --timeout=300s
@@ -307,7 +351,9 @@ tunnel, not the externally exposed mTLS path.
 | Kubernetes discovery reports forbidden | Check the ServiceAccount, RoleBinding namespace, and metadata/EndpointSlice permissions. |
 | Missing pod identity | Supply `POD_NAME`, `POD_UID`, and `POD_NAMESPACE` through the Downward API. |
 | Running pod, empty catalog | Check the Kubernetes namespace, logical filters, ready discovery-labeled EndpointSlices, metadata, KV event advertisements, and recovery endpoints. |
-| NATS connection failure or absent load | Match workers' NATS address and credentials; allow DNS and event-plane egress. |
+| NATS connection failure | Match workers' NATS address and credentials; allow DNS and event-plane egress. |
+| Missing events or load with ZMQ | Check worker/Relay event-plane settings, publisher discovery metadata, and reachability of advertised pod addresses and ports. |
+| TCP recovery timeout | Check Relay-to-worker recovery connectivity and the worker-to-Relay response-stream address/port. |
 | Catalog present, model not ready | Inspect the readiness stream's missing roles and member availability. Pool presence alone is not readiness. |
 | Listener unavailable | Check bind errors, pod logs, Service selectors, network connectivity, and whether a sidecar requires TLS. |
 | Client reports an oversized message | Raise client/proxy receive limits to match the Relay message limit. |
