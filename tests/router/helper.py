@@ -396,7 +396,7 @@ async def poll_for_worker_instances(
     while len(instance_ids) < expected_num_workers:
         instance_ids = client.instance_ids()
         if len(instance_ids) != last_logged:
-            logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
+            logger.info("Found %d instance(s): %s", len(instance_ids), instance_ids)
             last_logged = len(instance_ids)
 
         if len(instance_ids) >= expected_num_workers:

@@ -62,9 +62,14 @@ async def prefetch_model(model_path: str) -> str:
         logger.info(f"Model cached at: {local_path}")
         return str(local_path)
     except Exception as e:
+        # The binding raises the base ``Exception`` for every Rust-side failure
+        # (``to_pyerr``), so there is nothing narrower to catch. Falling back is
+        # deliberate: the workers, and the transformers branch of the KV-bytes
+        # estimate, still resolve the hub ID themselves.
         logger.warning(
-            f"Failed to pre-fetch model: {e}. "
-            "Workers will attempt individual downloads (may cause rate limiting)."
+            "Failed to pre-fetch model: %s. "
+            "Workers will attempt individual downloads (may cause rate limiting).",
+            e,
         )
         return model_path
 

@@ -71,32 +71,56 @@ def _config_get(config: Any, *names: str) -> Any:
     return None
 
 
-# Keys under which multimodal wrappers nest their language-model config. Mirrors
-# what transformers' ``get_text_config`` unwraps for the raw config.json path.
-_TEXT_CONFIG_KEYS = ("text_config", "llm_config", "language_config", "decoder")
+# Wrapper keys under which multimodal and multi-module configs nest the language
+# model's config, e.g. ``text_config`` (most VLMs) or ``thinker_config.text_config``
+# (Qwen2.5-Omni). Transformers' ``get_text_config`` picks the sub-config the same
+# way plus per-model overrides; a layout not found here falls back to transformers.
+_TEXT_CONFIG_KEYS = (
+    "text_config",
+    "llm_config",
+    "language_config",
+    "decoder",
+    "thinker_config",
+)
+# A raw config.json is used only when these appear verbatim. Legacy aliases such
+# as GPT-2's ``n_layer``/``n_embd`` are left to transformers' ``attribute_map``.
+_REQUIRED_KEYS = ("num_hidden_layers", "num_attention_heads", "hidden_size")
 
 
-def _text_config(config: dict[str, Any]) -> dict[str, Any]:
-    if "num_hidden_layers" in config and "hidden_size" in config:
+def _find_text_config(config: dict[str, Any], depth: int = 3) -> dict[str, Any] | None:
+    """Return the first dict carrying the required sizes, searching known wrappers."""
+    if all(isinstance(config.get(key), int) for key in _REQUIRED_KEYS):
         return config
+    if depth == 0:
+        return None
     for key in _TEXT_CONFIG_KEYS:
         sub = config.get(key)
-        if isinstance(sub, dict) and "num_hidden_layers" in sub:
-            return sub
-    return config
+        if isinstance(sub, dict):
+            found = _find_text_config(sub, depth - 1)
+            if found is not None:
+                return found
+    return None
 
 
 def _load_config(model_path: str) -> Any:
     """Return the model's text config for ``model_path`` as a dict or config object.
 
-    A local directory is read straight from its config.json so this path imports
-    neither ``transformers`` nor ``torch``. A bare hub ID still goes through
-    transformers as before.
+    A local directory whose config.json has the canonical layout is read directly,
+    so that path imports neither ``transformers`` nor ``torch``. Any other layout,
+    and a bare hub ID, go through transformers as before.
     """
     if os.path.isdir(model_path):
         with open(os.path.join(model_path, "config.json")) as f:
-            return _text_config(json.load(f))
+            text_config = _find_text_config(json.load(f))
+        if text_config is not None:
+            return text_config
+        logger.info(
+            "config.json layout not recognized, resolving %s through transformers",
+            model_path,
+        )
 
+    # Imported here on purpose: transformers pulls in torch, which dominates
+    # mocker startup, and the common path above does not need it.
     from transformers import AutoConfig
 
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=False)
@@ -124,24 +148,38 @@ def compute_kv_bytes_per_token(
     """
     try:
         config = _load_config(model_path)
-        num_layers = _config_get(config, "num_hidden_layers")
-        num_attention_heads = _config_get(config, "num_attention_heads")
-        num_kv_heads = _config_get(config, "num_key_value_heads", "num_kv_heads")
-        if num_kv_heads is None:
-            num_kv_heads = num_attention_heads
-        head_dim = _config_get(config, "hidden_size") // num_attention_heads
-        dtype_bytes = get_kv_cache_dtype_bytes(config, kv_cache_dtype)
-        kv_bytes = num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
-        logger.debug(
-            "Auto-computed kv_bytes_per_token=%s "
-            "(%s layers, %s kv_heads, %s head_dim, %s dtype_bytes)",
-            kv_bytes,
-            num_layers,
-            num_kv_heads,
-            head_dim,
-            dtype_bytes,
-        )
-        return kv_bytes
-    except Exception as e:
+    except (OSError, ValueError, KeyError) as e:
+        # No or unreadable config.json, invalid JSON, or a model type that
+        # transformers does not recognize. Anything else is a bug: let it raise.
         logger.warning("Could not compute kv_bytes_per_token from model config: %s", e)
         return None
+
+    num_layers = _config_get(config, "num_hidden_layers")
+    num_attention_heads = _config_get(config, "num_attention_heads")
+    hidden_size = _config_get(config, "hidden_size")
+    sizes = (num_layers, num_attention_heads, hidden_size)
+    if not all(isinstance(v, int) for v in sizes) or num_attention_heads == 0:
+        logger.warning(
+            "Could not compute kv_bytes_per_token: model config for %s lacks "
+            "layer, head, or hidden sizes (%s)",
+            model_path,
+            sizes,
+        )
+        return None
+
+    num_kv_heads = _config_get(config, "num_key_value_heads", "num_kv_heads")
+    if num_kv_heads is None:
+        num_kv_heads = num_attention_heads
+    head_dim = hidden_size // num_attention_heads
+    dtype_bytes = get_kv_cache_dtype_bytes(config, kv_cache_dtype)
+    kv_bytes = num_layers * 2 * num_kv_heads * head_dim * dtype_bytes
+    logger.debug(
+        "Auto-computed kv_bytes_per_token=%s "
+        "(%s layers, %s kv_heads, %s head_dim, %s dtype_bytes)",
+        kv_bytes,
+        num_layers,
+        num_kv_heads,
+        head_dim,
+        dtype_bytes,
+    )
+    return kv_bytes
