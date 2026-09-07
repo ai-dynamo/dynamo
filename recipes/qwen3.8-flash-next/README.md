@@ -233,13 +233,13 @@ A correct response should describe the visual content of the video frames.
 
 Benchmarked on B200, AIPerf trace-replay with 64K agentic trace (15% subset, 3,541 requests, 90% KV cache hit). ~130 requests exceeded the 262K context limit and were rejected (400 errors); ~3,411 requests completed successfully. All numbers below are from AIPerf's official `profile_export_aiperf.json` summary.
 
-| Recipe               | SKU  | Workers | GPUs | Concurrency | System output tok/s | Per-GPU tok/s | User output tok/s (P50) | TTFT P50 (ms) | ITL P50 (ms) | Prefix cache hit |
-|----------------------|------|---------|------|-------------|---------------------|---------------|-------------------------|---------------|--------------|-----------------|
-| Aggregated (15% subset) | B200 | 1 (TP4)  | 4  | 24 | 1,830  | 457.4 | 102.8 | 329 | 9.7 | 67.9% |
-| Aggregated (15% subset) | B200 | 2 (TP4×2) | 8  | 24 | 2,474  | 309.3 | 127.6 | 339 | 7.8 | 73.1% |
-| Aggregated (15% subset) | B200 | 3 (TP4×3) | 12 | 24 | 2,857  | 238.1 | 144.5 | 325 | 6.9 | 74.5% |
-| Disaggregated (15% subset) | B200 | 1P+1D (TP4×2) | 8  | 24 | 2,641  | 330.2 | 132.8 | 452 | 7.5 | 73.4% |
-| Disaggregated 2P1D (15% subset) | B200 | 2P+1D (TP4×3) | 12 | 24 | 2,735  | 227.9 | 133.4 | 407 | 7.5 | 77.2% |
+| Recipe               | SKU  | Workers | GPUs | Concurrency | System output tok/s | Per-GPU tok/s | User output tok/s (P50) | TTFT P50 (ms) | TTFT P90 (ms) | ITL P50 (ms) | ITL P90 (ms) | Prefix cache hit |
+|----------------------|------|---------|------|-------------|---------------------|---------------|-------------------------|---------------|---------------|--------------|--------------|-----------------|
+| Aggregated (15% subset) | B200 | 1 (TP4)  | 4  | 24 | 1,830  | 457.4 | 102.8 | 329 | 1,851 | 9.7 | 15.1 | 67.9% |
+| Aggregated (15% subset) | B200 | 2 (TP4×2) | 8  | 24 | 2,474  | 309.3 | 127.6 | 339 | 1,306 | 7.8 | 12.8 | 73.1% |
+| Aggregated (15% subset) | B200 | 3 (TP4×3) | 12 | 24 | 2,857  | 238.1 | 144.5 | 325 | 1,110 | 6.9 | 11.3 | 74.5% |
+| Disaggregated (15% subset) | B200 | 1P+1D (TP4×2) | 8  | 24 | 2,641  | 330.2 | 132.8 | 452 | 3,467 | 7.5 | 9.1 | 73.4% |
+| Disaggregated 2P1D (15% subset) | B200 | 2P+1D (TP4×3) | 12 | 24 | 2,735  | 227.9 | 133.4 | 407 | 1,165 | 7.5 | 8.9 | 77.2% |
 
 > **Note:** The 8-GPU aggregated recipe uses 2 workers (2×TP4) on a single node. Per-GPU throughput is lower (309 vs 458 tok/s/GPU) because the ultra-sparse model (6B active) is already compute-light — adding more workers improves aggregate throughput (+35%) and prefix cache hit rate (+5pp) but doesn't scale linearly due to shared memory bandwidth. ITL improves from 9.7 to 7.8 ms with more GPU resources per request.
 >
