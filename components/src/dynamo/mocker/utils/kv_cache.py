@@ -89,11 +89,9 @@ def _text_config(config: dict[str, Any]) -> dict[str, Any]:
 def _load_config(model_path: str) -> Any:
     """Return the model's text config for ``model_path`` as a dict or config object.
 
-    A local directory is read straight from its config.json. Importing
-    ``transformers`` costs several seconds and instantiating its config classes
-    imports ``torch``; together that was ~12 s of every mocker start, so the
-    common path (the mocker resolves hub IDs to the local cache first) must not
-    touch either. A bare hub ID still goes through transformers as before.
+    A local directory is read straight from its config.json so this path imports
+    neither ``transformers`` nor ``torch``. A bare hub ID still goes through
+    transformers as before.
     """
     if os.path.isdir(model_path):
         with open(os.path.join(model_path, "config.json")) as f:

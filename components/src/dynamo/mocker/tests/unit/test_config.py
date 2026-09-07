@@ -500,11 +500,6 @@ def test_get_kv_cache_dtype_bytes_supports_int8():
 def test_compute_kv_bytes_reads_local_config_json_without_transformers(
     monkeypatch, tmp_path
 ):
-    """A local model directory must be sized from config.json alone.
-
-    Importing transformers and instantiating its config classes (which import
-    torch) cost ~12 s per mocker start; the local path must not touch them.
-    """
     from dynamo.mocker.utils import kv_cache
 
     (tmp_path / "config.json").write_text(

@@ -81,11 +81,12 @@ async def worker():
     args.planner_profile_data = profile_data_result.npz_path
 
     try:
-        # Resolve the model to a local directory once, up front. Besides avoiding
-        # HuggingFace rate limiting with many workers, this keeps the KV-bytes
-        # estimate below from resolving a hub ID over the network on every start.
+        # Only when something needs the local files: many workers (rate limiting)
+        # or the KV-bytes estimate below (reads config.json).
         local_model_path = None
-        if args.model_path:
+        if args.model_path and (
+            args.num_workers > 1 or args.kv_bytes_per_token is None
+        ):
             local_model_path = await prefetch_model(args.model_path)
 
         engine_args = load_mocker_engine_args(args)
