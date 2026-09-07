@@ -120,6 +120,8 @@ async def test_accept_length_falls_back_to_configured_namespace():
         "get_avg_time_to_first_token",
         "get_avg_inter_token_latency",
         "get_avg_request_count",
+        "get_avg_input_sequence_tokens",
+        "get_avg_output_sequence_tokens",
     ],
 )
 async def test_invalid_required_metric_is_checked_before_float_logging(missing_method):

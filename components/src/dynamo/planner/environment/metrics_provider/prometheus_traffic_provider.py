@@ -83,7 +83,8 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
                 ", ".join(normalized_idle_metrics),
             )
 
-        if not m.is_valid():
+        num_req, isl, osl = m.num_req, m.isl, m.osl
+        if num_req is None or isl is None or osl is None or not m.is_valid():
             logger.info("Metrics contain None or NaN values, skipping")
             return None
 
@@ -103,9 +104,9 @@ class PrometheusTrafficProvider(TrafficMetricsProvider):
 
         return TrafficObservation(
             duration_s=duration_s,
-            num_req=m.num_req,
-            isl=m.isl,
-            osl=m.osl,
+            num_req=num_req,
+            isl=isl,
+            osl=osl,
             kv_hit_rate=m.kv_hit_rate,
             accept_length=m.accept_length,
         )
