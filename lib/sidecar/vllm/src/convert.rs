@@ -56,6 +56,7 @@ pub(crate) fn build_generate_request(
         // supplies the prompt KV.
         strip_multimodal_prompt_token_ids(&mut prefill_result);
     }
+    let skip_special_tokens = request.output_options.skip_special_tokens;
     let prompt_logprobs = request.output_options.prompt_logprobs;
     let output_logprobs = request.output_options.logprobs;
     let max_new_tokens = if mode.is_prefill() || mode.is_encode() {
@@ -81,6 +82,7 @@ pub(crate) fn build_generate_request(
     let stop_conditions = request.stop_conditions;
     let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
+    consume_vllm_tito(&mut extra_args)?;
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
     if has_media && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
         // These fields are already represented by token_ids and media.
@@ -131,6 +133,7 @@ pub(crate) fn build_generate_request(
             output_token_ids: true,
             output_logprobs: output_logprobs.is_some(),
             output_candidates: output_logprobs.map(top_n_candidates).transpose()?,
+            skip_special_tokens,
         }),
         kv: Some(kv),
         truncate_prompt_tokens: 0,
@@ -149,6 +152,82 @@ pub(crate) fn data_parallel_rank(
         DisaggregationMode::Prefill => routing.prefill_dp_rank.or(routing.dp_rank),
         DisaggregationMode::Aggregated | DisaggregationMode::Decode => routing.dp_rank,
     })
+}
+
+fn consume_vllm_tito(extra_args: &mut Option<serde_json::Value>) -> Result<(), DynamoError> {
+    let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() else {
+        return Ok(());
+    };
+    let Some(envelope) = extra.remove("vllm_tito") else {
+        return Ok(());
+    };
+    let serde_json::Value::Object(envelope) = envelope else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito must be a JSON object",
+        ));
+    };
+
+    for key in envelope.keys() {
+        if !matches!(
+            key.as_str(),
+            "request_id"
+                | "sampling_params"
+                | "model"
+                | "stream"
+                | "stream_options"
+                | "cache_salt"
+                | "priority"
+                | "kv_transfer_params"
+        ) {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.{key} is not supported by vLLM gRPC"
+            )));
+        }
+    }
+
+    let sampling = envelope.get("sampling_params").ok_or_else(|| {
+        client::invalid_argument("extra_args.vllm_tito.sampling_params is required")
+    })?;
+    let serde_json::Value::Object(sampling) = sampling else {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params must be a JSON object",
+        ));
+    };
+    for key in sampling.keys() {
+        if !matches!(
+            key.as_str(),
+            "temperature"
+                | "top_p"
+                | "top_k"
+                | "min_p"
+                | "seed"
+                | "max_tokens"
+                | "min_tokens"
+                | "presence_penalty"
+                | "frequency_penalty"
+                | "repetition_penalty"
+                | "stop_token_ids"
+                | "ignore_eos"
+                | "logprobs"
+                | "prompt_logprobs"
+                | "skip_reading_prefix_cache"
+                | "skip_special_tokens"
+                | "return_token_ids"
+        ) {
+            return Err(client::invalid_argument(format!(
+                "extra_args.vllm_tito.sampling_params.{key} is not supported by vLLM gRPC"
+            )));
+        }
+    }
+    if sampling
+        .get("return_token_ids")
+        .is_some_and(|value| value != &serde_json::Value::Bool(true))
+    {
+        return Err(client::invalid_argument(
+            "extra_args.vllm_tito.sampling_params.return_token_ids must be true",
+        ));
+    }
+    Ok(())
 }
 
 fn consume_redundant_nvext(
@@ -680,11 +759,6 @@ fn validate_request(
     if request.stop_conditions.max_thinking_tokens.is_some() {
         return Err(client::invalid_argument(
             "max_thinking_tokens is not supported by vLLM gRPC",
-        ));
-    }
-    if request.output_options.skip_special_tokens == Some(false) {
-        return Err(client::invalid_argument(
-            "skip_special_tokens=false is not supported by vLLM gRPC",
         ));
     }
     let sampling = &request.sampling_options;

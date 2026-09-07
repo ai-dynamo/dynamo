@@ -252,6 +252,7 @@ impl SamplingParams {
         StopConditions {
             max_tokens: self.max_tokens,
             min_tokens: self.min_tokens,
+            stop_token_ids_hidden: self.stop_token_ids.clone(),
             ignore_eos: Some(self.ignore_eos),
             ..Default::default()
         }
