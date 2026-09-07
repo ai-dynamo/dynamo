@@ -695,20 +695,20 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 		)...)
 	}
 
-	// Keep the component's multinode shape and explicit role names stable.
+	// Keep the component's multinode shape stable across updates.
 	if newComponent.IsMultinode() != oldComponent.IsMultinode() {
 		allErrs = append(allErrs, field.Invalid(
 			fldPath.Child("multinode"),
 			newComponent.Multinode,
 			"cannot change node topology between single-node and multi-node after creation",
 		))
+	} else {
+		allErrs = append(allErrs, validateComponentRolesUpdate(
+			newComponent,
+			oldComponent,
+			fldPath.Child("roles"),
+		)...)
 	}
-
-	allErrs = append(allErrs, validateComponentRolesUpdate(
-		newComponent.Roles,
-		oldComponent.Roles,
-		fldPath.Child("roles"),
-	)...)
 
 	// Protect replica ownership when a scaling adapter is present in either state.
 	if (newComponent.ScalingAdapter != nil || oldComponent.ScalingAdapter != nil) && !canModifyReplicas &&
@@ -792,14 +792,36 @@ func (v *sharedValidation) validateDynamoComponentDeploymentSharedSpecUpdate(
 	return allErrs
 }
 
-// validateComponentRolesUpdate keeps the explicit role-name set stable and
-// matches role-level provider identity by semantic name rather than list order.
+// validateComponentRolesUpdate permits equivalent role-mode migrations and
+// otherwise keeps explicit role names stable. Inputs must not be nil.
 func validateComponentRolesUpdate(
-	newRoles []nvidiacomv1beta1.ComponentRoleSpec,
-	oldRoles []nvidiacomv1beta1.ComponentRoleSpec,
+	newComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
+	oldComponent *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec,
 	fldPath *field.Path,
 ) field.ErrorList {
+	// Permit representation-only implicit/explicit migrations, but require
+	// role-specific configuration changes to happen in a subsequent update.
+	if (newComponent.Roles == nil) != (oldComponent.Roles == nil) {
+		explicitComponent := newComponent
+		implicitComponent := oldComponent
+		if explicitComponent.Roles == nil {
+			explicitComponent, implicitComponent = implicitComponent, explicitComponent
+		}
+		if explicitComponent.Multinode != nil && implicitComponent.Multinode != nil &&
+			explicitComponent.Multinode.NodeCount == implicitComponent.Multinode.NodeCount &&
+			dynamo.ExplicitMultinodeRolesMatchImplicit(explicitComponent) {
+			return nil
+		}
+		return field.ErrorList{field.Forbidden(
+			fldPath,
+			"cannot switch between implicit and explicit roles while changing the resolved role model; make the equivalent role structure explicit first",
+		)}
+	}
+
+	// Match role-level provider identity by semantic name rather than list order.
 	allErrs := field.ErrorList{}
+	newRoles := newComponent.Roles
+	oldRoles := oldComponent.Roles
 	oldByName := make(map[string]*nvidiacomv1beta1.ComponentRoleSpec, len(oldRoles))
 	for i := range oldRoles {
 		oldByName[oldRoles[i].Name] = &oldRoles[i]

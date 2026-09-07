@@ -99,6 +99,12 @@ func workerHashSpec(dcd *v1beta1.DynamoComponentDeployment) v1beta1.DynamoCompon
 	// explicit versions produce the same worker hash.
 	spec.RuntimeVersionOverride = ""
 
+	// An explicit declaration of the established multinode roles is a
+	// representation-only migration and must not create a worker generation.
+	if ExplicitMultinodeRolesMatchImplicit(&spec.DynamoComponentDeploymentSharedSpec) {
+		spec.Roles = nil
+	}
+
 	return *spec
 }
 

@@ -89,6 +89,26 @@ func TestComputeBetaDGDWorkersSpecHash_Deterministic(t *testing.T) {
 	assert.Len(t, h1, 8)
 }
 
+func TestComputeBetaDGDWorkersSpecHash_EquivalentExplicitRolesDoNotRoll(t *testing.T) {
+	t.Log("Build a multinode worker with the established implicit leader and worker layout")
+	implicit := betaDGD(t, baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {
+			ComponentType: commonconsts.ComponentTypeWorker,
+			Multinode:     &v1alpha1.MultinodeSpec{NodeCount: 4},
+		},
+	}))
+
+	t.Log("Make the same semantic role structure explicit in reverse declaration order")
+	explicit := implicit.DeepCopy()
+	explicit.Spec.Components[0].Roles = []v1beta1.ComponentRoleSpec{
+		{Name: v1beta1.ComponentRoleWorker, Replicas: ptr.To(int32(3))},
+		{Name: v1beta1.ComponentRoleLeader, Replicas: ptr.To(int32(1))},
+	}
+
+	t.Log("Verify the representation-only migration keeps the worker generation stable")
+	assert.Equal(t, mustComputeBetaDGDWorkersSpecHash(t, implicit), mustComputeBetaDGDWorkersSpecHash(t, explicit))
+}
+
 func TestComputeBetaDGDWorkersSpecHash_IgnoresNonWorkers(t *testing.T) {
 	withFrontend := baseDGD(map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 		"worker":   {ComponentType: commonconsts.ComponentTypeWorker},

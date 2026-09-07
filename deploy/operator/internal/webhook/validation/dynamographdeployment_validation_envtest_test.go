@@ -2140,14 +2140,32 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			}),
 		},
 		{
-			name: "implicit to explicit roles is a structural mutation",
+			name: "implicit to semantically equivalent explicit roles is allowed",
 			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
 			}),
 			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
 				setBetaExplicitMultinodeRoles(worker, 2)
 			}),
-			wantWebhookErrs: []string{"spec.components[1].roles: Invalid value: [{\"name\":\"leader\",\"replicas\":1},{\"name\":\"worker\",\"replicas\":1}]: role names are immutable after creation"},
+		},
+		{
+			name: "explicit to semantically equivalent implicit roles is allowed",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 2)
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+		},
+		{
+			name: "implicit to explicit roles cannot also change the resolved cardinality",
+			oldDeployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				worker.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDGDWithWorker(func(worker *nvidiacomv1beta1.DynamoComponentDeploymentSharedSpec) {
+				setBetaExplicitMultinodeRoles(worker, 3)
+			}),
+			wantWebhookErrs: []string{"spec.components[1].roles: Forbidden: cannot switch between implicit and explicit roles while changing the resolved role model; make the equivalent role structure explicit first"},
 		},
 		{
 			name: "explicit role list reorder is allowed",

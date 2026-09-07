@@ -1202,6 +1202,24 @@ func TestDynamoComponentDeploymentValidator_Validate(t *testing.T) {
 			wantWebhookErrs: []string{`spec.multinode: Invalid value: {"nodeCount":2}: cannot change node topology between single-node and multi-node after creation`},
 		},
 		{
+			name: "v1beta1 implicit to semantically equivalent explicit roles is allowed",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				setBetaExplicitMultinodeRoles(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
+			}),
+		},
+		{
+			name: "v1beta1 explicit to semantically equivalent implicit roles is allowed",
+			oldDeployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				setBetaExplicitMultinodeRoles(&dcd.Spec.DynamoComponentDeploymentSharedSpec, 2)
+			}),
+			deployment: betaDCDForAdmission(func(dcd *nvidiacomv1beta1.DynamoComponentDeployment) {
+				dcd.Spec.Multinode = &nvidiacomv1beta1.MultinodeSpec{NodeCount: 2}
+			}),
+		},
+		{
 			name:               "v1alpha1 update aggregates create and DCD-specific update errors",
 			seedWithoutWebhook: true,
 			oldDeployment: alphaDCDWithSharedSpec(nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{

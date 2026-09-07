@@ -1355,6 +1355,39 @@ func explicitRoleReplicas(roles []v1beta1.ComponentRoleSpec, name string, implic
 	return implicit
 }
 
+// ExplicitMultinodeRolesMatchImplicit reports whether the authored roles carry
+// exactly the established cardinality-only multinode structure.
+// component must not be nil.
+func ExplicitMultinodeRolesMatchImplicit(component *v1beta1.DynamoComponentDeploymentSharedSpec) bool {
+	if component.Multinode == nil || len(component.Roles) != 2 {
+		return false
+	}
+
+	// Require each role exactly once with no role-specific provider behavior.
+	seen := map[string]bool{}
+	for i := range component.Roles {
+		role := &component.Roles[i]
+		if seen[role.Name] || role.ProviderOverride != nil || role.Replicas == nil {
+			return false
+		}
+		seen[role.Name] = true
+
+		var expected int32
+		switch role.Name {
+		case v1beta1.ComponentRoleLeader:
+			expected = 1
+		case v1beta1.ComponentRoleWorker:
+			expected = component.Multinode.NodeCount - 1
+		default:
+			return false
+		}
+		if *role.Replicas != expected {
+			return false
+		}
+	}
+	return true
+}
+
 func expandSingleNodeGMSRoles(componentName string, totalEnginePods int32) []ServiceRole {
 	return []ServiceRole{
 		{Name: fmt.Sprintf("%s-%s-0", componentName, commonconsts.GroveRoleSuffixGMS), Role: RoleGMS, Replicas: 1, Rank: 0},
