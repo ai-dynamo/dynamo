@@ -95,14 +95,13 @@ spec:
         spec:
           containers:
             - name: main
-              image: vllm/vllm-openai:qwen38-flash-next
+              image: nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.2
               imagePullPolicy: IfNotPresent
               workingDir: /workspace
               command: ["/bin/bash", "-lc"]
               args:
                 - |
                   set -Eeuo pipefail
-                  pip install --no-cache-dir ai-dynamo==1.4.2
                   exec python3 -m dynamo.frontend \
                     --router-mode kv \
                     --router-kv-events \

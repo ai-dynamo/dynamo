@@ -59,7 +59,8 @@ Dynamo + vLLM deployment profiles for the B200 agentic workload (64K ISL / 400 O
 
 1. **Dynamo Platform installed** — see [Kubernetes Deployment Guide](../../docs/fern/pages/kubernetes/getting-started/quickstart.mdx).
 2. **vLLM image**: `vllm/vllm-openai:qwen38-flash-next` — a model-specific vLLM build with GDN/QSA
-   kernels. `ai-dynamo` is pip-installed at pod startup.
+   kernels. `ai-dynamo` is pip-installed at pod startup. The frontend uses
+   `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.2` (ai-dynamo baked in, no pip install).
 3. **Hugging Face access** to `Inferact/Qwen3.8-Flash-Next-NVFP4`.
 4. **Host memory**: ≥ 51 GB per worker for N-gram embedding offload (`VLLM_PLE_CPU_OFFLOAD=1`).
 5. **RDMA device plugin** (disaggregated only): The disagg manifests request
@@ -270,8 +271,10 @@ Non-obvious knobs, all already set in the manifest:
   uses the built-in Multi-Token Prediction module for 3 draft tokens per step.
 - **Event-driven KV routing.** Workers publish KV events (`--kv-events-config` over ZMQ), and the
   frontend uses `--router-mode kv --router-kv-events` for prefix-cache-aware routing.
-- **Image.** `vllm/vllm-openai:qwen38-flash-next` is a model-specific vLLM build with GDN/QSA kernels.
-  `ai-dynamo==1.4.2` is pip-installed at pod startup because the upstream image does not ship dynamo.
+- **Image.** The frontend uses `nvcr.io/nvidia/ai-dynamo/dynamo-frontend:1.4.2` (ai-dynamo
+  baked in). Workers use `vllm/vllm-openai:qwen38-flash-next` — a model-specific vLLM build with
+  GDN/QSA kernels. `ai-dynamo==1.4.2` is pip-installed at worker pod startup because the
+  upstream image does not ship dynamo.
 - **Runtime version override.** `runtimeVersionOverride: "1.4.2"` is required on each component
   when using a non-semver image tag (e.g. `qwen38-flash-next`). The DGD operator uses this to
   determine API compatibility.
