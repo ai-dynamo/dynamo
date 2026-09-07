@@ -151,16 +151,16 @@ def test_generic_failover_shadow_mode_enables_shared_geometry(monkeypatch):
     assert kv_identity.use_existing_shared_geometry()
 
 
-def test_vllm_v2_device_index_uses_current_cuda_device_for_unindexed_cuda(
-    monkeypatch,
-):
-    from types import SimpleNamespace
+def test_current_vllm_exposes_native_kv_allocation_context():
+    assert install_vmm_ipc_kv.native_kv_allocation_hook_available()
 
-    from gpu_memory_service.integrations.vllm import install_vmm_ipc_kv
 
-    monkeypatch.setattr(install_vmm_ipc_kv, "_current_cuda_device", lambda: 3)
+def test_native_kv_allocation_context_check_detects_worker_drift(monkeypatch):
+    from vllm.v1.worker.gpu_worker import Worker
 
-    assert install_vmm_ipc_kv._device_index(SimpleNamespace(index=None)) == 3
+    monkeypatch.setattr(Worker, "initialize_from_config", lambda self, config: None)
+
+    assert not install_vmm_ipc_kv.native_kv_allocation_hook_available()
 
 
 def test_geometry_wait_honors_vllm_specific_timeout(monkeypatch):
