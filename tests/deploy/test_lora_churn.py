@@ -93,7 +93,6 @@ def _dgd_manifest_path(tmp_path: Path) -> Path:
 
 
 def _adapter_present(base_url: str) -> bool:
-    """Return whether the loaded adapter is advertised by the frontend."""
     response = requests.get(f"{base_url}/v1/models", timeout=10)
     response.raise_for_status()
     return any(
@@ -102,14 +101,12 @@ def _adapter_present(base_url: str) -> bool:
 
 
 def _adapter_removed(base_url: str) -> bool:
-    """Return whether discovery has removed the unloaded adapter."""
     loras = requests.get(f"{base_url}/v1/loras", timeout=10)
     loras.raise_for_status()
     return not _adapter_present(base_url) and loras.json().get("count") == 0
 
 
 def _wait_for(predicate: Callable[[], bool], description: str) -> None:
-    """Wait for a condition or fail after the unload timeout."""
     deadline = time.monotonic() + UNLOAD_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if predicate():
@@ -119,7 +116,6 @@ def _wait_for(predicate: Callable[[], bool], description: str) -> None:
 
 
 def _load_lora(base_url: str) -> None:
-    """Register the test adapter and wait until it is routable."""
     response = requests.post(
         f"{base_url}/v1/loras",
         json={"lora_name": LORA_NAME, "source": {"uri": LORA_SOURCE}},
@@ -130,7 +126,6 @@ def _load_lora(base_url: str) -> None:
 
 
 def _unload_lora(base_url: str) -> None:
-    """Remove the test adapter and wait until discovery releases it."""
     response = requests.delete(f"{base_url}/v1/loras/{LORA_NAME}", timeout=60)
     assert response.ok, response.text
     _wait_for(lambda: _adapter_removed(base_url), "LoRA to leave discovery")
@@ -141,7 +136,6 @@ def _assert_bounded_growth(
     current: dict[str, dict[str, int]],
     cycle: int,
 ) -> None:
-    """Assert measurements remain within the leak regression bounds."""
     for service_name, baseline_values in baseline.items():
         current_values = current[service_name]
         assert current_values["fds"] <= baseline_values["fds"] + MAX_FD_GROWTH, (
