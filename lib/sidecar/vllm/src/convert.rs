@@ -11,6 +11,7 @@ use crate::json::{json_to_struct, struct_to_json};
 use crate::proto as pb;
 
 const VLLM_LOGPROB_FLOOR: f64 = -9999.0;
+const MULTIMODAL_PROMPT_TOKEN_IDS_KEY: &str = "_dynamo_sidecar_multimodal_prompt_token_ids";
 const MM_HASHES_KEY: &str = "mm_hashes";
 const IMAGE_URL_KEY: &str = "image_url";
 const VIDEO_URL_KEY: &str = "video_url";
@@ -30,6 +31,9 @@ pub(crate) fn build_generate_request(
         .multi_modal_data
         .as_ref()
         .is_some_and(|media| media.values().any(|items| !items.is_empty()));
+    // Decode receives prompt KV from prefill, but vLLM still needs the original
+    // media metadata to initialize model-specific multimodal positions (for
+    // example Qwen-VL mRoPE). A full KV hit prevents duplicate prompt compute.
     let has_images = request
         .multi_modal_data
         .as_ref()
@@ -43,16 +47,23 @@ pub(crate) fn build_generate_request(
         None
     };
     let media = build_media(&request, forwarded_image_uuids.as_deref())?;
-    let prefill_result = request.prefill_result;
+    let mut prefill_result = request.prefill_result;
     let token_ids = request.token_ids;
+    if mode.is_decode() && has_media {
+        // Remove sidecar-private prefill metadata before the KV handoff is
+        // serialized to vLLM. Decode rebuilds the expanded prompt and
+        // multimodal positions from the original prompt and media while NIXL
+        // supplies the prompt KV.
+        strip_multimodal_prompt_token_ids(&mut prefill_result);
+    }
     let prompt_logprobs = request.output_options.prompt_logprobs;
     let output_logprobs = request.output_options.logprobs;
-    let max_new_tokens = if mode.is_prefill() {
+    let max_new_tokens = if mode.is_prefill() || mode.is_encode() {
         1
     } else {
         request.stop_conditions.max_tokens.unwrap_or(0)
     };
-    let min_new_tokens = if mode.is_prefill() {
+    let min_new_tokens = if mode.is_prefill() || mode.is_encode() {
         1
     } else {
         request.stop_conditions.min_tokens.unwrap_or(0)
@@ -68,6 +79,7 @@ pub(crate) fn build_generate_request(
 
     let sampling = request.sampling_options;
     let stop_conditions = request.stop_conditions;
+    let encoder_result = request.encoder_result;
     let mut extra_args = request.extra_args;
     consume_redundant_nvext(&mut extra_args, cache_salt.as_deref())?;
     if has_media && let Some(serde_json::Value::Object(extra)) = extra_args.as_mut() {
@@ -76,7 +88,7 @@ pub(crate) fn build_generate_request(
         extra.remove("formatted_prompt");
         extra.remove(MM_HASHES_KEY);
     }
-    let kv = build_kv_parameters(extra_args, prefill_result, cache_salt, mode)?;
+    let kv = build_kv_parameters(extra_args, prefill_result, encoder_result, cache_salt, mode)?;
 
     Ok(pb::GenerateRequest {
         request_id,
@@ -112,7 +124,7 @@ pub(crate) fn build_generate_request(
             ignore_eos: stop_conditions.ignore_eos.unwrap_or(false),
         }),
         response: Some(pb::ResponseOptions {
-            prompt_token_ids: prompt_logprobs.is_some(),
+            prompt_token_ids: prompt_logprobs.is_some() || (has_media && mode.is_prefill()),
             prompt_logprobs: prompt_logprobs.is_some(),
             prompt_candidates: prompt_logprobs.map(top_n_candidates).transpose()?,
             output_text: Some(true),
@@ -132,12 +144,10 @@ pub(crate) fn data_parallel_rank(
     request: &PreprocessedRequest,
     mode: DisaggregationMode,
 ) -> Option<u32> {
-    request.routing.as_ref().and_then(|routing| {
-        if mode.is_prefill() {
-            routing.prefill_dp_rank.or(routing.dp_rank)
-        } else {
-            routing.dp_rank
-        }
+    request.routing.as_ref().and_then(|routing| match mode {
+        DisaggregationMode::Encode => None,
+        DisaggregationMode::Prefill => routing.prefill_dp_rank.or(routing.dp_rank),
+        DisaggregationMode::Aggregated | DisaggregationMode::Decode => routing.dp_rank,
     })
 }
 
@@ -188,6 +198,15 @@ fn consume_redundant_nvext(
         extra.remove("nvext");
     }
     Ok(())
+}
+
+fn strip_multimodal_prompt_token_ids(prefill_result: &mut Option<PrefillResult>) {
+    if let Some(params) = prefill_result
+        .as_mut()
+        .and_then(|result| result.disaggregated_params.as_object_mut())
+    {
+        params.remove(MULTIMODAL_PROMPT_TOKEN_IDS_KEY);
+    }
 }
 
 fn media_source(modality: &str, source: &str) -> Result<pb::media_item::Source, DynamoError> {
@@ -271,6 +290,20 @@ fn forwarded_image_uuids(
         .map(Some)
 }
 
+fn validate_media_uuid(uuid: &str) -> Result<(), DynamoError> {
+    if uuid == "."
+        || uuid == ".."
+        || uuid
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '\0'))
+    {
+        return Err(client::invalid_argument(
+            "multimodal media uuid must be a safe identifier without path separators, NUL bytes, or dot path components",
+        ));
+    }
+    Ok(())
+}
+
 fn build_media(
     request: &PreprocessedRequest,
     forwarded_uuids: Option<&[String]>,
@@ -351,6 +384,9 @@ fn build_media(
             } else {
                 String::new()
             };
+            if !uuid.is_empty() {
+                validate_media_uuid(&uuid)?;
+            }
             media.push(pb::MediaItem {
                 modality: modality as i32,
                 source: Some(source),
@@ -438,6 +474,7 @@ fn structured_output(
 fn build_kv_parameters(
     extra_args: Option<serde_json::Value>,
     prefill_result: Option<PrefillResult>,
+    encoder_result: Option<serde_json::Value>,
     cache_salt: Option<String>,
     mode: DisaggregationMode,
 ) -> Result<pb::KvCacheParameters, DynamoError> {
@@ -499,11 +536,22 @@ fn build_kv_parameters(
             stringify_remote_port(&mut params);
             Some(params)
         }
-        DisaggregationMode::Encode => {
-            return Err(client::invalid_argument(
-                "encode mode is not supported by the vLLM sidecar",
-            ));
-        }
+        DisaggregationMode::Encode => None,
+    };
+
+    let ec_transfer_params = match mode {
+        DisaggregationMode::Aggregated
+        | DisaggregationMode::Prefill
+        | DisaggregationMode::Decode => match encoder_result {
+            None => None,
+            Some(serde_json::Value::Object(params)) => Some(serde_json::Value::Object(params)),
+            Some(_) => {
+                return Err(client::invalid_argument(
+                    "encoder_result must be a JSON object",
+                ));
+            }
+        },
+        DisaggregationMode::Encode => None,
     };
 
     Ok(pb::KvCacheParameters {
@@ -512,7 +560,7 @@ fn build_kv_parameters(
             .map(|cache_salt| format!("{DYNAMO_CACHE_SALT_PREFIX}{cache_salt}"))
             .unwrap_or_default(),
         kv_transfer_params: kv_transfer_params.map(json_to_struct).transpose()?,
-        ec_transfer_params: None,
+        ec_transfer_params: ec_transfer_params.map(json_to_struct).transpose()?,
     })
 }
 
@@ -569,14 +617,34 @@ fn validate_request(
             "prompt embeddings are not supported by vLLM gRPC",
         ));
     }
-    if request.mm_processor_kwargs.is_some() || request.encoder_result.is_some() {
+    if request.mm_processor_kwargs.is_some() {
         return Err(client::invalid_argument(
             "preprocessed multimodal features are not supported by vLLM gRPC",
         ));
     }
-    if mode.is_encode() {
+    let has_media = request
+        .multi_modal_data
+        .as_ref()
+        .is_some_and(|media| media.values().any(|items| !items.is_empty()));
+    if mode.is_encode() && !has_media {
         return Err(client::invalid_argument(
-            "encode mode is not supported by the vLLM sidecar",
+            "encode requests require multimodal media",
+        ));
+    }
+    if mode.is_encode()
+        && request.multi_modal_data.as_ref().is_some_and(|media| {
+            media
+                .iter()
+                .any(|(modality, items)| modality != IMAGE_URL_KEY && !items.is_empty())
+        })
+    {
+        return Err(client::invalid_argument(
+            "encode requests support image media only",
+        ));
+    }
+    if mode.is_encode() && request.encoder_result.is_some() {
+        return Err(client::invalid_argument(
+            "encode requests must not include encoder_result",
         ));
     }
     if request
@@ -637,8 +705,9 @@ fn validate_request(
 pub(crate) struct ResponseState {
     prompt_tokens: u32,
     has_media: bool,
+    multimodal_prompt_token_ids: Option<Vec<u32>>,
     completion_tokens: u32,
-    is_prefill: bool,
+    mode: DisaggregationMode,
     output_logprobs: Option<u32>,
     expect_prompt_logprobs: bool,
     prompt_info: Option<pb::PromptInfo>,
@@ -652,8 +721,9 @@ impl ResponseState {
                 .multi_modal_data
                 .as_ref()
                 .is_some_and(|media| media.values().any(|items| !items.is_empty())),
+            multimodal_prompt_token_ids: None,
             completion_tokens: 0,
-            is_prefill: mode.is_prefill(),
+            mode,
             output_logprobs: request.output_options.logprobs,
             expect_prompt_logprobs: request.output_options.prompt_logprobs.is_some(),
             prompt_info: None,
@@ -661,7 +731,7 @@ impl ResponseState {
     }
 
     pub(crate) fn reported_completion_tokens(&self) -> u32 {
-        if self.is_prefill {
+        if self.mode.is_prefill() || self.mode.is_encode() {
             0
         } else {
             self.completion_tokens
@@ -696,8 +766,15 @@ impl ResponseState {
             )));
         }
 
+        if self.mode.is_encode() && output.num_tokens > 0 {
+            return Err(client::protocol_error(
+                "encode response produced output tokens",
+            ));
+        }
+
         let mapped_logprobs = if let Some(count) = self.output_logprobs
-            && !self.is_prefill
+            && !self.mode.is_prefill()
+            && !self.mode.is_encode()
         {
             Some(map_output_logprobs(&output, count > 0)?)
         } else {
@@ -713,12 +790,12 @@ impl ResponseState {
 
         self.completion_tokens = self.completion_tokens.saturating_add(num_tokens);
         let mut mapped = LLMEngineOutput {
-            token_ids: if self.is_prefill {
+            token_ids: if self.mode.is_prefill() || self.mode.is_encode() {
                 Vec::new()
             } else {
                 token_ids
             },
-            text: if self.is_prefill || text.is_empty() {
+            text: if self.mode.is_prefill() || self.mode.is_encode() || text.is_empty() {
                 None
             } else {
                 Some(text)
@@ -732,7 +809,7 @@ impl ResponseState {
         }
 
         let Some(finish) = finish_info else {
-            return if self.is_prefill || num_tokens == 0 {
+            return if self.mode.is_prefill() || self.mode.is_encode() || num_tokens == 0 {
                 Ok(None)
             } else {
                 Ok(Some(mapped))
@@ -768,11 +845,59 @@ impl ResponseState {
             pb::finish_info::StopReason::StopString(value) => StopReason::String(value),
         });
         mapped.completion_usage = Some(usage(self.prompt_tokens, completion_tokens));
+        if self.mode.is_encode() {
+            if matches!(
+                mapped.finish_reason,
+                Some(dynamo_backend_common::FinishReason::Cancelled)
+            ) {
+                return Ok(Some(mapped));
+            }
+            if !matches!(
+                mapped.finish_reason,
+                Some(dynamo_backend_common::FinishReason::Stop)
+            ) {
+                return Err(client::protocol_error(format!(
+                    "encode terminal has invalid finish reason {:?}; expected stop or cancelled",
+                    mapped.finish_reason
+                )));
+            }
+            let params = finish
+                .ec_transfer_params
+                .map(struct_to_json)
+                .transpose()?
+                .and_then(|value| value.as_object().cloned())
+                .ok_or_else(|| {
+                    client::protocol_error("encode terminal is missing valid ec_transfer_params")
+                })?;
+            return Ok(Some(LLMEngineOutput::encode_terminal(params)));
+        }
         mapped.disaggregated_params = finish.kv_transfer_params.map(struct_to_json).transpose()?;
-        if self.is_prefill && mapped.disaggregated_params.is_none() {
+        if self.mode.is_prefill() && mapped.disaggregated_params.is_none() {
             return Err(client::protocol_error(
                 "prefill terminal is missing kv_transfer_params",
             ));
+        }
+        if self.mode.is_prefill() && self.has_media {
+            let token_ids = self.multimodal_prompt_token_ids.take().ok_or_else(|| {
+                client::protocol_error(
+                    "multimodal prefill did not return expanded prompt token IDs",
+                )
+            })?;
+            let params = mapped
+                .disaggregated_params
+                .as_mut()
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| {
+                    client::protocol_error("prefill kv_transfer_params is not a JSON object")
+                })?;
+            params.insert(
+                MULTIMODAL_PROMPT_TOKEN_IDS_KEY.to_string(),
+                serde_json::to_value(token_ids).map_err(|error| {
+                    client::protocol_error(format!(
+                        "failed to encode multimodal prefill token IDs: {error}"
+                    ))
+                })?,
+            );
         }
         self.attach_prompt_data(&mut mapped);
         Ok(Some(mapped))
@@ -794,6 +919,16 @@ impl ResponseState {
             }
             // vLLM's count includes expanded media tokens.
             self.prompt_tokens = prompt.num_prompt_tokens;
+        }
+        if self.mode.is_prefill() && self.has_media {
+            if prompt.token_ids.len() != prompt.num_prompt_tokens as usize {
+                return Err(client::protocol_error(format!(
+                    "multimodal prefill returned {} prompt token IDs for {} prompt tokens",
+                    prompt.token_ids.len(),
+                    prompt.num_prompt_tokens
+                )));
+            }
+            self.multimodal_prompt_token_ids = Some(prompt.token_ids.clone());
         }
         if !self.expect_prompt_logprobs {
             return Ok(());

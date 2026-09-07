@@ -296,8 +296,8 @@ def _build_publisher_stub(
     *,
     attention_dp_size: int,
     fpm_enabled: bool,
-    publish_kv_events: bool = True,
     publish_metrics: bool = True,
+    kv_event_publication_mode: publisher_mod.KvEventPublicationMode = publisher_mod.KvEventPublicationMode.POLLING,
 ):
     """Bypass Publisher.__init__ (heavy deps) and seed only the attributes
     initialize() reads or writes. All side-effecty subsystems are stubbed
@@ -319,8 +319,10 @@ def _build_publisher_stub(
     pub.metrics_collector = None
     pub.kv_state_endpoint = None
     pub.image_token_id = None
-    pub.publish_kv_events = publish_kv_events
     pub.publish_metrics = publish_metrics
+    pub.kv_event_publication_mode = kv_event_publication_mode
+    pub.streaming_kv_events_config = None
+    pub.streaming_kv_events_gpus_per_node = None
     pub.attention_dp_size = attention_dp_size
     pub.fpm_enabled = fpm_enabled
     pub.processing_initial_created_events = True
@@ -364,6 +366,56 @@ def _build_publisher_stub(
     return pub, publisher_mod, fake_fpm_cls
 
 
+def test_streaming_kv_events_create_direct_subscribers_without_engine_polling(
+    monkeypatch,
+):
+    pub, module, _ = _build_publisher_stub(
+        monkeypatch,
+        attention_dp_size=2,
+        fpm_enabled=True,
+    )
+    pub.kv_event_publication_mode = publisher_mod.KvEventPublicationMode.STREAMING
+    pub.streaming_kv_events_config = {
+        "endpoint": "tcp://*:5557",
+        "topic": "kv-events",
+    }
+    pub.streaming_kv_events_gpus_per_node = 1
+    monkeypatch.setenv("DYN_TRTLLM_KV_EVENT_HOSTS", "worker01,worker02")
+
+    pub.initialize()
+
+    calls = module.KvEventPublisher.call_args_list
+    assert [call.kwargs["zmq_endpoint"] for call in calls] == [
+        "tcp://worker01:5557",
+        "tcp://worker02:5558",
+    ]
+    pub._init_publish_kv_cache_events_thread.assert_not_called()
+
+
+def test_streaming_kv_events_fall_back_to_slurm_hosts(monkeypatch):
+    monkeypatch.delenv("DYN_TRTLLM_KV_EVENT_HOSTS", raising=False)
+    monkeypatch.setenv("SLURM_STEP_NODELIST", "worker[01-03]")
+
+    assert publisher_mod._streaming_kv_event_hosts(2, 1) == [
+        "worker01",
+        "worker02",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "rank", "expected"),
+    [
+        ("ipc:///tmp/kv-events", 1, "ipc:///tmp/kv-events_dp1"),
+        ("inproc://kv-events", 2, "inproc://kv-events_dp2"),
+        ("tcp://127.0.0.1:5557", 2, "tcp://127.0.0.1:5559"),
+    ],
+)
+def test_streaming_kv_event_endpoint_offset_matches_trtllm_streaming_manager(
+    endpoint, rank, expected
+):
+    assert publisher_mod._offset_endpoint_port(endpoint, rank) == expected
+
+
 def test_publisher_initialize_constructs_fpm_direct_publisher_when_fpm_enabled(
     monkeypatch,
 ):
@@ -385,8 +437,8 @@ def test_publisher_initialize_metrics_only_does_not_start_kv_events(monkeypatch)
         monkeypatch,
         attention_dp_size=1,
         fpm_enabled=True,
-        publish_kv_events=False,
         publish_metrics=True,
+        kv_event_publication_mode=publisher_mod.KvEventPublicationMode.DISABLED,
     )
     pub.initialize()
 
@@ -400,7 +452,6 @@ def test_publisher_initialize_kv_events_only_does_not_start_metrics(monkeypatch)
         monkeypatch,
         attention_dp_size=1,
         fpm_enabled=True,
-        publish_kv_events=True,
         publish_metrics=False,
     )
     pub.initialize()
