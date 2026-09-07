@@ -244,3 +244,29 @@ async def test_cross_process_race(lock_path):
 
     # Both finished — both eventually acquired
     assert {r["engine_id"] for r in results} == {"p1", "p2"}
+
+
+@pytest.mark.asyncio
+async def test_release_nowait_is_thread_safe_and_idempotent(lock_path):
+    lock = FlockFailoverLock(lock_path)
+    await lock.acquire("engine-thread")
+
+    results = []
+
+    def release():
+        results.append(lock.release_nowait())
+
+    import threading
+
+    threads = [threading.Thread(target=release) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(results) == [False, True]
+    assert lock._fd is None
+
+    contender = FlockFailoverLock(lock_path)
+    await contender.acquire("contender", timeout=0.1)
+    await contender.release()
