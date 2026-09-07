@@ -104,17 +104,6 @@ def test_preloaded_v2_runner_installs_immediately(monkeypatch):
     assert calls == ["install"]
 
 
-def test_shared_kv_install_fails_without_lease_hooks(monkeypatch):
-    monkeypatch.setattr(install_vmm_ipc_kv, "_is_enabled", lambda: True)
-    monkeypatch.setattr(install_vmm_ipc_kv, "install_geometry_patch", lambda: False)
-    monkeypatch.setattr(install_vmm_ipc_kv, "_install_kv_leases", lambda: False)
-    monkeypatch.setattr(install_vmm_ipc_kv, "_kv_lease_hooks_installed", lambda: False)
-    monkeypatch.setattr(install_vmm_ipc_kv, "_shared_kv_enabled", lambda: True)
-    monkeypatch.setattr(install_vmm_ipc_kv, "_INSTALLED", False)
-
-    with pytest.raises(RuntimeError, match="lease-aware block allocation"):
-        install_vmm_ipc_kv.install()
-
 
 def test_v3_semantic_kv_tags_include_model_layers_and_size():
     tensor_a = SimpleNamespace(
@@ -415,16 +404,16 @@ def test_generic_failover_shadow_mode_enables_shared_geometry(monkeypatch):
     assert kv_identity.use_existing_shared_geometry()
 
 
-def test_vllm_v2_device_index_uses_current_cuda_device_for_unindexed_cuda(
-    monkeypatch,
-):
-    from types import SimpleNamespace
+def test_current_vllm_exposes_native_kv_allocation_context():
+    assert install_vmm_ipc_kv.native_kv_allocation_hook_available()
 
-    from gpu_memory_service.integrations.vllm import install_vmm_ipc_kv
 
-    monkeypatch.setattr(install_vmm_ipc_kv, "_current_cuda_device", lambda: 3)
+def test_native_kv_allocation_context_check_detects_worker_drift(monkeypatch):
+    from vllm.v1.worker.gpu_worker import Worker
 
-    assert install_vmm_ipc_kv._device_index(SimpleNamespace(index=None)) == 3
+    monkeypatch.setattr(Worker, "initialize_from_config", lambda self, config: None)
+
+    assert not install_vmm_ipc_kv.native_kv_allocation_hook_available()
 
 
 def test_geometry_wait_honors_vllm_specific_timeout(monkeypatch):

@@ -25,9 +25,8 @@ from gpu_memory_service.client.torch.allocator import (
     get_gms_client_memory_manager,
     get_or_create_gms_client_memory_manager,
     get_or_create_persistent_allocator,
-    gms_use_persistent_pool,
 )
-from gpu_memory_service.common.locks import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.locks import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path, is_scratch_kv_enabled
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import (
@@ -46,6 +45,9 @@ from gpu_memory_service.integrations.vllm.install_kv_leases import (
 from gpu_memory_service.integrations.vllm.install_vmm_ipc_kv import (
     install as install_vmm_ipc_kv,
 )
+from gpu_memory_service.integrations.vllm.install_vmm_ipc_kv import (
+    persistent_kv_allocation_context,
+)
 from gpu_memory_service.integrations.vllm.kv_identity import (
     allocation_engine_id,
     allocation_shared,
@@ -54,7 +56,6 @@ from gpu_memory_service.integrations.vllm.kv_identity import (
 )
 from gpu_memory_service.integrations.vllm.model_loader import (
     abort_pending_gms_write,
-    get_imported_weights_bytes,
     get_mx_load_context,
     publish_pending_gms_write,
     register_gms_loader,
@@ -197,43 +198,28 @@ def _get_dp_adjusted_local_rank(local_rank: int, parallel_config) -> int:
     return adjusted_local_rank
 
 
+def _resolve_gms_visible_device(local_rank: int, parallel_config, platform) -> int:
+    """Resolve the CUDA ordinal before vLLM takes its first snapshot.
+
+    Current vLLM supports an explicit logical-to-physical GPU assignment and
+    translates that assignment back into the process-visible CUDA ordinal.
+    GMS connects before ``Worker.init_device()``, so it must install and apply
+    the same mapping itself or it can attach to a different GPU's daemon than
+    the worker that vLLM initializes moments later.
+    """
+    assigned_physical_gpu_ids = getattr(
+        parallel_config, "assigned_physical_gpu_ids", None
+    )
+    if assigned_physical_gpu_ids is not None:
+        from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+        set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+    logical_device = _get_dp_adjusted_local_rank(local_rank, parallel_config)
+    return int(platform.logical_device_id_to_visible_device_id(logical_device))
+
+
 class GMSWorker(Worker):
     """vLLM Worker subclass with GMS integration."""
-
-    def _determine_available_memory_with_gms_weight_accounting(self) -> int:
-        """Avoid double-counting RW GMS weights during vLLM KV profiling.
-
-        RW GMS weight allocations are visible to cudaMemGetInfo, but not to
-        PyTorch's reserved-memory counters. vLLM therefore observes them as
-        non-torch memory growth during profiling. Passing the same bytes as
-        model_memory_usage would count them twice and can produce negative KV
-        capacity on large models.
-        """
-        manager = get_gms_client_memory_manager("weights")
-        model_runner = getattr(self, "model_runner", None)
-        if (
-            manager is None
-            or manager.granted_lock_type != GrantedLockType.RW
-            or model_runner is None
-            or not hasattr(model_runner, "model_memory_usage")
-        ):
-            return super().determine_available_memory()
-
-        old_usage = int(getattr(model_runner, "model_memory_usage") or 0)
-        if old_usage <= 0:
-            return super().determine_available_memory()
-
-        logger.info(
-            "[GMS] Suppressing %.2f GiB RW GMS weight bytes from vLLM "
-            "weights_memory during KV profiling; cudaMemGetInfo already "
-            "accounts for them as non-torch memory",
-            old_usage / (1 << 30),
-        )
-        model_runner.model_memory_usage = 0
-        try:
-            return super().determine_available_memory()
-        finally:
-            model_runner.model_memory_usage = old_usage
 
     def init_device(self) -> None:
         """Initialize device with early GMS connection.
@@ -245,7 +231,10 @@ class GMSWorker(Worker):
 
         # Set CUDA device first. Do not mutate self.local_rank here; the parent
         # Worker will apply the same DP adjustment during super().init_device().
-        device = _get_dp_adjusted_local_rank(self.local_rank, self.parallel_config)
+        device = _resolve_gms_visible_device(
+            self.local_rank, self.parallel_config, current_platform
+        )
+        self._gms_device = device
         current_platform.set_device(torch.device(f"cuda:{device}"))
 
         # Establish weights GMS connection (so MemorySnapshot can query committed bytes).
@@ -285,7 +274,7 @@ class GMSWorker(Worker):
         consumers cannot attach mid-profile and perturb vLLM's accounting.
         """
         try:
-            available = self._determine_available_memory_with_gms_weight_accounting()
+            available = super().determine_available_memory()
         except BaseException:
             try:
                 abort_pending_gms_write()
@@ -316,37 +305,27 @@ class GMSWorker(Worker):
         return result
 
     def initialize_from_config(self, kv_cache_config) -> None:
-        """Allocate persistent KV backing after publishing pending weights."""
+        """Register persistent KV backing, then use vLLM's native hook."""
         # EngineCore can skip determine_available_memory for models with no
         # KV cache. Publish before connector setup, allocation, or warm-up.
         publish_pending_gms_write()
 
-        from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
-
-        self.cache_config.num_gpu_blocks = kv_cache_config.num_blocks
-
-        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
-
-        device = self.local_rank
+        device = self._gms_device
         socket = get_gms_persistent_kv_socket(device, "GMS_VLLM_VMM_IPC_SOCKET")
         engine_id = allocation_engine_id(device)
         self._gms_kv_engine_id = engine_id
-        get_or_create_persistent_allocator(
+        self._gms_kv_manager = get_or_create_persistent_allocator(
             socket,
             device,
             engine_id,
             tag="kv_pool",
             shared=allocation_shared(),
         )
-        self.model_runner.initialize_kv_cache(kv_cache_config)
-
-        if self.model_config.enable_return_routed_experts:
-            self.model_runner.init_routed_experts_capturer()
-
-        if kv_cache_config.needs_kv_cache_zeroing and hasattr(
-            self.model_runner, "_init_kv_zero_meta"
-        ):
-            self.model_runner._init_kv_zero_meta()
+        self._gms_kv_cache_config = kv_cache_config
+        try:
+            super().initialize_from_config(kv_cache_config)
+        finally:
+            del self._gms_kv_cache_config
 
     def load_model(self, *args, **kwargs) -> None:
         """Load model with corrected memory accounting.
@@ -471,7 +450,7 @@ class GMSWorker(Worker):
             engine_id = getattr(
                 self,
                 "_gms_kv_engine_id",
-                stable_engine_id(self.local_rank),
+                stable_engine_id(self._gms_device),
             )
             logger.info(
                 "[GMS] vLLM KV wake_up connecting: engine_id=%s shared=%s",
@@ -487,9 +466,11 @@ class GMSWorker(Worker):
             or "kv_cache" in requested_tags
             or "kv_pool" in requested_tags
         ):
-            logger.info("[GMS] vLLM post_kv_cache_wake_up begin")
-            self.model_runner.post_kv_cache_wake_up()
-            logger.info("[GMS] vLLM post_kv_cache_wake_up done")
+            post_wake = getattr(self.model_runner, "post_kv_cache_wake_up", None)
+            if post_wake is not None:
+                logger.info("[GMS] vLLM post_kv_cache_wake_up begin")
+                post_wake()
+                logger.info("[GMS] vLLM post_kv_cache_wake_up done")
 
             # Reinitialize FP8 KV scales if needed for vLLM versions whose
             # post-wake hook does not already do it.
@@ -514,7 +495,10 @@ class GMSWorker(Worker):
             logger.debug("[GMS] Skipping CuMemAllocator for weights")
             return nullcontext()
         if tag == "kv_cache":
-            return gms_use_persistent_pool(
-                "kv_pool", torch.device("cuda", self.local_rank)
+            return persistent_kv_allocation_context(
+                self._gms_kv_manager,
+                self._gms_kv_engine_id,
+                self._gms_kv_cache_config,
+                torch.device("cuda", self._gms_device),
             )
         return super()._maybe_get_memory_pool_context(tag)

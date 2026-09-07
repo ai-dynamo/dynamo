@@ -15,7 +15,10 @@ import logging
 
 from gpu_memory_service.client.torch.allocator import get_gms_client_memory_manager
 from gpu_memory_service.common.locks import GrantedLockType
-from gpu_memory_service.integrations.vllm.kv_identity import allocation_engine_id
+from gpu_memory_service.integrations.vllm.kv_identity import (
+    allocation_engine_id,
+    failover_hooks_required,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +61,9 @@ def patch_memory_snapshot() -> None:
                 if device is None:
                     device = kv_manager.device
                 engine_id = allocation_engine_id(int(device))
-                persistent = kv_manager.list_persistent(engine_id=engine_id)
+                persistent = kv_manager.list_persistent(
+                    engine_id=engine_id, include_unclaimed=True
+                )
                 kv_bytes = sum(alloc.aligned_size for alloc in persistent)
                 committed_bytes += kv_bytes
                 if kv_bytes > 0:
@@ -67,6 +72,11 @@ def patch_memory_snapshot() -> None:
                         kv_bytes / (1 << 30),
                     )
             except Exception as exc:
+                if failover_hooks_required():
+                    raise RuntimeError(
+                        "GMS persistent KV accounting failed in shared/"
+                        "authoritative mode"
+                    ) from exc
                 logger.debug(
                     "[GMS Patch] Persistent KV memory accounting skipped: %s", exc
                 )

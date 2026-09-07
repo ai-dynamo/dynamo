@@ -58,12 +58,37 @@ def fail(message: str, *args, exc_info=None) -> NoReturn:
     os._exit(1)
 
 
-_uuid_cache: dict[int, str] = {}
+_uuid_cache: dict[tuple[int, str], str] = {}
 
 
 def invalidate_uuid_cache() -> None:
     """Clear cached GPU UUIDs. Call after CRIU restore when GPU assignment may change."""
     _uuid_cache.clear()
+
+
+def nvml_handle_for_cuda_device(pynvml, device: int):
+    """Return the NVML handle for a process-visible CUDA ordinal.
+
+    NVML indices are physical-device indices and, unlike CUDA ordinals, are
+    not reordered by ``CUDA_VISIBLE_DEVICES``. GMS APIs take CUDA ordinals,
+    so translate the numeric or UUID token before using NVML. This helper
+    intentionally does not inspect ``NVIDIA_VISIBLE_DEVICES``: container
+    runtimes apply that filter to NVML's own device namespace already.
+    """
+    raw = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
+    if not raw:
+        return pynvml.nvmlDeviceGetHandleByIndex(device)
+
+    visible = [token.strip() for token in raw.split(",") if token.strip()]
+    if device < 0 or device >= len(visible):
+        raise IndexError(
+            f"CUDA device {device} is not visible in CUDA_VISIBLE_DEVICES={raw}"
+        )
+    token = visible[device]
+    try:
+        return pynvml.nvmlDeviceGetHandleByIndex(int(token))
+    except ValueError:
+        return pynvml.nvmlDeviceGetHandleByUUID(token)
 
 
 def get_socket_path(device: int, tag: str = "weights") -> str:
@@ -79,17 +104,19 @@ def get_socket_path(device: int, tag: str = "weights") -> str:
         Socket path
         (e.g., "<tempdir>/gms_GPU-12345678-1234-1234-1234-123456789abc_weights.sock").
     """
-    uuid = _uuid_cache.get(device)
+    visibility = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    cache_key = (device, visibility)
+    uuid = _uuid_cache.get(cache_key)
     if uuid is None:
         import pynvml  # deferred: not available in all environments
 
         pynvml.nvmlInit()
         try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+            handle = nvml_handle_for_cuda_device(pynvml, device)
             uuid = pynvml.nvmlDeviceGetUUID(handle)
         finally:
             pynvml.nvmlShutdown()
-        _uuid_cache[device] = uuid
+        _uuid_cache[cache_key] = uuid
     socket_dir = os.environ.get("GMS_SOCKET_DIR") or tempfile.gettempdir()
     return os.path.join(socket_dir, f"gms_{uuid}_{tag}.sock")
 
