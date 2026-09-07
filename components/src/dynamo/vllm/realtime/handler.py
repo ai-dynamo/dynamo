@@ -584,7 +584,7 @@ class RealtimeTextHandler:
                 messages.append(message)
                 connection.emit(conversation_item_added_event(item, previous_item_id))
                 connection.emit(conversation_item_done_event(item, previous_item_id))
-            elif event_type == "input_text_buffer.append":
+            elif event_type == "input_text.append":
                 if running is not None:
                     emit_error(
                         event,
@@ -622,7 +622,7 @@ class RealtimeTextHandler:
                         factory=self._text_prefill_factory,
                     )
                 active_prefill.append(text)
-            elif event_type == "input_text_buffer.commit":
+            elif event_type == "input_text.commit":
                 if active_prefill is None or not active_prefill.text:
                     emit_error(event, "invalid_text", "input text buffer is empty")
                     return
@@ -642,7 +642,7 @@ class RealtimeTextHandler:
                 messages.append(message)
                 connection.emit(conversation_item_added_event(item, previous_item_id))
                 connection.emit(conversation_item_done_event(item, previous_item_id))
-            elif event_type == "input_text_buffer.clear":
+            elif event_type == "input_text.clear":
                 if active_prefill is not None:
                     await active_prefill.cancel()
                     active_prefill = None

@@ -458,7 +458,7 @@ async fn realtime_websocket_forwards_text_buffer_extension() {
 
     ws.send(Message::Text(
         serde_json::json!({
-            "type": "input_text_buffer.append",
+            "type": "input_text.append",
             "text": "hello"
         })
         .to_string()
@@ -478,7 +478,7 @@ async fn realtime_websocket_forwards_text_buffer_extension() {
         event
             .pointer("/error/message")
             .and_then(|value| value.as_str())
-            .is_some_and(|message| message.contains("input_text_buffer.append"))
+            .is_some_and(|message| message.contains("input_text.append"))
     );
 
     let _ = ws.close(None).await;

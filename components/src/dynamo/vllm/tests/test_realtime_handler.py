@@ -282,9 +282,9 @@ def test_text_buffer_prefills_cumulative_input_before_generation():
             handler,
             [
                 {"type": "session.update", "session": _text_session()},
-                {"type": "input_text_buffer.append", "text": "Hello"},
-                {"type": "input_text_buffer.append", "text": " world"},
-                {"type": "input_text_buffer.commit"},
+                {"type": "input_text.append", "text": "Hello"},
+                {"type": "input_text.append", "text": " world"},
+                {"type": "input_text.commit"},
                 {"type": "response.create"},
             ],
         )
@@ -331,10 +331,10 @@ def test_text_buffer_clear_discards_input_and_allows_replay():
             ),
             [
                 {"type": "session.update", "session": _text_session()},
-                {"type": "input_text_buffer.append", "text": "incorrect"},
-                {"type": "input_text_buffer.clear"},
-                {"type": "input_text_buffer.append", "text": "correct"},
-                {"type": "input_text_buffer.commit"},
+                {"type": "input_text.append", "text": "incorrect"},
+                {"type": "input_text.clear"},
+                {"type": "input_text.append", "text": "correct"},
+                {"type": "input_text.commit"},
                 {"type": "response.create"},
             ],
         )
@@ -374,8 +374,8 @@ def test_text_prefill_failure_does_not_fail_final_generation():
             ),
             [
                 {"type": "session.update", "session": _text_session()},
-                {"type": "input_text_buffer.append", "text": "Hello"},
-                {"type": "input_text_buffer.commit"},
+                {"type": "input_text.append", "text": "Hello"},
+                {"type": "input_text.commit"},
                 {"type": "response.create"},
             ],
         )
@@ -403,7 +403,7 @@ def test_text_buffer_must_be_committed_before_response():
             ),
             [
                 {"type": "session.update", "session": _text_session()},
-                {"type": "input_text_buffer.append", "text": "Hello"},
+                {"type": "input_text.append", "text": "Hello"},
                 {"type": "response.create"},
             ],
         )
@@ -416,9 +416,9 @@ def test_text_buffer_must_be_committed_before_response():
 @pytest.mark.parametrize(
     "event,message",
     [
-        ({"type": "input_text_buffer.append", "text": ""}, "non-empty"),
-        ({"type": "input_text_buffer.append", "text": 123}, "non-empty"),
-        ({"type": "input_text_buffer.commit"}, "buffer is empty"),
+        ({"type": "input_text.append", "text": ""}, "non-empty"),
+        ({"type": "input_text.append", "text": 123}, "non-empty"),
+        ({"type": "input_text.commit"}, "buffer is empty"),
     ],
 )
 def test_invalid_text_buffer_events_are_recoverable(event, message):
